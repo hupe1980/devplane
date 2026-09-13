@@ -196,6 +196,14 @@ pub struct Run {
     /// period, so one silent night is one event rather than one a minute.
     #[serde(default)]
     pub stall_noticed: bool,
+    /// Whether this session has ever told us anything itself.
+    ///
+    /// A session discovered in the roster is a process that exists. That is not
+    /// the same as a session somebody is using: an editor tab left open for
+    /// three days is also a process that exists. Until a hook, telemetry or a
+    /// live status arrives, the run is dormant and stays out of the way.
+    #[serde(default)]
+    pub reporting: bool,
     /// Until when this run's inbox items are hidden. Snoozing is per run
     /// because that is the unit a human thinks in: "not this one, not now".
     #[serde(default)]
@@ -242,6 +250,7 @@ impl Run {
             subagents: BTreeMap::new(),
             summary: None,
             stall_noticed: false,
+            reporting: false,
             snoozed_until: None,
         }
     }
@@ -254,6 +263,19 @@ impl Run {
     /// Seconds since the last activity, for the stall timer and the UI.
     pub fn idle_seconds(&self) -> i64 {
         (Timestamp::now() - self.last_activity_at).get_seconds()
+    }
+
+    /// Whether this run belongs in the working set: something is happening, or
+    /// somebody is being asked for something.
+    ///
+    /// The distinction matters at scale. Twenty-two rows that all look equally
+    /// alive answer no question at all; five that are actually in play answer
+    /// the only one the board exists for.
+    pub fn is_active(&self) -> bool {
+        self.state.needs_human()
+            || matches!(self.state, RunState::Working | RunState::Starting)
+            || matches!(self.state, RunState::Failed | RunState::Lost)
+            || self.reporting
     }
 
     /// Whether this run's inbox items are currently hidden.

@@ -50,11 +50,25 @@ impl World {
         self.projects.get(id)
     }
 
-    /// Live runs, newest activity first — the board's default order.
+    /// The board, most recently active first.
+    ///
+    /// Ordered by real activity rather than by when the daemon noticed a
+    /// session: a tab left open on Tuesday should not sit above the run that
+    /// is asking you something now.
     pub fn board(&self) -> Vec<&Run> {
         let mut v: Vec<&Run> = self.runs.values().collect();
-        v.sort_by_key(|r| std::cmp::Reverse(r.last_event_at));
+        v.sort_by_key(|r| std::cmp::Reverse(r.last_activity_at));
         v
+    }
+
+    /// The runs worth looking at: in play, or asking for something.
+    ///
+    /// A machine that has been running agents for a week accumulates editor
+    /// tabs whose processes are still alive. Listing them beside the work in
+    /// progress is technically complete and practically useless — the board's
+    /// job is to answer "what needs me", and twenty dormant rows answer nothing.
+    pub fn working_set(&self) -> Vec<&Run> {
+        self.board().into_iter().filter(|r| r.is_active()).collect()
     }
 
     /// The inbox, derived fresh every time. Cheap because it is a map over
@@ -323,6 +337,9 @@ impl World {
             if r.state.is_live() {
                 s.live += 1;
             }
+            if !r.is_active() {
+                s.dormant += 1;
+            }
             s.cost_usd += r.totals.cost_usd;
         }
         s
@@ -356,6 +373,8 @@ pub struct BoardSummary {
     pub needs_you: usize,
     pub idle: usize,
     pub failed: usize,
+    /// Sessions that exist but have never reported: editor tabs left open.
+    pub dormant: usize,
     pub cost_usd: f64,
 }
 
@@ -500,6 +519,106 @@ mod tests {
             b.run(&RunId::new("s1")).unwrap().state
         );
         assert_eq!(a.inbox().len(), b.inbox().len());
+    }
+
+    fn roster_row(status: Option<&str>, started_ms: i64) -> Event {
+        Event::RosterSeen {
+            kind: "interactive".into(),
+            state: None,
+            status: status.map(Into::into),
+            waiting_for: None,
+            pid: Some(1),
+            name: Some("repo-a1".into()),
+            entrypoint: Some("claude-vscode".into()),
+            started_at_ms: Some(started_ms),
+        }
+    }
+
+    #[test]
+    fn a_tab_left_open_for_days_is_not_the_working_set() {
+        // A machine that has been running agents for a week accumulates editor
+        // tabs whose processes are still alive. Twenty rows that all look
+        // equally alive answer no question at all.
+        let mut w = World::new();
+        let three_days_ago =
+            (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(72)).as_millisecond();
+
+        w.apply(
+            env("dormant", roster_row(None, three_days_ago)),
+            RunHint::default(),
+        );
+        w.apply(
+            env("busy", roster_row(Some("busy"), three_days_ago)),
+            RunHint::default(),
+        );
+
+        assert_eq!(w.runs().count(), 2, "both are still on the board");
+        let working: Vec<_> = w.working_set().iter().map(|r| r.id.clone()).collect();
+        assert_eq!(working, vec![RunId::new("busy")]);
+        assert_eq!(w.summary().dormant, 1);
+    }
+
+    #[test]
+    fn the_age_shown_is_the_sessions_own_not_the_moment_we_noticed_it() {
+        // Otherwise a three-day-old tab reads as new, every row shows the same
+        // number, and the board sorts by nothing.
+        let mut w = World::new();
+        let two_days_ago =
+            (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(48)).as_millisecond();
+        w.apply(
+            env("old", roster_row(None, two_days_ago)),
+            RunHint::default(),
+        );
+
+        let run = w.run(&RunId::new("old")).unwrap();
+        assert!(
+            run.idle_seconds() > 47 * 3600,
+            "expected roughly two days, got {}s",
+            run.idle_seconds()
+        );
+    }
+
+    #[test]
+    fn a_session_that_says_anything_joins_the_working_set() {
+        let mut w = World::new();
+        let long_ago =
+            (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(72)).as_millisecond();
+        w.apply(env("s1", roster_row(None, long_ago)), RunHint::default());
+        assert!(w.working_set().is_empty());
+
+        w.apply(
+            env(
+                "s1",
+                Event::ToolStarted {
+                    tool: "Bash".into(),
+                    input: serde_json::json!({}),
+                },
+            ),
+            RunHint::default(),
+        );
+        assert_eq!(w.working_set().len(), 1, "a hook makes it real");
+        assert_eq!(w.summary().dormant, 0);
+    }
+
+    #[test]
+    fn a_dormant_session_that_needs_a_human_is_never_hidden() {
+        // Hiding is about noise, not about silencing a question.
+        let mut w = World::new();
+        let long_ago =
+            (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(72)).as_millisecond();
+        w.apply(env("s1", roster_row(None, long_ago)), RunHint::default());
+        w.apply(
+            env(
+                "s1",
+                Event::QuestionAsked {
+                    question: "which one?".into(),
+                    options: vec![],
+                },
+            ),
+            RunHint::default(),
+        );
+        assert_eq!(w.working_set().len(), 1);
+        assert_eq!(w.inbox().len(), 1);
     }
 
     #[test]

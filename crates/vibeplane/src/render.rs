@@ -54,6 +54,8 @@ pub struct Summary {
     pub needs_you: usize,
     pub idle: usize,
     pub failed: usize,
+    #[serde(default)]
+    pub dormant: usize,
     pub cost_usd: f64,
 }
 
@@ -72,6 +74,8 @@ pub struct RunView {
     pub entrypoint: Option<String>,
     pub name: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub reporting: bool,
     pub cost_usd: f64,
     pub context_percent: Option<f64>,
     pub idle_seconds: i64,

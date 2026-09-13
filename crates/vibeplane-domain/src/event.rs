@@ -182,11 +182,18 @@ pub enum Event {
     RosterSeen {
         kind: String,
         state: Option<String>,
+        /// `busy` or `idle` for a session that is reporting. Absent means the
+        /// process exists but has not said anything — a tab left open rather
+        /// than a session in use.
         status: Option<String>,
         waiting_for: Option<String>,
         pid: Option<u32>,
         name: Option<String>,
         entrypoint: Option<String>,
+        /// When the session itself started, in milliseconds since the epoch.
+        /// Without it the board dates every discovered session to the moment
+        /// the daemon happened to look, and a three-day-old tab reads as new.
+        started_at_ms: Option<i64>,
     },
     /// A status-line sample: the only channel that carries rate limits.
     StatusSample {

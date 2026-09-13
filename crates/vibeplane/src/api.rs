@@ -371,8 +371,16 @@ async fn otel_metrics(State(state): State<Shared>, body: axum::body::Bytes) -> i
 #[derive(Serialize)]
 struct BoardResponse {
     summary: vibeplane_core::BoardSummary,
+    /// The working set by default; everything when `?all=true`.
     runs: Vec<RunView>,
     projects: Vec<vibeplane_domain::Project>,
+}
+
+#[derive(Deserialize)]
+struct BoardQuery {
+    /// Include sessions that exist but have never reported anything.
+    #[serde(default)]
+    all: bool,
 }
 
 /// What the board shows for one run. A view rather than the `Run` itself, so
@@ -397,6 +405,8 @@ pub struct RunView {
     pub context_percent: Option<f64>,
     pub tool_calls: u64,
     pub subagents: usize,
+    /// Whether this session has ever reported anything itself.
+    pub reporting: bool,
     pub idle_seconds: i64,
     pub last_event_at: String,
 }
@@ -425,17 +435,22 @@ impl RunView {
             context_percent: run.totals.context_percent(),
             tool_calls: run.totals.tool_calls,
             subagents: run.subagents.len(),
+            reporting: run.reporting,
             idle_seconds: run.idle_seconds(),
             last_event_at: run.last_event_at.to_string(),
         }
     }
 }
 
-async fn board(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+async fn board(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<BoardQuery>,
+) -> impl IntoResponse {
     guard!(state, headers);
     let w = state.world.lock().await;
-    let runs = w
-        .board()
+    let runs = if q.all { w.board() } else { w.working_set() };
+    let runs = runs
         .into_iter()
         .map(|r| {
             let name = r

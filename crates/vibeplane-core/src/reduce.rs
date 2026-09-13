@@ -23,6 +23,9 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
     run.last_event_at = env.at;
     if env.event.is_activity() {
         run.last_activity_at = env.at;
+        // Anything the session says about itself makes it real rather than
+        // merely present.
+        run.reporting = true;
         // Anything the session does ends the quiet period, so the next silence
         // is reported as its own stall rather than suppressed by the last one.
         run.stall_noticed = false;
@@ -216,7 +219,24 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             pid,
             name,
             entrypoint,
+            started_at_ms,
         } => {
+            // The session's own start time, not the moment we noticed it.
+            if let Some(ms) = started_at_ms
+                && let Some(t) = jiff::Timestamp::from_millisecond(*ms).ok()
+            {
+                run.started_at = t;
+                if !run.reporting {
+                    // Nothing has been heard from this session, so the last
+                    // thing we know about it is that it started.
+                    run.last_activity_at = t;
+                }
+            }
+            if status.is_some() {
+                // A status is the session reporting; that is what separates a
+                // working session from a tab somebody left open on Tuesday.
+                run.reporting = true;
+            }
             if pid.is_some() {
                 run.pid = *pid;
             }
@@ -468,6 +488,7 @@ mod tests {
                 waiting_for: Some("permission prompt".into()),
                 pid: Some(42),
                 name: Some("flaky-test-fix".into()),
+                started_at_ms: None,
             }),
         );
         assert_eq!(r.state, RunState::Waiting(WaitingFor::Permission));
@@ -484,6 +505,7 @@ mod tests {
             pid: Some(7),
             name: Some("repo-a1".into()),
             entrypoint: Some("claude-vscode".into()),
+            started_at_ms: None,
         }
     }
 

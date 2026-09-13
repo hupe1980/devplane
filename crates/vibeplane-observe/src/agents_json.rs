@@ -73,6 +73,7 @@ impl AgentRow {
             pid: self.pid,
             name: self.name.clone(),
             entrypoint: self.entrypoint.clone(),
+            started_at_ms: self.started_at,
         }
     }
 

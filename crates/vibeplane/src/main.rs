@@ -36,9 +36,14 @@ enum Command {
         #[arg(long, env = "VIBEPLANE_PORT", default_value_t = config::DEFAULT_PORT)]
         port: u16,
     },
-    /// Show every session on this machine.
+    /// Show what is happening: sessions in play, and anything asking for you.
     #[command(visible_alias = "ps")]
-    Ls,
+    Ls {
+        /// Include sessions that exist but have never reported anything —
+        /// editor tabs left open, usually for days.
+        #[arg(long, short)]
+        all: bool,
+    },
     /// Show what needs a human, most urgent first.
     Inbox,
     /// Show one run in detail.
@@ -188,7 +193,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Serve { port }) => cmd_serve(port).await,
-        Some(Command::Ls) | None => cmd_ls(cli.json).await,
+        Some(Command::Ls { all }) => cmd_ls(all, cli.json).await,
+        None => cmd_ls(false, cli.json).await,
         Some(Command::Inbox) => cmd_inbox(cli.json).await,
         Some(Command::Show { run }) => cmd_show(&run, cli.json).await,
         Some(Command::Search { query }) => cmd_search(&query, cli.json).await,
@@ -306,14 +312,31 @@ fn collect_rules(s: &str, out: &mut Vec<String>) {
     }
 }
 
-async fn cmd_ls(json: bool) -> Result<()> {
+async fn cmd_ls(all: bool, json: bool) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
-    let board: render::BoardResponse = c.get("/api/board").await?;
+    let path = if all {
+        "/api/board?all=true"
+    } else {
+        "/api/board"
+    };
+    let board: render::BoardResponse = c.get(path).await?;
 
     if json {
+        println!("{}", serde_json::to_string_pretty(&raw(&c, path).await?)?);
+        return Ok(());
+    }
+
+    if board.runs.is_empty() && board.summary.dormant > 0 {
         println!(
-            "{}",
-            serde_json::to_string_pretty(&raw(&c, "/api/board").await?)?
+            "Nothing in play.\n\n  {}\n\n{}",
+            paint(
+                DIM,
+                &format!(
+                    "{} session(s) exist but have never reported — editor tabs left open.",
+                    board.summary.dormant
+                )
+            ),
+            paint(DIM, "vibeplane ls --all shows them.")
         );
         return Ok(());
     }
@@ -361,6 +384,18 @@ async fn cmd_ls(json: bool) -> Result<()> {
             String::new()
         }
     );
+    if !all && s.dormant > 0 {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "{} dormant (never reported) — vibeplane ls --all",
+                    s.dormant
+                )
+            )
+        );
+    }
     println!();
 
     for r in &board.runs {
@@ -378,7 +413,10 @@ async fn cmd_ls(json: bool) -> Result<()> {
             .clone()
             .or_else(|| r.project_name.clone())
             .unwrap_or_else(|| "?".into());
-        println!(
+        // Trimmed: a working run with nothing to say would otherwise leave two
+        // spaces at the end of every line, which shows up the moment anyone
+        // pipes the board into a file.
+        let line = format!(
             "{} {:<18} {:<8} {:>5} {:>7} {:>5}  {}",
             state_marker(&r.state),
             paint(BOLD, &clip(&label, 18)),
@@ -395,6 +433,7 @@ async fn cmd_ls(json: bool) -> Result<()> {
                 60
             )
         );
+        println!("{}", line.trim_end());
         if let Some(w) = &r.worktree {
             println!("  {}", paint(DIM, &format!("worktree {}", clip(w, 70))));
         }

@@ -151,7 +151,7 @@ const ago = (s) =>
   s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m"
   : s < 86400 ? Math.floor(s / 3600) + "h" : Math.floor(s / 86400) + "d";
 
-let state = { board: null, inbox: [], work: [], sel: 0 };
+let state = { board: null, inbox: [], work: [], sel: 0, showAll: false };
 
 /// A gate report passes only when every command in it did — and an empty gate
 /// is not a pass, because a definition of done with nothing in it proves
@@ -169,7 +169,12 @@ function render() {
     `<span><b>${s.runs}</b> sessions</span>` +
     `<span><b>${s.working}</b> working</span>` +
     (s.needs_you ? `<span style="color:var(--wait)"><b>${s.needs_you}</b> need you</span>` : "") +
-    (s.cost_usd > 0 ? `<span>$${s.cost_usd.toFixed(2)}</span>` : "");
+    (s.cost_usd > 0 ? `<span>$${s.cost_usd.toFixed(2)}</span>` : "") +
+    // Editor tabs whose processes are still alive. Counted, not listed: twenty
+    // rows that all look equally alive answer no question at all.
+    (s.dormant
+      ? `<button id="dormant">${state.showAll ? "hide" : "show"} ${s.dormant} dormant</button>`
+      : "");
 
   // The inbox first, because it is the only part that is asking for something.
   $("inbox").innerHTML = state.inbox.length
@@ -238,7 +243,7 @@ function render() {
 async function refresh() {
   try {
     const [board, inbox, work] = await Promise.all([
-      api("/api/board"),
+      api(state.showAll ? "/api/board?all=true" : "/api/board"),
       api("/api/inbox"),
       api("/api/work"),
     ]);
@@ -281,6 +286,10 @@ async function act(kind, run, req) {
 }
 
 document.addEventListener("click", (e) => {
+  if (e.target.id === "dormant") {
+    state.showAll = !state.showAll;
+    return refresh();
+  }
   const btn = e.target.closest("button[data-act]");
   if (btn) return act(btn.dataset.act, btn.dataset.run, btn.dataset.req);
   const card = e.target.closest("[data-sel]");
