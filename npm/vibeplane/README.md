@@ -105,9 +105,10 @@ max_feedback_rounds = 2
 setup   = "pnpm install --frozen-lockfile"
 include = [".env"]
 
-[policy]
+[policy]                    # this repository's rules, not the machine's
 auto_allow = ["Read", "Bash(pnpm test *)"]
 never_auto = ["Bash(git push *)"]
+max_parallel_runs = 2
 
 [github]                    # off by default: pushing a branch is visible to other people
 pull_request = true
@@ -118,6 +119,11 @@ ready_label  = "vibeplane:ready"
 Gates run as children of the daemon, never through the agent — letting the thing being checked
 choose the check is the one mistake this whole layer exists to avoid. No `vibeplane.toml` is fine
 too: nothing is verified, and nothing pretends to be.
+
+`[policy]` governs **that repository**, whether the agent is one Vibeplane drives or a Claude Code
+session you started yourself in a terminal. A rule allowing a test command in one project has no
+business in the one beside it. Deny wins in both directions, an edit takes effect without a restart,
+and a malformed file keeps the rules it had — a typo in a deny rule must never read as permission.
 
 `vibeplane trust` is required before any agent starts in a repository, because a headless agent
 runs *that repository's* hooks and MCP servers without asking.

@@ -10,9 +10,11 @@
 
 pub mod config;
 pub mod policy;
+pub mod policy_cache;
 pub mod reduce;
 pub mod world;
 
 pub use config::{ConfigError, ProjectConfig};
 pub use policy::{Policy, Rule, Verdict};
+pub use policy_cache::PolicyCache;
 pub use world::{BoardSummary, Change, RunHint, World};

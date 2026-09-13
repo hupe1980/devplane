@@ -44,6 +44,8 @@ pub enum AttentionKind {
     CiRed,
     /// A pull request is green and waiting for a person.
     PrReady,
+    /// Work was mid-flight when the daemon stopped, and its agent is gone.
+    Interrupted,
 }
 
 impl AttentionKind {
@@ -58,6 +60,7 @@ impl AttentionKind {
             AttentionKind::RateLimit => "rate_limit",
             AttentionKind::CiRed => "ci_red",
             AttentionKind::PrReady => "pr_ready",
+            AttentionKind::Interrupted => "interrupted",
         }
     }
 
@@ -68,6 +71,7 @@ impl AttentionKind {
             | AttentionKind::RunFailed
             | AttentionKind::CiRed => Level::High,
             AttentionKind::Lost => Level::Critical,
+            AttentionKind::Interrupted => Level::High,
             AttentionKind::Stalled
             | AttentionKind::ContextHigh
             | AttentionKind::RateLimit
@@ -295,10 +299,8 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig) -> Vec<AttentionItem> {
 /// Work produces items that no run can: a pull request going red hours after
 /// the agent stopped is the clearest example of why Work is the durable unit
 /// and the session is not.
-pub fn items_for_work(work: &crate::work::Work) -> Vec<AttentionItem> {
-    let Some(pr) = &work.pull_request else {
-        return Vec::new();
-    };
+pub fn items_for_work(work: &crate::work::Work, has_live_run: bool) -> Vec<AttentionItem> {
+    let mut out = Vec::new();
     let mk = |kind: AttentionKind, title: String, detail: Option<String>, actions: Vec<Action>| {
         AttentionItem {
             id: AttentionId::new(format!("{}:{}", work.id.as_str(), kind.as_str())),
@@ -319,7 +321,32 @@ pub fn items_for_work(work: &crate::work::Work) -> Vec<AttentionItem> {
         }
     };
 
-    match pr.status.as_str() {
+    // Work that was mid-flight when the daemon stopped. The Work came back from
+    // the store; the agent process did not, and nothing will ever move it on
+    // its own — so it has to be said rather than left looking busy for ever.
+    if !has_live_run
+        && matches!(
+            work.phase,
+            crate::work::Phase::Implement | crate::work::Phase::Verify
+        )
+    {
+        out.push(mk(
+            AttentionKind::Interrupted,
+            format!("Interrupted: {}", work.title),
+            Some(
+                "The agent is gone and this was still in progress. Its branch and \
+                 worktree are untouched."
+                    .into(),
+            ),
+            vec![Action::Open, Action::Snooze],
+        ));
+    }
+
+    let Some(pr) = &work.pull_request else {
+        return out;
+    };
+
+    out.extend(match pr.status.as_str() {
         "failing" => vec![mk(
             AttentionKind::CiRed,
             format!("#{} is red: {}", pr.number, work.title),
@@ -345,7 +372,8 @@ pub fn items_for_work(work: &crate::work::Work) -> Vec<AttentionItem> {
             vec![Action::SendToAgent, Action::OpenPr, Action::Snooze],
         )],
         _ => Vec::new(),
-    }
+    });
+    out
 }
 
 /// Builds and ranks the whole inbox.

@@ -38,6 +38,7 @@ pub async fn dispatch(
         .canonicalize()
         .with_context(|| format!("resolving {}", cwd.display()))?;
     require_trust(state, &cwd).await?;
+    require_capacity(state, &cwd).await?;
     let (session, mut events) = vibeplane_acp::spawn(spec, cwd.clone())
         .await
         .with_context(|| format!("starting {}", spec.id))?;
@@ -121,6 +122,42 @@ pub async fn require_trust(state: &Shared, cwd: &Path) -> Result<()> {
         root.display(),
         root.display()
     )
+}
+
+/// Refuses when a project already has as many agents running as it allows.
+///
+/// `max_parallel_runs` exists because five agents in one repository is rarely
+/// five times the work: they collide on the same files, they multiply the
+/// permission prompts, and each one costs money whether or not it was a good
+/// idea. The limit is the project's own, because only it knows how much
+/// parallelism its tests and its ports can take.
+async fn require_capacity(state: &Shared, cwd: &Path) -> Result<()> {
+    let root = vibeplane_domain::project::main_checkout_for(cwd)
+        .or_else(|| vibeplane_domain::project::find_repo_root(cwd))
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    let Ok(config) = vibeplane_core::ProjectConfig::load(&root) else {
+        return Ok(());
+    };
+    let Some(limit) = config.policy.max_parallel_runs else {
+        return Ok(());
+    };
+
+    let id = vibeplane_domain::ProjectId::from_path(&root);
+    let live = {
+        let w = state.world.lock().await;
+        w.runs()
+            .filter(|r| r.project_id.as_ref() == Some(&id) && r.state.is_live())
+            .count()
+    };
+    if live >= limit {
+        anyhow::bail!(
+            "{} already has {live} agent(s) running and allows {limit}. \
+             Stop one, or raise max_parallel_runs in vibeplane.toml.",
+            root.display()
+        );
+    }
+    Ok(())
 }
 
 /// Sends a prompt to a driven run.
@@ -256,10 +293,10 @@ async fn handle(state: &Shared, run: &RunId, cwd: &Path, session: &Session, even
             // The same rules that answer a hook answer this. The protocol names
             // no tool, so the title is what the rule matches against — a rule
             // written for a shell command still reads as one here.
-            let verdict = {
-                let p = state.policy.lock().await;
-                p.evaluate("Bash", &serde_json::json!({ "command": title }))
-            };
+            let verdict =
+                state
+                    .policy
+                    .evaluate(cwd, "Bash", &serde_json::json!({ "command": title }));
             let pick = |kind: &str| options.iter().find(|o| o.kind.contains(kind)).cloned();
 
             match verdict {

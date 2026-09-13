@@ -474,3 +474,133 @@ async fn an_approved_and_green_pull_request_asks_for_nothing() {
     );
     std::fs::remove_dir_all(&repo).ok();
 }
+
+#[tokio::test]
+async fn a_projects_own_rules_decide_its_agents() {
+    // `[policy]` in vibeplane.toml was parsed and then ignored, which is worse
+    // than not offering it: a rule someone wrote did nothing at all.
+    let repo = scratch_repo("policy", "escalate", 0);
+    std::fs::write(
+        repo.join("vibeplane.toml"),
+        "[policy]\nauto_allow = [\"Bash(echo *)\"]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
+    )
+    .unwrap();
+    let (addr, c, _state) = boot().await;
+
+    let ask = |command: &str| {
+        let body = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "s1",
+            "cwd": repo.to_string_lossy(),
+            "tool_name": "Bash",
+            "tool_input": { "command": command }
+        });
+        let c = c.clone();
+        async move {
+            c.post(format!("http://{addr}/vibeplane/policy"))
+                .bearer_auth("tok")
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        }
+    };
+
+    let allowed: Value = serde_json::from_str(&ask("echo hello").await).unwrap();
+    assert_eq!(
+        allowed["hookSpecificOutput"]["decision"]["behavior"], "allow",
+        "the project's own allow rule must answer"
+    );
+
+    let denied: Value = serde_json::from_str(&ask("rm -rf node_modules").await).unwrap();
+    assert_eq!(denied["hookSpecificOutput"]["decision"]["behavior"], "deny");
+
+    let neither = ask("curl example.com").await;
+    assert_eq!(neither, "{}", "and anything else still reaches the human");
+
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[tokio::test]
+async fn a_projects_parallelism_limit_is_enforced() {
+    // Five agents in one repository is rarely five times the work: they collide
+    // on the same files and each one costs money regardless.
+    let Some(agent) = echo_agent() else { return };
+    let repo = scratch_repo("parallel", "escalate", 0);
+    std::fs::write(
+        repo.join("vibeplane.toml"),
+        "[policy]\nmax_parallel_runs = 1\n",
+    )
+    .unwrap();
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+
+    let first = post(
+        &c,
+        &addr,
+        "/api/dispatch",
+        serde_json::json!({ "agent": agent, "cwd": repo.to_string_lossy() }),
+    )
+    .await;
+    assert!(first["run_id"].is_string(), "{first}");
+
+    let second = post(
+        &c,
+        &addr,
+        "/api/dispatch",
+        serde_json::json!({ "agent": agent, "cwd": repo.to_string_lossy() }),
+    )
+    .await;
+    let err = second["error"].as_str().unwrap_or_default();
+    assert!(err.contains("allows 1"), "{second}");
+    assert!(
+        err.contains("max_parallel_runs"),
+        "and says how to change it"
+    );
+
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[tokio::test]
+async fn work_stranded_by_a_restart_says_so() {
+    // The Work comes back from the store; the agent process does not. Nothing
+    // will move it on its own, so it must not sit there looking busy for ever.
+    let repo = scratch_repo("stranded", "escalate", 0);
+    let (addr, c, state) = boot().await;
+
+    let mut work = vibeplane_domain::Work::new(
+        vibeplane_domain::ProjectId::from_path(&repo),
+        vibeplane_domain::WorkKind::Quick,
+        "half-finished".into(),
+        "x".into(),
+    );
+    work.phase = vibeplane_domain::Phase::Implement;
+    work.runs.push(vibeplane_domain::RunId::new("gone"));
+    state.works.lock().await.insert(work.id.clone(), work);
+
+    let inbox: Value = c
+        .get(format!("http://{addr}/api/inbox"))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let item = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "interrupted")
+        .expect("interrupted work must be visible");
+    assert!(item["title"].as_str().unwrap().contains("half-finished"));
+    assert!(
+        item["detail"].as_str().unwrap().contains("untouched"),
+        "and says the work itself is safe"
+    );
+    std::fs::remove_dir_all(&repo).ok();
+}

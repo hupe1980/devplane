@@ -218,10 +218,13 @@ async fn policy(
         .tool_input
         .clone()
         .unwrap_or(serde_json::Value::Null);
-    let verdict = {
-        let p = state.policy.lock().await;
-        p.evaluate(&tool, &input)
-    };
+    // Resolved for the directory this session is working in: the rule that
+    // allows a test command in one repository has no business in another.
+    let dir = payload
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let verdict = state.policy.evaluate(&dir, &tool, &input);
 
     let run = RunId::new(payload.session_id.clone());
     let (response, event) = match &verdict {

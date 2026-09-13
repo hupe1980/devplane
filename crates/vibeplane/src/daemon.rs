@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
-use vibeplane_core::{Policy, World};
+use vibeplane_core::{Policy, PolicyCache, World};
 use vibeplane_domain::event::{Event, EventEnvelope, Source};
 use vibeplane_domain::ids::RunId;
 use vibeplane_domain::run::RunMode;
@@ -28,7 +28,9 @@ pub struct AppState {
     /// Which work a run belongs to, so a finished turn knows what to verify.
     pub work_of_run: Mutex<std::collections::HashMap<RunId, vibeplane_domain::WorkId>>,
     pub store: Store,
-    pub policy: Mutex<Policy>,
+    /// Policies, resolved per repository. A rule belongs to the project it
+    /// protects, so there is no single answer to "what may an agent do".
+    pub policy: PolicyCache,
     pub token: String,
     /// Broadcasts every applied event, so the UI and `vibeplane watch` see
     /// changes without polling.
@@ -75,7 +77,7 @@ impl AppState {
             works: Mutex::new(works),
             work_of_run: Mutex::new(work_of_run),
             store,
-            policy: Mutex::new(policy),
+            policy: PolicyCache::new(policy),
             token,
             tx,
             started_at: jiff::Timestamp::now(),

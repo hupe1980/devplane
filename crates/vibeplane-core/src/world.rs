@@ -73,9 +73,16 @@ impl World {
             .runs
             .values()
             .flat_map(|r| items_for_run(r, &self.attention));
-        let from_work = works
-            .iter()
-            .flat_map(vibeplane_domain::attention::items_for_work);
+        let from_work = works.iter().flat_map(|w| {
+            // "Live" means a run that can still move this work on. A finished
+            // one cannot, which is the whole point of noticing.
+            let live = w
+                .current_run()
+                .and_then(|r| self.runs.get(r))
+                .map(|r| r.state.is_live())
+                .unwrap_or(false);
+            vibeplane_domain::attention::items_for_work(w, live)
+        });
         rank(from_runs.chain(from_work).collect())
     }
 
