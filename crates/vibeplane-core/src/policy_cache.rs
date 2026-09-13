@@ -24,9 +24,19 @@ use std::time::{Duration, Instant, SystemTime};
 /// effect while you are still looking at the terminal.
 const RECHECK: Duration = Duration::from_secs(1);
 
+/// What a project's config says, once compiled. Both pieces come from the same
+/// file, so they are read, cached and invalidated together.
+#[derive(Debug, Clone, Default)]
+struct Rules {
+    policy: Policy,
+    /// `[policy] stall_timeout`, in seconds. `None` means the project has not
+    /// said, and the machine-wide setting decides.
+    stall_seconds: Option<i64>,
+}
+
 #[derive(Debug)]
 struct Entry {
-    policy: Policy,
+    rules: Rules,
     /// The config file's modification time when it was read; `None` when there
     /// was no file, so one appearing is noticed too.
     mtime: Option<SystemTime>,
@@ -56,7 +66,7 @@ impl PolicyCache {
     /// override a project's deny. Anything else would make adding a rule
     /// somewhere able to quietly widen a prohibition written somewhere else.
     pub fn evaluate(&self, dir: &Path, tool: &str, input: &serde_json::Value) -> Verdict {
-        let project = self.for_dir(dir);
+        let project = self.for_dir(dir).map(|r| r.policy);
         let policies: Vec<&Policy> = project
             .iter()
             .chain(std::iter::once(&self.global))
@@ -75,8 +85,17 @@ impl PolicyCache {
         Verdict::Undecided
     }
 
-    /// The project policy for a directory, loading or refreshing as needed.
-    fn for_dir(&self, dir: &Path) -> Option<Policy> {
+    /// How long a run working in `dir` may be quiet before it has stalled.
+    ///
+    /// A project that has not said returns `None`, and the caller keeps its own
+    /// number — a repository should have to opt into a different threshold, not
+    /// inherit one by accident.
+    pub fn stall_seconds(&self, dir: &Path) -> Option<i64> {
+        self.for_dir(dir)?.stall_seconds
+    }
+
+    /// The rules for a directory, loading or refreshing as needed.
+    fn for_dir(&self, dir: &Path) -> Option<Rules> {
         let root = repo_root_of(dir)?;
         let path = root.join(crate::config::CONFIG_FILE);
 
@@ -84,7 +103,7 @@ impl PolicyCache {
         if let Some(entry) = cache.get(&root)
             && entry.checked.elapsed() < RECHECK
         {
-            return Some(entry.policy.clone());
+            return Some(entry.rules.clone());
         }
 
         let mtime = std::fs::metadata(&path)
@@ -94,32 +113,35 @@ impl PolicyCache {
             if entry.mtime == mtime {
                 // Unchanged: bump the clock so the next check is free again.
                 entry.checked = Instant::now();
-                return Some(entry.policy.clone());
+                return Some(entry.rules.clone());
             }
             tracing::info!(project = %root.display(), "policy reloaded");
         }
 
-        let policy = ProjectConfig::load(&root)
-            .map(|c| c.policy())
+        let rules = ProjectConfig::load(&root)
+            .map(|c| Rules {
+                policy: c.policy(),
+                stall_seconds: c.policy.stall_timeout.map(|d| d.as_secs() as i64),
+            })
             .unwrap_or_else(|e| {
                 // A malformed file must not silently become "no rules": that
                 // would turn a typo in a deny rule into permission.
                 tracing::warn!(error = %e, "keeping the previous policy");
                 cache
                     .get(&root)
-                    .map(|e| e.policy.clone())
+                    .map(|e| e.rules.clone())
                     .unwrap_or_default()
             });
 
         cache.insert(
             root.clone(),
             Entry {
-                policy: policy.clone(),
+                rules: rules.clone(),
                 mtime,
                 checked: Instant::now(),
             },
         );
-        Some(policy)
+        Some(rules)
     }
 
     /// Forgets everything, so the next check reads from disk.
@@ -156,6 +178,35 @@ fn worktree_parent(path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_project_sets_its_own_stall_timeout() {
+        // Twelve minutes of silence is a hung agent in one repository and a
+        // test suite running in another. The project decides.
+        let dir = repo("stall", "[policy]\nstall_timeout = \"12m\"\n");
+        let cache = PolicyCache::new(Policy::default());
+        assert_eq!(cache.stall_seconds(&dir), Some(720));
+    }
+
+    #[test]
+    fn a_project_that_says_nothing_keeps_the_machines_timeout() {
+        // `None`, not a default of its own: inheriting a threshold by accident
+        // is how a run gets called stalled for doing its job.
+        let dir = repo("stall-silent", "[policy]\nauto_allow = [\"Read\"]\n");
+        let cache = PolicyCache::new(Policy::default());
+        assert_eq!(cache.stall_seconds(&dir), None);
+    }
+
+    #[test]
+    fn a_worktree_stalls_on_its_repositorys_timeout() {
+        // Work happens in `.claude/worktrees/<name>`, which has no config file
+        // of its own and must not therefore lose the one that governs it.
+        let dir = repo("stall-wt", "[policy]\nstall_timeout = \"90s\"\n");
+        let wt = dir.join(".claude/worktrees/fix-login");
+        std::fs::create_dir_all(&wt).unwrap();
+        let cache = PolicyCache::new(Policy::default());
+        assert_eq!(cache.stall_seconds(&wt), Some(90));
+    }
 
     fn repo(tag: &str, policy: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("vp-pol-{tag}-{}", std::process::id()));

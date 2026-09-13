@@ -120,6 +120,15 @@ pub struct PolicySection {
     pub never_auto: Vec<String>,
     /// How many runs may work on this project at once.
     pub max_parallel_runs: Option<usize>,
+    /// How long a working run may produce nothing before it is called stalled.
+    ///
+    /// Per project, because the number is a statement about the work: a
+    /// repository whose test suite takes twelve minutes stalls at a different
+    /// threshold from one that answers in seconds, and a single machine-wide
+    /// number has to be wrong for one of them. Unset falls back to the global
+    /// setting.
+    #[serde(default, with = "humantime_opt")]
+    pub stall_timeout: Option<Duration>,
 }
 
 impl ProjectConfig {
@@ -155,6 +164,29 @@ pub enum ConfigError {
     Io(String, String),
     #[error("{0} is not valid: {1}")]
     Parse(String, String),
+}
+
+/// The same, for a setting that may be left out entirely.
+mod humantime_opt {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+        match d {
+            Some(d) => s.serialize_str(&format!("{}s", d.as_secs())),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        let raw = match Option::<String>::deserialize(d)? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        super::humantime::parse(&raw)
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom(format!("`{raw}` is not a duration")))
+    }
 }
 
 /// Durations as people write them: `10m`, `90s`, `1h30m`.
@@ -216,6 +248,7 @@ mod tests {
         assert_eq!(c.gates.max_feedback_rounds, 2);
         // And no rule decides anything on the user's behalf.
         assert!(c.policy.auto_allow.is_empty());
+        assert_eq!(c.policy.stall_timeout, None);
     }
 
     #[test]

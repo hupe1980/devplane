@@ -127,9 +127,17 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
             let cfg = w.attention;
             w.runs()
                 .filter(|r| {
+                    // How long is too quiet is a property of the work, not of
+                    // the machine: a repository whose suite takes twelve
+                    // minutes and one that answers in seconds cannot share a
+                    // threshold. The project's `[policy] stall_timeout` wins
+                    // where it is set, and the run's worktree resolves back to
+                    // the repository that owns it.
+                    let dir = r.worktree.as_deref().unwrap_or(&r.cwd);
+                    let limit = state.policy.stall_seconds(dir).unwrap_or(cfg.stall_seconds);
                     matches!(r.state, vibeplane_domain::RunState::Working)
                         && !r.stall_noticed
-                        && r.idle_seconds() > cfg.stall_seconds
+                        && r.idle_seconds() > limit
                 })
                 .map(|r| (r.id.clone(), r.idle_seconds()))
                 .collect()

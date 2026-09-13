@@ -231,7 +231,7 @@ integration claim in the notes against it.
 
 ```sh
 cargo build --examples       # builds the fixture agent the ACP suite drives
-cargo test                   # 180 tests, no network, no provider, no bill
+cargo test                   # 183 tests, no network, no provider, no bill
 cargo run -- serve           # the daemon in the foreground
 VIBEPLANE_HOME=/tmp/vp cargo run -- ls    # an isolated instance, touching nothing of yours
 ```
