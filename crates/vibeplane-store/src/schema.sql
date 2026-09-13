@@ -80,3 +80,21 @@ CREATE TABLE IF NOT EXISTS channel_health (
     p99_micros   INTEGER NOT NULL DEFAULT 0,
     last_error   TEXT
 );
+
+-- Work: the durable unit. Outlives the sessions that do it, which is the whole
+-- reason it exists as a row rather than living in a run.
+CREATE TABLE IF NOT EXISTS works (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT,
+    kind         TEXT NOT NULL,
+    phase        TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    worktree     TEXT,
+    branch       TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    payload      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS works_by_phase ON works(phase, updated_at DESC);
+CREATE INDEX IF NOT EXISTS works_by_project ON works(project_id, updated_at DESC);

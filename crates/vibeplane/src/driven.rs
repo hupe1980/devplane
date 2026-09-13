@@ -287,15 +287,20 @@ async fn handle(state: &Shared, run: &RunId, cwd: &Path, session: &Session, even
             let _ = (cost_usd, context_window);
         }
 
-        AcpEvent::TurnEnded { stop_reason } => match stop_reason.as_str() {
-            "refusal" => {
-                ingest(Event::TurnFailed {
-                    message: "the agent refused to continue".into(),
-                })
-                .await
+        AcpEvent::TurnEnded { stop_reason } => {
+            match stop_reason.as_str() {
+                "refusal" => {
+                    ingest(Event::TurnFailed {
+                        message: "the agent refused to continue".into(),
+                    })
+                    .await
+                }
+                _ => ingest(Event::TurnEnded).await,
             }
-            _ => ingest(Event::TurnEnded).await,
-        },
+            // The agent has stopped. If this run is doing a piece of work, that
+            // is the moment its claim gets checked.
+            crate::work::on_turn_ended(state, run).await;
+        }
 
         AcpEvent::Ended { error } => match error {
             Some(e) => ingest(Event::TurnFailed { message: e }).await,

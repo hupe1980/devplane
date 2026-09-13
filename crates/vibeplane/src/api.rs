@@ -44,6 +44,10 @@ pub fn router(state: Shared) -> Router {
         .route("/api/runs/{id}/decide", post(decide_run))
         .route("/api/runs/{id}/stop", post(stop_run))
         .route("/api/agents", get(agents))
+        .route("/api/work", get(list_work).post(start_work))
+        .route("/api/work/{id}/verify", post(verify_work))
+        .route("/api/work/{id}/finish", post(finish_work))
+        .route("/api/projects/trust", post(trust_project))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/stream", get(stream))
@@ -593,6 +597,171 @@ async fn stop_run(
 async fn agents(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     Json(vibeplane_acp::builtin()).into_response()
+}
+
+/// Starting a piece of work.
+#[derive(Deserialize)]
+struct StartWorkBody {
+    /// The repository. Must be trusted first.
+    cwd: String,
+    /// What to do, in the user's words. Also the branch name.
+    title: String,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default = "default_kind")]
+    kind: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default = "default_true")]
+    worktree: bool,
+}
+fn default_kind() -> String {
+    "quick".into()
+}
+fn default_true() -> bool {
+    true
+}
+
+async fn start_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<StartWorkBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let kind = match body.kind.as_str() {
+        "chore" => vibeplane_domain::WorkKind::Chore,
+        "bug" => vibeplane_domain::WorkKind::Bug,
+        "feature" => vibeplane_domain::WorkKind::Feature,
+        _ => vibeplane_domain::WorkKind::Quick,
+    };
+    let prompt = body.prompt.unwrap_or_else(|| body.title.clone());
+    let req = crate::work::StartRequest {
+        project_root: body.cwd.into(),
+        kind,
+        title: body.title,
+        prompt,
+        agent: body.agent,
+        worktree: body.worktree,
+    };
+    match crate::work::start(&state, req).await {
+        Ok(id) => {
+            let w = state.works.lock().await.get(&id).cloned();
+            Json(json!({"work_id": id.to_string(), "work": w})).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn list_work(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let works = state.works.lock().await;
+    let mut all: Vec<_> = works.values().cloned().collect();
+    all.sort_by_key(|w| std::cmp::Reverse(w.updated_at));
+    Json(all).into_response()
+}
+
+async fn verify_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::work::verify(&state, &vibeplane_domain::WorkId::new(id)).await {
+        Ok(report) => Json(json!({
+            "passed": report.passed(),
+            "summary": report.summary(),
+            "report": report,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct FinishQuery {
+    #[serde(default)]
+    remove_worktree: bool,
+    #[serde(default)]
+    force: bool,
+}
+
+async fn finish_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<FinishQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::work::finish(
+        &state,
+        &vibeplane_domain::WorkId::new(id),
+        q.remove_worktree,
+        q.force,
+    )
+    .await
+    {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Marks a project as one an agent may be started in.
+///
+/// Deliberately an explicit act. A headless agent runs the repository's own
+/// hooks and MCP servers without asking, so somebody has to have decided that
+/// this directory is theirs.
+#[derive(Deserialize)]
+struct TrustBody {
+    /// The repository root. In the body rather than the path: a filesystem
+    /// path is not one URL segment, and encoding it into one works until
+    /// something between here and there normalises the escapes.
+    path: String,
+}
+
+async fn trust_project(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<TrustBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(root) = std::path::PathBuf::from(&body.path).canonicalize() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("{} does not exist", body.path)})),
+        )
+            .into_response();
+    };
+    let project = {
+        let mut w = state.world.lock().await;
+        let mut p = vibeplane_domain::Project::from_root(root.clone());
+        p.trusted = true;
+        let pid = w.upsert_project(p);
+        w.trust(&pid);
+        w.project(&pid).cloned()
+    };
+    match project {
+        Some(p) => {
+            state.store.save_project(&p).await.ok();
+            Json(json!({"trusted": true, "project": p})).into_response()
+        }
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "could not register the project"})),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]

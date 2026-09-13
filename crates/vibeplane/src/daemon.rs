@@ -23,6 +23,10 @@ pub struct AppState {
     /// Live ACP sessions, by run. Only driven runs appear here; an observed
     /// session belongs to whoever started it.
     pub sessions: Mutex<std::collections::HashMap<RunId, vibeplane_acp::Session>>,
+    /// Work items, by id.
+    pub works: Mutex<std::collections::HashMap<vibeplane_domain::WorkId, vibeplane_domain::Work>>,
+    /// Which work a run belongs to, so a finished turn knows what to verify.
+    pub work_of_run: Mutex<std::collections::HashMap<RunId, vibeplane_domain::WorkId>>,
     pub store: Store,
     pub policy: Mutex<Policy>,
     pub token: String,
@@ -51,11 +55,25 @@ impl AppState {
         let runs = store.load_runs().await?;
         let restored = runs.len();
         world.restore_runs(runs);
-        tracing::info!(restored, "restored runs from the store");
+
+        // Work outlives the daemon that started it, so it comes back with the
+        // runs. The sessions do not: those processes are gone, and a run in a
+        // worktree is resumed deliberately rather than silently.
+        let mut works = std::collections::HashMap::new();
+        let mut work_of_run = std::collections::HashMap::new();
+        for w in store.load_works().await? {
+            for r in &w.runs {
+                work_of_run.insert(r.clone(), w.id.clone());
+            }
+            works.insert(w.id.clone(), w);
+        }
+        tracing::info!(restored, work = works.len(), "restored from the store");
 
         Ok(Arc::new(AppState {
             world: Mutex::new(world),
             sessions: Mutex::new(std::collections::HashMap::new()),
+            works: Mutex::new(works),
+            work_of_run: Mutex::new(work_of_run),
             store,
             policy: Mutex::new(policy),
             token,
@@ -120,6 +138,21 @@ impl AppState {
         }
 
         let _ = self.tx.send(env);
+    }
+
+    /// Wakes subscribers when something changed that no event describes — a
+    /// work phase, a snooze, a gate verdict.
+    pub fn notify_changed(&self) {
+        let _ = self.tx.send(EventEnvelope::new(
+            RunId::new("-"),
+            Source::Daemon,
+            Event::StatusSample {
+                context_used_percent: None,
+                rate_limit_five_hour: None,
+                rate_limit_seven_day: None,
+                session_name: None,
+            },
+        ));
     }
 }
 

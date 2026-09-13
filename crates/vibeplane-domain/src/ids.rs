@@ -56,6 +56,11 @@ string_id!(
      session we did not start has no other identity we can correlate on."
 );
 string_id!(AttentionId, "One item in the inbox.");
+string_id!(
+    WorkId,
+    "One unit of work: durable across sessions, and the thing a branch, a \
+     worktree and a set of gates belong to."
+);
 
 impl ProjectId {
     /// Derives a project id from a filesystem path. The path is used verbatim

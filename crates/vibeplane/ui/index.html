@@ -62,7 +62,11 @@
   .s { width: .8rem; display: inline-block; }
   .s.working { color: var(--work); } .s.starting { color: var(--work); }
   .s.waiting { color: var(--wait); } .s.failed, .s.lost { color: var(--fail); }
-  .s.completed { color: var(--done); } .s.idle, .s.stopped { color: var(--faint); }
+  .s.completed, .s.review { color: var(--done); } .s.idle, .s.stopped, .s.done { color: var(--faint); }
+  .s.verify { color: var(--wait); } .s.implement { color: var(--work); }
+  .gate { padding: 0 .4rem; border-radius: 3px; border: 1px solid var(--line); }
+  .gate.red { color: var(--fail); border-color: var(--fail); }
+  .gate.green { color: var(--done); border-color: var(--done); }
   .proj { color: var(--dim); margin: .9rem 0 .3rem; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
   .gauge { display: inline-block; width: 3.2rem; color: var(--faint); text-align: right; }
   .gauge.high { color: var(--wait); }
@@ -92,6 +96,10 @@
   <section id="needs">
     <h2>Needs you</h2>
     <div id="inbox"></div>
+  </section>
+  <section id="worksec" hidden>
+    <h2>Work</h2>
+    <div id="work"></div>
   </section>
   <section>
     <h2>Sessions</h2>
@@ -142,7 +150,14 @@ const ago = (s) =>
   s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m"
   : s < 86400 ? Math.floor(s / 3600) + "h" : Math.floor(s / 86400) + "d";
 
-let state = { board: null, inbox: [], sel: 0 };
+let state = { board: null, inbox: [], work: [], sel: 0 };
+
+/// A gate report passes only when every command in it did — and an empty gate
+/// is not a pass, because a definition of done with nothing in it proves
+/// nothing.
+const gatePassed = (g) =>
+  !!g && Array.isArray(g.commands) && g.commands.length > 0 &&
+  g.commands.every((c) => c.exit_code === 0 && !c.timed_out);
 
 function render() {
   const b = state.board;
@@ -172,6 +187,22 @@ function render() {
         </div>`).join("")
     : `<div class="empty">Nothing needs you.</div>`;
 
+  const work = state.work.filter((w) => w.phase !== "done" && w.phase !== "cancelled");
+  $("worksec").hidden = work.length === 0;
+  $("work").innerHTML = work.map((w) => {
+    const g = (w.gates || [])[w.gates.length - 1];
+    const badge = g
+      ? `<span class="gate ${gatePassed(g) ? "green" : "red"}">${gatePassed(g) ? "gates green" : "gates red"}</span>`
+      : "";
+    return `<div class="card row">
+      <span class="s ${w.phase}">${GLYPH[w.phase] || "\u25CF"}</span>
+      <span class="name">${esc(w.title)}</span>
+      <span class="meta">${esc(w.phase)}</span>
+      <span class="sum">${esc(w.branch || "")}</span>
+      ${badge}
+    </div>`;
+  }).join("");
+
   const byProject = {};
   for (const r of b.runs) (byProject[r.project_name || "elsewhere"] ||= []).push(r);
   const offset = state.inbox.length;
@@ -200,9 +231,14 @@ function render() {
 
 async function refresh() {
   try {
-    const [board, inbox] = await Promise.all([api("/api/board"), api("/api/inbox")]);
+    const [board, inbox, work] = await Promise.all([
+      api("/api/board"),
+      api("/api/inbox"),
+      api("/api/work"),
+    ]);
     state.board = board;
     state.inbox = inbox;
+    state.work = work;
     render();
   } catch (e) {
     document.querySelector("main").innerHTML = `<div class="err">${esc(e.message)}</div>`;

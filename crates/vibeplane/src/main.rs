@@ -73,6 +73,20 @@ enum Command {
     },
     /// List the agents Vibeplane can drive.
     Agents,
+    /// Allow Vibeplane to start agents in a repository.
+    ///
+    /// A headless agent runs that repository's own hooks and MCP servers
+    /// without asking, so this is a deliberate act rather than a default.
+    Trust {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Start work: an isolated checkout, an agent in it, and the project's
+    /// gates when the agent says it is finished.
+    Work {
+        #[command(subcommand)]
+        what: WorkCmd,
+    },
     /// Hide a run's inbox items for a while.
     Snooze {
         run: String,
@@ -120,6 +134,38 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum WorkCmd {
+    /// Begin a new piece of work.
+    Start {
+        /// What to do. Becomes the branch name and the first prompt.
+        title: Vec<String>,
+        #[arg(long, default_value = "quick")]
+        kind: String,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Work in the repository itself rather than an isolated checkout.
+        #[arg(long)]
+        no_worktree: bool,
+    },
+    /// Show every piece of work.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Run the project's gates now.
+    Verify { work: String },
+    /// Mark work finished, optionally removing its checkout.
+    Finish {
+        work: String,
+        #[arg(long)]
+        remove_worktree: bool,
+        /// Discard uncommitted changes in the checkout.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 #[derive(Subcommand, Clone, Copy)]
 enum ConnectTarget {
     /// Claude Code, through its user-scope settings.
@@ -147,6 +193,8 @@ async fn main() -> Result<()> {
             request,
         }) => cmd_decide(&run, &request, option).await,
         Some(Command::Agents) => cmd_agents(cli.json).await,
+        Some(Command::Trust { path }) => cmd_trust(path, cli.json).await,
+        Some(Command::Work { what }) => cmd_work(what, cli.json).await,
         Some(Command::Snooze { run, minutes }) => cmd_snooze(&run, minutes, cli.json).await,
         Some(Command::Open) => cmd_open().await,
         Some(Command::Watch) => cmd_watch().await,
@@ -652,6 +700,211 @@ async fn cmd_agents(json: bool) -> Result<()> {
             "Any command line works too: vibeplane dispatch --agent '/opt/my-agent --acp' ..."
         )
     );
+    Ok(())
+}
+
+async fn cmd_trust(path: PathBuf, json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let root = path.canonicalize().context("that path does not exist")?;
+    let v: serde_json::Value = c
+        .post_json(
+            "/api/projects/trust",
+            &serde_json::json!({ "path": root.to_string_lossy() }),
+        )
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    match v.get("error").and_then(|e| e.as_str()) {
+        Some(e) => anyhow::bail!("{e}"),
+        None => println!(
+            "{} {}\n  {}",
+            paint(render::GREEN, "trusted"),
+            root.display(),
+            paint(DIM, "agents may now be started here")
+        ),
+    }
+    Ok(())
+}
+
+async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    match what {
+        WorkCmd::Start {
+            title,
+            kind,
+            agent,
+            cwd,
+            no_worktree,
+        } => {
+            let cwd = match cwd {
+                Some(p) => p,
+                None => std::env::current_dir()?,
+            };
+            let title = title.join(" ");
+            if title.is_empty() {
+                anyhow::bail!("say what the work is: vibeplane work start \"fix the flaky test\"");
+            }
+            let v: serde_json::Value = c
+                .post_json(
+                    "/api/work",
+                    &serde_json::json!({
+                        "cwd": cwd.to_string_lossy(),
+                        "title": title,
+                        "kind": kind,
+                        "agent": agent,
+                        "worktree": !no_worktree,
+                    }),
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                anyhow::bail!("{e}");
+            }
+            let w = &v["work"];
+            println!(
+                "{} {}",
+                paint(render::GREEN, "started"),
+                paint(BOLD, w["title"].as_str().unwrap_or(&title))
+            );
+            if let Some(b) = w["branch"].as_str() {
+                println!("  branch    {b}");
+            }
+            if let Some(d) = w["worktree"].as_str() {
+                println!("  worktree  {d}");
+            }
+            println!(
+                "  {}",
+                paint(
+                    DIM,
+                    &format!(
+                        "vibeplane work verify {}",
+                        v["work_id"].as_str().unwrap_or("")
+                    )
+                )
+            );
+        }
+
+        WorkCmd::List => {
+            let v: serde_json::Value = c.get("/api/work").await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            let empty = vec![];
+            let items = v.as_array().unwrap_or(&empty);
+            if items.is_empty() {
+                println!(
+                    "No work yet.\n\n  {}",
+                    paint(BOLD, "vibeplane work start \"fix the flaky login test\"")
+                );
+                return Ok(());
+            }
+            for w in items {
+                let phase = w["phase"].as_str().unwrap_or("?");
+                let gate = w["gates"]
+                    .as_array()
+                    .and_then(|g| g.last())
+                    .map(|g| {
+                        let ok = g["commands"]
+                            .as_array()
+                            .map(|c| {
+                                !c.is_empty()
+                                    && c.iter()
+                                        .all(|r| r["exit_code"] == 0 && r["timed_out"] == false)
+                            })
+                            .unwrap_or(false);
+                        if ok { "gates green" } else { "gates red" }
+                    })
+                    .unwrap_or("");
+                println!(
+                    "{} {:<40} {:<10} {}",
+                    match phase {
+                        "review" => paint(render::GREEN, "✓"),
+                        "failed" => paint(render::RED, "✗"),
+                        "verify" => paint(render::YELLOW, "◆"),
+                        "done" => paint(DIM, "·"),
+                        _ => paint(render::BLUE, "●"),
+                    },
+                    clip(w["title"].as_str().unwrap_or(""), 40),
+                    phase,
+                    paint(DIM, gate)
+                );
+                println!(
+                    "  {}",
+                    paint(
+                        DIM,
+                        &format!(
+                            "{}  {}",
+                            w["id"].as_str().unwrap_or(""),
+                            w["branch"].as_str().unwrap_or("")
+                        )
+                    )
+                );
+            }
+        }
+
+        WorkCmd::Verify { work } => {
+            println!("{}", paint(DIM, "running the project's gates…"));
+            let v: serde_json::Value = c
+                .post_json(&format!("/api/work/{work}/verify"), &serde_json::json!({}))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                anyhow::bail!("{e}");
+            }
+            let passed = v["passed"].as_bool().unwrap_or(false);
+            println!(
+                "{} {}",
+                if passed {
+                    paint(render::GREEN, "passed")
+                } else {
+                    paint(render::RED, "failed")
+                },
+                v["summary"].as_str().unwrap_or("")
+            );
+            if !passed {
+                let empty = vec![];
+                for cmd in v["report"]["commands"].as_array().unwrap_or(&empty) {
+                    let empty2 = vec![];
+                    for f in cmd["failures"]
+                        .as_array()
+                        .unwrap_or(&empty2)
+                        .iter()
+                        .take(10)
+                    {
+                        println!("    {}", f.as_str().unwrap_or(""));
+                    }
+                }
+            }
+        }
+
+        WorkCmd::Finish {
+            work,
+            remove_worktree,
+            force,
+        } => {
+            let v: serde_json::Value = c
+                .post_json(
+                    &format!(
+                        "/api/work/{work}/finish?remove_worktree={remove_worktree}&force={force}"
+                    ),
+                    &serde_json::json!({}),
+                )
+                .await?;
+            match v.get("error").and_then(|e| e.as_str()) {
+                Some(e) => anyhow::bail!("{e}"),
+                None => println!("{}", paint(render::GREEN, "done")),
+            }
+        }
+    }
     Ok(())
 }
 

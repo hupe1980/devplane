@@ -14,10 +14,10 @@ $ vibeplane ls
 ○ blog-e2             vscode     12%   $0.02  41m  waiting for a prompt
 ```
 
-> **Status: early.** Watching works, and has been verified against Claude Code 2.1.270 on a machine
-> with 23 live sessions. Driving works: `vibeplane dispatch` starts an agent and its permission
-> requests are answerable from the inbox. Work items, verification gates and pipelines are designed,
-> not built.
+> **Status: early, but the whole loop runs.** Watching is verified against Claude Code 2.1.270 on a
+> machine with 23 live sessions. Driving works for any ACP agent. And work is *verified*: an agent
+> that says it is done but fails the project's own checks does not get to be done. GitHub, the
+> durable runtime and declared pipelines are designed, not built.
 
 ## Why
 
@@ -61,6 +61,47 @@ vibeplane decide <run> --request <id> --option allow
 A driven run is a run like any other: same board, same project grouping, same inbox. The difference
 is that its permission requests can be *answered* from Vibeplane rather than only looked at — and
 the same `[policy]` rules that auto-decide a hook decide these first.
+
+### Verified done
+
+This is the part that earns the tool.
+
+```sh
+vibeplane trust .                                     # once per repository
+vibeplane work start "fix the flaky login test" --kind bug
+vibeplane work list
+```
+
+`work start` makes an isolated checkout at `.claude/worktrees/<slug>` on its own branch, runs your
+setup command, copies the gitignored files you name, and puts an agent in it. **When the agent says
+it is finished, Vibeplane runs your checks.** Green means a human should look; red means the
+failures go back to that same session, bounded, and then you are asked.
+
+An agent that claims success without earning it reaches `failed`, never `review`.
+
+```toml
+# vibeplane.toml — committed, so the definition of done is the project's, not the agent's
+[gates]
+check   = ["pnpm typecheck", "pnpm test -- --run"]
+timeout = "10m"
+on_fail = "feedback"        # feedback | escalate | ignore
+max_feedback_rounds = 2
+
+[workspace]
+setup   = "pnpm install --frozen-lockfile"
+include = [".env"]
+
+[policy]
+auto_allow = ["Read", "Bash(pnpm test *)"]
+never_auto = ["Bash(git push *)"]
+```
+
+Gates run as children of the daemon, never through the agent — letting the thing being checked
+choose the check is the one mistake this whole layer exists to avoid. No `vibeplane.toml` is fine
+too: nothing is verified, and nothing pretends to be.
+
+`vibeplane trust` is required before any agent starts in a repository, because a headless agent
+runs *that repository's* hooks and MCP servers without asking.
 
 Agents come from the ACP registry, pinned to versions the conformance suite has run against; any
 command that speaks the protocol works too:

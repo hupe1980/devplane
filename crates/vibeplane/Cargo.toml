@@ -26,6 +26,8 @@ vibeplane-core.workspace = true
 vibeplane-store.workspace = true
 vibeplane-observe.workspace = true
 vibeplane-acp.workspace = true
+vibeplane-git.workspace = true
+vibeplane-gates.workspace = true
 
 anyhow.workspace = true
 axum.workspace = true

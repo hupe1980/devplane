@@ -158,6 +158,18 @@ impl World {
         (env, changes)
     }
 
+    /// Marks a project as one an agent may be started in.
+    pub fn trust(&mut self, id: &ProjectId) -> bool {
+        match self.projects.get_mut(id) {
+            Some(p) => {
+                p.trusted = true;
+                p.auto_discovered = false;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Hides or un-hides a run's inbox items.
     pub fn snooze(&mut self, run: &RunId, until: Option<jiff::Timestamp>) -> bool {
         match self.runs.get_mut(run) {

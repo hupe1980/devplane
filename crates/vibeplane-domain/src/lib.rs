@@ -9,9 +9,11 @@ pub mod event;
 pub mod ids;
 pub mod project;
 pub mod run;
+pub mod work;
 
 pub use attention::{Action, AttentionConfig, AttentionItem, AttentionKind, Level};
 pub use event::{ApiUsage, Event, EventEnvelope, Source, WaitingFor};
-pub use ids::{AttentionId, ProjectId, RunId, SessionId};
+pub use ids::{AttentionId, ProjectId, RunId, SessionId, WorkId};
 pub use project::Project;
 pub use run::{BlockedOn, Run, RunMode, RunState, RunTotals, ToolCall};
+pub use work::{CommandResult, GateReport, Phase, Work, WorkKind};

@@ -232,6 +232,40 @@ impl Store {
             .collect())
     }
 
+    pub async fn save_work(&self, w: &vibeplane_domain::Work) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO works (id, project_id, kind, phase, title, worktree, branch,
+                                created_at, updated_at, payload)
+             VALUES (?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET
+               phase=excluded.phase, title=excluded.title, worktree=excluded.worktree,
+               branch=excluded.branch, updated_at=excluded.updated_at, payload=excluded.payload",
+        )
+        .bind(w.id.as_str())
+        .bind(w.project_id.as_str())
+        .bind(w.kind.as_str())
+        .bind(w.phase.as_str())
+        .bind(&w.title)
+        .bind(w.worktree.as_ref().map(|p| p.to_string_lossy().to_string()))
+        .bind(w.branch.as_deref())
+        .bind(w.created_at.to_string())
+        .bind(w.updated_at.to_string())
+        .bind(serde_json::to_string(w)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn load_works(&self) -> Result<Vec<vibeplane_domain::Work>> {
+        let rows = sqlx::query("SELECT payload FROM works ORDER BY updated_at DESC")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| serde_json::from_str(r.get::<String, _>("payload").as_str()).ok())
+            .collect())
+    }
+
     /// Records that a channel delivered something, with how long the handler
     /// took. A hook that is slow is a hook the user feels, so the number is
     /// kept rather than inferred.

@@ -8,9 +8,11 @@
 //! * [`policy`] — the permission rules, shared by the hook, ACP and (later)
 //!   Vibeplane's own effects.
 
+pub mod config;
 pub mod policy;
 pub mod reduce;
 pub mod world;
 
+pub use config::{ConfigError, ProjectConfig};
 pub use policy::{Policy, Rule, Verdict};
 pub use world::{BoardSummary, Change, RunHint, World};
