@@ -63,6 +63,10 @@ pub enum Phase {
     Verify,
     /// Gates passed; a human should look.
     Review,
+    /// A declared human step has been reached and the pipeline is suspended
+    /// until somebody releases it. Distinct from `Review`, which is where work
+    /// lands when it is simply finished: this one the project asked for.
+    Human,
     /// Finished.
     Done,
     /// Gates failed past their feedback budget, or the run died.
@@ -77,6 +81,7 @@ impl Phase {
             Phase::Implement => "implement",
             Phase::Verify => "verify",
             Phase::Review => "review",
+            Phase::Human => "human",
             Phase::Done => "done",
             Phase::Failed => "failed",
             Phase::Cancelled => "cancelled",
@@ -118,17 +123,36 @@ pub struct GateReport {
     pub commands: Vec<CommandResult>,
     /// Which attempt this was, counting from one.
     pub attempt: u32,
+    /// Set when the gate is a reproduction: the commands are *supposed* to
+    /// fail, and one that succeeds has not reproduced anything. Carried on the
+    /// report so that `passed` means the same thing everywhere it is read.
+    #[serde(default)]
+    pub expect_fail: bool,
 }
 
 impl GateReport {
     pub fn passed(&self) -> bool {
-        !self.commands.is_empty() && self.commands.iter().all(CommandResult::passed)
+        // An empty gate is never a pass. A definition of done with no commands
+        // in it proves nothing, and neither does a reproduction with none.
+        if self.commands.is_empty() {
+            return false;
+        }
+        if self.expect_fail {
+            return self.commands.iter().any(|c| !c.passed());
+        }
+        self.commands.iter().all(CommandResult::passed)
     }
 
     /// A short summary a human can act on, and an agent can be told.
     pub fn summary(&self) -> String {
         if self.passed() {
-            return format!("{} passed", self.gate);
+            return match self.expect_fail {
+                true => format!("{} reproduced the problem", self.gate),
+                false => format!("{} passed", self.gate),
+            };
+        }
+        if self.expect_fail {
+            return format!("{} did not reproduce the problem", self.gate);
         }
         let failed: Vec<&CommandResult> = self.commands.iter().filter(|c| !c.passed()).collect();
         let first = failed.first();
@@ -148,6 +172,16 @@ impl GateReport {
     /// What to send back to the agent. Compact on purpose: a whole test log
     /// re-fills the context window the agent needs to fix the problem.
     pub fn feedback(&self) -> String {
+        if self.expect_fail {
+            // Every command succeeded when the point was to fail. Handing back
+            // a log of passing tests would read as good news.
+            return format!(
+                "`{}` was supposed to fail and did not, so the problem is not \
+                 reproduced yet. Write a check that fails for the reason \
+                 described, and do not change the behaviour under test.\n",
+                self.gate
+            );
+        }
         let mut out = String::from(
             "The project's checks did not pass. Fix the cause, do not disable the check.\n",
         );
@@ -187,6 +221,76 @@ pub struct PullRequestRef {
     pub failing_checks: Vec<String>,
 }
 
+/// Where a piece of work has got to in its declared chain of steps (D34).
+///
+/// The cursor lives on the Work, not in the process running it: a pipeline that
+/// survives a daemon restart is the whole point of declaring it, and a crash
+/// between review and verify must resume at verify rather than re-run an
+/// implement step that already cost money.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pipeline {
+    /// The name of the pipeline in `vibeplane.toml`.
+    pub name: String,
+    /// Which step is running or about to, counting from zero.
+    pub step: usize,
+    /// The role of each step, in order. Copied from the config when the work
+    /// starts so that editing `vibeplane.toml` mid-flight cannot renumber a
+    /// chain that is already running.
+    pub roles: Vec<String>,
+    /// How many times each step has been entered. Bounds the review loop.
+    pub entries: Vec<u32>,
+    /// What the last reviewing step found, waiting to be handed back.
+    #[serde(default)]
+    pub findings: Option<String>,
+}
+
+impl Pipeline {
+    pub fn new(name: String, roles: Vec<String>) -> Self {
+        let entries = vec![0; roles.len()];
+        Self {
+            name,
+            step: 0,
+            roles,
+            entries,
+            findings: None,
+        }
+    }
+
+    pub fn role(&self) -> Option<&str> {
+        self.roles.get(self.step).map(String::as_str)
+    }
+
+    /// The index of a step by role name, for `back_to`.
+    pub fn index_of(&self, role: &str) -> Option<usize> {
+        self.roles.iter().position(|r| r == role)
+    }
+
+    /// Records that the current step has been entered, and says how many times
+    /// it now has been.
+    pub fn enter(&mut self) -> u32 {
+        if let Some(n) = self.entries.get_mut(self.step) {
+            *n += 1;
+            return *n;
+        }
+        0
+    }
+
+    /// A one-line `implement › review › verify` with the current step marked,
+    /// which is what the board shows.
+    pub fn stepper(&self) -> String {
+        self.roles
+            .iter()
+            .enumerate()
+            .map(|(i, r)| match i.cmp(&self.step) {
+                std::cmp::Ordering::Less => format!("✓{r}"),
+                std::cmp::Ordering::Equal => format!("▸{r}"),
+                std::cmp::Ordering::Greater => r.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" › ")
+    }
+}
+
 /// A unit of work.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Work {
@@ -208,6 +312,9 @@ pub struct Work {
     /// The pull request this work opened, once it has one.
     #[serde(default)]
     pub pull_request: Option<PullRequestRef>,
+    /// The declared pipeline this work is running, if any.
+    #[serde(default)]
+    pub pipeline: Option<Pipeline>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -228,6 +335,7 @@ impl Work {
             gates: Vec::new(),
             feedback_rounds: 0,
             pull_request: None,
+            pipeline: None,
             created_at: now,
             updated_at: now,
         }
@@ -295,6 +403,79 @@ mod tests {
     }
 
     #[test]
+    fn a_reproduction_that_passes_has_reproduced_nothing() {
+        // The one gate whose success is a failure: if the check that
+        // demonstrates a bug passes, the bug has not been demonstrated, and
+        // letting that count as green would wave the whole class of "fixed it
+        // by not testing it" straight through.
+        let ok = CommandResult {
+            command: "cargo test --test repro".into(),
+            exit_code: Some(0),
+            duration_ms: 1,
+            output_tail: String::new(),
+            failures: vec![],
+            timed_out: false,
+        };
+        let bad = CommandResult {
+            exit_code: Some(101),
+            ..ok.clone()
+        };
+        let repro = |commands| GateReport {
+            gate: "repro".into(),
+            at: Timestamp::now(),
+            duration_ms: 1,
+            attempt: 1,
+            expect_fail: true,
+            commands,
+        };
+        assert!(repro(vec![bad.clone()]).passed(), "failing is the point");
+        assert!(!repro(vec![ok.clone()]).passed());
+        assert!(!repro(vec![]).passed(), "and an empty one proves nothing");
+
+        assert!(
+            repro(vec![ok.clone()])
+                .feedback()
+                .contains("was supposed to fail"),
+            "the agent must be told what actually went wrong"
+        );
+        assert!(
+            !repro(vec![ok]).feedback().contains("do not disable"),
+            "and not handed advice for the opposite problem"
+        );
+        assert!(
+            repro(vec![bad])
+                .summary()
+                .contains("reproduced the problem")
+        );
+    }
+
+    #[test]
+    fn the_stepper_says_where_a_pipeline_is() {
+        let mut p = Pipeline::new(
+            "feature".into(),
+            vec!["implement".into(), "review".into(), "merge".into()],
+        );
+        p.step = 1;
+        assert_eq!(p.stepper(), "✓implement › ▸review › merge");
+        assert_eq!(p.role(), Some("review"));
+        assert_eq!(p.index_of("implement"), Some(0));
+        assert_eq!(p.index_of("deploy"), None);
+    }
+
+    #[test]
+    fn entering_a_step_counts_that_step_only() {
+        // The count is what bounds a review loop, so counting the wrong step
+        // would either cut a chain short or let it run forever.
+        let mut p = Pipeline::new("feature".into(), vec!["implement".into(), "review".into()]);
+        assert_eq!(p.enter(), 1);
+        p.step = 1;
+        assert_eq!(p.enter(), 1);
+        p.step = 0;
+        assert_eq!(p.enter(), 2);
+        assert_eq!(p.entries, vec![2, 1]);
+    }
+
+    #[test]
     fn a_slug_is_readable_and_unique() {
         let w = work("Fix the flaky login test on CI");
         let slug = w.slug();
@@ -332,6 +513,7 @@ mod tests {
             duration_ms: 1,
             commands: cmds,
             attempt: 1,
+            expect_fail: false,
         };
         assert!(report(vec![ok.clone()]).passed());
         assert!(!report(vec![ok.clone(), bad.clone()]).passed());
@@ -347,6 +529,7 @@ mod tests {
             at: Timestamp::now(),
             duration_ms: 1,
             attempt: 1,
+            expect_fail: false,
             commands: vec![CommandResult {
                 command: "cargo test".into(),
                 exit_code: Some(101),
@@ -372,6 +555,7 @@ mod tests {
             at: Timestamp::now(),
             duration_ms: 1,
             attempt: 2,
+            expect_fail: false,
             commands: vec![CommandResult {
                 command: "cargo test".into(),
                 exit_code: None,

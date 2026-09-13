@@ -10,6 +10,7 @@
 //! of entry.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -24,6 +25,9 @@ pub struct ProjectConfig {
     pub gates: Gates,
     pub policy: PolicySection,
     pub github: GitHub,
+    /// Declared chains of agent runs, keyed by the Work kind they serve
+    /// (`quick`, `chore`, `bug`, `feature`) or by any name for a standing one.
+    pub pipelines: BTreeMap<String, Pipeline>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -60,6 +64,45 @@ pub struct Gates {
     /// asked. Bounded because an agent and a gate can argue indefinitely, and
     /// each round costs real money.
     pub max_feedback_rounds: u32,
+    /// Gates a pipeline step can ask for by name, beyond the default `check`.
+    pub named: BTreeMap<String, NamedGate>,
+}
+
+/// A gate that is not the Definition of Done.
+///
+/// The one that earns its keep is a reproduction: for a bug, the check that
+/// *should fail* before the fix is what proves the bug was real. So a gate
+/// carries what it expects, and a command that succeeds when failure was the
+/// point is a failed gate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NamedGate {
+    /// Commands that must all meet `expect`.
+    pub run: Vec<String>,
+    pub expect: Expect,
+    /// Overrides the project's gate timeout.
+    #[serde(default, with = "humantime_opt")]
+    pub timeout: Option<Duration>,
+}
+
+impl Default for NamedGate {
+    fn default() -> Self {
+        Self {
+            run: Vec::new(),
+            expect: Expect::Pass,
+            timeout: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Expect {
+    #[default]
+    Pass,
+    /// The commands must fail. A reproduction that passes has not reproduced
+    /// anything.
+    Fail,
 }
 
 impl Default for Gates {
@@ -69,8 +112,90 @@ impl Default for Gates {
             timeout: Duration::from_secs(600),
             on_fail: OnFail::Feedback,
             max_feedback_rounds: 2,
+            named: BTreeMap::new(),
         }
     }
+}
+
+/// A declared chain of agent runs (D34).
+///
+/// "Start Claude to implement, then start an agent to check it" is only worth
+/// having if it is written down in the repository rather than improvised per
+/// session: the same chain, on every piece of work of that kind, with the
+/// human in the places the project chose.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Pipeline {
+    pub steps: Vec<Step>,
+}
+
+/// One step of a pipeline: an agent doing something, or a person.
+///
+/// Untagged, because `{ human = "merge" }` and `{ role = "review", ... }` read
+/// better in TOML than a `type` discriminator would. The human form is tried
+/// first, so a step carrying `human` is never mistaken for a role.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Step {
+    /// Suspends the pipeline until a person releases it.
+    Human(HumanStep),
+    Role(RoleStep),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanStep {
+    /// What the person is being asked to do: `merge`, `spec_review`, …
+    pub human: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleStep {
+    /// What this step is for: `implement`, `review`, `verify`. Also the name
+    /// `back_to` refers to.
+    pub role: String,
+    /// The agent that does it. `any` — and the default — take the project's
+    /// `default_agent`. Naming a different vendor for review is the point: a
+    /// model reading its own diff is a weaker reader.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// A prompt template in `.vibeplane/prompts/<name>.md`, or the text itself
+    /// when no such file exists.
+    pub prompt: String,
+    /// A gate that must pass before the pipeline moves on: `check`, or a name
+    /// from `[gates.named]`.
+    #[serde(default)]
+    pub gate: Option<String>,
+    /// What to do when this step reports findings.
+    #[serde(default)]
+    pub findings: Option<Findings>,
+}
+
+/// How a reviewing step sends work back.
+///
+/// The reviewer writes its findings to a file in the worktree rather than
+/// announcing them in prose. Prose has to be parsed and can be wrong in ways
+/// that are invisible; a file is either there or it is not, a human can read
+/// it, and it is the same evidence the next agent is handed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Findings {
+    /// The role to return to. Must name an earlier step.
+    pub back_to: String,
+    /// How many times. Exhaustion asks a human; it never loops forever (R16).
+    #[serde(default = "one")]
+    pub max: u32,
+    /// Where the reviewer writes them, relative to the worktree.
+    #[serde(default = "findings_file")]
+    pub file: String,
+}
+
+fn one() -> u32 {
+    1
+}
+fn findings_file() -> String {
+    ".vibeplane/findings.md".into()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +281,29 @@ impl ProjectConfig {
     pub fn has_gates(&self) -> bool {
         !self.gates.check.is_empty()
     }
+
+    /// The pipeline that governs a kind of work, if the project declared one.
+    pub fn pipeline_for(&self, kind: &str) -> Option<&Pipeline> {
+        self.pipelines.get(kind).filter(|p| !p.steps.is_empty())
+    }
+
+    /// The commands and expectation behind a gate name.
+    ///
+    /// `check` is the Definition of Done and always resolves; anything else has
+    /// to be declared, and asking for a gate that does not exist is an error
+    /// rather than a silent pass — an empty gate that reads as success is the
+    /// failure this layer exists to prevent.
+    pub fn gate_named(&self, name: &str) -> Option<(Vec<String>, Expect, Duration)> {
+        if name == "check" {
+            return Some((self.gates.check.clone(), Expect::Pass, self.gates.timeout));
+        }
+        let g = self.gates.named.get(name)?;
+        Some((
+            g.run.clone(),
+            g.expect,
+            g.timeout.unwrap_or(self.gates.timeout),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -240,6 +388,75 @@ mod humantime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pipeline_reads_as_a_chain_of_roles_and_people() {
+        let c: ProjectConfig = toml::from_str(
+            r#"
+[pipelines.feature]
+steps = [
+  { role = "implement", agent = "claude", prompt = "implement", gate = "check" },
+  { role = "review",    agent = "codex",  prompt = "review", findings = { back_to = "implement", max = 2 } },
+  { human = "merge" },
+]
+"#,
+        )
+        .unwrap();
+        let p = c.pipeline_for("feature").expect("declared");
+        assert_eq!(p.steps.len(), 3);
+
+        let Step::Role(first) = &p.steps[0] else {
+            panic!("the first step is an agent's")
+        };
+        assert_eq!(first.gate.as_deref(), Some("check"));
+
+        let Step::Role(second) = &p.steps[1] else {
+            panic!("so is the second")
+        };
+        let f = second.findings.as_ref().expect("it sends work back");
+        assert_eq!(f.back_to, "implement");
+        assert_eq!(f.max, 2);
+        // Defaulted rather than required: a pipeline should be writable in
+        // three lines, and the path only matters when someone wants it moved.
+        assert_eq!(f.file, ".vibeplane/findings.md");
+
+        // A step with `human` is a person, never mistaken for a role.
+        assert!(matches!(&p.steps[2], Step::Human(h) if h.human == "merge"));
+    }
+
+    #[test]
+    fn a_pipeline_with_no_steps_is_not_a_pipeline() {
+        // Otherwise declaring `[pipelines.feature]` and forgetting the steps
+        // would start work that immediately claims to be finished.
+        let c: ProjectConfig = toml::from_str("[pipelines.feature]\nsteps = []\n").unwrap();
+        assert!(c.pipeline_for("feature").is_none());
+    }
+
+    #[test]
+    fn a_gate_that_is_not_declared_is_not_a_pass() {
+        // Asking for a gate nobody wrote must fail loudly. A missing gate that
+        // reads as success is the exact failure this layer exists to prevent.
+        let c: ProjectConfig = toml::from_str("[gates]\ncheck = [\"cargo test\"]\n").unwrap();
+        assert!(c.gate_named("check").is_some());
+        assert!(c.gate_named("repro-fails-on-base").is_none());
+    }
+
+    #[test]
+    fn a_reproduction_gate_says_it_expects_to_fail() {
+        let c: ProjectConfig = toml::from_str(
+            r#"
+[gates.named.repro]
+run = ["cargo test --test repro"]
+expect = "fail"
+timeout = "90s"
+"#,
+        )
+        .unwrap();
+        let (cmds, expect, timeout) = c.gate_named("repro").expect("declared");
+        assert_eq!(cmds, vec!["cargo test --test repro".to_string()]);
+        assert_eq!(expect, Expect::Fail);
+        assert_eq!(timeout, Duration::from_secs(90));
+    }
 
     #[test]
     fn a_repository_with_no_file_still_works() {

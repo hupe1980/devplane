@@ -178,6 +178,8 @@ enum WorkCmd {
     },
     /// Run the project's gates now.
     Verify { work: String },
+    /// Release a pipeline that is waiting at a declared human step.
+    Approve { work: String },
     /// Mark work finished, optionally removing its checkout.
     Finish {
         work: String,
@@ -968,6 +970,15 @@ async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
             );
         }
 
+        WorkCmd::Approve { work } => {
+            let v: serde_json::Value = c
+                .post_json(&format!("/api/work/{work}/approve"), &serde_json::json!({}))
+                .await?;
+            match v["released"].as_str() {
+                Some(step) => println!("{} released; the pipeline continues.", paint(BOLD, step)),
+                None => println!("released."),
+            }
+        }
         WorkCmd::List => {
             let v: serde_json::Value = c.get("/api/work").await?;
             if json {
@@ -1006,6 +1017,7 @@ async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
                         "review" => paint(render::GREEN, "✓"),
                         "failed" => paint(render::RED, "✗"),
                         "verify" => paint(render::YELLOW, "◆"),
+                        "human" => paint(render::YELLOW, "⏸"),
                         "done" => paint(DIM, "·"),
                         _ => paint(render::BLUE, "●"),
                     },
@@ -1013,6 +1025,26 @@ async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
                     phase,
                     paint(DIM, gate)
                 );
+                // The stepper is the whole story of a pipeline in one line:
+                // what it has done, where it is, what is left.
+                if let Some(p) = w["pipeline"].as_object() {
+                    let roles: Vec<&str> = p["roles"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|r| r.as_str()).collect())
+                        .unwrap_or_default();
+                    let at = p["step"].as_u64().unwrap_or(0) as usize;
+                    let line = roles
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| match i.cmp(&at) {
+                            std::cmp::Ordering::Less => paint(render::GREEN, &format!("✓{r}")),
+                            std::cmp::Ordering::Equal => paint(BOLD, &format!("▸{r}")),
+                            std::cmp::Ordering::Greater => paint(DIM, r),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(paint(DIM, " › ").as_str());
+                    println!("  {line}");
+                }
                 let pr = match w["pull_request"].as_object() {
                     Some(p) => format!(
                         "  #{} {}",

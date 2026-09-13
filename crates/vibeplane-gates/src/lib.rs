@@ -33,6 +33,23 @@ pub async fn run(
     timeout: Duration,
     attempt: u32,
 ) -> GateReport {
+    run_expecting(gate, commands, dir, timeout, attempt, false).await
+}
+
+/// The same, for a gate that is supposed to fail.
+///
+/// A reproduction is the one check whose success is a failure: if the command
+/// that demonstrates a bug passes, the bug has not been demonstrated. Stopping
+/// at the first failure is therefore wrong here — the failure is the result —
+/// so every command runs.
+pub async fn run_expecting(
+    gate: &str,
+    commands: &[String],
+    dir: &Path,
+    timeout: Duration,
+    attempt: u32,
+    expect_fail: bool,
+) -> GateReport {
     let started = Instant::now();
     let deadline = Instant::now() + timeout;
     let mut results = Vec::new();
@@ -42,12 +59,13 @@ pub async fn run(
         let result = run_one(command, dir, remaining).await;
         let passed = result.passed();
         results.push(result);
-        if !passed {
+        if !passed && !expect_fail {
             break;
         }
     }
 
     GateReport {
+        expect_fail,
         gate: gate.to_string(),
         at: jiff::Timestamp::now(),
         duration_ms: started.elapsed().as_millis() as u64,

@@ -64,6 +64,10 @@
   .s.waiting { color: var(--wait); } .s.failed, .s.lost { color: var(--fail); }
   .s.completed, .s.review { color: var(--done); } .s.idle, .s.stopped, .s.done { color: var(--faint); }
   .s.verify { color: var(--wait); } .s.implement { color: var(--work); }
+  .s.human { color: var(--wait); }
+  .steps b.ok { color: var(--done); font-weight: 500; }
+  .steps b.at { color: var(--work); }
+  .steps .todo { color: var(--dim); }
   .gate { padding: 0 .4rem; border-radius: 3px; border: 1px solid var(--line); }
   .gate.red { color: var(--fail); border-color: var(--fail); }
   .gate.green { color: var(--done); border-color: var(--done); }
@@ -144,7 +148,7 @@ const api = async (path, opts = {}) => {
 };
 
 const GLYPH = {
-  working: "●", starting: "●", waiting: "◆", idle: "○",
+  working: "●", starting: "●", waiting: "◆", idle: "○", human: "⏸",
   completed: "✓", failed: "✗", lost: "?", stopped: "○",
 };
 const ago = (s) =>
@@ -200,6 +204,7 @@ function render() {
             ${i.actions.includes("allow") ? `<button data-act="allow" data-run="${esc(i.run_id)}" data-req="${esc(i.request_id || "")}">allow</button>` : ""}
             ${i.actions.includes("deny") ? `<button data-act="deny" data-run="${esc(i.run_id)}" data-req="${esc(i.request_id || "")}">deny</button>` : ""}
             ${i.actions.includes("focus") ? `<button data-act="focus" data-run="${esc(i.run_id)}">focus window</button>` : ""}
+            ${i.actions.includes("approve") ? `<button data-act="approve" data-work="${esc(i.work_id || "")}">release</button>` : ""}
             <button data-act="attach" data-run="${esc(i.run_id)}">copy attach</button>
             <button data-act="snooze" data-run="${esc(i.run_id)}">snooze 1h</button>
           </div>
@@ -218,12 +223,25 @@ function render() {
             href="${esc(w.pull_request.url)}" target="_blank" rel="noreferrer"
          >#${w.pull_request.number} ${esc(w.pull_request.status.replace(/_/g, " "))}</a>`
       : "";
+    // The stepper is the whole story of a pipeline in one line: what is done,
+    // where it is, and what is left.
+    const step = w.pipeline
+      ? `<span class="steps">` + w.pipeline.roles.map((r, i) =>
+          i < w.pipeline.step ? `<b class="ok">\u2713${esc(r)}</b>`
+          : i === w.pipeline.step ? `<b class="at">\u25B8${esc(r)}</b>`
+          : `<span class="todo">${esc(r)}</span>`).join('<span class="todo"> \u203A </span>') + `</span>`
+      : "";
+    // A pipeline held at a human step is the one card that is asking for
+    // something, so it is the only one that gets a button.
+    const release = w.phase === "human"
+      ? `<button data-act="approve" data-work="${esc(w.id)}">release</button>`
+      : "";
     return `<div class="card row">
       <span class="s ${w.phase}">${GLYPH[w.phase] || "\u25CF"}</span>
       <span class="name">${esc(w.title)}</span>
       <span class="meta">${esc(w.phase)}</span>
-      <span class="sum">${esc(w.branch || "")}</span>
-      ${badge}${pr}
+      <span class="sum">${step || esc(w.branch || "")}</span>
+      ${badge}${pr}${release}
     </div>`;
   }).join("");
 
@@ -285,6 +303,9 @@ async function act(kind, run, req) {
     refresh();
   } else if (kind === "focus") {
     await api(`/api/runs/${run}/focus`, { method: "POST" }).catch((e) => alert(e.message));
+  } else if (kind === "approve") {
+    await api(`/api/work/${req}/approve`, { method: "POST" }).catch((e) => alert(e.message));
+    refresh();
   } else if (kind === "snooze") {
     await api(`/api/runs/${run}/snooze?minutes=60`, { method: "POST" });
     refresh();
@@ -304,7 +325,7 @@ document.addEventListener("click", (e) => {
     return refresh();
   }
   const btn = e.target.closest("button[data-act]");
-  if (btn) return act(btn.dataset.act, btn.dataset.run, btn.dataset.req);
+  if (btn) return act(btn.dataset.act, btn.dataset.run, btn.dataset.work || btn.dataset.req);
   const card = e.target.closest("[data-sel]");
   if (card) { state.sel = +card.dataset.sel; render(); }
 });

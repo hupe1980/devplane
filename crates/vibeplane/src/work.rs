@@ -99,6 +99,19 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<WorkId> {
 
     work.phase = Phase::Implement;
     let work_id = work.id.clone();
+
+    // A project that declared a pipeline for this kind of work gets the chain
+    // it wrote down; everything else gets one agent and the project's gates.
+    // The kind chooses the pipeline, which is why `--kind` is the only thing a
+    // person has to decide (D34).
+    if config.pipeline_for(req.kind.as_str()).is_some() {
+        work.updated_at = jiff::Timestamp::now();
+        state.store.save_work(&work).await.ok();
+        state.works.lock().await.insert(work_id.clone(), work);
+        crate::pipeline::begin(state, &work_id, &config, req.kind.as_str()).await?;
+        return Ok(work_id);
+    }
+
     let run_id = crate::driven::dispatch(state, &spec, dir, Some(req.prompt)).await?;
     work.runs.push(run_id.clone());
     work.updated_at = jiff::Timestamp::now();
@@ -121,6 +134,17 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<WorkId> {
 pub async fn on_turn_ended(state: &Shared, run: &RunId) {
     let work_id = { state.work_of_run.lock().await.get(run).cloned() };
     let Some(work_id) = work_id else { return };
+
+    // A declared chain decides for itself what comes after a step; the fixed
+    // implement → verify → review below is what work without one gets.
+    let piped = {
+        let works = state.works.lock().await;
+        works.get(&work_id).is_some_and(|w| w.pipeline.is_some())
+    };
+    if piped {
+        crate::pipeline::on_turn_ended(state, &work_id).await;
+        return;
+    }
 
     let (dir, attempt, rounds) = {
         let works = state.works.lock().await;
@@ -221,7 +245,7 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
 /// Failures here are reported and dropped rather than failing the work: the
 /// code is written and the checks passed, and a missing remote or an unlogged-in
 /// `gh` is a setup problem, not a reason to throw that away.
-async fn open_pull_request(state: &Shared, id: &WorkId, config: &ProjectConfig) {
+pub(crate) async fn open_pull_request(state: &Shared, id: &WorkId, config: &ProjectConfig) {
     if !config.github.pull_request {
         return;
     }
@@ -321,7 +345,7 @@ async fn pr_body(state: &Shared, id: &WorkId) -> String {
     body
 }
 
-async fn set_phase(state: &Shared, id: &WorkId, phase: Phase) {
+pub(crate) async fn set_phase(state: &Shared, id: &WorkId, phase: Phase) {
     let saved = {
         let mut works = state.works.lock().await;
         match works.get_mut(id) {

@@ -13,6 +13,7 @@ pub mod daemonise;
 pub mod driven;
 pub mod focus;
 pub mod notify;
+pub mod pipeline;
 pub mod poller;
 pub mod render;
 pub mod work;

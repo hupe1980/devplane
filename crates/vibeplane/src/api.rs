@@ -47,6 +47,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/work", get(list_work).post(start_work))
         .route("/api/work/{id}/verify", post(verify_work))
         .route("/api/work/{id}/finish", post(finish_work))
+        .route("/api/work/{id}/approve", post(approve_work))
         .route("/api/projects/trust", post(trust_project))
         .route("/api/issues", post(list_issues))
         .route("/api/search", get(search))
@@ -729,6 +730,23 @@ async fn verify_work(
             "report": report,
         }))
         .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Releases a pipeline held at a declared human step.
+async fn approve_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::pipeline::approve(&state, &vibeplane_domain::WorkId::new(id)).await {
+        Ok(step) => Json(json!({"ok": true, "released": step})).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),

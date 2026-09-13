@@ -53,6 +53,30 @@ max_feedback_rounds = {rounds}
     dir.canonicalize().unwrap()
 }
 
+/// A repository whose `vibeplane.toml` declares a pipeline.
+fn pipeline_repo(tag: &str, pipeline: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "vp-pipe-{tag}-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .expect("git");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "Test"]);
+    std::fs::write(dir.join("vibeplane.toml"), pipeline).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+    dir.canonicalize().unwrap()
+}
+
 fn echo_agent() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     let bin = exe.parent()?.parent()?.join("examples").join("echo_agent");
@@ -602,5 +626,210 @@ async fn work_stranded_by_a_restart_says_so() {
         item["detail"].as_str().unwrap().contains("untouched"),
         "and says the work itself is safe"
     );
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Declared pipelines (D34)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_pipeline_runs_its_steps_in_order_and_stops_where_a_person_belongs() {
+    // "Start an agent to implement; when it is done start another to check it"
+    // is only worth having if the chain is written down. This is that chain,
+    // end to end, including the step where the project said a human decides.
+    let Some(agent) = echo_agent() else { return };
+    let repo = pipeline_repo(
+        "order",
+        &format!(
+            r#"
+[pipelines.feature]
+steps = [
+  {{ role = "implement", agent = "{agent}", prompt = "write the thing" }},
+  {{ role = "review",    agent = "{agent}", prompt = "read the thing" }},
+  {{ human = "merge" }},
+]
+"#
+        ),
+    );
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+
+    let started = post(
+        &c,
+        &addr,
+        "/api/work",
+        serde_json::json!({
+            "cwd": repo.to_string_lossy(),
+            "title": "add rate limiting",
+            "kind": "feature",
+        }),
+    )
+    .await;
+    assert!(started["error"].is_null(), "{started}");
+
+    let held = await_phase(&c, &addr, &["human", "failed"]).await;
+    assert_eq!(
+        held["phase"], "human",
+        "the chain must reach the human step, not fall over on the way"
+    );
+    assert_eq!(held["pipeline"]["name"], "feature");
+    assert_eq!(
+        held["pipeline"]["step"], 2,
+        "implement and review are behind it"
+    );
+    assert_eq!(
+        held["runs"].as_array().unwrap().len(),
+        2,
+        "one run per step"
+    );
+
+    // It is in the inbox as a decision, not as a failure.
+    let inbox: Value = c
+        .get(format!("http://{addr}/api/inbox"))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let item = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "human_step")
+        .expect("a human step belongs in the inbox");
+    assert_eq!(item["level"], "normal", "an expected pause is not an alarm");
+    assert!(
+        item["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "approve")
+    );
+    assert_eq!(item["work_id"], held["id"]);
+
+    // Releasing it finishes the chain.
+    let released = post(
+        &c,
+        &addr,
+        &format!("/api/work/{}/approve", held["id"].as_str().unwrap()),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(released["released"], "merge", "{released}");
+
+    let done = await_phase(&c, &addr, &["review", "failed"]).await;
+    assert_eq!(done["phase"], "review");
+
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[tokio::test]
+async fn a_reviewer_that_finds_something_sends_the_work_back_and_the_loop_is_bounded() {
+    // Agents checking agents is the point, and an unbounded loop between them
+    // is the risk (R16). The reviewer here never runs out of complaints, so the
+    // only thing that can stop it is the declared bound.
+    let Some(agent) = echo_agent() else { return };
+    let repo = pipeline_repo(
+        "loop",
+        &format!(
+            r#"
+[pipelines.feature]
+steps = [
+  {{ role = "implement", agent = "{agent}", prompt = "write the thing" }},
+  {{ role = "review",    agent = "{agent}", prompt = "criticise the thing", findings = {{ back_to = "implement", max = 1 }} }},
+  {{ human = "merge" }},
+]
+"#
+        ),
+    );
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+
+    let started = post(
+        &c,
+        &addr,
+        "/api/work",
+        serde_json::json!({
+            "cwd": repo.to_string_lossy(),
+            "title": "add rate limiting",
+            "kind": "feature",
+        }),
+    )
+    .await;
+    assert!(started["error"].is_null(), "{started}");
+
+    let settled = await_phase(&c, &addr, &["failed", "human", "review"]).await;
+    assert_eq!(
+        settled["phase"], "failed",
+        "a review loop that never converges must end at a human, not run forever"
+    );
+    let entries = settled["pipeline"]["entries"].as_array().unwrap();
+    assert_eq!(
+        entries[0], 2,
+        "implement ran once, then once more on the findings — and no further"
+    );
+
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[tokio::test]
+async fn the_findings_reach_the_agent_that_has_to_act_on_them() {
+    // Sending work back without saying why costs a full turn of rediscovery.
+    let Some(agent) = echo_agent() else { return };
+    let repo = pipeline_repo(
+        "handback",
+        &format!(
+            r#"
+[pipelines.feature]
+steps = [
+  {{ role = "implement", agent = "{agent}", prompt = "write the thing" }},
+  {{ role = "review",    agent = "{agent}", prompt = "criticise the thing", findings = {{ back_to = "implement", max = 1 }} }},
+]
+"#
+        ),
+    );
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+
+    post(
+        &c,
+        &addr,
+        "/api/work",
+        serde_json::json!({
+            "cwd": repo.to_string_lossy(),
+            "title": "add rate limiting",
+            "kind": "feature",
+        }),
+    )
+    .await;
+    let settled = await_phase(&c, &addr, &["failed", "review"]).await;
+
+    // implement, review, then implement again on what the review found.
+    let runs = settled["runs"].as_array().unwrap();
+    assert!(runs.len() >= 3, "the work went back for a second attempt");
+
+    // Prompt text is never stored — telemetry is redacted and stays that way —
+    // so the fixture writes down what it was told, and that is what proves the
+    // reviewer's words reached the agent that has to act on them.
+    let worktree = PathBuf::from(settled["worktree"].as_str().unwrap());
+    let heard = std::fs::read_to_string(worktree.join(".vibeplane/heard.log")).unwrap_or_default();
+    let turns: Vec<&str> = heard
+        .split("\n---\n")
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    assert!(turns.len() >= 3, "three prompts, one per step: {turns:?}");
+    assert!(
+        turns[2].contains("error path is not covered"),
+        "the agent that has to fix it was never told what was wrong: {}",
+        turns[2]
+    );
+    assert!(
+        !turns[0].contains("error path is not covered"),
+        "and it was not told before there was anything to tell"
+    );
+
     std::fs::remove_dir_all(&repo).ok();
 }

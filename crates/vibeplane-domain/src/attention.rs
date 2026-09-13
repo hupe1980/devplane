@@ -46,6 +46,9 @@ pub enum AttentionKind {
     PrReady,
     /// Work was mid-flight when the daemon stopped, and its agent is gone.
     Interrupted,
+    /// A declared pipeline has reached a step where the project said a person
+    /// decides. Nothing is wrong; the chain is doing what it was told.
+    HumanStep,
 }
 
 impl AttentionKind {
@@ -61,6 +64,7 @@ impl AttentionKind {
             AttentionKind::CiRed => "ci_red",
             AttentionKind::PrReady => "pr_ready",
             AttentionKind::Interrupted => "interrupted",
+            AttentionKind::HumanStep => "human_step",
         }
     }
 
@@ -72,6 +76,9 @@ impl AttentionKind {
             | AttentionKind::CiRed => Level::High,
             AttentionKind::Lost => Level::Critical,
             AttentionKind::Interrupted => Level::High,
+            // Normal, not high: the pipeline stopped exactly where the project
+            // asked it to. An expected pause is not an alarm.
+            AttentionKind::HumanStep => Level::Normal,
             AttentionKind::Stalled
             | AttentionKind::ContextHigh
             | AttentionKind::RateLimit
@@ -104,6 +111,8 @@ pub enum Action {
     OpenPr,
     /// Hand the failing check's log back to the agent that wrote the code.
     SendToAgent,
+    /// Release a pipeline held at a declared human step.
+    Approve,
     /// Dismiss the item until something changes.
     Snooze,
 }
@@ -119,6 +128,7 @@ impl Action {
             Action::CopyResume => "copy_resume",
             Action::OpenPr => "open_pr",
             Action::SendToAgent => "send_to_agent",
+            Action::Approve => "approve",
             Action::Snooze => "snooze",
         }
     }
@@ -142,6 +152,11 @@ pub struct AttentionItem {
     /// The protocol request this item answers, when it can be answered.
     #[serde(default)]
     pub request_id: Option<String>,
+    /// The Work this item is about, when it is about Work rather than a run.
+    /// An item offering `Approve` needs it: the thing being released is the
+    /// pipeline, and the run that was doing the last step may already be gone.
+    #[serde(default)]
+    pub work_id: Option<crate::ids::WorkId>,
     pub since: Timestamp,
 }
 
@@ -204,6 +219,8 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig) -> Vec<AttentionItem> {
             options,
             actions,
             request_id: run.blocked_on.as_ref().and_then(|b| b.request_id.clone()),
+            // A run item is about a session, not a piece of work.
+            work_id: None,
             since,
         });
     };
@@ -317,6 +334,7 @@ pub fn items_for_work(work: &crate::work::Work, has_live_run: bool) -> Vec<Atten
             options: Vec::new(),
             actions,
             request_id: None,
+            work_id: Some(work.id.clone()),
             since: work.updated_at,
         }
     };
@@ -339,6 +357,23 @@ pub fn items_for_work(work: &crate::work::Work, has_live_run: bool) -> Vec<Atten
                     .into(),
             ),
             vec![Action::Open, Action::Snooze],
+        ));
+    }
+
+    // A pipeline that has reached a human step. This is the one inbox item
+    // that means everything went right.
+    if work.phase == crate::work::Phase::Human {
+        let step = work
+            .pipeline
+            .as_ref()
+            .and_then(|p| p.role())
+            .unwrap_or("a decision")
+            .to_string();
+        out.push(mk(
+            AttentionKind::HumanStep,
+            format!("{step}: {}", work.title),
+            work.pipeline.as_ref().map(|p| p.stepper()),
+            vec![Action::Approve, Action::Open, Action::Snooze],
         ));
     }
 

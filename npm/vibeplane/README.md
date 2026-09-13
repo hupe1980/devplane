@@ -30,8 +30,9 @@ joins the working set immediately.
 > **Status: early, but the whole loop runs.** Watching is verified against Claude Code 2.1.270 on a
 > machine with 23 live sessions. Driving works for any ACP agent. Work is *verified* — an agent that
 > says it is done but fails the project's own checks does not get to be done — and when it passes,
-> a draft pull request carries the evidence. The durable runtime and declared pipelines are
-> designed, not built.
+> a draft pull request carries the evidence. Declared pipelines chain agents — one implements,
+> another reviews, and a person decides where the project says so. The durable runtime underneath
+> is designed, not built.
 
 ## Why
 
@@ -104,10 +105,48 @@ minutes or hours after the session ended, which is exactly when nobody is lookin
 ```sh
 vibeplane work issues                  # what this repository labels as ready
 vibeplane work start --issue 7 --kind bug
+vibeplane work approve <id>            # release a pipeline waiting at a human step
 ```
 
 An issue's body reaches the agent marked as a report from someone else that may be wrong — it is
 text from the internet arriving at something that can run commands.
+
+### Agents checking agents
+
+A **pipeline** is that chain, written down in the repository rather than improvised per session:
+
+```toml
+[pipelines.feature]
+steps = [
+  { role = "implement", agent = "claude", prompt = "implement", gate = "check" },
+  { role = "review",    agent = "codex",  prompt = "review", findings = { back_to = "implement", max = 2 } },
+  { human = "merge" },
+]
+```
+
+The kind of work chooses the pipeline, so `work start --kind feature` is the whole command. Each
+step is a driven run in the same checkout; a step's gate must pass before the chain moves on; and
+`{ human = "merge" }` suspends it into your inbox until `vibeplane work approve <id>`.
+
+Two details are the difference between this working and it being a demo:
+
+- **A reviewer writes findings to a file** (`.vibeplane/findings.md`), not into prose. A file is
+  either there or it is not, you can read it, and it is the same evidence the next agent is handed.
+  Parsing a model's prose for whether it was happy is a guess dressed up as a protocol.
+- **The cursor lives on the work item**, so a daemon that dies between review and verify resumes at
+  verify instead of paying for implement twice. And `max` bounds the loop: two agents can disagree
+  forever, and every round costs real money, so exhaustion asks you.
+
+Naming a different vendor for the review step is the point rather than a flourish — a model reading
+its own diff is a weaker reader. `agent = "any"` takes the project's default.
+
+For a bug, the gate that earns its keep is the one that is *supposed* to fail:
+
+```toml
+[gates.named.repro]
+run    = ["pnpm test -- --run tests/repro"]
+expect = "fail"          # a reproduction that passes has reproduced nothing
+```
 
 ```toml
 # vibeplane.toml — committed, so the definition of done is the project's, not the agent's
@@ -130,6 +169,13 @@ max_parallel_runs = 2
 pull_request = true
 draft        = true
 ready_label  = "vibeplane:ready"
+
+[pipelines.feature]         # agents checking agents; see below
+steps = [
+  { role = "implement", agent = "claude", prompt = "implement", gate = "check" },
+  { role = "review",    agent = "codex",  prompt = "review", findings = { back_to = "implement", max = 2 } },
+  { human = "merge" },
+]
 ```
 
 Gates run as children of the daemon, never through the agent — letting the thing being checked
