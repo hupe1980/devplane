@@ -58,6 +58,11 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         Event::PromptSubmitted { .. } => {
             run.state = RunState::Working;
             run.blocked_on = None;
+            // The prompt text is redacted and always will be, so the honest
+            // line is that the agent has started and not yet done anything
+            // visible. Leaving the last turn's tool call there is worse: the
+            // board would show something finished as though it were running.
+            run.summary = Some("thinking".into());
         }
 
         Event::ToolStarted { tool, input } => {
@@ -360,6 +365,22 @@ mod tests {
 
     fn ev(e: Event) -> EventEnvelope {
         EventEnvelope::new(vibeplane_domain::ids::RunId::new("s1"), Source::Hook, e)
+    }
+
+    #[test]
+    fn a_new_prompt_replaces_the_last_turns_summary() {
+        // Otherwise the board shows the previous turn's last tool call as
+        // though the agent were running it now.
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::ToolStarted {
+                tool: "Bash".into(),
+                input: json!({"command": "cargo test"}),
+            }),
+        );
+        apply(&mut r, &ev(Event::PromptSubmitted { chars: 12 }));
+        assert_eq!(r.summary.as_deref(), Some("thinking"));
     }
 
     #[test]

@@ -153,6 +153,19 @@ const ago = (s) =>
 
 let state = { board: null, inbox: [], work: [], sel: 0, showAll: false };
 
+// A missing summary is not a session with nothing to say — it is one we have
+// nothing about, usually because the roster found it before any hook did.
+// Matches `render::summary_line` on the Rust side; the contract test reads
+// field names out of this page, so the two must agree in wording too.
+const SUMMARY_FALLBACK = {
+  waiting: "needs you",
+  idle: "waiting for a prompt",
+  working: "busy",
+  starting: "busy",
+  failed: "failed",
+  lost: "gone",
+};
+
 /// A gate report passes only when every command in it did — and an empty gate
 /// is not a pass, because a definition of done with nothing in it proves
 /// nothing.
@@ -231,7 +244,7 @@ function render() {
           <span class="gauge ${pct >= 85 ? "high" : ""}">${pct != null ? Math.round(pct) + "%" : ""}</span>
           <span class="cost">${r.cost_usd > 0 ? "$" + r.cost_usd.toFixed(2) : ""}</span>
           <span class="meta">${ago(r.idle_seconds)}</span>
-          <span class="sum">${esc(r.summary || (r.state === "idle" ? "waiting for a prompt" : ""))}</span>
+          <span class="sum">${esc(r.summary || SUMMARY_FALLBACK[r.state] || "")}</span>
         </div>`;
       }).join("")}`).join("");
 

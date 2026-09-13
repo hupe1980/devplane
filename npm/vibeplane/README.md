@@ -9,16 +9,23 @@ $ vibeplane ls
 8 projects · 23 sessions · 5 working · 2 need you · 16 idle · $4.18
 17 dormant (never reported) — vibeplane ls --all
 
-◆ saas-7c             vscode     62%   $1.04   3m  Keep the legacy /v1/login route?
-● core-lib-a1         vscode     88%   $0.41   2s  Bash: cargo test --workspace
-◆ mobile-04           cli         –    $0.12   8m  Permission: Bash rm -rf node_modules
-○ blog-e2             vscode     12%   $0.02  41m  waiting for a prompt
+saas
+  ◆ 7c         vscode     62%   $1.04   3m  Keep the legacy /v1/login route?
+
+core-lib  ·  2 sessions
+  ● a1         vscode     88%   $0.41   2s  Bash: cargo test --workspace
+  ○ 4f         vscode     12%   $0.02  41m  waiting for a prompt
+
+mobile
+  ◆ 04         cli         –    $0.12   8m  Permission: Bash rm -rf node_modules
 ```
 
-That last line is the point. A machine that has been running agents all week has editor tabs open
-whose processes are still alive; on the machine this was built against, 23 sessions were listed and
-five were in play. The board shows the working set and counts the rest. A dormant session that
-starts asking for something joins the working set immediately.
+Two lines carry most of the value. **Grouped by project**, because that is the unit you think in —
+nine sessions open on one repository are one line of context, not nine rows that differ by a hash.
+And **dormant sessions are counted, not listed**: a machine that has been running agents all week
+has editor tabs whose processes are still alive, and on the machine this was built against 23
+sessions were listed and five were in play. A dormant session that starts asking for something
+joins the working set immediately.
 
 > **Status: early, but the whole loop runs.** Watching is verified against Claude Code 2.1.270 on a
 > machine with 23 live sessions. Driving works for any ACP agent. Work is *verified* — an agent that
@@ -46,6 +53,8 @@ cargo install vibeplane      # or: brew install hupe1980/tap/vibeplane   (coming
 ```sh
 vibeplane ls                 # the working set — works immediately, no setup
 vibeplane ls --all           # every session on this machine, dormant tabs included
+vibeplane ls --project mako  # one project; matches on any part of the name
+vibeplane ls --needs-you     # only what is waiting on a human
 vibeplane connect claude     # add live state: hooks + telemetry, into your user settings
 vibeplane open               # the board in a browser, updating live
 

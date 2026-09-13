@@ -43,6 +43,13 @@ enum Command {
         /// editor tabs left open, usually for days.
         #[arg(long, short)]
         all: bool,
+        /// Only this project. Matches on any part of the name, so `mat` finds
+        /// `matter-kit`.
+        #[arg(long, short)]
+        project: Option<String>,
+        /// Only sessions that are waiting on a human.
+        #[arg(long = "needs-you")]
+        needs_you: bool,
     },
     /// Show what needs a human, most urgent first.
     Inbox,
@@ -193,8 +200,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Serve { port }) => cmd_serve(port).await,
-        Some(Command::Ls { all }) => cmd_ls(all, cli.json).await,
-        None => cmd_ls(false, cli.json).await,
+        Some(Command::Ls {
+            all,
+            project,
+            needs_you,
+        }) => cmd_ls(all, project.as_deref(), needs_you, cli.json).await,
+        None => cmd_ls(false, None, false, cli.json).await,
         Some(Command::Inbox) => cmd_inbox(cli.json).await,
         Some(Command::Show { run }) => cmd_show(&run, cli.json).await,
         Some(Command::Search { query }) => cmd_search(&query, cli.json).await,
@@ -312,18 +323,138 @@ fn collect_rules(s: &str, out: &mut Vec<String>) {
     }
 }
 
-async fn cmd_ls(all: bool, json: bool) -> Result<()> {
+/// Prints the runs grouped by project.
+fn print_board(board: &render::BoardResponse) {
+    // Grouped by project, because that is the unit the person cares about. A
+    // machine with nine sessions open on one repository otherwise prints nine
+    // near-identical rows that differ only in a hash, and reading them means
+    // matching prefixes by eye to work out that it is all one project.
+    //
+    // The board is already sorted by recency, so first appearance decides a
+    // project's place and the rows keep their order inside it.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, Vec<&render::RunView>> =
+        std::collections::HashMap::new();
+    for r in &board.runs {
+        let key = r
+            .project_name
+            .clone()
+            .unwrap_or_else(|| "(no project)".into());
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(r);
+    }
+
+    for (i, project) in order.iter().enumerate() {
+        let rows = &groups[project];
+        if i > 0 {
+            println!();
+        }
+        println!(
+            "{}{}",
+            paint(BOLD, project),
+            if rows.len() > 1 {
+                paint(DIM, &format!("  ·  {} sessions", rows.len()))
+            } else {
+                String::new()
+            }
+        );
+
+        for r in rows {
+            let ctx = r
+                .context_percent
+                .map(|p| format!("{p:3.0}%"))
+                .unwrap_or_else(|| "   -".into());
+            let cost = if r.cost_usd > 0.0 {
+                format!("${:.2}", r.cost_usd)
+            } else {
+                "-".into()
+            };
+            // The project is on the header line, so the row carries only what
+            // tells one of its sessions from another.
+            let label = session_label(r, project);
+            // Trimmed: a working run with nothing to say would otherwise leave
+            // two spaces at the end of every line, which shows up the moment
+            // anyone pipes the board into a file.
+            let line = format!(
+                "  {} {:<10} {:<8} {:>5} {:>7} {:>5}  {}",
+                state_marker(&r.state),
+                label,
+                paint(DIM, surface(r)),
+                ctx,
+                cost,
+                paint(DIM, &ago(r.idle_seconds)),
+                clip(render::summary_line(r), 58)
+            );
+            println!("{}", line.trim_end());
+            if let Some(w) = &r.worktree {
+                println!("    {}", paint(DIM, &format!("worktree {}", clip(w, 68))));
+            }
+        }
+    }
+}
+
+/// What distinguishes one session of a project from another.
+///
+/// Session names are `<project>-<hash>`, and the project is already the header
+/// above the row, so repeating it costs ten columns to say nothing.
+fn session_label(run: &render::RunView, project: &str) -> String {
+    let name = run.name.as_deref().unwrap_or("");
+    let short = name
+        .strip_prefix(project)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .unwrap_or(name);
+    if short.is_empty() {
+        // Nothing to strip and nothing to show: fall back to the run's own id,
+        // which is what `vibeplane show` and `focus` take anyway.
+        return run.id.chars().take(8).collect();
+    }
+    clip(short, 10)
+}
+
+async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: bool) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
+    // A filter asks about sessions that may well be dormant — `--project x`
+    // meaning "and nothing in x" would be a lie — so either one widens the
+    // fetch and then narrows it here.
+    let all = all || project.is_some() || needs_you;
     let path = if all {
         "/api/board?all=true"
     } else {
         "/api/board"
     };
-    let board: render::BoardResponse = c.get(path).await?;
+    let mut board: render::BoardResponse = c.get(path).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&raw(&c, path).await?)?);
         return Ok(());
+    }
+
+    if let Some(needle) = project {
+        let needle = needle.to_lowercase();
+        board.runs.retain(|r| {
+            r.project_name
+                .as_deref()
+                .is_some_and(|p| p.to_lowercase().contains(&needle))
+        });
+        if board.runs.is_empty() {
+            println!(
+                "No session matches {}.\n\n{}",
+                paint(BOLD, needle.as_str()),
+                paint(DIM, "vibeplane ls --all lists every project.")
+            );
+            return Ok(());
+        }
+    }
+    if needs_you {
+        board
+            .runs
+            .retain(|r| r.state == "waiting" || r.state == "failed");
+        if board.runs.is_empty() {
+            println!("{}", paint(DIM, "Nothing is waiting on you."));
+            return Ok(());
+        }
     }
 
     if board.runs.is_empty() && board.summary.dormant > 0 {
@@ -366,6 +497,37 @@ async fn cmd_ls(all: bool, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // A filtered view must not keep the whole machine's header: "7 projects ·
+    // 22 sessions" above two rows of one project is a summary of something
+    // else.
+    let filtered = project.is_some() || needs_you;
+    if filtered {
+        let projects: std::collections::HashSet<&str> = board
+            .runs
+            .iter()
+            .filter_map(|r| r.project_name.as_deref())
+            .collect();
+        println!(
+            "{} in {}",
+            paint(
+                BOLD,
+                &format!(
+                    "{} session{}",
+                    board.runs.len(),
+                    if board.runs.len() == 1 { "" } else { "s" }
+                )
+            ),
+            format_args!(
+                "{} project{}",
+                projects.len(),
+                if projects.len() == 1 { "" } else { "s" }
+            )
+        );
+        println!();
+        print_board(&board);
+        return Ok(());
+    }
+
     let s = &board.summary;
     println!(
         "{} · {} · {} working · {} need you · {} idle{}",
@@ -398,46 +560,8 @@ async fn cmd_ls(all: bool, json: bool) -> Result<()> {
     }
     println!();
 
-    for r in &board.runs {
-        let ctx = r
-            .context_percent
-            .map(|p| format!("{p:3.0}%"))
-            .unwrap_or_else(|| "   -".into());
-        let cost = if r.cost_usd > 0.0 {
-            format!("${:.2}", r.cost_usd)
-        } else {
-            "-".into()
-        };
-        let label = r
-            .name
-            .clone()
-            .or_else(|| r.project_name.clone())
-            .unwrap_or_else(|| "?".into());
-        // Trimmed: a working run with nothing to say would otherwise leave two
-        // spaces at the end of every line, which shows up the moment anyone
-        // pipes the board into a file.
-        let line = format!(
-            "{} {:<18} {:<8} {:>5} {:>7} {:>5}  {}",
-            state_marker(&r.state),
-            paint(BOLD, &clip(&label, 18)),
-            paint(DIM, surface(r)),
-            ctx,
-            cost,
-            paint(DIM, &ago(r.idle_seconds)),
-            clip(
-                r.summary.as_deref().unwrap_or(match r.state.as_str() {
-                    "waiting" => "needs you",
-                    "idle" => "waiting for a prompt",
-                    _ => "",
-                }),
-                60
-            )
-        );
-        println!("{}", line.trim_end());
-        if let Some(w) = &r.worktree {
-            println!("  {}", paint(DIM, &format!("worktree {}", clip(w, 70))));
-        }
-    }
+    print_board(&board);
+
     Ok(())
 }
 

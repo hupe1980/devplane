@@ -139,6 +139,26 @@ pub fn clip(s: &str, width: usize) -> String {
     out
 }
 
+/// The line shown for what a run is doing.
+///
+/// A missing summary is not a session with nothing to say — it is one we have
+/// nothing about, usually because the roster found it before any hook did. An
+/// empty column reads as the first; these words read as the second.
+pub fn summary_line(run: &RunView) -> &str {
+    if let Some(s) = run.summary.as_deref() {
+        return s;
+    }
+    match run.state.as_str() {
+        "waiting" => "needs you",
+        "idle" => "waiting for a prompt",
+        // The roster says the process is busy and nothing else has spoken.
+        "working" | "starting" => "busy",
+        "failed" => "failed",
+        "lost" => "gone",
+        _ => "",
+    }
+}
+
 /// The label shown for where a session lives.
 pub fn surface(run: &RunView) -> &str {
     match run.entrypoint.as_deref() {
@@ -156,6 +176,34 @@ pub fn surface(run: &RunView) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn view(state: &str, summary: Option<&str>) -> RunView {
+        let mut r: RunView = serde_json::from_value(serde_json::json!({
+            "id": "r1", "project_name": null, "agent": "claude", "mode": "observed",
+            "state": state, "waiting_for": null, "cwd": "/repo", "worktree": null,
+            "model": null, "entrypoint": null, "name": null, "summary": null,
+            "cost_usd": 0.0, "context_percent": null, "idle_seconds": 0,
+        }))
+        .unwrap();
+        r.summary = summary.map(str::to_string);
+        r
+    }
+
+    #[test]
+    fn a_working_run_that_has_said_nothing_still_says_something() {
+        // The roster found it before any hook did. An empty column would read
+        // as a session with nothing to report.
+        assert_eq!(summary_line(&view("working", None)), "busy");
+        assert_eq!(summary_line(&view("idle", None)), "waiting for a prompt");
+    }
+
+    #[test]
+    fn what_the_run_says_wins() {
+        assert_eq!(
+            summary_line(&view("working", Some("Bash: cargo test"))),
+            "Bash: cargo test"
+        );
+    }
 
     #[test]
     fn durations_are_short() {
