@@ -40,6 +40,10 @@ pub enum AttentionKind {
     ContextHigh,
     /// A subscription rate limit is nearly exhausted.
     RateLimit,
+    /// A check on a pull request Vibeplane opened is red.
+    CiRed,
+    /// A pull request is green and waiting for a person.
+    PrReady,
 }
 
 impl AttentionKind {
@@ -52,18 +56,22 @@ impl AttentionKind {
             AttentionKind::Lost => "lost",
             AttentionKind::ContextHigh => "context_high",
             AttentionKind::RateLimit => "rate_limit",
+            AttentionKind::CiRed => "ci_red",
+            AttentionKind::PrReady => "pr_ready",
         }
     }
 
     pub fn default_level(&self) -> Level {
         match self {
-            AttentionKind::Permission | AttentionKind::Question | AttentionKind::RunFailed => {
-                Level::High
-            }
+            AttentionKind::Permission
+            | AttentionKind::Question
+            | AttentionKind::RunFailed
+            | AttentionKind::CiRed => Level::High,
             AttentionKind::Lost => Level::Critical,
-            AttentionKind::Stalled | AttentionKind::ContextHigh | AttentionKind::RateLimit => {
-                Level::Normal
-            }
+            AttentionKind::Stalled
+            | AttentionKind::ContextHigh
+            | AttentionKind::RateLimit
+            | AttentionKind::PrReady => Level::Normal,
         }
     }
 }
@@ -88,6 +96,10 @@ pub enum Action {
     Open,
     /// Copy the command that resumes this session.
     CopyResume,
+    /// Open the pull request in a browser.
+    OpenPr,
+    /// Hand the failing check's log back to the agent that wrote the code.
+    SendToAgent,
     /// Dismiss the item until something changes.
     Snooze,
 }
@@ -101,6 +113,8 @@ impl Action {
             Action::Attach => "attach",
             Action::Open => "open",
             Action::CopyResume => "copy_resume",
+            Action::OpenPr => "open_pr",
+            Action::SendToAgent => "send_to_agent",
             Action::Snooze => "snooze",
         }
     }
@@ -274,6 +288,64 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig) -> Vec<AttentionItem> {
     }
 
     out
+}
+
+/// Derives the inbox entries for a piece of work.
+///
+/// Work produces items that no run can: a pull request going red hours after
+/// the agent stopped is the clearest example of why Work is the durable unit
+/// and the session is not.
+pub fn items_for_work(work: &crate::work::Work) -> Vec<AttentionItem> {
+    let Some(pr) = &work.pull_request else {
+        return Vec::new();
+    };
+    let mk = |kind: AttentionKind, title: String, detail: Option<String>, actions: Vec<Action>| {
+        AttentionItem {
+            id: AttentionId::new(format!("{}:{}", work.id.as_str(), kind.as_str())),
+            level: kind.default_level(),
+            kind,
+            run_id: crate::ids::RunId::new(
+                work.current_run()
+                    .map(|r| r.to_string())
+                    .unwrap_or_default(),
+            ),
+            project_id: Some(work.project_id.clone()),
+            title,
+            detail,
+            options: Vec::new(),
+            actions,
+            request_id: None,
+            since: work.updated_at,
+        }
+    };
+
+    match pr.status.as_str() {
+        "failing" => vec![mk(
+            AttentionKind::CiRed,
+            format!("#{} is red: {}", pr.number, work.title),
+            Some(if pr.failing_checks.is_empty() {
+                "a check failed".to_string()
+            } else {
+                pr.failing_checks.join(", ")
+            }),
+            vec![Action::SendToAgent, Action::OpenPr, Action::Snooze],
+        )],
+        // `ready_to_merge` is approved *and* green, so nobody is being asked
+        // for anything; it does not belong in a queue of decisions.
+        "ready_for_review" => vec![mk(
+            AttentionKind::PrReady,
+            format!("#{} is ready: {}", pr.number, work.title),
+            None,
+            vec![Action::OpenPr, Action::Snooze],
+        )],
+        "changes_requested" => vec![mk(
+            AttentionKind::CiRed,
+            format!("#{} has review comments: {}", pr.number, work.title),
+            None,
+            vec![Action::SendToAgent, Action::OpenPr, Action::Snooze],
+        )],
+        _ => Vec::new(),
+    }
 }
 
 /// Builds and ranks the whole inbox.

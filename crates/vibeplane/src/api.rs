@@ -48,6 +48,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/work/{id}/verify", post(verify_work))
         .route("/api/work/{id}/finish", post(finish_work))
         .route("/api/projects/trust", post(trust_project))
+        .route("/api/issues", post(list_issues))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/stream", get(stream))
@@ -452,8 +453,9 @@ async fn board(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
 
 async fn inbox(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
+    let works: Vec<_> = state.works.lock().await.values().cloned().collect();
     let w = state.world.lock().await;
-    Json(w.inbox()).into_response()
+    Json(w.inbox_with(&works)).into_response()
 }
 
 async fn run_detail(
@@ -614,6 +616,10 @@ struct StartWorkBody {
     agent: Option<String>,
     #[serde(default = "default_true")]
     worktree: bool,
+    /// Start from a GitHub issue: its number becomes the title, its body the
+    /// prompt, and the report is marked as untrusted for the agent.
+    #[serde(default)]
+    issue: Option<u64>,
 }
 fn default_kind() -> String {
     "quick".into()
@@ -634,11 +640,39 @@ async fn start_work(
         "feature" => vibeplane_domain::WorkKind::Feature,
         _ => vibeplane_domain::WorkKind::Quick,
     };
-    let prompt = body.prompt.unwrap_or_else(|| body.title.clone());
+    // An issue supplies both, and says plainly that its body is a report from
+    // someone else rather than an instruction.
+    let mut title = body.title;
+    let mut prompt = body.prompt.unwrap_or_else(|| title.clone());
+    if let Some(number) = body.issue {
+        let dir = std::path::PathBuf::from(&body.cwd);
+        match vibeplane_github::issues(&dir, None, 100).await {
+            Ok(issues) => match issues.into_iter().find(|i| i.number == number) {
+                Some(issue) => {
+                    title = format!("#{} {}", issue.number, issue.title);
+                    prompt = issue.prompt();
+                }
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("issue #{number} is not open here")})),
+                    )
+                        .into_response();
+                }
+            },
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    }
     let req = crate::work::StartRequest {
         project_root: body.cwd.into(),
         kind,
-        title: body.title,
+        title,
         prompt,
         agent: body.agent,
         worktree: body.worktree,
@@ -759,6 +793,44 @@ async fn trust_project(
         None => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": "could not register the project"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Issues a repository is offering as work.
+#[derive(Deserialize)]
+struct IssuesBody {
+    cwd: String,
+    /// Only issues carrying this label. Defaults to the project's
+    /// `[github].ready_label`, so a repository decides what it is offering.
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default = "default_issue_limit")]
+    limit: u32,
+}
+fn default_issue_limit() -> u32 {
+    30
+}
+
+async fn list_issues(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<IssuesBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let dir = std::path::PathBuf::from(&body.cwd);
+    let label = match body.label {
+        Some(l) => Some(l),
+        None => vibeplane_core::ProjectConfig::load(&dir)
+            .ok()
+            .and_then(|c| c.github.ready_label),
+    };
+    match vibeplane_github::issues(&dir, label.as_deref(), body.limit).await {
+        Ok(issues) => Json(issues).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
         )
             .into_response(),
     }

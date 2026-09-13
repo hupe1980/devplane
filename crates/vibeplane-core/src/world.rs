@@ -60,12 +60,23 @@ impl World {
     /// The inbox, derived fresh every time. Cheap because it is a map over
     /// runs, and correct because there is no cached copy to go stale.
     pub fn inbox(&self) -> Vec<AttentionItem> {
-        rank(
-            self.runs
-                .values()
-                .flat_map(|r| items_for_run(r, &self.attention))
-                .collect(),
-        )
+        self.inbox_with(&[])
+    }
+
+    /// The inbox, including anything the given Work items are asking for.
+    ///
+    /// Work produces entries no run can — a pull request going red hours after
+    /// the agent stopped — so they are merged rather than kept in a second list
+    /// the human has to remember to look at.
+    pub fn inbox_with(&self, works: &[vibeplane_domain::Work]) -> Vec<AttentionItem> {
+        let from_runs = self
+            .runs
+            .values()
+            .flat_map(|r| items_for_run(r, &self.attention));
+        let from_work = works
+            .iter()
+            .flat_map(vibeplane_domain::attention::items_for_work);
+        rank(from_runs.chain(from_work).collect())
     }
 
     /// Registers a project explicitly. Explicit registration is what grants

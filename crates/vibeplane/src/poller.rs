@@ -155,6 +155,63 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
     }
 }
 
+/// Refreshes the pull requests Vibeplane opened.
+///
+/// Checks finish minutes or hours after the agent stopped, which is the clearest
+/// illustration of why Work is the durable unit: the session that wrote the code
+/// is long gone, and somebody still has to be told the build went red.
+///
+/// Polled rather than pushed, because a webhook needs a public address and this
+/// is a local tool. Slowly, because nothing here is urgent to the second.
+pub async fn pull_requests(state: Shared) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        let watched: Vec<(vibeplane_domain::WorkId, std::path::PathBuf, String)> = {
+            let works = state.works.lock().await;
+            works
+                .values()
+                .filter(|w| {
+                    w.pull_request
+                        .as_ref()
+                        .map(|p| !matches!(p.status.as_str(), "merged" | "closed"))
+                        .unwrap_or(false)
+                })
+                .filter_map(|w| Some((w.id.clone(), w.worktree.clone()?, w.branch.clone()?)))
+                .collect()
+        };
+
+        for (id, dir, branch) in watched {
+            let Ok(Some(pr)) = vibeplane_github::pr_for_branch(&dir, &branch).await else {
+                continue;
+            };
+            let status = format!("{:?}", pr.status()).to_lowercase();
+            let failing: Vec<String> = pr.failing_checks().iter().map(|c| c.name.clone()).collect();
+
+            let changed = {
+                let mut works = state.works.lock().await;
+                match works.get_mut(&id) {
+                    Some(w) => match &mut w.pull_request {
+                        Some(existing) if existing.status != status => {
+                            existing.status = status.clone();
+                            existing.failing_checks = failing;
+                            w.updated_at = jiff::Timestamp::now();
+                            Some(w.clone())
+                        }
+                        _ => None,
+                    },
+                    None => None,
+                }
+            };
+            if let Some(w) = changed {
+                tracing::info!(work = %id, %status, "pull request changed");
+                state.store.save_work(&w).await.ok();
+                state.notify_changed();
+            }
+        }
+    }
+}
+
 /// Keeps the store and the board from growing without bound.
 ///
 /// Events age out; runs do not, because a row on the board costs nothing and

@@ -149,10 +149,21 @@ enum WorkCmd {
         /// Work in the repository itself rather than an isolated checkout.
         #[arg(long)]
         no_worktree: bool,
+        /// Start from a GitHub issue. Its title and body become the work.
+        #[arg(long)]
+        issue: Option<u64>,
     },
     /// Show every piece of work.
     #[command(visible_alias = "ls")]
     List,
+    /// Show the issues this repository is offering as work.
+    Issues {
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Only issues with this label. Defaults to `[github].ready_label`.
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Run the project's gates now.
     Verify { work: String },
     /// Mark work finished, optionally removing its checkout.
@@ -737,14 +748,18 @@ async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
             agent,
             cwd,
             no_worktree,
+            issue,
         } => {
             let cwd = match cwd {
                 Some(p) => p,
                 None => std::env::current_dir()?,
             };
             let title = title.join(" ");
-            if title.is_empty() {
-                anyhow::bail!("say what the work is: vibeplane work start \"fix the flaky test\"");
+            if title.is_empty() && issue.is_none() {
+                anyhow::bail!(
+                    "say what the work is: vibeplane work start \"fix the flaky test\"\n\
+                     or point at an issue:  vibeplane work start --issue 7"
+                );
             }
             let v: serde_json::Value = c
                 .post_json(
@@ -755,6 +770,7 @@ async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
                         "kind": kind,
                         "agent": agent,
                         "worktree": !no_worktree,
+                        "issue": issue,
                     }),
                 )
                 .await?;
@@ -834,18 +850,64 @@ async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
                     phase,
                     paint(DIM, gate)
                 );
+                let pr = match w["pull_request"].as_object() {
+                    Some(p) => format!(
+                        "  #{} {}",
+                        p["number"].as_u64().unwrap_or(0),
+                        p["status"].as_str().unwrap_or("")
+                    ),
+                    None => String::new(),
+                };
                 println!(
                     "  {}",
                     paint(
                         DIM,
                         &format!(
-                            "{}  {}",
+                            "{}  {}{}",
                             w["id"].as_str().unwrap_or(""),
-                            w["branch"].as_str().unwrap_or("")
+                            w["branch"].as_str().unwrap_or(""),
+                            pr
                         )
                     )
                 );
             }
+        }
+
+        WorkCmd::Issues { cwd, label } => {
+            let cwd = match cwd {
+                Some(p) => p,
+                None => std::env::current_dir()?,
+            };
+            let v: serde_json::Value = c
+                .post_json(
+                    "/api/issues",
+                    &serde_json::json!({ "cwd": cwd.to_string_lossy(), "label": label }),
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                anyhow::bail!("{e}");
+            }
+            let empty = vec![];
+            let issues = v.as_array().unwrap_or(&empty);
+            if issues.is_empty() {
+                println!("{}", paint(DIM, "no issues are on offer here"));
+                return Ok(());
+            }
+            for i in issues {
+                println!(
+                    "{:>6}  {}",
+                    paint(BOLD, &format!("#{}", i["number"].as_u64().unwrap_or(0))),
+                    clip(i["title"].as_str().unwrap_or(""), 70)
+                );
+            }
+            println!(
+                "\n  {}",
+                paint(DIM, "vibeplane work start --issue <number> --kind bug")
+            );
         }
 
         WorkCmd::Verify { work } => {

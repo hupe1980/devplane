@@ -307,3 +307,170 @@ async fn a_broken_config_stops_the_work_rather_than_being_ignored() {
     );
     std::fs::remove_dir_all(&repo).ok();
 }
+
+#[tokio::test]
+async fn dispatch_cannot_be_used_to_skip_the_trust_gate() {
+    // A check one caller can skip is not a check. `work start` enforced it and
+    // `dispatch` did not, so an agent could be started anywhere by choosing the
+    // other command.
+    let Some(agent) = echo_agent() else { return };
+    let repo = scratch_repo("bypass", "feedback", 1);
+    let (addr, c, _state) = boot().await;
+
+    let res = post(
+        &c,
+        &addr,
+        "/api/dispatch",
+        serde_json::json!({ "agent": agent, "cwd": repo.to_string_lossy() }),
+    )
+    .await;
+    assert!(
+        res["error"].as_str().unwrap_or("").contains("not trusted"),
+        "dispatch must refuse an untrusted repository too: {res}"
+    );
+
+    // And works once the decision has been made.
+    trust(&c, &addr, &repo).await;
+    let ok = post(
+        &c,
+        &addr,
+        "/api/dispatch",
+        serde_json::json!({ "agent": agent, "cwd": repo.to_string_lossy() }),
+    )
+    .await;
+    assert!(ok["run_id"].is_string(), "{ok}");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[tokio::test]
+async fn a_worktree_inherits_the_trust_of_its_repository() {
+    // Asking again for every checkout of a project somebody already trusted
+    // teaches people to say yes without reading.
+    let Some(agent) = echo_agent() else { return };
+    let repo = scratch_repo("inherit", "escalate", 0);
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+
+    let started = post(
+        &c,
+        &addr,
+        "/api/work",
+        serde_json::json!({
+            "cwd": repo.to_string_lossy(),
+            "title": "in a worktree",
+            "agent": agent,
+        }),
+    )
+    .await;
+    assert!(started["error"].is_null(), "{started}");
+    let worktree = started["work"]["worktree"].as_str().unwrap();
+
+    let again = post(
+        &c,
+        &addr,
+        "/api/dispatch",
+        serde_json::json!({ "agent": agent, "cwd": worktree }),
+    )
+    .await;
+    assert!(
+        again["run_id"].is_string(),
+        "the worktree is trusted too: {again}"
+    );
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[tokio::test]
+async fn a_red_pull_request_reaches_the_inbox_after_the_agent_is_gone() {
+    // The clearest reason Work is the durable unit: checks finish long after
+    // the session that wrote the code has ended, and somebody still has to be
+    // told the build went red.
+    let repo = scratch_repo("prinbox", "escalate", 0);
+    let (addr, c, state) = boot().await;
+    trust(&c, &addr, &repo).await;
+
+    // A finished piece of work with a pull request, and no live session at all.
+    let mut work = vibeplane_domain::Work::new(
+        vibeplane_domain::ProjectId::from_path(&repo),
+        vibeplane_domain::WorkKind::Bug,
+        "fix the flaky login test".into(),
+        "fix it".into(),
+    );
+    work.phase = vibeplane_domain::Phase::Review;
+    work.pull_request = Some(vibeplane_domain::work::PullRequestRef {
+        number: 142,
+        url: "https://github.com/acme/app/pull/142".into(),
+        status: "failing".into(),
+        failing_checks: vec!["test".into()],
+    });
+    let id = work.id.clone();
+    state.works.lock().await.insert(id.clone(), work);
+
+    let inbox: Value = c
+        .get(format!("http://{addr}/api/inbox"))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let item = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "ci_red")
+        .expect("a red pull request needs a human");
+    assert!(item["title"].as_str().unwrap().contains("#142"));
+    assert!(item["detail"].as_str().unwrap().contains("test"));
+    assert_eq!(
+        item["level"], "high",
+        "red is the state where waiting is wrong"
+    );
+    assert!(
+        item["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "send_to_agent"),
+        "and the obvious action is to hand it back"
+    );
+
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[tokio::test]
+async fn an_approved_and_green_pull_request_asks_for_nothing() {
+    // Nobody is being asked for anything, so it does not belong in a queue of
+    // decisions. An inbox that lists finished work stops being read.
+    let repo = scratch_repo("prquiet", "escalate", 0);
+    let (addr, c, state) = boot().await;
+    let mut work = vibeplane_domain::Work::new(
+        vibeplane_domain::ProjectId::from_path(&repo),
+        vibeplane_domain::WorkKind::Quick,
+        "done and dusted".into(),
+        "x".into(),
+    );
+    work.pull_request = Some(vibeplane_domain::work::PullRequestRef {
+        number: 9,
+        url: "u".into(),
+        status: "ready_to_merge".into(),
+        failing_checks: vec![],
+    });
+    state.works.lock().await.insert(work.id.clone(), work);
+
+    let inbox: Value = c
+        .get(format!("http://{addr}/api/inbox"))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        inbox.as_array().unwrap().is_empty(),
+        "nothing to decide: {inbox}"
+    );
+    std::fs::remove_dir_all(&repo).ok();
+}

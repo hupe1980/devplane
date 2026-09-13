@@ -23,6 +23,7 @@ pub struct ProjectConfig {
     pub workspace: Workspace,
     pub gates: Gates,
     pub policy: PolicySection,
+    pub github: GitHub,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -82,6 +83,32 @@ pub enum OnFail {
     Escalate,
     /// Record the report and carry on. For a check that is advisory.
     Ignore,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitHub {
+    /// Open a pull request when the gates pass. Off by default: pushing a
+    /// branch is the first thing Vibeplane does that other people can see.
+    pub pull_request: bool,
+    /// Open it as a draft. A pull request that looks finished summons
+    /// reviewers, and work a machine just finished has not been read by anyone.
+    pub draft: bool,
+    /// Issues carrying this label are offered as work.
+    pub ready_label: Option<String>,
+    /// Merge with a squash rather than a merge commit, once checks pass.
+    pub squash: bool,
+}
+
+impl Default for GitHub {
+    fn default() -> Self {
+        Self {
+            pull_request: false,
+            draft: true,
+            ready_label: None,
+            squash: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -216,6 +243,11 @@ max_feedback_rounds = 3
 auto_allow = ["Read", "Bash(pnpm test *)"]
 never_auto = ["Bash(git push *)"]
 max_parallel_runs = 2
+
+[github]
+pull_request = true
+draft = true
+ready_label = "vibeplane:ready"
 "#,
         )
         .unwrap();
@@ -230,6 +262,15 @@ max_parallel_runs = 2
             crate::Verdict::Deny { .. }
         ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn github_is_off_until_it_is_asked_for() {
+        // Pushing a branch is the first thing Vibeplane does that other people
+        // can see, so it is never a default.
+        let c = ProjectConfig::default();
+        assert!(!c.github.pull_request);
+        assert!(c.github.draft, "and when it is on, it is a draft");
     }
 
     #[test]

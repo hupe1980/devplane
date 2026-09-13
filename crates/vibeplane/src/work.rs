@@ -36,22 +36,11 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<WorkId> {
         .canonicalize()
         .with_context(|| format!("{} does not exist", req.project_root.display()))?;
 
-    // The trust gate. A headless agent runs the repository's own hooks and MCP
-    // servers with no dialog of its own, so the decision to let that happen has
-    // to be one somebody made deliberately, once, for this directory.
+    // Checked before the worktree is made, not only when the agent starts:
+    // refusing after creating a branch would leave litter behind. `dispatch`
+    // checks again, because that is where every path converges.
+    crate::driven::require_trust(state, &root).await?;
     let project_id = ProjectId::from_path(&root);
-    let trusted = {
-        let w = state.world.lock().await;
-        w.project(&project_id).map(|p| p.trusted).unwrap_or(false)
-    };
-    if !trusted {
-        bail!(
-            "{} is not trusted yet. Starting an agent there runs that repository's own \
-             hooks and MCP servers without asking. Run `vibeplane trust {}` if you meant to.",
-            root.display(),
-            root.display()
-        );
-    }
 
     let config = ProjectConfig::load(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -189,6 +178,9 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
 
     if passed {
         tracing::info!(work = %work_id, "gates passed");
+        // Only now. A pull request opened before the checks pass is a
+        // notification to other people that something is ready when it is not.
+        open_pull_request(state, &work_id, &config).await;
         set_phase(state, &work_id, Phase::Review).await;
         return;
     }
@@ -222,6 +214,111 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
             set_phase(state, &work_id, Phase::Failed).await;
         }
     }
+}
+
+/// Opens a pull request for finished work, if the project asked for one.
+///
+/// Failures here are reported and dropped rather than failing the work: the
+/// code is written and the checks passed, and a missing remote or an unlogged-in
+/// `gh` is a setup problem, not a reason to throw that away.
+async fn open_pull_request(state: &Shared, id: &WorkId, config: &ProjectConfig) {
+    if !config.github.pull_request {
+        return;
+    }
+    let (dir, branch, title, existing) = {
+        let works = state.works.lock().await;
+        let Some(w) = works.get(id) else { return };
+        match (&w.worktree, &w.branch) {
+            (Some(d), Some(b)) => (
+                d.clone(),
+                b.clone(),
+                w.title.clone(),
+                w.pull_request.is_some(),
+            ),
+            _ => return,
+        }
+    };
+    if existing {
+        return;
+    }
+    if !vibeplane_github::is_available(&dir).await {
+        tracing::info!("no GitHub remote here; skipping the pull request");
+        return;
+    }
+
+    // The branch has to exist on the remote before a pull request can point at
+    // it. This is the first thing Vibeplane does that other people can see,
+    // which is why `[github].pull_request` is off until asked for.
+    if let Err(e) = push_branch(&dir, &branch).await {
+        tracing::warn!(error = %e, "could not push the branch");
+        return;
+    }
+
+    let base = match &config.project.base_branch {
+        Some(b) => b.clone(),
+        None => vibeplane_git::base_branch(&dir).await,
+    };
+    let body = pr_body(state, id).await;
+    match vibeplane_github::create_pr(&dir, &branch, &base, &title, &body, config.github.draft)
+        .await
+    {
+        Ok(pr) => {
+            tracing::info!(number = pr.number, "opened a pull request");
+            let mut works = state.works.lock().await;
+            if let Some(w) = works.get_mut(id) {
+                w.pull_request = Some(vibeplane_domain::work::PullRequestRef {
+                    number: pr.number,
+                    url: pr.url.clone(),
+                    status: format!("{:?}", pr.status()).to_lowercase(),
+                    failing_checks: Vec::new(),
+                });
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not open a pull request"),
+    }
+}
+
+async fn push_branch(dir: &std::path::Path, branch: &str) -> Result<()> {
+    let out = tokio::process::Command::new("git")
+        .args(["push", "--set-upstream", "origin", branch])
+        .current_dir(dir)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+/// What the pull request says about itself.
+///
+/// The gate report goes in because it is the evidence: a reviewer can see which
+/// checks ran and that they passed, rather than taking the description's word.
+async fn pr_body(state: &Shared, id: &WorkId) -> String {
+    let works = state.works.lock().await;
+    let Some(w) = works.get(id) else {
+        return String::new();
+    };
+    let mut body = format!("{}\n\n", w.prompt);
+    if let Some(g) = w.last_gate() {
+        body.push_str("## Verification\n\n");
+        for c in &g.commands {
+            body.push_str(&format!(
+                "- `{}` — {}\n",
+                c.command,
+                if c.passed() { "passed" } else { "failed" }
+            ));
+        }
+        if w.feedback_rounds > 0 {
+            body.push_str(&format!(
+                "\nThe checks failed {} time(s) first; the failures were handed back and fixed.\n",
+                w.feedback_rounds
+            ));
+        }
+    }
+    body.push_str("\n---\n_Opened by Vibeplane after the project's own checks passed._\n");
+    body
 }
 
 async fn set_phase(state: &Shared, id: &WorkId, phase: Phase) {

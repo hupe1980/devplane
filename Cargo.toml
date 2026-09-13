@@ -9,6 +9,7 @@ members = [
     "crates/vibeplane-acp",
     "crates/vibeplane-git",
     "crates/vibeplane-gates",
+    "crates/vibeplane-github",
 ]
 
 [workspace.package]
@@ -28,6 +29,7 @@ vibeplane-observe = { path = "crates/vibeplane-observe", version = "0.1.0" }
 vibeplane-acp = { path = "crates/vibeplane-acp", version = "0.1.0" }
 vibeplane-git = { path = "crates/vibeplane-git", version = "0.1.0" }
 vibeplane-gates = { path = "crates/vibeplane-gates", version = "0.1.0" }
+vibeplane-github = { path = "crates/vibeplane-github", version = "0.1.0" }
 
 anyhow = "1"
 thiserror = "2"

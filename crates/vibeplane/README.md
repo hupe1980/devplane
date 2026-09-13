@@ -15,9 +15,10 @@ $ vibeplane ls
 ```
 
 > **Status: early, but the whole loop runs.** Watching is verified against Claude Code 2.1.270 on a
-> machine with 23 live sessions. Driving works for any ACP agent. And work is *verified*: an agent
-> that says it is done but fails the project's own checks does not get to be done. GitHub, the
-> durable runtime and declared pipelines are designed, not built.
+> machine with 23 live sessions. Driving works for any ACP agent. Work is *verified* — an agent that
+> says it is done but fails the project's own checks does not get to be done — and when it passes,
+> a draft pull request carries the evidence. The durable runtime and declared pipelines are
+> designed, not built.
 
 ## Why
 
@@ -79,6 +80,19 @@ failures go back to that same session, bounded, and then you are asked.
 
 An agent that claims success without earning it reaches `failed`, never `review`.
 
+When the checks *do* pass and the project asks for it, Vibeplane pushes the branch and opens a
+**draft** pull request whose body says which checks ran, that they passed, and how many times the
+failures were handed back first. A poller watches it afterwards: a red check reaches your inbox
+minutes or hours after the session ended, which is exactly when nobody is looking.
+
+```sh
+vibeplane work issues                  # what this repository labels as ready
+vibeplane work start --issue 7 --kind bug
+```
+
+An issue's body reaches the agent marked as a report from someone else that may be wrong — it is
+text from the internet arriving at something that can run commands.
+
 ```toml
 # vibeplane.toml — committed, so the definition of done is the project's, not the agent's
 [gates]
@@ -94,6 +108,11 @@ include = [".env"]
 [policy]
 auto_allow = ["Read", "Bash(pnpm test *)"]
 never_auto = ["Bash(git push *)"]
+
+[github]                    # off by default: pushing a branch is visible to other people
+pull_request = true
+draft        = true
+ready_label  = "vibeplane:ready"
 ```
 
 Gates run as children of the daemon, never through the agent — letting the thing being checked

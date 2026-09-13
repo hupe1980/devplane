@@ -21,6 +21,10 @@ use vibeplane_domain::ids::RunId;
 use vibeplane_domain::run::RunMode;
 
 /// Starts an agent and registers it as a run.
+///
+/// Every path that starts an agent comes through here, which is where the trust
+/// gate belongs. Putting it only in `work::start` left `dispatch` as a way
+/// around it — a check that one caller can skip is not a check.
 pub async fn dispatch(
     state: &Shared,
     spec: &AgentSpec,
@@ -30,6 +34,10 @@ pub async fn dispatch(
     if !cwd.is_dir() {
         anyhow::bail!("{} is not a directory", cwd.display());
     }
+    let cwd = cwd
+        .canonicalize()
+        .with_context(|| format!("resolving {}", cwd.display()))?;
+    require_trust(state, &cwd).await?;
     let (session, mut events) = vibeplane_acp::spawn(spec, cwd.clone())
         .await
         .with_context(|| format!("starting {}", spec.id))?;
@@ -85,6 +93,34 @@ pub async fn dispatch(
         session.prompt(text).await?;
     }
     Ok(run_id)
+}
+
+/// Refuses unless somebody has said this directory is theirs.
+///
+/// A headless agent runs the repository's own hooks and MCP servers with no
+/// dialog of its own, so the decision has to be deliberate and once. A worktree
+/// inherits the trust of the repository that owns it: trusting a project and
+/// then being asked again for each of its checkouts would teach people to say
+/// yes without reading.
+pub async fn require_trust(state: &Shared, cwd: &Path) -> Result<()> {
+    let root = vibeplane_domain::project::main_checkout_for(cwd)
+        .or_else(|| vibeplane_domain::project::find_repo_root(cwd))
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let id = vibeplane_domain::ProjectId::from_path(&root);
+
+    let trusted = {
+        let w = state.world.lock().await;
+        w.project(&id).map(|p| p.trusted).unwrap_or(false)
+    };
+    if trusted {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} is not trusted yet. Starting an agent there runs that repository's own hooks \
+         and MCP servers without asking. Run `vibeplane trust {}` if you meant to.",
+        root.display(),
+        root.display()
+    )
 }
 
 /// Sends a prompt to a driven run.

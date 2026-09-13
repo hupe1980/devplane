@@ -181,6 +181,7 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     let poller = tokio::spawn(crate::poller::run(state.clone()));
     let sweeper = tokio::spawn(crate::poller::stall_sweeper(state.clone(), notifications));
     let retention = tokio::spawn(crate::poller::retention(state.clone(), 30, 7));
+    let prs = tokio::spawn(crate::poller::pull_requests(state.clone()));
 
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -189,6 +190,7 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     poller.abort();
     sweeper.abort();
     retention.abort();
+    prs.abort();
     crate::config::clear_daemon_info().ok();
     result.context("serving")?;
     Ok(())

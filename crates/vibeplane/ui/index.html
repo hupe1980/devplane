@@ -67,6 +67,7 @@
   .gate { padding: 0 .4rem; border-radius: 3px; border: 1px solid var(--line); }
   .gate.red { color: var(--fail); border-color: var(--fail); }
   .gate.green { color: var(--done); border-color: var(--done); }
+  a.gate { text-decoration: none; }
   .proj { color: var(--dim); margin: .9rem 0 .3rem; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
   .gauge { display: inline-block; width: 3.2rem; color: var(--faint); text-align: right; }
   .gauge.high { color: var(--wait); }
@@ -194,12 +195,17 @@ function render() {
     const badge = g
       ? `<span class="gate ${gatePassed(g) ? "green" : "red"}">${gatePassed(g) ? "gates green" : "gates red"}</span>`
       : "";
+    const pr = w.pull_request
+      ? `<a class="gate ${w.pull_request.status === "failing" ? "red" : w.pull_request.status.startsWith("ready") ? "green" : ""}"
+            href="${esc(w.pull_request.url)}" target="_blank" rel="noreferrer"
+         >#${w.pull_request.number} ${esc(w.pull_request.status.replace(/_/g, " "))}</a>`
+      : "";
     return `<div class="card row">
       <span class="s ${w.phase}">${GLYPH[w.phase] || "\u25CF"}</span>
       <span class="name">${esc(w.title)}</span>
       <span class="meta">${esc(w.phase)}</span>
       <span class="sum">${esc(w.branch || "")}</span>
-      ${badge}
+      ${badge}${pr}
     </div>`;
   }).join("");
 

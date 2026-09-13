@@ -170,6 +170,23 @@ impl GateReport {
     }
 }
 
+/// The pull request a piece of work produced, and what it is waiting for.
+///
+/// Kept on the Work rather than looked up each time: the number and URL are
+/// what a human needs to click, and they do not change. The status does, and is
+/// refreshed by the poller.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PullRequestRef {
+    pub number: u64,
+    pub url: String,
+    /// `pending`, `failing`, `ready_for_review`, `ready_to_merge`,
+    /// `changes_requested`, `draft`, `merged`, `closed`.
+    pub status: String,
+    /// Names of the checks that are red, for the inbox card.
+    #[serde(default)]
+    pub failing_checks: Vec<String>,
+}
+
 /// A unit of work.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Work {
@@ -188,6 +205,9 @@ pub struct Work {
     pub gates: Vec<GateReport>,
     /// How many times failures have been handed back to the agent.
     pub feedback_rounds: u32,
+    /// The pull request this work opened, once it has one.
+    #[serde(default)]
+    pub pull_request: Option<PullRequestRef>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -207,6 +227,7 @@ impl Work {
             runs: Vec::new(),
             gates: Vec::new(),
             feedback_rounds: 0,
+            pull_request: None,
             created_at: now,
             updated_at: now,
         }

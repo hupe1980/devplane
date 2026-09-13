@@ -28,6 +28,7 @@ vibeplane-observe.workspace = true
 vibeplane-acp.workspace = true
 vibeplane-git.workspace = true
 vibeplane-gates.workspace = true
+vibeplane-github.workspace = true
 
 anyhow.workspace = true
 axum.workspace = true
@@ -47,4 +48,5 @@ uuid.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 vibeplane-core.workspace = true
+vibeplane-domain.workspace = true
 uuid.workspace = true

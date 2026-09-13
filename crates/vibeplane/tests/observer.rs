@@ -464,7 +464,20 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         return;
     };
     let (addr, token, c) = boot(Policy::default()).await;
-    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+    let cwd = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // Every path that starts an agent goes through the trust gate, dispatch
+    // included — so the test has to make the same decision a person would.
+    c.post(format!("http://{addr}/api/projects/trust"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": cwd }))
+        .send()
+        .await
+        .unwrap();
 
     let started: Value = c
         .post(format!("http://{addr}/api/dispatch"))

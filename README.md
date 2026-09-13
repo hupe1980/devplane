@@ -15,9 +15,10 @@ $ vibeplane ls
 ```
 
 > **Status: early, but the whole loop runs.** Watching is verified against Claude Code 2.1.270 on a
-> machine with 23 live sessions. Driving works for any ACP agent. And work is *verified*: an agent
-> that says it is done but fails the project's own checks does not get to be done. GitHub, the
-> durable runtime and declared pipelines are designed, not built.
+> machine with 23 live sessions. Driving works for any ACP agent. Work is *verified* — an agent that
+> says it is done but fails the project's own checks does not get to be done — and when it passes,
+> a draft pull request carries the evidence. The durable runtime and declared pipelines are
+> designed, not built.
 
 ## Why
 
@@ -79,6 +80,19 @@ failures go back to that same session, bounded, and then you are asked.
 
 An agent that claims success without earning it reaches `failed`, never `review`.
 
+When the checks *do* pass and the project asks for it, Vibeplane pushes the branch and opens a
+**draft** pull request whose body says which checks ran, that they passed, and how many times the
+failures were handed back first. A poller watches it afterwards: a red check reaches your inbox
+minutes or hours after the session ended, which is exactly when nobody is looking.
+
+```sh
+vibeplane work issues                  # what this repository labels as ready
+vibeplane work start --issue 7 --kind bug
+```
+
+An issue's body reaches the agent marked as a report from someone else that may be wrong — it is
+text from the internet arriving at something that can run commands.
+
 ```toml
 # vibeplane.toml — committed, so the definition of done is the project's, not the agent's
 [gates]
@@ -94,6 +108,11 @@ include = [".env"]
 [policy]
 auto_allow = ["Read", "Bash(pnpm test *)"]
 never_auto = ["Bash(git push *)"]
+
+[github]                    # off by default: pushing a branch is visible to other people
+pull_request = true
+draft        = true
+ready_label  = "vibeplane:ready"
 ```
 
 Gates run as children of the daemon, never through the agent — letting the thing being checked
@@ -177,6 +196,7 @@ rather than stored. Details in `concepts/` (not published — see below).
 | `crates/vibeplane-acp` | The Agent Client Protocol client, and the fixture agent its conformance suite drives |
 | `crates/vibeplane-git` | Worktrees per unit of work, and the status the board shows |
 | `crates/vibeplane-gates` | The project's definition of done: run, bounded, parsed |
+| `crates/vibeplane-github` | Pull requests, checks and issues, through the `gh` CLI |
 | `crates/vibeplane-observe` | Hooks, OpenTelemetry, roster, status line, connect, discovery |
 | `crates/vibeplane-store` | SQLite: events, runs, full-text search |
 | `scripts/` | Spec fetching and the checks that keep the notes honest |
@@ -191,21 +211,21 @@ integration claim in the notes against it.
 |---|---|---|
 | **M0 Sight** | see every session, on every surface | ⏳ usable |
 | **M1 Hands** | drive any agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com) | ✅ dispatch, prompt, permissions |
-| **M2 Proof** | work items, verification gates, GitHub — *verified done*, not *agent says done* | ⏳ worktrees and gates run; GitHub next |
+| **M2 Proof** | work items, verification gates, GitHub — *verified done*, not *agent says done* | ⏳ worktrees, gates and pull requests run |
 | **M3 Pipelines** | implement → review → verify, with agents checking agents | designed |
 
 ## Development
 
 ```sh
 cargo build --examples       # builds the fixture agent the ACP suite drives
-cargo test                   # 152 tests, no network, no provider, no bill
+cargo test                   # 165 tests, no network, no provider, no bill
 cargo run -- serve           # the daemon in the foreground
 VIBEPLANE_HOME=/tmp/vp cargo run -- ls    # an isolated instance, touching nothing of yours
 ```
 
 The protocol tests drive a real agent process — `crates/vibeplane-acp/examples/echo_agent` — rather
-than a vendor's. That is what keeps them runnable on every commit: a suite that needs a
-subscription is a suite nobody runs.
+than a vendor's, and the GitHub tests parse captured `gh` output rather than calling GitHub. That is
+what keeps them runnable on every commit: a suite that needs a subscription is a suite nobody runs.
 
 `VIBEPLANE_HOME` moves the database, token and daemon record; `CLAUDE_CONFIG_DIR` points `connect`
 at a throwaway Claude Code config. Together they let you exercise the whole thing without going near

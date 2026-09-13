@@ -2765,6 +2765,7 @@ dependencies = [
  "vibeplane-domain",
  "vibeplane-gates",
  "vibeplane-git",
+ "vibeplane-github",
  "vibeplane-observe",
  "vibeplane-store",
 ]
@@ -2824,6 +2825,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "vibeplane-github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
