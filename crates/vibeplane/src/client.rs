@@ -86,6 +86,25 @@ impl Client {
         res.json().await.with_context(|| format!("decoding {path}"))
     }
 
+    /// POSTs a body and returns the decoded answer, including error bodies:
+    /// the daemon explains refusals in JSON, and swallowing that to raise a
+    /// status code would lose the explanation.
+    pub async fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let res = self
+            .http
+            .post(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("POST {path}"))?;
+        res.json().await.with_context(|| format!("decoding {path}"))
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base
     }

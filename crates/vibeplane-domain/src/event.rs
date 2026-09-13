@@ -119,6 +119,12 @@ pub enum Event {
     Blocked {
         waiting_for: WaitingFor,
         message: Option<String>,
+        /// The protocol's id for the outstanding request, when there is one to
+        /// answer. Present for a driven run, absent for an observed session —
+        /// which is exactly the difference between an inbox item you can
+        /// decide and one you can only go and look at.
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// The agent asked a question with options. Observed sessions cannot be
     /// answered from Vibeplane, only focused.

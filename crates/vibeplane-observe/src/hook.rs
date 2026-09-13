@@ -178,16 +178,19 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
             Some("permission_prompt") => HookOutcome::just(Event::Blocked {
                 waiting_for: WaitingFor::Permission,
                 message: p.message.clone(),
+                request_id: None,
             }),
             Some("elicitation_dialog") | Some("elicitation_url_dialog") => {
                 HookOutcome::just(Event::Blocked {
                     waiting_for: WaitingFor::Question,
                     message: p.message.clone(),
+                    request_id: None,
                 })
             }
             Some("idle_prompt") => HookOutcome::just(Event::Blocked {
                 waiting_for: WaitingFor::Idle,
                 message: None,
+                request_id: None,
             }),
             _ => HookOutcome::none(),
         },

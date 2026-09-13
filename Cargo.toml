@@ -6,6 +6,7 @@ members = [
     "crates/vibeplane-core",
     "crates/vibeplane-store",
     "crates/vibeplane-observe",
+    "crates/vibeplane-acp",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ vibeplane-domain = { path = "crates/vibeplane-domain", version = "0.1.0" }
 vibeplane-core = { path = "crates/vibeplane-core", version = "0.1.0" }
 vibeplane-store = { path = "crates/vibeplane-store", version = "0.1.0" }
 vibeplane-observe = { path = "crates/vibeplane-observe", version = "0.1.0" }
+vibeplane-acp = { path = "crates/vibeplane-acp", version = "0.1.0" }
 
 anyhow = "1"
 thiserror = "2"

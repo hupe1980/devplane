@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use vibeplane::render::{BOLD, DIM, ago, clip, level_marker, paint, state_marker, surface};
 use vibeplane::{client, config, daemon, focus, poller, render};
 
@@ -48,6 +49,30 @@ enum Command {
     Focus { run: String },
     /// Attach a terminal to a run, resuming its session.
     Attach { run: String },
+    /// Start an agent on a project and give it something to do.
+    Dispatch {
+        /// What to ask for.
+        prompt: Vec<String>,
+        /// Which agent: `claude`, `codex`, `opencode`, `gemini`, or a command.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Where it runs. Defaults to the current directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Send another prompt to a run Vibeplane drives.
+    Say { run: String, prompt: Vec<String> },
+    /// Answer a permission request from a driven run.
+    Decide {
+        run: String,
+        /// The option to choose; omit to refuse.
+        #[arg(long)]
+        option: Option<String>,
+        #[arg(long)]
+        request: String,
+    },
+    /// List the agents Vibeplane can drive.
+    Agents,
     /// Hide a run's inbox items for a while.
     Snooze {
         run: String,
@@ -112,6 +137,16 @@ async fn main() -> Result<()> {
         Some(Command::Search { query }) => cmd_search(&query, cli.json).await,
         Some(Command::Focus { run }) => cmd_focus(&run).await,
         Some(Command::Attach { run }) => cmd_attach(&run).await,
+        Some(Command::Dispatch { prompt, agent, cwd }) => {
+            cmd_dispatch(&agent, cwd, prompt.join(" "), cli.json).await
+        }
+        Some(Command::Say { run, prompt }) => cmd_say(&run, prompt.join(" ")).await,
+        Some(Command::Decide {
+            run,
+            option,
+            request,
+        }) => cmd_decide(&run, &request, option).await,
+        Some(Command::Agents) => cmd_agents(cli.json).await,
         Some(Command::Snooze { run, minutes }) => cmd_snooze(&run, minutes, cli.json).await,
         Some(Command::Open) => cmd_open().await,
         Some(Command::Watch) => cmd_watch().await,
@@ -342,6 +377,21 @@ async fn cmd_inbox(json: bool) -> Result<()> {
                 &format!("run {} · {}", clip(&i.run_id, 12), i.actions.join(", "))
             )
         );
+        // Spell out the command only when Vibeplane can actually run it. For a
+        // session it merely watches there is nothing to decide from here, and
+        // printing a command that would fail is worse than printing none.
+        if let Some(req) = &i.request_id {
+            println!(
+                "     {}",
+                paint(
+                    DIM,
+                    &format!(
+                        "vibeplane decide {} --request {} --option allow",
+                        i.run_id, req
+                    )
+                )
+            );
+        }
     }
     Ok(())
 }
@@ -515,6 +565,94 @@ async fn cmd_attach(run: &str) -> Result<()> {
             .context("starting claude")?;
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+async fn cmd_dispatch(agent: &str, cwd: Option<PathBuf>, prompt: String, json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let cwd = match cwd {
+        Some(p) => p,
+        None => std::env::current_dir()?,
+    };
+    let body = serde_json::json!({
+        "agent": agent,
+        "cwd": cwd.to_string_lossy(),
+        "prompt": (!prompt.is_empty()).then_some(prompt),
+    });
+    let v: serde_json::Value = c.post_json("/api/dispatch", &body).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    match v.get("error").and_then(|e| e.as_str()) {
+        Some(e) => anyhow::bail!("{e}"),
+        None => println!(
+            "{} {} in {}\n  {}",
+            paint(render::GREEN, "started"),
+            v["agent"].as_str().unwrap_or(agent),
+            cwd.display(),
+            paint(
+                DIM,
+                &format!("vibeplane say {} ...", v["run_id"].as_str().unwrap_or(""))
+            )
+        ),
+    }
+    Ok(())
+}
+
+async fn cmd_say(run: &str, prompt: String) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let v: serde_json::Value = c
+        .post_json(
+            &format!("/api/runs/{run}/prompt"),
+            &serde_json::json!({ "text": prompt }),
+        )
+        .await?;
+    match v.get("error").and_then(|e| e.as_str()) {
+        Some(e) => anyhow::bail!("{e}"),
+        None => println!("{}", paint(DIM, "sent")),
+    }
+    Ok(())
+}
+
+async fn cmd_decide(run: &str, request: &str, option: Option<String>) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let v: serde_json::Value = c
+        .post_json(
+            &format!("/api/runs/{run}/decide"),
+            &serde_json::json!({ "request_id": request, "option_id": option }),
+        )
+        .await?;
+    match v.get("error").and_then(|e| e.as_str()) {
+        Some(e) => anyhow::bail!("{e}"),
+        None => println!("{}", paint(render::GREEN, "answered")),
+    }
+    Ok(())
+}
+
+async fn cmd_agents(json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let v: serde_json::Value = c.get("/api/agents").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let empty = vec![];
+    for a in v.as_array().unwrap_or(&empty) {
+        println!(
+            "{:<10} {:<14} {}",
+            paint(BOLD, a["id"].as_str().unwrap_or("")),
+            a["name"].as_str().unwrap_or(""),
+            paint(DIM, a["command"].as_str().unwrap_or(""))
+        );
+    }
+    println!(
+        "\n{}",
+        paint(
+            DIM,
+            "Any command line works too: vibeplane dispatch --agent '/opt/my-agent --acp' ..."
+        )
+    );
+    Ok(())
 }
 
 async fn cmd_snooze(run: &str, minutes: i64, json: bool) -> Result<()> {

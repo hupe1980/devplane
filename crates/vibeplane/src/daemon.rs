@@ -20,6 +20,9 @@ use vibeplane_store::Store;
 /// Shared daemon state.
 pub struct AppState {
     pub world: Mutex<World>,
+    /// Live ACP sessions, by run. Only driven runs appear here; an observed
+    /// session belongs to whoever started it.
+    pub sessions: Mutex<std::collections::HashMap<RunId, vibeplane_acp::Session>>,
     pub store: Store,
     pub policy: Mutex<Policy>,
     pub token: String,
@@ -52,6 +55,7 @@ impl AppState {
 
         Ok(Arc::new(AppState {
             world: Mutex::new(world),
+            sessions: Mutex::new(std::collections::HashMap::new()),
             store,
             policy: Mutex::new(policy),
             token,

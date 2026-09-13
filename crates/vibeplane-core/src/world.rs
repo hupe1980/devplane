@@ -455,6 +455,7 @@ mod tests {
                 Event::Blocked {
                     waiting_for: WaitingFor::Permission,
                     message: Some("Bash".into()),
+                    request_id: None,
                 },
             ),
         ];

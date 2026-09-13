@@ -88,6 +88,9 @@ pub struct InboxItem {
     pub options: Vec<String>,
     #[serde(default)]
     pub actions: Vec<String>,
+    /// Present when the item can be answered from here.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 /// The glyph and colour for a run state. The shape carries the meaning for

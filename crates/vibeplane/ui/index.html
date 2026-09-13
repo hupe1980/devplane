@@ -104,6 +104,7 @@
   <span><kbd>f</kbd> focus window</span>
   <span><kbd>a</kbd> copy attach</span>
   <span><kbd>s</kbd> snooze 1h</span>
+  <span><kbd>y</kbd><kbd>n</kbd> allow / deny</span>
   <span><kbd>r</kbd> refresh</span>
 </footer>
 
@@ -162,6 +163,8 @@ function render() {
           ${i.detail ? `<div class="d">${esc(i.detail)}</div>` : ""}
           ${i.options?.length ? `<ol class="opts">${i.options.map((o) => `<li>${esc(o)}</li>`).join("")}</ol>` : ""}
           <div class="acts">
+            ${i.actions.includes("allow") ? `<button data-act="allow" data-run="${esc(i.run_id)}" data-req="${esc(i.request_id || "")}">allow</button>` : ""}
+            ${i.actions.includes("deny") ? `<button data-act="deny" data-run="${esc(i.run_id)}" data-req="${esc(i.request_id || "")}">deny</button>` : ""}
             ${i.actions.includes("focus") ? `<button data-act="focus" data-run="${esc(i.run_id)}">focus window</button>` : ""}
             <button data-act="attach" data-run="${esc(i.run_id)}">copy attach</button>
             <button data-act="snooze" data-run="${esc(i.run_id)}">snooze 1h</button>
@@ -206,8 +209,21 @@ async function refresh() {
   }
 }
 
-async function act(kind, run) {
-  if (kind === "focus") {
+async function act(kind, run, req) {
+  if (kind === "allow" || kind === "deny") {
+    // The agent is stopped, waiting for this. Refusing is `option_id: null`,
+    // which is also what an unanswered request becomes when it times out.
+    const item = state.inbox.find((i) => i.run_id === run);
+    await api(`/api/runs/${run}/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        request_id: req || item?.request_id,
+        option_id: kind === "allow" ? "allow" : null,
+      }),
+    }).catch((e) => alert(e.message));
+    refresh();
+  } else if (kind === "focus") {
     await api(`/api/runs/${run}/focus`, { method: "POST" }).catch((e) => alert(e.message));
   } else if (kind === "snooze") {
     await api(`/api/runs/${run}/snooze?minutes=60`, { method: "POST" });
@@ -224,7 +240,7 @@ async function act(kind, run) {
 
 document.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-act]");
-  if (btn) return act(btn.dataset.act, btn.dataset.run);
+  if (btn) return act(btn.dataset.act, btn.dataset.run, btn.dataset.req);
   const card = e.target.closest("[data-sel]");
   if (card) { state.sel = +card.dataset.sel; render(); }
 });
@@ -237,8 +253,8 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "j" || e.key === "ArrowDown") { state.sel = Math.min(state.sel + 1, cards.length - 1); render(); e.preventDefault(); }
   else if (e.key === "k" || e.key === "ArrowUp") { state.sel = Math.max(state.sel - 1, 0); render(); e.preventDefault(); }
   else if (e.key === "r") refresh();
-  else if (run && (e.key === "f" || e.key === "a" || e.key === "s")) {
-    act({ f: "focus", a: "attach", s: "snooze" }[e.key], run);
+  else if (run && "fasyn".includes(e.key)) {
+    act({ f: "focus", a: "attach", s: "snooze", y: "allow", n: "deny" }[e.key], run);
   }
 });
 

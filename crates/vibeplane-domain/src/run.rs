@@ -207,6 +207,9 @@ pub struct Run {
 pub struct BlockedOn {
     pub waiting_for: WaitingFor,
     pub message: Option<String>,
+    /// Set when this can be answered from Vibeplane.
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub tool: Option<String>,
     pub input: Option<serde_json::Value>,
     pub options: Vec<String>,

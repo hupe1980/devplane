@@ -74,6 +74,11 @@ impl AttentionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
+    /// Grant the outstanding request. Offered only when Vibeplane can actually
+    /// answer it — a driven run — never for a session it merely watches.
+    Allow,
+    /// Refuse it.
+    Deny,
     /// Raise the window that owns this session. The only way to answer an
     /// observed session, and named honestly for that reason.
     Focus,
@@ -90,6 +95,8 @@ pub enum Action {
 impl Action {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Action::Allow => "allow",
+            Action::Deny => "deny",
             Action::Focus => "focus",
             Action::Attach => "attach",
             Action::Open => "open",
@@ -114,6 +121,9 @@ pub struct AttentionItem {
     pub detail: Option<String>,
     pub options: Vec<String>,
     pub actions: Vec<Action>,
+    /// The protocol request this item answers, when it can be answered.
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub since: Timestamp,
 }
 
@@ -175,6 +185,7 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig) -> Vec<AttentionItem> {
             detail,
             options,
             actions,
+            request_id: run.blocked_on.as_ref().and_then(|b| b.request_id.clone()),
             since,
         });
     };
@@ -188,13 +199,21 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig) -> Vec<AttentionItem> {
             } else {
                 format!("Permission: {tool}")
             };
+            // Answerable only when Vibeplane owns the session. Offering
+            // "allow" for a run it cannot reach would be a button that lies.
+            let answerable = b.and_then(|b| b.request_id.as_ref()).is_some();
+            let actions = if answerable {
+                vec![Action::Allow, Action::Deny, Action::Open]
+            } else {
+                vec![Action::Focus, Action::Attach, Action::Open]
+            };
             push(
                 AttentionKind::Permission,
                 title,
                 b.and_then(|b| b.message.clone())
                     .or_else(|| b.and_then(|b| b.input.as_ref().map(summarise_input))),
                 Vec::new(),
-                vec![Action::Focus, Action::Attach, Action::Open],
+                actions,
                 b.map(|b| b.since).unwrap_or(run.last_event_at),
             );
         }

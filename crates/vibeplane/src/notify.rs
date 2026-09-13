@@ -146,6 +146,7 @@ mod tests {
             detail: None,
             options: vec![],
             actions: vec![Action::Focus],
+            request_id: None,
             since: jiff::Timestamp::now(),
         }
     }

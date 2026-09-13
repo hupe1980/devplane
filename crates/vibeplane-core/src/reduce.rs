@@ -90,6 +90,10 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         Event::PermissionDecided { .. } => {
             // A decision unblocks whatever prompted it. The decision itself is
             // recorded as an event; the run carries no permission history.
+            //
+            // This is what takes an answered request out of the inbox. Waiting
+            // for the agent's next move would leave it on screen until the
+            // agent did something — and after a refusal, that may be never.
             if matches!(run.state, RunState::Waiting(WaitingFor::Permission)) {
                 run.state = RunState::Working;
                 run.blocked_on = None;
@@ -99,6 +103,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         Event::Blocked {
             waiting_for,
             message,
+            request_id,
         } => {
             // `idle_prompt` means the turn ended and nobody has typed since. It
             // is not a question, so it must not outrank one: a run already
@@ -113,6 +118,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                 run.blocked_on = Some(BlockedOn {
                     waiting_for: waiting_for.clone(),
                     message: message.clone(),
+                    request_id: request_id.clone(),
                     tool: last_pending_tool(run),
                     input: None,
                     options: Vec::new(),
@@ -126,6 +132,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             run.blocked_on = Some(BlockedOn {
                 waiting_for: WaitingFor::Question,
                 message: Some(question.clone()),
+                request_id: None,
                 tool: None,
                 input: None,
                 options: options.clone(),
@@ -245,6 +252,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                             _ => WaitingFor::Question,
                         },
                         message: waiting_for.clone(),
+                        request_id: None,
                         tool: None,
                         input: None,
                         options: Vec::new(),
@@ -374,6 +382,7 @@ mod tests {
             &ev(Event::Blocked {
                 waiting_for: WaitingFor::Permission,
                 message: Some("Bash wants to run".into()),
+                request_id: None,
             }),
         );
         apply(
@@ -381,6 +390,7 @@ mod tests {
             &ev(Event::Blocked {
                 waiting_for: WaitingFor::Idle,
                 message: None,
+                request_id: None,
             }),
         );
         assert_eq!(r.state, RunState::Waiting(WaitingFor::Permission));
@@ -394,6 +404,7 @@ mod tests {
             &ev(Event::Blocked {
                 waiting_for: WaitingFor::Permission,
                 message: None,
+                request_id: None,
             }),
         );
         apply(&mut r, &ev(Event::PromptSubmitted { chars: 12 }));
@@ -509,6 +520,30 @@ mod tests {
         let mut r = run();
         apply(&mut r, &ev(roster("interactive", None)));
         assert_eq!(r.state, RunState::Idle);
+    }
+
+    #[test]
+    fn answering_a_permission_clears_it_from_the_inbox() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::Blocked {
+                waiting_for: WaitingFor::Permission,
+                message: Some("rm -rf node_modules".into()),
+                request_id: Some("req-1".into()),
+            }),
+        );
+        assert!(r.state.needs_human());
+        apply(
+            &mut r,
+            &ev(Event::PermissionDecided {
+                tool: String::new(),
+                decision: "deny".into(),
+                by: "human".into(),
+            }),
+        );
+        assert_eq!(r.state, RunState::Working);
+        assert!(r.blocked_on.is_none(), "an answered request is answered");
     }
 
     #[test]

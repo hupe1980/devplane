@@ -5,6 +5,7 @@
 //! hook whose shape changed, a permission answered a millisecond too late, a
 //! notification that empties the inbox instead of filling it.
 
+use serde_json::Value;
 use std::net::SocketAddr;
 use std::path::Path;
 use vibeplane::daemon::{AppState, Shared};
@@ -433,4 +434,155 @@ async fn events_survive_a_restart_and_rebuild_the_same_board() {
     assert_eq!(events.as_array().unwrap().len(), 1);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Driven runs
+// ---------------------------------------------------------------------------
+
+/// The fixture agent from `vibeplane-acp`, built as a sibling of this binary.
+fn echo_agent_path() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let bin = exe
+        .parent()?
+        .parent()?
+        .join("examples")
+        .join(if cfg!(windows) {
+            "echo_agent.exe"
+        } else {
+            "echo_agent"
+        });
+    bin.exists().then(|| bin.to_string_lossy().to_string())
+}
+
+#[tokio::test]
+async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() {
+    // The whole point of driving an agent is that the answer happens here
+    // rather than in somebody's terminal. This walks that path end to end.
+    let Some(agent) = echo_agent_path() else {
+        eprintln!("skipping: build the fixture with `cargo build -p vibeplane-acp --examples`");
+        return;
+    };
+    let (addr, token, c) = boot(Policy::default()).await;
+    let cwd = std::env::temp_dir().to_string_lossy().to_string();
+
+    let started: Value = c
+        .post(format!("http://{addr}/api/dispatch"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "agent": agent, "cwd": cwd }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run = started["run_id"].as_str().expect("a run id").to_string();
+
+    // It is a run like any other: same board, same project resolution.
+    let board = get_json(&c, &addr, "/api/board", &token).await;
+    let row = board["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == run.as_str())
+        .expect("the driven run is on the board");
+    assert_eq!(row["mode"], "driven");
+
+    c.post(format!("http://{addr}/api/runs/{run}/prompt"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "text": "this needs permission" }))
+        .send()
+        .await
+        .unwrap();
+
+    // Wait for the request to surface rather than sleeping a fixed time: a
+    // test that races the agent is a test that fails on a busy machine.
+    let mut item = Value::Null;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+        if let Some(first) = inbox.as_array().and_then(|a| a.first()) {
+            item = first.clone();
+            break;
+        }
+    }
+    assert_eq!(
+        item["kind"], "permission",
+        "the request must reach the inbox"
+    );
+    assert!(
+        item["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "allow"),
+        "a driven permission is answerable, not merely visible"
+    );
+    let request_id = item["request_id"].as_str().expect("something to answer");
+
+    c.post(format!("http://{addr}/api/runs/{run}/decide"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "request_id": request_id, "option_id": "allow" }))
+        .send()
+        .await
+        .unwrap();
+
+    let mut cleared = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if get_json(&c, &addr, "/api/inbox", &token)
+            .await
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false)
+        {
+            cleared = true;
+            break;
+        }
+    }
+    assert!(cleared, "an answered request leaves the inbox");
+
+    c.post(format!("http://{addr}/api/runs/{run}/stop"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_unknown_agent_is_refused_by_name() {
+    let (addr, token, c) = boot(Policy::default()).await;
+    let res: Value = c
+        .post(format!("http://{addr}/api/dispatch"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "agent": "clauude", "cwd": "/tmp" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        res["error"].as_str().unwrap_or("").contains("clauude"),
+        "a typo must be reported as an unknown agent, not a missing binary"
+    );
+}
+
+#[tokio::test]
+async fn dispatching_into_a_directory_that_does_not_exist_is_refused() {
+    let (addr, token, c) = boot(Policy::default()).await;
+    let Some(agent) = echo_agent_path() else {
+        return;
+    };
+    let res: Value = c
+        .post(format!("http://{addr}/api/dispatch"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "agent": agent, "cwd": "/no/such/place" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(res["error"].as_str().unwrap_or("").contains("directory"));
 }

@@ -10,6 +10,7 @@ pub mod client;
 pub mod config;
 pub mod daemon;
 pub mod daemonise;
+pub mod driven;
 pub mod focus;
 pub mod notify;
 pub mod poller;

@@ -39,6 +39,11 @@ pub fn router(state: Shared) -> Router {
         .route("/api/runs/{id}/events", get(run_events))
         .route("/api/runs/{id}/snooze", post(snooze))
         .route("/api/runs/{id}/focus", post(focus_run))
+        .route("/api/dispatch", post(dispatch))
+        .route("/api/runs/{id}/prompt", post(prompt_run))
+        .route("/api/runs/{id}/decide", post(decide_run))
+        .route("/api/runs/{id}/stop", post(stop_run))
+        .route("/api/agents", get(agents))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/stream", get(stream))
@@ -236,6 +241,9 @@ async fn policy(
             Event::Blocked {
                 waiting_for: vibeplane_domain::event::WaitingFor::Permission,
                 message: Some(describe(&tool, &input)),
+                // An observed session's prompt belongs to Claude Code's own
+                // dialog; Vibeplane can show it, not answer it.
+                request_id: None,
             },
         ),
     };
@@ -481,6 +489,110 @@ async fn run_events(
         )
             .into_response(),
     }
+}
+
+/// Starting an agent.
+#[derive(Deserialize)]
+struct DispatchBody {
+    /// An agent id from `/api/agents`, or a command line.
+    agent: String,
+    /// Where it runs. The project must be trusted: a headless agent executes
+    /// the repository's own hooks and MCP servers with no dialog of its own.
+    cwd: String,
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+async fn dispatch(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<DispatchBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Some(spec) = vibeplane_acp::resolve(&body.agent, &[]) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("unknown agent `{}`", body.agent)})),
+        )
+            .into_response();
+    };
+    match crate::driven::dispatch(&state, &spec, body.cwd.into(), body.prompt).await {
+        Ok(run) => Json(json!({"run_id": run.to_string(), "agent": spec.id})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PromptBody {
+    text: String,
+}
+
+async fn prompt_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PromptBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::driven::prompt(&state, &RunId::new(id), body.text).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DecideBody {
+    request_id: String,
+    /// The option to choose. Absent refuses, which is also what an unanswered
+    /// request becomes when its deadline passes.
+    #[serde(default)]
+    option_id: Option<String>,
+}
+
+async fn decide_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<DecideBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::driven::decide(&state, &RunId::new(id), &body.request_id, body.option_id).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn stop_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::driven::stop(&state, &RunId::new(id)).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn agents(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    Json(vibeplane_acp::builtin()).into_response()
 }
 
 #[derive(Deserialize)]

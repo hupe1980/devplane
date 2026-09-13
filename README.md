@@ -1,8 +1,8 @@
 # Vibeplane
 
 **The local-first control plane for AI coding agents.** One binary that sees every Claude Code
-session on your machine — in a terminal, in VS Code, in the desktop app — and tells you which ones
-need you.
+session on your machine — in a terminal, in VS Code, in the desktop app — tells you which ones need
+you, and drives any agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com).
 
 ```console
 $ vibeplane ls
@@ -14,8 +14,10 @@ $ vibeplane ls
 ○ blog-e2             vscode     12%   $0.02  41m  waiting for a prompt
 ```
 
-> **Status: early.** The observer (M0) runs, and has been verified against Claude Code 2.1.270 on a
-> machine with 23 live sessions. Driving agents, work items and gates are designed, not built.
+> **Status: early.** Watching works, and has been verified against Claude Code 2.1.270 on a machine
+> with 23 live sessions. Driving works: `vibeplane dispatch` starts an agent and its permission
+> requests are answerable from the inbox. Work items, verification gates and pipelines are designed,
+> not built.
 
 ## Why
 
@@ -44,6 +46,27 @@ vibeplane focus <run>        # raise the editor window that owns a session
 vibeplane attach <run>       # hand the terminal to Claude Code, resuming that session
 vibeplane snooze <run>       # not this one, not now
 vibeplane doctor             # is anything actually arriving?
+```
+
+### Driving an agent
+
+```sh
+vibeplane agents                                   # what can be driven
+vibeplane dispatch "add rate limiting to /login"   # starts Claude Code here
+vibeplane dispatch --agent codex --cwd ../core-lib "review the auth change"
+vibeplane say <run> "use the existing middleware"  # another turn
+vibeplane decide <run> --request <id> --option allow
+```
+
+A driven run is a run like any other: same board, same project grouping, same inbox. The difference
+is that its permission requests can be *answered* from Vibeplane rather than only looked at — and
+the same `[policy]` rules that auto-decide a hook decide these first.
+
+Agents come from the ACP registry, pinned to versions the conformance suite has run against; any
+command that speaks the protocol works too:
+
+```sh
+vibeplane dispatch --agent '/opt/my-agent --acp' "..."
 ```
 
 `vibeplane ls` works before you connect anything: sessions are discovered from Claude Code's own
@@ -110,6 +133,7 @@ rather than stored. Details in `concepts/` (not published — see below).
 | `crates/vibeplane` | The binary: daemon, receivers, HTTP API, CLI, and the board (`ui/index.html`) |
 | `crates/vibeplane-domain` | Types and pure functions. No I/O |
 | `crates/vibeplane-core` | The reducer, the attention engine, the permission policy |
+| `crates/vibeplane-acp` | The Agent Client Protocol client, and the fixture agent its conformance suite drives |
 | `crates/vibeplane-observe` | Hooks, OpenTelemetry, roster, status line, connect, discovery |
 | `crates/vibeplane-store` | SQLite: events, runs, full-text search |
 | `scripts/` | Spec fetching and the checks that keep the notes honest |
@@ -123,17 +147,22 @@ integration claim in the notes against it.
 | | | |
 |---|---|---|
 | **M0 Sight** | see every session, on every surface | ⏳ usable |
-| **M1 Hands** | drive any agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com) | next |
+| **M1 Hands** | drive any agent that speaks the [Agent Client Protocol](https://agentclientprotocol.com) | ⏳ dispatch works; work items next |
 | **M2 Proof** | work items, verification gates, GitHub — *verified done*, not *agent says done* | designed |
 | **M3 Pipelines** | implement → review → verify, with agents checking agents | designed |
 
 ## Development
 
 ```sh
-cargo test                   # 106 tests, no network, no provider needed
+cargo build --examples       # builds the fixture agent the ACP suite drives
+cargo test                   # 122 tests, no network, no provider, no bill
 cargo run -- serve           # the daemon in the foreground
 VIBEPLANE_HOME=/tmp/vp cargo run -- ls    # an isolated instance, touching nothing of yours
 ```
+
+The protocol tests drive a real agent process — `crates/vibeplane-acp/examples/echo_agent` — rather
+than a vendor's. That is what keeps them runnable on every commit: a suite that needs a
+subscription is a suite nobody runs.
 
 `VIBEPLANE_HOME` moves the database, token and daemon record; `CLAUDE_CONFIG_DIR` points `connect`
 at a throwaway Claude Code config. Together they let you exercise the whole thing without going near
