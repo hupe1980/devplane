@@ -154,6 +154,11 @@ impl Default for AttentionConfig {
 /// and a rebuild after a restart produces exactly the same list.
 pub fn items_for_run(run: &Run, cfg: &AttentionConfig) -> Vec<AttentionItem> {
     let mut out = Vec::new();
+    // A snoozed run is still on the board — it is only out of the queue of
+    // things being asked of the human right now.
+    if run.is_snoozed() {
+        return out;
+    }
     let mut push = |kind: AttentionKind,
                     title: String,
                     detail: Option<String>,

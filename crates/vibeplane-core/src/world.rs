@@ -158,6 +158,17 @@ impl World {
         (env, changes)
     }
 
+    /// Hides or un-hides a run's inbox items.
+    pub fn snooze(&mut self, run: &RunId, until: Option<jiff::Timestamp>) -> bool {
+        match self.runs.get_mut(run) {
+            Some(r) => {
+                r.snoozed_until = until;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Loads previously persisted runs into memory.
     ///
     /// Restoring is not believing: a run recorded as working is a claim about a

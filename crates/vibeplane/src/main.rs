@@ -46,6 +46,17 @@ enum Command {
     Search { query: String },
     /// Raise the editor window that owns a run.
     Focus { run: String },
+    /// Attach a terminal to a run, resuming its session.
+    Attach { run: String },
+    /// Hide a run's inbox items for a while.
+    Snooze {
+        run: String,
+        /// Minutes to stay quiet. `0` un-snoozes.
+        #[arg(long, default_value_t = 60)]
+        minutes: i64,
+    },
+    /// Open the board in a browser.
+    Open,
     /// Follow events as they arrive.
     Watch,
     /// Channel health, latency and daemon status.
@@ -55,6 +66,11 @@ enum Command {
     Connect {
         #[command(subcommand)]
         what: ConnectTarget,
+        /// Also wrap the status line, which is the only source of subscription
+        /// rate limits. Off by default because it touches a command you
+        /// configured yourself.
+        #[arg(long)]
+        statusline: bool,
     },
     /// Remove everything `connect` installed.
     Disconnect {
@@ -95,9 +111,14 @@ async fn main() -> Result<()> {
         Some(Command::Show { run }) => cmd_show(&run, cli.json).await,
         Some(Command::Search { query }) => cmd_search(&query, cli.json).await,
         Some(Command::Focus { run }) => cmd_focus(&run).await,
+        Some(Command::Attach { run }) => cmd_attach(&run).await,
+        Some(Command::Snooze { run, minutes }) => cmd_snooze(&run, minutes, cli.json).await,
+        Some(Command::Open) => cmd_open().await,
         Some(Command::Watch) => cmd_watch().await,
         Some(Command::Diagnostics) => cmd_diagnostics(cli.json).await,
-        Some(Command::Connect { what }) => cmd_connect(what, cli.json).await,
+        Some(Command::Connect { what, statusline }) => {
+            cmd_connect(what, statusline, cli.json).await
+        }
         Some(Command::Disconnect { what }) => cmd_disconnect(what, cli.json).await,
         Some(Command::Stop) => cmd_stop().await,
         Some(Command::Hook) => cmd_hook().await,
@@ -439,6 +460,105 @@ async fn cmd_focus(run: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hands the terminal to Claude Code, resuming the session in its own
+/// directory.
+///
+/// This is the escape hatch the whole product is built around: Vibeplane is
+/// not a terminal, and when a session needs more than a decision the right
+/// answer is the real thing, in the right place, with one keystroke.
+async fn cmd_attach(run: &str) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let v = raw(&c, &format!("/api/runs/{run}")).await?;
+    let dir = v["worktree"]
+        .as_str()
+        .or_else(|| v["cwd"].as_str())
+        .unwrap_or(".");
+    let session = v["session_id"].as_str().unwrap_or(run);
+    let mode = v["mode"].as_str().unwrap_or("observed");
+
+    let bin = vibeplane_observe::locate::claude_binary()
+        .context("no claude binary found; set VIBEPLANE_CLAUDE_BIN")?;
+
+    // A background session is owned by Claude's daemon, which has its own way
+    // in; resuming it as a fresh conversation would fork the transcript.
+    let args: Vec<String> = if mode == "background" {
+        vec!["attach".into(), session.into()]
+    } else {
+        vec!["--resume".into(), session.into()]
+    };
+
+    println!(
+        "{}",
+        paint(
+            DIM,
+            &format!("{} {} (in {dir})", bin.display(), args.join(" "))
+        )
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Replace this process rather than nesting one inside it: the user
+        // wanted Claude Code, not Vibeplane holding a pipe to it.
+        let err = std::process::Command::new(&bin)
+            .args(&args)
+            .current_dir(dir)
+            .exec();
+        Err(err).context("starting claude")
+    }
+    #[cfg(not(unix))]
+    {
+        let status = std::process::Command::new(&bin)
+            .args(&args)
+            .current_dir(dir)
+            .status()
+            .context("starting claude")?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+async fn cmd_snooze(run: &str, minutes: i64, json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let v: serde_json::Value = c
+        .post(&format!("/api/runs/{run}/snooze?minutes={minutes}"))
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else if minutes == 0 {
+        println!(
+            "{} — its items are back in the inbox.",
+            paint(BOLD, "Un-snoozed")
+        );
+    } else {
+        println!("Quiet for {minutes} minutes.");
+    }
+    Ok(())
+}
+
+async fn cmd_open() -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let url = format!("{}/?token={}", c.base_url(), c.token());
+    println!("{}", paint(DIM, c.base_url()));
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(target_os = "linux")]
+    let opener = "xdg-open";
+    #[cfg(target_os = "windows")]
+    let opener = "explorer";
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let opener = "";
+
+    if !opener.is_empty() {
+        std::process::Command::new(opener)
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("opening a browser")?;
+    }
+    Ok(())
+}
+
 async fn cmd_watch() -> Result<()> {
     let c = client::Client::connect_or_start().await?;
     println!("{}", paint(DIM, "watching — ctrl-c to stop"));
@@ -569,7 +689,7 @@ async fn cmd_diagnostics(json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_connect(_what: ConnectTarget, json: bool) -> Result<()> {
+async fn cmd_connect(_what: ConnectTarget, statusline: bool, json: bool) -> Result<()> {
     // Start the daemon first: the hooks we are about to install point at it,
     // and a port in the settings file that nothing answers is worse than no
     // hooks at all.
@@ -578,7 +698,15 @@ async fn cmd_connect(_what: ConnectTarget, json: bool) -> Result<()> {
     let path = vibeplane_observe::connect::settings_path()?;
     let mut settings = vibeplane_observe::connect::read_settings(&path)?;
     let exe = std::env::current_exe().context("finding the vibeplane binary")?;
-    let report = vibeplane_observe::connect::connect(&mut settings, c.base_url(), &token, &exe);
+    let mut report = vibeplane_observe::connect::connect(&mut settings, c.base_url(), &token, &exe);
+    if statusline {
+        report
+            .notes
+            .push(vibeplane_observe::connect::wrap_status_line(
+                &mut settings,
+                &exe,
+            ));
+    }
     vibeplane_observe::connect::write_settings(&path, &settings)?;
 
     if json {

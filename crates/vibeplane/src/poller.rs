@@ -111,40 +111,69 @@ async fn poll_once(state: &Shared) -> anyhow::Result<usize> {
     Ok(seen)
 }
 
-/// Notices runs that stopped producing events.
+/// Notices runs that stopped producing events, and keeps the inbox audible.
 ///
 /// A stall is the absence of evidence, so nothing can report it: the only way
-/// to know is to look at the clock. The sweeper does not change state — the
-/// inbox derives `stalled` from the run's own idle time — it exists to wake
-/// subscribers so a stalled run appears without anyone refreshing.
-pub async fn stall_sweeper(state: Shared) {
+/// to know is to look at the clock. The sweeper also drives desktop
+/// notifications, because the inbox changes for reasons no event announces —
+/// a run going quiet is one of them.
+pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
+    let mut notifier = crate::notify::Notifier::new(notify_enabled);
     loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        let stalled: Vec<RunId> = {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+
+        let newly_stalled: Vec<(RunId, i64)> = {
             let w = state.world.lock().await;
             let cfg = w.attention;
             w.runs()
                 .filter(|r| {
                     matches!(r.state, vibeplane_domain::RunState::Working)
+                        && !r.stall_noticed
                         && r.idle_seconds() > cfg.stall_seconds
                 })
-                .map(|r| r.id.clone())
+                .map(|r| (r.id.clone(), r.idle_seconds()))
                 .collect()
         };
-        for id in stalled {
-            // A zero-cost nudge: re-broadcast the run so subscribers re-derive
-            // the inbox. No event is recorded, because nothing happened.
-            let env = vibeplane_domain::event::EventEnvelope::new(
-                id,
-                Source::Daemon,
-                Event::StatusSample {
-                    context_used_percent: None,
-                    rate_limit_five_hour: None,
-                    rate_limit_seven_day: None,
-                    session_name: None,
-                },
-            );
-            let _ = state.tx.send(env);
+
+        for (id, idle_seconds) in newly_stalled {
+            state
+                .ingest(
+                    id,
+                    Source::Daemon,
+                    Event::Stalled { idle_seconds },
+                    None,
+                    RunMode::Observed,
+                )
+                .await;
+        }
+
+        let inbox = {
+            let w = state.world.lock().await;
+            w.inbox()
+        };
+        notifier.sync(&inbox);
+    }
+}
+
+/// Keeps the store and the board from growing without bound.
+///
+/// Events age out; runs do not, because a row on the board costs nothing and
+/// losing one would make a resumable session invisible. Terminal runs leave
+/// memory once they are old enough to be history rather than context.
+pub async fn retention(state: Shared, keep_event_days: i64, keep_run_days: i64) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+        match state.store.prune_events(keep_event_days).await {
+            Ok(n) if n > 0 => tracing::info!(events = n, "pruned old events"),
+            Err(e) => tracing::warn!(error = %e, "pruning events failed"),
+            _ => {}
+        }
+        let dropped = {
+            let mut w = state.world.lock().await;
+            w.prune(keep_run_days * 86_400)
+        };
+        if dropped > 0 {
+            tracing::info!(runs = dropped, "dropped finished runs from the board");
         }
     }
 }

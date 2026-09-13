@@ -192,6 +192,14 @@ pub struct Run {
     pub subagents: BTreeMap<String, Option<String>>,
     /// A one-line summary of what the run is doing.
     pub summary: Option<String>,
+    /// Set when a stall has already been recorded for the current quiet
+    /// period, so one silent night is one event rather than one a minute.
+    #[serde(default)]
+    pub stall_noticed: bool,
+    /// Until when this run's inbox items are hidden. Snoozing is per run
+    /// because that is the unit a human thinks in: "not this one, not now".
+    #[serde(default)]
+    pub snoozed_until: Option<Timestamp>,
 }
 
 /// What a blocked run is waiting for, with enough detail to decide.
@@ -230,6 +238,8 @@ impl Run {
             recent_tools: Vec::new(),
             subagents: BTreeMap::new(),
             summary: None,
+            stall_noticed: false,
+            snoozed_until: None,
         }
     }
 
@@ -241,5 +251,12 @@ impl Run {
     /// Seconds since the last activity, for the stall timer and the UI.
     pub fn idle_seconds(&self) -> i64 {
         (Timestamp::now() - self.last_activity_at).get_seconds()
+    }
+
+    /// Whether this run's inbox items are currently hidden.
+    pub fn is_snoozed(&self) -> bool {
+        self.snoozed_until
+            .map(|t| t > Timestamp::now())
+            .unwrap_or(false)
     }
 }

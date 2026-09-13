@@ -23,6 +23,9 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
     run.last_event_at = env.at;
     if env.event.is_activity() {
         run.last_activity_at = env.at;
+        // Anything the session does ends the quiet period, so the next silence
+        // is reported as its own stall rather than suppressed by the last one.
+        run.stall_noticed = false;
     }
 
     match &env.event {
@@ -276,6 +279,10 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             }
         }
 
+        Event::Stalled { .. } => {
+            run.stall_noticed = true;
+        }
+
         Event::Lost { reason } => {
             run.state = RunState::Lost;
             run.summary = Some(reason.clone());
@@ -502,6 +509,22 @@ mod tests {
         let mut r = run();
         apply(&mut r, &ev(roster("interactive", None)));
         assert_eq!(r.state, RunState::Idle);
+    }
+
+    #[test]
+    fn a_stall_is_recorded_once_per_quiet_period() {
+        let mut r = run();
+        apply(&mut r, &ev(Event::Stalled { idle_seconds: 900 }));
+        assert!(r.stall_noticed);
+        // Anything the session does starts a new period.
+        apply(
+            &mut r,
+            &ev(Event::ToolStarted {
+                tool: "Bash".into(),
+                input: json!({}),
+            }),
+        );
+        assert!(!r.stall_noticed);
     }
 
     #[test]

@@ -282,6 +282,17 @@ async fn an_unauthorised_client_learns_nothing() {
             .status();
         assert_eq!(status, 401, "{path} must require the token");
     }
+    // The live stream too — an empty stream would leak nothing, but it would
+    // be indistinguishable from a quiet machine.
+    assert_eq!(
+        c.get(format!("http://{addr}/api/stream"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+
     // The health probe is deliberately open: it proves the port is ours
     // without revealing anything about what is running on it.
     assert!(
@@ -291,6 +302,77 @@ async fn an_unauthorised_client_learns_nothing() {
             .unwrap()
             .status()
             .is_success()
+    );
+}
+
+#[tokio::test]
+async fn the_browser_shell_is_served_and_needs_no_token_of_its_own() {
+    // The page carries no data; it cannot fetch any without the token the
+    // user's browser holds. Gating it would only stop it rendering the message
+    // that explains as much.
+    let (addr, _token, c) = boot(Policy::default()).await;
+    let res = c.get(format!("http://{addr}/")).send().await.unwrap();
+    assert!(res.status().is_success());
+    let body = res.text().await.unwrap();
+    assert!(body.contains("<title>Vibeplane</title>"));
+    assert!(
+        !body.contains("test-token"),
+        "the page must never embed a credential"
+    );
+}
+
+#[tokio::test]
+async fn a_snooze_takes_a_run_out_of_the_inbox_and_gives_it_back() {
+    let (addr, token, c) = boot(Policy::default()).await;
+    post(
+        &c,
+        &addr,
+        "/vibeplane/hook",
+        &token,
+        r#"{"hook_event_name":"PreToolUse","session_id":"s9","cwd":"/tmp/repo",
+            "tool_name":"AskUserQuestion",
+            "tool_input":{"questions":[{"question":"which?","options":[]}]}}"#,
+    )
+    .await;
+    assert_eq!(
+        get_json(&c, &addr, "/api/inbox", &token)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    c.post(format!("http://{addr}/api/runs/s9/snooze?minutes=60"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        get_json(&c, &addr, "/api/inbox", &token)
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a snoozed run is out of the queue"
+    );
+
+    // But still on the board: snoozing hides a request, not a session.
+    let board = get_json(&c, &addr, "/api/board", &token).await;
+    assert_eq!(board["summary"]["runs"], 1);
+
+    c.post(format!("http://{addr}/api/runs/s9/snooze?minutes=0"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        get_json(&c, &addr, "/api/inbox", &token)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
 }
 

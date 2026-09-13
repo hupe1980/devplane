@@ -1,0 +1,269 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vibeplane</title>
+<style>
+  /* One file, no build step. The UI is small enough that a bundler would cost
+     more than it saves, and a dashboard that cannot be opened without `npm`
+     is a dashboard that rots the first time the toolchain moves. */
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --panel: #fff; --line: #e6e4e0; --ink: #1c1b19;
+    --dim: #6f6b66; --faint: #a5a09a;
+    --work: #2d6cdf; --wait: #b8860b; --fail: #c0392b; --done: #2e8b57;
+    --accent: #1c1b19;
+    font-synthesis: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --panel: #1c1c21; --line: #2b2b32; --ink: #e8e6e3;
+      --dim: #9b968f; --faint: #6a655f;
+      --work: #6ea8ff; --wait: #e3b341; --fail: #f0715f; --done: #57c98a;
+      --accent: #e8e6e3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    padding: 0 0 4rem;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
+    border-bottom: 1px solid var(--line); padding: .8rem 1rem;
+    display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap;
+  }
+  h1 { font-size: 13px; margin: 0; letter-spacing: .12em; text-transform: uppercase; }
+  .counts { color: var(--dim); display: flex; gap: .9rem; flex-wrap: wrap; }
+  .counts b { color: var(--ink); font-weight: 600; }
+  .live { margin-left: auto; color: var(--faint); display: flex; align-items: center; gap: .4rem; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--done); }
+  .dot.off { background: var(--fail); }
+  main { padding: 1rem; max-width: 1100px; }
+  section { margin-bottom: 1.6rem; }
+  h2 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--dim); margin: 0 0 .5rem; font-weight: 600;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: .6rem .75rem; margin-bottom: .4rem; cursor: default;
+  }
+  .card:focus-visible, .card.sel { outline: 2px solid var(--work); outline-offset: 1px; }
+  .item { border-left: 3px solid var(--wait); }
+  .item.critical { border-left-color: var(--fail); }
+  .item .t { font-weight: 600; }
+  .item .d { color: var(--dim); margin-top: .2rem; overflow-wrap: anywhere; }
+  .opts { margin: .35rem 0 0; padding-left: 1.1rem; color: var(--dim); }
+  .row { display: flex; gap: .6rem; align-items: baseline; }
+  .row .name { font-weight: 600; min-width: 13rem; }
+  .row .meta { color: var(--faint); }
+  .row .sum { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s { width: .8rem; display: inline-block; }
+  .s.working { color: var(--work); } .s.starting { color: var(--work); }
+  .s.waiting { color: var(--wait); } .s.failed, .s.lost { color: var(--fail); }
+  .s.completed { color: var(--done); } .s.idle, .s.stopped { color: var(--faint); }
+  .proj { color: var(--dim); margin: .9rem 0 .3rem; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  .gauge { display: inline-block; width: 3.2rem; color: var(--faint); text-align: right; }
+  .gauge.high { color: var(--wait); }
+  .cost { display: inline-block; width: 4rem; text-align: right; color: var(--faint); }
+  .acts { margin-top: .4rem; display: flex; gap: .4rem; flex-wrap: wrap; }
+  button {
+    font: inherit; background: transparent; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 4px; padding: .1rem .5rem; cursor: pointer;
+  }
+  button:hover { color: var(--ink); border-color: var(--dim); }
+  kbd {
+    font: inherit; border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 3px; padding: 0 .3rem; color: var(--dim);
+  }
+  .empty { color: var(--faint); padding: .5rem 0; }
+  footer { color: var(--faint); padding: 0 1rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+  .err { color: var(--fail); padding: 1rem; }
+</style>
+
+<header>
+  <h1>Vibeplane</h1>
+  <div class="counts" id="counts"></div>
+  <div class="live"><span class="dot" id="dot"></span><span id="livetext">connecting</span></div>
+</header>
+
+<main>
+  <section id="needs">
+    <h2>Needs you</h2>
+    <div id="inbox"></div>
+  </section>
+  <section>
+    <h2>Sessions</h2>
+    <div id="board"></div>
+  </section>
+</main>
+
+<footer>
+  <span><kbd>j</kbd><kbd>k</kbd> move</span>
+  <span><kbd>f</kbd> focus window</span>
+  <span><kbd>a</kbd> copy attach</span>
+  <span><kbd>s</kbd> snooze 1h</span>
+  <span><kbd>r</kbd> refresh</span>
+</footer>
+
+<script>
+// The token arrives once in the URL from `vibeplane open`, is kept for the tab,
+// and is stripped from the address bar so it does not end up in a screenshot or
+// a bookmark.
+const url = new URL(location.href);
+if (url.searchParams.get("token")) {
+  sessionStorage.setItem("vp_token", url.searchParams.get("token"));
+  url.searchParams.delete("token");
+  history.replaceState({}, "", url);
+}
+const TOKEN = sessionStorage.getItem("vp_token") || "";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), Authorization: "Bearer " + TOKEN },
+  });
+  if (res.status === 401) throw new Error("unauthorised — run `vibeplane open` again");
+  if (!res.ok) throw new Error(path + " → " + res.status);
+  return res.json();
+};
+
+const GLYPH = {
+  working: "●", starting: "●", waiting: "◆", idle: "○",
+  completed: "✓", failed: "✗", lost: "?", stopped: "○",
+};
+const ago = (s) =>
+  s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m"
+  : s < 86400 ? Math.floor(s / 3600) + "h" : Math.floor(s / 86400) + "d";
+
+let state = { board: null, inbox: [], sel: 0 };
+
+function render() {
+  const b = state.board;
+  if (!b) return;
+  const s = b.summary;
+  $("counts").innerHTML =
+    `<span><b>${s.projects}</b> projects</span>` +
+    `<span><b>${s.runs}</b> sessions</span>` +
+    `<span><b>${s.working}</b> working</span>` +
+    (s.needs_you ? `<span style="color:var(--wait)"><b>${s.needs_you}</b> need you</span>` : "") +
+    (s.cost_usd > 0 ? `<span>$${s.cost_usd.toFixed(2)}</span>` : "");
+
+  // The inbox first, because it is the only part that is asking for something.
+  $("inbox").innerHTML = state.inbox.length
+    ? state.inbox.map((i, n) => `
+        <div class="card item ${i.level}" data-sel="${n}" data-run="${esc(i.run_id)}" tabindex="0">
+          <div class="t">${esc(i.title)}</div>
+          ${i.detail ? `<div class="d">${esc(i.detail)}</div>` : ""}
+          ${i.options?.length ? `<ol class="opts">${i.options.map((o) => `<li>${esc(o)}</li>`).join("")}</ol>` : ""}
+          <div class="acts">
+            ${i.actions.includes("focus") ? `<button data-act="focus" data-run="${esc(i.run_id)}">focus window</button>` : ""}
+            <button data-act="attach" data-run="${esc(i.run_id)}">copy attach</button>
+            <button data-act="snooze" data-run="${esc(i.run_id)}">snooze 1h</button>
+          </div>
+        </div>`).join("")
+    : `<div class="empty">Nothing needs you.</div>`;
+
+  const byProject = {};
+  for (const r of b.runs) (byProject[r.project_name || "elsewhere"] ||= []).push(r);
+  const offset = state.inbox.length;
+  let n = offset;
+  $("board").innerHTML = Object.entries(byProject)
+    .sort((a, c) => c[1].length - a[1].length)
+    .map(([proj, runs]) => `
+      <div class="proj">${esc(proj)} · ${runs.length}</div>
+      ${runs.map((r) => {
+        const pct = r.context_percent;
+        return `<div class="card row" data-sel="${n++}" data-run="${esc(r.id)}" tabindex="0">
+          <span class="s ${r.state}">${GLYPH[r.state] || "·"}</span>
+          <span class="name">${esc(r.name || r.id.slice(0, 8))}</span>
+          <span class="meta">${esc(r.entrypoint || r.mode)}</span>
+          <span class="gauge ${pct >= 85 ? "high" : ""}">${pct != null ? Math.round(pct) + "%" : ""}</span>
+          <span class="cost">${r.cost_usd > 0 ? "$" + r.cost_usd.toFixed(2) : ""}</span>
+          <span class="meta">${ago(r.idle_seconds)}</span>
+          <span class="sum">${esc(r.summary || (r.state === "idle" ? "waiting for a prompt" : ""))}</span>
+        </div>`;
+      }).join("")}`).join("");
+
+  const sel = document.querySelector(`[data-sel="${state.sel}"]`);
+  document.querySelectorAll(".sel").forEach((e) => e.classList.remove("sel"));
+  if (sel) sel.classList.add("sel");
+}
+
+async function refresh() {
+  try {
+    const [board, inbox] = await Promise.all([api("/api/board"), api("/api/inbox")]);
+    state.board = board;
+    state.inbox = inbox;
+    render();
+  } catch (e) {
+    document.querySelector("main").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+async function act(kind, run) {
+  if (kind === "focus") {
+    await api(`/api/runs/${run}/focus`, { method: "POST" }).catch((e) => alert(e.message));
+  } else if (kind === "snooze") {
+    await api(`/api/runs/${run}/snooze?minutes=60`, { method: "POST" });
+    refresh();
+  } else if (kind === "attach") {
+    const cmd = `vibeplane attach ${run}`;
+    navigator.clipboard?.writeText(cmd);
+    // Clipboard access can be refused; showing the command is the fallback that
+    // always works.
+    $("livetext").textContent = "copied: " + cmd;
+    setTimeout(() => (window.__live?.() ?? null), 2000);
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (btn) return act(btn.dataset.act, btn.dataset.run);
+  const card = e.target.closest("[data-sel]");
+  if (card) { state.sel = +card.dataset.sel; render(); }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const cards = [...document.querySelectorAll("[data-sel]")];
+  const cur = cards[state.sel];
+  const run = cur?.dataset.run;
+  if (e.key === "j" || e.key === "ArrowDown") { state.sel = Math.min(state.sel + 1, cards.length - 1); render(); e.preventDefault(); }
+  else if (e.key === "k" || e.key === "ArrowUp") { state.sel = Math.max(state.sel - 1, 0); render(); e.preventDefault(); }
+  else if (e.key === "r") refresh();
+  else if (run && (e.key === "f" || e.key === "a" || e.key === "s")) {
+    act({ f: "focus", a: "attach", s: "snooze" }[e.key], run);
+  }
+});
+
+// Live updates. Every event is a reason to re-derive the board; the daemon
+// batches high-volume output, so a coalescing timer here is enough to keep a
+// noisy session from re-rendering the page hundreds of times a second.
+let pending = null;
+function connect() {
+  const es = new EventSource(`/api/stream?token=${encodeURIComponent(TOKEN)}`);
+  const setLive = (ok, text) => {
+    $("dot").classList.toggle("off", !ok);
+    $("livetext").textContent = text;
+  };
+  window.__live = () => setLive(true, "live");
+  es.onopen = () => setLive(true, "live");
+  es.onerror = () => setLive(false, "reconnecting");
+  es.onmessage = () => {
+    if (pending) return;
+    pending = setTimeout(() => { pending = null; refresh(); }, 250);
+  };
+}
+
+refresh();
+connect();
+// A safety net: the stall timer changes the inbox without any event, and a tab
+// left open overnight should still be right in the morning.
+setInterval(refresh, 30000);
+</script>

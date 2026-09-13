@@ -189,6 +189,15 @@ pub enum Event {
         rate_limit_seven_day: Option<f64>,
         session_name: Option<String>,
     },
+    /// A live run has produced nothing for longer than the stall timeout.
+    ///
+    /// Nothing reports a stall — it is the absence of evidence — so the daemon
+    /// notices it by looking at the clock and records that it did. Emitted once
+    /// per quiet period, so a run that is silent overnight produces one event
+    /// rather than one a minute.
+    Stalled {
+        idle_seconds: i64,
+    },
     /// Reconciliation could not find the process or session any more.
     Lost {
         reason: String,
@@ -218,6 +227,7 @@ impl Event {
             Event::SessionEnded { .. } => "session_ended",
             Event::RosterSeen { .. } => "roster_seen",
             Event::StatusSample { .. } => "status_sample",
+            Event::Stalled { .. } => "stalled",
             Event::Lost { .. } => "lost",
         }
     }
@@ -227,7 +237,10 @@ impl Event {
     pub fn is_activity(&self) -> bool {
         !matches!(
             self,
-            Event::StatusSample { .. } | Event::RosterSeen { .. } | Event::Lost { .. }
+            Event::StatusSample { .. }
+                | Event::RosterSeen { .. }
+                | Event::Stalled { .. }
+                | Event::Lost { .. }
         )
     }
 }

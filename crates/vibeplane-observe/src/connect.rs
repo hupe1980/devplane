@@ -270,6 +270,43 @@ pub fn connect(
     report
 }
 
+/// Wraps the user's status line so rate limits reach the daemon.
+///
+/// Optional, and off by default, because it takes over a command the user
+/// configured. The wrapper forwards the sample and then runs the original with
+/// the same input, so the status line on screen is unchanged — if the shim
+/// dies, the worst case is a status line that stops updating, which is why it
+/// is not installed unless asked for.
+pub fn wrap_status_line(settings: &mut Map<String, Value>, exe: &Path) -> String {
+    let existing = settings
+        .get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+
+    if existing.as_deref().map(is_shim_command).unwrap_or(false) {
+        return "status line already wrapped".into();
+    }
+
+    let command = match &existing {
+        Some(orig) => format!("{} statusline --then {}", shell_quote(exe), shell_arg(orig)),
+        None => format!("{} statusline", shell_quote(exe)),
+    };
+    settings.insert(
+        "statusLine".into(),
+        json!({ "type": "command", "command": command }),
+    );
+    match existing {
+        Some(_) => "wrapped your existing status line".into(),
+        None => "installed a status line (it prints nothing of its own)".into(),
+    }
+}
+
+/// Quotes an arbitrary string as one shell argument.
+fn shell_arg(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Removes everything `connect` added, and nothing else.
 pub fn disconnect(settings: &mut Map<String, Value>) -> ConnectReport {
     let mut report = ConnectReport::default();
@@ -293,6 +330,33 @@ pub fn disconnect(settings: &mut Map<String, Value>) -> ConnectReport {
 
     if let Some(Value::Array(list)) = settings.get_mut("allowedHttpHookUrls") {
         list.retain(|v| v.as_str() != Some("http://127.0.0.1:*"));
+    }
+
+    // Unwrap the status line, restoring whatever it was wrapping. Leaving a
+    // shim behind that points at a daemon the user just removed would stop
+    // their status line updating and give no clue why.
+    if let Some(cmd) = settings
+        .get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+        && is_shim_command(&cmd)
+    {
+        match cmd.split_once(" --then ") {
+            Some((_, original)) => {
+                let original = original.trim().trim_matches('\'').replace("'\\''", "'");
+                settings.insert(
+                    "statusLine".into(),
+                    json!({ "type": "command", "command": original }),
+                );
+                report
+                    .notes
+                    .push("restored your original status line".into());
+            }
+            None => {
+                settings.remove("statusLine");
+            }
+        }
     }
 
     if let Some(Value::Object(env)) = settings.get_mut("env") {
@@ -344,21 +408,25 @@ fn is_ours(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Recognises the shim regardless of where the binary lives, without matching a
-/// user's own script that merely mentions the word.
+/// Recognises one of our shims regardless of where the binary lives, without
+/// matching a user's own script that merely mentions the word.
 fn is_shim_command(cmd: &str) -> bool {
-    let trimmed = cmd.trim().trim_end_matches(|c: char| c.is_whitespace());
-    trimmed.ends_with(" hook")
-        && trimmed
-            .rsplit_once(" hook")
-            .map(|(head, _)| {
+    let trimmed = cmd.trim();
+    ["hook", "statusline"].iter().any(|verb| {
+        trimmed
+            .split_once(&format!(" {verb}"))
+            .map(|(head, tail)| {
                 let head = head.trim().trim_matches('\'').trim_matches('"');
-                std::path::Path::new(head)
+                let is_ours = std::path::Path::new(head)
                     .file_name()
                     .map(|f| f == "vibeplane" || f == "vibeplane.exe")
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                // `statusline --then ...` has a tail; `hook` must not, or a
+                // script called `hook-something` would match.
+                is_ours && (tail.is_empty() || tail.starts_with(' ') || tail.starts_with(" --"))
             })
             .unwrap_or(false)
+    })
 }
 
 /// Quotes a path for a shell command line.
@@ -655,6 +723,44 @@ mod tests {
         assert!(state.allowlist_blocks_us);
         connect_test(&mut s, "http://127.0.0.1:1", "t");
         assert!(!inspect(&s, Path::new("/x")).allowlist_blocks_us);
+    }
+
+    #[test]
+    fn wrapping_a_status_line_preserves_the_original() {
+        let mut s: Map<String, Value> = serde_json::from_str(
+            r#"{"statusLine": {"type": "command", "command": "~/bin/my-line.sh --fancy"}}"#,
+        )
+        .unwrap();
+        wrap_status_line(&mut s, Path::new("/usr/local/bin/vibeplane"));
+        let cmd = s["statusLine"]["command"].as_str().unwrap();
+        assert!(cmd.starts_with("/usr/local/bin/vibeplane statusline --then "));
+        assert!(cmd.contains("my-line.sh --fancy"));
+
+        // And disconnecting gives it back exactly.
+        disconnect(&mut s);
+        assert_eq!(
+            s["statusLine"]["command"],
+            json!("~/bin/my-line.sh --fancy")
+        );
+    }
+
+    #[test]
+    fn wrapping_twice_is_not_nesting() {
+        let mut s = Map::new();
+        wrap_status_line(&mut s, Path::new("/usr/local/bin/vibeplane"));
+        let once = s["statusLine"]["command"].as_str().unwrap().to_string();
+        wrap_status_line(&mut s, Path::new("/usr/local/bin/vibeplane"));
+        assert_eq!(s["statusLine"]["command"].as_str().unwrap(), once);
+    }
+
+    #[test]
+    fn a_status_line_we_did_not_install_is_left_alone() {
+        let mut s: Map<String, Value> = serde_json::from_str(
+            r#"{"statusLine": {"type": "command", "command": "starship prompt"}}"#,
+        )
+        .unwrap();
+        disconnect(&mut s);
+        assert_eq!(s["statusLine"]["command"], json!("starship prompt"));
     }
 
     #[test]

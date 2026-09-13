@@ -140,8 +140,10 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
 
     tracing::info!(%bound, "vibeplane daemon listening");
 
+    let notifications = std::env::var("VIBEPLANE_NOTIFY").as_deref() != Ok("0");
     let poller = tokio::spawn(crate::poller::run(state.clone()));
-    let sweeper = tokio::spawn(crate::poller::stall_sweeper(state.clone()));
+    let sweeper = tokio::spawn(crate::poller::stall_sweeper(state.clone(), notifications));
+    let retention = tokio::spawn(crate::poller::retention(state.clone(), 30, 7));
 
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -149,6 +151,7 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
 
     poller.abort();
     sweeper.abort();
+    retention.abort();
     crate::config::clear_daemon_info().ok();
     result.context("serving")?;
     Ok(())

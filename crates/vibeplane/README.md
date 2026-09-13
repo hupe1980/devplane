@@ -37,8 +37,12 @@ cargo install vibeplane      # or: brew install hupe1980/tap/vibeplane   (coming
 ```sh
 vibeplane ls                 # every session on this machine — works immediately, no setup
 vibeplane connect claude     # add live state: hooks + telemetry, into your user settings
+vibeplane open               # the board in a browser, updating live
+
 vibeplane inbox              # only what needs a human, most urgent first
 vibeplane focus <run>        # raise the editor window that owns a session
+vibeplane attach <run>       # hand the terminal to Claude Code, resuming that session
+vibeplane snooze <run>       # not this one, not now
 vibeplane doctor             # is anything actually arriving?
 ```
 
@@ -47,6 +51,21 @@ roster. Connecting is what adds cost, context usage, blocking and the permission
 
 Every command starts the daemon if it is not already running, and every command takes `--json`.
 
+### The board
+
+`vibeplane open` serves a single page from the daemon — no build step, no CDN, no account. It
+updates over server-sent events, groups sessions by project, and puts what needs you at the top.
+`j`/`k` to move, `f` to raise the editor window, `a` to copy the attach command, `s` to snooze.
+
+It works on a laptop with no network, and the token is handed over once in the URL and then stripped
+from the address bar so it cannot end up in a screenshot.
+
+### Notifications
+
+A session that blocks on a question or a permission raises a desktop notification — once, never
+twice for the same thing, and only for what genuinely needs a person. `VIBEPLANE_NOTIFY=0` turns
+them off.
+
 ### What `connect` changes
 
 It writes to `~/.claude/settings.json`, keeping a backup, and adds only:
@@ -54,7 +73,10 @@ It writes to `~/.claude/settings.json`, keeping a backup, and adds only:
 - **hook entries** pointing at `http://127.0.0.1:47831` with a bearer token — merged alongside hooks
   you already have, and removed exactly by `vibeplane disconnect claude`;
 - **OpenTelemetry variables** pointing at the same loopback port, so cost and token counts arrive.
-  If you already export telemetry somewhere, Vibeplane leaves it alone and says so.
+  If you already export telemetry somewhere, Vibeplane leaves it alone and says so;
+- with `--statusline`, a **wrapper around your status line** — the only source of subscription rate
+  limits. It runs your original command with the same input, so what you see is unchanged, and
+  `disconnect` puts it back exactly.
 
 It never sets the flags that would put your prompts or the agent's responses into telemetry, never
 creates `allowedHttpHookUrls` (creating it would restrict every other HTTP hook on your machine),

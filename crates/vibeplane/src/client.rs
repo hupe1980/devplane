@@ -72,6 +72,20 @@ impl Client {
         res.json().await.with_context(|| format!("decoding {path}"))
     }
 
+    pub async fn post<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let res = self
+            .http
+            .post(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .with_context(|| format!("POST {path}"))?;
+        if !res.status().is_success() {
+            bail!("{path} returned {}", res.status());
+        }
+        res.json().await.with_context(|| format!("decoding {path}"))
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base
     }

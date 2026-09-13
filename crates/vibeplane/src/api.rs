@@ -37,10 +37,13 @@ pub fn router(state: Shared) -> Router {
         .route("/api/inbox", get(inbox))
         .route("/api/runs/{id}", get(run_detail))
         .route("/api/runs/{id}/events", get(run_events))
+        .route("/api/runs/{id}/snooze", post(snooze))
+        .route("/api/runs/{id}/focus", post(focus_run))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/stream", get(stream))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/", get(index))
         .with_state(state)
 }
 
@@ -49,13 +52,21 @@ pub fn router(state: Shared) -> Router {
 /// Loopback is not an access control: every process running as this user can
 /// reach the port. The token, in a file only the user can read, is what
 /// actually separates Vibeplane from everything else on the machine.
-fn authorised(state: &Shared, headers: &HeaderMap) -> bool {
-    let Some(v) = headers.get(axum::http::header::AUTHORIZATION) else {
-        return false;
-    };
-    let Ok(v) = v.to_str() else { return false };
-    let presented = v.strip_prefix("Bearer ").unwrap_or(v);
-    constant_time_eq(presented.as_bytes(), state.token.as_bytes())
+///
+/// A `token` query parameter is accepted as well, because `EventSource` cannot
+/// send a header and the browser shell needs the live stream. The page drops it
+/// from the address bar as soon as it has it, so it does not end up in a
+/// screenshot or a bookmark.
+fn authorised(state: &Shared, headers: &HeaderMap, query: Option<&str>) -> bool {
+    let from_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
+
+    match from_header.or(query) {
+        Some(t) => constant_time_eq(t.as_bytes(), state.token.as_bytes()),
+        None => false,
+    }
 }
 
 /// Compares without leaking the match position through timing.
@@ -68,10 +79,54 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 macro_rules! guard {
     ($state:expr, $headers:expr) => {
-        if !authorised(&$state, &$headers) {
-            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorised"}))).into_response();
+        if !authorised(&$state, &$headers, None) {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorised"})))
+                .into_response();
         }
     };
+}
+
+/// The board, embedded in the binary.
+///
+/// Deliberately unauthenticated: it is a static page that contains no data and
+/// cannot fetch any without the token the user's browser holds. Gating it would
+/// only mean the page could not render the message explaining that.
+async fn index() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../ui/index.html"),
+    )
+}
+
+/// Raises the editor window that owns a run, for the browser shell.
+async fn focus_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let dir = {
+        let w = state.world.lock().await;
+        w.run(&RunId::new(id)).map(|r| r.working_dir().clone())
+    };
+    let Some(dir) = dir else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
+    };
+    match crate::focus::focus_path(&dir) {
+        Ok(crate::focus::Focused::Editor { app, pid }) => {
+            Json(json!({"focused": true, "app": app, "pid": pid})).into_response()
+        }
+        Ok(crate::focus::Focused::Nothing) => Json(json!({
+            "focused": false,
+            "reason": format!("no editor window has {} open", dir.display())
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +484,68 @@ async fn run_events(
 }
 
 #[derive(Deserialize)]
+struct StreamQuery {
+    #[serde(default)]
+    token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SnoozeQuery {
+    /// Minutes to stay quiet. Zero un-snoozes, which is the only way back.
+    #[serde(default = "default_snooze")]
+    minutes: i64,
+}
+fn default_snooze() -> i64 {
+    60
+}
+
+/// Hides a run's inbox items for a while.
+///
+/// Snoozing is per run rather than per item: "not this one, not now" is the
+/// thought a person actually has, and a run that is being ignored deliberately
+/// should not keep producing new reasons to look at it.
+async fn snooze(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<SnoozeQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let until = (q.minutes > 0)
+        .then(|| jiff::Timestamp::now() + jiff::SignedDuration::from_mins(q.minutes));
+
+    let run_id = RunId::new(id);
+    let saved = {
+        let mut w = state.world.lock().await;
+        if !w.snooze(&run_id, until) {
+            None
+        } else {
+            w.run(&run_id).cloned()
+        }
+    };
+
+    let Some(run) = saved else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
+    };
+    // Persisted, so a snooze survives a restart. A quiet run that starts
+    // shouting again because the daemon bounced is a broken promise.
+    if let Err(e) = state.store.save_run(&run).await {
+        tracing::warn!(error = %e, "could not persist snooze");
+    }
+    let _ = state.tx.send(vibeplane_domain::event::EventEnvelope::new(
+        run_id,
+        Source::Daemon,
+        Event::StatusSample {
+            context_used_percent: None,
+            rate_limit_five_hour: None,
+            rate_limit_seven_day: None,
+            session_name: None,
+        },
+    ));
+    Json(json!({"snoozed_until": until.map(|t| t.to_string())})).into_response()
+}
+
+#[derive(Deserialize)]
 struct SearchQuery {
     q: String,
     #[serde(default = "default_limit")]
@@ -480,12 +597,16 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
 async fn stream(
     State(state): State<Shared>,
     headers: HeaderMap,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    // `Sse` has a single response type, so an unauthorised subscriber gets an
-    // immediately-finished stream rather than a status code.
-    let rx = authorised(&state, &headers).then(|| state.tx.subscribe());
+    Query(q): Query<StreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, StatusCode> {
+    // An empty stream would leak nothing, but it would also be indistinguishable
+    // from a quiet machine — so a bad token says so.
+    if !authorised(&state, &headers, q.token.as_deref()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let rx = state.tx.subscribe();
 
-    let stream = futures_util::stream::unfold(rx, |rx| async move {
+    let stream = futures_util::stream::unfold(Some(rx), |rx| async move {
         let mut rx = rx?;
         loop {
             match rx.recv().await {
@@ -502,5 +623,5 @@ async fn stream(
         }
     });
 
-    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
 }

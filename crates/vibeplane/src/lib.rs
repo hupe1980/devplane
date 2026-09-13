@@ -11,5 +11,6 @@ pub mod config;
 pub mod daemon;
 pub mod daemonise;
 pub mod focus;
+pub mod notify;
 pub mod poller;
 pub mod render;
