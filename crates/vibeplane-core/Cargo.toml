@@ -1,0 +1,17 @@
+[package]
+name = "vibeplane-core"
+description = "Vibeplane core: state reducers, the attention engine, and the permission policy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+vibeplane-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jiff.workspace = true
+tracing.workspace = true

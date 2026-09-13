@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# The claim ledger of concepts/QUALITY.md §2: every load-bearing integration claim in the
+# concept notes is pinned to a file in specs/ and this script greps for it. Run
+# scripts/fetch-specs.sh first. Exit 1 if any claim is missing from its source.
+set -u
+cd "$(dirname "$0")/../specs" || { echo "no specs/ (run scripts/fetch-specs.sh)"; exit 1; }
+fail=0; n=0
+chk() { n=$((n+1)); if grep -q -i -E "$3" $2 2>/dev/null; then printf 'OK   %s\n' "$1"; else printf 'MISS %s  (%s ~ /%s/)\n' "$1" "$2" "$3"; fail=1; fi; }
+chk "hooks: http type"                              claude-code/hooks.md '"type": "http"'
+chk "hooks: async flag"                             claude-code/hooks.md '"async": true'
+chk "hooks: allowedHttpHookUrls"                    claude-code/hooks.md 'allowedHttpHookUrls'
+chk "hooks: httpHookAllowedEnvVars"                 claude-code/hooks.md 'httpHookAllowedEnvVars'
+chk "hooks: Notification permission_prompt"         claude-code/hooks.md 'permission_prompt'
+chk "hooks: elicitation_dialog matcher"             claude-code/hooks.md 'elicitation_dialog'
+chk "hooks: agent_needs_input only in agent view"   claude-code/hooks.md 'agent_needs_input.*agent view|while \[agent view\]'
+chk "hooks: PermissionRequest decision object"      claude-code/hooks.md '"decision"'
+chk "hooks: transcript_path in common input"        claude-code/hooks.md 'transcript_path'
+chk "changelog: PermissionRequest fires in --print" claude-code/CHANGELOG.md 'PermissionRequest hooks not firing in .--print. mode'
+chk "agent-view: --json"                            claude-code/agent-view.md 'agents --json'
+chk "agent-view: waitingFor"                        claude-code/agent-view.md 'waitingFor'
+chk "agent-view: single cwd / --cwd"                claude-code/agent-view.md '\-\-cwd'
+chk "cli: --permission-prompt-tool"                 claude-code/cli-reference.md 'permission-prompt-tool'
+chk "cli: --bg"                                     claude-code/cli-reference.md '\-\-bg'
+chk "cli: --worktree"                               claude-code/cli-reference.md '\-\-worktree'
+chk "cli: --json-schema"                            claude-code/cli-reference.md 'json-schema'
+chk "cli: --replay-user-messages"                   claude-code/cli-reference.md 'replay-user-messages'
+chk "cli: --include-partial-messages"               claude-code/cli-reference.md 'include-partial-messages'
+chk "sdk: AskUserQuestion via permission host"      claude-agent-sdk/user-input.md 'AskUserQuestion'
+chk "headless: permission-prompt-tool"              claude-code/headless.md 'permission-prompt-tool'
+chk "sessions: JSONL internal/unstable"             claude-code/sessions.md 'internal to Claude Code and changes'
+chk "worktrees: .claude/worktrees default"          claude-code/worktrees.md '\.claude/worktrees'
+chk "statusline: used_percentage"                   claude-code/statusline.md 'used_percentage'
+chk "statusline: 300ms debounce"                    claude-code/statusline.md '300ms|300 ms'
+chk "otel: http/json protocol"                      claude-code/monitoring-usage.md 'http/json'
+chk "otel: tool_decision event"                     claude-code/monitoring-usage.md 'tool_decision'
+chk "otel: api_request cost_usd"                    claude-code/monitoring-usage.md 'cost_usd'
+chk "otel: session.id attribute"                    claude-code/monitoring-usage.md 'session\.id'
+chk "otel: app.entrypoint"                          claude-code/monitoring-usage.md 'app\.entrypoint'
+chk "otel: vcs repository attributes"               claude-code/monitoring-usage.md 'OTEL_METRICS_INCLUDE_REPOSITORY'
+chk "otel: desktop / VS Code entrypoints"           claude-code/monitoring-usage.md 'claude-vscode|desktop'
+chk "settings: env block"                           claude-code/settings-reference.md '"env"'
+chk "sdk: settingSources default all"               claude-agent-sdk/typescript.md 'settingSources'
+chk "acp v2: session/resume"                        acp/v2-session-list.md 'session/resume'
+chk "acp v2: replayFrom"                            acp/v2-session-list.md 'replayFrom'
+chk "acp v2: elicitation requestedSchema"           acp/v2-elicitation.md 'requestedSchema'
+chk "acp v2: allow_always"                          acp/v2-tool-calls.md 'allow_always'
+chk "acp v1: session/set_mode"                      acp/v1-session-modes.md 'session/set_mode'
+chk "acp v1: terminal/create"                       acp/v1-terminals.md 'terminal/create'
+chk "acp v1: fs/read_text_file"                     acp/v1-file-system.md 'fs/read_text_file'
+chk "registry: claude-agent-acp"                    acp/registry.json 'claude-agent-acp'
+chk "registry: codex-acp"                           acp/registry.json 'codex-acp'
+chk "registry: opencode native"                     acp/registry.json '"opencode"'
+chk "symphony: stall timeout"                       symphony/SPEC.md 'stall'
+chk "codex app-server: JSON-RPC"                    codex/app-server-README.md 'JSON-RPC|thread/start'
+chk "opencode openapi: /session"                    opencode/openapi.json '"/session"'
+echo "verify-claims: $n claims checked, exit $fail"
+exit $fail

@@ -20,9 +20,19 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# downloaded third-party specs/docs (re-fetch with scripts/fetch-specs.sh)
-specs/
 target/
 node_modules/
 
-CONCEPT.md
+
+# ── Internal notes and third-party specifications ────────────────────────────
+
+# Architecture notes. Not published with the crates and not part of the repository's
+# public surface: they cite decisions and risks by identifiers that mean nothing outside
+# the folder, and a `(D9)` leaking into a doc comment renders on docs.rs as a reference
+# to a document the reader cannot open.
+/concepts/
+
+# Third-party documentation and specifications — copyrighted publications, so local
+# copies are not redistributed here. `concepts/REFERENCES.md` indexes every one with its
+# retrieval URL and `scripts/fetch-specs.sh` rebuilds the folder from scratch.
+/specs/

@@ -3,7 +3,7 @@
 # Usage: scripts/fetch-specs.sh
 set -u
 cd "$(dirname "$0")/.."
-mkdir -p specs/claude-code specs/claude-agent-sdk specs/codex specs/opencode specs/symphony specs/sdd
+mkdir -p specs/claude-code specs/claude-agent-sdk specs/codex specs/opencode specs/symphony specs/sdd specs/mcp specs/jsonrpc specs/acp
 UA='vibeplane-specs-fetch'
 fetch() { # url dest
   local code sz
@@ -15,12 +15,13 @@ fetch() { # url dest
   fi
 }
 # Claude Code docs (Mintlify serves markdown at <page>.md)
-for p in hooks hooks-guide headless cli-reference worktrees sessions agent-view statusline channels permissions \
+for p in hooks hooks-guide headless cli-reference worktrees sessions agent-view statusline channels permissions monitoring-usage \
          permission-modes settings-reference agent-teams cross-session-messaging sub-agents tools-reference mcp \
          remote-control desktop claude-directory env-vars checkpointing; do
   fetch "https://code.claude.com/docs/en/$p.md" "specs/claude-code/$p.md"
 done
 fetch https://code.claude.com/docs/llms.txt specs/claude-code/llms.txt
+fetch https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md specs/claude-code/CHANGELOG.md
 # Claude Agent SDK docs
 for p in overview permissions user-input streaming-output structured-outputs sessions mcp hooks typescript python cost-tracking; do
   fetch "https://code.claude.com/docs/en/agent-sdk/$p.md" "specs/claude-agent-sdk/$p.md"
@@ -46,6 +47,26 @@ done
 fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/server.mdx specs/opencode/server.mdx
 fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/sdk.mdx specs/opencode/sdk.mdx
 fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/sdk/openapi.json specs/opencode/openapi.json
+# Model Context Protocol (the gate server speaks it) + JSON-RPC 2.0 (daemon API, Codex app-server)
+for p in basic/index server/tools basic/transports client/elicitation; do
+  fetch "https://modelcontextprotocol.io/specification/2025-06-18/$p.md" "specs/mcp/$(echo "$p" | tr '/' '-' | sed 's/-index$//').md"
+done
+fetch https://modelcontextprotocol.io/specification/2025-06-18.md specs/mcp/spec-2025-06-18.md
+fetch https://modelcontextprotocol.io/llms.txt specs/mcp/llms.txt
+fetch https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/schema/2025-06-18/schema.json specs/mcp/schema-2025-06-18.json
+fetch https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/main/README.md specs/mcp/rmcp-README.md
+fetch https://www.jsonrpc.org/specification specs/jsonrpc/jsonrpc-2.0.html
+# Agent Client Protocol: protocol pages (v1/v2), Rust SDK page, registry docs + JSON, READMEs
+for p in v2/overview v2/initialization v2/session-setup v2/session-list v2/prompt-lifecycle v2/tool-calls v2/agent-plan v2/elicitation v2/cancellation v2/extensibility v1/overview v1/file-system v1/terminals v1/session-modes; do
+  fetch "https://agentclientprotocol.com/protocol/$p.md" "specs/acp/$(echo "$p" | tr '/' '-').md"
+done
+fetch https://agentclientprotocol.com/libraries/rust.md specs/acp/libraries-rust.md
+fetch https://agentclientprotocol.com/get-started/registry.md specs/acp/registry.md
+fetch https://agentclientprotocol.com/llms.txt specs/acp/llms.txt
+fetch https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json specs/acp/registry.json
+fetch https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/README.md specs/acp/agent-client-protocol-README.md
+fetch https://raw.githubusercontent.com/agentclientprotocol/claude-agent-acp/main/README.md specs/acp/claude-agent-acp-README.md
+fetch https://raw.githubusercontent.com/agentclientprotocol/registry/main/README.md specs/acp/registry-README.md
 # claude-view (closest existing observer)
 fetch https://raw.githubusercontent.com/tombelieber/claude-view/main/README.md specs/claude-view-README.md
 date -u +'fetched: %Y-%m-%dT%H:%MZ' > specs/FETCHED.txt

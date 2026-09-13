@@ -1,0 +1,506 @@
+//! The HTTP surface: receivers for the providers, and an API for the clients.
+//!
+//! One server, on loopback, for both. The browser shell needs HTTP anyway, and
+//! a second transport for the CLI would mean two protocols to keep in step for
+//! no gain. Everything under `/api` and `/vibeplane` requires the bearer token
+//! from `~/.vibeplane/token`.
+
+use crate::daemon::Shared;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::response::sse::{Event as SseEvent, Sse};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures_util::stream::Stream;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::convert::Infallible;
+use std::time::Instant;
+use vibeplane_core::Verdict;
+use vibeplane_domain::event::{Event, Source};
+use vibeplane_domain::ids::RunId;
+use vibeplane_domain::run::RunMode;
+use vibeplane_observe::hook::{HookPayload, PermissionResponse};
+
+pub fn router(state: Shared) -> Router {
+    Router::new()
+        // Receivers. The paths carry the `/vibeplane/` marker that `connect`
+        // uses to recognise its own entries when disconnecting.
+        .route("/vibeplane/hook", post(hook))
+        .route("/vibeplane/policy", post(policy))
+        .route("/vibeplane/statusline", post(statusline))
+        .route("/vibeplane/otel/v1/logs", post(otel_logs))
+        .route("/vibeplane/otel/v1/metrics", post(otel_metrics))
+        // Client API.
+        .route("/api/board", get(board))
+        .route("/api/inbox", get(inbox))
+        .route("/api/runs/{id}", get(run_detail))
+        .route("/api/runs/{id}/events", get(run_events))
+        .route("/api/search", get(search))
+        .route("/api/diagnostics", get(diagnostics))
+        .route("/api/stream", get(stream))
+        .route("/healthz", get(|| async { "ok" }))
+        .with_state(state)
+}
+
+/// Checks the bearer token.
+///
+/// Loopback is not an access control: every process running as this user can
+/// reach the port. The token, in a file only the user can read, is what
+/// actually separates Vibeplane from everything else on the machine.
+fn authorised(state: &Shared, headers: &HeaderMap) -> bool {
+    let Some(v) = headers.get(axum::http::header::AUTHORIZATION) else {
+        return false;
+    };
+    let Ok(v) = v.to_str() else { return false };
+    let presented = v.strip_prefix("Bearer ").unwrap_or(v);
+    constant_time_eq(presented.as_bytes(), state.token.as_bytes())
+}
+
+/// Compares without leaking the match position through timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+macro_rules! guard {
+    ($state:expr, $headers:expr) => {
+        if !authorised(&$state, &$headers) {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorised"}))).into_response();
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Receivers
+// ---------------------------------------------------------------------------
+
+/// The lifecycle hook. Answers immediately and does the work after replying:
+/// these hooks are configured `async`, but a receiver that blocks is still a
+/// receiver that can make Claude feel slow if that ever changes.
+async fn hook(State(state): State<Shared>, headers: HeaderMap, body: String) -> impl IntoResponse {
+    guard!(state, headers);
+    let started = Instant::now();
+
+    let payload: HookPayload = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            state
+                .store
+                .record_channel(
+                    "hook",
+                    started.elapsed().as_micros() as u64,
+                    Some(&e.to_string()),
+                )
+                .await
+                .ok();
+            // A malformed payload must not fail the hook: Claude Code would
+            // show the user an error about a tool they did not misuse.
+            return (StatusCode::OK, Json(json!({}))).into_response();
+        }
+    };
+
+    let outcome = vibeplane_observe::hook::to_events(&payload);
+    let run = RunId::new(payload.session_id.clone());
+    for event in outcome.events {
+        state
+            .ingest(
+                run.clone(),
+                Source::Hook,
+                event,
+                payload.cwd.clone(),
+                RunMode::Observed,
+            )
+            .await;
+    }
+    state
+        .store
+        .record_channel("hook", started.elapsed().as_micros() as u64, None)
+        .await
+        .ok();
+    (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// The permission gate.
+///
+/// This is the only synchronous hook, and it is the instant signal that a
+/// session is blocked: the `permission_prompt` notification waits six seconds
+/// and, in a terminal, defers again on every keystroke.
+///
+/// It answers in one of two ways and never waits for a human:
+///
+/// * a rule matches — allow or deny, the session continues, nothing reaches the
+///   inbox;
+/// * no rule matches — reply with no decision, so Claude Code prompts exactly
+///   as it would have, and record that the run is blocked so the inbox knows.
+async fn policy(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let started = Instant::now();
+
+    let Ok(payload) = serde_json::from_str::<HookPayload>(&body) else {
+        return (StatusCode::OK, Json(PermissionResponse::undecided())).into_response();
+    };
+
+    let tool = payload.tool_name.clone().unwrap_or_default();
+    let input = payload
+        .tool_input
+        .clone()
+        .unwrap_or(serde_json::Value::Null);
+    let verdict = {
+        let p = state.policy.lock().await;
+        p.evaluate(&tool, &input)
+    };
+
+    let run = RunId::new(payload.session_id.clone());
+    let (response, event) = match &verdict {
+        Verdict::Allow { rule } => (
+            PermissionResponse::allow(),
+            Event::PermissionDecided {
+                tool: tool.clone(),
+                decision: "allow".into(),
+                by: format!("policy:{rule}"),
+            },
+        ),
+        Verdict::Deny { rule } => (
+            PermissionResponse::deny(format!("denied by Vibeplane policy rule {rule}")),
+            Event::PermissionDecided {
+                tool: tool.clone(),
+                decision: "deny".into(),
+                by: format!("policy:{rule}"),
+            },
+        ),
+        Verdict::Undecided => (
+            PermissionResponse::undecided(),
+            Event::Blocked {
+                waiting_for: vibeplane_domain::event::WaitingFor::Permission,
+                message: Some(describe(&tool, &input)),
+            },
+        ),
+    };
+
+    // Reply first, record second: the session is waiting on this response.
+    let micros = started.elapsed().as_micros() as u64;
+    let st = state.clone();
+    let cwd = payload.cwd.clone();
+    tokio::spawn(async move {
+        st.ingest(run, Source::Hook, event, cwd, RunMode::Observed)
+            .await;
+        st.store.record_channel("policy", micros, None).await.ok();
+    });
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// A one-line description of what is being asked for.
+fn describe(tool: &str, input: &serde_json::Value) -> String {
+    match vibeplane_core::policy::rule_content(tool, input) {
+        Some(c) if c.len() > 120 => format!("{tool}: {}…", &c[..120]),
+        Some(c) => format!("{tool}: {c}"),
+        None => tool.to_string(),
+    }
+}
+
+async fn statusline(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(payload) = serde_json::from_str::<vibeplane_observe::statusline::StatusPayload>(&body)
+    else {
+        return (StatusCode::OK, Json(json!({}))).into_response();
+    };
+    let run = RunId::new(payload.session_id.clone());
+    for event in vibeplane_observe::statusline::to_events(&payload) {
+        state
+            .ingest(
+                run.clone(),
+                Source::StatusLine,
+                event,
+                None,
+                RunMode::Observed,
+            )
+            .await;
+    }
+    (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// OTLP/HTTP logs. Claude Code appends `/v1/logs` to the configured endpoint.
+async fn otel_logs(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    // The OTLP exporter cannot be given a bearer token per signal without
+    // also sending it to every other collector the user configures, so the
+    // telemetry endpoint is authorised by being on loopback alone. It accepts
+    // only observations, never commands.
+    let _ = headers;
+    let started = Instant::now();
+    let records = match vibeplane_observe::otel::parse_logs(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            state
+                .store
+                .record_channel(
+                    "otel",
+                    started.elapsed().as_micros() as u64,
+                    Some(&e.to_string()),
+                )
+                .await
+                .ok();
+            return (StatusCode::OK, Json(json!({"partialSuccess": {}}))).into_response();
+        }
+    };
+    for rec in records {
+        let run = RunId::new(rec.session_id.clone());
+        state
+            .ingest(
+                run.clone(),
+                Source::Otel,
+                rec.event,
+                None,
+                RunMode::Observed,
+            )
+            .await;
+        if let Some(entry) = rec.entrypoint {
+            let mut w = state.world.lock().await;
+            w.set_entrypoint(&run, &entry, rec.repo_url.as_deref());
+        }
+    }
+    state
+        .store
+        .record_channel("otel", started.elapsed().as_micros() as u64, None)
+        .await
+        .ok();
+    (StatusCode::OK, Json(json!({"partialSuccess": {}}))).into_response()
+}
+
+async fn otel_metrics(State(state): State<Shared>, body: axum::body::Bytes) -> impl IntoResponse {
+    let n = vibeplane_observe::otel::parse_metrics_sessions(&body).len();
+    state
+        .store
+        .record_channel("otel_metrics", n as u64, None)
+        .await
+        .ok();
+    (StatusCode::OK, Json(json!({"partialSuccess": {}})))
+}
+
+// ---------------------------------------------------------------------------
+// Client API
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct BoardResponse {
+    summary: vibeplane_core::BoardSummary,
+    runs: Vec<RunView>,
+    projects: Vec<vibeplane_domain::Project>,
+}
+
+/// What the board shows for one run. A view rather than the `Run` itself, so
+/// that adding a field to the domain does not silently change the wire format.
+#[derive(Serialize)]
+pub struct RunView {
+    pub id: String,
+    pub project: Option<String>,
+    pub project_name: Option<String>,
+    pub agent: String,
+    pub mode: String,
+    pub state: String,
+    pub waiting_for: Option<String>,
+    pub cwd: String,
+    pub worktree: Option<String>,
+    pub branch: Option<String>,
+    pub model: Option<String>,
+    pub entrypoint: Option<String>,
+    pub name: Option<String>,
+    pub summary: Option<String>,
+    pub cost_usd: f64,
+    pub context_percent: Option<f64>,
+    pub tool_calls: u64,
+    pub subagents: usize,
+    pub idle_seconds: i64,
+    pub last_event_at: String,
+}
+
+impl RunView {
+    fn of(run: &vibeplane_domain::Run, project_name: Option<String>) -> Self {
+        Self {
+            id: run.id.to_string(),
+            project: run.project_id.as_ref().map(|p| p.to_string()),
+            project_name,
+            agent: run.agent.clone(),
+            mode: run.mode.as_str().into(),
+            state: run.state.as_str().into(),
+            waiting_for: match &run.state {
+                vibeplane_domain::RunState::Waiting(w) => Some(format!("{w:?}").to_lowercase()),
+                _ => None,
+            },
+            cwd: run.cwd.display().to_string(),
+            worktree: run.worktree.as_ref().map(|p| p.display().to_string()),
+            branch: run.branch.clone(),
+            model: run.model.clone(),
+            entrypoint: run.entrypoint.clone(),
+            name: run.name.clone(),
+            summary: run.summary.clone(),
+            cost_usd: run.totals.cost_usd,
+            context_percent: run.totals.context_percent(),
+            tool_calls: run.totals.tool_calls,
+            subagents: run.subagents.len(),
+            idle_seconds: run.idle_seconds(),
+            last_event_at: run.last_event_at.to_string(),
+        }
+    }
+}
+
+async fn board(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let w = state.world.lock().await;
+    let runs = w
+        .board()
+        .into_iter()
+        .map(|r| {
+            let name = r
+                .project_id
+                .as_ref()
+                .and_then(|p| w.project(p))
+                .map(|p| p.name.clone());
+            RunView::of(r, name)
+        })
+        .collect();
+    Json(BoardResponse {
+        summary: w.summary(),
+        runs,
+        projects: w.projects().cloned().collect(),
+    })
+    .into_response()
+}
+
+async fn inbox(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let w = state.world.lock().await;
+    Json(w.inbox()).into_response()
+}
+
+async fn run_detail(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let w = state.world.lock().await;
+    match w.run(&RunId::new(id)) {
+        Some(r) => Json(r.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct LimitQuery {
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+fn default_limit() -> i64 {
+    200
+}
+
+async fn run_events(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match state.store.events_for_run(&RunId::new(id), q.limit).await {
+        Ok(evs) => Json(evs).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+
+async fn search(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<SearchQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match state.store.search(&q.q, q.limit).await {
+        Ok(hits) => Json(
+            hits.into_iter()
+                .map(|(r, t)| json!({"run_id": r.to_string(), "text": t}))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let channels = state.store.channel_health().await.unwrap_or_default();
+    let w = state.world.lock().await;
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "started_at": state.started_at.to_string(),
+        "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
+        "summary": w.summary(),
+        "channels": channels,
+        "stall_seconds": w.attention.stall_seconds,
+    }))
+    .into_response()
+}
+
+/// Live events, as server-sent events. The browser shell and `vibeplane watch`
+/// use the same stream.
+///
+/// A subscriber that falls behind is skipped forward rather than disconnected:
+/// a burst of tool calls must not knock the UI off the stream.
+async fn stream(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    // `Sse` has a single response type, so an unauthorised subscriber gets an
+    // immediately-finished stream rather than a status code.
+    let rx = authorised(&state, &headers).then(|| state.tx.subscribe());
+
+    let stream = futures_util::stream::unfold(rx, |rx| async move {
+        let mut rx = rx?;
+        loop {
+            match rx.recv().await {
+                Ok(env) => {
+                    let data = serde_json::to_string(&env).unwrap_or_default();
+                    return Some((Ok(SseEvent::default().data(data)), Some(rx)));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::debug!(skipped = n, "subscriber lagged");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}

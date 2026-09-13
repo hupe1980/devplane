@@ -1,13 +1,29 @@
 {
   "name": "vibeplane",
-  "version": "0.0.1",
-  "description": "Vibeplane — the local-first control plane for AI coding agents (Claude Code first). Placeholder release reserving the package name.",
+  "version": "0.1.0",
+  "description": "Vibeplane \u2014 the local-first control plane for AI coding agents. Placeholder: install the binary with `cargo install vibeplane` until the npm wrapper ships.",
   "license": "MIT OR Apache-2.0",
-  "repository": { "type": "git", "url": "git+https://github.com/hupe1980/vibeplane.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hupe1980/vibeplane.git"
+  },
   "homepage": "https://vibeplane.dev",
-  "author": "Frank Hübner <hupe@huebner-frank.de>",
-  "keywords": ["ai", "agents", "claude-code", "developer-tools", "orchestration"],
-  "bin": { "vibeplane": "index.js" },
-  "files": ["index.js", "README.md"],
-  "engines": { "node": ">=18" }
+  "author": "Frank H\u00fcbner <hupe@huebner-frank.de>",
+  "keywords": [
+    "ai",
+    "agents",
+    "claude-code",
+    "developer-tools",
+    "orchestration"
+  ],
+  "bin": {
+    "vibeplane": "index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
 }

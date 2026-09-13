@@ -1,6 +1,6 @@
 [package]
 name = "vibeplane"
-description = "Vibeplane — the local-first control plane for AI coding agents (Claude Code first). Placeholder release; the real thing is being built at the repository below."
+description = "The local-first control plane for AI coding agents: see every Claude Code session on your machine and know which ones need you."
 readme = "README.md"
 keywords = ["ai", "agents", "claude-code", "developer-tools", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
@@ -12,8 +12,36 @@ homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "vibeplane"
+path = "src/lib.rs"
+
 [[bin]]
 name = "vibeplane"
 path = "src/main.rs"
 
 [dependencies]
+vibeplane-domain.workspace = true
+vibeplane-core.workspace = true
+vibeplane-store.workspace = true
+vibeplane-observe.workspace = true
+
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+dirs.workspace = true
+futures-util.workspace = true
+jiff.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+vibeplane-core.workspace = true
+uuid.workspace = true
