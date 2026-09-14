@@ -56,11 +56,10 @@ if command -v cargo >/dev/null 2>&1; then
     || { echo "the dependency figures in D70/D78 have drifted (scripts/deps-count.sh)"; fail=1; }
 fi
 
-# The test count is an internal figure and internal figures were supposed to be the safe
-# kind — and this one still disagreed with itself across two documents for a pass (366 in
-# the roadmap, 377 in the quality notes) because nothing recomputed it. The static count of
-# test attributes matches what `cargo test` reports exactly, so the check costs a grep
-# rather than a build.
+# The test count, against a static count of test attributes — which matches what
+# `cargo test` reports exactly, so the check costs a grep rather than a build.
+# A ledger figure is written `**N tests**`; bold is what separates it from prose
+# like "3 tests red", and an unbolded total is therefore invisible here.
 tests_in_tree=$(grep -rhE "^[[:space:]]*#\[(tokio::)?test\]" ../src ../tests 2>/dev/null | wc -l | tr -d ' ')
 if [ "${tests_in_tree:-0}" -gt 0 ]; then
   claimed=$(grep -rhoE '\*\*[0-9]+ tests\*\*' *.md | grep -oE '[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')

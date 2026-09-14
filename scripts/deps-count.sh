@@ -5,10 +5,9 @@
 # latter lists every dependency a package *could* have, including optional ones
 # no enabled feature turns on, which this binary never compiles.
 #
-# The lesson is the one these notes already claim to follow: a number no check
-# pins has rotted, and a check that measures the wrong thing is worse than none,
-# because it makes the wrong number look verified. This one was used to schedule
-# work.
+# Counted for one pinned target, because the graph is host-dependent: macOS
+# resolves one package fewer than Linux and two fewer than Windows, so an
+# unpinned count asserts whatever the person running it happens to be on.
 #
 # Two measures:
 #
@@ -25,15 +24,17 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 # What concepts/DECISIONS.md D70 and D78 assert, re-measured.
-WANT_TOTAL=209
+TARGET=x86_64-unknown-linux-musl
+WANT_TOTAL=210
 WANT_ONLY_SQLX=29
 
 tree=$(mktemp)
 trap 'rm -f "$tree"' EXIT
-cargo tree --edges normal --prefix depth --no-dedupe >"$tree" 2>/dev/null
+cargo tree --edges normal --prefix depth --no-dedupe --target "$TARGET" >"$tree" 2>/dev/null
 [ -s "$tree" ] || { echo "cargo tree failed"; exit 1; }
 
 # The tree goes in by path, not on stdin: the heredoc below is already stdin.
+echo "  target                             $TARGET"
 python3 - "$WANT_TOTAL" "$WANT_ONLY_SQLX" "$tree" <<'PY'
 import re, sys
 
