@@ -74,7 +74,7 @@ jobs:
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
       - name: Build
         shell: bash
-        run: dist build --target ${{ matrix.target }} --output-format=json > dist-build.json
+        run: dist build --artifacts=local --target ${{ matrix.target }} --output-format=json > dist-build.json
       - uses: actions/upload-artifact@v4
         with:
           name: artifacts-${{ matrix.target }}
