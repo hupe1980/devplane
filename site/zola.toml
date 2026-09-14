@@ -1,0 +1,61 @@
+base_url = "https://hupe1980.github.io/vibeplane"
+title = "Vibeplane"
+description = "The local-first control plane for AI coding agents. One binary that watches the Claude Code and GitHub Copilot sessions on your machine, drives any Agent Client Protocol agent, and turns “the agent says it’s done” into “verified done”."
+default_language = "en"
+author = "hupe1980"
+
+compile_sass = true
+minify_html = true
+build_search_index = true
+generate_feeds = true
+feed_filenames = ["atom.xml"]
+
+hard_link_static = false
+
+taxonomies = []
+
+[markdown]
+smart_punctuation = true
+github_alerts = true
+# So a reader can link to a section rather than to the page.
+insert_anchor_links = "heading"
+bottom_footnotes = true
+
+[markdown.highlighting]
+# Classes, not inline styles, so the theme toggle reaches code blocks too.
+style = "class"
+light_theme = "catppuccin-latte"
+dark_theme = "catppuccin-mocha"
+
+[link_checker]
+# A broken internal link fails the build. External ones only warn: they break
+# for reasons outside this repository, and CI that goes red for those is ignored.
+internal_level = "error"
+external_level = "warn"
+
+[search]
+index_format = "elasticlunr_json"
+include_title = true
+include_description = true
+include_path = true
+include_content = true
+
+[extra]
+tagline = "The control plane for vibe engineering."
+repo = "https://github.com/hupe1980/vibeplane"
+acp = "https://agentclientprotocol.com"
+version = "0.1.0"
+og_image = "/og.png"
+
+[[extra.nav]]
+name = "Docs"
+url = "/docs/"
+
+[[extra.nav]]
+name = "Install"
+url = "/docs/install/"
+
+[[extra.nav]]
+name = "GitHub"
+url = "https://github.com/hupe1980/vibeplane"
+external = true

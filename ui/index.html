@@ -1,0 +1,939 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vibeplane</title>
+<style>
+  /* One file, no build step. The UI is small enough that a bundler would cost
+     more than it saves, and a dashboard that cannot be opened without `npm`
+     is a dashboard that rots the first time the toolchain moves. */
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --panel: #fff; --line: #e6e4e0; --ink: #1c1b19;
+    --dim: #6f6b66; --faint: #a5a09a;
+    --work: #2d6cdf; --wait: #b8860b; --fail: #c0392b; --done: #2e8b57;
+    --accent: #1c1b19;
+    font-synthesis: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --panel: #1c1c21; --line: #2b2b32; --ink: #e8e6e3;
+      --dim: #9b968f; --faint: #6a655f;
+      --work: #6ea8ff; --wait: #e3b341; --fail: #f0715f; --done: #57c98a;
+      --accent: #e8e6e3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    padding: 0 0 4rem;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
+    border-bottom: 1px solid var(--line); padding: .8rem 1rem;
+    display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap;
+  }
+  h1 { font-size: 13px; margin: 0; letter-spacing: .12em; text-transform: uppercase; }
+  .counts { color: var(--dim); display: flex; gap: .9rem; flex-wrap: wrap; }
+  .counts b { color: var(--ink); font-weight: 600; }
+  .live { margin-left: auto; color: var(--faint); display: flex; align-items: center; gap: .4rem; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--done); }
+  .dot.off { background: var(--fail); }
+  main { padding: 1rem; max-width: 1100px; }
+  section { margin-bottom: 1.6rem; }
+  h2 {
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--dim); margin: 0 0 .5rem; font-weight: 600;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: .6rem .75rem; margin-bottom: .4rem; cursor: default;
+  }
+  .card:focus-visible, .card.sel { outline: 2px solid var(--work); outline-offset: 1px; }
+  .item { border-left: 3px solid var(--wait); }
+  .item.critical { border-left-color: var(--fail); }
+  .item .t { font-weight: 600; }
+  .item .d { color: var(--dim); margin-top: .2rem; overflow-wrap: anywhere; }
+  .opts { margin: .35rem 0 0; padding-left: 1.1rem; color: var(--dim); }
+  .opts.picks { padding-left: 0; display: flex; gap: .4rem; flex-wrap: wrap; }
+  .opts.picks button { display: inline-flex; align-items: baseline; gap: .45rem; }
+  .opts.picks .num { color: var(--faint); }
+  .opt-dead { color: var(--faint); border: 1px dashed var(--line); border-radius: 4px; padding: .1rem .5rem; }
+  .row { display: flex; gap: .6rem; align-items: baseline; }
+  .row .name { font-weight: 600; min-width: 13rem; }
+  .row .meta { color: var(--faint); }
+  .row .sum { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s { width: .8rem; display: inline-block; }
+  .s.working { color: var(--work); } .s.starting { color: var(--work); }
+  .s.waiting { color: var(--wait); } .s.failed, .s.lost { color: var(--fail); }
+  .s.completed, .s.review { color: var(--done); } .s.idle, .s.stopped, .s.done { color: var(--faint); }
+  .s.verify { color: var(--wait); } .s.implement { color: var(--work); }
+  .s.human { color: var(--wait); }
+  .s.failed { color: var(--fail); }
+  .steps b.ok { color: var(--done); font-weight: 500; }
+  .steps b.at { color: var(--work); }
+  .steps .todo { color: var(--dim); }
+  .gate { padding: 0 .4rem; border-radius: 3px; border: 1px solid var(--line); }
+  .gate.red { color: var(--fail); border-color: var(--fail); }
+  .gate.green { color: var(--done); border-color: var(--done); }
+  a.gate { text-decoration: none; }
+  /* A `claude-cli://` link. It fills a prompt box and sends nothing — Claude
+     Code shows its own "prompt from an external link" warning until the person
+     presses enter — so it is styled as an offer, not as an action. */
+  a.gate.launch { color: var(--work); border-color: var(--work); }
+  .proj { color: var(--dim); margin: .9rem 0 .3rem; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  .gauge { display: inline-block; width: 3.2rem; color: var(--faint); text-align: right; }
+  .gauge.high { color: var(--wait); }
+  .cost { display: inline-block; width: 4rem; text-align: right; color: var(--faint); }
+  .acts { margin-top: .4rem; display: flex; gap: .4rem; flex-wrap: wrap; }
+  button {
+    font: inherit; background: transparent; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 4px; padding: .1rem .5rem; cursor: pointer;
+  }
+  button:hover { color: var(--ink); border-color: var(--dim); }
+  input {
+    font: inherit; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 4px; padding: .15rem .5rem;
+  }
+  input:focus-visible { outline: 2px solid var(--work); outline-offset: 1px; }
+  input::placeholder { color: var(--faint); }
+  .hit { display: flex; gap: .6rem; align-items: baseline; }
+  .hit .run { color: var(--faint); flex: none; font-variant-numeric: tabular-nums; }
+  .hit .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .hit { cursor: pointer; }
+  .hit:hover { border-color: var(--dim); }
+  kbd {
+    font: inherit; border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 3px; padding: 0 .3rem; color: var(--dim);
+  }
+  .empty { color: var(--faint); padding: .5rem 0; }
+  footer { color: var(--faint); padding: 0 1rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+  .err { color: var(--fail); padding: 1rem; }
+
+  /* The launchers. Deliberately the only things that cover the page. */
+  #veil { position: fixed; inset: 0; background: rgba(0,0,0,.38); z-index: 8; }
+  #veil[hidden] { display: none; }
+  .over {
+    position: fixed; left: 50%; top: 12vh; transform: translateX(-50%);
+    width: min(46rem, 92vw); background: var(--panel); z-index: 9;
+    border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 18px 48px rgba(0,0,0,.34); overflow: hidden;
+  }
+  .over[hidden] { display: none; }
+  .over input, .over textarea {
+    width: 100%; border: 0; border-radius: 0; background: transparent;
+    padding: .7rem .9rem; font: inherit; color: var(--ink); resize: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .over input:focus-visible, .over textarea:focus-visible { outline: none; }
+  #phits { max-height: 46vh; overflow-y: auto; }
+  .phit { display: flex; gap: .6rem; align-items: baseline; padding: .35rem .9rem; cursor: pointer; }
+  .phit .k { color: var(--faint); width: 4.5rem; flex: none; }
+  .phit .n { font-weight: 600; }
+  .phit .d { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .phit.on { background: var(--line); }
+  .drow { display: flex; gap: .35rem; flex-wrap: wrap; padding: .5rem .9rem; border-bottom: 1px solid var(--line); }
+  .chip {
+    border: 1px solid var(--line); border-radius: 4px; padding: .1rem .5rem;
+    color: var(--dim); cursor: pointer; white-space: nowrap;
+  }
+  .chip.on { border-color: var(--work); color: var(--work); }
+  .chip .k { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; margin-right: .35rem; }
+  #dtpl { max-height: 26vh; overflow-y: auto; }
+  #dwill { padding: .5rem .9rem; background: var(--bg); border-top: 1px solid var(--line); color: var(--dim); }
+  .dfoot { display: flex; gap: .9rem; align-items: center; padding: .5rem .9rem; border-top: 1px solid var(--line); color: var(--faint); }
+  .whyhead { display: flex; gap: .6rem; align-items: baseline; padding: .6rem .9rem; border-bottom: 1px solid var(--line); }
+  #whybody { padding: .6rem .9rem 1rem; max-height: 52vh; overflow-y: auto; }
+  #whybody .e { display: flex; gap: .6rem; align-items: baseline; padding: .15rem 0; }
+  #whybody .e .t { color: var(--faint); flex: none; }
+  #whybody .e .who { width: 4rem; flex: none; color: var(--dim); }
+  #whybody .r { color: var(--faint); padding: 0 0 .3rem 4.8rem; }
+
+  /* The transcript. Only driven runs have one: a session somebody started in
+     an editor is already showing its own, and `focus` raises that window. */
+  #talk { position: fixed; inset: auto 0 0 0; height: 45vh; background: var(--panel);
+          border-top: 1px solid var(--line); display: flex; flex-direction: column; }
+  #talk[hidden] { display: none; }
+  #talkhead { display: flex; gap: .6rem; align-items: baseline; padding: .5rem .9rem;
+              border-bottom: 1px solid var(--line); }
+  #talkhead .who { font-weight: 600; }
+  #talkbody { overflow-y: auto; padding: .6rem .9rem 1.2rem; flex: 1; }
+  .msg { display: flex; gap: .6rem; margin-bottom: .5rem; align-items: baseline; }
+  .msg .role { color: var(--faint); min-width: 3.4rem; text-align: right; flex-shrink: 0; }
+  .msg .body { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user .role { color: var(--work); }
+  .msg.agent .role { color: var(--accent); }
+  .msg.thought { color: var(--faint); }
+  .plan { margin: .3rem 0 0 1.4rem; padding: 0; list-style: none; color: var(--dim); }
+  .plan .done { color: var(--done); }
+  .plan .at { color: var(--work); }
+</style>
+
+<header>
+  <h1>Vibeplane</h1>
+  <div class="counts" id="counts"></div>
+  <input id="q" type="search" placeholder="search tool calls, questions, errors  /"
+         autocomplete="off" spellcheck="false" size="34">
+  <div class="live"><span class="dot" id="dot"></span><span id="livetext">connecting</span></div>
+</header>
+
+<main>
+  <section id="needs">
+    <h2>Needs you</h2>
+    <div id="inbox"></div>
+  </section>
+  <section id="worksec" hidden>
+    <h2>Work</h2>
+    <div id="work"></div>
+  </section>
+  <section id="hitsec" hidden>
+    <h2 id="hitshead">Matches</h2>
+    <div id="hits"></div>
+  </section>
+  <section>
+    <h2>Sessions</h2>
+    <div id="board"></div>
+  </section>
+</main>
+
+<section id="talk" hidden>
+  <div id="talkhead">
+    <span class="who" id="talkwho"></span>
+    <span class="meta" id="talkmode"></span>
+    <button id="talkthinking">show thinking</button>
+    <button id="talkclose" style="margin-left:auto">close</button>
+  </div>
+  <div id="talkbody"></div>
+</section>
+
+<!-- Two launchers and one explainer. They are the only things allowed to cover
+     the page, and the exemption is a rule rather than an exception: neither is
+     a decision, so neither has evidence that has to stay beside it. -->
+<div id="veil" hidden></div>
+
+<div id="palette" class="over" hidden>
+  <input id="pq" type="search" placeholder="jump to a project, a piece of work, a session…"
+         autocomplete="off" spellcheck="false">
+  <div id="phits"></div>
+</div>
+
+<div id="dispatch" class="over" hidden>
+  <textarea id="dprompt" rows="3" placeholder="what should the agent do?"></textarea>
+  <div class="drow" id="dprojects"></div>
+  <div class="drow" id="dopts"></div>
+  <div id="dtpl"></div>
+  <div id="dwill"></div>
+  <div class="dfoot">
+    <span><kbd>tab</kbd> next field</span>
+    <span><kbd>&#8984;&#8629;</kbd> send</span>
+    <span><kbd>esc</kbd> cancel</span>
+    <button id="dgo" class="primary" style="margin-left:auto">start work</button>
+  </div>
+</div>
+
+<div id="why" class="over" hidden>
+  <div class="whyhead"><b>Why this is here</b><button id="whyclose" style="margin-left:auto">close</button></div>
+  <div id="whybody"></div>
+</div>
+
+<footer>
+  <span><kbd>j</kbd><kbd>k</kbd> move</span>
+  <span><kbd>f</kbd> focus window</span>
+  <span><kbd>a</kbd> copy attach</span>
+  <span><kbd>s</kbd> snooze 1h</span>
+  <span><kbd>y</kbd><kbd>n</kbd> allow / deny</span>
+  <span><kbd>1</kbd>&ndash;<kbd>9</kbd> pick an answer</span>
+  <span><kbd>r</kbd> reply</span>
+  <span><kbd>enter</kbd> what it is saying</span>
+  <span><kbd>?</kbd> why</span>
+  <span><kbd>&#8984;K</kbd> jump</span>
+  <span><kbd>&#8984;N</kbd> dispatch</span>
+  <span><kbd>/</kbd> search</span>
+</footer>
+
+<script>
+// The token arrives once in the URL from `vibeplane open`, is kept for the tab,
+// and is stripped from the address bar so it does not end up in a screenshot or
+// a bookmark.
+const url = new URL(location.href);
+if (url.searchParams.get("token")) {
+  sessionStorage.setItem("vp_token", url.searchParams.get("token"));
+  url.searchParams.delete("token");
+  history.replaceState({}, "", url);
+}
+const TOKEN = sessionStorage.getItem("vp_token") || "";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), Authorization: "Bearer " + TOKEN },
+  });
+  if (res.status === 401) throw new Error("unauthorised — run `vibeplane open` again");
+  if (!res.ok) throw new Error(path + " → " + res.status);
+  return res.json();
+};
+
+const GLYPH = {
+  working: "●", starting: "●", waiting: "◆", idle: "○", human: "⏸",
+  completed: "✓", failed: "✗", lost: "?", stopped: "○",
+  ready: "·", implement: "●", verify: "◆", review: "✓", done: "·",
+};
+const ago = (s) =>
+  s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m"
+  : s < 86400 ? Math.floor(s / 3600) + "h" : Math.floor(s / 86400) + "d";
+
+let state = { board: null, inbox: [], work: [], sel: 0, showAll: false };
+// The open transcript: which run, what it has said, and whether to show the
+// agent's reasoning (usually not — a reader skips it far more often than reads).
+let talk = { run: null, messages: [], thinking: false, es: null };
+
+// A missing summary is not a session with nothing to say — it is one we have
+// nothing about, usually because the roster found it before any hook did.
+// Matches `render::summary_line` on the Rust side; the contract test reads
+// field names out of this page, so the two must agree in wording too.
+const SUMMARY_FALLBACK = {
+  waiting: "needs you",
+  idle: "waiting for a prompt",
+  working: "busy",
+  starting: "busy",
+  failed: "failed",
+  lost: "gone",
+};
+
+function render() {
+  const b = state.board;
+  if (!b) return;
+  const s = b.summary;
+  $("counts").innerHTML =
+    `<span><b>${s.projects}</b> projects</span>` +
+    `<span><b>${s.runs}</b> sessions</span>` +
+    `<span><b>${s.working}</b> working</span>` +
+    (s.needs_you ? `<span style="color:var(--wait)"><b>${s.needs_you}</b> need you</span>` : "") +
+    (s.cost_usd > 0 ? `<span>$${s.cost_usd.toFixed(2)}</span>` : "") +
+    // Editor tabs whose processes are still alive. Counted, not listed: twenty
+    // rows that all look equally alive answer no question at all.
+    (s.dormant
+      ? `<button id="dormant">${state.showAll ? "hide" : "show"} ${s.dormant} dormant</button>`
+      : "");
+
+  // The inbox first, because it is the only part that is asking for something.
+  $("inbox").innerHTML = state.inbox.length
+    ? state.inbox.map((i, n) => `
+        <div class="card item ${i.level}" data-sel="${n}" data-run="${esc(i.run_id || "")}" tabindex="0">
+          <div class="t">${esc(i.title)}</div>
+          ${i.detail ? `<div class="d">${esc(i.detail)}</div>` : ""}
+          ${i.options?.length ? (
+            i.actions.includes("choose")
+              // The agent named the answers it will take, so those are the
+              // buttons. Numbered, because `1`-`9` picks one without the mouse.
+              ? `<div class="opts picks">${i.options.map((o, k) =>
+                  (i.actions.includes("choose") && o.id) ? `<button data-act="choose" data-run="${esc(i.run_id || "")}" data-req="${esc(i.request_id || "")}" data-opt="${esc(o.id)}"><span class="num">${k + 1}</span>${esc(o.label)}</button>`
+                  : `<span class="opt-dead">${esc(o.label)}</span>`).join("")}</div>`
+              // No ids: the provider owns this dialog and only its own window
+              // can answer. Shown, because reading them is still worth
+              // something, but never dressed up as buttons.
+              : `<ol class="opts">${i.options.map((o) => `<li>${esc(o.label)}</li>`).join("")}</ol>`
+          ) : ""}
+          <div class="acts">
+            ${i.actions.includes("allow") ? `<button data-act="allow" data-run="${esc(i.run_id || "")}" data-req="${esc(i.request_id || "")}">allow</button>` : ""}
+            ${i.actions.includes("deny") ? `<button data-act="deny" data-run="${esc(i.run_id || "")}" data-req="${esc(i.request_id || "")}">deny</button>` : ""}
+            ${i.actions.includes("reply") ? `<button data-act="reply" data-run="${esc(i.run_id || "")}">reply</button>` : ""}
+            ${i.actions.includes("focus") ? `<button data-act="focus" data-run="${esc(i.run_id || "")}">focus window</button>` : ""}
+            ${i.actions.includes("approve") ? `<button data-act="approve" data-work="${esc(i.work_id || "")}">release</button>` : ""}
+            ${i.actions.includes("retry") ? `<button data-act="retry" data-work="${esc(i.work_id || "")}">hand back again</button>` : ""}
+            ${i.actions.includes("resume") ? `<button data-act="resume" data-work="${esc(i.work_id || "")}">pick it back up</button>` : ""}
+            ${i.actions.includes("open_pr") && i.url ? `<a class="gate" href="${esc(i.url)}" target="_blank" rel="noreferrer">open pull request</a>` : ""}
+            ${i.launch ? `<a class="gate launch" href="${esc(i.launch)}">open an agent on it</a>` : ""}
+            ${i.actions.includes("attach") ? `<button data-act="attach" data-run="${esc(i.run_id || "")}">copy attach</button>` : ""}
+            ${i.actions.includes("snooze") ? `<button data-act="snooze" data-run="${esc(i.run_id || "")}" data-work="${esc(i.work_id || "")}">snooze 1h</button>` : ""}
+          </div>
+        </div>`).join("")
+    : `<div class="empty">Nothing needs you.</div>`;
+
+  const work = state.work.filter((w) => w.phase !== "done" && w.phase !== "cancelled");
+  $("worksec").hidden = work.length === 0;
+  $("work").innerHTML = work.map((w) => {
+    // The verdict comes from the daemon. The page used to re-derive it from
+    // the raw exit codes, which reads a reproduction gate — where failing is
+    // the point — exactly backwards.
+    // Work that stopped says why, and the reason comes from the daemon already
+    // composed. Showing the gate badge here instead put "gates green" on a row
+    // whose phase is `failed`, because a chain stopped by its reviewer leaves
+    // the last gate passing — two true statements that read as a contradiction.
+    const badge = w.stopped_summary
+      ? `<span class="gate red" title="${esc(w.stopped_summary)}">${esc(w.stopped_summary)}</span>`
+      : w.gate
+      ? `<span class="gate ${w.gate.passed ? "green" : "red"}" title="${esc(w.gate.summary)}">${w.gate.passed ? "gates green" : "gates red"}</span>`
+      : "";
+    const pr = w.pull_request
+      ? `<a class="gate ${w.pull_request.status === "failing" ? "red" : w.pull_request.status.startsWith("ready") ? "green" : ""}"
+            href="${esc(w.pull_request.url)}" target="_blank" rel="noreferrer"
+         >#${w.pull_request.number} ${esc(w.pull_request.status.replace(/_/g, " "))}</a>`
+      : "";
+    // The stepper is the whole story of a pipeline in one line: what is done,
+    // where it is, and what is left.
+    const step = w.pipeline
+      ? `<span class="steps">` + w.pipeline.roles.map((r, i) =>
+          i < w.pipeline.step ? `<b class="ok">\u2713${esc(r)}</b>`
+          : i === w.pipeline.step ? `<b class="at">\u25B8${esc(r)}</b>`
+          : `<span class="todo">${esc(r)}</span>`).join('<span class="todo"> \u203A </span>') + `</span>`
+      : "";
+    // The two cards that are asking for something: a pipeline held where the
+    // project said a person decides, and work whose checks kept failing.
+    const release = w.phase === "human"
+      ? `<button data-act="approve" data-work="${esc(w.id)}">release</button>`
+      : w.can_retry
+      ? `<button data-act="retry" data-work="${esc(w.id)}" title="${esc(w.stopped_summary || w.gate?.summary || "")}">hand back again</button>`
+      : "";
+    return `<div class="card row">
+      <span class="s ${w.phase}">${GLYPH[w.phase] || "\u25CF"}</span>
+      <span class="name">${esc(w.title)}</span>
+      <span class="meta">${esc(w.phase)}</span>
+      <span class="sum">${step || esc(w.branch || "")}</span>
+      <span class="cost">${w.cost_usd > 0 ? "$" + w.cost_usd.toFixed(2) : ""}</span>
+      ${badge}${pr}${release}
+    </div>`;
+  }).join("");
+
+  const byProject = {};
+  for (const r of b.runs) (byProject[r.project_name || "elsewhere"] ||= []).push(r);
+  const offset = state.inbox.length;
+  let n = offset;
+  $("board").innerHTML = Object.entries(byProject)
+    .sort((a, c) => c[1].length - a[1].length)
+    .map(([proj, runs]) => `
+      <div class="proj">${esc(proj)} · ${runs.length}</div>
+      ${runs.map((r) => {
+        const pct = r.context_percent;
+        return `<div class="card row" data-sel="${n++}" data-run="${esc(r.id)}" tabindex="0">
+          <span class="s ${r.state}">${GLYPH[r.state] || "·"}</span>
+          <span class="name">${esc(r.name || r.id.slice(0, 8))}</span>
+          <span class="meta">${esc(r.entrypoint || r.mode)}</span>
+          <span class="gauge ${pct >= 85 ? "high" : ""}">${pct != null ? Math.round(pct) + "%" : ""}</span>
+          <span class="cost">${r.cost_usd > 0 ? "$" + r.cost_usd.toFixed(2) : ""}</span>
+          <span class="meta">${ago(r.idle_seconds)}</span>
+          <span class="sum">${esc(r.summary || SUMMARY_FALLBACK[r.state] || "")}</span>
+          ${r.plan_total ? `<span class="meta">${r.plan_done}/${r.plan_total}</span>` : ""}
+        </div>`;
+      }).join("")}`).join("");
+
+  const sel = document.querySelector(`[data-sel="${state.sel}"]`);
+  document.querySelectorAll(".sel").forEach((e) => e.classList.remove("sel"));
+  if (sel) sel.classList.add("sel");
+}
+
+// ---------------------------------------------------------------------------
+// The transcript of a driven run.
+//
+// Only driven runs have one, and that is not a gap to fill later: hooks carry
+// lifecycle and tool inputs, telemetry redacts prompts and responses, and the
+// transcript files are documented as internal. A session you started yourself
+// is already showing you its own — `f` raises that window.
+// ---------------------------------------------------------------------------
+
+function renderTalk() {
+  const run = state.board?.runs.find((r) => r.id === talk.run);
+  $("talkwho").textContent = run?.name || (talk.run || "").slice(0, 8);
+  $("talkmode").textContent = run?.mode === "driven" ? "driven by vibeplane" : "";
+  $("talkthinking").textContent = talk.thinking ? "hide thinking" : "show thinking";
+
+  const plan = (run?.plan || []).length
+    ? `<ul class="plan">${run.plan.map((p) =>
+        `<li class="${p.status === "completed" ? "done" : p.status === "in_progress" ? "at" : ""}">${
+          p.status === "completed" ? "\u2713" : p.status === "in_progress" ? "\u25B8" : "\u00B7"
+        } ${esc(p.content)}</li>`).join("")}</ul>`
+    : "";
+
+  const body = $("talkbody");
+  // Only auto-scroll when the reader was already at the bottom; yanking them
+  // back down while they are reading history is its own kind of rude.
+  const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+  body.innerHTML = plan + talk.messages
+    .filter((m) => talk.thinking || m.role !== "thought")
+    .map((m) => `<div class="msg ${esc(m.role)}"><span class="role">${
+      m.role === "user" ? "you" : m.role === "thought" ? "\u00B7\u00B7\u00B7" : "agent"
+    }</span><span class="body">${esc(m.text.trim())}</span></div>`).join("");
+  if (pinned) body.scrollTop = body.scrollHeight;
+}
+
+async function openTalk(run) {
+  const r = state.board?.runs.find((x) => x.id === run);
+  if (r && r.mode !== "driven") {
+    // Saying why beats an empty panel.
+    alert(
+      "Vibeplane watches this session, it does not drive it, and the documented " +
+      "channels carry no transcript.\n\nIts own window has the conversation — press f to raise it."
+    );
+    return;
+  }
+  closeTalk();
+  talk.run = run;
+  talk.messages = await api(`/api/runs/${run}/messages?limit=200`).catch(() => []);
+  $("talk").hidden = false;
+  renderTalk();
+
+  // Narrowed to this run: a chatty agent in another project is not something
+  // this reader needs to be sent.
+  talk.es = new EventSource(`/api/stream?run=${encodeURIComponent(run)}&token=${encodeURIComponent(TOKEN)}`);
+  talk.es.onmessage = (e) => {
+    let f;
+    try { f = JSON.parse(e.data); } catch { return; }
+    if (f.frame !== "message") return;
+    talk.messages.push(f);
+    if (talk.messages.length > 500) talk.messages.shift();
+    renderTalk();
+  };
+}
+
+function closeTalk() {
+  talk.es?.close();
+  talk = { run: null, messages: [], thinking: talk.thinking, es: null };
+  $("talk").hidden = true;
+}
+
+// Search, debounced.
+//
+// The daemon already has the index — `/api/search` is what `vibeplane search`
+// uses — so the board was the only surface that could not answer "where did I
+// see that command". Typing is not a reason to run a query per keystroke, and
+// the result of an older query must never overwrite a newer one, so each run
+// carries a sequence number and a late answer is dropped.
+let searchTimer = null;
+let searchSeq = 0;
+
+function showHits(hits, query) {
+  const sec = $("hitsec");
+  if (!query) {
+    sec.hidden = true;
+    return;
+  }
+  sec.hidden = false;
+  $("hitshead").textContent = hits.length
+    ? `Matches for “${query}” (${hits.length})`
+    : `Nothing matches “${query}”`;
+  $("hits").innerHTML = hits
+    .map(
+      (h) => `<div class="card hit" data-run="${esc(h.run_id)}">
+          <span class="run">${esc(String(h.run_id).slice(0, 8))}</span>
+          <span class="text">${esc(h.text)}</span>
+        </div>`,
+    )
+    .join("");
+}
+
+function search(query) {
+  clearTimeout(searchTimer);
+  const q = query.trim();
+  if (!q) {
+    searchSeq++;
+    return showHits([], "");
+  }
+  searchTimer = setTimeout(async () => {
+    const mine = ++searchSeq;
+    try {
+      const hits = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      // A slower earlier query must not replace a faster later one.
+      if (mine === searchSeq) showHits(hits, q);
+    } catch (e) {
+      if (mine === searchSeq) {
+        $("hitsec").hidden = false;
+        $("hitshead").textContent = "Search failed";
+        $("hits").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+      }
+    }
+  }, 180);
+}
+
+$("q").addEventListener("input", (e) => search(e.target.value));
+$("q").addEventListener("keydown", (e) => {
+  // Escape clears and gives the keyboard back to the board.
+  if (e.key === "Escape") {
+    e.target.value = "";
+    search("");
+    e.target.blur();
+  }
+  // The board's single-letter shortcuts must not fire while typing.
+  e.stopPropagation();
+});
+
+async function refresh() {
+  try {
+    const [board, inbox, work, projs] = await Promise.all([
+      api(state.showAll ? "/api/board?all=true" : "/api/board"),
+      api("/api/inbox"),
+      api("/api/work"),
+      api("/api/projects"),
+    ]);
+    projects = projs;
+    state.board = board;
+    state.inbox = inbox;
+    state.work = work;
+    render();
+  } catch (e) {
+    document.querySelector("main").innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+async function act(kind, run, req, opt) {
+  if (kind === "choose") {
+    // The exact option the agent offered. `decision: allow|deny` is the
+    // shorthand for a permission; an answer to a question has no shorthand,
+    // because the agent chose what the answers are.
+    await api(`/api/runs/${run}/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ request_id: req, option_id: opt }),
+    }).catch((e) => alert(e.message));
+    refresh();
+  } else if (kind === "reply") {
+    const text = prompt("Reply to the agent");
+    if (!text) return;
+    await api(`/api/runs/${run}/prompt`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: text }),
+    }).catch((e) => alert(e.message));
+    refresh();
+  } else if (kind === "allow" || kind === "deny") {
+    // The agent is stopped, waiting for this. The daemon resolves `allow` and
+    // `deny` against the options the agent actually offered — the page used to
+    // send the literal id "allow", which only a fixture answers to.
+    const item = state.inbox.find((i) => i.run_id && i.run_id === run);
+    await api(`/api/runs/${run}/decide`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ request_id: req || item?.request_id, decision: kind }),
+    }).catch((e) => alert(e.message));
+    refresh();
+  } else if (kind === "focus") {
+    await api(`/api/runs/${run}/focus`, { method: "POST" }).catch((e) => alert(e.message));
+  } else if (kind === "approve" || kind === "retry" || kind === "resume") {
+    await api(`/api/work/${req}/${kind}`, { method: "POST" }).catch((e) => alert(e.message));
+    refresh();
+  } else if (kind === "snooze") {
+    // Work and runs snooze separately. An item a pull request produced has
+    // often outlived every session that worked on it, so there is no run left
+    // to quieten — `req` carries the work id for exactly those.
+    const where_ = req ? `/api/work/${req}` : `/api/runs/${run}`;
+    await api(`${where_}/snooze?minutes=60`, { method: "POST" }).catch((e) => alert(e.message));
+    refresh();
+  } else if (kind === "attach") {
+    const cmd = `vibeplane attach ${run}`;
+    navigator.clipboard?.writeText(cmd);
+    // Clipboard access can be refused; showing the command is the fallback that
+    // always works.
+    $("livetext").textContent = "copied: " + cmd;
+    setTimeout(() => (window.__live?.() ?? null), 2000);
+  }
+}
+
+// ── The two launchers and the explainer ───────────────────────────────────────
+//
+// These are the only things allowed to cover the page, and the exemption is a
+// rule rather than an exception: neither is a decision, so neither has evidence
+// that has to stay on screen beside it.
+
+let projects = [];
+let over = { which: null, sel: 0, hits: [], dispatch: null };
+
+const openOver = (which) => {
+  over.which = which;
+  over.sel = 0;
+  $("veil").hidden = false;
+  for (const id of ["palette", "dispatch", "why"]) $(id).hidden = id !== which;
+};
+const closeOver = () => {
+  over.which = null;
+  $("veil").hidden = true;
+  for (const id of ["palette", "dispatch", "why"]) $(id).hidden = true;
+};
+
+// ── ⌘K: everything by name ───────────────────────────────────────────────────
+//
+// A subsequence match, not a fuzzy score: `crlb` finds `core-lib` and nothing
+// pretends to rank. A picker whose order changes for reasons a person cannot
+// predict is one they stop trusting mid-keystroke.
+const subseq = (needle, hay) => {
+  let i = 0;
+  for (const c of hay.toLowerCase()) if (c === needle[i]) i++;
+  return i === needle.length;
+};
+
+function paletteRows() {
+  const rows = [];
+  for (const p of projects) {
+    rows.push({ kind: "project", name: p.name, detail: p.root, go: () => startDispatch(p.id) });
+  }
+  for (const w of state.work || []) {
+    rows.push({ kind: "work", name: w.title, detail: w.phase, go: () => openTalk(w.runs?.at(-1)) });
+  }
+  for (const r of state.board?.runs || []) {
+    rows.push({
+      kind: "session",
+      name: r.name || r.id.slice(0, 8),
+      detail: r.summary || r.project_name || "",
+      go: () => openTalk(r.id),
+    });
+  }
+  rows.push({ kind: "action", name: "dispatch work", detail: "⌘N", go: () => startDispatch() });
+  rows.push({ kind: "action", name: "show all sessions", detail: "the dormant ones too", go: () => { state.showAll = true; refresh(); } });
+  return rows;
+}
+
+function renderPalette() {
+  const q = $("pq").value.trim().toLowerCase();
+  // `p`, not `r`: a palette row is a locally built {kind, name, detail}, not a
+  // run from the API, and sharing the letter made the contract test unable to
+  // tell which fields it was checking.
+  over.hits = paletteRows().filter((p) => !q || subseq(q, p.name + " " + p.kind)).slice(0, 40);
+  if (over.sel >= over.hits.length) over.sel = Math.max(0, over.hits.length - 1);
+  $("phits").innerHTML = over.hits.length
+    ? over.hits.map((p, i) => `<div class="phit ${i === over.sel ? "on" : ""}" data-i="${i}">
+         <span class="k">${esc(p.kind)}</span><span class="n">${esc(p.name)}</span>
+         <span class="d">${esc(p.detail || "")}</span></div>`).join("")
+    : `<div class="empty" style="padding:.6rem .9rem">nothing by that name</div>`;
+}
+
+// ── ⌘N: a launcher, not a form ───────────────────────────────────────────────
+//
+// It opens with the cursor in the prompt and everything else already decided by
+// the project. The panel at the bottom says what will happen *before* it
+// happens, which is the whole difference between dispatching and gambling.
+function startDispatch(projectId) {
+  const pick = projects.find((p) => p.id === projectId) || projects.find((p) => p.sessions > 0) || projects[0];
+  over.dispatch = { project: pick?.id ?? null, kind: "quick", worktree: true, template: null };
+  openOver("dispatch");
+  renderDispatch();
+  $("dprompt").focus();
+}
+
+function renderDispatch() {
+  const d = over.dispatch;
+  const p = projects.find((x) => x.id === d.project);
+  $("dprojects").innerHTML = projects
+    .slice()
+    .sort((a, b) => b.sessions - a.sessions || a.name.localeCompare(b.name))
+    .slice(0, 12)
+    .map((x) => `<span class="chip ${x.id === d.project ? "on" : ""}" data-proj="${esc(x.id)}">
+        <span class="k">to</span>${esc(x.name)}</span>`).join("");
+
+  // Only the kinds this project can actually run: a pipeline it never declared
+  // would fail several minutes and one model call later.
+  const kinds = ["quick", "chore", ...(p?.pipelines || []).filter((k) => k !== "quick" && k !== "chore")];
+  $("dopts").innerHTML =
+    kinds.map((k) => `<span class="chip ${k === d.kind ? "on" : ""}" data-kind="${esc(k)}"><span class="k">kind</span>${esc(k)}</span>`).join("") +
+    `<span class="chip ${d.worktree ? "on" : ""}" data-toggle="worktree"><span class="k">worktree</span>${d.worktree ? "yes" : "no"}</span>` +
+    `<span class="chip"><span class="k">agent</span>${esc(p?.default_agent || "project default")}</span>`;
+
+  const tpl = p?.templates || [];
+  $("dtpl").innerHTML = tpl.length
+    ? tpl.map((t) => `<div class="phit ${t.name === d.template ? "on" : ""}" data-tpl="${esc(t.name)}">
+         <span class="k">${esc(t.source)}</span><span class="n">${esc(t.name)}</span>
+         <span class="d">${esc(t.description || "")}</span>
+         <span class="k">${esc(t.hint || "")}</span></div>`).join("")
+    : "";
+
+  // What will happen, before it happens.
+  const why = !p ? "No project to start in."
+    : !p.trusted ? `<b>${esc(p.name)} is not trusted.</b> An agent runs that repository's own hooks and MCP servers, so the decision has to be one somebody made deliberately — <code>vibeplane trust ${esc(p.root)}</code>.`
+    : `Creates <b>${esc(d.kind)}</b> work in <b>${esc(p.name)}</b>${d.worktree ? ", in an isolated checkout on its own branch" : ", in the checkout itself"}. The project's gates run when the agent stops.`;
+  $("dwill").innerHTML = why;
+  $("dgo").disabled = !p || !p.trusted;
+}
+
+async function sendDispatch() {
+  const d = over.dispatch;
+  const p = projects.find((x) => x.id === d.project);
+  const title = $("dprompt").value.trim();
+  if (!p || !p.trusted || !title) return;
+  const body = { cwd: p.root, title, kind: d.kind, worktree: d.worktree };
+  // A template names a prompt the project already wrote down; the typed line
+  // stays the title either way, because that is what names the branch.
+  if (d.template) body.prompt = d.template;
+  try {
+    await api("/api/work", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    closeOver();
+    $("dprompt").value = "";
+    refresh();
+  } catch (e) {
+    $("dwill").innerHTML = `<span style="color:var(--fail)">${esc(e.message)}</span>`;
+  }
+}
+
+// ── ?: why is this here ──────────────────────────────────────────────────────
+//
+// The cheapest possible way to make a supervision tool explainable: the same
+// decision log `vibeplane audit` reads, narrowed to the row under the cursor.
+async function showWhy(item) {
+  openOver("why");
+  const about = item?.work_id || item?.run_id;
+  $("whybody").innerHTML = `<div class="empty">reading the decision log…</div>`;
+  const head = item
+    ? `<div style="margin-bottom:.6rem"><b>${esc(item.title)}</b><div style="color:var(--dim)">${esc(item.kind)} · ${esc(item.level)}${item.detail ? " · " + esc(item.detail) : ""}</div></div>`
+    : "";
+  if (!about) {
+    $("whybody").innerHTML = head + `<div class="empty">Nothing has been decided about this yet.</div>`;
+    return;
+  }
+  try {
+    const rows = await api(`/api/decisions?limit=25&about=${encodeURIComponent(about)}`);
+    $("whybody").innerHTML = head + (rows.length
+      // `d`, not `r`: a decision row is not a run, and one letter meaning two
+      // things is why the contract test needed an allowlist — which then
+      // silently stopped covering every field nobody remembered to add to it.
+      ? rows.map((d) => `<div class="e"><span class="t">${esc((d.at || "").slice(11, 16))}</span>
+           <span class="who">${esc(d.actor)}</span><span>${esc(d.outcome)} ${esc(d.action)}</span></div>
+           ${d.reason ? `<div class="r">↳ ${esc(d.reason)}</div>` : ""}`).join("")
+      : `<div class="empty">Nothing has been decided about this yet.</div>`);
+  } catch (e) {
+    $("whybody").innerHTML = head + `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target.id === "veil" || e.target.id === "whyclose") return closeOver();
+  const hit = e.target.closest("#phits .phit");
+  if (hit) { over.sel = +hit.dataset.i; const r = over.hits[over.sel]; closeOver(); return r?.go(); }
+  const proj = e.target.closest("[data-proj]");
+  if (proj) { over.dispatch.project = proj.dataset.proj; return renderDispatch(); }
+  const kind = e.target.closest("[data-kind]");
+  if (kind) { over.dispatch.kind = kind.dataset.kind; return renderDispatch(); }
+  const tog = e.target.closest('[data-toggle="worktree"]');
+  if (tog) { over.dispatch.worktree = !over.dispatch.worktree; return renderDispatch(); }
+  const tpl = e.target.closest("[data-tpl]");
+  if (tpl) {
+    // A second click clears it: the template is an offer, not a mode you get
+    // stuck in.
+    over.dispatch.template = over.dispatch.template === tpl.dataset.tpl ? null : tpl.dataset.tpl;
+    return renderDispatch();
+  }
+  if (e.target.id === "dgo") return sendDispatch();
+  if (e.target.id === "dormant") {
+    state.showAll = !state.showAll;
+    return refresh();
+  }
+  if (e.target.id === "talkclose") return closeTalk();
+  if (e.target.id === "talkthinking") {
+    talk.thinking = !talk.thinking;
+    return renderTalk();
+  }
+  const btn = e.target.closest("button[data-act]");
+  if (btn) return act(btn.dataset.act, btn.dataset.run, btn.dataset.work || btn.dataset.req, btn.dataset.opt);
+  // A match is only useful if it takes you to the session it came from.
+  const hit = e.target.closest(".hit[data-run]");
+  if (hit) return openTalk(hit.dataset.run);
+  const card = e.target.closest("[data-sel]");
+  if (card) { state.sel = +card.dataset.sel; render(); }
+});
+
+$("pq").addEventListener("input", renderPalette);
+
+document.addEventListener("keydown", (e) => {
+  // The launchers are modal, so they take the keyboard before anything else.
+  if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+    e.preventDefault();
+    openOver("palette");
+    $("pq").value = "";
+    renderPalette();
+    return $("pq").focus();
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === "n") { e.preventDefault(); return startDispatch(); }
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && over.which === "dispatch") {
+    e.preventDefault();
+    return sendDispatch();
+  }
+  if (over.which) {
+    if (e.key === "Escape") { e.preventDefault(); return closeOver(); }
+    if (over.which === "palette") {
+      if (e.key === "ArrowDown" || (e.key === "n" && e.ctrlKey)) {
+        over.sel = Math.min(over.sel + 1, over.hits.length - 1); renderPalette(); return e.preventDefault();
+      }
+      if (e.key === "ArrowUp" || (e.key === "p" && e.ctrlKey)) {
+        over.sel = Math.max(over.sel - 1, 0); renderPalette(); return e.preventDefault();
+      }
+      if (e.key === "Enter") {
+        const r = over.hits[over.sel]; closeOver(); r?.go(); return e.preventDefault();
+      }
+    }
+    // Everything else inside an overlay is text.
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "/" && document.activeElement !== $("q")) {
+    $("q").focus();
+    $("q").select();
+    return e.preventDefault();
+  }
+  // Anything typed into a field is text, not a command.
+  if (e.target instanceof HTMLInputElement) return;
+  const cards = [...document.querySelectorAll("[data-sel]")];
+  const cur = cards[state.sel];
+  const run = cur?.dataset.run;
+  if (e.key === "j" || e.key === "ArrowDown") { state.sel = Math.min(state.sel + 1, cards.length - 1); render(); e.preventDefault(); }
+  else if (e.key === "k" || e.key === "ArrowUp") { state.sel = Math.max(state.sel - 1, 0); render(); e.preventDefault(); }
+  else if (e.key === "?") {
+    // The cheapest way to make a supervision tool explainable: the decision
+    // log, narrowed to the row under the cursor.
+    showWhy(state.inbox[+cur?.dataset.sel]);
+    e.preventDefault();
+  }
+  else if (e.key === "Escape") closeTalk();
+  else if (e.key === "Enter" && run) { openTalk(run); e.preventDefault(); }
+  else if (e.key >= "1" && e.key <= "9") {
+    // Pick the nth answer the agent offered. Documented for a long time before
+    // anything could do it.
+    const item = state.inbox[+cur?.dataset.sel];
+    const opt = item?.actions?.includes("choose") && item.options?.[+e.key - 1];
+    if (opt?.id) { act("choose", item.run_id, item.request_id, opt.id); e.preventDefault(); }
+  }
+  else if ("fasynr".includes(e.key)) {
+    // Only what this item offers. The shortcuts used to fire on any card, so
+    // `a` on a driven run copied an `attach` command that cannot work and `s`
+    // snoozed a run that was not what the item was about.
+    const item = state.inbox[+cur?.dataset.sel];
+    const want = { f: "focus", a: "attach", s: "snooze", y: "allow", n: "deny", r: "reply" }[e.key];
+    if (item?.actions?.includes(want)) {
+      act(want, item.run_id, want === "snooze" ? item.work_id : item.request_id);
+    }
+  }
+});
+
+// Live updates. Every event is a reason to re-derive the board; the daemon
+// batches high-volume output, so a coalescing timer here is enough to keep a
+// noisy session from re-rendering the page hundreds of times a second.
+let pending = null;
+function connect() {
+  const es = new EventSource(`/api/stream?token=${encodeURIComponent(TOKEN)}`);
+  const setLive = (ok, text) => {
+    $("dot").classList.toggle("off", !ok);
+    $("livetext").textContent = text;
+  };
+  window.__live = () => setLive(true, "live");
+  es.onopen = () => setLive(true, "live");
+  es.onerror = () => setLive(false, "reconnecting");
+  es.onmessage = (e) => {
+    // The board only needs to know that something changed. Transcript frames
+    // reach the panel through its own narrowed stream, so re-reading the whole
+    // board for every sentence an agent says would be a lot of work for nothing.
+    try {
+      if (JSON.parse(e.data).frame === "message") return;
+    } catch { /* a frame we cannot read is still a reason to look again */ }
+    if (pending) return;
+    pending = setTimeout(() => { pending = null; refresh(); }, 250);
+  };
+}
+
+refresh();
+connect();
+// A safety net: the stall timer changes the inbox without any event, and a tab
+// left open overnight should still be right in the morning.
+setInterval(refresh, 30000);
+</script>

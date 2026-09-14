@@ -3,12 +3,18 @@
 # Usage: scripts/fetch-specs.sh
 set -u
 cd "$(dirname "$0")/.."
-mkdir -p specs/claude-code specs/claude-agent-sdk specs/codex specs/opencode specs/symphony specs/sdd specs/mcp specs/jsonrpc specs/acp
+mkdir -p specs/claude-code specs/claude-agent-sdk specs/copilot specs/codex specs/opencode specs/symphony specs/sdd specs/mcp specs/jsonrpc specs/acp
 UA='vibeplane-specs-fetch'
+# The test is "did we get the document or an error page", and size was a bad proxy for it:
+# a `-gt 500` floor deleted 83 of the 130 generated Codex schema files, because a generated
+# TypeScript type alias is legitimately four lines long. A guard that removes the thing it
+# was checking is worse than no guard, and this one reported the deletion as FAIL 200 —
+# a success code beside the word FAIL, which is what it looks like when the check is wrong
+# rather than the fetch. The HTML sniff is the real test; size only has to be non-zero.
 fetch() { # url dest
   local code sz
   code=$(curl -sL -A "$UA" -o "$2" -w '%{http_code}' "$1"); sz=$(wc -c < "$2" | tr -d ' ')
-  if [ "$code" = 200 ] && [ "$sz" -gt 500 ] && ! head -c 300 "$2" | grep -qi '<!doctype html\|<html'; then
+  if [ "$code" = 200 ] && [ "$sz" -gt 0 ] && ! head -c 300 "$2" | grep -qi '<!doctype html\|<html'; then
     echo "OK   $2"
   else
     echo "FAIL $code $1"; rm -f "$2"
@@ -17,16 +23,43 @@ fetch() { # url dest
 # Claude Code docs (Mintlify serves markdown at <page>.md)
 for p in hooks hooks-guide headless cli-reference worktrees sessions agent-view statusline channels permissions monitoring-usage \
          permission-modes settings-reference agent-teams cross-session-messaging sub-agents tools-reference mcp \
-         remote-control desktop claude-directory env-vars checkpointing; do
+         remote-control desktop claude-directory env-vars checkpointing \
+         workflows sandboxing deep-links goal auto-mode-config skills plugins plugin-evals commands \
+         scheduled-tasks routines agents vs-code claude-code-on-the-web accessibility keybindings \
+         ultrareview code-review advisor feature-availability context-window \
+         channels-reference plugins-reference errors github-actions gitlab-ci-cd \
+         sandbox-environments analytics artifacts; do
   fetch "https://code.claude.com/docs/en/$p.md" "specs/claude-code/$p.md"
 done
 fetch https://code.claude.com/docs/llms.txt specs/claude-code/llms.txt
+# The vendor publishes a dated weekly digest of what changed. Re-verification reads these
+# rather than diffing a 300-page index by hand: a surface that landed since the last pass
+# is a row in one of them.
+fetch https://code.claude.com/docs/en/whats-new/index.md specs/claude-code/whats-new.md
+for w in 37 36 35 34 33 32 31 30 29 28 27 26; do
+  fetch "https://code.claude.com/docs/en/whats-new/2026-w$w.md" "specs/claude-code/whats-new-2026-w$w.md"
+done
+# A week with no digest is normal and is not an absence of change: the digest stopped at week
+# 34 while the product reached 2.1.270, so thirty releases — including a sixth permission-rule
+# widening — exist only in the CHANGELOG. The digest tells you what the vendor thought was
+# notable; the changelog is the enumerated table (R26).
 fetch https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md specs/claude-code/CHANGELOG.md
 # Claude Agent SDK docs
-for p in overview permissions user-input streaming-output structured-outputs sessions mcp hooks typescript python cost-tracking; do
+for p in overview permissions user-input streaming-output structured-outputs sessions mcp hooks typescript python cost-tracking \
+         session-storage observability todo-tracking subagents; do
   fetch "https://code.claude.com/docs/en/agent-sdk/$p.md" "specs/claude-agent-sdk/$p.md"
 done
 fetch https://raw.githubusercontent.com/Roasbeef/claude-agent-sdk-go/main/docs/cli-protocol.md specs/claude-agent-sdk/community-cli-wire-protocol.md
+# GitHub Copilot: the second provider that documents all three channels (D116).
+# GitHub publishes its docs as markdown in github/docs, so these are the source files
+# rather than a rendered page.
+CPD=https://raw.githubusercontent.com/github/docs/main/content/copilot
+fetch "$CPD/reference/hooks-reference.md"                              specs/copilot/hooks-reference.md
+fetch "$CPD/reference/copilot-cli-reference/acp-server.md"             specs/copilot/acp-server.md
+fetch "$CPD/reference/copilot-cli-reference/cli-command-reference.md"  specs/copilot/cli-command-reference.md
+fetch "$CPD/reference/copilot-cli-reference/cli-config-dir-reference.md" specs/copilot/cli-config-dir-reference.md
+fetch "$CPD/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md"     specs/copilot/allowing-tools.md
+fetch "$CPD/how-tos/copilot-sdk/observability/opentelemetry.md"        specs/copilot/sdk-opentelemetry.md
 # OpenAI Symphony (orchestration spec, Apache-2.0)
 fetch https://raw.githubusercontent.com/openai/symphony/main/SPEC.md specs/symphony/SPEC.md
 fetch https://raw.githubusercontent.com/openai/symphony/main/README.md specs/symphony/README.md
@@ -48,12 +81,14 @@ fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/
 fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/sdk.mdx specs/opencode/sdk.mdx
 fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/sdk/openapi.json specs/opencode/openapi.json
 # Model Context Protocol (the gate server speaks it) + JSON-RPC 2.0 (daemon API, Codex app-server)
+MCP_REV=2026-07-28
 for p in basic/index server/tools basic/transports client/elicitation; do
-  fetch "https://modelcontextprotocol.io/specification/2025-06-18/$p.md" "specs/mcp/$(echo "$p" | tr '/' '-' | sed 's/-index$//').md"
+  fetch "https://modelcontextprotocol.io/specification/$MCP_REV/$p.md" "specs/mcp/$(echo "$p" | tr '/' '-' | sed 's/-index$//').md"
 done
-fetch https://modelcontextprotocol.io/specification/2025-06-18.md specs/mcp/spec-2025-06-18.md
+fetch "https://modelcontextprotocol.io/specification/$MCP_REV.md" "specs/mcp/spec-$MCP_REV.md"
 fetch https://modelcontextprotocol.io/llms.txt specs/mcp/llms.txt
-fetch https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/schema/2025-06-18/schema.json specs/mcp/schema-2025-06-18.json
+fetch "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/schema/$MCP_REV/schema.json" "specs/mcp/schema-$MCP_REV.json"
+rm -f specs/mcp/spec-2025-06-18.md specs/mcp/schema-2025-06-18.json
 fetch https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/main/README.md specs/mcp/rmcp-README.md
 fetch https://www.jsonrpc.org/specification specs/jsonrpc/jsonrpc-2.0.html
 # Agent Client Protocol: protocol pages (v1/v2), Rust SDK page, registry docs + JSON, READMEs

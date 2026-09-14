@@ -1412,9 +1412,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2746,125 +2746,24 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vibeplane"
 version = "0.1.0"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
  "axum",
  "clap",
  "dirs",
  "futures-util",
  "jiff",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
  "sqlx",
+ "thiserror",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",
- "vibeplane-acp",
- "vibeplane-core",
- "vibeplane-domain",
- "vibeplane-gates",
- "vibeplane-git",
- "vibeplane-github",
- "vibeplane-observe",
- "vibeplane-store",
-]
-
-[[package]]
-name = "vibeplane-acp"
-version = "0.1.0"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
- "vibeplane-domain",
-]
-
-[[package]]
-name = "vibeplane-core"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "tracing",
- "vibeplane-domain",
-]
-
-[[package]]
-name = "vibeplane-domain"
-version = "0.1.0"
-dependencies = [
- "jiff",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "vibeplane-gates"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jiff",
- "tokio",
- "tracing",
- "vibeplane-domain",
-]
-
-[[package]]
-name = "vibeplane-git"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "vibeplane-github"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "vibeplane-observe"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jiff",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "vibeplane-domain",
-]
-
-[[package]]
-name = "vibeplane-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jiff",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "tracing",
- "vibeplane-domain",
 ]
 
 [[package]]

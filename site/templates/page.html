@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="docs-layout">
+  {% include "partials/sidebar.html" %}
+
+  <article class="doc">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="{{ get_url(path='/') }}">Home</a></li>
+        <li><a href="{{ get_url(path='/docs/') }}">Docs</a></li>
+        <li aria-current="page">{{ page.title }}</li>
+      </ol>
+    </nav>
+
+    <header class="doc-head">
+      <h1>{{ page.title }}</h1>
+      {% if page.description %}<p class="lede">{{ page.description }}</p>{% endif %}
+    </header>
+
+    {{ page.content | safe }}
+
+    <nav class="doc-foot" aria-label="Next and previous">
+      {% if page.lower %}
+        <a class="pager prev" href="{{ page.lower.permalink }}">
+          <span>Previous</span><strong>{{ page.lower.title }}</strong>
+        </a>
+      {% else %}<span></span>{% endif %}
+      {% if page.higher %}
+        <a class="pager next" href="{{ page.higher.permalink }}">
+          <span>Next</span><strong>{{ page.higher.title }}</strong>
+        </a>
+      {% endif %}
+    </nav>
+
+    <p class="edit muted small">
+      Something wrong or out of date?
+      <a href="{{ config.extra.repo }}/edit/main/site/content/{{ page.relative_path | replace(from='content/', to='') }}" rel="noopener">Edit this page</a>.
+    </p>
+  </article>
+
+  {% if page.toc | length > 1 %}
+  <nav class="toc" aria-label="On this page">
+    <p class="toc-head">On this page</p>
+    <ul>
+      {% for h in page.toc %}
+        <li><a href="{{ h.permalink | safe }}">{{ h.title }}</a>
+          {% if h.children %}
+          <ul>{% for c in h.children %}<li><a href="{{ c.permalink | safe }}">{{ c.title }}</a></li>{% endfor %}</ul>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </nav>
+  {% endif %}
+</div>
+
+{# A breadcrumb a crawler can read, not only one a person can see. #}
+<script type="application/ld+json">
+{{ {
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "Home", "item": config.base_url ~ "/" },
+    { "@type": "ListItem", "position": 2, "name": "Docs", "item": config.base_url ~ "/docs/" },
+    { "@type": "ListItem", "position": 3, "name": page.title, "item": page.permalink }
+  ]
+} | json_encode(pretty=true) | safe }}
+</script>
+{% endblock %}

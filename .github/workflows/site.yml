@@ -1,0 +1,63 @@
+# Builds the documentation site and publishes it to GitHub Pages.
+#
+# `zola build` fails on a broken internal link, so a page that references one
+# that does not exist never reaches the site — which is the failure a static
+# generator is uniquely able to catch and a reviewer is uniquely bad at.
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/site.yml"
+  pull_request:
+    paths:
+      - "site/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zola
+        run: |
+          ZOLA=0.23.4
+          curl -sSL "https://github.com/getzola/zola/releases/download/v${ZOLA}/zola-v${ZOLA}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xz -C /usr/local/bin zola
+
+      # Checks that every internal link resolves, before anything is built.
+      - name: Check links
+        working-directory: site
+        run: zola check
+
+      - name: Build
+        working-directory: site
+        run: zola build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/public
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="docs-layout no-toc">
+  {% include "partials/sidebar.html" %}
+
+  <article class="doc">
+    <header class="doc-head">
+      <h1>{{ section.title }}</h1>
+      {% if section.description %}<p class="lede">{{ section.description }}</p>{% endif %}
+    </header>
+
+    {{ section.content | safe }}
+
+    {% set groups = [
+      { "id": "start",     "name": "Getting started", "blurb": "Install it, and get the board on screen." },
+      { "id": "guide",     "name": "Guides",          "blurb": "The loop, end to end." },
+      { "id": "reference", "name": "Reference",       "blurb": "Every flag, key and rule." }
+    ] %}
+    {% for g in groups %}
+      <h2 id="{{ g.id }}">{{ g.name }}</h2>
+      <p class="muted">{{ g.blurb }}</p>
+      <div class="cards">
+        {% for p in section.pages %}{% if p.extra.group == g.id %}
+          <a class="card" href="{{ p.permalink }}">
+            <strong>{{ p.title }}</strong>
+            <span class="muted">{{ p.description }}</span>
+          </a>
+        {% endif %}{% endfor %}
+      </div>
+    {% endfor %}
+  </article>
+</div>
+{% endblock %}

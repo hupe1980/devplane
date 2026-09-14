@@ -1,0 +1,35 @@
+{# The documentation navigation, ordered by `weight` rather than alphabetically:
+   a reader arriving at "Install" wants "Quickstart" next, not "Agents". #}
+{% set docs = get_section(path="docs/_index.md") %}
+<aside class="sidebar" id="sidebar">
+  <form class="search" role="search" onsubmit="return false">
+    <label class="visually-hidden" for="search-input">Search the documentation</label>
+    <input type="search" id="search-input" placeholder="Search docs…" autocomplete="off"
+           spellcheck="false" aria-describedby="search-hint">
+    <kbd id="search-hint">/</kbd>
+  </form>
+  <div id="search-results" class="search-results" hidden role="listbox" aria-label="Search results"></div>
+
+  <nav class="sidebar-nav" aria-label="Documentation">
+    <p class="sidebar-head">Getting started</p>
+    <ul>
+      {% for p in docs.pages %}{% if p.extra.group == "start" %}
+        <li><a href="{{ p.permalink }}"{% if page is defined and page.permalink == p.permalink %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+      {% endif %}{% endfor %}
+    </ul>
+
+    <p class="sidebar-head">Guides</p>
+    <ul>
+      {% for p in docs.pages %}{% if p.extra.group == "guide" %}
+        <li><a href="{{ p.permalink }}"{% if page is defined and page.permalink == p.permalink %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+      {% endif %}{% endfor %}
+    </ul>
+
+    <p class="sidebar-head">Reference</p>
+    <ul>
+      {% for p in docs.pages %}{% if p.extra.group == "reference" %}
+        <li><a href="{{ p.permalink }}"{% if page is defined and page.permalink == p.permalink %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+      {% endif %}{% endfor %}
+    </ul>
+  </nav>
+</aside>

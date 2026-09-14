@@ -1,0 +1,131 @@
+{# Everything a crawler, a social card and a browser need, in one place.
+
+   Kept as one partial rather than spread across the templates because the
+   failure mode is silent: a page with no description, or a canonical pointing
+   at the wrong address, looks perfectly fine to the person who wrote it. #}
+
+{%- set is_home = page is not defined and section is defined and section.path == "/" -%}
+{%- if page is defined -%}
+  {%- set title = page.title -%}
+  {%- set raw_desc = page.description -%}
+  {%- set url = page.permalink -%}
+{%- elif section is defined -%}
+  {%- set title = section.title | default(value=config.title) -%}
+  {%- set raw_desc = section.description -%}
+  {%- set url = section.permalink -%}
+{%- else -%}
+  {#- Neither a page nor a section: the 404. -#}
+  {%- set title = "Page not found" -%}
+  {%- set raw_desc = "That page is not here. The documentation index lists everything there is." -%}
+  {%- set url = config.base_url ~ "/404.html" -%}
+{%- endif -%}
+{#- `default` only fires on an *undefined* value, and a page with no
+    `description` in its front matter has an empty one instead — which is how
+    the home page shipped `<meta name=description>` with nothing in it. The
+    length test catches both. -#}
+{%- set desc = raw_desc | default(value="") -%}
+{%- if desc | length == 0 -%}{%- set desc = config.description -%}{%- endif -%}
+
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+{# One brand, one separator. The home page does not repeat its own name. #}
+<title>{% if is_home %}{{ config.title }} — {{ config.extra.tagline }}{% else %}{{ title }} · {{ config.title }}{% endif %}</title>
+<meta name="description" content="{{ desc }}">
+<link rel="canonical" href="{{ url | safe }}">
+
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b0c0e" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fbfbfa" media="(prefers-color-scheme: light)">
+
+{# Open Graph and the Twitter card read the same three facts; disagreeing is
+   how a link previews one way on one network and another way elsewhere. #}
+<meta property="og:type" content="{% if is_home %}website{% else %}article{% endif %}">
+<meta property="og:site_name" content="{{ config.title }}">
+<meta property="og:title" content="{% if is_home %}{{ config.title }} — {{ config.extra.tagline }}{% else %}{{ title }}{% endif %}">
+<meta property="og:description" content="{{ desc }}">
+<meta property="og:url" content="{{ url | safe }}">
+<meta property="og:image" content="{{ get_url(path=config.extra.og_image) }}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:locale" content="en">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{% if is_home %}{{ config.title }} — {{ config.extra.tagline }}{% else %}{{ title }}{% endif %}">
+<meta name="twitter:description" content="{{ desc }}">
+<meta name="twitter:image" content="{{ get_url(path=config.extra.og_image) }}">
+
+<link rel="icon" href="{{ get_url(path='favicon.svg') }}" type="image/svg+xml">
+<link rel="apple-touch-icon" href="{{ get_url(path='icon-180.png') }}">
+<link rel="alternate" type="application/atom+xml" title="{{ config.title }}" href="{{ get_url(path='atom.xml') }}">
+
+{# The stylesheet is one file and is not render-blocking for long: it is small
+   enough that splitting it would cost a round trip to save nothing. #}
+<link rel="stylesheet" href="{{ get_url(path='main.css') | safe }}">
+{# Zola emits one stylesheet per highlight theme. The media query is the
+   default; `applyTheme` below rewrites it when somebody has chosen, because a
+   toggle that recolours the page and leaves the code blocks in the other theme
+   is worse than no toggle. #}
+<link rel="stylesheet" id="hl-dark"  href="{{ get_url(path='giallo-dark.css') | safe }}"  media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" id="hl-light" href="{{ get_url(path='giallo-light.css') | safe }}" media="(prefers-color-scheme: light)">
+
+{# Structured data. A software page and a documentation page are different
+   things to a search engine, and saying which is the difference between a
+   rich result and a blue link. #}
+{% if is_home %}
+<script type="application/ld+json">
+{{ {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": config.title,
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS, Linux, Windows",
+  "description": config.description,
+  "url": config.base_url ~ "/",
+  "softwareVersion": config.extra.version,
+  "license": "https://spdx.org/licenses/MIT.html",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": config.author },
+  "codeRepository": config.extra.repo
+} | json_encode(pretty=true) | safe }}
+</script>
+{% else %}
+<script type="application/ld+json">
+{{ {
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": title,
+  "description": desc,
+  "url": url,
+  "inLanguage": "en",
+  "isPartOf": {
+    "@type": "WebSite",
+    "name": config.title,
+    "url": config.base_url ~ "/"
+  },
+  "author": { "@type": "Person", "name": config.author }
+} | json_encode(pretty=true) | safe }}
+</script>
+{% endif %}
+
+{# Applied before paint, so a chosen theme never flashes the other one on
+   navigation. Shared with site.js rather than written twice: the toggle and
+   the first paint have to agree, and two copies of this eventually will not. #}
+<script>
+  window.vpApplyTheme = function (theme) {
+    var root = document.documentElement;
+    if (theme) root.dataset.theme = theme; else delete root.dataset.theme;
+
+    // The syntax stylesheets are picked by media query until somebody chooses.
+    var dark = document.getElementById("hl-dark");
+    var light = document.getElementById("hl-light");
+    if (!dark || !light) return;
+    if (theme === "dark")       { dark.media = "all"; light.media = "not all"; }
+    else if (theme === "light") { dark.media = "not all"; light.media = "all"; }
+    else {
+      dark.media = "(prefers-color-scheme: dark)";
+      light.media = "(prefers-color-scheme: light)";
+    }
+  };
+  try { window.vpApplyTheme(localStorage.getItem("vp-theme")); } catch (e) {}
+</script>

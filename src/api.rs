@@ -1,0 +1,1879 @@
+//! The HTTP surface: receivers for the providers, and an API for the clients.
+//!
+//! One server, on loopback, for both. The browser shell needs HTTP anyway, and
+//! a second transport for the CLI would mean two protocols to keep in step for
+//! no gain. Everything under `/api` and `/vibeplane` requires the bearer token
+//! from `~/.vibeplane/token`.
+
+use crate::core::Verdict;
+use crate::core::event::{Event, Source};
+use crate::core::ids::RunId;
+use crate::core::run::RunMode;
+use crate::daemon::Shared;
+use crate::observe::hook::{HookPayload, PermissionResponse, PreToolUseResponse};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::response::sse::{Event as SseEvent, Sse};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures_util::stream::Stream;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::convert::Infallible;
+use std::time::Instant;
+
+pub fn router(state: Shared) -> Router {
+    Router::new()
+        // Receivers. The paths carry the `/vibeplane/` marker that `connect`
+        // uses to recognise its own entries when disconnecting.
+        .route("/vibeplane/hook", post(hook))
+        .route("/vibeplane/policy", post(policy))
+        .route("/vibeplane/statusline", post(statusline))
+        .route("/vibeplane/otel/v1/logs", post(otel_logs))
+        .route("/vibeplane/otel/v1/metrics", post(otel_metrics))
+        // The second dialect. Claude Code exports log records; agents that
+        // follow the GenAI semantic conventions — GitHub Copilot, Codex —
+        // export traces, on the same transport and the same `http/json` wire
+        // protocol. One receiver, two readers, one event model.
+        .route("/vibeplane/otel/v1/traces", post(otel_traces))
+        // GitHub Copilot's channels. Its deciding hook is a `command` one
+        // — an HTTP `preToolUse` hook there fails open — so the gate arrives
+        // through the shim rather than from the agent directly.
+        .route("/vibeplane/copilot/hook", post(copilot_hook))
+        .route("/vibeplane/copilot/gate", post(copilot_gate))
+        // Telemetry arrives in batches and axum's default body limit is 2 MB,
+        // which a busy session can exceed. A rejected batch is not an error
+        // anybody sees: the exporter drops it, the receiver is never called,
+        // and the only symptom is a board that is quietly missing cost. This
+        // layer's whole promise is that what it shows is what happened, so the
+        // limit is set deliberately rather than inherited — generous for a
+        // batch, and still a bound, because the endpoint takes no credential.
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+        // Client API.
+        .route("/api/board", get(board))
+        .route("/api/inbox", get(inbox))
+        .route("/api/runs/{id}", get(run_detail))
+        .route("/api/runs/{id}/events", get(run_events))
+        .route("/api/runs/{id}/messages", get(run_messages))
+        .route("/api/runs/{id}/snooze", post(snooze))
+        .route("/api/runs/{id}/focus", post(focus_run))
+        .route("/api/dispatch", post(dispatch))
+        .route("/api/runs/{id}/prompt", post(prompt_run))
+        .route("/api/runs/{id}/decide", post(decide_run))
+        .route("/api/runs/{id}/stop", post(stop_run))
+        .route("/api/agents", get(agents))
+        .route("/api/work", get(list_work).post(start_work))
+        .route("/api/work/{id}/verify", post(verify_work))
+        .route("/api/work/{id}/finish", post(finish_work))
+        .route("/api/work/{id}/approve", post(approve_work))
+        .route("/api/work/{id}/retry", post(retry_work))
+        .route("/api/work/{id}/snooze", post(snooze_work))
+        .route("/api/work/{id}/resume", post(resume_work))
+        .route("/api/projects", get(projects))
+        .route("/api/projects/trust", post(trust_project))
+        .route("/api/issues", post(list_issues))
+        .route("/api/decisions", get(decisions))
+        .route("/api/search", get(search))
+        .route("/api/diagnostics", get(diagnostics))
+        .route("/api/attention", get(attention))
+        .route("/api/shutdown", post(shutdown))
+        .route("/api/stream", get(stream))
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/", get(index))
+        .with_state(state)
+}
+
+/// A status and a body, for a request that named something unresolvable.
+///
+/// Deliberately not a built `Response`: that type is large enough that carrying
+/// one in every `Result::Err` is a clippy warning and a real cost on the happy
+/// path. It becomes a response at the point of return.
+type Refusal = (StatusCode, Json<serde_json::Value>);
+
+/// Turns the id a person typed into the run they meant.
+///
+/// The board prints a short label, so that is what users copy. Requiring the
+/// whole id everywhere made the only identifier anyone sees the one identifier
+/// nothing accepts — see [`World::resolve_run`](crate::core::World::resolve_run).
+/// Ambiguity is a 409 naming the candidates, never a guess.
+async fn resolved_run(state: &Shared, id: String) -> Result<RunId, Refusal> {
+    let world = state.world.lock().await;
+    world.resolve_run(&id).map_err(|e| {
+        let code = match e {
+            crate::core::Ambiguous::NotFound => StatusCode::NOT_FOUND,
+            crate::core::Ambiguous::Several(_) => StatusCode::CONFLICT,
+        };
+        (code, Json(json!({"error": e.to_string()})))
+    })
+}
+
+/// The same, for work. Work ids are long enough that nobody types one in full,
+/// and `vibeplane work ls` prints them clipped.
+async fn resolved_work(state: &Shared, id: String) -> Result<crate::core::WorkId, Refusal> {
+    let works = state.works.lock().await;
+    if works.contains_key(&crate::core::WorkId::new(id.clone())) {
+        return Ok(crate::core::WorkId::new(id));
+    }
+    let mut hits: Vec<&crate::core::WorkId> = works
+        .keys()
+        .filter(|w| w.as_str().starts_with(&id))
+        .collect();
+    match hits.len() {
+        1 => Ok(hits.remove(0).clone()),
+        0 => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such work"})),
+        )),
+        n => Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("that matches {n} pieces of work. Use more of the id.")
+            })),
+        )),
+    }
+}
+
+macro_rules! work_id {
+    ($state:expr, $id:expr) => {
+        match resolved_work(&$state, $id).await {
+            Ok(w) => w,
+            Err(refusal) => return refusal.into_response(),
+        }
+    };
+}
+
+macro_rules! run_id {
+    ($state:expr, $id:expr) => {
+        match resolved_run(&$state, $id).await {
+            Ok(r) => r,
+            Err(refusal) => return refusal.into_response(),
+        }
+    };
+}
+
+/// Checks the bearer token.
+///
+/// Loopback is not an access control: every process running as this user can
+/// reach the port. The token, in a file only the user can read, is what
+/// actually separates Vibeplane from everything else on the machine.
+///
+/// A `token` query parameter is accepted as well, because `EventSource` cannot
+/// send a header and the browser shell needs the live stream. The page drops it
+/// from the address bar as soon as it has it, so it does not end up in a
+/// screenshot or a bookmark.
+fn authorised(state: &Shared, headers: &HeaderMap, query: Option<&str>) -> bool {
+    let from_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
+
+    match from_header.or(query) {
+        Some(t) => constant_time_eq(t.as_bytes(), state.token.as_bytes()),
+        None => false,
+    }
+}
+
+/// Compares without leaking the match position through timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+macro_rules! guard {
+    ($state:expr, $headers:expr) => {
+        if !authorised(&$state, &$headers, None) {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorised"})))
+                .into_response();
+        }
+    };
+}
+
+/// The board, embedded in the binary.
+///
+/// Deliberately unauthenticated: it is a static page that contains no data and
+/// cannot fetch any without the token the user's browser holds. Gating it would
+/// only mean the page could not render the message explaining that.
+async fn index() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../ui/index.html"),
+    )
+}
+
+/// Raises the editor window that owns a run, for the browser shell.
+async fn focus_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = run_id!(state, id);
+    let dir = {
+        let w = state.world.lock().await;
+        w.run(&id).map(|r| r.working_dir().clone())
+    };
+    let Some(dir) = dir else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
+    };
+    match crate::focus::focus_path(&dir) {
+        Ok(crate::focus::Focused::Editor { app, pid }) => {
+            Json(json!({"focused": true, "app": app, "pid": pid})).into_response()
+        }
+        Ok(crate::focus::Focused::Nothing) => Json(json!({
+            "focused": false,
+            "reason": format!("no editor window has {} open", dir.display())
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Receivers
+// ---------------------------------------------------------------------------
+
+/// The lifecycle hook. Answers immediately and does the work after replying:
+/// these hooks are configured `async`, but a receiver that blocks is still a
+/// receiver that can make Claude feel slow if that ever changes.
+async fn hook(State(state): State<Shared>, headers: HeaderMap, body: String) -> impl IntoResponse {
+    guard!(state, headers);
+    let started = Instant::now();
+
+    let payload: HookPayload = match serde_json::from_str(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            state
+                .store
+                .record_channel(
+                    "hook",
+                    started.elapsed().as_micros() as u64,
+                    Some(&e.to_string()),
+                )
+                .await
+                .ok();
+            // A malformed payload must not fail the hook: Claude Code would
+            // show the user an error about a tool they did not misuse.
+            return (StatusCode::OK, Json(json!({}))).into_response();
+        }
+    };
+
+    let outcome = crate::observe::hook::to_events(&payload);
+    let run = RunId::new(payload.session_id.clone());
+    for event in outcome.events {
+        state
+            .ingest(
+                run.clone(),
+                Source::Hook,
+                event,
+                payload.cwd.clone(),
+                RunMode::Observed,
+            )
+            .await;
+    }
+    state
+        .store
+        .record_channel("hook", started.elapsed().as_micros() as u64, None)
+        .await
+        .ok();
+    (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// The `PreToolUse` half of the gate: prohibitions only, in every mode.
+///
+/// `PreToolUse` fires before every tool call whether or not it needs
+/// permission, which makes it the only event that reaches a session in **auto
+/// mode**. There a classifier reviews actions instead of the user, routine
+/// calls are approved with no prompt, and `PermissionRequest` — which fires
+/// only when Claude Code is about to ask — never happens at all. Without this
+/// handler a project's `never_auto` rule would simply not run in that mode.
+///
+/// It answers with a prohibition or with nothing, and never with an allow: a
+/// `PreToolUse` allow skips Claude Code's permission system altogether,
+/// classifier included, so a rule meaning "no need to ask me" would switch off
+/// a safety layer somebody chose.
+async fn pre_tool_use(
+    state: Shared,
+    payload: HookPayload,
+    tool: String,
+    input: serde_json::Value,
+    started: Instant,
+) -> axum::response::Response {
+    let verdict = match payload.cwd.as_deref() {
+        Some(dir) => state.policy.restrictive(dir, &tool, &input),
+        None => state.policy.restrictive_global_only(&tool, &input),
+    };
+
+    let response = match &verdict {
+        Verdict::Deny { rule } => {
+            PreToolUseResponse::deny(format!("denied by Vibeplane policy rule {rule}"))
+        }
+        Verdict::Ask { rule } => {
+            PreToolUseResponse::ask(format!("{rule} asks that a person decides this"))
+        }
+        // Everything else is Claude Code's own business. Saying nothing is the
+        // whole point: the call goes through the permission flow it would have
+        // gone through with no hook installed at all.
+        _ => PreToolUseResponse::undecided(),
+    };
+
+    let run = RunId::new(payload.session_id.clone());
+    let micros = started.elapsed().as_micros() as u64;
+    let st = state.clone();
+    // The lifecycle event this hook used to carry as an async observation still
+    // has to be recorded: it is how a tool call reaches the board, and how an
+    // `AskUserQuestion` reaches the inbox the instant it is asked.
+    let observed = crate::observe::hook::to_events(&payload).events;
+    let cwd_for_events = payload.cwd.clone();
+    let recorded = verdict.rule().map(|rule| {
+        crate::core::Decision::new(
+            crate::core::Actor::Policy,
+            "agent:tool.use",
+            describe(&tool, &input),
+            verdict.as_str(),
+        )
+        .because(rule)
+        .for_run(&run)
+    });
+    tokio::spawn(async move {
+        if let Some(d) = recorded {
+            st.record(d).await;
+        }
+        for event in observed {
+            st.ingest(
+                run.clone(),
+                Source::Hook,
+                event,
+                cwd_for_events.clone(),
+                RunMode::Observed,
+            )
+            .await;
+        }
+        st.store.record_channel("policy", micros, None).await.ok();
+    });
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// The permission gate.
+///
+/// One of the two synchronous hooks, and the instant signal that a session is
+/// blocked: the `permission_prompt` notification waits six seconds and, in a
+/// terminal, defers again on every keystroke.
+///
+/// This is the half that fires only when a human was going to be asked anyway,
+/// so it carries the full verdict — an allow here skips a prompt that was
+/// already coming, rather than a safety layer. It answers in one of two ways
+/// and never waits for a human:
+///
+/// * a rule matches — allow or deny, the session continues, nothing reaches the
+///   inbox;
+/// * no rule matches — reply with no decision, so Claude Code prompts exactly
+///   as it would have, and record that the run is blocked so the inbox knows.
+async fn policy(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let started = Instant::now();
+
+    let Ok(payload) = serde_json::from_str::<HookPayload>(&body) else {
+        return (StatusCode::OK, Json(PermissionResponse::undecided())).into_response();
+    };
+
+    let tool = payload.tool_name.clone().unwrap_or_default();
+    let input = payload
+        .tool_input
+        .clone()
+        .unwrap_or(serde_json::Value::Null);
+
+    // Two events arrive here and they are answered differently.
+    //
+    // `PermissionRequest` fires only when Claude Code is about to ask a human,
+    // so the full verdict applies: an allow here skips a prompt that was going
+    // to be shown anyway.
+    //
+    // `PreToolUse` fires before every tool call in every mode. It is the only
+    // way a prohibition reaches a session in **auto mode**, where a classifier
+    // approves routine actions silently and no permission prompt — and so no
+    // `PermissionRequest` hook — ever happens. It may carry a prohibition and
+    // never a grant: a `PreToolUse` allow would skip the classifier too.
+    if payload.hook_event_name == "PreToolUse" {
+        return pre_tool_use(state, payload, tool, input, started).await;
+    }
+    // Resolved for the directory this session is working in: the rule that
+    // allows a test command in one repository has no business in another.
+    //
+    // Falling back to `"."` would be the *daemon's* directory, letting one
+    // repository's rules answer another repository's session. There is no
+    // honest project answer without a directory, so the machine-wide rules
+    // decide alone.
+    let verdict = match payload.cwd.as_deref() {
+        Some(dir) => state.policy.evaluate(dir, &tool, &input),
+        None => state.policy.evaluate_global_only(&tool, &input),
+    };
+
+    let run = RunId::new(payload.session_id.clone());
+    let (response, event) = match &verdict {
+        Verdict::Allow { rule } => (
+            PermissionResponse::allow(),
+            Event::PermissionDecided {
+                tool: tool.clone(),
+                decision: "allow".into(),
+                by: format!("policy:{rule}"),
+            },
+        ),
+        Verdict::Deny { rule } => (
+            PermissionResponse::deny(format!("denied by Vibeplane policy rule {rule}")),
+            Event::PermissionDecided {
+                tool: tool.clone(),
+                decision: "deny".into(),
+                by: format!("policy:{rule}"),
+            },
+        ),
+        // A project said a person decides this one, whatever else matches. The
+        // reply is the same as `Undecided` — Claude Code prompts exactly as it
+        // would have — but the rule is recorded, because "nobody had an
+        // opinion" and "the project asked to be asked" are different facts.
+        Verdict::Ask { .. } | Verdict::Undecided => (
+            PermissionResponse::undecided(),
+            Event::Blocked {
+                waiting_for: crate::core::event::WaitingFor::Permission,
+                message: Some(describe(&tool, &input)),
+                // An observed session's prompt belongs to Claude Code's own
+                // dialog; Vibeplane can show it, not answer it.
+                request_id: None,
+                options: Vec::new(),
+            },
+        ),
+    };
+
+    // Reply first, record second: the session is waiting on this response.
+    let micros = started.elapsed().as_micros() as u64;
+    let st = state.clone();
+    let cwd = payload.cwd.clone();
+    // A rule that decided on somebody's behalf is the thing the log exists for:
+    // "auto-approved" is not an answer, "auto-approved by `Bash(pnpm test *)`"
+    // is. An undecided request is not a decision — Claude Code's own dialog
+    // makes that one, and the human answering it is not something we saw.
+    let recorded = verdict.rule().map(|rule| {
+        crate::core::Decision::new(
+            crate::core::Actor::Policy,
+            "agent:tool.use",
+            describe(&tool, &input),
+            verdict.as_str(),
+        )
+        .because(rule)
+        .for_run(&run)
+    });
+    tokio::spawn(async move {
+        if let Some(d) = recorded {
+            st.record(d).await;
+        }
+        st.ingest(run, Source::Hook, event, cwd, RunMode::Observed)
+            .await;
+        st.store.record_channel("policy", micros, None).await.ok();
+    });
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// A one-line description of what is being asked for.
+fn describe(tool: &str, input: &serde_json::Value) -> String {
+    match crate::core::policy::rule_content(tool, input) {
+        Some(c) => format!("{tool}: {}", crate::core::text::clip(&c, 120)),
+        None => tool.to_string(),
+    }
+}
+
+async fn statusline(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(payload) = serde_json::from_str::<crate::observe::statusline::StatusPayload>(&body)
+    else {
+        return (StatusCode::OK, Json(json!({}))).into_response();
+    };
+    let run = RunId::new(payload.session_id.clone());
+    for event in crate::observe::statusline::to_events(&payload) {
+        state
+            .ingest(
+                run.clone(),
+                Source::StatusLine,
+                event,
+                None,
+                RunMode::Observed,
+            )
+            .await;
+    }
+    (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// One GitHub Copilot lifecycle payload. Informational only.
+///
+/// The event name comes from the query string because Copilot's native
+/// payloads do not carry one — the registration knows which event it wrote,
+/// and that is the only place the answer exists.
+async fn copilot_hook(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<CopilotEvent>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !authorised(&state, &headers, None) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "bad token"})),
+        )
+            .into_response();
+    }
+    let started = Instant::now();
+    let mut payload: crate::observe::copilot::HookPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            // Answered 200 and dropped, like every other receiver here. An
+            // observer has no business making the work it observes fail.
+            state
+                .store
+                .record_channel("copilot", 0, Some(&e.to_string()))
+                .await
+                .ok();
+            return (StatusCode::OK, Json(json!({}))).into_response();
+        }
+    };
+    payload.event = q.event.unwrap_or_default();
+    let run = RunId::new(payload.session_id.clone());
+    let cwd = payload.cwd.clone();
+    for event in crate::observe::copilot::to_events(&payload) {
+        state
+            .ingest(
+                run.clone(),
+                Source::Hook,
+                event,
+                cwd.clone(),
+                RunMode::Observed,
+            )
+            .await;
+    }
+    state
+        .store
+        .record_channel("copilot", started.elapsed().as_micros() as u64, None)
+        .await
+        .ok();
+    (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct CopilotEvent {
+    event: Option<String>,
+}
+
+/// The Copilot permission gate.
+///
+/// Reached through the `vibeplane hook --gate copilot` shim rather than
+/// directly, because a `command` hook is the only handler type Copilot
+/// fails **closed** on — an HTTP one falls through to the default permission
+/// flow on any error, which is a prohibition that evaporates exactly when the
+/// daemon is under load.
+///
+/// It answers a prohibition or nothing, never a grant: the same restraint as
+/// Claude Code's `PreToolUse`, and for the same reason.
+async fn copilot_gate(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    use crate::observe::copilot::GateReply;
+    if !authorised(&state, &headers, None) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({}))).into_response();
+    }
+    let started = Instant::now();
+    let Ok(payload) = serde_json::from_slice::<crate::observe::copilot::HookPayload>(&body) else {
+        return (StatusCode::OK, Json(GateReply::undecided().to_json())).into_response();
+    };
+    let tool = payload.tool();
+    let input = payload.input();
+    let verdict = match payload.cwd.as_deref() {
+        Some(dir) => state.policy.restrictive(dir, &tool, &input),
+        None => state.policy.restrictive_global_only(&tool, &input),
+    };
+    let reply = match &verdict {
+        Verdict::Deny { rule } => {
+            GateReply::deny(format!("denied by Vibeplane policy rule {rule}"))
+        }
+        Verdict::Ask { rule } => GateReply::ask(format!("{rule} asks that a person decides this")),
+        _ => GateReply::undecided(),
+    };
+
+    let run = RunId::new(payload.session_id.clone());
+    let cwd = payload.cwd.clone();
+    let micros = started.elapsed().as_micros() as u64;
+    let st = state.clone();
+    let recorded = verdict.rule().map(|rule| {
+        crate::core::Decision::new(
+            crate::core::Actor::Policy,
+            "agent:tool.use",
+            describe(&tool, &input),
+            verdict.as_str(),
+        )
+        .because(rule)
+        .for_run(&run)
+    });
+    let observed = crate::observe::copilot::to_events(&crate::observe::copilot::HookPayload {
+        event: "preToolUse".into(),
+        ..payload
+    });
+    tokio::spawn(async move {
+        if let Some(d) = recorded {
+            st.record(d).await;
+        }
+        for event in observed {
+            st.ingest(
+                run.clone(),
+                Source::Hook,
+                event,
+                cwd.clone(),
+                RunMode::Observed,
+            )
+            .await;
+        }
+        st.store.record_channel("copilot", micros, None).await.ok();
+    });
+    (StatusCode::OK, Json(reply.to_json())).into_response()
+}
+
+/// OTLP/HTTP logs. Claude Code appends `/v1/logs` to the configured endpoint.
+///
+/// The OTLP exporter cannot be given a bearer token per signal without also
+/// sending it to every other collector the user configures, so the telemetry
+/// endpoints are authorised by being on loopback alone. They accept only
+/// observations, never commands.
+async fn otel_logs(State(state): State<Shared>, body: axum::body::Bytes) -> impl IntoResponse {
+    ingest_otel(state, &body, crate::observe::otel::parse_logs).await
+}
+
+/// OTLP/HTTP traces, written to the GenAI semantic conventions.
+async fn otel_traces(State(state): State<Shared>, body: axum::body::Bytes) -> impl IntoResponse {
+    ingest_otel(state, &body, crate::observe::otel::parse_traces).await
+}
+
+async fn ingest_otel(
+    state: Shared,
+    body: &[u8],
+    parse: fn(&[u8]) -> Result<Vec<crate::observe::otel::OtelRecord>, serde_json::Error>,
+) -> axum::response::Response {
+    let started = Instant::now();
+    let records = match parse(body) {
+        Ok(r) => r,
+        Err(e) => {
+            state
+                .store
+                .record_channel(
+                    "otel",
+                    started.elapsed().as_micros() as u64,
+                    Some(&e.to_string()),
+                )
+                .await
+                .ok();
+            return (StatusCode::OK, Json(json!({"partialSuccess": {}}))).into_response();
+        }
+    };
+    for rec in records {
+        let run = RunId::new(rec.session_id.clone());
+        state
+            .ingest(
+                run.clone(),
+                Source::Otel,
+                rec.event,
+                None,
+                RunMode::Observed,
+            )
+            .await;
+        if let Some(entry) = rec.entrypoint {
+            let mut w = state.world.lock().await;
+            w.set_entrypoint(&run, &entry, rec.repo_url.as_deref());
+        }
+    }
+    state
+        .store
+        .record_channel("otel", started.elapsed().as_micros() as u64, None)
+        .await
+        .ok();
+    (StatusCode::OK, Json(json!({"partialSuccess": {}}))).into_response()
+}
+
+async fn otel_metrics(State(state): State<Shared>, body: axum::body::Bytes) -> impl IntoResponse {
+    let n = crate::observe::otel::parse_metrics_sessions(&body).len();
+    state
+        .store
+        .record_channel("otel_metrics", n as u64, None)
+        .await
+        .ok();
+    (StatusCode::OK, Json(json!({"partialSuccess": {}})))
+}
+
+// ---------------------------------------------------------------------------
+// Client API
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct BoardResponse {
+    summary: crate::core::BoardSummary,
+    /// The working set by default; everything when `?all=true`.
+    runs: Vec<RunView>,
+    projects: Vec<crate::core::Project>,
+}
+
+#[derive(Deserialize)]
+struct BoardQuery {
+    /// Include sessions that exist but have never reported anything.
+    #[serde(default)]
+    all: bool,
+}
+
+/// What the board shows for one run. A view rather than the `Run` itself, so
+/// that adding a field to the domain does not silently change the wire format.
+#[derive(Serialize)]
+pub struct RunView {
+    pub id: String,
+    pub project: Option<String>,
+    pub project_name: Option<String>,
+    pub agent: String,
+    pub mode: String,
+    pub state: String,
+    pub waiting_for: Option<String>,
+    pub cwd: String,
+    pub worktree: Option<String>,
+    pub branch: Option<String>,
+    pub model: Option<String>,
+    pub entrypoint: Option<String>,
+    pub name: Option<String>,
+    pub summary: Option<String>,
+    pub cost_usd: f64,
+    pub context_percent: Option<f64>,
+    /// How much of the tightest subscription window is used, where the
+    /// status-line shim is installed. The only channel that carries it.
+    pub rate_limit_percent: Option<f64>,
+    pub tool_calls: u64,
+    pub subagents: usize,
+    /// Whether this session has ever reported anything itself.
+    pub reporting: bool,
+    pub idle_seconds: i64,
+    pub last_event_at: String,
+    /// What the agent says it is going to do, where it reports a plan.
+    pub plan: Vec<crate::core::PlanStep>,
+    /// How far through it, for the one-line board row.
+    pub plan_done: usize,
+    pub plan_total: usize,
+}
+
+impl RunView {
+    fn of(run: &crate::core::Run, project_name: Option<String>) -> Self {
+        Self {
+            id: run.id.to_string(),
+            project: run.project_id.as_ref().map(|p| p.to_string()),
+            project_name,
+            agent: run.agent.clone(),
+            mode: run.mode.as_str().into(),
+            state: run.state.as_str().into(),
+            waiting_for: match &run.state {
+                crate::core::RunState::Waiting(w) => Some(format!("{w:?}").to_lowercase()),
+                _ => None,
+            },
+            cwd: run.cwd.display().to_string(),
+            worktree: run.worktree.as_ref().map(|p| p.display().to_string()),
+            branch: run.branch.clone(),
+            model: run.model.clone(),
+            entrypoint: run.entrypoint.clone(),
+            name: run.name.clone(),
+            summary: run.summary.clone(),
+            cost_usd: run.totals.cost_usd,
+            context_percent: run.totals.context_percent(),
+            rate_limit_percent: run.totals.rate_limit_percent,
+            tool_calls: run.totals.tool_calls,
+            subagents: run.subagents.len(),
+            reporting: run.reporting,
+            idle_seconds: run.idle_seconds(),
+            last_event_at: run.last_event_at.to_string(),
+            plan_done: run.plan_progress().map(|(d, _)| d).unwrap_or(0),
+            plan_total: run.plan.len(),
+            plan: run.plan.clone(),
+        }
+    }
+}
+
+async fn board(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<BoardQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let w = state.world.lock().await;
+    let runs = if q.all { w.board() } else { w.working_set() };
+    let runs = runs
+        .into_iter()
+        .map(|r| {
+            let name = r
+                .project_id
+                .as_ref()
+                .and_then(|p| w.project(p))
+                .map(|p| p.name.clone());
+            RunView::of(r, name)
+        })
+        .collect();
+    Json(BoardResponse {
+        summary: w.summary(),
+        runs,
+        projects: w.projects().cloned().collect(),
+    })
+    .into_response()
+}
+
+async fn inbox(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let works: Vec<_> = state.works.lock().await.values().cloned().collect();
+    let drivable = state.drivable_runs().await;
+    let w = state.world.lock().await;
+    Json(w.inbox_with(&works, &drivable, &|dir| state.policy.stall_seconds(dir))).into_response()
+}
+
+async fn run_detail(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = run_id!(state, id);
+    let w = state.world.lock().await;
+    match w.run(&id) {
+        Some(r) => Json(r.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct LimitQuery {
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+fn default_limit() -> i64 {
+    200
+}
+
+async fn run_events(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = run_id!(state, id);
+    match state.store.events_for_run(&id, q.limit).await {
+        Ok(evs) => Json(evs).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// What a driven agent said, oldest first.
+///
+/// Empty for a session Vibeplane only watches, and that is not a gap to fill
+/// later: hooks carry lifecycle and tool inputs, OpenTelemetry redacts prompts
+/// and responses and Vibeplane never sets the flag that would change it, and
+/// the transcript files are documented as internal. For those runs the honest
+/// action is `focus` — the text is already on screen in the window that owns it.
+async fn run_messages(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = run_id!(state, id);
+    match state.store.messages_for_run(&id, q.limit).await {
+        Ok(m) => Json(m).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Starting an agent.
+#[derive(Deserialize)]
+struct DispatchBody {
+    /// An agent id from `/api/agents`, or a command line.
+    agent: String,
+    /// Where it runs. The project must be trusted: a headless agent executes
+    /// the repository's own hooks and MCP servers with no dialog of its own.
+    cwd: String,
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+async fn dispatch(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<DispatchBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Some(spec) = crate::acp::resolve(&body.agent, &state.agents) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("unknown agent `{}`", body.agent)})),
+        )
+            .into_response();
+    };
+    match crate::driven::dispatch(&state, &spec, body.cwd.into(), body.prompt).await {
+        Ok(run) => Json(json!({"run_id": run.to_string(), "agent": spec.id})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PromptBody {
+    text: String,
+}
+
+async fn prompt_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PromptBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = run_id!(state, id);
+    match crate::driven::prompt(&state, &id, body.text).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DecideBody {
+    request_id: String,
+    /// `allow` or `deny`, resolved against the options the agent offered.
+    #[serde(default)]
+    decision: Option<String>,
+    /// An exact option id, for a caller that read one off the inbox item.
+    /// Wins over `decision` when both are given.
+    #[serde(default)]
+    option_id: Option<String>,
+}
+
+async fn decide_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<DecideBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let want = crate::driven::Decision::parse(body.decision.as_deref(), body.option_id);
+    let id = run_id!(state, id);
+    match crate::driven::decide(&state, &id, &body.request_id, want).await {
+        Ok(()) => {
+            acted_on(
+                &state,
+                id.as_str(),
+                &[
+                    crate::core::AttentionKind::Permission,
+                    crate::core::AttentionKind::Question,
+                ],
+                crate::core::attention::Resolution::Acted,
+            )
+            .await;
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn stop_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = run_id!(state, id);
+    match crate::driven::stop(&state, &id).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn agents(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    Json(state.agents.clone()).into_response()
+}
+
+/// Starting a piece of work.
+#[derive(Deserialize)]
+struct StartWorkBody {
+    /// The repository. Must be trusted first.
+    cwd: String,
+    /// What to do, in the user's words. Also the branch name.
+    title: String,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default = "default_kind")]
+    kind: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default = "default_true")]
+    worktree: bool,
+    /// Start from a GitHub issue: its number becomes the title, its body the
+    /// prompt, and the report is marked as untrusted for the agent.
+    #[serde(default)]
+    issue: Option<u64>,
+}
+fn default_kind() -> String {
+    "quick".into()
+}
+fn default_true() -> bool {
+    true
+}
+
+async fn start_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<StartWorkBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let kind = match body.kind.as_str() {
+        "chore" => crate::core::WorkKind::Chore,
+        "bug" => crate::core::WorkKind::Bug,
+        "feature" => crate::core::WorkKind::Feature,
+        _ => crate::core::WorkKind::Quick,
+    };
+    // An issue supplies both, and says plainly that its body is a report from
+    // someone else rather than an instruction.
+    let mut title = body.title;
+    let mut prompt = body.prompt.unwrap_or_else(|| title.clone());
+    if let Some(number) = body.issue {
+        let dir = std::path::PathBuf::from(&body.cwd);
+        match crate::github::issues(&dir, None, 100).await {
+            Ok(issues) => match issues.into_iter().find(|i| i.number == number) {
+                Some(issue) => {
+                    title = format!("#{} {}", issue.number, issue.title);
+                    prompt = issue.prompt();
+                }
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("issue #{number} is not open here")})),
+                    )
+                        .into_response();
+                }
+            },
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let req = crate::work::StartRequest {
+        project_root: body.cwd.into(),
+        kind,
+        title,
+        prompt,
+        agent: body.agent,
+        worktree: body.worktree,
+    };
+    match crate::work::start(&state, req).await {
+        Ok(id) => {
+            let w = state.works.lock().await.get(&id).cloned();
+            Json(json!({"work_id": id.to_string(), "work": w})).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// A piece of work, with its last gate already judged.
+///
+/// The verdict is served rather than left to the caller. There is one
+/// definition of a passing gate, it lives in the domain, and it is the one on
+/// the wire — so no surface can read a reproduction gate, where failing *is*
+/// passing, backwards.
+#[derive(Serialize)]
+struct WorkView<'a> {
+    #[serde(flatten)]
+    work: &'a crate::core::Work,
+    gate: Option<GateView>,
+    /// Whether `work retry` would work right now. Served rather than guessed,
+    /// because the board cannot see whether the session that wrote the code is
+    /// still there — and an offer it cannot keep is the one thing a control
+    /// plane must never show.
+    can_retry: bool,
+    /// One line saying why the work stopped, already composed.
+    ///
+    /// The board used to title its "hand back again" button with the last
+    /// gate's summary, which on work stopped by a *reviewer* is the summary of
+    /// a gate that passed. Deriving a sentence in two places is how that
+    /// happened; there is one definition and it is in the domain.
+    ///
+    /// Named apart from the flattened `stopped` object it summarises, because
+    /// two fields of one name in a flattened struct is a duplicate key and
+    /// whichever the reader takes is luck.
+    stopped_summary: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GateView {
+    name: String,
+    passed: bool,
+    /// One line a human can act on, from the same code the agent is told.
+    summary: String,
+    attempt: u32,
+    /// Set when the gate was a reproduction: failing was the point.
+    expect_fail: bool,
+}
+
+impl<'a> WorkView<'a> {
+    fn of(work: &'a crate::core::Work, can_retry: bool) -> Self {
+        Self {
+            gate: work.last_gate().map(|g| GateView {
+                name: g.gate.clone(),
+                passed: g.passed(),
+                summary: g.summary(),
+                attempt: g.attempt,
+                expect_fail: g.expect_fail,
+            }),
+            can_retry,
+            stopped_summary: work
+                .stopped
+                .as_ref()
+                .map(crate::core::work::Stopped::headline),
+            work,
+        }
+    }
+}
+
+async fn list_work(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let live: std::collections::HashSet<crate::core::RunId> = state
+        .sessions
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, s)| s.is_live())
+        .map(|(r, _)| r.clone())
+        .collect();
+
+    let works = state.works.lock().await;
+    let mut all: Vec<_> = works.values().collect();
+    all.sort_by_key(|w| std::cmp::Reverse(w.updated_at));
+    Json(
+        all.iter()
+            .map(|w| {
+                let can_retry = w.retryable(w.current_run().is_some_and(|r| live.contains(r)));
+                WorkView::of(w, can_retry)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
+}
+
+async fn verify_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = work_id!(state, id);
+    match crate::work::verify(&state, &id).await {
+        Ok(report) => Json(json!({
+            "passed": report.passed(),
+            "summary": report.summary(),
+            "report": report,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Marks the inbox items a person just answered, at the moment they answer.
+///
+/// This is what makes [`Resolution::Acted`](crate::core::attention::Resolution)
+/// exact rather than inferred. The sweeper that follows closes whatever merely
+/// vanished, and its `resolved_at IS NULL` guard means it can never overwrite
+/// what is written here — so there is no timing window and no correlation
+/// heuristic anywhere in the measurement.
+async fn acted_on(
+    state: &Shared,
+    subject: &str,
+    kinds: &[crate::core::AttentionKind],
+    resolution: crate::core::attention::Resolution,
+) {
+    let ids: Vec<String> = kinds
+        .iter()
+        .map(|k| format!("{subject}:{}", k.as_str()))
+        .collect();
+    if let Err(e) = state.store.attention_resolve(&ids, resolution).await {
+        tracing::warn!(error = %e, "could not record that an inbox item was answered");
+    }
+}
+
+/// Releases a pipeline held at a declared human step.
+async fn approve_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = work_id!(state, id);
+    match crate::pipeline::approve(&state, &id).await {
+        Ok(step) => {
+            acted_on(
+                &state,
+                id.as_str(),
+                &[crate::core::AttentionKind::HumanStep],
+                crate::core::attention::Resolution::Acted,
+            )
+            .await;
+            Json(json!({"ok": true, "released": step})).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Hands a failed check back to the agent once more.
+async fn retry_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = work_id!(state, id);
+    match crate::work::retry(&state, &id).await {
+        Ok(()) => {
+            acted_on(
+                &state,
+                id.as_str(),
+                // Both kinds retry closes. Naming only one would let the
+                // sweeper record the other as `elsewhere` — "it stopped asking
+                // on its own" — about an item a person had just answered,
+                // which is precisely the correlation the attention log exists
+                // to avoid.
+                &[
+                    crate::core::AttentionKind::GateFailed,
+                    crate::core::AttentionKind::ReviewExhausted,
+                ],
+                crate::core::attention::Resolution::Acted,
+            )
+            .await;
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Picks work back up after a restart, against the same agent session.
+async fn resume_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = work_id!(state, id);
+    match crate::work::resume(&state, &id).await {
+        Ok(()) => {
+            acted_on(
+                &state,
+                id.as_str(),
+                &[crate::core::AttentionKind::Interrupted],
+                crate::core::attention::Resolution::Acted,
+            )
+            .await;
+            Json(json!({"ok": true})).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Hides a piece of work's inbox items for a while.
+///
+/// Its own endpoint rather than the run's, because the items Work produces
+/// outlive the sessions that produced them: a pull request that went red hours
+/// after the agent stopped has no run left to snooze.
+async fn snooze_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<SnoozeQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let until = (q.minutes > 0)
+        .then(|| jiff::Timestamp::now() + jiff::SignedDuration::from_mins(q.minutes));
+    let id = work_id!(state, id);
+
+    let saved = {
+        let mut works = state.works.lock().await;
+        match works.get_mut(&id) {
+            Some(w) => {
+                // The kinds it is asking about right now — a snooze covers
+                // what was on screen, never what turns up later.
+                let kinds: Vec<_> = crate::core::attention::items_for_work(w, false, false)
+                    .into_iter()
+                    .map(|i| i.kind)
+                    .collect();
+                match until {
+                    Some(t) => w.snoozed.hide(kinds.clone(), t),
+                    None => w.snoozed.clear(),
+                }
+                Some((w.clone(), kinds))
+            }
+            None => None,
+        }
+    };
+    let Some((saved, dismissed)) = saved else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such work"})),
+        )
+            .into_response();
+    };
+    acted_on(
+        &state,
+        saved.id.as_str(),
+        &dismissed,
+        crate::core::attention::Resolution::Dismissed,
+    )
+    .await;
+    // A write the board's state depends on may not be answered with `.ok()`:
+    // a snooze that silently failed to persist comes back shouting after the
+    // next restart, which is a promise broken with nothing to explain it.
+    if let Err(e) = state.store.save_work(&saved).await {
+        tracing::warn!(error = %e, "could not persist a work snooze");
+    }
+    state.notify_changed();
+    Json(json!({"ok": true, "until": until.map(|t| t.to_string())})).into_response()
+}
+
+#[derive(Deserialize)]
+struct FinishQuery {
+    #[serde(default)]
+    remove_worktree: bool,
+    #[serde(default)]
+    force: bool,
+}
+
+async fn finish_work(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<FinishQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::work::finish(&state, &work_id!(state, id), q.remove_worktree, q.force).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Marks a project as one an agent may be started in.
+///
+/// Deliberately an explicit act. A headless agent runs the repository's own
+/// hooks and MCP servers without asking, so somebody has to have decided that
+/// this directory is theirs.
+#[derive(Deserialize)]
+struct TrustBody {
+    /// The repository root. In the body rather than the path: a filesystem
+    /// path is not one URL segment, and encoding it into one works until
+    /// something between here and there normalises the escapes.
+    path: String,
+}
+
+async fn trust_project(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<TrustBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(root) = std::path::PathBuf::from(&body.path).canonicalize() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("{} does not exist", body.path)})),
+        )
+            .into_response();
+    };
+    let project = {
+        let mut w = state.world.lock().await;
+        let mut p = crate::core::Project::from_root(root.clone());
+        p.trusted = true;
+        let pid = w.upsert_project(p);
+        w.trust(&pid);
+        w.project(&pid).cloned()
+    };
+    match project {
+        Some(p) => {
+            // Checked, and rolled back when it fails. Trust is granted once,
+            // by a person, for a directory — a headless agent runs that
+            // repository's own hooks with no dialog of its own — so answering
+            // `{"trusted": true}` for a row that never reached the store would
+            // be untrue again after the next restart.
+            if let Err(e) = state.store.save_project(&p).await {
+                tracing::error!(project = %p.id.as_str(), error = %e, "could not record trust");
+                state
+                    .store
+                    .record_channel("store", 0, Some(&e.to_string()))
+                    .await
+                    .ok();
+                let mut w = state.world.lock().await;
+                w.untrust(&p.id);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!(
+                            "could not record that {} is trusted, so it is not: {e}",
+                            p.root.display()
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+            Json(json!({"trusted": true, "project": p})).into_response()
+        }
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "could not register the project"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Issues a repository is offering as work.
+#[derive(Deserialize)]
+struct IssuesBody {
+    cwd: String,
+    /// Only issues carrying this label. Defaults to the project's
+    /// `[github].ready_label`, so a repository decides what it is offering.
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default = "default_issue_limit")]
+    limit: u32,
+}
+fn default_issue_limit() -> u32 {
+    30
+}
+
+async fn list_issues(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<IssuesBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let dir = std::path::PathBuf::from(&body.cwd);
+    let label = match body.label {
+        Some(l) => Some(l),
+        None => crate::core::ProjectConfig::load(&dir)
+            .ok()
+            .and_then(|c| c.github.ready_label),
+    };
+    match crate::github::issues(&dir, label.as_deref(), body.limit).await {
+        Ok(issues) => Json(issues).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// What a person can dispatch to, and what each project already offers.
+///
+/// The launcher's whole reason to exist is that it does not make you retype the
+/// thing you do every Tuesday, so a project arrives with its prompts, the
+/// pipelines its `vibeplane.toml` declares, and whether an agent may start in
+/// it at all. Every project is listed, including ones with no session running —
+/// the board shows what *is* happening, and this answers what *could*.
+async fn projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let w = state.world.lock().await;
+    let live: std::collections::BTreeMap<_, usize> =
+        w.runs()
+            .filter(|r| r.is_active())
+            .fold(std::collections::BTreeMap::new(), |mut acc, r| {
+                if let Some(p) = &r.project_id {
+                    *acc.entry(p.clone()).or_default() += 1;
+                }
+                acc
+            });
+
+    let out: Vec<_> = w
+        .projects()
+        .map(|p| {
+            // Read rather than cached: a project's configuration is a file the
+            // person edits while this window is open, and a launcher offering
+            // yesterday's pipelines is a launcher that lies.
+            let cfg = crate::core::ProjectConfig::load(&p.root).ok();
+            json!({
+                "id": p.id.as_str(),
+                "name": p.name,
+                "root": p.root.display().to_string(),
+                "trusted": p.trusted,
+                "sessions": live.get(&p.id).copied().unwrap_or(0),
+                "repo": p.repo_slug(),
+                "default_agent": cfg.as_ref().and_then(|c| c.project.default_agent.clone()),
+                "pipelines": cfg
+                    .as_ref()
+                    .map(|c| c.pipelines.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                "templates": crate::core::templates::list(&p.root),
+            })
+        })
+        .collect();
+    Json(out).into_response()
+}
+
+#[derive(Deserialize)]
+struct AttentionQuery {
+    /// How far back to look. A week by default: long enough that a kind which
+    /// fires twice a day has something to say, short enough that a threshold
+    /// changed last month is not still being judged on its old behaviour.
+    #[serde(default = "default_attention_days")]
+    days: i64,
+}
+fn default_attention_days() -> i64 {
+    7
+}
+
+/// What the inbox asked for, and what became of it.
+///
+/// The product is a filter and this is the only thing that measures it. Read
+/// it as three numbers per kind rather than one: `acted` is the item doing its
+/// job, `dismissed` is the clearest evidence a kind is too loud, and
+/// `elsewhere` is genuinely ambiguous — the question was answered in a
+/// terminal, which means the item was right that a person was needed and wrong
+/// about where they would be.
+async fn attention(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<AttentionQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let since =
+        jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * q.days.clamp(1, 365));
+    match state.store.attention_stats(since).await {
+        Ok(by_kind) => Json(json!({
+            "since": since.to_string(),
+            "days": q.days,
+            "kinds": by_kind,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct StreamQuery {
+    #[serde(default)]
+    token: Option<String>,
+    /// Narrow to one run. What a transcript view wants: a chatty agent in
+    /// another project is not something this reader needs to be sent.
+    #[serde(default)]
+    run: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SnoozeQuery {
+    /// Minutes to stay quiet. Zero un-snoozes, which is the only way back.
+    #[serde(default = "default_snooze")]
+    minutes: i64,
+}
+fn default_snooze() -> i64 {
+    60
+}
+
+/// Hides the kinds a run is currently asking about, for a while.
+///
+/// "Not this one, not now" is the thought a person actually has, so a snooze
+/// covers what is on screen — and nothing else. The single timestamp this
+/// replaces also swallowed whatever turned up next, including the permission
+/// request that is the one item the product exists to deliver
+/// ([`Snoozed`](crate::core::attention::Snoozed)).
+async fn snooze(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<SnoozeQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let until = (q.minutes > 0)
+        .then(|| jiff::Timestamp::now() + jiff::SignedDuration::from_mins(q.minutes));
+
+    let run_id = run_id!(state, id);
+    // Named before the snooze hides them, because afterwards there is nothing
+    // left to name. A dismissal is the clearest signal a kind is too loud, and
+    // it is the one number that tells us so.
+    let mut dismissed: Vec<crate::core::AttentionKind> = Vec::new();
+    let saved = {
+        let mut w = state.world.lock().await;
+        if until.is_some()
+            && let Some(r) = w.run(&run_id)
+        {
+            let cfg = w.attention;
+            dismissed = crate::core::attention::items_for_run(r, &cfg, cfg.stall_seconds)
+                .into_iter()
+                .map(|i| i.kind)
+                .collect();
+        }
+        if !w.snooze(&run_id, until) {
+            None
+        } else {
+            w.run(&run_id).cloned()
+        }
+    };
+    acted_on(
+        &state,
+        run_id.as_str(),
+        &dismissed,
+        crate::core::attention::Resolution::Dismissed,
+    )
+    .await;
+
+    let Some(run) = saved else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
+    };
+    // Persisted, so a snooze survives a restart. A quiet run that starts
+    // shouting again because the daemon bounced is a broken promise.
+    if let Err(e) = state.store.save_run(&run).await {
+        tracing::warn!(error = %e, "could not persist snooze");
+    }
+    state.notify_changed();
+    Json(json!({"snoozed_until": until.map(|t| t.to_string())})).into_response()
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+
+async fn search(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<SearchQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match state.store.search(&q.q, q.limit).await {
+        Ok(hits) => Json(
+            hits.into_iter()
+                .map(|(r, t)| json!({"run_id": r.to_string(), "text": t}))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    /// A run or work id to narrow to.
+    #[serde(default)]
+    about: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+
+/// What Vibeplane decided, newest first.
+async fn decisions(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<AuditQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match state.store.decisions(q.about.as_deref(), q.limit).await {
+        Ok(d) => Json(d).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Asks the daemon to stop.
+///
+/// What `vibeplane stop` calls. A request rather than a signal to the pid in
+/// `~/.vibeplane/daemon.json`, because a stale record names a pid the operating
+/// system may since have given to somebody else. A request needs no such
+/// guard: it carries the bearer token, it
+/// reaches the same graceful path as ctrl-c, and it behaves identically on a
+/// platform with no signals.
+async fn shutdown(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    // Answer first: the reply has to leave before the server stops serving.
+    let st = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        st.stopping.notify_waiters();
+    });
+    Json(json!({"stopping": true, "pid": std::process::id()})).into_response()
+}
+
+async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let channels = state.store.channel_health().await.unwrap_or_default();
+    // A `vibeplane.toml` that will not load keeps whatever rules were already
+    // cached, which is the safe half of the answer. The unsafe half is that a
+    // daemon restarted against a broken file has nothing cached, so that
+    // repository's `never_auto` list is simply gone — and nothing said so.
+    let broken: Vec<_> = state
+        .policy
+        .broken()
+        .into_iter()
+        .map(|(root, error)| json!({"project": root.display().to_string(), "error": error}))
+        .collect();
+    // The same argument one table down. The schema here changes without a
+    // migration on purpose, so a row this build cannot decode is simply absent
+    // from the board — which looks exactly like never having had it. A Work row
+    // is the one that hurts: it carries the branch and the worktree, so losing
+    // one orphans a checkout nobody is left to tell you about.
+    let unreadable_rows: Vec<_> = state
+        .store
+        .unreadable()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(row, error)| json!({"row": row, "error": error}))
+        .collect();
+    // Before the lock: it shells out, and holding the world while waiting on
+    // a subprocess would stall every other reader.
+    let auto_mode = crate::observe::automode::effective().await;
+    let w = state.world.lock().await;
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "started_at": state.started_at.to_string(),
+        "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
+        "summary": w.summary(),
+        "channels": channels,
+        "stall_seconds": w.attention.stall_seconds,
+        "unreadable_configs": broken,
+        "unreadable_rows": unreadable_rows,
+        // The *other* gate. Vibeplane's prohibitions reach auto mode, and in
+        // that mode the thing actually deciding is a classifier configured
+        // somewhere else. Read back, never written.
+        "auto_mode": match auto_mode {
+            Ok(cfg) => json!({
+                "configured": !cfg.is_empty(),
+                "environment": cfg.environment.len(),
+                "allow": cfg.allow.len(),
+                "soft_deny": cfg.soft_deny.len(),
+                "hard_deny": cfg.hard_deny.len(),
+            }),
+            Err(why) => json!({"unavailable": why}),
+        },
+    }))
+    .into_response()
+}
+
+/// Live events, as server-sent events. The browser shell and `vibeplane watch`
+/// use the same stream.
+///
+/// A subscriber that falls behind is skipped forward rather than disconnected:
+/// a burst of tool calls must not knock the UI off the stream.
+async fn stream(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<StreamQuery>,
+) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, StatusCode> {
+    // An empty stream would leak nothing, but it would also be indistinguishable
+    // from a quiet machine — so a bad token says so.
+    if !authorised(&state, &headers, q.token.as_deref()) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let rx = state.tx.subscribe();
+    let only = q.run.map(RunId::new);
+
+    let stream = futures_util::stream::unfold(Some(rx), move |rx| {
+        let only = only.clone();
+        async move {
+            let mut rx = rx?;
+            loop {
+                match rx.recv().await {
+                    Ok(frame) => {
+                        if let Some(want) = &only
+                            && frame.run_id() != want
+                        {
+                            continue;
+                        }
+                        let data = serde_json::to_string(&frame).unwrap_or_default();
+                        return Some((Ok(SseEvent::default().data(data)), Some(rx)));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!(skipped = n, "subscriber lagged");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        }
+    });
+
+    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
+}

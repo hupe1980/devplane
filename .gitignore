@@ -23,6 +23,9 @@ target
 target/
 node_modules/
 
+# The documentation site is built from site/ by CI; the output is not committed.
+/site/public/
+
 
 # ── Internal notes and third-party specifications ────────────────────────────
 
@@ -36,3 +39,8 @@ node_modules/
 # copies are not redistributed here. `concepts/REFERENCES.md` indexes every one with its
 # retrieval URL and `scripts/fetch-specs.sh` rebuilds the folder from scratch.
 /specs/
+
+# Litter from the protocol suite: the fixture agent writes down what it was told,
+# in the directory the client named — which for a test that dispatches into the
+# repository itself is the repository itself.
+.vibeplane/

@@ -1,0 +1,43 @@
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div>
+      <p class="footer-brand">Vibeplane</p>
+      <p class="muted">{{ config.extra.tagline }}</p>
+      <p class="muted small">Local-first. No account, no relay, no telemetry of our own.</p>
+    </div>
+
+    <nav aria-label="Documentation">
+      <p class="footer-head">Docs</p>
+      <ul>
+        <li><a href="{{ get_url(path='/docs/install/') }}">Install</a></li>
+        <li><a href="{{ get_url(path='/docs/quickstart/') }}">Quickstart</a></li>
+        <li><a href="{{ get_url(path='/docs/cli/') }}">CLI reference</a></li>
+        <li><a href="{{ get_url(path='/docs/configuration/') }}">Configuration</a></li>
+      </ul>
+    </nav>
+
+    <nav aria-label="Concepts">
+      <p class="footer-head">Concepts</p>
+      <ul>
+        <li><a href="{{ get_url(path='/docs/verified-done/') }}">Verified done</a></li>
+        <li><a href="{{ get_url(path='/docs/permissions/') }}">Permissions</a></li>
+        <li><a href="{{ get_url(path='/docs/pipelines/') }}">Pipelines</a></li>
+        <li><a href="{{ get_url(path='/docs/architecture/') }}">Architecture</a></li>
+      </ul>
+    </nav>
+
+    <nav aria-label="Project">
+      <p class="footer-head">Project</p>
+      <ul>
+        <li><a href="{{ config.extra.repo }}" rel="noopener">GitHub</a></li>
+        <li><a href="{{ config.extra.repo }}/issues" rel="noopener">Issues</a></li>
+        <li><a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a></li>
+        <li><a href="{{ get_url(path='atom.xml') }}">Feed</a></li>
+      </ul>
+    </nav>
+  </div>
+
+  <div class="footer-legal">
+    <p class="muted small">MIT OR Apache-2.0 · Not affiliated with Anthropic.</p>
+  </div>
+</footer>

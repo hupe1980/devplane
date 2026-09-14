@@ -1,0 +1,125 @@
+# Turns a tag into installable artifacts. `dist` owns cross-compilation,
+# checksums, the shell installer and the Homebrew formula; its configuration
+# lives in `[workspace.metadata.dist]` in Cargo.toml.
+#
+# A thin shim over the tool. `dist init` replaces this with its own generated
+# workflow, which fans out per platform, and should be run before a real release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Plans the release without building it, so a tag that would fail is known
+  # before it is pushed.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      # Reads the config and says what a release would contain. Cheap, and the
+      # only part that runs on a manual dispatch.
+      - name: Plan
+        run: dist plan --output-format=json | tee dist-plan.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-plan
+          path: dist-plan.json
+      # crates.io rejects a bad manifest only at publish time, which is after
+      # the tag is pushed and the artifacts are built.
+      - name: Check the crate is publishable
+        run: cargo publish --dry-run --locked
+
+  build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          # Native ARM rather than a cross toolchain: `libsqlite3-sys` is C, and
+          # `musl-gcc` only targets the host architecture.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - name: Build
+        shell: bash
+        run: dist build --target ${{ matrix.target }} --output-format=json > dist-build.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: target/distrib/*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          merge-multiple: true
+          path: target/distrib
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      # The installers are generated from the manifest, not from the binaries,
+      # so they are produced here rather than per platform.
+      - name: Installers and checksums
+        run: dist build --artifacts=global --output-format=json > dist-global.json
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Install: \`curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh\`" \
+            target/distrib/*
+
+  crates-io:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      # Trusted publishing: crates.io mints a short-lived token from this
+      # workflow's identity, so no registry token is stored in the repository.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

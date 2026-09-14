@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block content %}
+
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Local-first · One binary · MIT OR Apache-2.0</p>
+    <h1>See every coding agent on your machine.<br><span class="accent">Know which one needs you.</span></h1>
+    <p class="lede">
+      Vibeplane is a control plane for AI coding agents. It watches the Claude Code and
+      GitHub&nbsp;Copilot sessions already running — terminal, VS&nbsp;Code, desktop, background —
+      drives any agent that speaks the
+      <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a>, and turns
+      <em>“the agent says it’s done”</em> into <em>“your project’s checks agree”</em>.
+    </p>
+
+    <div class="cta-row">
+      <a class="btn primary" href="{{ get_url(path='/docs/quickstart/') }}">Get started</a>
+      <a class="btn" href="{{ config.extra.repo }}" rel="noopener">View on GitHub</a>
+    </div>
+
+    <div class="install-line">
+      <code>brew install hupe1980/tap/vibeplane</code>
+      <button type="button" class="copy" data-copy="brew install hupe1980/tap/vibeplane" aria-label="Copy the install command">Copy</button>
+    </div>
+    <p class="muted small">
+      Windows, or no Homebrew? <a href="{{ get_url(path='/docs/install/') }}">Every install path</a>.
+    </p>
+
+    {# A real capture, not a mock. #}
+    <figure class="terminal" aria-label="Example output of the vibeplane ls command">
+      <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+<pre><code><span class="t-dim">$</span> vibeplane ls
+<span class="t-bold">8 projects</span> · 23 sessions · 5 working · <span class="t-warn">2</span> need you · 16 idle <span class="t-dim">· $4.18</span>
+<span class="t-dim">17 dormant (never reported) — vibeplane ls --all</span>
+
+<span class="t-bold">saas</span>
+  <span class="t-warn">◆</span> 7c         <span class="t-dim">vscode</span>     62%   $1.04   3m  Keep the legacy /v1/login route?
+
+<span class="t-bold">core-lib</span>  <span class="t-dim">·  2 sessions</span>
+  <span class="t-ok">●</span> a1         <span class="t-dim">vscode</span>     88%   $0.41   2s  Bash: cargo test --workspace
+  <span class="t-dim">○</span> 4f         <span class="t-dim">vscode</span>     12%   $0.02  41m  waiting for a prompt
+
+<span class="t-bold">mobile</span>
+  <span class="t-warn">◆</span> 04         <span class="t-dim">cli</span>         –    $0.12   8m  Permission: Bash rm -rf node_modules
+</code></pre>
+    </figure>
+    <p class="muted small caption">
+      Grouped by project, because that is the unit you think in. Dormant editor tabs are counted,
+      not listed — and any of them that starts asking for something joins the working set at once.
+    </p>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2>Five windows, five agents, and no idea which one is stuck</h2>
+    <div class="two-col">
+      <div>
+        <p>
+          Claude Code’s own <code>claude agents</code> shows background sessions in one directory.
+          The VS&nbsp;Code Agents window shows what VS&nbsp;Code started. Neither spans your terminal,
+          your editor and the desktop app at once — and none of them knows what <em>done</em> means
+          for your project.
+        </p>
+        <p>
+          Vibeplane sits above all of them, on documented interfaces only, and stays out of the way.
+          It does not replace your editor, your tracker or your agent. It is the layer that spans them.
+        </p>
+      </div>
+      <div>
+        <p class="muted">
+          <strong>It works before you configure anything.</strong> Sessions are discovered from
+          Claude Code’s own roster, so <code>vibeplane ls</code> is useful on first run with nothing
+          installed. Connecting is what adds live state: cost, context usage, blocking, and the
+          permission gate.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2 class="section-head">What it does</h2>
+  <div class="features">
+    <article class="feature">
+      <h3>Sight</h3>
+      <p>
+        Every session on the machine, on one board, with state, cost, context percentage, worktree
+        and pull request. Hooks and OpenTelemetry for live state; the session roster for discovery.
+        Your workflow does not change.
+      </p>
+      <a class="more" href="{{ get_url(path='/docs/observe/') }}">How observing works</a>
+    </article>
+
+    <article class="feature">
+      <h3>Hands</h3>
+      <p>
+        Dispatch, prompt, answer permissions and cancel — for Claude&nbsp;Code, Codex, OpenCode and
+        Gemini&nbsp;CLI out of the box, and any other agent that speaks the protocol by naming its
+        command in one file.
+      </p>
+      <a class="more" href="{{ get_url(path='/docs/agents/') }}">Driving agents</a>
+    </article>
+
+    <article class="feature">
+      <h3>Proof</h3>
+      <p>
+        Work outlives sessions. An isolated checkout, your own commands as the definition of done,
+        failures handed back to the agent that wrote the code — bounded — and then a person is
+        asked. An unearned claim of done never reaches <em>review</em>.
+      </p>
+      <a class="more" href="{{ get_url(path='/docs/verified-done/') }}">Verified done</a>
+    </article>
+
+    <article class="feature">
+      <h3>Pipelines</h3>
+      <p>
+        Declared chains of runs: one agent implements, another reviews, a gate decides, and a person
+        approves where the project says so. The cursor lives on the work item, so a crash resumes
+        where it stopped instead of paying twice.
+      </p>
+      <a class="more" href="{{ get_url(path='/docs/pipelines/') }}">Agents checking agents</a>
+    </article>
+
+    <article class="feature">
+      <h3>Permissions that are really yours</h3>
+      <p>
+        Claude&nbsp;Code’s rule syntax, implemented in full and resolved per repository. Deny always
+        wins, and holds in auto mode too, where a classifier approves routine calls and no prompt
+        ever appears. A rule that cannot match anything is refused rather than carried, because a
+        deny rule that silently matches nothing reads as protection and is none.
+      </p>
+      <a class="more" href="{{ get_url(path='/docs/permissions/') }}">The rule syntax</a>
+    </article>
+
+    <article class="feature">
+      <h3>An answer months later</h3>
+      <p>
+        Every verdict a rule reaches, every gate, every push and every pull request is appended to a
+        decision log with the reason behind it. “Auto-approved” is not an answer.
+        “Auto-approved&nbsp;by <code>Bash(pnpm test *)</code>” is.
+      </p>
+      <a class="more" href="{{ get_url(path='/docs/decisions/') }}">The decision log</a>
+    </article>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2 class="section-head">The loop</h2>
+    <ol class="loop">
+      <li><strong>See</strong><span>Every session, grouped by project, on one board.</span></li>
+      <li><strong>Decide</strong><span>One ranked inbox. Permissions, questions, red checks, spent budgets.</span></li>
+      <li><strong>Dispatch</strong><span>An agent in an isolated checkout, with the project’s rules.</span></li>
+      <li><strong>Verify</strong><span>Your own commands decide. Failures go back, bounded.</span></li>
+      <li><strong>Account</strong><span>Every decision, with the rule or the check behind it.</span></li>
+    </ol>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2 class="section-head">Principles</h2>
+  <div class="principles">
+    <div><h3>Local-first</h3><p>No account, no cloud relay, no service to run. Loopback only, and a token in a file only you can read. Nothing leaves the machine.</p></div>
+    <div><h3>Documented interfaces only</h3><p>Hooks, OpenTelemetry, the session roster, the Agent Client Protocol. No transcript scraping, no undocumented wire protocols.</p></div>
+    <div><h3>Observe before own</h3><p>A session Vibeplane did not start is first-class. Ownership is additive, never a prerequisite.</p></div>
+    <div><h3>Work outlives sessions</h3><p>Sessions crash and get handed to an editor. A pull request goes red hours later. Only work carries gates, evidence and history.</p></div>
+    <div><h3>The model is never the authority</h3><p>If the answer is a function of trusted inputs, it is a function. Attention, gates and policy never call a model.</p></div>
+    <div><h3>An offered action is an implemented action</h3><p>A button that cannot do what it says is the one failure a control plane cannot afford, because the whole product is a claim about what is true.</p></div>
+  </div>
+</section>
+
+<section class="closer">
+  <div class="wrap narrow">
+    <h2>Try it on the machine you already have</h2>
+    <p class="lede">One binary. It finds your sessions on the first run.</p>
+    <div class="install-line big">
+      <code>brew install hupe1980/tap/vibeplane &amp;&amp; vibeplane ls</code>
+      <button type="button" class="copy" data-copy="brew install hupe1980/tap/vibeplane && vibeplane ls" aria-label="Copy the install command">Copy</button>
+    </div>
+    <p class="cta-row">
+      <a class="btn primary" href="{{ get_url(path='/docs/quickstart/') }}">Quickstart</a>
+      <a class="btn" href="{{ get_url(path='/docs/') }}">Read the docs</a>
+    </p>
+  </div>
+</section>
+
+{% endblock %}

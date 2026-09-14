@@ -1,0 +1,1380 @@
+//! The inbox: what needs a human, ranked.
+//!
+//! Attention items are *derived* from run state, never stored as authoritative
+//! facts — a rebuild from events produces the same inbox. From M2 the open
+//! human tasks of the runtime are merged into the same list.
+
+use crate::core::event::{Choice, WaitingFor};
+use crate::core::ids::{AttentionId, ProjectId, RunId};
+use crate::core::run::{Run, RunState};
+use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
+
+/// How loudly an item asks for the human. Only `High` and `Critical` are
+/// allowed to raise an OS notification.
+///
+/// Three levels, because there are three answers to "when does this reach a
+/// person": now and loudly, now and quietly, and whenever they look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    Normal,
+    High,
+    Critical,
+}
+
+impl Level {
+    /// The name this level is stored and reported under.
+    ///
+    /// Spelled out rather than derived from `Debug`, which is what the store
+    /// did: `format!("{:?}", level).to_lowercase()` agrees with the
+    /// serialisation for all three variants today and would stop agreeing the
+    /// first time one is spelled with two words — `VeryHigh` becomes
+    /// `veryhigh`, not `very_high`. That agreement is a coincidence, and a
+    /// coincidence is not something a test can tell from a rule.
+    ///
+    /// `a_level_is_stored_as_serde_spells_it` holds this against the
+    /// serialisation rather than against a second list.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Level::Normal => "normal",
+            Level::High => "high",
+            Level::Critical => "critical",
+        }
+    }
+}
+
+/// What kind of decision is being asked for. The kinds are deliberately about
+/// *what the human must do*, not about which subsystem produced them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionKind {
+    /// A tool wants permission and no policy rule matched.
+    Permission,
+    /// The agent asked a question.
+    Question,
+    /// A run ended with an error.
+    RunFailed,
+    /// A live run has produced no activity for longer than the stall timeout.
+    Stalled,
+    /// Reconciliation lost the process.
+    Lost,
+    /// The context window is nearly full; quality drops and compaction looms.
+    ContextHigh,
+    /// A subscription rate limit is nearly exhausted.
+    RateLimit,
+    /// A piece of work reached the spending ceiling its project set.
+    CostSpike,
+    /// The project's own checks did not pass, and the feedback budget is spent.
+    ///
+    /// The end of the loop the whole product exists for: an agent claimed to be
+    /// finished, the project disagreed, the failures went back to it as many
+    /// times as the project allows, and it is now somebody's turn.
+    GateFailed,
+    /// A check on a pull request Vibeplane opened is red.
+    CiRed,
+    /// A reviewer asked for changes on a pull request Vibeplane opened.
+    ChangesRequested,
+    /// A pull request is green and waiting for a person.
+    PrReady,
+    /// Another piece of work in this repository is editing the same files.
+    ///
+    /// The one kind here that fires while everything is going *right*, and it
+    /// is the only warning anybody gets before the merge: two isolated
+    /// checkouts are exactly as isolated as they were designed to be, and that
+    /// is what lets both of them be locally correct and jointly impossible.
+    Conflict,
+    /// Work was mid-flight when the daemon stopped, and its agent is gone.
+    Interrupted,
+    /// A declared pipeline has reached a step where the project said a person
+    /// decides. Nothing is wrong; the chain is doing what it was told.
+    HumanStep,
+    /// A reviewing step kept finding things until its loop was spent.
+    ///
+    /// Its own kind rather than `gate_failed`, for the reason `changes_requested`
+    /// is its own kind rather than `ci_red`: a suite disagreeing and a reviewer
+    /// disagreeing are not the same errand and do not want the same answer. The
+    /// item carries what the reviewer actually found, which used to be read from
+    /// the worktree, deleted, and thrown away.
+    ReviewExhausted,
+    /// The chain itself could not continue — a step that is no longer declared,
+    /// a gate nobody wrote. Nothing an agent can fix, so nothing is offered to
+    /// hand back to one.
+    PipelineBroken,
+    /// This run keeps being refused, and is still going.
+    ///
+    /// The only kind raised about a session that is neither blocked nor failed.
+    /// A refused agent does not stop, so a rule that is too tight and one that
+    /// is working look identical from outside; measured at up to 167 % cost
+    /// inflation and 18.3 points of success ([arXiv:2608.02670]), because runs
+    /// *"grind into timeouts or wrong solutions rather than stopping early"*.
+    ///
+    /// [arXiv:2608.02670]: https://arxiv.org/abs/2608.02670
+    Refused,
+}
+
+impl AttentionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttentionKind::Permission => "permission",
+            AttentionKind::Question => "question",
+            AttentionKind::RunFailed => "run_failed",
+            AttentionKind::Stalled => "stalled",
+            AttentionKind::Lost => "lost",
+            AttentionKind::ContextHigh => "context_high",
+            AttentionKind::RateLimit => "rate_limit",
+            AttentionKind::CostSpike => "cost_spike",
+            AttentionKind::GateFailed => "gate_failed",
+            AttentionKind::CiRed => "ci_red",
+            AttentionKind::ChangesRequested => "changes_requested",
+            AttentionKind::PrReady => "pr_ready",
+            AttentionKind::Conflict => "conflict",
+            AttentionKind::Interrupted => "interrupted",
+            AttentionKind::HumanStep => "human_step",
+            AttentionKind::ReviewExhausted => "review_exhausted",
+            AttentionKind::PipelineBroken => "pipeline_broken",
+            AttentionKind::Refused => "refused",
+        }
+    }
+
+    pub fn default_level(&self) -> Level {
+        match self {
+            AttentionKind::Permission
+            | AttentionKind::Question
+            | AttentionKind::RunFailed
+            | AttentionKind::GateFailed
+            | AttentionKind::ChangesRequested
+            | AttentionKind::ReviewExhausted
+            | AttentionKind::PipelineBroken
+            | AttentionKind::CiRed => Level::High,
+            AttentionKind::Lost => Level::Critical,
+            AttentionKind::Interrupted => Level::High,
+            // Normal, not high: the pipeline stopped exactly where the project
+            // asked it to. An expected pause is not an alarm.
+            AttentionKind::HumanStep => Level::Normal,
+            AttentionKind::CostSpike
+            | AttentionKind::Refused
+            | AttentionKind::Stalled
+            | AttentionKind::ContextHigh
+            | AttentionKind::RateLimit
+            | AttentionKind::PrReady
+            // Normal on purpose. Nothing has failed and nothing is blocked:
+            // this is information that is cheap now and expensive at the merge,
+            // and a kind that interrupts for something nobody has to answer
+            // this minute is how a list stops being read.
+            | AttentionKind::Conflict => Level::Normal,
+        }
+    }
+}
+
+/// An action offered on an item.
+///
+/// Two rules, and both are about the same thing. **An offered action is an
+/// implemented action**, for the kind of run it is offered on: a button that
+/// cannot do what it says is the one failure a control plane cannot afford.
+/// And **an implemented action is an offered action** — which is why
+/// [`Choose`](Action::Choose) exists, since carrying an agent's four labelled
+/// answers to a surface that only offers yes/no answers a question nobody
+/// asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    /// Pick one of the `options` by its protocol id.
+    ///
+    /// Offered when the agent supplied options carrying ids, which is the only
+    /// case where a choice can be sent back, and listed before `Allow`/`Deny`:
+    /// when an agent has named the answers it accepts, those are the answers.
+    Choose,
+    /// Grant the outstanding request. Offered only when Vibeplane can actually
+    /// answer it — a driven run — never for a session it merely watches.
+    Allow,
+    /// Refuse it.
+    Deny,
+    /// Send free text back to a driven run: the answer to a question that
+    /// offered no options, or a correction mid-turn.
+    Reply,
+    /// Raise the window that owns this session. The only way to answer an
+    /// observed session, and named honestly for that reason.
+    Focus,
+    /// Attach a terminal to the session.
+    Attach,
+    /// Open the run in the UI.
+    Open,
+    /// Open the pull request in a browser. The item carries its `url`.
+    OpenPr,
+    /// Release a pipeline held at a declared human step.
+    Approve,
+    /// Hand the failures back to the agent once more, past the bound the
+    /// project set. The bound stops the *machine* looping for ever; a person
+    /// may always choose one more round, and that choice is recorded as one.
+    Retry,
+    /// Continue work whose agent is gone, against the same agent-side session.
+    ///
+    /// Offered only when the run recorded the id its agent will answer
+    /// `session/resume` on. Without that id the conversation cannot be
+    /// continued — only started again — and the two are not the same offer.
+    Resume,
+    /// Dismiss the item until something changes.
+    Snooze,
+}
+
+impl Action {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Action::Choose => "choose",
+            Action::Allow => "allow",
+            Action::Deny => "deny",
+            Action::Reply => "reply",
+            Action::Focus => "focus",
+            Action::Attach => "attach",
+            Action::Open => "open",
+            Action::OpenPr => "open_pr",
+            Action::Approve => "approve",
+            Action::Retry => "retry",
+            Action::Resume => "resume",
+            Action::Snooze => "snooze",
+        }
+    }
+}
+
+/// Which of a subject's inbox items are hidden, and until when.
+///
+/// **Per kind, not per subject.** "Not this one, not now" is a thought about
+/// the thing in front of you, so a snooze covers the kinds that were on screen
+/// when it was taken; a kind that turns up afterwards was never dismissed and
+/// is shown. That is also why no level needs an exemption — the danger was
+/// never somebody silencing an alarm deliberately, it was somebody silencing
+/// one thing and getting silence about another.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Snoozed(std::collections::BTreeMap<String, Timestamp>);
+
+impl Snoozed {
+    /// Whether this kind is hidden right now.
+    pub fn hides(&self, kind: &AttentionKind) -> bool {
+        self.0
+            .get(kind.as_str())
+            .is_some_and(|until| Timestamp::now() < *until)
+    }
+
+    /// Hide these kinds until `until`. The caller passes the kinds currently
+    /// derived for the subject, so a snooze is always about what was visible.
+    pub fn hide(&mut self, kinds: impl IntoIterator<Item = AttentionKind>, until: Timestamp) {
+        for k in kinds {
+            self.0.insert(k.as_str().to_string(), until);
+        }
+    }
+
+    /// Un-snooze everything. The only way back, and the reason `minutes = 0`
+    /// means "show me again" rather than "hide for no time at all".
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Whether anything is hidden right now — what the board's marker reads.
+    pub fn any(&self) -> bool {
+        let now = Timestamp::now();
+        self.0.values().any(|until| now < *until)
+    }
+
+    /// When the last hidden kind comes back, for the surfaces that say so.
+    pub fn until(&self) -> Option<Timestamp> {
+        let now = Timestamp::now();
+        self.0.values().filter(|u| now < **u).max().copied()
+    }
+}
+
+/// One entry in the inbox.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttentionItem {
+    pub id: AttentionId,
+    pub kind: AttentionKind,
+    pub level: Level,
+    /// The session this is about. `None` for an item belonging to a piece of
+    /// Work whose runs have all ended — a pull request going red hours later
+    /// is the ordinary case, not an edge one.
+    #[serde(default)]
+    pub run_id: Option<RunId>,
+    pub project_id: Option<ProjectId>,
+    /// One line naming the decision, not the subsystem.
+    pub title: String,
+    /// The detail a human needs to decide: the tool input, the question, the
+    /// error. Rendered as untrusted text.
+    pub detail: Option<String>,
+    /// The answers on offer. An option with an `id` can be chosen from here; one
+    /// without can only be read, and the actions say so.
+    pub options: Vec<Choice>,
+    pub actions: Vec<Action>,
+    /// The protocol request this item answers, when it can be answered.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Where `open_pr` goes. Present exactly when that action is offered.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// A `claude-cli://` link that opens an agent in the right repository with
+    /// a prompt already typed — and **not sent**.
+    ///
+    /// Present on the items that name work somebody is about to do anyway: a
+    /// red pull request, a spent feedback budget, a reviewer asking for
+    /// changes. It turns the sentence "CI is red on payments-api" into the
+    /// thing you were going to do about it, on whatever machine you are
+    /// sitting at.
+    #[serde(default)]
+    pub launch: Option<String>,
+    /// The Work this item is about, when it is about Work rather than a run.
+    /// An item offering `Approve` needs it: the thing being released is the
+    /// pipeline, and the run that was doing the last step may already be gone.
+    #[serde(default)]
+    pub work_id: Option<crate::core::ids::WorkId>,
+    pub since: Timestamp,
+}
+
+impl AttentionItem {
+    /// The stable id of an item, so that the same open question keeps its
+    /// place in the list across rebuilds and can be snoozed.
+    pub fn make_id(run: &RunId, kind: &AttentionKind) -> AttentionId {
+        AttentionId::new(format!("{}:{}", run.as_str(), kind.as_str()))
+    }
+
+    /// Sort key: level first, then age. Reverse-sorted, so the most urgent and
+    /// oldest is first.
+    pub fn rank(&self) -> (Level, i64) {
+        (self.level, -self.since.as_second())
+    }
+}
+
+/// How an inbox item stopped needing a person.
+///
+/// Every threshold in this module is a judgement somebody made once, and a kind
+/// that cries wolf costs the *whole list* its credibility rather than only its
+/// own row. So every raise and resolution is recorded.
+///
+/// Deliberately three outcomes rather than one ratio called "precision":
+/// `Elsewhere` is ambiguous — the person answered in a terminal, so the item
+/// was right about needing attention and wrong about where — and averaging it
+/// away would hide the one distinction worth acting on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    /// A person used one of the item's own actions. The item did its job.
+    Acted,
+    /// A person snoozed it. The clearest signal a kind is too loud.
+    Dismissed,
+    /// It went away on its own: the agent unblocked, the checks went green,
+    /// the run ended. Right that something was happening, wrong that it needed
+    /// a person — or answered somewhere else.
+    Elsewhere,
+}
+
+impl Resolution {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Resolution::Acted => "acted",
+            Resolution::Dismissed => "dismissed",
+            Resolution::Elsewhere => "elsewhere",
+        }
+    }
+}
+
+/// What the inbox did for one kind over a window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct KindStats {
+    pub raised: i64,
+    pub acted: i64,
+    pub dismissed: i64,
+    pub elsewhere: i64,
+    pub open: i64,
+}
+
+impl KindStats {
+    /// The fraction of *resolved* items a person acted on here.
+    ///
+    /// `None` rather than zero when nothing has resolved yet, because a kind
+    /// that has never fired and a kind that fires and is always ignored are
+    /// opposite facts and must not print the same.
+    pub fn acted_share(&self) -> Option<f64> {
+        let closed = self.acted + self.dismissed + self.elsewhere;
+        (closed > 0).then(|| self.acted as f64 / closed as f64)
+    }
+}
+
+/// Thresholds the inbox uses. Kept in one struct so the daemon can expose them
+/// and the tests can set them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AttentionConfig {
+    pub stall_seconds: i64,
+    pub context_high_percent: f64,
+    pub rate_limit_percent: f64,
+    /// How many refused tool calls in one run before somebody is told.
+    ///
+    /// A guess, like every other number here, and the same answer applies: it
+    /// is reported by `vibeplane attention` per kind, so the first evidence
+    /// that it is wrong is a `dismissed` column nobody can argue with.
+    pub refusals: u64,
+}
+
+impl Default for AttentionConfig {
+    fn default() -> Self {
+        Self {
+            stall_seconds: 600,
+            context_high_percent: 85.0,
+            rate_limit_percent: 90.0,
+            // Low enough to catch a loop early, high enough that one refused
+            // `git push` and a person answering "no" twice do not raise it.
+            refusals: 5,
+        }
+    }
+}
+
+/// Derives the inbox for one run. Pure, so the whole inbox is a map over runs
+/// and a rebuild after a restart produces exactly the same list.
+///
+/// `stall_seconds` is the threshold that governs *this* run — the project's own
+/// where it set one. It is passed in rather than read from `cfg` because the
+/// sweeper that emits the `Stalled` event already resolved it per project, and
+/// the two disagreeing is worse than either being wrong: a repository whose
+/// suite takes forty minutes set `stall_timeout = "45m"`, the event log
+/// correctly said nothing, and the inbox raised a stall at ten minutes anyway.
+pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Vec<AttentionItem> {
+    let mut out = Vec::new();
+    let mut push = |kind: AttentionKind,
+                    title: String,
+                    detail: Option<String>,
+                    options: Vec<Choice>,
+                    actions: Vec<Action>,
+                    since: Timestamp| {
+        // Snoozed per kind: a run stays on the board, and a kind the human has
+        // not dismissed is never hidden by a dismissal of another one.
+        if run.snoozed.hides(&kind) {
+            return;
+        }
+        out.push(AttentionItem {
+            id: AttentionItem::make_id(&run.id, &kind),
+            level: kind.default_level(),
+            kind,
+            run_id: Some(run.id.clone()),
+            project_id: run.project_id.clone(),
+            title,
+            detail,
+            options,
+            actions,
+            request_id: run.blocked_on.as_ref().and_then(|b| b.request_id.clone()),
+            url: None,
+            // A blocked session is already open somewhere; the errand is to
+            // reach *it*, not to start a second one beside it.
+            launch: None,
+            // A run item is about a session, not a piece of work.
+            work_id: None,
+            since,
+        });
+    };
+
+    match &run.state {
+        RunState::Waiting(WaitingFor::Permission) => {
+            let b = run.blocked_on.as_ref();
+            let tool = b.and_then(|b| b.tool.clone()).unwrap_or_default();
+            let title = if tool.is_empty() {
+                "Permission needed".to_string()
+            } else {
+                format!("Permission: {tool}")
+            };
+            // Answerable only when Vibeplane owns the session. Offering
+            // "allow" for a run it cannot reach would be a button that lies.
+            let answerable = b.and_then(|b| b.request_id.as_ref()).is_some();
+            let options = b.map(|b| b.options.clone()).unwrap_or_default();
+            let actions = answerable_actions(answerable, run, &options, WaitingFor::Permission);
+            push(
+                AttentionKind::Permission,
+                title,
+                b.and_then(|b| b.message.clone())
+                    .or_else(|| b.and_then(|b| b.input.as_ref().map(summarise_input))),
+                options,
+                actions,
+                b.map(|b| b.since).unwrap_or(run.last_event_at),
+            );
+        }
+        RunState::Waiting(WaitingFor::Question) => {
+            let b = run.blocked_on.as_ref();
+            // Answerable exactly when there is a protocol request behind it,
+            // which is the same test the permission item uses. `Focus` and
+            // `Attach` would be unusable here: a driven run has no window to
+            // raise and no terminal to attach to.
+            let answerable = b.and_then(|b| b.request_id.as_ref()).is_some();
+            let options = b.map(|b| b.options.clone()).unwrap_or_default();
+            let actions = answerable_actions(answerable, run, &options, WaitingFor::Question);
+            push(
+                AttentionKind::Question,
+                b.and_then(|b| b.message.clone())
+                    .unwrap_or_else(|| "Agent asked a question".to_string()),
+                None,
+                options,
+                actions,
+                b.map(|b| b.since).unwrap_or(run.last_event_at),
+            );
+        }
+        // A blocked state the provider named and this code does not model.
+        // Never answerable from here — there is no protocol request behind it
+        // — so it offers the honest ways to reach the session, exactly as an
+        // observed permission does. Forward-compatible on purpose: a value the
+        // vendor adds next month reaches the inbox without a release.
+        RunState::Waiting(WaitingFor::Other(what)) => push(
+            AttentionKind::Question,
+            format!("Waiting: {what}"),
+            Some(
+                "Claude Code is waiting on a person for something Vibeplane \
+                 does not model. Its own window has the dialog."
+                    .into(),
+            ),
+            Vec::new(),
+            reach(run, &[Action::Open, Action::Snooze]),
+            run.blocked_on
+                .as_ref()
+                .map(|b| b.since)
+                .unwrap_or(run.last_event_at),
+        ),
+        RunState::Failed => push(
+            AttentionKind::RunFailed,
+            "Run failed".to_string(),
+            run.summary.clone(),
+            Vec::new(),
+            reach(run, &[Action::Open, Action::Snooze]),
+            run.last_event_at,
+        ),
+        RunState::Lost => push(
+            AttentionKind::Lost,
+            "Session lost".to_string(),
+            run.summary.clone(),
+            Vec::new(),
+            reach(run, &[Action::Open]),
+            run.last_event_at,
+        ),
+        RunState::Working if run.idle_seconds() > stall_seconds => push(
+            AttentionKind::Stalled,
+            format!("No activity for {} min", run.idle_seconds() / 60),
+            run.summary.clone(),
+            Vec::new(),
+            reach(run, &[Action::Open, Action::Snooze]),
+            run.last_activity_at,
+        ),
+        _ => {}
+    }
+
+    if run.state.is_live()
+        && let Some(pct) = run.totals.context_percent()
+        && pct >= cfg.context_high_percent
+    {
+        push(
+            AttentionKind::ContextHigh,
+            format!("Context {pct:.0}% full"),
+            Some(
+                "Compaction is close; ask the agent to commit or hand off to a fresh session."
+                    .into(),
+            ),
+            Vec::new(),
+            reach(run, &[Action::Open, Action::Snooze]),
+            run.last_event_at,
+        );
+    }
+
+    // A run that is still going and keeps being stopped. Not blocked — a
+    // blocked run is a `permission` item and a person is already being asked —
+    // but *refused*, over and over, by a rule that answers without asking. The
+    // agent carries on regardless, which is the whole problem: nothing else on
+    // any surface distinguishes "the policy is protecting you" from "the policy
+    // is wrong and this run is burning money finding out".
+    if run.state.is_live()
+        && run.refusals >= cfg.refusals
+        && let Some(last) = &run.last_refusal
+    {
+        let by = match last.by.strip_prefix("policy:") {
+            Some(rule) => format!("`{rule}`"),
+            None if last.by == "claude" => "Claude Code's own auto mode".to_string(),
+            None => last.by.clone(),
+        };
+        push(
+            AttentionKind::Refused,
+            format!("{} calls refused in this run", run.refusals),
+            Some(format!(
+                "The last one was {}, refused by {by}. A refused agent does not stop — it \
+                 tries something else — so a rule that is too tight costs a run that \
+                 finishes worse and bills more. Check that the rule means what you meant.",
+                if last.tool.is_empty() {
+                    "a tool call".to_string()
+                } else {
+                    format!("`{}`", last.tool)
+                }
+            )),
+            Vec::new(),
+            reach(run, &[Action::Open, Action::Snooze]),
+            last.at,
+        );
+    }
+
+    // The one thing the status-line shim is installed for, and the one thing it
+    // did not do: the percentage arrived, the reducer dropped it, and no item
+    // was ever produced. A subscription window about to close is worth knowing
+    // before the agent finds out mid-turn.
+    if run.state.is_live()
+        && let Some(pct) = run.totals.rate_limit_percent
+        && pct >= cfg.rate_limit_percent
+    {
+        let window = match run.totals.rate_limit_window.as_deref() {
+            Some("seven_day") => "seven-day",
+            _ => "five-hour",
+        };
+        push(
+            AttentionKind::RateLimit,
+            format!("{window} limit {pct:.0}% used"),
+            Some(
+                "Dispatching more work will run into this. Pause, or switch this \
+                 project to another agent."
+                    .into(),
+            ),
+            Vec::new(),
+            reach(run, &[Action::Open, Action::Snooze]),
+            run.last_event_at,
+        );
+    }
+
+    out
+}
+
+/// Derives the inbox entries for a piece of work.
+///
+/// Work produces items that no run can: a pull request going red hours after
+/// the agent stopped is the clearest example of why Work is the durable unit
+/// and the session is not.
+///
+/// `can_drive` says whether Vibeplane still holds a session it could prompt —
+/// not whether a run row looks alive. Only the first is a reason to offer
+/// anything that talks to an agent.
+pub fn items_for_work(
+    work: &crate::core::work::Work,
+    can_drive: bool,
+    can_resume: bool,
+) -> Vec<AttentionItem> {
+    items_for_work_in(work, can_drive, can_resume, None)
+}
+
+/// The same, told the repository slug so it can build a launch link.
+///
+/// A slug rather than a path, because the link is the sort of thing that ends
+/// up in a notification read on another machine, and `repo=` resolves to
+/// whichever clone the reader actually has.
+pub fn items_for_work_in(
+    work: &crate::core::work::Work,
+    can_drive: bool,
+    can_resume: bool,
+    repo: Option<&str>,
+) -> Vec<AttentionItem> {
+    let mut out = Vec::new();
+    let url = work.pull_request.as_ref().map(|p| p.url.clone());
+    let launch_for = |kind: &AttentionKind| -> Option<String> {
+        let repo = repo?;
+        // Only the kinds that name work somebody is about to do anyway. A
+        // launch link on an item that is merely informational is one more
+        // thing to read.
+        let prompt = match kind {
+            AttentionKind::CiRed => format!(
+                "The checks on pull request #{} are failing. Find out why and fix it.",
+                work.pull_request.as_ref()?.number
+            ),
+            AttentionKind::ChangesRequested => format!(
+                "A reviewer asked for changes on pull request #{}. Read the comments and address them.",
+                work.pull_request.as_ref()?.number
+            ),
+            AttentionKind::GateFailed => format!(
+                "The project's checks did not pass for \"{}\" and the feedback budget is spent. \
+                 Look at what is failing and fix the cause rather than the check.",
+                work.title
+            ),
+            _ => return None,
+        };
+        crate::core::deeplink::open_repo(repo, &prompt)
+    };
+    let mk = |kind: AttentionKind, title: String, detail: Option<String>, actions: Vec<Action>| {
+        // Per kind, for the reason on `Snoozed`: dismissing a red pull request
+        // must not also swallow the gate failure that follows it.
+        if work.snoozed.hides(&kind) {
+            return None;
+        }
+        Some(AttentionItem {
+            launch: launch_for(&kind),
+            url: actions
+                .contains(&Action::OpenPr)
+                .then(|| url.clone())
+                .flatten(),
+            id: AttentionId::new(format!("{}:{}", work.id.as_str(), kind.as_str())),
+            level: kind.default_level(),
+            kind,
+            // Genuinely absent once every run on this work has ended, which is
+            // the ordinary case for a pull request that goes red the next day.
+            run_id: work.current_run().cloned(),
+            project_id: Some(work.project_id.clone()),
+            title,
+            detail,
+            options: Vec::new(),
+            actions,
+            request_id: None,
+            work_id: Some(work.id.clone()),
+            since: work.updated_at,
+        })
+    };
+
+    // Work that was mid-flight when the daemon stopped. The Work came back from
+    // the store; the agent process did not, and nothing will ever move it on
+    // its own — so it has to be said rather than left looking busy for ever.
+    if !can_drive
+        && matches!(
+            work.phase,
+            crate::core::work::Phase::Implement | crate::core::work::Phase::Verify
+        )
+    {
+        // The one thing that actually rescues it, where the agent kept the
+        // conversation. Without `can_resume` this item could only describe the
+        // problem.
+        let mut actions = vec![Action::Open, Action::Snooze];
+        if can_resume {
+            actions.insert(0, Action::Resume);
+        }
+        out.extend(mk(
+            AttentionKind::Interrupted,
+            format!("Interrupted: {}", work.title),
+            Some(match can_resume {
+                true => "The agent is gone and this was still in progress. Its branch and \
+                         worktree are untouched, and its conversation can be picked up \
+                         where it stopped."
+                    .into(),
+                false => "The agent is gone and this was still in progress. Its branch and \
+                          worktree are untouched, but the conversation cannot be continued \
+                          — start the work again when you want it finished."
+                    .to_string(),
+            }),
+            actions,
+        ));
+    }
+
+    // The end of the verified-done loop: the project's checks did not pass and
+    // the budget for arguing about it is spent, so somebody is asked.
+    //
+    // Expensive and stopped is a different question from wrong and stopped: one
+    // asks whether to spend more, the other whether the code is right, so they
+    // are different kinds.
+    // Why the work stopped is read, never inferred. Four unrelated reasons
+    // reach `Phase::Failed`, they want four different answers from a person,
+    // and guessing between them by reading the last gate report announced a
+    // gate that had passed as the thing that failed.
+    match work.stopped.as_ref() {
+        None => {}
+
+        Some(crate::core::work::Stopped::OverBudget { bound, .. }) => {
+            out.extend(mk(
+                AttentionKind::CostSpike,
+                format!("{}: {}", bound, work.title),
+                Some(
+                    "This reached one of the bounds `[budget]` sets. Raise it in \
+                     vibeplane.toml if the work is worth more, or pick it up yourself."
+                        .into(),
+                ),
+                vec![Action::Open, Action::Snooze],
+            ));
+        }
+
+        Some(crate::core::work::Stopped::GateFailed { gate }) => {
+            let report = work.last_gate();
+            let detail = match report {
+                // The failing lines, not the log: the same summary the agent
+                // was handed, so the person and the agent saw the same thing.
+                Some(g) => {
+                    let mut d = g.summary();
+                    let failing: Vec<&str> = g
+                        .commands
+                        .iter()
+                        .filter(|c| !c.passed())
+                        .flat_map(|c| c.failures.iter().map(String::as_str))
+                        .take(5)
+                        .collect();
+                    if !failing.is_empty() {
+                        d.push('\n');
+                        d.push_str(&failing.join("\n"));
+                    }
+                    d
+                }
+                None => format!("{gate} failed."),
+            };
+            // Offering "one more round" only when there is an agent left to
+            // hand it to. A button that cannot do what it says is worse than
+            // no button.
+            let mut actions = vec![Action::Open, Action::Snooze];
+            if work.retryable(can_drive) {
+                actions.insert(0, Action::Retry);
+            }
+            out.extend(mk(
+                AttentionKind::GateFailed,
+                format!("{gate}: {}", work.title),
+                Some(detail),
+                actions,
+            ));
+        }
+
+        Some(crate::core::work::Stopped::ReviewExhausted {
+            step,
+            back_to,
+            findings,
+        }) => {
+            let mut actions = vec![Action::Open, Action::Snooze];
+            if work.retryable(can_drive) {
+                actions.insert(0, Action::Retry);
+            }
+            out.extend(mk(
+                AttentionKind::ReviewExhausted,
+                format!("{step} kept finding things: {}", work.title),
+                Some(format!(
+                    "`{step}` sent the work back to `{back_to}` as many times as the \
+                     pipeline allows and still found this:\n\n{findings}"
+                )),
+                actions,
+            ));
+        }
+
+        Some(crate::core::work::Stopped::Broken { detail }) => {
+            out.extend(mk(
+                AttentionKind::PipelineBroken,
+                format!("the chain stopped: {}", work.title),
+                Some(format!(
+                    "{detail}\n\nThis is a problem with the pipeline rather than with \
+                     the code, so there is nothing to hand back to an agent. \
+                     `vibeplane check` reads the file the same way this did."
+                )),
+                vec![Action::Open, Action::Snooze],
+            ));
+        }
+    }
+
+    // A pipeline that has reached a human step. This is the one inbox item
+    // that means everything went right.
+    if work.phase == crate::core::work::Phase::Human {
+        let step = work
+            .pipeline
+            .as_ref()
+            .and_then(|p| p.role())
+            .unwrap_or("a decision")
+            .to_string();
+        out.extend(mk(
+            AttentionKind::HumanStep,
+            format!("{step}: {}", work.title),
+            work.pipeline.as_ref().map(|p| p.stepper()),
+            vec![Action::Approve, Action::Open, Action::Snooze],
+        ));
+    }
+
+    // Somebody else is editing the same files. Raised before the pull request
+    // rather than by the merge, which is the only point at which it is cheap.
+    if !work.overlaps.is_empty() {
+        let files: Vec<&str> = work
+            .overlaps
+            .iter()
+            .flat_map(|o| o.files.iter().map(String::as_str))
+            .take(5)
+            .collect();
+        let others: Vec<&str> = work.overlaps.iter().map(|o| o.title.as_str()).collect();
+        out.extend(mk(
+            AttentionKind::Conflict,
+            format!(
+                "{} is editing the same files as {}",
+                work.title,
+                others.join(", ")
+            ),
+            Some(format!(
+                "Both are in flight and both are locally correct; they cannot both land \
+                 unchanged.\n\n{}",
+                files.join("\n")
+            )),
+            vec![Action::Open, Action::Snooze],
+        ));
+    }
+
+    let Some(pr) = &work.pull_request else {
+        return out;
+    };
+
+    out.extend(
+        match pr.status.as_str() {
+            "failing" => vec![mk(
+                AttentionKind::CiRed,
+                format!("#{} is red: {}", pr.number, work.title),
+                Some(if pr.failing_checks.is_empty() {
+                    "a check failed".to_string()
+                } else {
+                    pr.failing_checks.join(", ")
+                }),
+                vec![Action::OpenPr, Action::Snooze],
+            )],
+            // `ready_to_merge` is approved *and* green, so nobody is being asked
+            // for anything; it does not belong in a queue of decisions.
+            "ready_for_review" => vec![mk(
+                AttentionKind::PrReady,
+                format!("#{} is ready: {}", pr.number, work.title),
+                None,
+                vec![Action::OpenPr, Action::Snooze],
+            )],
+            "changes_requested" => vec![mk(
+                AttentionKind::ChangesRequested,
+                format!("#{} has review comments: {}", pr.number, work.title),
+                Some(
+                    "A person asked for changes. Read them before asking an agent to act on them."
+                        .into(),
+                ),
+                vec![Action::OpenPr, Action::Snooze],
+            )],
+            _ => Vec::new(),
+        }
+        .into_iter()
+        .flatten(),
+    );
+    out
+}
+
+/// What a blocked run offers: the answers the agent will actually take where
+/// Vibeplane can send one, and otherwise the honest ways to reach the session.
+///
+/// `Focus` raises the editor window that owns a directory and `Attach` hands
+/// the terminal to `claude --resume`. Neither means anything for a run
+/// Vibeplane started over the protocol: it has no window, and its session id
+/// belongs to an agent that may not be Claude Code at all. Offering them there
+/// was a button that lies, which is the one failure a control plane cannot
+/// afford.
+///
+/// The shape of the answer comes from the agent, not from us:
+///
+/// * **Options with ids** — the agent named what it will accept, so `Choose`
+///   leads and a surface renders one control per option. For a *permission*
+///   those options are `allow_once`/`reject_once` and friends, so `Allow` and
+///   `Deny` stay beside `Choose` as the one-key shorthand a person wants at
+///   3 a.m.; for a *question* they are arbitrary answers and a yes/no would be
+///   an invention, so there is none.
+/// * **No options** — a question with free-text expected, which is `Reply`.
+/// * **Nothing answerable** — an observed session, whose dialog belongs to its
+///   own window.
+fn answerable_actions(
+    answerable: bool,
+    run: &Run,
+    options: &[Choice],
+    waiting_for: WaitingFor,
+) -> Vec<Action> {
+    if !answerable {
+        return reach(run, &[Action::Open]);
+    }
+    let choosable = options.iter().any(|o| o.id.is_some());
+    let mut out = Vec::new();
+    if choosable {
+        out.push(Action::Choose);
+    }
+    match waiting_for {
+        // A permission is a grant or a refusal however many ways the agent
+        // spells it, so the shorthand is always meaningful.
+        WaitingFor::Permission => out.extend([Action::Allow, Action::Deny]),
+        // A question is whatever the agent asked. If it offered no options,
+        // the answer is prose.
+        WaitingFor::Question if !choosable => out.push(Action::Reply),
+        _ => {}
+    }
+    out.push(Action::Open);
+    out
+}
+
+/// The ways to reach this run's session, ahead of whatever else is offered.
+///
+/// Empty for a driven run, which has neither a window nor a `claude --resume`
+/// to hand a terminal to.
+fn reach(run: &Run, then: &[Action]) -> Vec<Action> {
+    let mut out = match run.mode {
+        crate::core::run::RunMode::Driven => Vec::new(),
+        _ => vec![Action::Focus, Action::Attach],
+    };
+    out.extend_from_slice(then);
+    out
+}
+
+/// Builds and ranks the whole inbox.
+pub fn rank(mut items: Vec<AttentionItem>) -> Vec<AttentionItem> {
+    items.sort_by_key(|i| std::cmp::Reverse(i.rank()));
+    items
+}
+
+fn summarise_input(v: &serde_json::Value) -> String {
+    if let Some(cmd) = v.get("command").and_then(|c| c.as_str()) {
+        return cmd.to_string();
+    }
+    if let Some(p) = v.get("file_path").and_then(|c| c.as_str()) {
+        return p.to_string();
+    }
+    // `to_string` on arbitrary JSON can be megabytes and is full of non-ASCII:
+    // a byte slice here panicked the receiver that was describing the call.
+    crate::core::text::clip(&v.to_string(), 200)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_level_is_stored_as_serde_spells_it() {
+        // The rule that exists because reconstructing a wire value from `Debug`
+        // has already cost this project two silent bugs. Held against the
+        // serialisation itself, not against a second hand-written list — a
+        // second list is the thing that drifts.
+        for level in [Level::Normal, Level::High, Level::Critical] {
+            let serde = serde_json::to_value(level).unwrap();
+            assert_eq!(
+                serde.as_str(),
+                Some(level.as_str()),
+                "{level:?} is stored under a different name from the one it serialises to"
+            );
+        }
+    }
+
+    #[test]
+    fn work_editing_the_same_files_as_other_work_says_so_before_the_merge() {
+        // The failure isolated checkouts cannot prevent, and are in fact the
+        // reason for: two branches, each locally correct, that cannot both
+        // land. `max_parallel_runs` does not see it — it counts agents, and
+        // the question is which files.
+        let mut w = crate::core::Work::new(
+            crate::core::ProjectId::new("p"),
+            crate::core::WorkKind::Quick,
+            "rename the auth module".into(),
+            "…".into(),
+        );
+        w.phase = crate::core::Phase::Review;
+        w.overlaps = vec![crate::core::Overlap {
+            work_id: crate::core::WorkId::new("other"),
+            title: "add oauth".into(),
+            files: vec!["src/auth.rs".into()],
+        }];
+        let items = items_for_work(&w, false, false);
+        let item = items
+            .iter()
+            .find(|i| i.kind == AttentionKind::Conflict)
+            .expect("an overlap raises a conflict");
+        assert_eq!(item.level, Level::Normal, "nothing has failed yet");
+        assert!(
+            item.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("src/auth.rs")
+        );
+        assert!(item.title.contains("add oauth"), "it names the other work");
+
+        // And no overlap is silence, not an empty warning.
+        w.overlaps.clear();
+        assert!(
+            !items_for_work(&w, false, false)
+                .iter()
+                .any(|i| i.kind == AttentionKind::Conflict)
+        );
+    }
+
+    use super::*;
+    use crate::core::run::{BlockedOn, RunMode};
+    use std::path::PathBuf;
+
+    fn run(mode: RunMode) -> Run {
+        Run::new(
+            crate::core::ids::SessionId::new("s1"),
+            PathBuf::from("/repo"),
+            mode,
+            "claude",
+        )
+    }
+
+    fn items(run: &Run) -> Vec<AttentionItem> {
+        items_for_run(run, &AttentionConfig::default(), 600)
+    }
+
+    #[test]
+    fn a_rate_limit_about_to_close_is_an_inbox_item() {
+        // The status-line shim exists for this number and nothing else read it:
+        // the reducer dropped both windows, no item was ever produced, and the
+        // threshold beside it decided nothing. A feature with a kind, a config
+        // key and a documented trigger, and no code.
+        let mut r = run(RunMode::Observed);
+        r.state = RunState::Working;
+        r.totals.rate_limit_percent = Some(93.0);
+        r.totals.rate_limit_window = Some("seven_day".into());
+
+        let out = items(&r);
+        let item = out
+            .iter()
+            .find(|i| i.kind == AttentionKind::RateLimit)
+            .expect("a limit at 93% is worth knowing about");
+        assert!(item.title.contains("seven-day"), "{}", item.title);
+        assert!(!item.actions.is_empty(), "every item can be acted on");
+
+        // And below the threshold it says nothing.
+        r.totals.rate_limit_percent = Some(40.0);
+        assert!(!items(&r).iter().any(|i| i.kind == AttentionKind::RateLimit));
+    }
+
+    #[test]
+    fn a_run_that_keeps_being_refused_says_so_and_names_the_rule() {
+        // The only kind raised about a session that is neither blocked nor
+        // failed. A refused agent carries on, so "the policy is protecting
+        // you" and "the policy is wrong and this run is burning money finding
+        // out" look identical on every other surface.
+        let mut r = run(RunMode::Observed);
+        r.state = RunState::Working;
+        r.refusals = 6;
+        r.last_refusal = Some(crate::core::run::Refusal {
+            tool: "Bash".into(),
+            by: "policy:Bash(git push *)".into(),
+            at: Timestamp::now(),
+        });
+
+        let item = items(&r)
+            .into_iter()
+            .find(|i| i.kind == AttentionKind::Refused)
+            .expect("six refusals in one run is worth a look");
+        let detail = item.detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("Bash(git push *)"),
+            "it has to name the rule doing the refusing, or there is nothing to act on: {detail}"
+        );
+        assert!(!item.actions.is_empty(), "every item can be acted on");
+
+        // The vendor's own auto mode is named in words rather than left as a
+        // bare token nobody can look up.
+        r.last_refusal = Some(crate::core::run::Refusal {
+            tool: "Bash".into(),
+            by: "claude".into(),
+            at: Timestamp::now(),
+        });
+        let detail = items(&r)
+            .into_iter()
+            .find(|i| i.kind == AttentionKind::Refused)
+            .and_then(|i| i.detail)
+            .unwrap_or_default();
+        assert!(detail.contains("auto mode"), "{detail}");
+
+        // Below the threshold, and on a run that has finished, it says nothing:
+        // one refused `git push` is the policy working, and a run nobody can
+        // affect any more is history rather than a decision.
+        r.refusals = 2;
+        assert!(!items(&r).iter().any(|i| i.kind == AttentionKind::Refused));
+        r.refusals = 9;
+        r.state = RunState::Completed;
+        assert!(
+            !items(&r).iter().any(|i| i.kind == AttentionKind::Refused),
+            "a finished run is not something to act on"
+        );
+    }
+
+    #[test]
+    fn a_project_that_raised_its_stall_threshold_is_not_told_it_stalled() {
+        // The sweeper already resolved the project's own `stall_timeout` before
+        // emitting the event; the inbox derived its item from the machine-wide
+        // number instead. A repository whose suite takes forty minutes was told
+        // every ten minutes that it had stalled, and the event log disagreed.
+        let mut r = run(RunMode::Observed);
+        r.state = RunState::Working;
+        r.last_activity_at = Timestamp::now() - jiff::SignedDuration::from_mins(20);
+
+        let machine_wide = items_for_run(&r, &AttentionConfig::default(), 600);
+        assert!(
+            machine_wide
+                .iter()
+                .any(|i| i.kind == AttentionKind::Stalled)
+        );
+
+        let project_says = items_for_run(&r, &AttentionConfig::default(), 45 * 60);
+        assert!(
+            !project_says
+                .iter()
+                .any(|i| i.kind == AttentionKind::Stalled),
+            "a project that allows forty-five minutes of quiet meant it"
+        );
+    }
+
+    #[test]
+    fn a_driven_run_is_never_offered_a_window_to_raise() {
+        // `Focus` raises the editor window that owns a directory and `Attach`
+        // runs `claude --resume`. A run Vibeplane started over the protocol has
+        // no window, and its session id may not belong to Claude Code at all —
+        // so both were buttons that could not do what they said.
+        let mut r = run(RunMode::Driven);
+        r.state = RunState::Waiting(WaitingFor::Question);
+        r.blocked_on = Some(BlockedOn {
+            waiting_for: WaitingFor::Question,
+            message: Some("which one?".into()),
+            request_id: None,
+            tool: None,
+            input: None,
+            options: vec![],
+            since: Timestamp::now(),
+        });
+
+        let offered = &items(&r)[0].actions;
+        assert!(!offered.contains(&Action::Focus), "{offered:?}");
+        assert!(!offered.contains(&Action::Attach), "{offered:?}");
+
+        // An observed one still gets both: its window is where the answer is.
+        let mut o = run(RunMode::Observed);
+        o.state = r.state.clone();
+        o.blocked_on = r.blocked_on.clone();
+        assert!(items(&o)[0].actions.contains(&Action::Focus));
+    }
+
+    fn blocked(waiting_for: WaitingFor, options: Vec<Choice>) -> BlockedOn {
+        BlockedOn {
+            waiting_for,
+            message: Some("keep the legacy route?".into()),
+            request_id: Some("req-1".into()),
+            tool: None,
+            input: None,
+            options,
+            since: Timestamp::now(),
+        }
+    }
+
+    fn pick(id: &str, label: &str) -> Choice {
+        Choice {
+            id: Some(id.into()),
+            label: label.into(),
+            kind: None,
+        }
+    }
+
+    #[test]
+    fn a_question_is_answered_with_the_answers_the_agent_offered() {
+        // The bug this pins: a question carrying four labelled options was
+        // offered as `allow`/`deny`. The API could already answer it by option
+        // id and two documents promised `1`–`9` would pick one — so the one
+        // question Vibeplane could genuinely answer was reduced to a yes/no
+        // nobody asked, and the options rode along as decoration.
+        let mut r = run(RunMode::Driven);
+        r.state = RunState::Waiting(WaitingFor::Question);
+        r.blocked_on = Some(blocked(
+            WaitingFor::Question,
+            vec![pick("o1", "keep it"), pick("o2", "remove it")],
+        ));
+
+        let item = &items(&r)[0];
+        assert_eq!(item.actions.first(), Some(&Action::Choose), "{item:?}");
+        assert!(
+            !item.actions.contains(&Action::Allow) && !item.actions.contains(&Action::Deny),
+            "a question is not a yes/no: {:?}",
+            item.actions
+        );
+        assert!(item.options.iter().all(|o| o.id.is_some()));
+        assert_eq!(item.request_id.as_deref(), Some("req-1"));
+    }
+
+    #[test]
+    fn a_question_with_no_options_is_answered_in_prose() {
+        let mut r = run(RunMode::Driven);
+        r.state = RunState::Waiting(WaitingFor::Question);
+        r.blocked_on = Some(blocked(WaitingFor::Question, vec![]));
+
+        let offered = &items(&r)[0].actions;
+        assert!(offered.contains(&Action::Reply), "{offered:?}");
+        assert!(!offered.contains(&Action::Choose), "{offered:?}");
+    }
+
+    #[test]
+    fn a_permission_keeps_the_one_key_shorthand_beside_its_options() {
+        // A permission is a grant or a refusal however many ways the agent
+        // spells it, so `allow`/`deny` stay — unlike a question, where a binary
+        // would be Vibeplane inventing an answer.
+        let mut r = run(RunMode::Driven);
+        r.state = RunState::Waiting(WaitingFor::Permission);
+        r.blocked_on = Some(blocked(
+            WaitingFor::Permission,
+            vec![pick("a1", "allow once"), pick("r1", "reject once")],
+        ));
+
+        let offered = &items(&r)[0].actions;
+        assert_eq!(offered.first(), Some(&Action::Choose));
+        assert!(offered.contains(&Action::Allow) && offered.contains(&Action::Deny));
+    }
+
+    #[test]
+    fn a_snooze_never_hides_something_that_arrived_after_it() {
+        // The failure this replaces: one timestamp on the run. Dismissing a
+        // context-window warning also swallowed the permission request that
+        // came five minutes later — the single item the product exists to
+        // deliver, hidden by a gesture about something else, silently.
+        let mut r = run(RunMode::Observed);
+        r.state = RunState::Working;
+        r.totals.reported_context_percent = Some(92.0);
+        let kinds: Vec<_> = items(&r).into_iter().map(|i| i.kind).collect();
+        assert!(kinds.contains(&AttentionKind::ContextHigh));
+
+        r.snoozed.hide(
+            kinds,
+            Timestamp::now() + jiff::SignedDuration::from_hours(1),
+        );
+        assert!(
+            !items(&r)
+                .iter()
+                .any(|i| i.kind == AttentionKind::ContextHigh),
+            "the dismissed kind is hidden"
+        );
+
+        // Now it blocks on a permission. That was never dismissed.
+        r.state = RunState::Waiting(WaitingFor::Permission);
+        r.blocked_on = Some(blocked(WaitingFor::Permission, vec![pick("a1", "allow")]));
+        assert!(
+            items(&r)
+                .iter()
+                .any(|i| i.kind == AttentionKind::Permission),
+            "a kind nobody dismissed is new information"
+        );
+    }
+
+    #[test]
+    fn a_blocked_state_nobody_modelled_still_reaches_the_inbox() {
+        // `claude agents --json` reports `waitingFor` only while a session is
+        // waiting, so every value it carries means a person is being waited
+        // on. Three documented ones — `sandbox request`, `worker request`,
+        // `dialog open` — mapped to `Other`, `needs_human` listed only the two
+        // it recognised, and all three reached the board and never the inbox.
+        // Silently, for as long as they have existed.
+        for what in ["sandbox request", "worker request", "dialog open"] {
+            let mut r = run(RunMode::Observed);
+            r.state = RunState::Waiting(WaitingFor::Other(what.into()));
+            assert!(r.state.needs_human(), "{what} is a person being waited on");
+
+            let out = items(&r);
+            let item = out
+                .first()
+                .unwrap_or_else(|| panic!("{what} raised nothing"));
+            assert!(item.title.contains(what), "{}", item.title);
+            // Never answerable from here: there is no protocol request behind
+            // it, so it offers the honest ways to reach the session.
+            assert!(!item.actions.contains(&Action::Allow), "{:?}", item.actions);
+            assert!(item.actions.contains(&Action::Focus), "{:?}", item.actions);
+        }
+
+        // And `Idle` is still not a person being waited on.
+        let mut idle = run(RunMode::Observed);
+        idle.state = RunState::Waiting(WaitingFor::Idle);
+        assert!(!idle.state.needs_human());
+    }
+
+    #[test]
+    fn a_work_item_with_no_live_run_names_no_run() {
+        // It used to carry `RunId::new("")`, which every surface rendered as a
+        // run and offered actions against. A pull request going red the day
+        // after the agent finished is the ordinary case, not an edge one.
+        let mut w = crate::core::work::Work::new(
+            crate::core::ids::ProjectId::new("p"),
+            crate::core::work::WorkKind::Bug,
+            "fix the flaky login test".into(),
+            "…".into(),
+        );
+        w.phase = crate::core::work::Phase::Human;
+        assert!(w.current_run().is_none());
+
+        let item = &items_for_work(&w, false, false)[0];
+        assert_eq!(item.run_id, None);
+        assert_eq!(item.work_id.as_ref(), Some(&w.id));
+    }
+}

@@ -1,55 +1,91 @@
-[workspace]
-resolver = "3"
-members = [
-    "crates/vibeplane",
-    "crates/vibeplane-domain",
-    "crates/vibeplane-core",
-    "crates/vibeplane-store",
-    "crates/vibeplane-observe",
-    "crates/vibeplane-acp",
-    "crates/vibeplane-git",
-    "crates/vibeplane-gates",
-    "crates/vibeplane-github",
-]
-
-[workspace.package]
+[package]
+name = "vibeplane"
+description = "The local-first control plane for AI coding agents: see every Claude Code session on your machine and know which ones need you."
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hupe1980/vibeplane"
-homepage = "https://vibeplane.dev"
-authors = ["Frank Hübner <hupe@huebner-frank.de>"]
-rust-version = "1.90"
+homepage = "https://hupe1980.github.io/vibeplane"
+authors = ["hupe1980"]
+readme = "README.md"
+keywords = ["ai", "agents", "claude-code", "developer-tools", "orchestration"]
+categories = ["command-line-utilities", "development-tools"]
+# The crate root is the repository root, so the published package is named
+# explicitly rather than taking the site, the scripts and the CI with it.
+include = [
+  "/src",
+  "/ui",
+  "/examples",
+  "/README.md",
+  "/LICENSE-MIT",
+  "/LICENSE-APACHE",
+]
 
-[workspace.dependencies]
-vibeplane-domain = { path = "crates/vibeplane-domain", version = "0.1.0" }
-vibeplane-core = { path = "crates/vibeplane-core", version = "0.1.0" }
-vibeplane-store = { path = "crates/vibeplane-store", version = "0.1.0" }
-vibeplane-observe = { path = "crates/vibeplane-observe", version = "0.1.0" }
-vibeplane-acp = { path = "crates/vibeplane-acp", version = "0.1.0" }
-vibeplane-git = { path = "crates/vibeplane-git", version = "0.1.0" }
-vibeplane-gates = { path = "crates/vibeplane-gates", version = "0.1.0" }
-vibeplane-github = { path = "crates/vibeplane-github", version = "0.1.0" }
+# One crate, at the repository root. `tests/purity.rs` enforces the rule a
+# second one would have: nothing in `src/core/` may reach the outside world.
+[workspace]
 
+[lib]
+name = "vibeplane"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vibeplane"
+path = "src/main.rs"
+
+# The fixture the protocol suite drives: a real agent process speaking real ACP,
+# rather than a vendor's, so `cargo test` needs no subscription and no network.
+[[example]]
+name = "echo_agent"
+
+[dependencies]
+agent-client-protocol = "2.1"
 anyhow = "1"
-thiserror = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "process", "signal", "time", "sync", "fs", "io-util"] }
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
-tower-http = { version = "0.6", features = ["trace"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "json"] }
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+dirs = "7"
+futures-util = "0.3"
+jiff = { version = "0.2", features = ["serde"] }
+# Three calls, none of which touches an agent — the protocol crate owns those
+# process groups: `setsid` to detach the daemon, `kill(pid, 0)` to ask whether
+# an observed process still exists, and `kill(-pid, SIGKILL)` for a timed-out
+# gate and its whole group. Already in the tree via `sqlx` and `dirs`.
+libc = "0.2"
 # The client only ever talks to 127.0.0.1, so no TLS stack is linked at all.
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
-dirs = "7"
-jiff = { version = "0.2", features = ["serde"] }
-futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "json"] }
+thiserror = "2"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "process", "signal", "time", "sync", "fs", "io-util"] }
 toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
 [profile.release]
 lto = "thin"
 strip = true
+
+# Artifacts, checksums, the shell installer and the Homebrew formula. No macOS
+# signing: `dist` signs Windows only, which is why `site/content/docs/install.md`
+# documents `brew` and `curl` rather than the releases page.
+[workspace.metadata.dist]
+cargo-dist-version = "0.32.0"
+ci = ["github"]
+installers = ["shell", "homebrew"]
+# The formula is published here; the tap repository must exist before a release.
+tap = "hupe1980/homebrew-tap"
+# musl rather than gnu so one Linux artifact runs everywhere. `libsqlite3-sys`
+# is C, so a musl build needs a musl C toolchain.
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-musl",
+  "x86_64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+]
+# A pull request plans the release without building it.
+pr-run-mode = "plan"
+install-updater = false
