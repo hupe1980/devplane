@@ -24,7 +24,8 @@ vp *ARGS: build
 
 # ── The loop ─────────────────────────────────────────────────────────────────
 
-# Everything CI runs, in the order it fails cheapest first.
+# Everything CI runs, cheapest failure first — but for this host only. CI also
+# runs it on Linux, which is where a `cfg`-gated import goes unused unnoticed.
 check: fmt-check clippy build test
 
 build:

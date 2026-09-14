@@ -5,7 +5,7 @@
 //! next best thing: it puts the human in front of the session that is asking,
 //! instead of leaving them to find which of twenty windows it was.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use std::path::Path;
 
 /// What was raised, so the caller can say so rather than claiming success
@@ -40,6 +40,7 @@ pub fn focus_path(path: &Path) -> Result<Focused> {
 
 #[cfg(target_os = "macos")]
 fn raise(pid: u32) -> Result<()> {
+    use anyhow::Context;
     // Raising by process id rather than by application name: several windows of
     // the same editor are several processes, and the one holding this session
     // is the only right answer.
