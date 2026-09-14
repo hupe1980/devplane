@@ -19,11 +19,11 @@
     </div>
 
     <div class="install-line">
-      <code>brew install hupe1980/tap/vibeplane</code>
-      <button type="button" class="copy" data-copy="brew install hupe1980/tap/vibeplane" aria-label="Copy the install command">Copy</button>
+      <code>curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh</code>
+      <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh" aria-label="Copy the install command">Copy</button>
     </div>
     <p class="muted small">
-      Windows, or no Homebrew? <a href="{{ get_url(path='/docs/install/') }}">Every install path</a>.
+      macOS (Apple Silicon), Linux and Windows. <a href="{{ get_url(path='/docs/install/') }}">Other install paths</a>.
     </p>
 
     {# A real capture, not a mock. #}
@@ -175,8 +175,8 @@
     <h2>Try it on the machine you already have</h2>
     <p class="lede">One binary. It finds your sessions on the first run.</p>
     <div class="install-line big">
-      <code>brew install hupe1980/tap/vibeplane &amp;&amp; vibeplane ls</code>
-      <button type="button" class="copy" data-copy="brew install hupe1980/tap/vibeplane && vibeplane ls" aria-label="Copy the install command">Copy</button>
+      <code>curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh &amp;&amp; vibeplane ls</code>
+      <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh && vibeplane ls" aria-label="Copy the install command">Copy</button>
     </div>
     <p class="cta-row">
       <a class="btn primary" href="{{ get_url(path='/docs/quickstart/') }}">Quickstart</a>

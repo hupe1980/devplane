@@ -46,19 +46,15 @@ Vibeplane watches all of them, on documented interfaces, and stays out of the wa
 ## 📦 Install
 
 ```sh
-# macOS and Linux
-brew install hupe1980/tap/vibeplane
-
-# any platform
+# a prebuilt binary, any platform
 curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh
 
 # from source, needs Rust 1.90+
 cargo install vibeplane
 ```
 
-On macOS use one of the first two rather than the releases page: the binaries are not notarised, and
-macOS quarantines a file based on what downloaded it — a browser sets that flag and `curl` and
-Homebrew do not.
+On macOS use the installer rather than the releases page: the binaries are not notarised, and macOS
+quarantines a file based on what downloaded it — a browser sets that flag and `curl` does not.
 
 [Install guide →](https://hupe1980.github.io/vibeplane/docs/install/)
 

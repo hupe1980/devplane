@@ -1,5 +1,5 @@
 # Turns a tag into installable artifacts. `dist` owns cross-compilation,
-# checksums, the shell installer and the Homebrew formula; its configuration
+# checksums and the shell installer; its configuration
 # lives in `[workspace.metadata.dist]` in Cargo.toml.
 #
 # A thin shim over the tool. `dist init` replaces this with its own generated
@@ -48,8 +48,6 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-apple-darwin
           # Native ARM rather than a cross toolchain: `libsqlite3-sys` is C, and
           # `musl-gcc` only targets the host architecture.
           - os: ubuntu-24.04-arm

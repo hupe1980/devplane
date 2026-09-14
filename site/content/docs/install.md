@@ -9,27 +9,26 @@ group = "start"
 Vibeplane is a single static binary. It contains the daemon, the CLI, the hook shims and the web
 board — there is no service to run and nothing to configure before it is useful.
 
-## The two paths that are meant for you
+## The path that is meant for you
 
 ```sh
-# macOS and Linux
-brew install hupe1980/tap/vibeplane
-
-# any platform
 curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh
 ```
 
-Both fetch a prebuilt binary. Neither needs a Rust toolchain.
+Fetches a prebuilt binary for macOS (Apple Silicon), Linux and Windows. No Rust toolchain.
 
 > [!IMPORTANT]
-> **On macOS, use one of these two rather than downloading from the releases page.**
+> **On macOS, use this rather than downloading from the releases page.**
 > The binaries are not notarised — the release tooling signs Windows artifacts and has no macOS
 > signing support at all — and macOS applies `com.apple.quarantine` based on *what downloaded the
-> file*. A browser sets it, so a `.tar.gz` you click will be refused by Gatekeeper. `curl` and
-> Homebrew do not set it, so a binary that arrives either way just runs.
+> file*. A browser sets it, so a `.tar.gz` you click will be refused by Gatekeeper. `curl` does not
+> set it, so a binary that arrives that way just runs.
 >
-> The artifacts on the releases page are what these two commands fetch. They are not a third
-> install path, and saying so is more useful than letting you find out.
+> The artifacts on the releases page are what this command fetches. They are not a second install
+> path, and saying so is more useful than letting you find out.
+
+Intel Macs are not covered: the release builds `aarch64-apple-darwin` only. Build from source
+there.
 
 ## From source
 
@@ -101,8 +100,8 @@ vibeplane stop                 # stops the daemon, and the agents it started
 rm -rf ~/.vibeplane
 ```
 
-Then remove the binary the way you installed it — `brew uninstall vibeplane`, `cargo uninstall
-vibeplane`, or deleting it from `~/.local/bin`.
+Then remove the binary the way you installed it — `cargo uninstall vibeplane`, or deleting it from
+`~/.local/bin`.
 
 `disconnect claude` removes exactly the entries `connect` added, leaving the hooks you configured
 yourself alone. `disconnect copilot` deletes `~/.copilot/hooks/vibeplane.json`, which is the whole
