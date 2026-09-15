@@ -274,10 +274,30 @@ fn every_key_a_project_can_set_is_in_the_reference() {
         .collect();
     assert!(!sources.is_empty(), "no configuration reference found");
 
-    let undocumented: Vec<&String> = keys
-        .iter()
-        .filter(|k| !sources.iter().any(|s| s.contains(k.as_str())))
-        .collect();
+    // **A bare substring is not a mention.** This used to ask whether the page
+    // *contained* the key's name, which quietly passes for every short, common
+    // word: a key called `only` was "documented" by the phrase "a ceiling in
+    // dollars only bites", and `max`, `file` and `run` are the same trap. The
+    // reference writes a key in backticks or as a TOML assignment, and nothing
+    // else counts — so a new key has to be written down rather than coincide
+    // with English.
+    let documented = |k: &str| {
+        let forms = [
+            format!("`{k}`"),
+            format!("{k} ="),
+            format!("{k}="),
+            // A section is written as its header, not as a bare key.
+            format!("[{k}]"),
+            format!("[{k}."),
+            format!(".{k}]"),
+            // A nested key is documented by its path: `findings.file`.
+            format!(".{k}`"),
+        ];
+        sources
+            .iter()
+            .any(|s| forms.iter().any(|f| s.contains(f.as_str())))
+    };
+    let undocumented: Vec<&String> = keys.iter().filter(|k| !documented(k)).collect();
     assert!(
         undocumented.is_empty(),
         "a project can set these and the configuration reference never mentions them: {undocumented:?}"
@@ -315,5 +335,162 @@ fn the_release_workflow_builds_every_target_the_manifest_declares() {
     assert_eq!(
         declared_sorted, built,
         "[workspace.metadata.dist] targets and the release.yml build matrix disagree"
+    );
+}
+
+/// Every rule spelling the permissions page calls **refused** is one the gate
+/// actually reports, and every one it shows as working actually works.
+///
+/// The page is the only place a person learns which rule shapes are dead, and
+/// it contradicted itself for a release: one section documented `!` exceptions
+/// as honoured and scoped to their file — which is what the code does — while
+/// the "rules that cannot work" table three screens down said Vibeplane did not
+/// implement them and told the reader to keep such a rule in `settings.json`.
+/// Both sentences were written from the code, at different times, and nothing
+/// read either one afterwards.
+///
+/// So the table is executed. A row is a rule in backticks in the first column;
+/// the check is that `problems()` has something to say about it. The inverse
+/// half matters as much: a rule the page presents as ordinary must be clean,
+/// or the page is teaching a spelling the gate will refuse.
+#[test]
+fn the_refused_rules_table_on_the_site_is_the_one_the_gate_refuses() {
+    use vibeplane::core::policy::{Class, Rule};
+
+    let page = std::fs::read_to_string(repo_root().join("site/content/docs/permissions.md"))
+        .expect("the permissions page");
+
+    // The table that follows the heading, up to the next one.
+    let start = page
+        .find("## Rules that cannot work are refused")
+        .expect("the refused-rules heading");
+    let table = &page[start..];
+    let table = &table[..table.find("\nAnd one **warning**").unwrap_or(table.len())];
+
+    let mut checked = 0;
+    for line in table.lines().filter(|l| l.starts_with("| `")) {
+        let cell = line
+            .trim_start_matches("| ")
+            .split(" |")
+            .next()
+            .unwrap_or("");
+        for raw in cell.split(", ").filter_map(|s| {
+            let s = s.trim();
+            s.strip_prefix('`')
+                .and_then(|s| s.split('`').next())
+                .filter(|s| !s.is_empty())
+        }) {
+            // An allow-side-only refusal is only refused on that side.
+            let class = if cell.contains("auto_allow") || line.contains("auto_allow") {
+                Class::Allow
+            } else {
+                Class::Deny
+            };
+            let Some(rule) = Rule::parse(raw, class) else {
+                continue; // a rule that does not parse at all is refused enough
+            };
+            assert!(
+                !rule.problems().is_empty(),
+                "the permissions page lists `{raw}` as refused, and the gate has \
+                 nothing to say about it — one of the two is out of date"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 6,
+        "only {checked} refused rules were checked; the table's shape changed \
+         and this test stopped reading it"
+    );
+
+    // The other direction, on the spellings the page teaches as ordinary.
+    for (raw, class) in [
+        ("Bash(rm *)", Class::Deny),
+        ("Read(.env)", Class::Deny),
+        ("Edit(src/**)", Class::Allow),
+        ("PowerShell(Remove-Item *)", Class::Deny),
+        ("!Bash(git status *)", Class::Deny),
+        ("mcp__github__get_*", Class::Deny),
+    ] {
+        let rule = Rule::parse(raw, class).expect("a documented rule parses");
+        assert!(
+            rule.problems().is_empty(),
+            "the permissions page teaches `{raw}`, and the gate reports {:?}",
+            rule.problems()
+        );
+    }
+}
+
+/// The release the gate was measured against has one home, and the documents
+/// that quote it agree with it.
+///
+/// It used to live in comments in three source files, in a shell script, and in
+/// four published pages — eight copies of a number that moves every time
+/// somebody runs the differential harness. The internal notes already hold each
+/// figure to a single authority; the *published* tree had no such rule, and a
+/// page claiming a baseline the binary does not hold is the same class of
+/// silent drift, aimed at the reader instead of the author.
+///
+/// `VERIFIED_AGAINST` is the authority. Raising it means running the harness in
+/// full, and this test is what makes the rest follow.
+#[test]
+fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
+    let baseline = vibeplane::core::policy::VERIFIED_AGAINST;
+    let root = repo_root();
+    // The phrasings the published tree actually uses, each followed by the
+    // version. A page that invents a ninth phrasing is invisible here, which is
+    // why the count is asserted too.
+    //
+    // Only the phrasings that state the **harness baseline**. "Built against
+    // Claude Code 2.1.272" is a different fact — the release the product was
+    // developed and read against — and the two are deliberately different
+    // numbers, because one costs a grep and the other costs a signed-in agent
+    // and real money. Collapsing them is the mistake this project already made
+    // once; a test that collapses them teaches the same error with authority.
+    let patterns = [
+        "verified against Claude Code ",
+        "last full run: ",
+        "ran in full against ",
+        "full run, against Claude Code ",
+    ];
+    let mut found = 0;
+    for rel in [
+        "site/content/docs/permissions.md",
+        "site/content/docs/security.md",
+        "site/content/docs/observe.md",
+        "README.md",
+    ] {
+        let path = root.join(rel);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for pat in patterns {
+            let mut from = 0;
+            while let Some(i) = text[from..].find(pat) {
+                let at = from + i + pat.len();
+                let version: String = text[at..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                from = at;
+                // Not every match is a version: "against Claude Code hooks".
+                if version.split('.').count() < 3 {
+                    continue;
+                }
+                let version = version.trim_end_matches('.');
+                assert_eq!(
+                    version, baseline,
+                    "{rel} says the gate was verified against {version}; the binary says \
+                     {baseline}. Raising the baseline means running \
+                     scripts/verify-permissions-diff.sh in full."
+                );
+                found += 1;
+            }
+        }
+    }
+    assert!(
+        found >= 4,
+        "only {found} statements of the gate baseline were found in the published tree; \
+         the phrasing changed and this test stopped reading them"
     );
 }

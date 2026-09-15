@@ -212,7 +212,7 @@ anything. Sessions Vibeplane merely watches are unaffected either way.
 |---|---|---|---|
 | `pull_request` | bool | `false` | open one when the gates pass |
 | `draft` | bool | `true` | open it as a draft |
-| `ready_label` | string | none | which issues `work issues` offers |
+| `ready_label` | string | none | which issues `vibeplane issues --ready` offers |
 
 Off by default because pushing a branch is the first thing Vibeplane does that other people can see.
 
@@ -247,6 +247,7 @@ steps = [
 | `findings.back_to` | an **earlier** role, which must declare a `gate` |
 | `findings.max` | how many times work may go back |
 | `findings.file` | where the reviewer writes them (default `.vibeplane/findings.md`) |
+| `findings.only` | words that make a finding worth returning the work for; empty (the default) means every finding counts |
 | `human` | suspends the chain until `vibeplane work approve` |
 
 A step is one or the other: setting both `role` and `human` is an error, and so is giving a human
@@ -270,4 +271,5 @@ cutting and pasting it.
 | `VIBEPLANE_CLAUDE_BIN` | the `claude` binary, when it is not where Vibeplane looks |
 | `VIBEPLANE_NOTIFY` | `0` turns desktop notifications off |
 | `VIBEPLANE_LOG` | tracing filter, e.g. `vibeplane=debug` |
+| `VIBEPLANE_UI` | serve the board from this file instead of the copy compiled into the binary — for working on the page |
 | `CLAUDE_CONFIG_DIR` | which Claude Code config `connect` writes to |

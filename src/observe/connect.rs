@@ -229,12 +229,22 @@ pub fn connect(
     }
 
     for (event, matcher, is_async) in HOOKS {
-        let path = if matches!(*event, "PermissionRequest" | "PreToolUse") {
-            "policy"
+        // **The two deciding events ride a `command` hook; everything else
+        // rides HTTP.** Claude Code walks past an unreachable HTTP hook
+        // (*"Connection failure: non-blocking error, execution continues"*), so
+        // an HTTP gate is off whenever the daemon is — announced only as a
+        // generic hook error, once per tool call, naming no rule. A daemon is
+        // often not running; a binary at a fixed path is not.
+        //
+        // The cost is a spawn per tool call, measured before it was chosen:
+        // about 26 ms cold, against the ~50 ms this path already had over
+        // loopback. Observation stays on HTTP — it is `async`, and a dropped
+        // event costs history rather than a verdict.
+        let entry = if matches!(*event, "PermissionRequest" | "PreToolUse") {
+            gate_entry(exe, *matcher)
         } else {
-            "hook"
+            hook_entry(base_url, "hook", token, *matcher, *is_async)
         };
-        let entry = hook_entry(base_url, path, token, *matcher, *is_async);
         let list = hooks
             .entry(event.to_string())
             .or_insert_with(|| json!([]))
@@ -486,6 +496,24 @@ fn shell_quote(p: &Path) -> String {
     }
 }
 
+/// The deciding hook: this binary, reading the payload on stdin and answering
+/// on stdout, with no daemon in the path.
+fn gate_entry(exe: &Path, matcher: Option<&str>) -> Value {
+    let mut hook = json!({
+        "type": "command",
+        "command": format!("{} hook", shell_quote(exe)),
+        // Generous against a cold page cache on a spinning disk, and still a
+        // bound. A gate slower than this is one nobody is waiting for: Claude
+        // Code cancels it and prompts the person itself, which is the same
+        // outcome as `undecided` and the right one.
+        "timeout": 5,
+    });
+    if let Some(m) = matcher {
+        hook["matcher"] = json!(m);
+    }
+    json!({ "hooks": [hook] })
+}
+
 fn hook_entry(
     base_url: &str,
     path: &str,
@@ -533,6 +561,16 @@ pub struct ConnectState {
 /// Whether an installed entry for `event` is the blocking, policy-routed shape
 /// the gate needs. An `async` entry, or one pointing at the observation
 /// endpoint, cannot decide anything.
+/// Whether the entries for a deciding event contain a gate that can actually
+/// decide.
+///
+/// Two ways this has been false while reading as installed, and both are here
+/// because each was shipped. An **async** entry cannot answer at all. An
+/// **HTTP** entry answers only while the daemon is up, and Claude Code
+/// documents a connection failure as a non-blocking error that lets the call
+/// through — so a stopped daemon is a machine with no prohibitions, announced
+/// as a generic hook error once per tool call. A gate installed before the move
+/// is stale in exactly the sense this field means: present, and not deciding.
 fn is_live_gate(entries: &Value) -> bool {
     entries
         .as_array()
@@ -543,9 +581,10 @@ fn is_live_gate(entries: &Value) -> bool {
                     .map(|hs| {
                         hs.iter().any(|h| {
                             h.get("async").is_none()
-                                && h.get("url")
-                                    .and_then(|u| u.as_str())
-                                    .map(|u| u.ends_with("/vibeplane/policy"))
+                                && h.get("type").and_then(|t| t.as_str()) == Some("command")
+                                && h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .map(is_shim_command)
                                     .unwrap_or(false)
                         })
                     })
@@ -553,6 +592,159 @@ fn is_live_gate(entries: &Value) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// The result of actually running the gate the way the provider runs it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GateProbe {
+    /// The command the settings file says to run.
+    pub command: Option<String>,
+    /// Whether it answered with a verdict for a call a rule covers.
+    pub answered: bool,
+    /// How long it took, in milliseconds.
+    pub millis: u128,
+    pub error: Option<String>,
+}
+
+/// Runs the installed gate against a call its own rules must refuse, and
+/// reports whether it answered.
+///
+/// **No hook can enforce its own presence** — a timed-out one does not block,
+/// and the vendor's reference says not to count on a stalled one to act as a
+/// gate — so detection is the defence, and it has to *run the thing*. A
+/// settings file containing the right line is evidence about a settings file.
+///
+/// The probe is a `Read` deny on a path nothing will hold, in a temporary
+/// project of its own, so it exercises rule loading, path matching and the
+/// reply shape without depending on what the user has written.
+pub fn probe_gate(settings: &Map<String, Value>) -> GateProbe {
+    let started = std::time::Instant::now();
+    let command = settings
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|e| e.as_array())
+        .and_then(|list| {
+            list.iter().filter(|e| is_ours(e)).find_map(|e| {
+                e.get("hooks")?
+                    .as_array()?
+                    .iter()
+                    .find_map(|h| h.get("command")?.as_str().map(str::to_string))
+            })
+        });
+    let Some(command) = command else {
+        return GateProbe {
+            command: None,
+            answered: false,
+            millis: 0,
+            error: Some("no command gate is installed for PreToolUse".into()),
+        };
+    };
+
+    let probe = match probe_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            return GateProbe {
+                command: Some(command),
+                answered: false,
+                millis: 0,
+                error: Some(e.to_string()),
+            };
+        }
+    };
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": crate::observe::hook::PROBE_SESSION,
+        "cwd": probe.display().to_string(),
+        "tool_name": "Bash",
+        "tool_input": { "command": "cat .vibeplane-probe" },
+    })
+    .to_string();
+
+    let out = run_gate(&command, &payload);
+    std::fs::remove_dir_all(&probe).ok();
+    let millis = started.elapsed().as_millis();
+
+    match out {
+        Err(e) => GateProbe {
+            command: Some(command),
+            answered: false,
+            millis,
+            error: Some(e),
+        },
+        Ok(text) => {
+            let decided = serde_json::from_str::<Value>(text.trim())
+                .ok()
+                .and_then(|v| {
+                    v.get("hookSpecificOutput")?
+                        .get("permissionDecision")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .is_some_and(|d| d == "deny");
+            GateProbe {
+                command: Some(command),
+                answered: decided,
+                millis,
+                error: (!decided)
+                    .then(|| format!("it ran and did not refuse a denied read; it said {text:?}")),
+            }
+        }
+    }
+}
+
+/// A throwaway project whose only rule is the one the probe exercises.
+fn probe_dir() -> std::io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join(format!("vibeplane-probe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join(crate::core::config::CONFIG_FILE),
+        "[project]\nname = \"vibeplane-probe\"\n\n[policy]\nnever_auto = [\"Read(.vibeplane-probe)\"]\n",
+    )?;
+    Ok(dir)
+}
+
+/// Runs the configured command exactly as the provider does: through a shell,
+/// with the payload on stdin.
+fn run_gate(command: &str, payload: &str) -> Result<String, String> {
+    use std::io::Write;
+    let mut child = shell_command(command)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("it will not start: {e}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("no stdin")?
+        .write_all(payload.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "it exited {} — {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("no output")
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+#[cfg(windows)]
+fn shell_command(command: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("cmd");
+    c.arg("/C").arg(command);
+    c
+}
+
+#[cfg(not(windows))]
+fn shell_command(command: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("sh");
+    c.arg("-c").arg(command);
+    c
 }
 
 pub fn inspect(settings: &Map<String, Value>, path: &Path) -> ConnectState {
@@ -705,6 +897,22 @@ mod tests {
             "an async observation hook is not a gate"
         );
 
+        // And an HTTP gate is stale too, for a subtler reason: it decides only
+        // while the daemon is listening, and a connection failure is a
+        // non-blocking error the session never shows. Installed, and off
+        // whenever the daemon is.
+        let http_gate: Map<String, Value> = serde_json::from_str(
+            r#"{"hooks": {"PreToolUse": [{"hooks": [{"type":"http",
+                 "url":"http://127.0.0.1:47831/vibeplane/policy","timeout":5}]}]},
+                "PermissionRequest": [{"hooks": [{"type":"http",
+                 "url":"http://127.0.0.1:47831/vibeplane/policy","timeout":5}]}]}"#,
+        )
+        .unwrap();
+        assert!(
+            inspect(&http_gate, std::path::Path::new("/tmp/settings.json")).gate_is_stale,
+            "an HTTP gate is absent whenever the daemon is"
+        );
+
         connect_test(&mut old, "http://127.0.0.1:47831", "t");
         let state = inspect(&old, std::path::Path::new("/tmp/settings.json"));
         assert!(!state.gate_is_stale, "reconnecting has to actually fix it");
@@ -725,9 +933,18 @@ mod tests {
             if matches!(event.as_str(), "PermissionRequest" | "PreToolUse") {
                 assert!(hook.get("async").is_none(), "{event} must block");
                 assert!(hook.get("timeout").is_some(), "{event} needs a deadline");
+                // **Not HTTP.** Claude Code treats a connection failure as a
+                // non-blocking error and carries on, so an HTTP gate is off
+                // whenever the daemon is — silently. The binary is on disk
+                // either way and decides in its own process.
+                assert_eq!(
+                    hook["type"],
+                    json!("command"),
+                    "{event} must not need a daemon"
+                );
                 assert!(
-                    hook["url"].as_str().unwrap().ends_with("/vibeplane/policy"),
-                    "{event} must reach the endpoint that decides"
+                    hook["command"].as_str().unwrap().ends_with(" hook"),
+                    "{event} must run the binary that decides"
                 );
                 blocking.push(event.clone());
             } else {

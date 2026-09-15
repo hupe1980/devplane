@@ -2,6 +2,189 @@
 
 Notable changes per release. Dates are UTC.
 
+## 0.3.0 — 2026-09-15
+
+The permission gate runs as a `command` hook instead of reaching the daemon, and
+several rules decide differently. **Run `vibeplane connect claude` after
+upgrading**: the old hook entries are installed and do not decide.
+
+### Added
+
+- **GitHub across every project.** The daemon reads every registered project's
+  open issues and pull requests through `gh`, a few seconds after it starts and
+  every five minutes after. Project headings carry `· 4 issues · 2 PRs (1 needs
+  you)`; `g` or the counts themselves open both lists on the board, and
+  `vibeplane issues` and `vibeplane prs` print them. **Nothing is written to
+  GitHub** — every action is a link.
+- **What GitHub is waiting on you for is in the inbox**: an issue assigned to
+  you, a review requested from you, and your own pull request that is red,
+  contested or approved-and-unmerged. Snoozable per project, and always normal
+  urgency, so none of them raises a desktop notification. A draft of your own
+  asks nothing — though a review requested of you, or changes requested on your
+  own, still reaches you through one.
+- **A project GitHub could not be read for keeps its last good numbers** and is
+  marked `stale`, rather than showing them as fresh. One with no GitHub remote
+  is ruled out and asked again an hour later. `doctor` gains a `github` section
+  naming whose `gh` this is, when it last read, and what was ruled out and why.
+- **A client restarts a daemon older than itself.** `/healthz` names the
+  daemon's version; every command compares it to its own and restarts a stale
+  one instead of hitting routes it does not have. Two releases of
+  `vibeplane audit` and `vibeplane attention` answered 404 on machines that had
+  upgraded without restarting.
+- **`vibeplane doctor` runs the gate** with a probe call and reports whether it
+  answered and how fast, instead of checking that a settings line exists. The
+  probe is recorded nowhere.
+- `vibeplane doctor` reports how many decisions are waiting in the spool.
+- **A `gate_down` inbox item**, critical, raised when the daemon's periodic
+  probe finds the installed gate not answering. No hook can enforce its own
+  presence, so a broken one is otherwise indistinguishable from a quiet machine.
+- `vibeplane explain` says why nothing answered: no rules here, rules that will
+  not load, or rules that loaded and did not match. A `vibeplane.toml` that
+  fails to parse is reported with its error.
+- **The board is usable with a screen reader.** Every state glyph has a word
+  beside it, the inbox, board and work sections are lists, every overlay is a
+  dialog that gives focus back to whatever opened it, and there is one live
+  region — polite, and silent unless its sentence changes. Each rule has a
+  test.
+- **`VIBEPLANE_UI` serves the board from a file on disk** instead of the copy
+  compiled into the binary, so working on the page is edit-and-reload rather
+  than rebuild-and-restart. `just ui` is that with the path filled in. The
+  board is also served `Cache-Control: no-store`, so a reload gets the page
+  that is there.
+- **The status line reads the rest of its payload.** The session's model, its
+  Claude Code version, the context window's size, every rate-limit window with
+  its reset time — including the gateway spend limit — the session cost and the
+  lines it changed. `vibeplane show` prints them; the shim is still optional.
+- **`vibeplane doctor` gains a `gate` section**: the Claude Code release the
+  matcher was tested against, and any session observed running a newer one.
+- **`findings.only`** on a pipeline step: words that make a finding worth
+  returning the work for. A findings file with no matching line is *nothing
+  found*. For reporters that grade what they find, such as a spec-driven
+  tool's analyser.
+- `VIBEPLANE_DIFF_AXIS=dialect` runs the `PowerShell`, `Monitor` and `LSP`
+  shapes against this matcher and prints a checklist to put to a running Claude
+  Code. It is not a measurement and says so in its output.
+
+### Changed
+
+- **The gate decides in its own process and no longer needs the daemon.** An
+  unreachable HTTP hook is a non-blocking error Claude Code walks past, so
+  every rule was inert whenever the daemon was stopped. `vibeplane doctor`
+  reports an HTTP gate as out of date.
+- **A decision taken with no daemon is spooled** to
+  `~/.vibeplane/pending-decisions.jsonl` and filed at the next start. Capped at
+  20 000 rows, oldest dropped. Observations are not spooled.
+- **A glob in a command's operands reaches a path deny.** `Read(.env)` now
+  stops `cat .en?`, `cat .env*`, `head -c3 .en?` and `cat .en[v]`. A wildcard
+  still cannot reach a name beginning with `.` unless the pattern spells the
+  dot, so `cat *` is not one of them. Allow rules never grant on a glob.
+- **`fmt` and `pr` read their operands**, so a `Read` deny covers them.
+- **An allow rule must cover at least one part of a command.** A rule matching
+  nothing no longer approves a command made entirely of read-only parts, and no
+  verdict names a rule that did not fire.
+- **`vibeplane explain` reads `~/.vibeplane/policy.toml`** as well as the
+  project's rules, so it answers for the gate rather than for half of it.
+- **`vibeplane.toml` is found without git.** A directory with no repository
+  above it is governed by the file sitting in it. Inside a repository the root
+  still wins.
+- **`vibeplane work issues` is gone; `vibeplane issues --ready` replaces it.**
+  `--label` and `--cwd` imply `--ready`.
+- **GitHub Copilot's `powershell` tool is reported as `PowerShell`**, not
+  `Bash`, so its commands are matched as PowerShell rather than parsed by a
+  POSIX shell parser.
+- `vibeplane check` labels an exception `except` rather than by the list it
+  subtracts from.
+- A rule is suggested for every command tool, not only `Bash`.
+
+- **A closed editor tab is no longer a lost session.** Reconciliation marked
+  every live run whose process had gone as `lost`, which is *critical*. On the
+  development machine that made **twelve of the inbox's thirteen items**
+  sessions nobody had touched for two days. One observation — the process is
+  not there — now has two readings, and the reducer picks from what the run was
+  doing: working or being asked something is a loss; idle or just-announced is
+  a session that ended.
+- **The board is the working set again.** A run counted as in play if it had
+  *ever* reported, so a machine with one live session showed **thirty-eight
+  rows**, twenty-five of them editor tabs reading "waiting for a prompt" since
+  Tuesday. A session that is working or asking is always listed; everything
+  else is listed while it is still today's business (six hours) and counted
+  afterwards. `--all` lists them, and the counter now says "quiet" rather than
+  "dormant (never reported)", which is what it now means.
+- **The numbers above the board partition it.** `38 sessions · 1 working ·
+  0 need you · 25 idle` alongside `10 dormant` double-counted ten sessions and
+  left twelve failed ones unmentioned. `working + need you + idle + failed +
+  quiet` is now the total, on the board page as well as the CLI, and failed
+  sessions are printed when there are any.
+
+### Fixed
+
+- **A `PowerShell` rule resolves command names to their cmdlet and ignores
+  case**, as Claude Code does. `never_auto = ["PowerShell(Remove-Item *)"]`
+  stopped `Remove-Item` and let `rm`, `del`, `ri`, `rd` and `erase` through.
+- **A `Bash(…)` rule reaches the `Monitor` tool** and **a `Read(…)` rule reaches
+  `LSP`** — both named in Claude Code's rule-format table, neither reached
+  before.
+- **A `Read` deny reaches a path inside a git revision**, so `Read(.env)`
+  refuses `git show HEAD:.env`.
+- A path rule on a reader is told to become a `Read` rule rather than an `Edit`
+  rule.
+- `Monitor(npm *)` is reported as a rule that cannot work instead of being
+  accepted and never consulted.
+- The permissions page said `!` exceptions were not implemented while another
+  section documented them. The refused-rules table is now checked against the
+  gate by `cargo test`.
+- **"No activity for 519 min" about a session the board showed as busy.** The
+  quiet clock ran for any session the roster had given a status to — but
+  without hooks installed there is no channel carrying activity, so the clock
+  was measuring the installation rather than the session. A stall is now raised
+  only for a session that has produced activity at least once.
+- **A review requested from any team counted as a review requested from you.**
+  `a && b || c` grouped as `(a && b) || c`, so every team's request matched —
+  and a pull request's `reviewRequests` cannot say which teams you belong to
+  anyway. GitHub is asked instead, once per pass, with `review-requested:@me`,
+  which it resolves against your actual team membership.
+- **A lost session could not be dismissed.** It was critical, offered `open`
+  only — `focus` and `attach` have nothing to reach once the process is gone —
+  and had no snooze. It now carries what the run was doing rather than
+  overwriting that with "process not found at startup", and can be snoozed.
+- **The gate's own probe could reach the board.** The hook declines to report
+  the probe call `doctor` and the daemon's timer make, but the daemon did not
+  decline to *file* one — so a probe spooled by an earlier build arrived at
+  the next start as a `vibeplane-probe-<pid>` project, a working session and
+  two audit rows. Both receivers now drop the probe session, and a start
+  forgets any rows an earlier build left.
+- **Every value the board prints is escaped.** Session names, branch names,
+  pull request titles and permission options come from repositories and from
+  models, and eighteen of the page's 149 interpolation sites did not escape
+  them. No exploitable path was found. Two tests now enforce it — one reading
+  the page, one rendering it with an `<img onerror=...>` in every field a
+  person reads.
+- **Run rows written by an earlier build were dropped from the board** when a
+  later build added a field to the run's totals — fourteen sessions on the
+  development machine, reported only by `doctor`. The totals now default any
+  field a row lacks.
+- **`stalled` fired for sessions that had never reported.** Without hooks a
+  roster row emits no activity, so its idle clock measured nothing and every
+  long turn on a machine that had not run `connect` was a stall. A stall is
+  now raised only for a session that reports.
+- Two sessions of one project with the same short name printed the same
+  label twice on `vibeplane ls`; a repeated label now falls back to the id.
+- The protocol conformance tests wrote their fixture's session files into the
+  repository they ran from — 847 of them — instead of a scratch directory.
+- **`vibeplane inbox` failed to decode any item without a session** — a piece of
+  work whose runs have ended, which is the ordinary case for a pull request
+  going red later. The command printed a decoding error instead of the inbox.
+- **`max_runtime` never fired.** The elapsed time was computed through a string
+  round trip that fell back to zero.
+- An inbox row with no subject and no action no longer prints a bare `· `.
+- `cli::run` uses the `Cli` it is given instead of re-parsing the process's own
+  argv, so a test can drive a subcommand without a subprocess.
+
+### Removed
+
+- The `/vibeplane/policy` and `/vibeplane/copilot/gate` endpoints. The process
+  that enforces a verdict records it through `/vibeplane/decided`.
+
 ## 0.2.0 — 2026-09-15
 
 Several permission rules now decide differently, after checking them against a

@@ -277,6 +277,34 @@ countchk() { # label  actual  file-glob-in-concepts  regex-with-one-capture
     printf 'MISS %s: corpus says %s, concepts/ says %s\n' "$1" "$2" "$claimed"; fail=1
   fi
 }
+# ── Which tools a rule reaches: the vendor's own rule-format table (D182) ─────
+chk "cc: a Bash rule also governs Monitor"        claude-code/tools-reference.md '\`Bash\(npm run \*\)\`[^|]*\| Bash, Monitor'
+chk "cc: a Read rule also governs LSP"            claude-code/tools-reference.md '\`Read\(~/secrets/\*\*\)\`[^|]*\| Read, Grep, Glob, LSP'
+chk "cc: an Edit rule governs three writers"      claude-code/tools-reference.md '\`Edit\(/src/\*\*\)\`[^|]*\| Edit, Write, NotebookEdit'
+chk "cc: PowerShell has its own rule syntax"      claude-code/tools-reference.md '\`PowerShell\(Get-ChildItem \*\)\`'
+chk "cc: Monitor runs a command in background"    claude-code/tools-reference.md 'Runs a command in the background'
+chk "cc: LSP reads files through a language server" claude-code/tools-reference.md 'code intelligence from a running language server'
+# ── PowerShell is a dialect, not a spelling of Bash (D183) ────────────────────
+chk "ps: aliases are canonicalized first"         claude-code/permissions.md 'aliases are canonicalized before matching'
+chk "ps: a cmdlet rule matches its aliases"       claude-code/permissions.md 'matches \`gci\`, \`ls\`, and \`dir\`'
+chk "ps: matching ignores case"                   claude-code/permissions.md 'Matching is case-insensitive'
+chk "ps: compound commands split like Bash"       claude-code/permissions.md 'A rule must match every subcommand'
+chk "ps: rules use the Bash rule shape"           claude-code/permissions.md 'PowerShell permission rules use the same shape as Bash rules'
+# ── What a path deny does NOT reach, stated by the vendor ─────────────────────
+chk "cc: a deny misses an interpreter's own reads" claude-code/permissions.md 'like a Python or Node script that opens files itself'
+# ── Spec-driven development: the category's analysers report and never decide (D178) ─
+chk "sdd: speckit analyze is non-destructive"     sdd/spec-kit-analyze.md 'non-destructive cross-artifact consistency and quality analysis'
+chk "sdd: speckit analyze writes nothing"         sdd/spec-kit-analyze.md 'Do \*\*not\*\* modify any files'
+chk "sdd: its findings carry a severity"          sdd/spec-kit-analyze.md 'CRITICAL'
+chk "sdd: speckit converge appends, never fails"  sdd/spec-kit-converge.md 'append any remaining unbuilt work as new tasks to tasks.md'
+chk "sdd: the extension hook has no executor"     sdd/spec-kit-analyze.md 'leave condition evaluation to the HookExecutor implementation'
+chk "sdd: a mandatory hook is optional: false"    sdd/spec-kit-analyze.md 'optional: false'
+chk "sdd: the analyser calls itself read-only"    sdd/spec-kit-analyze.md 'STRICTLY READ-ONLY'
+chk "sdd: requirements carry stable ids"          sdd/spec-kit-analyze.md 'FR-###.*SC-###|FR-/SC- identifiers'
+# ── AGENTS.md: the one context file every vendor reads (D179) ────────────────
+chk "agents.md: stewarded by the AAIF"            standards/agents-md.md 'Agentic AI Foundation'
+chk "agents.md: over 60k repositories"            standards/agents-md.md 'over.{0,40}60k'
+chk "agents.md: it mandates no structure"         standards/agents-md.md 'the agent simply parses the text you provide'
 if [ -d ../concepts ]; then
   acp_agents=$(python3 -c 'import json;print(len(json.load(open("acp/registry.json"))["agents"]))' 2>/dev/null || echo '?')
   # Every spelling these notes use for the registry size, and only those: a loose pattern

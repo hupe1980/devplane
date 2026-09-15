@@ -50,6 +50,14 @@ pub enum RunState {
     Lost,
 }
 
+/// How long after its last activity a session is still part of the working set.
+///
+/// A working day, near enough: a session you touched this morning is still
+/// yours to finish, and one quiet since yesterday is an editor tab. It is a
+/// judgement rather than a measurement, which is why it is one constant with
+/// one name rather than a setting nobody would tune.
+pub const IN_PLAY_SECONDS: i64 = 6 * 3600;
+
 impl RunState {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -129,7 +137,12 @@ pub struct Refusal {
 /// the only documented per-request channel; the context gauge is derived from
 /// the last request's input tokens rather than a running sum, because the
 /// context window is a level, not a total.
+// `default` on the struct: a run row is a projection of the event log, kept so
+// the board is on screen before a replay finishes, and a field added in a later
+// build must not make every row an earlier build wrote unreadable — fourteen
+// were, silently, until `doctor` was asked.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RunTotals {
     pub cost_usd: f64,
     pub input_tokens: u64,
@@ -160,9 +173,19 @@ pub struct RunTotals {
     /// implemented.
     #[serde(default)]
     pub rate_limit_percent: Option<f64>,
-    /// `five_hour` or `seven_day`: which window is the one under pressure.
+    /// `five_hour`, `seven_day` or `spend_limit`: which window is under
+    /// pressure.
     #[serde(default)]
     pub rate_limit_window: Option<String>,
+    /// When that window resets, in Unix epoch seconds — what makes the
+    /// percentage actionable.
+    #[serde(default)]
+    pub rate_limit_resets_at: Option<i64>,
+    /// Lines the session added and removed, as the provider counts them.
+    #[serde(default)]
+    pub lines_added: u64,
+    #[serde(default)]
+    pub lines_removed: u64,
 }
 
 impl RunTotals {
@@ -232,6 +255,14 @@ pub struct Run {
     pub worktree: Option<PathBuf>,
     pub branch: Option<String>,
     pub model: Option<String>,
+    /// The Claude Code release **this session** is running.
+    ///
+    /// Only the status line reports it, so it is absent without the shim. It
+    /// exists for one question: the gate is tested against a single release
+    /// ([`crate::core::policy::VERIFIED_AGAINST`]), and a session ahead of it
+    /// is governed by rules nobody has measured against it. `doctor` says so.
+    #[serde(default)]
+    pub claude_version: Option<String>,
     /// OpenTelemetry's `app.entrypoint`: which surface started this session.
     pub entrypoint: Option<String>,
     /// A name the provider gave the session, when it has one.
@@ -284,6 +315,21 @@ pub struct Run {
     /// live status arrives, the run is dormant and stays out of the way.
     #[serde(default)]
     pub reporting: bool,
+    /// Whether this session has ever produced an event that *is* activity — a
+    /// hook, a telemetry record, a turn of a driven run.
+    ///
+    /// Not the same question as [`reporting`](Self::reporting), and conflating
+    /// the two put a contradiction on the screen: the roster sets `reporting`
+    /// when it gives a session a status, so a machine with no hooks installed
+    /// had a session the board showed as `busy` and the inbox showed as
+    /// *"No activity for 519 min"*. There had been no activity because there
+    /// was no channel carrying any — which is a fact about the installation,
+    /// not about the session.
+    ///
+    /// The quiet clock only means something for a session that would have said
+    /// so, which is what this flag answers.
+    #[serde(default)]
+    pub activity_seen: bool,
     /// Which of this run's inbox items are hidden, and until when.
     ///
     /// Per *kind*, not per run: "not this one, not now" is a thought about the
@@ -325,6 +371,7 @@ impl Run {
             worktree: None,
             branch: None,
             model: None,
+            claude_version: None,
             entrypoint: None,
             name: None,
             pid: None,
@@ -341,6 +388,7 @@ impl Run {
             summary: None,
             stall_noticed: false,
             reporting: false,
+            activity_seen: false,
             snoozed: Default::default(),
         }
     }
@@ -355,17 +403,28 @@ impl Run {
         (Timestamp::now() - self.last_activity_at).get_seconds()
     }
 
-    /// Whether this run belongs in the working set: something is happening, or
-    /// somebody is being asked for something.
+    /// Whether this run belongs in the working set: something is happening,
+    /// somebody is being asked for something, or it went wrong or quiet
+    /// recently enough to still be today's business.
     ///
-    /// The distinction matters at scale. Twenty-two rows that all look equally
-    /// alive answer no question at all; five that are actually in play answer
-    /// the only one the board exists for.
+    /// The distinction matters at scale, and getting it wrong is not a matter
+    /// of taste. This read `|| self.reporting`, which is true of every session
+    /// the roster ever gave a status to — so a machine with one session in
+    /// play showed **thirty-eight rows**, twenty-five of them editor tabs
+    /// reading "waiting for a prompt" since Tuesday. A board that lists the
+    /// inventory answers no question at all.
+    ///
+    /// Two things never age out, because both are somebody waiting: a session
+    /// asking for something, and a session doing something. Everything else —
+    /// idle, failed, lost — is today's business for [`IN_PLAY_SECONDS`] and
+    /// history afterwards, counted rather than listed (`--all` lists them).
     pub fn is_active(&self) -> bool {
-        self.state.needs_human()
-            || matches!(self.state, RunState::Working | RunState::Starting)
-            || matches!(self.state, RunState::Failed | RunState::Lost)
-            || self.reporting
+        if self.state.needs_human() || matches!(self.state, RunState::Working | RunState::Starting)
+        {
+            return true;
+        }
+        let recent = self.idle_seconds() < IN_PLAY_SECONDS;
+        recent && (self.reporting || matches!(self.state, RunState::Failed | RunState::Lost))
     }
 
     /// How far through its own plan the agent says it is, as `done/total`.

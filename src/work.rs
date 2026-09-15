@@ -517,12 +517,14 @@ pub(crate) async fn tally_all(
                 (c + r.totals.cost_usd, t + r.totals.turns as u32)
             })
     };
-    let elapsed = (jiff::Timestamp::now() - started)
-        .to_string()
-        .parse::<jiff::SignedDuration>()
-        .ok()
-        .map(|d| d.unsigned_abs())
-        .unwrap_or(std::time::Duration::ZERO);
+    // `duration_since`, not a `Span` round-tripped through its own `Display`.
+    // The old spelling formatted the difference as ISO-8601 and re-parsed it,
+    // and the failure arm was `Duration::ZERO` — so anything that made the
+    // round trip fail turned `max_runtime` into a budget that never fires,
+    // silently, which is the one way a guard must not be wrong.
+    let elapsed = jiff::Timestamp::now()
+        .duration_since(started)
+        .unsigned_abs();
     // Kept on the row: runs age off the board after a week and the bill does
     // not stop being true.
     if let Some(w) = state.works.lock().await.get_mut(id) {

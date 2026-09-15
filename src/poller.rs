@@ -135,7 +135,11 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
                     // the repository that owns it.
                     let dir = r.worktree.as_deref().unwrap_or(&r.cwd);
                     let limit = state.policy.stall_seconds(dir).unwrap_or(cfg.stall_seconds);
-                    matches!(r.state, crate::core::RunState::Working)
+                    // Only a session on a channel that carries activity can be
+                    // seen to go quiet — the same question the inbox asks, for
+                    // the reason both must ask it the same way.
+                    r.activity_seen
+                        && matches!(r.state, crate::core::RunState::Working)
                         && !r.stall_noticed
                         && r.idle_seconds() > limit
                 })
@@ -159,12 +163,7 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
         // included, and the project's own stall threshold. A notifier reading a
         // different list announces things the inbox does not show, and stays
         // silent about things it does.
-        let works: Vec<_> = state.works.lock().await.values().cloned().collect();
-        let drivable = state.drivable_runs().await;
-        let inbox = {
-            let w = state.world.lock().await;
-            w.inbox_with(&works, &drivable, &|dir| state.policy.stall_seconds(dir))
-        };
+        let inbox = state.current_inbox().await;
         notifier.sync(&inbox);
 
         // The inbox measuring itself. Every item asking right now is recorded
@@ -245,6 +244,156 @@ pub async fn pull_requests(state: Shared) {
                 state.notify_changed();
             }
         }
+    }
+}
+
+/// How often every project's forge is read. Slowly: an issue assigned to you
+/// five minutes late is still an issue assigned to you, and `gh` is two
+/// process spawns per project.
+const FORGE_EVERY: Duration = Duration::from_secs(300);
+/// How many of each a project contributes. Past this the board shows a count,
+/// and a count is the honest shape of four hundred open issues anyway.
+const FORGE_LIMIT: u32 = 100;
+
+/// Reads GitHub for every registered project: open issues, open pull
+/// requests, and which of them are waiting on the person whose `gh` this is.
+///
+/// Soon after start, then on a slow timer. Never writes. A project whose
+/// directory has no GitHub remote is asked once and then skipped for the life
+/// of the daemon; a `gh` that is not logged in stops the whole pass and is
+/// reported in `doctor` rather than retried every second.
+pub async fn forge_watch(state: Shared) {
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    loop {
+        forge_once(&state).await;
+        tokio::time::sleep(FORGE_EVERY).await;
+    }
+}
+
+async fn forge_once(state: &Shared) {
+    let projects: Vec<crate::core::Project> =
+        state.world.lock().await.projects().cloned().collect();
+    if projects.is_empty() {
+        return;
+    }
+
+    // Whose forge. Asked once, from a directory that is certainly there.
+    let viewer = {
+        let known = state.forge.lock().await.viewer.clone();
+        match known {
+            Some(v) => Some(v),
+            None => match crate::github::viewer_login(&std::env::temp_dir()).await {
+                Ok(v) => {
+                    let mut f = state.forge.lock().await;
+                    f.viewer = Some(v.clone());
+                    f.error = None;
+                    Some(v)
+                }
+                Err(e) => {
+                    let mut f = state.forge.lock().await;
+                    f.error = Some(e.to_string());
+                    f.last_poll_at = Some(jiff::Timestamp::now());
+                    tracing::info!(error = %e, "forge: gh is not usable");
+                    return;
+                }
+            },
+        }
+    };
+
+    // Which pull requests GitHub says are waiting for this person's review —
+    // one search for the whole machine, because whether a team request reaches
+    // them is a fact only the server has (see `review_requested_of_me`). A
+    // failure costs that one signal and nothing else, so it is logged rather
+    // than allowed to fail the pass.
+    let asked_of_me = match crate::github::review_requested_of_me(&std::env::temp_dir()).await {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::info!(error = %e, "forge: could not search for review requests");
+            Default::default()
+        }
+    };
+
+    // A project ruled out stays ruled out for an hour, not forever: adding a
+    // GitHub remote is a thing people do, and a daemon restart is not a
+    // reasonable thing to require of them for it.
+    let now = jiff::Timestamp::now();
+    let skip: std::collections::BTreeSet<_> = {
+        let f = state.forge.lock().await;
+        f.skip
+            .keys()
+            .filter(|id| f.should_skip(id, now))
+            .cloned()
+            .collect()
+    };
+    let before = state.forge.lock().await.counts();
+    for p in projects {
+        if skip.contains(&p.id) {
+            continue;
+        }
+        let issues = crate::github::open_issues(&p.root, FORGE_LIMIT).await;
+        let prs = crate::github::open_pull_requests(&p.root, FORGE_LIMIT).await;
+        let mut f = state.forge.lock().await;
+        match (issues, prs) {
+            (Ok(issues), Ok(prs)) => {
+                let slug = p.repo_slug();
+                f.projects.insert(
+                    p.id.clone(),
+                    crate::core::ProjectForge {
+                        project_id: p.id.clone(),
+                        repo: slug.clone(),
+                        fetched_at: jiff::Timestamp::now(),
+                        issues: issues
+                            .iter()
+                            .map(|i| i.to_forge(viewer.as_deref()))
+                            .collect(),
+                        pull_requests: prs
+                            .iter()
+                            .map(|r| {
+                                // Server-resolved, because team membership is
+                                // not in the row (see `review_requested_of_me`).
+                                let asked = slug.as_deref().is_some_and(|s| {
+                                    asked_of_me.contains(&(s.to_string(), r.number))
+                                });
+                                r.to_forge(viewer.as_deref(), asked)
+                            })
+                            .collect(),
+                        error: None,
+                    },
+                );
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                let msg = e.to_string();
+                if crate::github::is_permanent(&msg) {
+                    // Not a GitHub project. Say so once, then stop asking.
+                    tracing::debug!(project = %p.name, error = %msg, "forge: no GitHub remote");
+                    f.skip.insert(p.id.clone(), (msg, jiff::Timestamp::now()));
+                    f.projects.remove(&p.id);
+                } else if let Some(existing) = f.projects.get_mut(&p.id) {
+                    // Keep what was known; a network blip must not empty the board.
+                    existing.error = Some(msg);
+                } else {
+                    f.projects.insert(
+                        p.id.clone(),
+                        crate::core::ProjectForge {
+                            project_id: p.id.clone(),
+                            repo: p.repo_slug(),
+                            fetched_at: jiff::Timestamp::now(),
+                            issues: vec![],
+                            pull_requests: vec![],
+                            error: Some(msg),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let after = {
+        let mut f = state.forge.lock().await;
+        f.last_poll_at = Some(jiff::Timestamp::now());
+        f.counts()
+    };
+    if before != after {
+        state.notify_changed();
     }
 }
 
@@ -353,5 +502,55 @@ pub async fn reconcile_at_startup(state: &Shared) {
             tracing::warn!(error = %e, "could not persist reconciliation");
         }
         let _ = state.tx.send(crate::core::Frame::Event(env));
+    }
+}
+
+/// Runs the installed gate on a slow timer and remembers whether it answered.
+///
+/// **A broken gate and a quiet machine are the same thing in the event log** —
+/// no hook arrives either way — so this is the only mechanism that can tell
+/// them apart without a person. `vibeplane doctor` asks the same question and
+/// only helps whoever runs it; this puts the answer in the inbox.
+///
+/// Slow on purpose. The probe spawns a process, and a gate that broke four
+/// minutes ago is caught soon enough: the failure it is looking for is a
+/// binary that moved or a settings file somebody edited, neither of which
+/// happens between two tool calls. The first check is immediate, because the
+/// interesting moment is a daemon starting on a machine whose gate has been
+/// broken since the last reboot.
+pub async fn gate_watch(state: Shared) {
+    const EVERY: Duration = Duration::from_secs(240);
+    loop {
+        let settings = crate::observe::connect::settings_path()
+            .ok()
+            .and_then(|p| crate::observe::connect::read_settings(&p).ok());
+        if let Some(settings) = settings {
+            // The probe spawns a process and reads a file, so it goes on the
+            // blocking pool rather than holding a reactor thread that agent
+            // sessions are also using.
+            let probe =
+                tokio::task::spawn_blocking(move || crate::observe::connect::probe_gate(&settings))
+                    .await;
+            if let Ok(probe) = probe {
+                // Not installed is not the same as broken. Somebody who has
+                // never run `connect` is being told that by every other
+                // surface, and an inbox item saying the gate is down would be
+                // the product complaining that it has not been set up.
+                let down = (probe.command.is_some() && !probe.answered).then(|| {
+                    probe
+                        .error
+                        .unwrap_or_else(|| "it did not refuse a denied read".into())
+                });
+                let mut held = state.gate_down.lock().await;
+                if *held != down {
+                    match &down {
+                        Some(why) => tracing::error!(why, "the permission gate is not answering"),
+                        None => tracing::info!("the permission gate is answering again"),
+                    }
+                }
+                *held = down;
+            }
+        }
+        tokio::time::sleep(EVERY).await;
     }
 }

@@ -48,7 +48,7 @@ pub struct Template {
     pub hint: Option<String>,
 }
 
-/// Everything the project offers, in the order [`resolve`] would pick it.
+/// Everything the project offers, in the order a dispatch would pick it.
 ///
 /// Deduplicated by name, first wins — so a portable prompt shadowing a skill of
 /// the same name appears once, as the one that will actually run. A picker that

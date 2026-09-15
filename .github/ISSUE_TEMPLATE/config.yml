@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://hupe1980.github.io/vibeplane
+    about: Install, quickstart, CLI reference, permissions, security.

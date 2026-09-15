@@ -77,6 +77,16 @@ pub enum AttentionKind {
     ChangesRequested,
     /// A pull request is green and waiting for a person.
     PrReady,
+    /// An issue on one of the person's projects is assigned to them.
+    ///
+    /// The forge kinds: nothing about a session, everything about the
+    /// repository. Raised from the polled GitHub state, never from a hook,
+    /// and answered by opening a browser — this tool writes nothing to GitHub
+    /// from an inbox row.
+    IssueAssigned,
+    /// A review was requested from the person on a pull request they did not
+    /// open through Vibeplane.
+    ReviewRequested,
     /// Another piece of work in this repository is editing the same files.
     ///
     /// The one kind here that fires while everything is going *right*, and it
@@ -111,6 +121,20 @@ pub enum AttentionKind {
     ///
     /// [arXiv:2608.02670]: https://arxiv.org/abs/2608.02670
     Refused,
+    /// **The gate is installed and not answering**, so no rule in any project
+    /// is being enforced.
+    ///
+    /// The only kind that is about the machine rather than about a run, and the
+    /// only one raised by Vibeplane about *itself*. It exists because no hook
+    /// can enforce its own presence: a hook that times out does not block, and
+    /// one whose binary has moved is a non-blocking error the agent walks past.
+    /// Detection is the whole defence, and detection nobody performs is none —
+    /// `vibeplane doctor` only helps the person who runs it.
+    ///
+    /// Critical, which no other kind is by default except a lost run. Everything
+    /// else in this list is one piece of work going wrong; this is every
+    /// prohibition on the machine being inert while the board says all is well.
+    GateDown,
 }
 
 impl AttentionKind {
@@ -128,12 +152,15 @@ impl AttentionKind {
             AttentionKind::CiRed => "ci_red",
             AttentionKind::ChangesRequested => "changes_requested",
             AttentionKind::PrReady => "pr_ready",
+            AttentionKind::IssueAssigned => "issue_assigned",
+            AttentionKind::ReviewRequested => "review_requested",
             AttentionKind::Conflict => "conflict",
             AttentionKind::Interrupted => "interrupted",
             AttentionKind::HumanStep => "human_step",
             AttentionKind::ReviewExhausted => "review_exhausted",
             AttentionKind::PipelineBroken => "pipeline_broken",
             AttentionKind::Refused => "refused",
+            AttentionKind::GateDown => "gate_down",
         }
     }
 
@@ -148,6 +175,9 @@ impl AttentionKind {
             | AttentionKind::PipelineBroken
             | AttentionKind::CiRed => Level::High,
             AttentionKind::Lost => Level::Critical,
+            // The board looks fine and nothing is enforced. There is no louder
+            // thing this product can have to say.
+            AttentionKind::GateDown => Level::Critical,
             AttentionKind::Interrupted => Level::High,
             // Normal, not high: the pipeline stopped exactly where the project
             // asked it to. An expected pause is not an alarm.
@@ -158,6 +188,10 @@ impl AttentionKind {
             | AttentionKind::ContextHigh
             | AttentionKind::RateLimit
             | AttentionKind::PrReady
+            // The forge kinds are normal too: a review asked of you and an
+            // issue put on your plate are work, not incidents.
+            | AttentionKind::IssueAssigned
+            | AttentionKind::ReviewRequested
             // Normal on purpose. Nothing has failed and nothing is blocked:
             // this is information that is cheap now and expensive at the merge,
             // and a kind that interrupts for something nobody has to answer
@@ -202,6 +236,8 @@ pub enum Action {
     Open,
     /// Open the pull request in a browser. The item carries its `url`.
     OpenPr,
+    /// Open the issue in a browser. The item carries its `url`.
+    OpenIssue,
     /// Release a pipeline held at a declared human step.
     Approve,
     /// Hand the failures back to the agent once more, past the bound the
@@ -229,6 +265,7 @@ impl Action {
             Action::Attach => "attach",
             Action::Open => "open",
             Action::OpenPr => "open_pr",
+            Action::OpenIssue => "open_issue",
             Action::Approve => "approve",
             Action::Retry => "retry",
             Action::Resume => "resume",
@@ -438,15 +475,6 @@ impl Default for AttentionConfig {
     }
 }
 
-/// Derives the inbox for one run. Pure, so the whole inbox is a map over runs
-/// and a rebuild after a restart produces exactly the same list.
-///
-/// `stall_seconds` is the threshold that governs *this* run — the project's own
-/// where it set one. It is passed in rather than read from `cfg` because the
-/// sweeper that emits the `Stalled` event already resolved it per project, and
-/// the two disagreeing is worse than either being wrong: a repository whose
-/// suite takes forty minutes set `stall_timeout = "45m"`, the event log
-/// correctly said nothing, and the inbox raised a stall at ten minutes anyway.
 /// The rule that would have answered the call this run is blocked on.
 ///
 /// The **exact** call, never a pattern — see `AttentionItem::suggested_rule`.
@@ -463,6 +491,48 @@ fn rule_that_would_answer(run: &Run) -> Option<String> {
     Some(format!("{tool}({spec})"))
 }
 
+/// The one item that is about the machine rather than about a run.
+///
+/// Raised when the daemon last ran the installed gate and it did not refuse a
+/// call its own rule denies. There is nothing to offer but the diagnostic: the
+/// fix is reconnecting or reinstalling, and a button that silently rewrote
+/// somebody's `settings.json` from an inbox row is not something this product
+/// does.
+pub fn gate_down_item(why: &str) -> AttentionItem {
+    AttentionItem {
+        // Stable, so the attention log records one open item rather than one
+        // per poll for as long as the gate stays broken.
+        id: AttentionId::from("gate-down".to_string()),
+        kind: AttentionKind::GateDown,
+        level: AttentionKind::GateDown.default_level(),
+        run_id: None,
+        project_id: None,
+        title: "The permission gate is installed and not answering".into(),
+        detail: Some(format!(
+            "No rule in any project is being enforced right now.\n{why}\n\n\
+             Run `vibeplane doctor` for the command it tried, then \
+             `vibeplane connect claude` to reinstall it."
+        )),
+        options: Vec::new(),
+        actions: Vec::new(),
+        request_id: None,
+        url: None,
+        launch: None,
+        work_id: None,
+        suggested_rule: None,
+        since: jiff::Timestamp::now(),
+    }
+}
+
+/// Derives the inbox for one run. Pure, so the whole inbox is a map over runs
+/// and a rebuild after a restart produces exactly the same list.
+///
+/// `stall_seconds` is the threshold that governs *this* run — the project's own
+/// where it set one. It is passed in rather than read from `cfg` because the
+/// sweeper that emits the `Stalled` event already resolved it per project, and
+/// the two disagreeing is worse than either being wrong: a repository whose
+/// suite takes forty minutes set `stall_timeout = "45m"`, the event log
+/// correctly said nothing, and the inbox raised a stall at ten minutes anyway.
 pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Vec<AttentionItem> {
     let mut out = Vec::new();
     let mut push = |kind: AttentionKind,
@@ -577,12 +647,22 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
         RunState::Lost => push(
             AttentionKind::Lost,
             "Session lost".to_string(),
+            // What it was doing, which is the only useful thing left. The
+            // reason ("process not found at startup") is the diagnosis and
+            // used to overwrite the evidence.
             run.summary.clone(),
             Vec::new(),
-            reach(run, &[Action::Open]),
+            // Snooze included, because the alternative is a *critical* item
+            // that offers no way to act and no way to dismiss it: the process
+            // is gone, so `focus` and `attach` have nothing to reach.
+            reach(run, &[Action::Open, Action::Snooze]),
             run.last_event_at,
         ),
-        RunState::Working if run.idle_seconds() > stall_seconds => push(
+        // Only a session on a channel that carries activity can be seen to go
+        // quiet. Without one the idle clock measures the installation, not the
+        // session — and said so: "No activity for 519 min" about a run the
+        // board was showing as busy, on a machine with no hooks installed.
+        RunState::Working if run.activity_seen && run.idle_seconds() > stall_seconds => push(
             AttentionKind::Stalled,
             format!("No activity for {} min", run.idle_seconds() / 60),
             run.summary.clone(),
@@ -1204,6 +1284,26 @@ mod tests {
     }
 
     #[test]
+    fn a_session_that_has_never_reported_cannot_stall() {
+        // Without hooks a roster row emits no activity, so "no activity for
+        // 77 min" was raised about a session that was busy the whole time.
+        // Silence is a signal only from something that speaks.
+        let mut r = run(RunMode::Observed);
+        r.state = RunState::Working;
+        // The roster gave it a status — so it is real, and on the board — but
+        // no hook, telemetry record or turn has ever arrived for it.
+        r.reporting = true;
+        r.activity_seen = false;
+        r.last_activity_at = Timestamp::now() - jiff::SignedDuration::from_hours(3);
+        assert!(
+            !items_for_run(&r, &AttentionConfig::default(), 600)
+                .iter()
+                .any(|i| i.kind == AttentionKind::Stalled),
+            "a quiet clock on a channel that carries nothing measures the installation"
+        );
+    }
+
+    #[test]
     fn a_project_that_raised_its_stall_threshold_is_not_told_it_stalled() {
         // The sweeper already resolved the project's own `stall_timeout` before
         // emitting the event; the inbox derived its item from the machine-wide
@@ -1211,6 +1311,8 @@ mod tests {
         // every ten minutes that it had stalled, and the event log disagreed.
         let mut r = run(RunMode::Observed);
         r.state = RunState::Working;
+        r.reporting = true;
+        r.activity_seen = true;
         r.last_activity_at = Timestamp::now() - jiff::SignedDuration::from_mins(20);
 
         let machine_wide = items_for_run(&r, &AttentionConfig::default(), 600);

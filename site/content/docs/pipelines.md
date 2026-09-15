@@ -144,6 +144,48 @@ Templates substitute `{title}`, `{task}`, `{role}` and `{findings}`. A template 
 `{findings}` would silently drop them and the loop would spend its whole budget re-reviewing the same
 code, so they are appended instead.
 
+## Spec-driven development
+
+Vibeplane knows nothing about `.specify/`, `openspec/` or Kiro's steering files — three third-party
+layouts to track, for no capability `[gates]` and `[pipelines]` do not already have. It contributes
+the part the category leaves out: **every spec tool ships a consistency checker and none of them
+decides.** Spec Kit's `/speckit.analyze` is **"STRICTLY READ-ONLY"** and closes with a
+*recommendation*; `/speckit.converge` appends the unbuilt work to `tasks.md` rather than failing.
+
+**If your spec tool has a CLI, drift is already a gate.** OpenSpec has one:
+
+```toml
+[gates]
+check = ["openspec validate --strict", "pnpm test -- --run"]
+```
+
+A red drift check behaves exactly like a red test: the lines go back to the same session, bounded by
+`max_feedback_rounds`, and the work never reaches `review`.
+
+**An analyser that runs inside a session reports in prose and grades it.** A step that returns the
+work for a `LOW` terminology note spends its budget on style, so `findings.only` says which grades
+stop it:
+
+```toml
+[pipelines.feature]
+steps = [
+  { role = "implement", agent = "claude", prompt = "speckit.implement", gate = "check" },
+  { role = "drift", agent = "claude", prompt = "speckit.analyze",
+    findings = { back_to = "implement", max = 2, only = ["CRITICAL", "HIGH"] } },
+  { human = "merge" },
+]
+```
+
+Matching is per line and case-insensitive; a findings file with no matching line is **nothing
+found**. The words are yours — `CRITICAL` and `HIGH` are Spec Kit's vocabulary, and Vibeplane holds
+no table of anyone's severity names.
+
+**The phases are a pipeline.** `specify → plan → tasks → implement` is a chain with sign-off between
+the steps, so declare it as one and use your own prompts — a Spec Kit command, a Skill, a file in
+`.vibeplane/prompts/`. What Vibeplane adds is the gate between the steps, the human step that
+suspends until somebody releases it, the cursor that survives a crash, and the row in
+`vibeplane audit` saying why each step proceeded.
+
 ## What `check` refuses
 
 ```sh

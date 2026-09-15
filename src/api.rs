@@ -5,12 +5,11 @@
 //! no gain. Everything under `/api` and `/vibeplane` requires the bearer token
 //! from `~/.vibeplane/token`.
 
-use crate::core::Verdict;
-use crate::core::event::{Event, Source};
+use crate::core::event::Source;
 use crate::core::ids::RunId;
 use crate::core::run::RunMode;
 use crate::daemon::Shared;
-use crate::observe::hook::{HookPayload, PermissionResponse, PreToolUseResponse};
+use crate::observe::hook::HookPayload;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -28,7 +27,12 @@ pub fn router(state: Shared) -> Router {
         // Receivers. The paths carry the `/vibeplane/` marker that `connect`
         // uses to recognise its own entries when disconnecting.
         .route("/vibeplane/hook", post(hook))
-        .route("/vibeplane/policy", post(policy))
+        // Where the `command` hook files what it has **already decided**.
+        // This endpoint does not decide: the process that enforced a verdict is
+        // the authority for what was enforced, and a second evaluation here
+        // could disagree with it — writing down a rule other than the one that
+        // fired is the same failure as naming no rule at all.
+        .route("/vibeplane/decided", post(decided))
         .route("/vibeplane/statusline", post(statusline))
         .route("/vibeplane/otel/v1/logs", post(otel_logs))
         .route("/vibeplane/otel/v1/metrics", post(otel_metrics))
@@ -41,7 +45,6 @@ pub fn router(state: Shared) -> Router {
         // — an HTTP `preToolUse` hook there fails open — so the gate arrives
         // through the shim rather than from the agent directly.
         .route("/vibeplane/copilot/hook", post(copilot_hook))
-        .route("/vibeplane/copilot/gate", post(copilot_gate))
         // Telemetry arrives in batches and axum's default body limit is 2 MB,
         // which a busy session can exceed. A rejected batch is not an error
         // anybody sees: the exporter drops it, the receiver is never called,
@@ -72,14 +75,22 @@ pub fn router(state: Shared) -> Router {
         .route("/api/work/{id}/resume", post(resume_work))
         .route("/api/projects", get(projects))
         .route("/api/projects/trust", post(trust_project))
+        .route("/api/projects/{id}/snooze", post(snooze_project))
         .route("/api/issues", post(list_issues))
+        .route("/api/forge", get(forge))
         .route("/api/decisions", get(decisions))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/attention", get(attention))
         .route("/api/shutdown", post(shutdown))
         .route("/api/stream", get(stream))
-        .route("/healthz", get(|| async { "ok" }))
+        // Open, and it names the version: a client checks it before every
+        // command and restarts a daemon older than itself, because a stale
+        // daemon answers 404 to routes this client believes exist.
+        .route(
+            "/healthz",
+            get(|| async { concat!("ok ", env!("CARGO_PKG_VERSION")) }),
+        )
         .route("/", get(index))
         .with_state(state)
 }
@@ -196,10 +207,31 @@ macro_rules! guard {
 /// Deliberately unauthenticated: it is a static page that contains no data and
 /// cannot fetch any without the token the user's browser holds. Gating it would
 /// only mean the page could not render the message explaining that.
+/// The board.
+///
+/// Embedded, so the binary is the whole product and the page works on a laptop
+/// with no network. `VIBEPLANE_UI` points at the file on disk instead, which is
+/// the difference between a one-second edit-reload loop and a rebuild plus a
+/// daemon restart for every line of CSS. Development only: it reads a file the
+/// user named, so it is opt-in by an environment variable rather than a
+/// setting, and it falls back to the embedded copy rather than failing.
 async fn index() -> impl IntoResponse {
+    const EMBEDDED: &str = include_str!("../ui/index.html");
+    let body = match std::env::var_os("VIBEPLANE_UI") {
+        Some(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            tracing::warn!(path = ?path, error = %e, "VIBEPLANE_UI is set and unreadable; serving the embedded page");
+            EMBEDDED.to_string()
+        }),
+        None => EMBEDDED.to_string(),
+    };
     (
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../ui/index.html"),
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // The page is the binary's own; a stale one is a debugging session
+            // spent on a bug that was fixed.
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
     )
 }
 
@@ -239,6 +271,124 @@ async fn focus_run(
 // Receivers
 // ---------------------------------------------------------------------------
 
+/// Records a decision the `command` hook has already enforced, and ingests the
+/// observation that came with it.
+///
+/// **The verdict arrives; it is not recomputed.** The hook decides in its own
+/// process so that a stopped daemon cannot silently disable the gate, which
+/// leaves this endpoint one job: write down what happened. Re-deciding here
+/// would put a rule in the log that did not fire, one process further out: the
+/// daemon's cached rules can be seconds behind the file the hook just read, so
+/// the log could name a rule that did not fire.
+///
+/// The same envelope is what `~/.vibeplane/pending-decisions.jsonl` holds, so
+/// a decision taken with no daemon and one taken with a daemon are written down
+/// by the same code.
+async fn decided(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let started = Instant::now();
+    let Ok(env) = serde_json::from_str::<crate::core::DecidedEnvelope>(&body) else {
+        return (StatusCode::OK, Json(json!({}))).into_response();
+    };
+    record_decided(&state, env).await;
+    state
+        .store
+        .record_channel("policy", started.elapsed().as_micros() as u64, None)
+        .await
+        .ok();
+    (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// One envelope, written down. Shared by the live path and the spool drain.
+pub async fn record_decided(state: &Shared, env: crate::core::DecidedEnvelope) {
+    // The gate is run against a probe call by `doctor` and by the daemon's own
+    // timer, and the hook already declines to report those. Declined *here*
+    // too, because an older hook binary — or a spool written by one — can
+    // still deliver it, and it arrived once: a `vibeplane-probe-<pid>` project
+    // with a working session on the board and two rows in the audit log.
+    if env.session == crate::observe::hook::PROBE_SESSION {
+        return;
+    }
+    let run = RunId::new(env.session.clone());
+    let subject = env.subject.clone();
+
+    if let Some(rule) = env.rule.as_deref() {
+        let mut d = crate::core::Decision::new(
+            crate::core::Actor::Policy,
+            "agent:tool.use",
+            subject,
+            &env.verdict,
+        )
+        .because(if env.late {
+            // Saying so matters: a reader comparing the log against a session
+            // transcript would otherwise find the rows in the wrong order and
+            // conclude the log was unreliable.
+            format!("{rule} (filed late: no daemon was running)")
+        } else {
+            rule.to_string()
+        })
+        .for_run(&run);
+        if let Some(at) = env.at {
+            d = d.at(at);
+        }
+        state.record(d).await;
+    }
+
+    // The observation half, so the board shows the call whether or not a rule
+    // had an opinion about it — and so a question reaches the inbox the instant
+    // it is asked rather than six seconds later on a notification.
+    let cwd = env
+        .payload
+        .as_ref()
+        .and_then(|p| p.get("cwd"))
+        .and_then(|v| v.as_str())
+        .map(std::path::PathBuf::from);
+    let mut events = Vec::new();
+    if let Some(payload) = env.payload.clone()
+        && let Ok(p) = serde_json::from_value::<HookPayload>(payload)
+    {
+        events.extend(crate::observe::hook::to_events(&p).events);
+    }
+    // A permission nobody had a rule about is a run that is **blocked**, and
+    // the inbox learns it from here. A decided one is not: it never reached a
+    // person. The gate reports which it was; this only writes it down.
+    match env.verdict.as_str() {
+        "allow" | "deny" => events.push(crate::core::event::Event::PermissionDecided {
+            tool: env.tool.clone(),
+            decision: env.verdict.clone(),
+            by: env
+                .rule
+                .as_deref()
+                .map(|r| format!("policy:{r}"))
+                .unwrap_or_else(|| "policy".into()),
+        }),
+        _ if env.blocked => events.push(crate::core::event::Event::Blocked {
+            waiting_for: crate::core::event::WaitingFor::Permission,
+            message: Some(env.subject.clone()),
+            // An observed session's prompt belongs to Claude Code's own dialog;
+            // Vibeplane can show it, not answer it.
+            request_id: None,
+            options: Vec::new(),
+        }),
+        _ => {}
+    }
+    for event in events {
+        state
+            .ingest(
+                run.clone(),
+                Source::Hook,
+                event,
+                cwd.clone(),
+                RunMode::Observed,
+            )
+            .await;
+    }
+}
+
 /// The lifecycle hook. Answers immediately and does the work after replying:
 /// these hooks are configured `async`, but a receiver that blocks is still a
 /// receiver that can make Claude feel slow if that ever changes.
@@ -264,6 +414,10 @@ async fn hook(State(state): State<Shared>, headers: HeaderMap, body: String) -> 
         }
     };
 
+    if payload.session_id == crate::observe::hook::PROBE_SESSION {
+        // A probe of the gate, never a session. See `record_decided`.
+        return (StatusCode::OK, Json(json!({}))).into_response();
+    }
     let outcome = crate::observe::hook::to_events(&payload);
     let run = RunId::new(payload.session_id.clone());
     for event in outcome.events {
@@ -283,213 +437,6 @@ async fn hook(State(state): State<Shared>, headers: HeaderMap, body: String) -> 
         .await
         .ok();
     (StatusCode::OK, Json(json!({}))).into_response()
-}
-
-/// The `PreToolUse` half of the gate: prohibitions only, in every mode.
-///
-/// `PreToolUse` fires before every tool call whether or not it needs
-/// permission, which makes it the only event that reaches a session in **auto
-/// mode**. There a classifier reviews actions instead of the user, routine
-/// calls are approved with no prompt, and `PermissionRequest` — which fires
-/// only when Claude Code is about to ask — never happens at all. Without this
-/// handler a project's `never_auto` rule would simply not run in that mode.
-///
-/// It answers with a prohibition or with nothing, and never with an allow: a
-/// `PreToolUse` allow skips Claude Code's permission system altogether,
-/// classifier included, so a rule meaning "no need to ask me" would switch off
-/// a safety layer somebody chose.
-async fn pre_tool_use(
-    state: Shared,
-    payload: HookPayload,
-    tool: String,
-    input: serde_json::Value,
-    started: Instant,
-) -> axum::response::Response {
-    let verdict = match payload.cwd.as_deref() {
-        Some(dir) => state.policy.restrictive(dir, &tool, &input),
-        None => state.policy.restrictive_global_only(&tool, &input),
-    };
-
-    let response = match &verdict {
-        Verdict::Deny { rule } => {
-            PreToolUseResponse::deny(format!("denied by Vibeplane policy rule {rule}"))
-        }
-        Verdict::Ask { rule } => {
-            PreToolUseResponse::ask(format!("{rule} asks that a person decides this"))
-        }
-        // Everything else is Claude Code's own business. Saying nothing is the
-        // whole point: the call goes through the permission flow it would have
-        // gone through with no hook installed at all.
-        _ => PreToolUseResponse::undecided(),
-    };
-
-    let run = RunId::new(payload.session_id.clone());
-    let micros = started.elapsed().as_micros() as u64;
-    let st = state.clone();
-    // The lifecycle event this hook used to carry as an async observation still
-    // has to be recorded: it is how a tool call reaches the board, and how an
-    // `AskUserQuestion` reaches the inbox the instant it is asked.
-    let observed = crate::observe::hook::to_events(&payload).events;
-    let cwd_for_events = payload.cwd.clone();
-    let recorded = verdict.rule().map(|rule| {
-        crate::core::Decision::new(
-            crate::core::Actor::Policy,
-            "agent:tool.use",
-            describe(&tool, &input),
-            verdict.as_str(),
-        )
-        .because(rule)
-        .for_run(&run)
-    });
-    tokio::spawn(async move {
-        if let Some(d) = recorded {
-            st.record(d).await;
-        }
-        for event in observed {
-            st.ingest(
-                run.clone(),
-                Source::Hook,
-                event,
-                cwd_for_events.clone(),
-                RunMode::Observed,
-            )
-            .await;
-        }
-        st.store.record_channel("policy", micros, None).await.ok();
-    });
-    (StatusCode::OK, Json(response)).into_response()
-}
-
-/// The permission gate.
-///
-/// One of the two synchronous hooks, and the instant signal that a session is
-/// blocked: the `permission_prompt` notification waits six seconds and, in a
-/// terminal, defers again on every keystroke.
-///
-/// This is the half that fires only when a human was going to be asked anyway,
-/// so it carries the full verdict — an allow here skips a prompt that was
-/// already coming, rather than a safety layer. It answers in one of two ways
-/// and never waits for a human:
-///
-/// * a rule matches — allow or deny, the session continues, nothing reaches the
-///   inbox;
-/// * no rule matches — reply with no decision, so Claude Code prompts exactly
-///   as it would have, and record that the run is blocked so the inbox knows.
-async fn policy(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let started = Instant::now();
-
-    let Ok(payload) = serde_json::from_str::<HookPayload>(&body) else {
-        return (StatusCode::OK, Json(PermissionResponse::undecided())).into_response();
-    };
-
-    let tool = payload.tool_name.clone().unwrap_or_default();
-    let input = payload
-        .tool_input
-        .clone()
-        .unwrap_or(serde_json::Value::Null);
-
-    // Two events arrive here and they are answered differently.
-    //
-    // `PermissionRequest` fires only when Claude Code is about to ask a human,
-    // so the full verdict applies: an allow here skips a prompt that was going
-    // to be shown anyway.
-    //
-    // `PreToolUse` fires before every tool call in every mode. It is the only
-    // way a prohibition reaches a session in **auto mode**, where a classifier
-    // approves routine actions silently and no permission prompt — and so no
-    // `PermissionRequest` hook — ever happens. It may carry a prohibition and
-    // never a grant: a `PreToolUse` allow would skip the classifier too.
-    if payload.hook_event_name == "PreToolUse" {
-        return pre_tool_use(state, payload, tool, input, started).await;
-    }
-    // Resolved for the directory this session is working in: the rule that
-    // allows a test command in one repository has no business in another.
-    //
-    // Falling back to `"."` would be the *daemon's* directory, letting one
-    // repository's rules answer another repository's session. There is no
-    // honest project answer without a directory, so the machine-wide rules
-    // decide alone.
-    let verdict = match payload.cwd.as_deref() {
-        Some(dir) => state.policy.evaluate(dir, &tool, &input),
-        None => state.policy.evaluate_global_only(&tool, &input),
-    };
-
-    let run = RunId::new(payload.session_id.clone());
-    let (response, event) = match &verdict {
-        Verdict::Allow { rule } => (
-            PermissionResponse::allow(),
-            Event::PermissionDecided {
-                tool: tool.clone(),
-                decision: "allow".into(),
-                by: format!("policy:{rule}"),
-            },
-        ),
-        Verdict::Deny { rule } => (
-            PermissionResponse::deny(format!("denied by Vibeplane policy rule {rule}")),
-            Event::PermissionDecided {
-                tool: tool.clone(),
-                decision: "deny".into(),
-                by: format!("policy:{rule}"),
-            },
-        ),
-        // A project said a person decides this one, whatever else matches. The
-        // reply is the same as `Undecided` — Claude Code prompts exactly as it
-        // would have — but the rule is recorded, because "nobody had an
-        // opinion" and "the project asked to be asked" are different facts.
-        Verdict::Ask { .. } | Verdict::Undecided => (
-            PermissionResponse::undecided(),
-            Event::Blocked {
-                waiting_for: crate::core::event::WaitingFor::Permission,
-                message: Some(describe(&tool, &input)),
-                // An observed session's prompt belongs to Claude Code's own
-                // dialog; Vibeplane can show it, not answer it.
-                request_id: None,
-                options: Vec::new(),
-            },
-        ),
-    };
-
-    // Reply first, record second: the session is waiting on this response.
-    let micros = started.elapsed().as_micros() as u64;
-    let st = state.clone();
-    let cwd = payload.cwd.clone();
-    // A rule that decided on somebody's behalf is the thing the log exists for:
-    // "auto-approved" is not an answer, "auto-approved by `Bash(pnpm test *)`"
-    // is. An undecided request is not a decision — Claude Code's own dialog
-    // makes that one, and the human answering it is not something we saw.
-    let recorded = verdict.rule().map(|rule| {
-        crate::core::Decision::new(
-            crate::core::Actor::Policy,
-            "agent:tool.use",
-            describe(&tool, &input),
-            verdict.as_str(),
-        )
-        .because(rule)
-        .for_run(&run)
-    });
-    tokio::spawn(async move {
-        if let Some(d) = recorded {
-            st.record(d).await;
-        }
-        st.ingest(run, Source::Hook, event, cwd, RunMode::Observed)
-            .await;
-        st.store.record_channel("policy", micros, None).await.ok();
-    });
-
-    (StatusCode::OK, Json(response)).into_response()
-}
-
-/// A one-line description of what is being asked for.
-fn describe(tool: &str, input: &serde_json::Value) -> String {
-    match crate::core::policy::rule_content(tool, input) {
-        Some(c) => format!("{tool}: {}", crate::core::text::clip(&c, 120)),
-        None => tool.to_string(),
-    }
 }
 
 async fn statusline(
@@ -576,80 +523,6 @@ struct CopilotEvent {
     event: Option<String>,
 }
 
-/// The Copilot permission gate.
-///
-/// Reached through the `vibeplane hook --gate copilot` shim rather than
-/// directly, because a `command` hook is the only handler type Copilot
-/// fails **closed** on — an HTTP one falls through to the default permission
-/// flow on any error, which is a prohibition that evaporates exactly when the
-/// daemon is under load.
-///
-/// It answers a prohibition or nothing, never a grant: the same restraint as
-/// Claude Code's `PreToolUse`, and for the same reason.
-async fn copilot_gate(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    use crate::observe::copilot::GateReply;
-    if !authorised(&state, &headers, None) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({}))).into_response();
-    }
-    let started = Instant::now();
-    let Ok(payload) = serde_json::from_slice::<crate::observe::copilot::HookPayload>(&body) else {
-        return (StatusCode::OK, Json(GateReply::undecided().to_json())).into_response();
-    };
-    let tool = payload.tool();
-    let input = payload.input();
-    let verdict = match payload.cwd.as_deref() {
-        Some(dir) => state.policy.restrictive(dir, &tool, &input),
-        None => state.policy.restrictive_global_only(&tool, &input),
-    };
-    let reply = match &verdict {
-        Verdict::Deny { rule } => {
-            GateReply::deny(format!("denied by Vibeplane policy rule {rule}"))
-        }
-        Verdict::Ask { rule } => GateReply::ask(format!("{rule} asks that a person decides this")),
-        _ => GateReply::undecided(),
-    };
-
-    let run = RunId::new(payload.session_id.clone());
-    let cwd = payload.cwd.clone();
-    let micros = started.elapsed().as_micros() as u64;
-    let st = state.clone();
-    let recorded = verdict.rule().map(|rule| {
-        crate::core::Decision::new(
-            crate::core::Actor::Policy,
-            "agent:tool.use",
-            describe(&tool, &input),
-            verdict.as_str(),
-        )
-        .because(rule)
-        .for_run(&run)
-    });
-    let observed = crate::observe::copilot::to_events(&crate::observe::copilot::HookPayload {
-        event: "preToolUse".into(),
-        ..payload
-    });
-    tokio::spawn(async move {
-        if let Some(d) = recorded {
-            st.record(d).await;
-        }
-        for event in observed {
-            st.ingest(
-                run.clone(),
-                Source::Hook,
-                event,
-                cwd.clone(),
-                RunMode::Observed,
-            )
-            .await;
-        }
-        st.store.record_channel("copilot", micros, None).await.ok();
-    });
-    (StatusCode::OK, Json(reply.to_json())).into_response()
-}
-
 /// OTLP/HTTP logs. Claude Code appends `/v1/logs` to the configured endpoint.
 ///
 /// The OTLP exporter cannot be given a bearer token per signal without also
@@ -730,6 +603,9 @@ struct BoardResponse {
     /// The working set by default; everything when `?all=true`.
     runs: Vec<RunView>,
     projects: Vec<crate::core::Project>,
+    /// Per project id: open issues, open pull requests, and how many of them
+    /// are waiting on the person. Absent for a project with no forge.
+    forge: std::collections::BTreeMap<String, crate::core::ForgeCounts>,
 }
 
 #[derive(Deserialize)]
@@ -816,6 +692,7 @@ async fn board(
     Query(q): Query<BoardQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
+    let forge = state.forge.lock().await.counts();
     let w = state.world.lock().await;
     let runs = if q.all { w.board() } else { w.working_set() };
     let runs = runs
@@ -829,20 +706,182 @@ async fn board(
             RunView::of(r, name)
         })
         .collect();
+    let mut summary = w.summary();
+    for c in forge.values() {
+        summary.open_issues += c.issues;
+        summary.open_prs += c.pull_requests;
+        summary.forge_needs_you += c.needs_you;
+    }
     Json(BoardResponse {
-        summary: w.summary(),
+        summary,
         runs,
         projects: w.projects().cloned().collect(),
+        forge: forge
+            .into_iter()
+            .map(|(id, c)| (id.to_string(), c))
+            .collect(),
     })
     .into_response()
 }
 
 async fn inbox(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
-    let works: Vec<_> = state.works.lock().await.values().cloned().collect();
-    let drivable = state.drivable_runs().await;
-    let w = state.world.lock().await;
-    Json(w.inbox_with(&works, &drivable, &|dir| state.policy.stall_seconds(dir))).into_response()
+    Json(state.current_inbox().await).into_response()
+}
+
+/// One row of the cross-project issue or pull-request list.
+#[derive(Serialize)]
+struct ForgeRow<T: Serialize> {
+    project: String,
+    project_name: String,
+    #[serde(flatten)]
+    item: T,
+}
+
+/// Everything the forge says, for every registered project, from the last
+/// poll: the open issues and the open pull requests in one answer.
+///
+/// One route rather than two, because both halves share an envelope — whose
+/// `gh` this is, why the last poll failed, when it ran. Splitting them costs
+/// the board a second round trip and lets one page show issues read at 10:42
+/// beside pull requests read at 10:47 under a single `fetched_at`.
+/// `vibeplane issues` and `vibeplane prs` each read the half they print.
+///
+/// Ordered by what needs the person, then by project, then newest first —
+/// the order somebody with eight repositories actually wants.
+async fn forge(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let names: std::collections::BTreeMap<_, _> = {
+        let w = state.world.lock().await;
+        w.projects()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect()
+    };
+    let f = state.forge.lock().await;
+    let row = |pf: &crate::core::ProjectForge| {
+        let name = names.get(&pf.project_id).cloned().unwrap_or_default();
+        (pf.project_id.to_string(), name)
+    };
+
+    let mut issues: Vec<ForgeRow<crate::core::ForgeIssue>> = f
+        .projects
+        .values()
+        .flat_map(|pf| {
+            let (project, project_name) = row(pf);
+            pf.issues.iter().cloned().map(move |item| ForgeRow {
+                project: project.clone(),
+                project_name: project_name.clone(),
+                item,
+            })
+        })
+        .collect();
+    issues.sort_by(|a, b| {
+        b.item
+            .assigned_to_me
+            .cmp(&a.item.assigned_to_me)
+            .then_with(|| a.project_name.cmp(&b.project_name))
+            .then_with(|| b.item.updated_at.cmp(&a.item.updated_at))
+    });
+
+    let mut prs: Vec<ForgeRow<crate::core::ForgePullRequest>> = f
+        .projects
+        .values()
+        .flat_map(|pf| {
+            let (project, project_name) = row(pf);
+            pf.pull_requests.iter().cloned().map(move |item| ForgeRow {
+                project: project.clone(),
+                project_name: project_name.clone(),
+                item,
+            })
+        })
+        .collect();
+    prs.sort_by(|a, b| {
+        b.item
+            .needs_me()
+            .cmp(&a.item.needs_me())
+            .then_with(|| a.project_name.cmp(&b.project_name))
+            .then_with(|| b.item.updated_at.cmp(&a.item.updated_at))
+    });
+
+    // Which projects could not be read, and why. The counts on the board are
+    // the last good ones for those, so the view has to be able to say which
+    // numbers are old — otherwise stale reads exactly like fresh.
+    let stale: Vec<_> = f
+        .projects
+        .values()
+        .filter_map(|pf| {
+            pf.error.as_ref().map(|e| {
+                json!({
+                    "project": pf.project_id.to_string(),
+                    "project_name": names.get(&pf.project_id).cloned().unwrap_or_default(),
+                    "error": e,
+                    "last_good": pf.fetched_at.to_string(),
+                })
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "viewer": f.viewer,
+        "error": f.error,
+        "fetched_at": f.last_poll_at.map(|t| t.to_string()),
+        "issues": issues,
+        "pull_requests": prs,
+        "stale": stale,
+    }))
+    .into_response()
+}
+
+/// Hides a project's forge items for a while. Per kind, like every other
+/// snooze here: dismissing a review request must not also swallow the issue
+/// that gets assigned an hour later.
+async fn snooze_project(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<SnoozeQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let until = (q.minutes > 0)
+        .then(|| jiff::Timestamp::now() + jiff::SignedDuration::from_mins(q.minutes));
+    let project = crate::core::ProjectId::new(id);
+    let dismissed: Vec<crate::core::AttentionKind> = {
+        let mut f = state.forge.lock().await;
+        let Some(pf) = f.projects.get(&project).cloned() else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "no forge for that project"})),
+            )
+                .into_response();
+        };
+        let none = crate::core::attention::Snoozed::default();
+        let kinds: Vec<_> = crate::core::forge::items_for_forge(
+            &pf,
+            f.snoozed.get(&project).unwrap_or(&none),
+            &Default::default(),
+        )
+        .into_iter()
+        .map(|i| i.kind)
+        .collect();
+        let entry = f.snoozed.entry(project.clone()).or_default();
+        match until {
+            Some(t) => entry.hide(kinds.clone(), t),
+            None => entry.clear(),
+        }
+        kinds
+    };
+    for kind in &dismissed {
+        let id = format!("gh:{}:{}", project.as_str(), kind.as_str());
+        // The forge ids carry the number too; resolve every item of that kind
+        // for the project, which is what the person dismissed.
+        state
+            .store
+            .attention_resolve_prefix(&id, crate::core::attention::Resolution::Dismissed)
+            .await
+            .ok();
+    }
+    state.notify_changed();
+    Json(json!({"snoozed_until": until.map(|t| t.to_string()), "kinds": dismissed})).into_response()
 }
 
 async fn run_detail(
@@ -1804,14 +1843,56 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
     // Before the lock: it shells out, and holding the world while waiting on
     // a subprocess would stall every other reader.
     let auto_mode = crate::observe::automode::effective().await;
+    let forge = {
+        let f = state.forge.lock().await;
+        json!({
+            "viewer": f.viewer,
+            "error": f.error,
+            "last_poll_at": f.last_poll_at.map(|t| t.to_string()),
+            "projects": f.projects.len(),
+            "skipped": f.skip.len(),
+            // Which ones, and why. A count of things that were ruled out is a
+            // number a person can do nothing with; the reason is the whole
+            // value, because the usual one is "no GitHub remote" and the
+            // second usual one is that `is_permanent` guessed wrong.
+            "skipped_projects": f
+                .skip
+                .iter()
+                .map(|(id, (why, at))| json!({
+                    "project": id.to_string(),
+                    "reason": why,
+                    "at": at.to_string(),
+                }))
+                .collect::<Vec<_>>(),
+        })
+    };
     let w = state.world.lock().await;
+    // Which observed sessions run a Claude Code newer than the release this
+    // gate's behaviour was tested against — the gap a silent widening lives in.
+    //
+    // Only the status-line shim reports a version, so this is what is *known*
+    // and never a claim about the whole machine. Hence the count beside it:
+    // nought ahead of nought reporting is not agreement.
+    let ahead: Vec<_> = w
+        .runs()
+        .filter_map(|r| r.claude_version.as_deref().map(|v| (r, v)))
+        .filter(|(_, v)| crate::core::policy::is_ahead_of_baseline(v))
+        .map(|(r, v)| json!({"run": r.id.to_string(), "version": v}))
+        .collect();
+    let reporting = w.runs().filter(|r| r.claude_version.is_some()).count();
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "gate": {
+            "verified_against": crate::core::policy::VERIFIED_AGAINST,
+            "sessions_reporting_a_version": reporting,
+            "sessions_ahead_of_baseline": ahead,
+        },
         "pid": std::process::id(),
         "started_at": state.started_at.to_string(),
         "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
         "summary": w.summary(),
         "channels": channels,
+        "forge": forge,
         "stall_seconds": w.attention.stall_seconds,
         "unreadable_configs": broken,
         "unreadable_rows": unreadable_rows,

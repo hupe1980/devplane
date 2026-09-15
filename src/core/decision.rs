@@ -86,6 +86,13 @@ impl Decision {
         }
     }
 
+    /// Overrides the timestamp, for a decision recorded later than it was
+    /// taken — the spool the `command` hook writes when no daemon is running.
+    pub fn at(mut self, at: Timestamp) -> Self {
+        self.at = at;
+        self
+    }
+
     pub fn because(mut self, reason: impl Into<String>) -> Self {
         self.reason = Some(reason.into());
         self
@@ -150,4 +157,50 @@ mod tests {
         let d = Decision::new(Actor::Daemon, "gate:run", "x".repeat(500), "pass");
         assert!(d.line().chars().count() < 120);
     }
+}
+
+/// What the `command` hook hands back after it has enforced a verdict.
+///
+/// One shape for two journeys. Posted to `/vibeplane/decided` when a daemon is
+/// listening, and appended to `~/.vibeplane/pending-decisions.jsonl` when one
+/// is not — so a decision taken while the daemon was down is written down by
+/// exactly the code that writes down every other decision, rather than by a
+/// second path nobody exercises.
+///
+/// It carries the **verdict**, never the inputs to recompute one. The process
+/// that enforced a rule is the authority for which rule it was; the daemon's
+/// cached rules can be seconds behind the file the hook just read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecidedEnvelope {
+    pub session: String,
+    /// `allow`, `deny`, `ask` or `undecided`.
+    pub verdict: String,
+    /// The rule that produced it. `None` means no rule did — which is not a
+    /// decision and is therefore not recorded, only observed.
+    #[serde(default)]
+    pub rule: Option<String>,
+    /// What was asked for, in the words the audit log prints.
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub tool: String,
+    /// When it was taken, which is not when it was filed.
+    #[serde(default)]
+    pub at: Option<Timestamp>,
+    /// Set on a row that waited in the spool, so the log can say so rather than
+    /// leaving a reader to wonder why the timestamps run backwards.
+    #[serde(default)]
+    pub late: bool,
+    /// Whether the session is now waiting on a person.
+    ///
+    /// True for a `PermissionRequest` no rule answered: Claude Code is showing
+    /// its own dialog and the run is blocked, which is how the inbox learns
+    /// about it the instant it happens rather than six seconds later on a
+    /// notification. False for `PreToolUse`, which fires on every call and
+    /// says nothing about whether anybody is going to be asked.
+    #[serde(default)]
+    pub blocked: bool,
+    /// The raw hook payload, for the observation half.
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
 }

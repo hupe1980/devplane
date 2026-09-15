@@ -29,13 +29,13 @@
     <figure class="terminal" aria-label="Example output of the vibeplane ls command">
       <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
 <pre><code><span class="t-dim">$</span> vibeplane ls
-<span class="t-bold">8 projects</span> · 23 sessions · 5 working · <span class="t-warn">2</span> need you · 16 idle <span class="t-dim">· $4.18</span>
-<span class="t-dim">17 dormant (never reported) — vibeplane ls --all</span>
+<span class="t-bold">8 projects</span> · 23 sessions · 5 working · <span class="t-warn">2</span> need you · 4 idle <span class="t-dim">· $4.18</span>
+<span class="t-dim">12 quiet (nothing heard for hours) — vibeplane ls --all</span>
 
-<span class="t-bold">saas</span>
+<span class="t-bold">saas</span>  <span class="t-dim">·  4 issues · 2 PRs (1 needs you)</span>
   <span class="t-warn">◆</span> 7c         <span class="t-dim">vscode</span>     62%   $1.04   3m  Keep the legacy /v1/login route?
 
-<span class="t-bold">core-lib</span>  <span class="t-dim">·  2 sessions</span>
+<span class="t-bold">core-lib</span>  <span class="t-dim">·  2 sessions  ·  1 PR</span>
   <span class="t-ok">●</span> a1         <span class="t-dim">vscode</span>     88%   $0.41   2s  Bash: cargo test --workspace
   <span class="t-dim">○</span> 4f         <span class="t-dim">vscode</span>     12%   $0.02  41m  waiting for a prompt
 
@@ -44,8 +44,8 @@
 </code></pre>
     </figure>
     <p class="muted small caption">
-      Grouped by project, because that is the unit you think in. Dormant editor tabs are counted,
-      not listed — and any of them that starts asking for something joins the working set at once.
+      Grouped by project, with the issues and pull requests waiting on you. Quiet editor tabs are
+      counted, not listed — and any that starts asking for something joins the working set at once.
     </p>
   </div>
 </section>
@@ -85,8 +85,9 @@
       <h3>Sight</h3>
       <p>
         Every session on the machine, on one board, with state, cost, context percentage, worktree
-        and pull request. Hooks and OpenTelemetry for live state; the session roster for discovery.
-        Your workflow does not change.
+        and pull request — and every open issue and pull request across your projects beside them.
+        Hooks and OpenTelemetry for live state; the session roster for discovery. Your workflow does
+        not change.
       </p>
       <a class="more" href="{{ get_url(path='/docs/observe/') }}">How observing works</a>
     </article>

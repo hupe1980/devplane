@@ -22,6 +22,19 @@ fn repo_root() -> std::path::PathBuf {
 }
 
 /// The fixture agent, built by `cargo test` as a sibling of the test binary.
+/// A working directory per test, so the fixture's on-disk session files land
+/// in a temporary place rather than in the repository the tests run from —
+/// which is where 847 of them had accumulated.
+fn scratch() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "vp-conformance-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    dir
+}
+
 fn echo_agent() -> AgentSpec {
     let exe = std::env::current_exe().expect("test binary path");
     // target/debug/deps/conformance-<hash> → target/debug/examples/echo_agent
@@ -76,7 +89,7 @@ async fn collect(
 #[tokio::test]
 async fn a_prompt_runs_a_turn_and_streams_the_answer() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), PathBuf::from("."))
+    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
         .await
         .expect("spawning the agent");
 
@@ -104,7 +117,7 @@ async fn a_prompt_runs_a_turn_and_streams_the_answer() {
 #[tokio::test]
 async fn a_tool_call_is_reported() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), PathBuf::from("."))
+    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -125,7 +138,7 @@ async fn a_permission_request_blocks_until_it_is_answered() {
     let _serial = common::one_agent_at_a_time();
     // This is the path the whole product turns on: the agent is stopped, the
     // human decides, and the turn continues.
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), PathBuf::from("."))
+    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -172,7 +185,7 @@ async fn a_permission_request_blocks_until_it_is_answered() {
 #[tokio::test]
 async fn refusing_a_permission_also_lets_the_turn_finish() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), PathBuf::from("."))
+    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -198,7 +211,7 @@ async fn refusing_a_permission_also_lets_the_turn_finish() {
 #[tokio::test]
 async fn a_refusal_is_reported_as_the_stop_reason() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), PathBuf::from("."))
+    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -217,7 +230,7 @@ async fn several_turns_run_on_one_session() {
     let _serial = common::one_agent_at_a_time();
     // A driven run is a conversation, not a one-shot: the session has to
     // survive a completed turn and take the next prompt.
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), PathBuf::from("."))
+    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -325,7 +338,7 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
 async fn a_missing_agent_fails_loudly_rather_than_hanging() {
     let _serial = common::one_agent_at_a_time();
     let spec = AgentSpec::new("nope", "nope", "/definitely/not/an/agent --acp");
-    match vibeplane::acp::spawn(&spec, PathBuf::from(".")).await {
+    match vibeplane::acp::spawn(&spec, scratch()).await {
         Err(e) => assert!(!e.to_string().is_empty()),
         Ok((session, mut events)) => {
             // Some transports only fail once the process is reaped, so an

@@ -269,8 +269,7 @@ pub async fn remove_worktree(root: &Path, dir: &Path, force: bool) -> Result<()>
 /// from `base` — committed on the branch, staged, or still dirty.
 ///
 /// Used to answer a question no single piece of work can answer about itself:
-/// whether somebody else is editing the same file right now
-/// ([`crate::work::note_overlaps`]).
+/// whether somebody else is editing the same file right now.
 ///
 /// `...` is a three-dot diff against the merge base, so a `base` that has moved
 /// on since the worktree was made does not report everybody else's commits as

@@ -149,10 +149,43 @@ impl PolicyCache {
         }
     }
 
-    /// A cache with nothing but a project's own rules, for a caller that has no
-    /// machine-wide file — the tests, and `vibeplane check`.
+    /// A cache with nothing but a project's own rules. **Tests only**, where
+    /// there is no home directory to read and none should be invented.
+    ///
+    /// Not for a command a person runs: `vibeplane explain` used this and so
+    /// answered without the machine-wide rules, which meant the surface built
+    /// to say *what would the gate decide* could say `allow` for a call
+    /// `~/.vibeplane/policy.toml` denies. [`Self::from_disk`] is what a command
+    /// uses.
     pub fn for_projects_only() -> Self {
         Self::new(Policy::default(), PathBuf::from("/"), None)
+    }
+
+    /// The rules this machine actually enforces: the machine-wide file plus
+    /// whatever each project adds.
+    ///
+    /// **One evaluator for every surface.** The daemon, `vibeplane explain` and
+    /// the `command` hook all build the gate this way, so a verdict cannot
+    /// depend on which of the three was asked. It used to: two of them read the
+    /// machine-wide file and one did not.
+    ///
+    /// A machine-wide file that will not parse yields no machine-wide rules and
+    /// says so through `error`. The projects' own rules still apply — refusing
+    /// to answer at all would take every project's prohibitions down with one
+    /// typo in a file they do not control.
+    pub fn from_disk() -> (Self, Option<String>) {
+        let Ok(home) = crate::config::home() else {
+            return (Self::for_projects_only(), None);
+        };
+        let global_root = home.clone();
+        let user_home = dirs::home_dir();
+        match crate::core::GlobalConfig::load(&home) {
+            Ok(g) => (Self::new(g.policy(), global_root, user_home), None),
+            Err(e) => (
+                Self::new(Policy::default(), global_root, user_home),
+                Some(e.to_string()),
+            ),
+        }
     }
 
     /// Decides one tool call, for an agent working in `dir`.
@@ -176,7 +209,11 @@ impl PolicyCache {
         // asked once across both rather than inside each. Asking each set on
         // its own would let a target the machine-wide file allows be refused
         // because the project's file never mentioned it.
-        if tool == "Bash"
+        // `is_shell`, never a literal `"Bash"`: `Policy::evaluate` asks the same
+        // question through that function, and the two spellings drifted apart
+        // the moment `Monitor` was added — leaving the redirect check running
+        // per rule set here and across both sets there, for the same call.
+        if crate::core::policy::is_shell(tool)
             && crate::core::policy::uncovered_targets(input, |side, file| {
                 sets.iter().any(|(p, c)| p.allows_path(side, c, file))
                     || crate::core::policy::within(dir, file)

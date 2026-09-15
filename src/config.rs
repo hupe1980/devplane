@@ -113,6 +113,111 @@ fn generate_token() -> String {
     )
 }
 
+/// Where a decision goes when it was made with no daemon to record it.
+///
+/// The `command` hook decides in its own process (see `cli::cmd_hook`), so a
+/// stopped daemon no longer means an unenforced rule — but it would mean an
+/// unrecorded one, and an audit trail with invisible holes is the same class of
+/// failure as a rule that quietly does not fire.
+pub fn spool_path() -> Result<PathBuf> {
+    Ok(home()?.join("pending-decisions.jsonl"))
+}
+
+/// The most decisions held for a daemon that never comes. Twenty thousand lines
+/// is a few megabytes and weeks of ordinary use.
+///
+/// **A bound rather than none**, because the alternative is a file that grows
+/// for as long as somebody runs agents without ever starting the daemon — which
+/// is a supported way to use this, since the gate no longer needs one. The
+/// oldest rows go first: a decision from three weeks ago explains less than the
+/// one taken a minute ago, and the drain says how many were dropped rather than
+/// leaving the count to be inferred from a gap.
+const SPOOL_MAX_LINES: usize = 20_000;
+
+/// Appends one decision. `O_APPEND` with a single short write is atomic enough
+/// for the only concurrency there is: several hook processes, one line each.
+///
+/// Failure is deliberately ignored by the caller. This runs while a session is
+/// blocked, and a full disk must not turn into a refused tool call.
+pub fn spool_decision(line: &serde_json::Value) -> Result<()> {
+    use std::io::Write;
+    let path = spool_path()?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Checked before the write rather than after, so the file cannot exceed the
+    // bound even briefly — and by size first, because `metadata` is one syscall
+    // and counting lines is a read of the whole file on every tool call.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > (SPOOL_MAX_LINES * 512) as u64) {
+        trim_spool(&path);
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(f, "{line}")?;
+    Ok(())
+}
+
+/// Keeps the newest `SPOOL_MAX_LINES` and records how many went.
+///
+/// Rewritten through a temporary file and renamed, so a crash mid-trim leaves
+/// either the old spool or the new one and never a half-written log of
+/// decisions.
+fn trim_spool(path: &std::path::Path) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= SPOOL_MAX_LINES {
+        return;
+    }
+    let dropped = lines.len() - SPOOL_MAX_LINES;
+    let marker = serde_json::json!({
+        "session": "vibeplane",
+        "verdict": "note",
+        "rule": null,
+        "subject": format!("{dropped} spooled decisions were dropped: no daemon had started in a very long time"),
+        "late": true,
+    });
+    let tmp = path.with_extension("jsonl.tmp");
+    let kept = format!("{marker}\n{}\n", lines[dropped..].join("\n"));
+    if std::fs::write(&tmp, kept).is_ok() {
+        std::fs::rename(&tmp, path).ok();
+    }
+}
+
+/// How many decisions are waiting to be filed, without consuming them.
+///
+/// `doctor` reports it: an enforced decision that is not yet written down is a
+/// true statement about the machine, and the person reading diagnostics is the
+/// one who would want to know their audit trail is behind.
+pub fn drain_spool_count() -> usize {
+    spool_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+/// Reads and removes the spool, for the daemon to ingest at startup.
+///
+/// Read-then-remove rather than truncate: a hook appending between the two
+/// loses a line, and losing the *newest* line is better than the alternative of
+/// holding a lock on the path every hook process needs.
+pub fn drain_spool() -> Vec<serde_json::Value> {
+    let Ok(path) = spool_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    std::fs::remove_file(&path).ok();
+    text.lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

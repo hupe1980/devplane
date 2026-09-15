@@ -13,8 +13,8 @@ vibeplane ls
 ```
 
 ```console
-8 projects · 23 sessions · 5 working · 2 need you · 16 idle · $4.18
-17 dormant (never reported) — vibeplane ls --all
+8 projects · 23 sessions · 5 working · 2 need you · 4 idle · $4.18
+12 quiet (nothing heard for hours) — vibeplane ls --all
 
 saas
   ◆ 7c         vscode     62%   $1.04   3m  Keep the legacy /v1/login route?
@@ -33,7 +33,7 @@ editor tabs whose processes are still alive. One that starts asking for somethin
 set immediately.
 
 ```sh
-vibeplane ls --all           # including the dormant tabs
+vibeplane ls --all           # including the quiet ones
 vibeplane ls --project saas  # one project; matches any part of the name
 vibeplane ls --needs-you     # only what is waiting on a human
 ```
@@ -64,7 +64,9 @@ vibeplane open
 ```
 
 One page served from the daemon on loopback — no build step, no CDN, no account. It updates live,
-groups by project, and puts what needs you at the top.
+groups by project, and puts what needs you at the top. It is a document rather than a canvas: every
+state has a word as well as a colour, the sections are lists, and one polite live region says how
+many things need you — so it reads aloud, and it survives being screenshotted in greyscale.
 
 | Key | What |
 |---|---|
@@ -72,6 +74,10 @@ groups by project, and puts what needs you at the top.
 | `1`–`9` | pick one of the answers the agent offered |
 | `y` `n` · `r` | allow · deny a permission · reply |
 | `?` | **why is this here** — the decision log for the row under the cursor |
+| `g` | **every open issue and pull request**, across every registered project — `i` and `p` switch |
+
+The counts are the same door: `4 issues · 2 PRs` in the header, and the same figures on a project
+heading, are buttons. A count you cannot open is a number telling you to go and look somewhere else.
 | `⌘K` | jump to any project, piece of work or session by name |
 | `⌘N` | dispatch work: prompt, project, kind, and the project's own templates |
 | `f` · `s` · `/` | raise the editor window · snooze · search |
@@ -131,7 +137,30 @@ vibeplane work show <id>     # where it got to, what it cost, what the checks sa
 
 Next: [Verified done](/docs/verified-done/) in full.
 
-## 6. Ask afterwards
+## 6. See what GitHub is holding
+
+```sh
+vibeplane issues
+```
+
+```console
+as hupe1980 · what needs you first
+
+saas
+  ◆ #212   Login fails on Safari 17                       bug · assigned to you
+    https://github.com/acme/saas/issues/212
+  ○ #209   Document the rate limits                       docs
+    https://github.com/acme/saas/issues/209
+```
+
+Every open issue and pull request across every registered project, read through your own `gh`. On
+the board, press `g` for the same two lists, or click the counts in a project heading. `◆` is what
+is waiting on you — an issue assigned to you, a review requested from you, your own pull request
+that is red, contested, or approved and unmerged. Those are inbox items too.
+
+**Nothing here writes to GitHub.** Every action is a link.
+
+## 7. Ask afterwards
 
 ```sh
 vibeplane audit

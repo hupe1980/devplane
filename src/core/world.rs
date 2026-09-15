@@ -154,7 +154,32 @@ impl World {
         drivable: &std::collections::BTreeSet<RunId>,
         stall_for: &dyn Fn(&Path) -> Option<i64>,
     ) -> Vec<AttentionItem> {
-        let from_runs = self.runs.values().flat_map(|r| {
+        self.inbox_with_gate(works, drivable, stall_for, None, Vec::new())
+    }
+
+    /// The inbox, plus the one item that is about the machine rather than about
+    /// anything on it.
+    ///
+    /// `gate_down` carries the reason the installed gate did not answer when the
+    /// daemon last ran it. It is threaded in here rather than derived, because
+    /// it is the one fact in the inbox that cannot be read off a run: nothing
+    /// happening is exactly what a working gate and a broken one both look like
+    /// from the event log.
+    pub fn inbox_with_gate(
+        &self,
+        works: &[crate::core::Work],
+        drivable: &std::collections::BTreeSet<RunId>,
+        stall_for: &dyn Fn(&Path) -> Option<i64>,
+        gate_down: Option<&str>,
+        forge: Vec<AttentionItem>,
+    ) -> Vec<AttentionItem> {
+        // The same runs the board shows, for the reason the notifier reads
+        // this list rather than deriving its own: two surfaces disagreeing
+        // about what needs a person is worse than either being wrong. A
+        // session asking for something never ages out — `is_active` keeps
+        // every blocked run — so what this drops is the noise: a stall, a
+        // context gauge or a lost tab from three days ago.
+        let from_runs = self.runs.values().filter(|r| r.is_active()).flat_map(|r| {
             let stall = stall_for(r.working_dir()).unwrap_or(self.attention.stall_seconds);
             items_for_run(r, &self.attention, stall)
         });
@@ -174,7 +199,17 @@ impl World {
             let repo = self.projects.get(&w.project_id).and_then(|p| p.repo_slug());
             crate::core::attention::items_for_work_in(w, can_drive, can_resume, repo.as_deref())
         });
-        rank(from_runs.chain(from_work).collect())
+        let gate = gate_down.map(crate::core::attention::gate_down_item);
+        // `forge` is derived by the caller from state this module cannot see
+        // — the polled GitHub facts live on the other side of the purity line
+        // — and ranked here so there is one list and one order.
+        rank(
+            from_runs
+                .chain(from_work)
+                .chain(gate)
+                .chain(forge)
+                .collect(),
+        )
     }
 
     /// Registers a project explicitly. Explicit registration is what grants
@@ -413,8 +448,18 @@ impl World {
             .map(|r| r.id.clone())
             .collect();
         for id in ids {
-            let gone = self.runs.get(&id).map(|r| !alive(r)).unwrap_or(false);
-            if gone {
+            let Some(run) = self.runs.get(&id) else {
+                continue;
+            };
+            if alive(run) {
+                continue;
+            }
+            // One fact — the process is not there — and the reducer decides
+            // what it means from what the run was doing. Both readings used to
+            // be `Lost`, which is Critical, so every closed editor tab became a
+            // critical inbox item: twelve of the development machine's thirteen
+            // entries were sessions nobody had touched for two days.
+            {
                 let env = EventEnvelope::new(
                     id.clone(),
                     crate::core::event::Source::Daemon,
@@ -443,6 +488,16 @@ impl World {
     }
 
     /// Counts for the board header.
+    /// The numbers above the board, and they **partition what is on it**.
+    ///
+    /// They did not. The state counts ran over every run and `dormant` was an
+    /// orthogonal cut across the same set, so a line reading
+    /// `38 sessions · 1 working · 0 need you · 25 idle` plus `10 dormant`
+    /// double-counted and still left twelve sessions unmentioned. Now the
+    /// breakdown covers exactly the runs the board shows and `dormant` is
+    /// everything else, so `working + needs_you + idle + failed + dormant`
+    /// is `runs` — which is what a reader assumes the moment they see a list
+    /// of numbers with a total in front of it.
     pub fn summary(&self) -> BoardSummary {
         let mut s = BoardSummary {
             projects: self.projects.len(),
@@ -450,20 +505,24 @@ impl World {
             ..Default::default()
         };
         for r in self.runs.values() {
+            // Spend is spend, whoever is looking: summed over everything.
+            s.cost_usd += r.totals.cost_usd;
+            if !r.is_active() {
+                s.dormant += 1;
+                continue;
+            }
             match r.state {
                 RunState::Working | RunState::Starting => s.working += 1,
                 RunState::Waiting(_) => s.needs_you += 1,
                 RunState::Idle => s.idle += 1,
                 RunState::Failed | RunState::Lost => s.failed += 1,
-                _ => {}
+                // A completed or stopped run that is still in play — it ended
+                // ten minutes ago — is on the board and belongs somewhere.
+                _ => s.idle += 1,
             }
             if r.state.is_live() {
                 s.live += 1;
             }
-            if !r.is_active() {
-                s.dormant += 1;
-            }
-            s.cost_usd += r.totals.cost_usd;
         }
         s
     }
@@ -525,6 +584,16 @@ pub struct BoardSummary {
     /// Sessions that exist but have never reported: editor tabs left open.
     pub dormant: usize,
     pub cost_usd: f64,
+    /// Open issues across every registered project, from the last forge poll.
+    /// Filled by the daemon, which holds that state; zero here.
+    #[serde(default)]
+    pub open_issues: usize,
+    /// Open pull requests, the same way.
+    #[serde(default)]
+    pub open_prs: usize,
+    /// Of those, the ones waiting on the person (see `ForgeCounts`).
+    #[serde(default)]
+    pub forge_needs_you: usize,
 }
 
 #[cfg(test)]
@@ -885,5 +954,128 @@ mod tests {
         assert_eq!(lost.len(), 1);
         assert_eq!(w.run(&RunId::new("s1")).unwrap().state, RunState::Lost);
         assert_eq!(w.inbox()[0].kind, crate::core::AttentionKind::Lost);
+    }
+
+    /// A closed editor tab is not a loss.
+    ///
+    /// Reconciliation marked **every** live run whose process was missing as
+    /// `Lost`, which is Critical. On the development machine that made twelve
+    /// of the inbox's thirteen items sessions nobody had touched for two days
+    /// — the exact failure the ranking policy exists to prevent, produced by
+    /// the ranking policy itself.
+    #[test]
+    fn a_tab_that_closed_has_ended_and_work_that_vanished_is_lost() {
+        let mut w = World::new();
+        seed(&mut w, "idle-one", None);
+        seed(&mut w, "busy-one", None);
+        w.runs.get_mut(&RunId::new("idle-one")).unwrap().state = RunState::Idle;
+        w.apply(
+            env(
+                "busy-one",
+                Event::ToolStarted {
+                    tool: "Bash".into(),
+                    input: serde_json::json!({"command": "cargo test"}),
+                },
+            ),
+            RunHint::default(),
+        );
+        assert_eq!(
+            w.run(&RunId::new("busy-one")).unwrap().state,
+            RunState::Working
+        );
+
+        // Neither process exists any more.
+        let events = w.reconcile(&|_| false);
+        assert_eq!(events.len(), 2);
+
+        let idle = w.run(&RunId::new("idle-one")).unwrap();
+        assert_eq!(idle.state, RunState::Stopped, "a tab closing is not a loss");
+        let busy = w.run(&RunId::new("busy-one")).unwrap();
+        assert_eq!(busy.state, RunState::Lost, "work stopped mid-flight is");
+        assert_eq!(
+            busy.summary.as_deref(),
+            Some("Bash: cargo test"),
+            "what it was doing is the only useful thing left; the diagnosis used to overwrite it"
+        );
+
+        // And only the loss reaches the inbox.
+        let kinds: Vec<_> = w.inbox().into_iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, [crate::core::AttentionKind::Lost]);
+    }
+
+    /// The numbers above the board add up to the board.
+    ///
+    /// They did not: the state counts ran over every run while `dormant` was an
+    /// orthogonal cut of the same set, so `38 sessions · 1 working · 0 need you
+    /// · 25 idle` left twelve failed sessions unmentioned and double-counted
+    /// the ten it did mention.
+    #[test]
+    fn the_summary_partitions_every_session() {
+        let mut w = World::new();
+        seed(&mut w, "a", None);
+        seed(&mut w, "b", None);
+        seed(&mut w, "c", None);
+        for id in ["a", "b", "c"] {
+            let r = w.runs.get_mut(&RunId::new(id)).unwrap();
+            r.reporting = true;
+            r.state = RunState::Idle;
+        }
+        // Quiet since yesterday: real, and not today's business.
+        w.runs.get_mut(&RunId::new("a")).unwrap().last_activity_at =
+            jiff::Timestamp::now() - jiff::SignedDuration::from_hours(30);
+        // Failed just now. The third is plain idle and was heard from a moment ago.
+        w.runs.get_mut(&RunId::new("b")).unwrap().state = RunState::Failed;
+
+        let s = w.summary();
+        assert_eq!(s.runs, 3);
+        assert_eq!(
+            s.working + s.needs_you + s.idle + s.failed + s.dormant,
+            s.runs,
+            "every session is in exactly one column"
+        );
+        assert_eq!(
+            s.dormant, 1,
+            "the one nothing has been heard from since yesterday"
+        );
+        assert_eq!(s.failed, 1);
+        assert_eq!(s.idle, 1);
+    }
+
+    /// The board and the inbox read the same list.
+    ///
+    /// A `stalled` or `lost` row from three days ago is history; a session
+    /// *asking* for something never ages out, however long it has been asking.
+    #[test]
+    fn what_ages_off_the_board_ages_out_of_the_inbox_unless_it_is_asking() {
+        let mut w = World::new();
+        seed(&mut w, "old-stall", None);
+        seed(&mut w, "old-ask", None);
+        {
+            let r = w.runs.get_mut(&RunId::new("old-stall")).unwrap();
+            r.reporting = true;
+            r.state = RunState::Working;
+            r.last_activity_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(40);
+        }
+        {
+            let r = w.runs.get_mut(&RunId::new("old-ask")).unwrap();
+            r.reporting = true;
+            r.state = RunState::Waiting(WaitingFor::Permission);
+            r.last_activity_at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(40);
+        }
+
+        // Working never ages out either — it is doing something.
+        let ids: Vec<_> = w.working_set().iter().map(|r| r.id.to_string()).collect();
+        assert!(ids.contains(&"old-stall".to_string()));
+        assert!(ids.contains(&"old-ask".to_string()));
+
+        // But a *terminal* row from forty hours ago is off both surfaces.
+        w.runs.get_mut(&RunId::new("old-stall")).unwrap().state = RunState::Lost;
+        assert!(!w.working_set().iter().any(|r| r.id.as_str() == "old-stall"));
+        let kinds: Vec<_> = w.inbox().into_iter().map(|i| i.kind).collect();
+        assert!(!kinds.contains(&crate::core::AttentionKind::Lost));
+        assert!(
+            kinds.contains(&crate::core::AttentionKind::Permission),
+            "a session that is asking is never history"
+        );
     }
 }

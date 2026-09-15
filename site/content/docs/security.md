@@ -64,9 +64,19 @@ the prompt.
 service unreachable” path, and the build fails if anything in the pure half grows one. Given the
 call, the answer is always a verdict.
 
-**Delivering that verdict depends on the vendor's hook.** On Claude Code the gate rides an HTTP hook
-the session waits for, so a verdict that exists is one that arrives. On GitHub Copilot it does not —
-see below. *The rules cannot fail open; a channel can.*
+**And the gate does not need the daemon.** It is a `command` hook — the `vibeplane` binary, reading
+the call on stdin and answering on stdout in about 26 ms — so a daemon that is stopped, crashed or
+not yet started costs you the *record* of a decision, never the decision. A decision taken with no
+daemon listening is appended to `~/.vibeplane/pending-decisions.jsonl` and written into the log at
+the next start, marked as filed late.
+
+**No hook can enforce its own presence**, and that is the vendor's design: a timed-out hook does not
+block, and the reference says plainly *"don't count on a stalled hook to act as a gate."* So
+detection is the defence. `vibeplane doctor` **runs** the installed gate with a probe call rather
+than checking a line exists in a settings file, and the daemon does the same on a timer and raises a
+critical `gate_down` item when it stops answering.
+
+*The rules cannot fail open; a channel can, and the channel is a local process.*
 
 `never_auto` cannot be overridden by `auto_allow`, in either direction.
 
@@ -81,11 +91,19 @@ It asks on two axes: an `auto_allow` list answering *did Claude Code run it?*, a
 list answering *did Claude Code refuse?*. The oracle is a model, so a disagreement is re-asked once
 and reported only if it reproduces.
 
-Against Claude Code 2.1.270 both axes are clean: 176 deny cases and 126 allow cases, with no
-reproducible disagreement in either direction. See [Permissions](/docs/permissions/).
+A third axis, `VIBEPLANE_DIFF_AXIS=dialect`, covers the tools that are not shells — `PowerShell`,
+`Monitor`, `LSP` — which cannot use that oracle, since two run no command and the third needs a
+Windows host. It runs **this matcher alone** and prints a checklist to put to a running product, and
+says in its own output that it is not a measurement.
 
-A malformed `vibeplane.toml` keeps the rules it had. Because a restarted daemon has none to keep,
-`vibeplane doctor` names the project whose rules are not in force.
+Its last full run, against Claude Code 2.1.270, was clean on both: 176 deny cases and 126 allow
+cases, with no reproducible disagreement. **It has not been re-run since the current matcher
+shipped**, and a harness result is true only of the code it ran against.
+See [Permissions](/docs/permissions/).
+
+A malformed `vibeplane.toml` keeps the rules it had. Because a process starting fresh has none to
+keep, both `vibeplane doctor` and `vibeplane explain` name the project whose rules are not in force
+rather than answering as though it simply had no rules.
 
 ### On GitHub Copilot the same rules ride a different hook
 

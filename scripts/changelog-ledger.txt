@@ -92,3 +92,11 @@ floor: 2.1.240
         ^ substitutions inside a command do not widen a pattern match — `a_deny_rule_reaches_into_substitutions_and_bodies`
 2.1.243 | declined | [VSCode] Fixed sessions started before feature flags were first fetched (for example right after install) opening in the default permission mode instead of auto mode or your configured default mode
         ^ which mode a VS Code session opens in before feature flags load
+2.1.271 | case | Fixed Bash permission checks missing the file that `fmt`, `column` and similar commands read when it follows an option the checker doesn't recognize
+        ^ `fmt` was absent from the reader table entirely — `fmt .env` walked past `Read(.env)`. Nineteenth widening; `a_reader_named_by_the_vendor_is_in_the_table`
+2.1.271 | case | Fixed Bash permission checks skipping files a wildcard expands to when the wildcard sits in a command's pattern or option value (for example `grep -v dir/* file`)
+        ^ no operand carrying a glob was ever matched against a path deny — `cat *.env` walked past `Read(.env)`. Twentieth widening, and the one that also produced a wrong *reason*; `a_glob_operand_is_matched_against_a_path_deny`, `an_allowed_call_names_the_rule_that_allowed_it`
+2.1.271 | declined | Fixed Bash permission checks so that shell variable declaration flags cannot misrepresent the command being run
+        ^ probed on this matcher across `declare`/`local`/`typeset`/`export`/`readonly` with a substitution in the value: every form either denies on the substitution or reaches a person. The error here is a narrowing, which is the reported direction
+2.1.271 | declined | Changed auto mode so that a skill's or slash command's inline `!` shell commands follow default-mode permission rules instead of the classifier; a command no rule decides runs as a reviewed tool call
+        ^ auto mode's own precedence, upstream of the hook Vibeplane answers; a `[policy]` rule decides the same way whichever path reached it

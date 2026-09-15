@@ -31,6 +31,17 @@ pub struct PullRequest {
     pub merge_state: Option<String>,
     #[serde(default, rename = "statusCheckRollup")]
     pub checks: Vec<Check>,
+    #[serde(default)]
+    pub author: Option<Author>,
+    #[serde(default, rename = "updatedAt")]
+    pub updated_at: Option<String>,
+}
+
+/// A GitHub user, as `gh` names one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Author {
+    #[serde(default)]
+    pub login: String,
 }
 
 /// One check run or status on a pull request.
@@ -145,6 +156,35 @@ impl PullRequest {
     pub fn failing_checks(&self) -> Vec<&Check> {
         self.checks.iter().filter(|c| c.is_failure()).collect()
     }
+
+    /// The board's view of this pull request, relative to the person whose
+    /// `gh` this is.
+    ///
+    /// `review_requested` is **not** derived from the pull request's own
+    /// `reviewRequests` list, and that is the whole point. That list names
+    /// users and *teams*, and nothing in it says which teams this person
+    /// belongs to — so reading it here marked every team's review request as
+    /// theirs. GitHub can answer the question and the client cannot, so
+    /// [`review_requested_of_me`] asks it once per pass and the answer is
+    /// passed in.
+    pub fn to_forge(
+        &self,
+        me: Option<&str>,
+        review_requested: bool,
+    ) -> crate::core::ForgePullRequest {
+        let mine = me.is_some_and(|m| self.author.as_ref().is_some_and(|a| a.login == m));
+        crate::core::ForgePullRequest {
+            number: self.number,
+            title: self.title.clone(),
+            url: self.url.clone(),
+            status: self.status().as_str().to_string(),
+            draft: self.is_draft,
+            mine,
+            review_requested,
+            head_ref: self.head_ref.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
 }
 
 /// An issue, as imported into work.
@@ -157,6 +197,12 @@ pub struct Issue {
     pub url: String,
     #[serde(default)]
     pub labels: Vec<Label>,
+    /// Assignment is unambiguous — assignees are people, never teams — so
+    /// unlike a review request this one *is* answered from the row itself.
+    #[serde(default)]
+    pub assignees: Vec<Author>,
+    #[serde(default, rename = "updatedAt")]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -169,6 +215,18 @@ impl Issue {
         self.labels
             .iter()
             .any(|l| l.name.eq_ignore_ascii_case(name))
+    }
+
+    /// The board's view of this issue, relative to the person whose `gh` this is.
+    pub fn to_forge(&self, me: Option<&str>) -> crate::core::ForgeIssue {
+        crate::core::ForgeIssue {
+            number: self.number,
+            title: self.title.clone(),
+            url: self.url.clone(),
+            labels: self.labels.iter().map(|l| l.name.clone()).collect(),
+            assigned_to_me: me.is_some_and(|m| self.assignees.iter().any(|a| a.login == m)),
+            updated_at: self.updated_at.clone(),
+        }
     }
 
     /// What an agent is told to do about this issue.
@@ -194,9 +252,8 @@ impl Issue {
 
 /// The fields fetched for a pull request. Named once so the parse and the
 /// request cannot drift apart.
-const PR_FIELDS: &str =
-    "number,title,url,state,isDraft,headRefName,reviewDecision,mergeStateStatus,statusCheckRollup";
-const ISSUE_FIELDS: &str = "number,title,body,url,labels";
+const PR_FIELDS: &str = "number,title,url,state,isDraft,headRefName,reviewDecision,mergeStateStatus,statusCheckRollup,author,updatedAt";
+const ISSUE_FIELDS: &str = "number,title,body,url,labels,assignees,updatedAt";
 
 async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
     let out = tokio::process::Command::new("gh")
@@ -224,6 +281,95 @@ async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
 /// Whether this directory has a GitHub remote `gh` can act on.
 pub async fn is_available(dir: &Path) -> bool {
     gh(dir, &["repo", "view", "--json", "name"]).await.is_ok()
+}
+
+/// Whose `gh` this is. Asked once per daemon: it is what "assigned to you"
+/// and "review requested from you" are relative to.
+pub async fn viewer_login(dir: &Path) -> Result<String> {
+    let out = gh(dir, &["api", "user", "--jq", ".login"]).await?;
+    let login = out.trim().to_string();
+    if login.is_empty() {
+        bail!("gh api user returned no login");
+    }
+    Ok(login)
+}
+
+/// Every open pull request on the repository this directory belongs to,
+/// newest first. Bounded: a project with four hundred open pull requests is
+/// a project whose board shows a count, not a list.
+pub async fn open_pull_requests(dir: &Path, limit: u32) -> Result<Vec<PullRequest>> {
+    let limit = limit.to_string();
+    let out = gh(
+        dir,
+        &[
+            "pr", "list", "--state", "open", "--limit", &limit, "--json", PR_FIELDS,
+        ],
+    )
+    .await?;
+    parse_pr_list(&out)
+}
+
+/// Every open issue, newest first, whatever its labels. Pull requests are
+/// not issues here: `gh issue list` already excludes them.
+pub async fn open_issues(dir: &Path, limit: u32) -> Result<Vec<Issue>> {
+    issues(dir, None, limit).await
+}
+
+/// The pull requests GitHub says are waiting for **this person's** review,
+/// as `(owner/name, number)`.
+///
+/// Asked of the search API once for the whole machine rather than derived
+/// from each pull request's `reviewRequests`: `review-requested:@me` is
+/// resolved server-side and covers requests made to a team the person is
+/// actually a member of, which is precisely the fact a client cannot know.
+/// Deriving it locally marked every team's request as theirs.
+///
+/// A failure here costs the `review_requested` signal and nothing else — the
+/// counts and every other item still come from the per-project lists — so it
+/// is logged by the caller rather than failing the pass.
+pub async fn review_requested_of_me(
+    dir: &Path,
+) -> Result<std::collections::BTreeSet<(String, u64)>> {
+    #[derive(Deserialize)]
+    struct Hit {
+        number: u64,
+        repository: Repo,
+    }
+    #[derive(Deserialize)]
+    struct Repo {
+        #[serde(default, rename = "nameWithOwner")]
+        name_with_owner: String,
+    }
+    let out = gh(
+        dir,
+        &[
+            "search",
+            "prs",
+            "--review-requested",
+            "@me",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,repository",
+        ],
+    )
+    .await?;
+    let hits: Vec<Hit> =
+        serde_json::from_str(&out).context("reading the review-requested search gh returned")?;
+    Ok(hits
+        .into_iter()
+        .map(|h| (h.repository.name_with_owner, h.number))
+        .collect())
+}
+
+/// Whether an error from `gh` means this directory will never have a forge —
+/// no remote, no GitHub host, not a repository — as opposed to a network or
+/// login problem that a later poll may not have.
+pub fn is_permanent(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("remote") || e.contains("not a git repository") || e.contains("no known github host")
 }
 
 /// The pull request for a branch, if there is one.
@@ -417,6 +563,8 @@ mod tests {
             body: "x".repeat(50_000),
             url: String::new(),
             labels: vec![],
+            assignees: vec![],
+            updated_at: None,
         };
         let p = issue.prompt();
         assert!(p.len() < 6_000, "an issue must not eat the context window");
@@ -446,6 +594,55 @@ mod tests {
         }
         assert!(PrStatus::Merged.is_finished());
         assert!(!PrStatus::Failing.is_finished());
+    }
+
+    #[test]
+    fn who_wrote_it_is_read_from_the_row_and_who_was_asked_is_not() {
+        // Authorship is in the row and is exact. A review request is not:
+        // `reviewRequests` names teams, and which of them this person belongs
+        // to is a fact only GitHub has — so it arrives from the search instead.
+        let prs = parse_pr_list(
+            r#"[{
+              "number": 5, "title": "t", "url": "u", "state": "OPEN",
+              "author": {"login": "hupe1980"},
+              "updatedAt": "2026-09-15T10:00:00Z"
+            }]"#,
+        )
+        .unwrap();
+        let mine = prs[0].to_forge(Some("hupe1980"), false);
+        assert!(mine.mine && !mine.review_requested);
+        assert_eq!(mine.updated_at.as_deref(), Some("2026-09-15T10:00:00Z"));
+
+        let theirs = prs[0].to_forge(Some("alice"), true);
+        assert!(!theirs.mine && theirs.review_requested);
+
+        // Nobody signed in: nothing is mine.
+        assert!(!prs[0].to_forge(None, false).mine);
+    }
+
+    #[test]
+    fn an_assignee_makes_an_issue_mine() {
+        // Assignees are people. Unlike a review request there is no team
+        // indirection, so this one is answered from the row.
+        let issues = parse_issues(
+            r#"[{"number": 9, "title": "t", "url": "u",
+                 "assignees": [{"login": "hupe1980"}], "labels": [{"name": "bug"}]}]"#,
+        )
+        .unwrap();
+        let f = issues[0].to_forge(Some("hupe1980"));
+        assert!(f.assigned_to_me);
+        assert_eq!(f.labels, ["bug"]);
+        assert!(!issues[0].to_forge(Some("alice")).assigned_to_me);
+    }
+
+    #[test]
+    fn a_missing_remote_is_permanent_and_a_login_problem_is_not() {
+        assert!(is_permanent(
+            "none of the git remotes configured point to a known GitHub host"
+        ));
+        assert!(is_permanent("fatal: not a git repository"));
+        assert!(!is_permanent("gh is not logged in — run `gh auth login`"));
+        assert!(!is_permanent("dial tcp: connection refused"));
     }
 
     #[test]

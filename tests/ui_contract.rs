@@ -455,3 +455,251 @@ fn the_board_script_parses() {
     }
     std::fs::remove_file(&js).ok();
 }
+
+/// A value read straight off the API is escaped, every time, without anybody
+/// deciding whether this particular one needs it.
+///
+/// The page renders agent output, issue titles, branch names and error text
+/// written by people who are not the reader. Safety rested on somebody
+/// remembering `esc()` at a hundred and forty-nine interpolation sites, and
+/// while the discipline held — nothing unescaped was ever found to be
+/// exploitable — "we have been careful so far" is not a security property.
+///
+/// The rule is deliberately uniform rather than clever: an interpolation that
+/// is a bare property path (`r.state`, `s.projects`, `w.pull_request.number`)
+/// is escaped whether it holds a string or a number. Escaping a number costs
+/// nothing; deciding case by case is how one gets missed. Expressions that do
+/// arithmetic, compare, or call something are judged on their own and are not
+/// what this catches.
+#[test]
+fn every_value_read_off_the_api_is_escaped() {
+    let mut bare = Vec::new();
+    for (at, _) in PAGE.match_indices("${") {
+        let rest = &PAGE[at + 2..];
+        let Some(end) = rest.find('}') else { continue };
+        let expr = rest[..end].trim();
+        // A bare dotted path and nothing else: no call, no operator, no ternary.
+        let is_path = expr.split('.').all(|seg| {
+            !seg.is_empty() && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }) && expr.contains('.')
+            && expr.starts_with(|c: char| c.is_ascii_lowercase());
+        // `state.sel` addresses a CSS selector rather than markup.
+        if is_path && expr != "state.sel" {
+            bare.push(expr.to_string());
+        }
+    }
+    assert!(
+        bare.is_empty(),
+        "these values reach the page unescaped: {bare:?}. \
+         Wrap each in esc() — a number costs nothing to escape."
+    );
+}
+
+/// The page announces, and announces one thing.
+///
+/// Twenty sessions changing state must not become twenty announcements, so
+/// there is exactly one region and it announces the count that decides whether
+/// to look — never the thing that changed.
+#[test]
+fn there_is_exactly_one_live_region_and_it_is_polite() {
+    assert_eq!(
+        PAGE.matches("aria-live").count(),
+        1,
+        "one live region: a second one is a second thing talking over the first"
+    );
+    assert!(PAGE.contains(r#"aria-live="polite""#), "never assertive");
+    assert!(
+        PAGE.contains(r#"id="announce""#) && PAGE.contains(r#"aria-atomic="true""#),
+        "the whole sentence is read, not the character that changed"
+    );
+    assert!(
+        PAGE.contains(r#"$("announce").textContent !== say"#),
+        "it must only speak when the sentence changes, or every poll is an announcement"
+    );
+}
+
+/// Anything that covers the page says so, and gives the keyboard back.
+#[test]
+fn every_overlay_is_a_dialog_and_returns_focus() {
+    // The overlays are *found*, never listed. A hardcoded list is an allowlist,
+    // and an allowlist stops covering the thing somebody adds next — which is
+    // the failure this file already learned once, on the field scanner above.
+    // Anything that covers the page carries `class="over"`; the transcript is
+    // the one panel that covers it without being a launcher.
+    let mut overlays: Vec<&str> = PAGE
+        .match_indices(r#"class="over""#)
+        .map(|(at, _)| {
+            let tag_start = PAGE[..at].rfind('<').expect("an opening tag");
+            let tag_end = PAGE[tag_start..]
+                .find('>')
+                .map_or(PAGE.len(), |i| tag_start + i);
+            &PAGE[tag_start..tag_end]
+        })
+        .collect();
+    overlays.push({
+        let at = PAGE.find(r#"id="talk""#).expect("the transcript exists");
+        let tag_start = PAGE[..at].rfind('<').expect("an opening tag");
+        let tag_end = PAGE[tag_start..]
+            .find('>')
+            .map_or(PAGE.len(), |i| tag_start + i);
+        &PAGE[tag_start..tag_end]
+    });
+    assert!(
+        overlays.len() >= 5,
+        "only {} overlays found; the scan is broken, not the page",
+        overlays.len()
+    );
+    for tag in overlays {
+        let id = tag
+            .split(r#"id=""#)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .unwrap_or("?");
+        assert!(
+            tag.contains(r#"role="dialog""#) && tag.contains(r#"aria-modal="true""#),
+            "{id} covers the page and does not say so: {tag}"
+        );
+        assert!(
+            tag.contains("aria-label="),
+            "{id} has no name a screen reader can read: {tag}"
+        );
+    }
+    // And closing puts the keyboard back where it was.
+    assert!(
+        PAGE.contains("over.cameFrom") && PAGE.contains("talk.cameFrom"),
+        "a dialog that drops focus on the body strands a keyboard user at the top of the page"
+    );
+}
+
+/// Every state that shows as a glyph also reads as a word.
+///
+/// "State is never carried by colour alone. Every state has a glyph and a
+/// word" — but the board row carried the glyph and nothing else, so a screen
+/// reader announced a run's state as "●".
+#[test]
+fn a_glyph_that_carries_state_has_a_word_beside_it() {
+    assert!(
+        PAGE.contains(".sr {"),
+        "there has to be a way to say something to a screen reader and nobody else"
+    );
+    for (at, _) in PAGE.match_indices("GLYPH[") {
+        let line_start = PAGE[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end = PAGE[at..].find('\n').map(|i| at + i).unwrap_or(PAGE.len());
+        let line = &PAGE[line_start..line_end];
+        // The fallback table for a missing summary is prose, not a glyph.
+        if !line.contains("<span") {
+            continue;
+        }
+        assert!(
+            line.contains(r#"class="sr""#) && line.contains(r#"aria-hidden="true""#),
+            "a glyph carrying state with no word beside it: {}",
+            line.trim()
+        );
+    }
+}
+
+/// The board's list sections are lists.
+#[test]
+fn the_sections_that_hold_rows_say_they_are_lists() {
+    for id in ["inbox", "board", "work"] {
+        let at = PAGE
+            .find(&format!(r#"id="{id}""#))
+            .unwrap_or_else(|| panic!("{id} exists"));
+        let tag_end = PAGE[at..].find('>').map(|i| at + i).unwrap_or(PAGE.len());
+        assert!(
+            PAGE[at..tag_end].contains(r#"role="list""#),
+            "{id} holds rows and does not present as a list"
+        );
+    }
+    assert!(
+        PAGE.matches(r#"role="listitem""#).count() >= 3,
+        "the rows inside those lists are the items of them"
+    );
+}
+
+/// The page renders, and nothing a stranger wrote comes back as markup.
+///
+/// Every other test here reads the page as *text*, so none can see a template
+/// that throws or prove that a title carrying `<img onerror=...>` arrives
+/// escaped. This runs the script against a stub DOM and checks what lands in
+/// `innerHTML`; `tests/ui_render.js` holds the fixtures and the assertions.
+///
+/// Node is not a build dependency, so a machine without it skips. CI has it.
+#[test]
+fn the_page_renders_and_escapes_what_it_renders() {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ui_render.js");
+    let page = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/index.html");
+    let out = match std::process::Command::new("node")
+        .arg(script)
+        .arg(page)
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipped: node is not installed");
+            return;
+        }
+        Err(e) => panic!("could not run node: {e}"),
+    };
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The page is one file, it asks the network for nothing, and it stays small.
+///
+/// The shell decision rests on these numbers, and a trigger nobody measures is
+/// a trigger nobody reaches.
+///
+/// The external-request check is the load-bearing half: a CDN font or an
+/// off-machine script tag breaks the board over Tailscale on a phone and
+/// `curl`ing the page to debug it, silently, on someone else's network.
+#[test]
+fn the_page_is_one_small_self_contained_file() {
+    let lines = PAGE.lines().count();
+    let bytes = PAGE.len();
+    assert!(
+        bytes < 100 * 1024,
+        "the page is {bytes} bytes; UX.md §2 promises under 100 KB uncompressed"
+    );
+    assert!(
+        lines < 3_000,
+        "the page is {lines} lines, past the point where a build step is worth revisiting"
+    );
+
+    // Anything that would make the browser fetch from somewhere else.
+    for (at, _) in PAGE.match_indices("//") {
+        let line = &PAGE[PAGE[..at].rfind('\n').map_or(0, |i| i + 1)..];
+        let line = &line[..line.find('\n').unwrap_or(line.len())];
+        let is_url = PAGE[..at].ends_with("http:") || PAGE[..at].ends_with("https:");
+        if !is_url {
+            continue;
+        }
+        let rest = &PAGE[at + 2..];
+        let host: String = rest
+            .chars()
+            .take_while(|c| !"/\"' )".contains(*c))
+            .collect();
+        assert!(
+            host.starts_with("127.0.0.1")
+                || host.starts_with("localhost")
+                || host.contains("w3.org"),
+            "the page would reach {host}, and it must ask the network for nothing: {}",
+            line.trim()
+        );
+    }
+    for tag in [
+        "<script src",
+        "<link rel=\"stylesheet\"",
+        "@import",
+        "<iframe",
+    ] {
+        assert!(
+            !PAGE.contains(tag),
+            "`{tag}` loads a second file; the page is served as one"
+        );
+    }
+}

@@ -19,7 +19,7 @@ answers a different question.
 | **Session roster** (`claude agents --json`) | which sessions exist, where, since when | no |
 | **Hooks** (HTTP) | what a session is doing, and when it is blocked | yes |
 | **OpenTelemetry** | cost, tokens, context usage, tool decisions | yes |
-| **Status line** (optional shim) | subscription rate limits, exact context percentage | `--statusline` |
+| **Status line** (optional shim) | rate limits and when they reset, exact context percentage and window size, model, cost, lines changed, the session's Claude Code version | `--statusline` |
 
 Connecting subscribes to twenty-two of the thirty-three documented hook events. Four are worth naming:
 
@@ -55,15 +55,23 @@ vibeplane disconnect claude
 `connect` writes to `~/.claude/settings.json` — your **user** settings, so every project is covered —
 after taking a backup, and adds only two things.
 
-**Hook entries** pointing at `http://127.0.0.1:47831` with a bearer token, merged alongside hooks you
-already have. Sixteen events over HTTP plus one that cannot be:
+**Hook entries**, merged alongside hooks you already have. Observation goes over HTTP to
+`http://127.0.0.1:47831` with a bearer token; the two events that **decide** do not.
 
-- `SessionStart` is a **command** hook running `vibeplane hook`, because that event accepts only
-  `command` and `mcp_tool` hooks. An HTTP entry there is written happily into the settings file and
-  then never runs, which looks exactly like a session that started without telling anyone.
-- **Two are synchronous**, and they answer different questions. `PermissionRequest` is the instant
-  signal that a session is blocked, and it carries the full verdict — it fires only when Claude Code
-  is about to ask you, so an allow there skips a prompt that was already coming.
+- **The two deciding hooks run the `vibeplane` binary**, not a URL. `PermissionRequest` and
+  `PreToolUse` are `command` hooks: Claude Code pipes the call in on stdin and reads the verdict from
+  stdout, and no daemon is involved. That is deliberate. Claude Code treats a failure to reach an
+  HTTP hook as a non-blocking error and lets the call through, so a gate delivered over HTTP is one
+  that stops deciding whenever the daemon is stopped. You would see a `PreToolUse hook error` notice
+  — once per tool call, naming no rule — which is noise rather than protection. The binary is on
+  disk either way, and answering from it takes about 26 ms, less than the round trip it replaced.
+- `SessionStart` is a **command** hook for a different reason: that event accepts only `command` and
+  `mcp_tool` hooks. An HTTP entry there is written happily into the settings file and then never
+  runs, which looks exactly like a session that started without telling anyone.
+- **The two deciding hooks are synchronous**, and they answer different questions.
+  `PermissionRequest` is the instant signal that a session is blocked, and it carries the full
+  verdict — it fires only when Claude Code is about to ask you, so an allow there skips a prompt
+  that was already coming.
 - `PreToolUse` is the other, and it exists because of **auto mode**: there a classifier approves
   routine calls with no prompt, so `PermissionRequest` never fires and a prohibition answered only
   there would not run at all. `PreToolUse` fires before every tool call in every mode. It answers
@@ -156,30 +164,78 @@ vibeplane connect claude --statusline
 ```
 
 The shim runs your original status-line command with the same input, so what you see is unchanged,
-and `disconnect` puts it back exactly. It is the only channel that carries **subscription rate
-limits** — a five-hour or seven-day window past 90 % becomes a `rate_limit` item in the inbox,
-before an agent finds out mid-turn.
+and `disconnect` puts it back exactly.
+
+Several of its facts arrive through **no other channel** — no telemetry to enable, no hook to install:
+
+| What | Why it is only here |
+|---|---|
+| **Subscription rate limits, and when they reset** | A five-hour, seven-day or gateway spend window past 90 % becomes a `rate_limit` item before an agent finds out mid-turn. |
+| **The model** | Otherwise this needs OpenTelemetry, or a `SessionStart` hook the reference says Claude Code *"doesn't always include"*. |
+| **The context window's size** | 200 000, or 1 000 000 on an extended-context model — stated, rather than inferred from which model is in play. |
+| **Cost, and the lines it changed** | Cost without telemetry, and the only report of what a session changed rather than how long it took. |
+| **The Claude Code release this session runs** | The permission gate's behaviour is differentially tested against one release. A session ahead of it is governed by rules nobody has checked against it — `vibeplane doctor` says which, and `vibeplane show` marks it. |
+
+```console
+$ vibeplane show 7c
+  model      claude-opus-5
+  cost       $2.5000 over 41 requests
+  changed    +156 −23 lines
+  limits     5-hour 88% used, resets in 39m
+  harness    Claude Code 2.1.272 — newer than the release the gate was measured against
+```
+
+**Nothing depends on it.** It exists only in an interactive session that renders a status line, so
+every fact above degrades to the channel that already answers it, or to absent. The board is correct
+without the shim.
 
 ## What the board shows
 
 The **working set**, not the inventory.
 
 A machine that has been running agents all week accumulates editor tabs whose processes are still
-alive. On the machine this was developed against, 23 sessions were listed and five were in play.
-Listing all of them is technically complete and practically useless, so a session that has never
-reported anything is counted rather than shown:
+alive. On the machine this was developed against, 38 sessions existed and **one** was in play.
+Listing all of them is technically complete and practically useless, so a session that is neither
+doing something nor asking for something is counted rather than shown:
 
 ```console
-8 projects · 23 sessions · 5 working · 2 need you · 16 idle · $4.18
-17 dormant (never reported) — vibeplane ls --all
+8 projects · 23 sessions · 5 working · 2 need you · 4 idle · $4.18
+12 quiet (nothing heard for hours) — vibeplane ls --all
 ```
 
-A dormant session that starts asking for something joins the working set immediately. This is about
-noise, never about silencing a question.
+Two things are never counted away, however old they are: a session that is **working**, and a
+session that is **asking** you something. Everything else — idle, failed, lost — is on the board
+while it is still today's business and quiet afterwards. A quiet session that starts asking for
+something joins the working set immediately. This is about noise, never about silencing a question.
+
+The numbers **partition** the sessions: `working + need you + idle + failed + quiet` is the total.
+A breakdown that leaves some of its subject unmentioned is worse than no breakdown, because it
+reads like one.
 
 Rows are **grouped by project**, and a run's age is the **session's own start time**, not the moment
 the daemon first noticed it — otherwise every session discovered in one poll shows the same age and
 sorting by recency sorts by nothing.
+
+## GitHub, for every project
+
+Half of what is waiting on you is not a session. For every registered project the daemon reads the
+open issues and pull requests through your own `gh` — a few seconds after it starts, then every
+five minutes — and puts the counts on the board's project heading:
+
+```console
+saas  ·  4 issues · 2 PRs (1 needs you)
+```
+
+What counts as *needs you*: an issue assigned to you; a review requested from you (directly or
+through a team); your own pull request that is red, has changes requested, or is approved and
+waiting for a merge. Each of those is an inbox item too, at normal level, snoozable per project.
+Pull requests Vibeplane opened itself are not counted twice — their Work already raises
+`ci_red`, `changes_requested` and `pr_ready`.
+
+This is observation only. Nothing on the board, in the inbox or on the command line writes to
+GitHub; every action is a link to the thing. A project whose directory has no GitHub remote is
+asked once and then skipped, and a `gh` that is not logged in is reported by `vibeplane doctor`
+rather than retried on every poll.
 
 ## What `doctor` will tell you that nothing else does
 

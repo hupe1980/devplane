@@ -151,8 +151,35 @@ fn linked_worktree_owner(start: &Path) -> Option<PathBuf> {
 ///
 /// One function, because five call sites spelling out the same `or_else` chain
 /// is five places for the worktree case to be forgotten in — and it was.
+///
+/// **The last clause is a fallback and not a third convention.** A directory
+/// with no git above it used to have no rules at all, however plainly a
+/// `vibeplane.toml` was sitting in it — so `vibeplane check` read the file and
+/// printed its rules while `vibeplane explain`, in the same directory, answered
+/// `undecided` and never mentioned it. Two commands disagreeing about one file
+/// is worse than either answer.
+///
+/// Inside a repository the root still wins, even if a nested directory carries
+/// its own `vibeplane.toml`: making the *nearest* file win would silently move
+/// authority for every existing checkout, in a direction nobody could predict
+/// from the outside. This only reaches a path that has no repository above it.
 pub fn governing_root(path: &Path) -> Option<PathBuf> {
-    main_checkout_for(path).or_else(|| find_repo_root(path))
+    main_checkout_for(path)
+        .or_else(|| find_repo_root(path))
+        .or_else(|| find_config_root(path))
+}
+
+/// The nearest ancestor holding a `vibeplane.toml`, for a path with no
+/// repository above it.
+fn find_config_root(start: &Path) -> Option<PathBuf> {
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        if dir.join(crate::core::config::CONFIG_FILE).is_file() {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
 }
 
 /// Whether a path is a checkout that some other repository owns.

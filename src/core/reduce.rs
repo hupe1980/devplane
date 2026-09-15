@@ -26,6 +26,9 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         // Anything the session says about itself makes it real rather than
         // merely present.
         run.reporting = true;
+        // And it means a channel is carrying this session's activity, so
+        // silence from it later is a fact rather than an absence of wiring.
+        run.activity_seen = true;
         // Anything the session does ends the quiet period, so the next silence
         // is reported as its own stall rather than suppressed by the last one.
         run.stall_noticed = false;
@@ -362,31 +365,51 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             let _ = kind;
         }
 
-        Event::StatusSample {
-            context_used_percent,
-            rate_limit_five_hour,
-            rate_limit_seven_day,
-            session_name,
-        } => {
-            if context_used_percent.is_some() {
-                run.totals.reported_context_percent = *context_used_percent;
+        Event::StatusSample(s) => {
+            if s.context_used_percent.is_some() {
+                run.totals.reported_context_percent = s.context_used_percent;
             }
-            // The window that is closest to its limit is the one that will stop
-            // the work, so that is the one to carry. Both were being read off
-            // the wire and thrown away here.
-            let worst = [
-                ("five_hour", rate_limit_five_hour),
-                ("seven_day", rate_limit_seven_day),
-            ]
-            .into_iter()
-            .filter_map(|(name, v)| v.map(|p| (name, p)))
-            .max_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((window, percent)) = worst {
-                run.totals.rate_limit_percent = Some(percent);
-                run.totals.rate_limit_window = Some(window.to_string());
+            // The window the percentage is *of*, stated rather than inferred
+            // from the model. Only overwritten when the provider says so, so a
+            // sample without it leaves a figure derived from telemetry alone.
+            if s.context_window_size.is_some() {
+                run.totals.context_window = s.context_window_size;
             }
-            if session_name.is_some() && run.name.is_none() {
-                run.name = session_name.clone();
+            // The window closest to its limit is the one that will stop the
+            // work, so that is the one to carry, with its reset time.
+            if let Some(w) = s
+                .rate_limits
+                .iter()
+                .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent))
+            {
+                run.totals.rate_limit_percent = Some(w.used_percent);
+                run.totals.rate_limit_window = Some(w.name.clone());
+                run.totals.rate_limit_resets_at = w.resets_at;
+            }
+            if s.session_name.is_some() && run.name.is_none() {
+                run.name = s.session_name.clone();
+            }
+            // A sample never *clears* a fact: the payload omits blocks in some
+            // states, and forgetting one because a message did not repeat it is
+            // how a board flickers.
+            if s.model.is_some() {
+                run.model = s.model.clone();
+            }
+            if s.claude_version.is_some() {
+                run.claude_version = s.claude_version.clone();
+            }
+            // Cost from the provider's own accounting. Assigned rather than
+            // added: it is a session total, where the telemetry channel sends
+            // per-request deltas. Whichever arrives last is the more recent
+            // statement of the same quantity.
+            if let Some(c) = s.cost_usd {
+                run.totals.cost_usd = c;
+            }
+            if let Some(n) = s.lines_added {
+                run.totals.lines_added = n;
+            }
+            if let Some(n) = s.lines_removed {
+                run.totals.lines_removed = n;
             }
         }
 
@@ -394,9 +417,27 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             run.stall_noticed = true;
         }
 
-        Event::Lost { reason } => {
-            run.state = RunState::Lost;
-            run.summary = Some(reason.clone());
+        Event::Lost { reason: _ } => {
+            // One observation — the process is not there — with two readings,
+            // and which one applies is a property of what the run was doing.
+            // A session that was working or being asked something stopped
+            // mid-flight and nobody was told: that is a loss, and it is
+            // Critical. A session that was idle or had only just announced
+            // itself is an editor tab that closed: it is simply over.
+            //
+            // Deciding this here rather than at the call site is what keeps a
+            // replay of the log honest, and `Lost` is deliberately not
+            // activity — so a session that died on Tuesday does not get a
+            // timestamp saying it did something just now.
+            //
+            // The summary is left alone for the same reason: what it was doing
+            // is the only useful thing left, and overwriting it with the
+            // diagnosis ("process not found at startup") threw the evidence
+            // away.
+            run.state = match run.state {
+                RunState::Working | RunState::Waiting(_) => RunState::Lost,
+                _ => RunState::Stopped,
+            };
             run.blocked_on = None;
         }
 
@@ -427,6 +468,94 @@ fn summarise_tool(tool: &str, input: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_status_sample_carries_every_fact_only_it_knows() {
+        use crate::core::event::{RateWindow, StatusSample};
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::StatusSample(StatusSample {
+                context_used_percent: Some(42.0),
+                context_window_size: Some(1_000_000),
+                rate_limits: vec![
+                    RateWindow {
+                        name: "five_hour".into(),
+                        used_percent: 88.0,
+                        resets_at: Some(1_790_000_000),
+                    },
+                    RateWindow {
+                        name: "seven_day".into(),
+                        used_percent: 12.0,
+                        resets_at: Some(1_790_500_000),
+                    },
+                ],
+                session_name: Some("auth".into()),
+                model: Some("claude-opus-5".into()),
+                claude_version: Some("2.1.272".into()),
+                cost_usd: Some(2.5),
+                lines_added: Some(156),
+                lines_removed: Some(23),
+            })),
+        );
+        assert_eq!(r.totals.reported_context_percent, Some(42.0));
+        // Stated by the provider, not inferred from which model is in play.
+        assert_eq!(r.totals.context_window, Some(1_000_000));
+        // The window closest to its limit is the one that will stop the work.
+        assert_eq!(r.totals.rate_limit_window.as_deref(), Some("five_hour"));
+        assert_eq!(r.totals.rate_limit_percent, Some(88.0));
+        assert_eq!(r.totals.rate_limit_resets_at, Some(1_790_000_000));
+        assert_eq!(r.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(r.claude_version.as_deref(), Some("2.1.272"));
+        assert_eq!(r.totals.cost_usd, 2.5);
+        assert_eq!(r.totals.lines_added, 156);
+        assert_eq!(r.totals.lines_removed, 23);
+    }
+
+    #[test]
+    fn a_sample_that_omits_a_fact_does_not_forget_it() {
+        // The payload drops blocks in some states — a model between turns, a
+        // cost before the first response. Clearing a fact because one message
+        // did not repeat it is how a board flickers, and a flickering board is
+        // one people stop reading.
+        use crate::core::event::StatusSample;
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::StatusSample(StatusSample {
+                model: Some("claude-opus-5".into()),
+                claude_version: Some("2.1.272".into()),
+                cost_usd: Some(2.5),
+                context_window_size: Some(200_000),
+                ..Default::default()
+            })),
+        );
+        apply(&mut r, &ev(Event::StatusSample(StatusSample::default())));
+        assert_eq!(r.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(r.claude_version.as_deref(), Some("2.1.272"));
+        assert_eq!(r.totals.cost_usd, 2.5);
+        assert_eq!(r.totals.context_window, Some(200_000));
+    }
+
+    #[test]
+    fn the_status_line_cost_replaces_rather_than_accumulates() {
+        // Telemetry sends per-request deltas and the status line sends a
+        // session total. Adding the total to the running sum would double every
+        // figure on a machine with both channels on — the kind of wrong that
+        // looks plausible on a board and is never questioned.
+        use crate::core::event::StatusSample;
+        let mut r = run();
+        for c in [1.0, 2.0, 3.0] {
+            apply(
+                &mut r,
+                &ev(Event::StatusSample(StatusSample {
+                    cost_usd: Some(c),
+                    ..Default::default()
+                })),
+            );
+        }
+        assert_eq!(r.totals.cost_usd, 3.0);
+    }
+
     #[test]
     fn a_turn_is_counted_once_however_many_usage_updates_it_streams() {
         // The bound `max_turns` rests on, and the reason it is not counted from

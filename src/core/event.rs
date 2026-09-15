@@ -145,6 +145,55 @@ impl<T: Into<String>> From<T> for Choice {
         Self::label(label)
     }
 }
+/// One sample of the status line's payload.
+///
+/// A struct rather than a wide variant: the payload has roughly forty
+/// documented fields. Each one here has a consumer — `RunTotals`, `doctor` or
+/// the board — because a field nothing reads is a claim, not a feature.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatusSample {
+    /// The provider's own context percentage, preferred over the derived one.
+    pub context_used_percent: Option<f64>,
+    /// The window the percentage is *of* — 200 000, or 1 000 000 on an
+    /// extended-context model. Stated by the provider rather than inferred from
+    /// which model is in play, which is a lookup table that rots on every
+    /// model launch.
+    pub context_window_size: Option<u64>,
+    /// Every rate-limit window the payload carried, with when each resets.
+    /// The reducer keeps the one closest to its limit.
+    pub rate_limits: Vec<RateWindow>,
+    pub session_name: Option<String>,
+    /// The live model, with no telemetry connected. Otherwise this needs the
+    /// OTEL channel, or a `SessionStart` the reference says Claude Code
+    /// "doesn't always include".
+    pub model: Option<String>,
+    /// The Claude Code release **this session** is running.
+    ///
+    /// The gate is differentially tested against one version; a session ahead
+    /// of it is running against rules nobody has measured. Machine-wide that is
+    /// an assumption, and per session it is a fact — see
+    /// [`crate::core::policy::VERIFIED_AGAINST`].
+    pub claude_version: Option<String>,
+    /// Session cost as the provider computes it, with no telemetry connected.
+    pub cost_usd: Option<f64>,
+    /// What the session changed. Nothing else here reports it cheaply.
+    pub lines_added: Option<u64>,
+    pub lines_removed: Option<u64>,
+}
+
+/// One rate-limit window: how much is used, and when it resets.
+///
+/// The reset time is what makes the percentage actionable.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateWindow {
+    /// `five_hour`, `seven_day`, or `spend_limit`.
+    pub name: String,
+    pub used_percent: f64,
+    /// Unix epoch seconds.
+    pub resets_at: Option<i64>,
+}
 
 /// A single observation about a run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -314,12 +363,7 @@ pub enum Event {
         started_at_ms: Option<i64>,
     },
     /// A status-line sample: the only channel that carries rate limits.
-    StatusSample {
-        context_used_percent: Option<f64>,
-        rate_limit_five_hour: Option<f64>,
-        rate_limit_seven_day: Option<f64>,
-        session_name: Option<String>,
-    },
+    StatusSample(StatusSample),
     /// A live run has produced nothing for longer than the stall timeout.
     ///
     /// Nothing reports a stall — it is the absence of evidence — so the daemon
@@ -366,7 +410,7 @@ impl Event {
             Event::ModelChanged { .. } => "model_changed",
             Event::SessionEnded { .. } => "session_ended",
             Event::RosterSeen { .. } => "roster_seen",
-            Event::StatusSample { .. } => "status_sample",
+            Event::StatusSample(_) => "status_sample",
             Event::Stalled { .. } => "stalled",
             Event::Lost { .. } => "lost",
             Event::Refresh => "refresh",

@@ -31,10 +31,22 @@ impl Client {
     /// never has to think about: the first `vibeplane ls` after a reboot starts
     /// the observer that should have been running all along.
     pub async fn connect_or_start() -> Result<Self> {
-        if let Ok(c) = Self::connect()
-            && c.healthy().await
-        {
-            return Ok(c);
+        if let Ok(c) = Self::connect() {
+            match c.version().await {
+                Some(v) if v == env!("CARGO_PKG_VERSION") => return Ok(c),
+                // A daemon from a previous install. Every command would then
+                // hit routes it does not have and report 404 as if the feature
+                // were missing — which is exactly what happened for two
+                // releases. Restart it; the store and the spool survive.
+                Some(v) => {
+                    eprintln!(
+                        "vibeplane: the running daemon is v{v} and this is v{}; restarting it",
+                        env!("CARGO_PKG_VERSION")
+                    );
+                    c.stop_and_wait().await;
+                }
+                None => {}
+            }
         }
         crate::daemonise::spawn_detached()?;
         for _ in 0..50 {
@@ -46,6 +58,59 @@ impl Client {
             }
         }
         bail!("started a daemon but it did not become ready; try `vibeplane serve` to see why")
+    }
+
+    /// The running daemon's version, or `None` when nothing healthy answers.
+    ///
+    /// `/healthz` says `ok <version>`; a daemon old enough to say only `ok`
+    /// reports as `0.0.0`, which is older than anything and gets restarted.
+    pub async fn version(&self) -> Option<String> {
+        let text = self
+            .http
+            .get(format!("{}/healthz", self.base))
+            .timeout(std::time::Duration::from_millis(500))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .text()
+            .await
+            .ok()?;
+        let mut words = text.split_whitespace();
+        (words.next() == Some("ok")).then(|| words.next().unwrap_or("0.0.0").to_string())
+    }
+
+    /// Asks the daemon to stop and waits for its port to go quiet. Falls back
+    /// to a signal for a daemon too old to have the route.
+    async fn stop_and_wait(&self) {
+        let _ = self
+            .http
+            .post(format!("{}/api/shutdown", self.base))
+            .bearer_auth(&self.token)
+            .timeout(std::time::Duration::from_millis(1000))
+            .send()
+            .await;
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !self.healthy().await {
+                crate::config::clear_daemon_info().ok();
+                return;
+            }
+        }
+        #[cfg(unix)]
+        if let Ok(Some(info)) = crate::config::read_daemon_info() {
+            unsafe {
+                libc::kill(info.pid as i32, libc::SIGTERM);
+            }
+            for _ in 0..30 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if !self.healthy().await {
+                    break;
+                }
+            }
+        }
+        crate::config::clear_daemon_info().ok();
     }
 
     pub async fn healthy(&self) -> bool {

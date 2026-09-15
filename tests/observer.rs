@@ -20,9 +20,22 @@ async fn boot(policy: Policy) -> (SocketAddr, String, reqwest::Client) {
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    let state = boot_with_db(&db, "test-token".into(), policy).await;
-    let addr = listen(state).await;
-    (addr, "test-token".to_string(), reqwest::Client::new())
+    let (addr, token, c, _state) = boot_shared(policy, &db).await;
+    (addr, token, c)
+}
+
+/// The same, keeping the state so a test can reach into the daemon's own view
+/// of itself — which is where `gate_down` lives, because nothing observable
+/// distinguishes a gate that has stopped deciding from a quiet machine.
+async fn boot_shared(policy: Policy, db: &Path) -> (SocketAddr, String, reqwest::Client, Shared) {
+    let state = boot_with_db(db, "test-token".into(), policy).await;
+    let addr = listen(state.clone()).await;
+    (
+        addr,
+        "test-token".to_string(),
+        reqwest::Client::new(),
+        state,
+    )
 }
 
 async fn boot_with_db(db: &Path, token: String, policy: Policy) -> Shared {
@@ -45,6 +58,48 @@ async fn listen(state: Shared) -> SocketAddr {
         axum::serve(listener, app).await.ok();
     });
     addr
+}
+
+/// Runs the gate the way Claude Code runs it: the binary, a payload on stdin,
+/// the verdict on stdout, with a `~/.vibeplane` of our own and **no daemon**.
+///
+/// The gate used to be an HTTP handler in the daemon, and these tests used to
+/// drive that handler. It is a `command` hook now, because Claude Code treats a
+/// connection failure as a non-blocking error and carries on — so an HTTP gate
+/// is one that is off whenever the daemon is, silently. Testing the handler
+/// would now be testing something no session ever reaches.
+fn gate(home: &Path, machine_rules: &str, payload: &str) -> Value {
+    std::fs::create_dir_all(home).unwrap();
+    std::fs::write(home.join("policy.toml"), machine_rules).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_vibeplane"))
+        .arg("hook")
+        .env("VIBEPLANE_HOME", home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(payload.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("the gate runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(text.trim()).unwrap_or_else(|e| panic!("stdout was {text:?}: {e}"))
+}
+
+/// A throwaway `~/.vibeplane`.
+fn gate_home(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "vp-gate-{}-{name}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&d).unwrap();
+    d
 }
 
 async fn post(
@@ -125,21 +180,28 @@ async fn a_session_that_asks_a_question_reaches_the_inbox() {
 async fn a_permission_no_rule_covers_is_left_to_claude_and_shown_to_the_human() {
     let (addr, token, c) = boot(Policy::default()).await;
 
-    let reply = post(
-        &c,
-        &addr,
-        "/vibeplane/policy",
-        &token,
-        r#"{"hook_event_name":"PermissionRequest","session_id":"s2","cwd":"/tmp/repo",
-            "tool_name":"Bash","tool_input":{"command":"rm -rf node_modules"}}"#,
-    )
-    .await;
+    let payload = r#"{"hook_event_name":"PermissionRequest","session_id":"s2","cwd":"/tmp/repo",
+            "tool_name":"Bash","tool_input":{"command":"rm -rf node_modules"}}"#;
 
     // An empty object means "no decision": Claude Code prompts exactly as it
     // would have. Anything else would change what the user sees.
-    assert_eq!(reply, "{}");
+    let reply = gate(&gate_home("nocover"), "", payload);
+    assert_eq!(reply, serde_json::json!({}));
 
-    // The block is recorded asynchronously, after the reply.
+    // The daemon learns about it through the envelope the gate files.
+    post(
+        &c,
+        &addr,
+        "/vibeplane/decided",
+        &token,
+        &serde_json::json!({
+            "session": "s2", "verdict": "undecided", "rule": null, "blocked": true,
+            "subject": "Bash: rm -rf node_modules", "tool": "Bash",
+            "payload": serde_json::from_str::<Value>(payload).unwrap(),
+        })
+        .to_string(),
+    )
+    .await;
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
     assert_eq!(inbox[0]["kind"], "permission");
@@ -151,62 +213,94 @@ async fn a_permission_no_rule_covers_is_left_to_claude_and_shown_to_the_human() 
 
 #[tokio::test]
 async fn a_matching_rule_answers_without_bothering_anyone() {
-    let policy = Policy::new(&["Bash(pnpm test *)".into()], &["Bash(git push *)".into()]);
-    let (addr, token, c) = boot(policy).await;
+    let (addr, token, c) = boot(Policy::default()).await;
+    let home = gate_home("matching");
+    let rules = r#"
+[policy]
+auto_allow = ["Bash(pnpm test *)"]
+never_auto = ["Bash(git push *)"]
+"#;
 
-    let allow = post(
-        &c,
-        &addr,
-        "/vibeplane/policy",
-        &token,
+    let allow = gate(
+        &home,
+        rules,
         r#"{"hook_event_name":"PermissionRequest","session_id":"s3","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"pnpm test -- --run"}}"#,
-    )
-    .await;
-    let v: serde_json::Value = serde_json::from_str(&allow).unwrap();
-    assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
+    );
+    assert_eq!(allow["hookSpecificOutput"]["decision"]["behavior"], "allow");
 
-    let deny = post(
-        &c,
-        &addr,
-        "/vibeplane/policy",
-        &token,
+    let deny = gate(
+        &home,
+        rules,
         r#"{"hook_event_name":"PermissionRequest","session_id":"s3","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}"#,
+    );
+    assert_eq!(deny["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    assert!(
+        deny["hookSpecificOutput"]["decision"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Bash(git push *)"),
+        "the refusal names the rule that produced it"
+    );
+
+    // A decided permission is not a decision the human has to make.
+    post(
+        &c,
+        &addr,
+        "/vibeplane/decided",
+        &token,
+        r#"{"session":"s3","verdict":"deny","rule":"Bash(git push *)",
+            "subject":"Bash: git push --force origin main","tool":"Bash"}"#,
     )
     .await;
-    let v: serde_json::Value = serde_json::from_str(&deny).unwrap();
-    assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "deny");
-
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
-    assert!(
-        inbox.as_array().unwrap().is_empty(),
-        "a decided permission is not a decision the human has to make"
-    );
+    assert!(inbox.as_array().unwrap().is_empty());
+
+    // And it is written down, naming the rule.
+    let decisions = get_json(&c, &addr, "/api/decisions", &token).await;
+    let rows = decisions.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "one refusal, one row");
+    assert_eq!(rows[0]["outcome"], "deny");
+    assert_eq!(rows[0]["reason"], "Bash(git push *)");
 }
 
 #[tokio::test]
 async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
     // The session is blocked while this runs. A gate that takes long enough to
     // notice is a gate that makes Claude Code feel slower than it is.
-    let policy = Policy::new(&["Bash(ls *)".into()], &[]);
-    let (addr, token, c) = boot(policy).await;
+    //
+    // **This test used to measure an HTTP handler, and then it measured
+    // nothing.** When the gate moved to a `command` hook the route went with
+    // it, and the assertion went on passing — a 404 is very fast. A latency
+    // test pointed at something that no longer exists is worse than no latency
+    // test, because it reports a budget nobody is holding. It now spawns the
+    // binary, which is what Claude Code does.
+    //
+    // The budget is what the move was justified on: a cold process answering
+    // from disk beat the ~50 ms this path was already allowed over loopback.
+    // Measured on the **debug** binary, which is the slow one — release was
+    // about 26 ms.
+    let home = gate_home("latency");
     let body = r#"{"hook_event_name":"PermissionRequest","session_id":"s4","cwd":"/tmp/repo",
         "tool_name":"Bash","tool_input":{"command":"ls -la"}}"#;
+    let rules = "[policy]\nauto_allow = [\"Bash(ls *)\"]\n";
 
-    // Warm the connection so the measurement is the handler, not the TCP setup.
-    post(&c, &addr, "/vibeplane/policy", &token, body).await;
+    // Warm the page cache so the measurement is the gate, not the first read of
+    // a 40 MB debug binary off a cold disk.
+    gate(&home, rules, body);
 
     let mut worst = std::time::Duration::ZERO;
-    for _ in 0..50 {
+    for _ in 0..20 {
         let t = std::time::Instant::now();
-        post(&c, &addr, "/vibeplane/policy", &token, body).await;
+        let reply = gate(&home, rules, body);
         worst = worst.max(t.elapsed());
+        assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "allow");
     }
     assert!(
-        worst < std::time::Duration::from_millis(50),
-        "worst policy round trip was {worst:?}; the budget is 50ms over loopback"
+        worst < std::time::Duration::from_millis(250),
+        "worst gate answer was {worst:?}; the budget is 250ms for an unoptimised build"
     );
 }
 
@@ -402,9 +496,9 @@ async fn a_malformed_hook_payload_never_fails_the_session() {
         .unwrap();
     assert!(res.status().is_success());
 
-    let reply = post(&c, &addr, "/vibeplane/policy", &token, "{ also not json }").await;
     assert_eq!(
-        reply, "{}",
+        gate(&gate_home("garbage"), "", "{ also not json }"),
+        serde_json::json!({}),
         "and an unreadable permission request is left alone"
     );
 }
@@ -663,13 +757,14 @@ async fn dispatching_into_a_directory_that_does_not_exist_is_refused() {
 /// a safety layer the user chose.
 #[tokio::test]
 async fn a_prohibition_reaches_a_session_that_is_never_going_to_prompt() {
-    let policy = Policy::with_ask(
-        &["Bash(pnpm test *)".into()],
-        &["Bash(git push *)".into()],
-        &["Bash(gh release *)".into()],
-    );
-    let (addr, token, c) = boot(policy).await;
-
+    let (addr, token, c) = boot(Policy::default()).await;
+    let home = gate_home("auto");
+    let rules = r#"
+[policy]
+auto_allow = ["Bash(pnpm test *)"]
+never_auto = ["Bash(git push *)"]
+always_ask = ["Bash(gh release *)"]
+"#;
     let pre = |cmd: &str| {
         format!(
             r#"{{"hook_event_name":"PreToolUse","session_id":"auto","cwd":"/tmp/repo",
@@ -678,21 +773,13 @@ async fn a_prohibition_reaches_a_session_that_is_never_going_to_prompt() {
     };
 
     // A deny stops the call, and says which rule did it.
-    let denied = post(
-        &c,
-        &addr,
-        "/vibeplane/policy",
-        &token,
-        &pre("git push --force"),
-    )
-    .await;
-    let v: serde_json::Value = serde_json::from_str(&denied).unwrap();
+    let denied = gate(&home, rules, &pre("git push --force"));
     assert_eq!(
-        v["hookSpecificOutput"]["permissionDecision"], "deny",
+        denied["hookSpecificOutput"]["permissionDecision"], "deny",
         "a never_auto rule has to reach auto mode or it protects nothing"
     );
     assert!(
-        v["hookSpecificOutput"]["permissionDecisionReason"]
+        denied["hookSpecificOutput"]["permissionDecisionReason"]
             .as_str()
             .unwrap()
             .contains("Bash(git push *)"),
@@ -700,33 +787,29 @@ async fn a_prohibition_reaches_a_session_that_is_never_going_to_prompt() {
     );
 
     // An ask forces the prompt the classifier would otherwise have skipped.
-    let asked = post(
-        &c,
-        &addr,
-        "/vibeplane/policy",
-        &token,
-        &pre("gh release create v1"),
-    )
-    .await;
-    let v: serde_json::Value = serde_json::from_str(&asked).unwrap();
-    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "ask");
+    let asked = gate(&home, rules, &pre("gh release create v1"));
+    assert_eq!(asked["hookSpecificOutput"]["permissionDecision"], "ask");
 
     // An *allowed* command is answered with nothing at all. The call still
     // goes through the classifier, which is the layer this must not remove.
-    let allowed = post(
-        &c,
-        &addr,
-        "/vibeplane/policy",
-        &token,
-        &pre("pnpm test -- --run"),
-    )
-    .await;
     assert_eq!(
-        allowed, "{}",
+        gate(&home, rules, &pre("pnpm test -- --run")),
+        serde_json::json!({}),
         "a PreToolUse allow would skip the classifier as well as the prompt"
     );
 
-    // And the prohibition is accounted for afterwards, like every other verdict.
+    // And the prohibition is accounted for afterwards, like every other verdict
+    // — through the envelope the gate files rather than by the daemon deciding
+    // a second time.
+    post(
+        &c,
+        &addr,
+        "/vibeplane/decided",
+        &token,
+        r#"{"session":"auto","verdict":"deny","rule":"Bash(git push *)",
+            "subject":"Bash: git push --force","tool":"Bash"}"#,
+    )
+    .await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let log = get_json(&c, &addr, "/api/decisions", &token).await;
     let rules: Vec<&str> = log
@@ -741,6 +824,49 @@ async fn a_prohibition_reaches_a_session_that_is_never_going_to_prompt() {
     );
 }
 
+/// The property the move to a `command` hook was for: a stopped daemon costs
+/// the *record*, never the enforcement.
+///
+/// Claude Code documents a connection failure on an HTTP hook as a non-blocking
+/// error that lets execution continue, so while the gate lived in the daemon,
+/// every `never_auto` rule on the machine was off whenever the daemon was —
+/// silently, with nothing in the session to say so.
+#[tokio::test]
+async fn the_gate_decides_with_no_daemon_and_files_the_decision_afterwards() {
+    let home = gate_home("nodaemon");
+    let rules = "[policy]\nnever_auto = [\"Read(.env)\"]\n";
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"offline","cwd":"/tmp/repo",
+        "tool_name":"Bash","tool_input":{"command":"cat .env"}}"#;
+
+    // Nothing is listening: `VIBEPLANE_HOME` is fresh, so there is no
+    // `daemon.json` for the gate to find.
+    assert!(!home.join("daemon.json").exists());
+    let reply = gate(&home, rules, payload);
+    assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    // The decision it took is waiting to be written down, with the rule and the
+    // time it was actually taken.
+    let spool = std::fs::read_to_string(home.join("pending-decisions.jsonl"))
+        .expect("a decision taken with no daemon is spooled, not lost");
+    let row: Value = serde_json::from_str(spool.lines().next().unwrap()).unwrap();
+    assert_eq!(row["verdict"], "deny");
+    assert_eq!(row["rule"], "Read(.env)");
+    assert_eq!(row["late"], true, "the log has to say it was filed late");
+    assert!(row["at"].is_string());
+
+    // An *undecided* call is not spooled: nobody had a rule about it, and the
+    // provider can be asked again. Only decisions have to survive.
+    let quiet = gate(
+        &home,
+        rules,
+        r#"{"hook_event_name":"PreToolUse","session_id":"offline","cwd":"/tmp/repo",
+            "tool_name":"Bash","tool_input":{"command":"ls -la"}}"#,
+    );
+    assert_eq!(quiet, serde_json::json!({}));
+    let spool = std::fs::read_to_string(home.join("pending-decisions.jsonl")).unwrap();
+    assert_eq!(spool.lines().count(), 1, "observations are not decisions");
+}
+
 /// A `Read` deny has to survive the trip through a shell command, because
 /// `cat .env` is reading `.env` by any honest reading of the rule.
 #[tokio::test]
@@ -749,20 +875,29 @@ async fn a_file_rule_reaches_the_files_a_shell_command_names() {
     // the running product draws the line: under `Read(.env)` alone it refuses
     // `cat .env` and runs `echo pwned > .env`. Both halves are needed to
     // protect a file from a shell, and saying so is the honest version of a
-    // test that used to assert `Read` did both (D147).
-    let policy = Policy::new(
-        &["Bash(cat *)".into(), "Bash(echo *)".into()],
-        &["Read(.env)".into(), "Edit(.env)".into()],
-    );
-    let (addr, token, c) = boot(policy).await;
-
-    for cmd in ["cat .env", "echo pwned > .env", "echo pwned | tee .env"] {
+    // test that used to assert `Read` did both.
+    let home = gate_home("filerule");
+    let rules = r#"
+[policy]
+auto_allow = ["Bash(cat *)", "Bash(echo *)"]
+never_auto = ["Read(.env)", "Edit(.env)"]
+"#;
+    // The glob spellings are here because they were not, and `cat .en?` read
+    // the file under this exact rule for two passes: the shell expands the
+    // operand before the program sees it, and the matcher was comparing a rule
+    // against a pattern as though it were a path.
+    for cmd in [
+        "cat .env",
+        "echo pwned > .env",
+        "echo pwned | tee .env",
+        "cat .en?",
+        "cat .env*",
+    ] {
         let body = format!(
             r#"{{"hook_event_name":"PreToolUse","session_id":"sh","cwd":"/tmp/repo",
                 "tool_name":"Bash","tool_input":{{"command":"{cmd}"}}}}"#
         );
-        let reply = post(&c, &addr, "/vibeplane/policy", &token, &body).await;
-        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let v = gate(&home, rules, &body);
         assert_eq!(
             v["hookSpecificOutput"]["permissionDecision"], "deny",
             "`{cmd}` is covered by Read(.env) and a rule that misses it reads as protection and is none"
@@ -809,4 +944,435 @@ async fn a_repository_with_no_remote_is_asked_about_once() {
     );
     state.shutdown().await;
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `doctor` must **run** the gate, not read a settings file.
+///
+/// Every way this layer has been wrong was a gate that read as installed and
+/// decided nothing: an async entry, an HTTP entry with no daemon behind it, a
+/// hook set from before the second event existed. And no hook can enforce its
+/// own presence — the vendor's reference says not to count on a stalled hook to
+/// act as a gate — so detection is the only defence there is.
+#[test]
+fn doctor_runs_the_gate_rather_than_reading_about_it() {
+    use serde_json::Map;
+    let exe = env!("CARGO_BIN_EXE_vibeplane");
+
+    // A real one answers.
+    let installed: Map<String, Value> = serde_json::from_str(&format!(
+        r#"{{"hooks": {{"PreToolUse": [{{"hooks": [
+            {{"type":"command","command":"{exe} hook","timeout":5}}]}}]}}}}"#
+    ))
+    .unwrap();
+    let probe = vibeplane::observe::connect::probe_gate(&installed);
+    assert!(
+        probe.answered,
+        "the installed gate refused nothing: {:?}",
+        probe.error
+    );
+
+    // An HTTP entry is not a command gate, however well-formed it looks.
+    let http: Map<String, Value> = serde_json::from_str(
+        r#"{"hooks": {"PreToolUse": [{"hooks": [
+            {"type":"http","url":"http://127.0.0.1:47831/vibeplane/policy","timeout":5}]}]}}"#,
+    )
+    .unwrap();
+    assert!(!vibeplane::observe::connect::probe_gate(&http).answered);
+
+    // A binary that has been moved or uninstalled reads as installed and is
+    // not a gate. This is the failure the probe exists for, and the provider
+    // lets the call through when it happens.
+    let moved: Map<String, Value> = serde_json::from_str(
+        r#"{"hooks": {"PreToolUse": [{"hooks": [
+            {"type":"command","command":"/nowhere/vibeplane hook","timeout":5}]}]}}"#,
+    )
+    .unwrap();
+    let probe = vibeplane::observe::connect::probe_gate(&moved);
+    assert!(!probe.answered);
+    assert!(probe.error.is_some(), "and it says what went wrong");
+}
+
+/// Running the diagnostic must not write history.
+///
+/// The probe gets a real verdict, because it goes through the real gate. A real
+/// verdict used to get a real row: three `vibeplane doctor` runs left three
+/// refusals of a command nobody issued, in the one table that is never pruned
+/// and exists to answer "why did that happen".
+#[test]
+fn probing_the_gate_writes_nothing_down() {
+    let home = gate_home("probe-noop");
+    let rules = "[policy]\nnever_auto = [\"Read(.env)\"]\n";
+    let probe = format!(
+        r#"{{"hook_event_name":"PreToolUse","session_id":"{}","cwd":"/tmp/repo",
+            "tool_name":"Bash","tool_input":{{"command":"cat .env"}}}}"#,
+        vibeplane::observe::hook::PROBE_SESSION
+    );
+
+    // It still decides — a gate that answered the probe differently would be
+    // testing something other than the gate.
+    let reply = gate(&home, rules, &probe);
+    assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    // And with no daemon listening, a real decision would have been spooled.
+    assert!(
+        !home.join("pending-decisions.jsonl").exists(),
+        "the diagnostic filed a decision about a call nobody made"
+    );
+
+    // The same call from a real session does spool, which is what makes the
+    // assertion above mean something.
+    let real = probe.replace(vibeplane::observe::hook::PROBE_SESSION, "s-real");
+    gate(&home, rules, &real);
+    assert!(home.join("pending-decisions.jsonl").exists());
+}
+
+/// A gate that has stopped deciding and a quiet machine are the same thing in
+/// the event log: no hook arrives either way.
+///
+/// So this is the one inbox item Vibeplane raises about **itself**, and the
+/// only one that is about the machine rather than about a run. It is critical,
+/// which nothing else is except a lost run, because the board looks completely
+/// normal while no rule in any project is being enforced.
+#[tokio::test]
+async fn a_gate_that_stopped_answering_reaches_the_inbox() {
+    let db = std::env::temp_dir().join(format!(
+        "vp-gatedown-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
+
+    // Nothing wrong: the inbox says nothing about the gate.
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    assert!(
+        !inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == "gate_down"),
+        "a working gate is not news"
+    );
+
+    // The watcher finds the installed command will not run.
+    *state.gate_down.lock().await = Some("it will not start: No such file or directory".into());
+
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    let item = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "gate_down")
+        .expect("the gate being inert has to reach the inbox");
+    assert_eq!(item["level"], "critical");
+    assert!(item["run_id"].is_null(), "it is about the machine");
+    assert!(
+        item["detail"].as_str().unwrap().contains("No such file"),
+        "and it carries the reason, so `doctor` is a confirmation rather than a hunt"
+    );
+    // Nothing is offered, because the fix is reinstalling and this product does
+    // not rewrite somebody's settings.json from an inbox row.
+    assert!(item["actions"].as_array().unwrap().is_empty());
+
+    // **The CLI has to be able to read it**, and this is the assertion that
+    // would have caught a bug that was already shipped: `render::InboxItem`
+    // typed `run_id` as `String` while the API has always sent `null` for an
+    // item with no session — so `vibeplane inbox` failed to decode the *whole*
+    // response the moment one existed, which `AttentionItem` describes as "the
+    // ordinary case, not an edge one". Driving the API and never the decoder is
+    // how a whole surface stayed broken.
+    let decoded: Vec<vibeplane::render::InboxItem> =
+        serde_json::from_value(inbox.clone()).expect("the CLI decodes what the API serves");
+    assert!(decoded.iter().any(|i| i.kind == "gate_down"));
+
+    // The shape that was already broken before this item existed: a work item
+    // whose runs have all ended. A pull request going red hours later is the
+    // ordinary case.
+    let work_shaped = serde_json::json!([{
+        "kind": "ci_red", "level": "high", "run_id": null,
+        "title": "CI is red", "work_id": "w-1", "actions": ["open_pr"]
+    }]);
+    let decoded: Vec<vibeplane::render::InboxItem> =
+        serde_json::from_value(work_shaped).expect("a work item with no run must decode too");
+    assert!(decoded[0].run_id.is_none());
+}
+
+#[tokio::test]
+async fn the_gates_own_probe_never_reaches_the_board_from_either_receiver() {
+    // `doctor` and the daemon's timer run the installed gate against a probe
+    // call. The hook declines to report it — and an older hook binary, or a
+    // spool it wrote, can still deliver one to the daemon. Both receivers have
+    // to drop it: once it arrived as a `vibeplane-probe-<pid>` project with a
+    // working session and two audit rows.
+    let (addr, token, c) = boot(Policy::default()).await;
+    let probe = vibeplane::observe::hook::PROBE_SESSION;
+
+    post(
+        &c,
+        &addr,
+        "/vibeplane/hook",
+        &token,
+        &format!(
+            r#"{{"hook_event_name":"PreToolUse","session_id":"{probe}","cwd":"/tmp/vibeplane-probe-1",
+                "tool_name":"Bash","tool_input":{{"command":"cat .vibeplane-probe"}}}}"#
+        ),
+    )
+    .await;
+    post(
+        &c,
+        &addr,
+        "/vibeplane/decided",
+        &token,
+        &serde_json::json!({
+            "session": probe, "verdict": "deny", "rule": "Read(.vibeplane-probe)",
+            "blocked": true, "subject": "Bash: cat .vibeplane-probe", "tool": "Bash",
+            "late": true,
+            "payload": {"hook_event_name":"PreToolUse","session_id":probe,
+                        "cwd":"/tmp/vibeplane-probe-1","tool_name":"Bash",
+                        "tool_input":{"command":"cat .vibeplane-probe"}},
+        })
+        .to_string(),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let board = get_json(&c, &addr, "/api/board?all=true", &token).await;
+    assert_eq!(
+        board["runs"].as_array().unwrap().len(),
+        0,
+        "a probe is not a session"
+    );
+    assert!(
+        board["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| !p["root"].as_str().unwrap_or("").contains("vibeplane-probe")),
+        "a probe's scratch directory is not a project"
+    );
+    let decisions = get_json(&c, &addr, "/api/decisions?limit=10", &token).await;
+    assert!(
+        decisions
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["subject"].as_str().unwrap_or("") != "Bash: cat .vibeplane-probe"),
+        "a probe verdict is real and the call is not; the log must not carry it"
+    );
+}
+
+#[tokio::test]
+async fn the_health_probe_names_the_version_so_a_client_can_restart_a_stale_daemon() {
+    // Every command compares this to its own version and restarts a daemon
+    // older than itself. Two releases of `audit` and `attention` answered 404
+    // on machines that had upgraded without a restart.
+    let (addr, _token, c) = boot(Policy::default()).await;
+    let text = c
+        .get(format!("http://{addr}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(text, format!("ok {}", env!("CARGO_PKG_VERSION")));
+}
+
+/// The forge endpoint: one route, both halves, what needs the person first.
+///
+/// Everything else that knows about GitHub here is either pure (the derivation
+/// in `core::forge`) or a process running `gh`. The seam between them — the
+/// route, its bearer check, the sort, the envelope the board reads — had no
+/// test at all, which is the seam every interesting bug in this product lives
+/// at.
+#[tokio::test]
+async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() {
+    use vibeplane::core::{ForgeIssue, ForgePullRequest, ProjectForge, ProjectId};
+
+    let db = std::env::temp_dir().join(format!(
+        "vp-forge-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
+
+    let pr = |number: u64, mine: bool, review: bool, status: &str, draft: bool| ForgePullRequest {
+        number,
+        title: format!("pr {number}"),
+        url: format!("https://github.com/acme/app/pull/{number}"),
+        status: status.into(),
+        draft,
+        mine,
+        review_requested: review,
+        head_ref: "x".into(),
+        updated_at: None,
+    };
+    {
+        let mut f = state.forge.lock().await;
+        f.viewer = Some("me".into());
+        f.last_poll_at = Some(jiff::Timestamp::now());
+        f.projects.insert(
+            ProjectId::new("p1"),
+            ProjectForge {
+                project_id: ProjectId::new("p1"),
+                repo: Some("acme/app".into()),
+                fetched_at: jiff::Timestamp::now(),
+                issues: vec![
+                    ForgeIssue {
+                        number: 1,
+                        title: "someone else's".into(),
+                        url: "u1".into(),
+                        labels: vec![],
+                        assigned_to_me: false,
+                        updated_at: None,
+                    },
+                    ForgeIssue {
+                        number: 2,
+                        title: "yours".into(),
+                        url: "u2".into(),
+                        labels: vec!["bug".into()],
+                        assigned_to_me: true,
+                        updated_at: None,
+                    },
+                ],
+                // A draft of your own with red checks asks nothing, so it sorts
+                // below the review that was actually requested of you.
+                pull_requests: vec![
+                    pr(10, true, false, "failing", true),
+                    pr(11, false, true, "ready_for_review", false),
+                ],
+                error: None,
+            },
+        );
+    }
+
+    // The bearer check is the thing that separates this from every other
+    // process running as this user, and a `?token=` is not it.
+    let un = c
+        .get(format!("http://{addr}/api/forge?token={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(un.status(), 401, "a query token must not open an API route");
+
+    let v = get_json(&c, &addr, "/api/forge", &token).await;
+    assert_eq!(v["viewer"], "me");
+    assert!(v["fetched_at"].is_string(), "the board says when it read");
+
+    let issues = v["issues"].as_array().expect("issues");
+    assert_eq!(issues.len(), 2, "every open issue, not only yours");
+    assert_eq!(
+        issues[0]["number"], 2,
+        "what is assigned to you comes first"
+    );
+    // The poller only ever reads registered projects, so a name is normally
+    // there. This is the fallback: a forge entry whose project the world no
+    // longer has still renders as a row rather than failing to serialise.
+    assert_eq!(issues[0]["project"], "p1");
+    assert_eq!(issues[0]["project_name"], "");
+    assert_eq!(issues[0]["labels"][0], "bug");
+
+    let prs = v["pull_requests"].as_array().expect("pull_requests");
+    assert_eq!(prs.len(), 2, "every open pull request, drafts included");
+    assert_eq!(
+        prs[0]["number"], 11,
+        "the review asked of you outranks your own unfinished draft"
+    );
+    assert_eq!(prs[1]["draft"], true);
+
+    // A project whose last poll failed keeps its numbers and says they are old.
+    {
+        let mut f = state.forge.lock().await;
+        f.projects.get_mut(&ProjectId::new("p1")).unwrap().error =
+            Some("gh: connection refused".into());
+    }
+    let v = get_json(&c, &addr, "/api/forge", &token).await;
+    let stale = v["stale"].as_array().expect("stale");
+    assert_eq!(stale.len(), 1, "the view names what it could not read");
+    assert_eq!(stale[0]["error"], "gh: connection refused");
+    assert!(stale[0]["last_good"].is_string(), "and when it last could");
+    assert_eq!(
+        v["issues"].as_array().unwrap().len(),
+        2,
+        "a failed poll does not empty the board"
+    );
+    let board = get_json(&c, &addr, "/api/board", &token).await;
+    assert_eq!(
+        board["forge"]["p1"]["stale"], "gh: connection refused",
+        "and the heading's counts carry why they might be wrong"
+    );
+    {
+        let mut f = state.forge.lock().await;
+        f.projects.get_mut(&ProjectId::new("p1")).unwrap().error = None;
+    }
+
+    // And the board's headings count exactly what the inbox would list.
+    let board = get_json(&c, &addr, "/api/board", &token).await;
+    assert_eq!(board["summary"]["open_issues"], 2);
+    assert_eq!(board["summary"]["open_prs"], 2);
+    assert_eq!(
+        board["summary"]["forge_needs_you"], 2,
+        "one assigned issue and one requested review; the draft asks nothing"
+    );
+    std::fs::remove_file(&db).ok();
+}
+
+/// A project ruled out of the forge is re-checked, and says why it was.
+///
+/// `is_permanent` decides "this will never have a forge" by looking for the
+/// word `remote` in another program's English error message. That is brittle
+/// by construction, and it used to be *final*: a wrong guess dropped a project
+/// from the forge for the daemon's lifetime, with no row anywhere saying so.
+/// It was also simply wrong about time — `git remote add origin …` makes a
+/// project a GitHub project, and nothing noticed until a restart.
+#[tokio::test]
+async fn a_project_ruled_out_of_the_forge_is_re_checked_and_says_why() {
+    use vibeplane::core::ProjectId;
+
+    let db = std::env::temp_dir().join(format!(
+        "vp-skip-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
+    {
+        let mut f = state.forge.lock().await;
+        f.viewer = Some("me".into());
+        f.skip.insert(
+            ProjectId::new("scratch"),
+            (
+                "no git remotes configured".into(),
+                jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2),
+            ),
+        );
+        f.skip.insert(
+            ProjectId::new("fresh"),
+            ("no git remotes configured".into(), jiff::Timestamp::now()),
+        );
+    }
+
+    let d = get_json(&c, &addr, "/api/diagnostics", &token).await;
+    let ruled = d["forge"]["skipped_projects"].as_array().expect("skipped");
+    assert_eq!(ruled.len(), 2, "both are reported, not just counted");
+    assert!(
+        ruled
+            .iter()
+            .all(|r| r["reason"] == "no git remotes configured" && r["at"].is_string()),
+        "a count of things ruled out is a number a person can do nothing with"
+    );
+
+    // An hour-old ruling is spent; a fresh one still holds. This calls the
+    // predicate the poller calls: a test that re-implements it can agree with
+    // itself while the code does something else entirely.
+    let now = jiff::Timestamp::now();
+    let f = state.forge.lock().await;
+    assert!(
+        !f.should_skip(&ProjectId::new("scratch"), now),
+        "a two-hour-old ruling is re-checked"
+    );
+    assert!(
+        f.should_skip(&ProjectId::new("fresh"), now),
+        "a fresh one is not re-asked every pass"
+    );
+    drop(f);
+    std::fs::remove_file(&db).ok();
 }

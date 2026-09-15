@@ -190,7 +190,7 @@ pub fn rule_content_field(tool: &str) -> Option<&'static str> {
 
 fn content_field(tool: &str) -> Option<&'static str> {
     match tool {
-        "Bash" | "PowerShell" => Some("command"),
+        "Bash" | "PowerShell" | "Monitor" => Some("command"),
         // `MultiEdit` is Claude Code's legacy name and still appears in files
         // people copy from.
         "Read" | "Edit" | "Write" | "MultiEdit" => Some("file_path"),
@@ -199,9 +199,22 @@ fn content_field(tool: &str) -> Option<&'static str> {
         // files a search may reach, and `pattern` is what it looks for in them.
         "Glob" | "Grep" => Some("path"),
         "WebFetch" => Some("url"),
+        // `LSP` is documented as governed by `Read(...)` rules and its input
+        // field is not documented at all, so it is read through
+        // [`PATH_FIELDS`] rather than guessed at here. Naming one key and
+        // being wrong would make every `Read` deny silently skip this tool,
+        // which is the failure this module exists to avoid.
+        "LSP" => None,
         _ => None,
     }
 }
+
+/// The keys a file-path tool may carry its path under, most specific first.
+///
+/// Only consulted for a tool whose content field is not documented. A rule that
+/// cannot find a path matches nothing, so reading several conventional keys is
+/// the difference between a deny that fires and one that is silently absent.
+const PATH_FIELDS: &[&str] = &["file_path", "path", "uri", "filePath"];
 
 /// How a tool's specifier is interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,13 +232,201 @@ enum Shape {
 
 fn shape_of(tool: &str) -> Shape {
     match tool {
-        "Bash" | "PowerShell" => Shape::Command,
-        "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "Glob" | "Grep" => {
+        // `Monitor` is in this list because the vendor's own rule table puts it
+        // there: `Bash(npm run *)` is documented as applying to "Bash, Monitor".
+        // It runs a command in the background and feeds its output back, so a
+        // rule about what may run has to reach it or `never_auto = ["Bash(rm
+        // *)"]` stops the foreground `rm` and not the background one.
+        "Bash" | "PowerShell" | "Monitor" => Shape::Command,
+        // `LSP` is here for the same reason one column over: the table says
+        // `Read(~/secrets/**)` applies to "Read, Grep, Glob, LSP".
+        "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "Glob" | "Grep" | "LSP" => {
             Shape::FilePath
         }
         "WebFetch" => Shape::Url,
         _ => Shape::Opaque,
     }
+}
+
+/// Which command language a tool's content field is written in.
+///
+/// It is a property of the **tool being called**, never of the rule: a
+/// `PowerShell(...)` rule and a `PowerShell` call are matched in PowerShell's
+/// terms, and there is no cross-dialect rule to worry about because each rule
+/// names one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dialect {
+    Posix,
+    PowerShell,
+}
+
+fn dialect_of(tool: &str) -> Dialect {
+    match tool {
+        "PowerShell" => Dialect::PowerShell,
+        _ => Dialect::Posix,
+    }
+}
+
+/// PowerShell's default aliases, cmdlet first.
+///
+/// Shipped with PowerShell itself rather than invented here, which is what
+/// makes the table safe to hold. The reference: *"common aliases are
+/// canonicalized before matching… `PowerShell(Get-ChildItem *)` matches `gci`,
+/// `ls`, and `dir` as well."*
+///
+/// The Unix-looking half is why it matters: without it,
+/// `never_auto = ["PowerShell(Remove-Item *)"]` is walked past by `rm`, `del`,
+/// `ri`, `rd` and `erase`.
+const PS_ALIASES: &[(&str, &str)] = &[
+    ("get-childitem", "gci|ls|dir"),
+    ("get-content", "gc|cat|type"),
+    ("remove-item", "ri|rm|rmdir|del|erase|rd"),
+    ("copy-item", "cpi|cp|copy"),
+    ("move-item", "mi|mv|move"),
+    ("rename-item", "rni|ren"),
+    ("new-item", "ni"),
+    ("set-item", "si"),
+    ("get-item", "gi"),
+    ("invoke-item", "ii"),
+    ("clear-item", "cli"),
+    ("set-content", "sc"),
+    ("add-content", "ac"),
+    ("clear-content", "clc"),
+    ("get-itemproperty", "gp"),
+    ("set-itemproperty", "sp"),
+    ("clear-itemproperty", "clp"),
+    ("remove-itemproperty", "rp"),
+    ("invoke-expression", "iex"),
+    ("invoke-command", "icm"),
+    ("invoke-webrequest", "iwr|curl|wget"),
+    ("invoke-restmethod", "irm"),
+    ("start-process", "saps|start"),
+    ("stop-process", "spps|kill"),
+    ("get-process", "gps|ps"),
+    ("start-service", "sasv"),
+    ("stop-service", "spsv"),
+    ("get-service", "gsv"),
+    ("set-location", "sl|cd|chdir"),
+    ("get-location", "gl|pwd"),
+    ("push-location", "pushd"),
+    ("pop-location", "popd"),
+    ("select-string", "sls"),
+    ("select-object", "select"),
+    ("where-object", "where|?"),
+    ("foreach-object", "foreach|%"),
+    ("sort-object", "sort"),
+    ("group-object", "group"),
+    ("measure-object", "measure"),
+    ("compare-object", "compare|diff"),
+    ("tee-object", "tee"),
+    ("get-member", "gm"),
+    ("write-output", "echo|write"),
+    ("out-host", "oh"),
+    ("out-gridview", "ogv"),
+    ("format-list", "fl"),
+    ("format-table", "ft"),
+    ("format-wide", "fw"),
+    ("get-command", "gcm"),
+    ("get-help", "man|help"),
+    ("get-history", "h|history|ghy"),
+    ("invoke-history", "r|ihy"),
+    ("get-variable", "gv"),
+    ("set-variable", "sv|set"),
+    ("remove-variable", "rv"),
+    ("clear-variable", "clv"),
+    ("get-alias", "gal"),
+    ("set-alias", "sal"),
+    ("new-alias", "nal"),
+    ("import-module", "ipmo"),
+    ("get-module", "gmo"),
+    ("remove-module", "rmo"),
+    ("get-psdrive", "gdr"),
+    ("new-psdrive", "ndr"),
+    ("remove-psdrive", "rdr"),
+    ("enter-pssession", "etsn"),
+    ("exit-pssession", "exsn"),
+    ("new-pssession", "nsn"),
+    ("remove-pssession", "rsn"),
+    ("export-csv", "epcsv"),
+    ("import-csv", "ipcsv"),
+    ("export-alias", "epal"),
+    ("import-alias", "ipal"),
+    ("get-job", "gjb"),
+    ("receive-job", "rcjb"),
+    ("remove-job", "rjb"),
+    ("start-job", "sajb"),
+    ("stop-job", "spjb"),
+    ("wait-job", "wjb"),
+    ("get-clipboard", "gcb"),
+    ("set-clipboard", "scb"),
+    ("clear-host", "clear|cls"),
+    ("get-wmiobject", "gwmi"),
+    ("invoke-wmimethod", "iwmi"),
+    ("remove-wmiobject", "rwmi"),
+    ("set-wmiinstance", "swmi"),
+    ("new-item", "md|mkdir"),
+    ("resolve-path", "rvpa"),
+    ("convert-path", "cvpa"),
+    ("test-path", "tp"),
+    ("write-host", "wh"),
+];
+
+/// The cmdlet an alias names, or the word itself.
+fn ps_canonical_word(word: &str) -> &str {
+    let lower = word;
+    for (cmdlet, aliases) in PS_ALIASES {
+        if *cmdlet == lower {
+            return cmdlet;
+        }
+        if aliases.split('|').any(|a| a == lower) {
+            return cmdlet;
+        }
+    }
+    word
+}
+
+/// One PowerShell command line, lowercased with every command name resolved to
+/// its cmdlet, so a rule and a call can be compared as the vendor compares
+/// them.
+///
+/// The command name is the first word of each subcommand, and the subcommands
+/// are what the reference names: the pipeline operator, the statement
+/// separator, and PowerShell 7's chain operators. Everything else is left
+/// alone — this canonicalises names, it does not parse PowerShell.
+fn ps_canonical(text: &str) -> String {
+    let lower = text.to_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut rest = lower.as_str();
+    loop {
+        // The next separator, and how wide it is.
+        let found = ["&&", "||", "|", ";"]
+            .iter()
+            .filter_map(|s| rest.find(s).map(|i| (i, *s)))
+            .min_by_key(|(i, s)| (*i, std::cmp::Reverse(s.len())));
+        let (head, sep, tail) = match found {
+            Some((i, s)) => (&rest[..i], Some(s), &rest[i + s.len()..]),
+            None => (rest, None, ""),
+        };
+        let trimmed = head.trim_start();
+        let pad = head.len() - trimmed.len();
+        out.push_str(&head[..pad]);
+        match trimmed.split_once(char::is_whitespace) {
+            Some((first, args)) => {
+                out.push_str(ps_canonical_word(first));
+                out.push(' ');
+                out.push_str(args);
+            }
+            None => out.push_str(ps_canonical_word(trimmed)),
+        }
+        match sep {
+            Some(s) => {
+                out.push_str(s);
+                rest = tail;
+            }
+            None => break,
+        }
+    }
+    out
 }
 
 /// The built-in tools Claude Code documents, for catching a typo in a rule.
@@ -289,8 +490,76 @@ const KNOWN_TOOLS: &[&str] = &[
 /// a path rule should reach. Bash only: PowerShell's redirection and cmdlet
 /// vocabulary is a different language, and guessing at it would be the kind of
 /// confident wrong this module exists to avoid.
-fn is_shell(tool: &str) -> bool {
-    tool == "Bash"
+/// The Claude Code release this matcher's behaviour has been differentially
+/// tested against, end to end.
+///
+/// One number, one home: `doctor` reads it, and a session observed running a
+/// *newer* release is reported rather than assumed equivalent — the gap between
+/// "verified against" and "what is actually running here" is the window every
+/// silent widening has lived in.
+///
+/// Raised only by running `scripts/verify-permissions-diff.sh` in full against
+/// that release on both axes. It is not a "latest version we know about".
+pub const VERIFIED_AGAINST: &str = "2.1.270";
+
+/// Whether `observed` is a Claude Code release newer than [`VERIFIED_AGAINST`].
+///
+/// Compared field by field as integers, so `2.1.9` is older than `2.1.270`
+/// rather than newer, which is what a string comparison would say. An
+/// unparseable version is **not** reported as ahead: a warning nobody can act
+/// on is worse than silence, and the provider's version string is somebody
+/// else's format.
+pub fn is_ahead_of_baseline(observed: &str) -> bool {
+    let parts = |v: &str| -> Option<Vec<u64>> {
+        // The **core** version only. A pre-release or build suffix is cut from
+        // the whole string rather than from each segment, because
+        // `2.1.270-beta.1` is a pre-release *of* 2.1.270 and is therefore
+        // older than it — splitting per segment would read the `1` as a fourth
+        // number and call it newer. `2.1.272-rc1` is still ahead, because its
+        // core is.
+        let v = v.trim().trim_start_matches('v');
+        let core = v.split(['-', '+']).next().unwrap_or(v);
+        let nums: Vec<u64> = core
+            .split('.')
+            .map(|p| p.parse::<u64>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        (!nums.is_empty()).then_some(nums)
+    };
+    let (Some(a), Some(b)) = (parts(observed), parts(VERIFIED_AGAINST)) else {
+        return false;
+    };
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// Whether a rule for this tool carries a **command pattern** rather than a
+/// path, a domain or an opaque value.
+///
+/// The authority for the set is [`shape_of`]; this is the same question asked
+/// from outside the module, by the surfaces that *offer* a rule. Without it a
+/// suggested rule for a `PowerShell` call was the literal command line, which
+/// covers that call and nothing else.
+pub fn is_command_tool(tool: &str) -> bool {
+    shape_of(tool) == Shape::Command
+}
+
+pub fn is_shell(tool: &str) -> bool {
+    // `Monitor` runs its `command` through the same shell, so a redirection in
+    // it writes the same file and a recognised file command in it reads the
+    // same one. PowerShell is deliberately absent: its redirection and cmdlet
+    // vocabulary is a different language, the operand extraction in
+    // [`crate::core::command`] is a POSIX parser, and running one over the
+    // other produces a confident wrong answer rather than no answer.
+    matches!(tool, "Bash" | "Monitor")
 }
 
 /// Tools whose calls a `Read(path)` rule governs.
@@ -300,7 +569,9 @@ fn is_shell(tool: &str) -> bool {
 /// path — a rule that says "never look at `.env`" plainly also means "never
 /// overwrite it".
 fn reads_files(tool: &str) -> bool {
-    matches!(tool, "Read" | "Grep" | "Glob")
+    // `LSP` reads files to answer "where is this defined" and "what type is
+    // this", and the vendor's rule table lists it beside Read, Grep and Glob.
+    matches!(tool, "Read" | "Grep" | "Glob" | "LSP")
 }
 
 /// Tools whose calls an `Edit(path)` rule governs. `Edit` covers every built-in
@@ -317,11 +588,19 @@ fn edits_files(tool: &str) -> bool {
 /// board's one-line summary and the permission card — and both should say the
 /// same thing the policy was looking at.
 pub fn rule_content(tool: &str, input: &serde_json::Value) -> Option<String> {
-    let key = content_field(tool)?;
-    input
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    if let Some(key) = content_field(tool) {
+        return input
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+    if shape_of(tool) == Shape::FilePath {
+        return PATH_FIELDS
+            .iter()
+            .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +779,14 @@ impl Rule {
     /// call. Claude Code's escape hatch for the forms no prefix rule may
     /// approve is *"write an exact-match rule for the full command string"*,
     /// so the veto in `Policy::evaluate` has to be able to tell them apart.
+    /// Whether this rule is an exception carving a hole in its own list.
+    ///
+    /// Read by the surfaces that *show* a rule set, so a negation is not
+    /// printed under the badge of the list it subtracts from.
+    pub fn is_negated(&self) -> bool {
+        self.negated
+    }
+
     pub fn has_wildcard(&self) -> bool {
         match &self.spec {
             Spec::Any => true,
@@ -535,7 +822,7 @@ impl Rule {
             Spec::Path(p) if self.path_tool_applies(tool) => self.path_matches(p, ctx, tool, input),
             Spec::Path(p) if is_shell(tool) => self.shell_path_matches(p, ctx, input),
             Spec::Path(_) => false,
-            _ if !self.tool.matches(tool, self.class) => false,
+            _ if !self.command_tool_applies(tool) => false,
             Spec::Any => true,
             // Not against the whole string. Claude Code splits the command on
             // shell operators and matches each subcommand, and the two sides
@@ -546,6 +833,15 @@ impl Rule {
             // and `Bash(pnpm test *)` in `auto_allow` approved
             // `pnpm test && rm -rf /`. See [`crate::core::command`].
             Spec::Command { pattern, bare } => match rule_content(tool, input) {
+                // PowerShell is matched in PowerShell's terms: both sides
+                // lowercased and every command name resolved to its cmdlet,
+                // which is what the reference says the running product does.
+                // Both sides, symmetrically — a rule written `PowerShell(rm *)`
+                // has to reach `Remove-Item` for the same reason the other
+                // direction has to reach `rm`.
+                Some(c) if dialect_of(tool) == Dialect::PowerShell => {
+                    self.command_matches(&ps_canonical(pattern), *bare, &ps_canonical(&c))
+                }
                 Some(c) => self.command_matches(pattern, *bare, &c),
                 None => false,
             },
@@ -634,12 +930,29 @@ impl Rule {
         // approving a compound saves a rule "for each subcommand that requires
         // approval".
         //
+        // **The rule must cover at least one part**, because
+        // `never_asks_about` answers *"does this part need a rule?"* and is not
+        // evidence that *this* rule speaks for anything. Without the check, any
+        // rule in the file matches any command made entirely of self-approving
+        // parts — and is then named in the decision log as the authority for
+        // it, which is the one field a person cannot check for themselves. The
+        // specification presupposes this: a rule "for each subcommand that
+        // requires approval" is a rule that approves one.
+        //
         // An unparseable line — `npm test &&` — is not split at all, and
         // approves nothing.
         match crate::core::command::subcommands(command) {
-            Some(parts) => parts
-                .iter()
-                .all(|c| one(c, false) || crate::core::command::never_asks_about(c)),
+            Some(parts) => {
+                let mut covers_one = false;
+                for c in &parts {
+                    if one(c, false) {
+                        covers_one = true;
+                    } else if !crate::core::command::never_asks_about(c) {
+                        return false;
+                    }
+                }
+                covers_one
+            }
             None => false,
         }
     }
@@ -672,6 +985,20 @@ impl Rule {
     }
 
     /// Whether a path rule written on this tool governs a call to `tool`.
+    /// Whether this rule's tool name speaks for `tool`.
+    ///
+    /// The same idea as [`Self::path_tool_applies`] one column over: the
+    /// vendor's rule table lists `Bash(npm run *)` as applying to "Bash,
+    /// Monitor", so a rule written about what may run reaches the tool that
+    /// runs things in the background as well as the one that runs them in
+    /// front of you. Everything else is the tool pattern as written.
+    fn command_tool_applies(&self, tool: &str) -> bool {
+        if tool == "Monitor" && self.tool.as_str().eq_ignore_ascii_case("Bash") {
+            return true;
+        }
+        self.tool.matches(tool, self.class)
+    }
+
     fn path_tool_applies(&self, tool: &str) -> bool {
         let named = self.tool.as_str();
         if named.eq_ignore_ascii_case("Edit") {
@@ -932,17 +1259,32 @@ impl Rule {
             && !named.eq_ignore_ascii_case("Read")
             && !named.eq_ignore_ascii_case("Edit")
         {
-            let replacement = if named.eq_ignore_ascii_case("Glob") {
-                "Read"
-            } else {
-                "Edit"
-            };
+            // The suggestion follows what the tool *does*, not an alphabetical
+            // guess: a reader is replaced by `Read`, everything else by `Edit`.
+            // `LSP(src/**)` used to be answered with "write it as `Edit(…)`",
+            // which sends somebody to forbid writes on a tool that only reads.
+            let replacement = if reads_files(named) { "Read" } else { "Edit" };
             out.push((
                 true,
                 format!(
                     "`{raw}` puts a path on `{named}`, and file permissions are only \
                      checked against `Read(…)` and `Edit(…)`. Write it as \
                      `{replacement}(…)` — `{named}` rules are accepted and never consulted"
+                ),
+            ));
+        }
+
+        // A command specifier belongs on `Bash`. The vendor's rule table gives
+        // `Monitor` no rule format of its own — it is governed *through*
+        // `Bash(…)` — so `Monitor(npm *)` is accepted and never consulted, the
+        // same silent shape as `Write(path)` above.
+        if matches!(self.spec, Spec::Command { .. }) && named.eq_ignore_ascii_case("Monitor") {
+            out.push((
+                true,
+                format!(
+                    "`{raw}` puts a command pattern on `Monitor`, which has no rule \
+                     format of its own. Write it as `Bash(…)`, which governs both the \
+                     foreground command and the one `Monitor` runs in the background"
                 ),
             ));
         }
@@ -1245,7 +1587,9 @@ impl PathPattern {
         };
         let real_file = resolve(&absolute).unwrap_or(absolute);
         let resolved = match self.resolved_base(ctx, resolve) {
-            Some((base, skip)) => self.matches_from(&base, &self.segments[skip..], &real_file),
+            Some((base, skip)) => {
+                self.matches_from(&base, &self.segments[skip..], &real_file, class)
+            }
             None => self.matches_one(ctx, &real_file, class),
         };
         if class.is_restrictive() {
@@ -1326,7 +1670,7 @@ impl PathPattern {
 
     /// `matches_one` with the base and remaining segments supplied, so a
     /// resolved prefix can stand in for the spelled one.
-    fn matches_from(&self, base: &Path, segments: &[String], file: &Path) -> bool {
+    fn matches_from(&self, base: &Path, segments: &[String], file: &Path, class: Class) -> bool {
         let file = normalise(file);
         let base = normalise(base);
         let Ok(rel) = file.strip_prefix(&base) else {
@@ -1338,7 +1682,7 @@ impl PathPattern {
             .split('/')
             .filter(|s| !s.is_empty())
             .collect();
-        segments_match(segments, &parts)
+        segments_match(segments, &parts, class.is_restrictive())
     }
 
     /// Whether this pattern covers one spelling of a file.
@@ -1374,9 +1718,9 @@ impl PathPattern {
         if floats {
             let mut pattern: Vec<String> = vec!["**".into()];
             pattern.extend(self.segments.iter().cloned());
-            return segments_match(&pattern, &parts);
+            return segments_match(&pattern, &parts, class.is_restrictive());
         }
-        segments_match(&self.segments, &parts)
+        segments_match(&self.segments, &parts, class.is_restrictive())
     }
 }
 
@@ -1396,8 +1740,10 @@ impl PathPattern {
 /// Recognised file commands are skipped: they are in the built-in read-only
 /// set, so nobody was going to be asked and there is no prompt to skip.
 pub fn uncovered_targets(input: &Value, covered: impl Fn(&str, &Path) -> bool) -> Option<String> {
-    let command = rule_content("Bash", input)?;
-    for t in crate::core::command::file_targets(&command) {
+    // Every shell tool carries its line under the same key, so the field is
+    // named once here rather than the caller's tool being threaded through.
+    let command = input.get("command").and_then(|v| v.as_str())?;
+    for t in crate::core::command::file_targets(command) {
         if !t.allow_side_applies() {
             continue;
         }
@@ -1468,7 +1814,18 @@ fn normalise(p: &Path) -> PathBuf {
 /// exactly one path segment, so the only choice is how far each `**` reaches —
 /// take the shortest and extend on failure, and every option is tried once.
 /// `a_path_rule_cannot_be_made_slow_by_the_path_it_matches` is the bound.
-fn segments_match(pattern: &[String], path: &[&str]) -> bool {
+/// `glob_aware` is `class.is_restrictive()`: on the deny and ask side a
+/// segment the agent wrote may itself be a glob the shell will expand, so the
+/// comparison is an intersection rather than a match. See
+/// [`segments_could_meet`].
+fn segments_match(pattern: &[String], path: &[&str], glob_aware: bool) -> bool {
+    let seg = |p: &str, t: &str| {
+        if glob_aware {
+            segments_could_meet(p, t)
+        } else {
+            segment_match(p, t)
+        }
+    };
     let (mut pi, mut ti) = (0usize, 0usize);
     let (mut star, mut resume) = (None::<usize>, 0usize);
 
@@ -1477,7 +1834,7 @@ fn segments_match(pattern: &[String], path: &[&str]) -> bool {
             star = Some(pi);
             resume = ti;
             pi += 1;
-        } else if pi < pattern.len() && segment_match(&pattern[pi], path[ti]) {
+        } else if pi < pattern.len() && seg(&pattern[pi], path[ti]) {
             pi += 1;
             ti += 1;
         } else if let Some(s) = star {
@@ -1496,6 +1853,69 @@ fn segments_match(pattern: &[String], path: &[&str]) -> bool {
         pi += 1;
     }
     pi == pattern.len()
+}
+
+/// Whether a rule segment and a segment the **agent wrote** could name the same
+/// file, when the agent's segment is itself a glob.
+///
+/// `segment_match` treats its text as a literal, which is right for a path a
+/// file tool names and wrong for a shell operand: the shell expands `cat .en?`
+/// before `cat` sees it, so comparing `.env` against those four characters
+/// misses a command that reads `.env`.
+///
+/// The glob is not expanded for real — `src/core/` may not touch a filesystem
+/// (`tests/purity.rs`), and the daemon's working directory is not the
+/// session's. The question is asked textually instead: **could any one name
+/// satisfy both patterns.** That over-approximates, which is the direction this
+/// module is allowed to be wrong in — a false intersection costs a prompt, a
+/// missed one costs the prohibition.
+///
+/// **Restrictive rules only.** Granting on a glob would approve every file it
+/// might expand to, which is a grant over a set nobody wrote down. The allow
+/// side skips an unpinnable target instead.
+///
+/// POSIX's dotfile rule keeps the over-approximation usable: without it
+/// `Read(.env)` would refuse `cat *`, which no shell expands onto `.env`.
+fn segments_could_meet(rule: &str, operand: &str) -> bool {
+    if !operand.contains('*') && !operand.contains('?') && !operand.contains('[') {
+        return segment_match(rule, operand);
+    }
+    // POSIX will not expand a wildcard onto a name beginning with `.` unless
+    // the pattern spells the dot **literally** — which is why this looks at the
+    // first character rather than at the pattern's meaning. `.en[v]` expands to
+    // `.env` and `[.]env` does not, and the difference is exactly whether the
+    // first character is a dot. Both were checked against a real shell.
+    if rule.starts_with('.') && !operand.starts_with('.') {
+        return false;
+    }
+    // A bracket expression stands for one character from a set this matcher
+    // does not parse, so it is treated as one *unknown* character. That
+    // over-approximates — `.en[x]` is not `.env` — in the direction this
+    // module is allowed to be wrong in, and it avoids carrying a second glob
+    // dialect (ranges, negation, classes) for a spelling agents rarely write.
+    let operand = &collapse_brackets(operand);
+    // Neither pattern is the text, so ask in both directions: one of the two
+    // is the more specific and it is not knowable which.
+    segment_match(rule, operand) || segment_match(operand, rule)
+}
+
+/// `[abc]` and `[!a-z]` become a single `?`. An unterminated `[` is a literal
+/// bracket, which is what a shell does with it too.
+fn collapse_brackets(seg: &str) -> String {
+    let mut out = String::with_capacity(seg.len());
+    let mut rest = seg;
+    while let Some(open) = rest.find('[') {
+        match rest[open + 1..].find(']') {
+            Some(close) => {
+                out.push_str(&rest[..open]);
+                out.push('?');
+                rest = &rest[open + 1 + close + 1..];
+            }
+            None => break,
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// One path segment against one pattern segment. `*` stops at a separator,
@@ -1790,6 +2210,170 @@ mod tests {
 
     fn bash(cmd: &str) -> serde_json::Value {
         json!({ "command": cmd })
+    }
+
+    // -----------------------------------------------------------------------
+    // The dialect a command is written in, and the tools a rule reaches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_powershell_deny_reaches_the_cmdlet_s_aliases_and_ignores_case() {
+        // *"Common aliases are canonicalized before matching… Matching is
+        // case-insensitive."* Without it, `never_auto =
+        // ["PowerShell(Remove-Item *)"]` stopped `Remove-Item` and waved
+        // through `rm`, `del`, `ri`, `rd` and `erase` — five silent widenings
+        // from one rule, on a vendor surface that documents the behaviour.
+        let p = Policy::new(&[], &["PowerShell(Remove-Item *)".into()]);
+        for cmd in [
+            "Remove-Item x",
+            "remove-item x",
+            "REMOVE-ITEM x",
+            "ri x",
+            "rm x",
+            "del x",
+            "erase x",
+            "rd x",
+            "rmdir x",
+            "Get-ChildItem .; rm x",
+        ] {
+            assert!(
+                matches!(
+                    p.evaluate(&ctx(), "PowerShell", &bash(cmd)),
+                    Verdict::Deny { .. }
+                ),
+                "{cmd} is Remove-Item"
+            );
+        }
+    }
+
+    #[test]
+    fn a_powershell_allow_covers_the_aliases_the_reference_names() {
+        // The same canonicalisation, the other way: the reference's own
+        // example is that `PowerShell(Get-ChildItem *)` matches `gci`, `ls`
+        // and `dir`. Both directions or neither — a rule that denies through
+        // aliases and does not allow through them is a rule that reads one way
+        // and behaves another.
+        let p = Policy::new(&["PowerShell(Get-ChildItem *)".into()], &[]);
+        for cmd in [
+            "Get-ChildItem .",
+            "gci .",
+            "dir .",
+            "ls .",
+            "GET-CHILDITEM .",
+        ] {
+            assert!(
+                matches!(
+                    p.evaluate(&ctx(), "PowerShell", &bash(cmd)),
+                    Verdict::Allow { .. }
+                ),
+                "{cmd} is Get-ChildItem"
+            );
+        }
+        // And a PowerShell rule still says nothing about a Bash call.
+        assert!(matches!(
+            p.evaluate(&ctx(), "Bash", &bash("ls .")),
+            Verdict::Undecided
+        ));
+    }
+
+    #[test]
+    fn a_posix_command_is_not_canonicalised() {
+        // The alias table belongs to one tool. `rm` under Bash is `rm`, and a
+        // `Bash(Remove-Item *)` rule is a rule about a program nobody has.
+        let p = Policy::new(&[], &["Bash(Remove-Item *)".into()]);
+        assert!(matches!(
+            p.evaluate(&ctx(), "Bash", &bash("rm x")),
+            Verdict::Undecided
+        ));
+    }
+
+    #[test]
+    fn a_bash_rule_reaches_the_monitor_tool() {
+        // The vendor's rule table: `Bash(npm run *)` applies to "Bash,
+        // Monitor". `Monitor` runs a command in the background and feeds its
+        // output back, so a rule about what may run has to reach it — or
+        // `never_auto` stops the foreground `rm` and not the background one.
+        let p = Policy::new(&["Bash(npm run *)".into()], &["Bash(rm *)".into()]);
+        assert!(matches!(
+            p.evaluate(&ctx(), "Monitor", &bash("rm -rf /")),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            p.evaluate(&ctx(), "Monitor", &bash("npm run watch")),
+            Verdict::Allow { .. }
+        ));
+        // And a redirection in a Monitor command is checked like any other.
+        let p = Policy::new(&["Bash(echo *)".into()], &["Edit(.env)".into()]);
+        assert!(matches!(
+            p.evaluate(&ctx(), "Monitor", &bash("echo x > .env")),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn a_rule_that_cannot_work_names_the_right_replacement() {
+        // A path rule on a *reader* used to be answered with "write it as
+        // `Edit(…)`", which sends somebody to forbid writes on a tool that only
+        // reads. And a command pattern on `Monitor` was not reported at all:
+        // the vendor's table gives `Monitor` no rule format of its own, so the
+        // rule is accepted and never consulted — silent, like `Write(path)`.
+        let says = |raw: &str| {
+            Rule::parse(raw, Class::Deny)
+                .unwrap()
+                .problems()
+                .into_iter()
+                .map(|(_, m)| m)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert!(says("LSP(src/**)").contains("Write it as `Read(…)`"));
+        assert!(says("Glob(src/**)").contains("Write it as `Read(…)`"));
+        assert!(says("Write(src/**)").contains("Write it as `Edit(…)`"));
+        assert!(says("NotebookEdit(x)").contains("Write it as `Edit(…)`"));
+        assert!(says("Monitor(npm *)").contains("Write it as `Bash(…)`"));
+        // And the two that do work are not complained about.
+        assert!(says("Read(.env)").is_empty());
+        assert!(says("Bash(rm *)").is_empty());
+    }
+
+    #[test]
+    fn a_read_deny_reaches_the_lsp_tool() {
+        // The vendor's rule table: `Read(~/secrets/**)` applies to "Read,
+        // Grep, Glob, LSP". The LSP tool opens files to answer "where is this
+        // defined", and its input field is not documented — so the path is
+        // read through the conventional keys rather than guessed at, because
+        // naming one and being wrong makes every `Read` deny skip this tool
+        // silently.
+        let p = Policy::new(&[], &["Read(.env)".into()]);
+        for input in [
+            json!({ "file_path": ".env" }),
+            json!({ "path": ".env" }),
+            json!({ "uri": ".env" }),
+        ] {
+            assert!(
+                matches!(p.evaluate(&ctx(), "LSP", &input), Verdict::Deny { .. }),
+                "{input} is .env"
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_deny_reaches_a_path_inside_a_revision() {
+        // `git show HEAD:.env` is the same secret arriving through git's object
+        // store rather than the working tree.
+        let p = Policy::new(&[], &["Read(.env)".into()]);
+        for cmd in ["git show HEAD:.env", "git cat-file -p HEAD:.env"] {
+            assert!(
+                matches!(p.evaluate(&ctx(), "Bash", &bash(cmd)), Verdict::Deny { .. }),
+                "{cmd} reads .env"
+            );
+        }
+        // A colon is legal in a filename, so the whole operand still counts.
+        let p = Policy::new(&[], &["Read(HEAD:.env)".into()]);
+        assert!(matches!(
+            p.evaluate(&ctx(), "Bash", &bash("git show HEAD:.env")),
+            Verdict::Deny { .. }
+        ));
     }
 
     #[test]
@@ -2476,11 +3060,27 @@ mod tests {
         // What actually protects a redirect is the **target** check, which runs
         // over the whole command line regardless of any of this.
         let p = Policy::new(&["Bash(touch *)".into()], &[]);
-        // Inside the working directory: allowed, as Manual mode allows it.
-        assert!(matches!(
+        // **This assertion was inverted, and it had been pinning a defect.**
+        // It used to require `Bash(touch *)` to *allow* `echo hi > ran.txt` —
+        // a rule about `touch` answering for a command containing no `touch`,
+        // on the strength of every part being self-approving. That is how a
+        // rule matching nothing came to be printed as the authority for a call
+        // it had never seen.
+        //
+        // `Undecided` is the truthful answer and is also the safer one.
+        // `evaluate` answers `PermissionRequest`, which fires only when the
+        // provider was **already going to ask a person**: if it is asking about
+        // `echo hi > ran.txt`, it did not treat that as needing no rule, and
+        // saying "read-only, allow" here would overrule the harness on its own
+        // question. Undecided hands it back, which is what "no rule of ours
+        // covers this" means.
+        assert_eq!(
             p.evaluate(&ctx(), "Bash", &bash("echo hi > ran.txt")),
-            Verdict::Allow { .. }
-        ));
+            Verdict::Undecided
+        );
+        // A compound where the rule genuinely covers a part is unchanged, and
+        // is the case the free-part reasoning exists for: `ls > out.txt` needs
+        // no rule, `touch a` is the one this rule speaks for.
         assert!(matches!(
             p.evaluate(&ctx(), "Bash", &bash("ls > out.txt && touch a")),
             Verdict::Allow { .. }
@@ -3219,7 +3819,7 @@ mod tests {
         );
 
         // The same, one path segment at a time.
-        assert!(segments_match(&["*b".to_string()], &["*ab"]));
+        assert!(segments_match(&["*b".to_string()], &["*ab"], false));
     }
 
     /// One case per row of Claude Code's own "Compound commands" and
@@ -3393,7 +3993,9 @@ mod tests {
         let m = |pat: &str, path: &str| {
             let segs: Vec<String> = pat.split('/').map(str::to_string).collect();
             let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-            segments_match(&segs, &parts)
+            // The adversarial-input benchmark runs the glob-aware path, which
+            // is the slower of the two and therefore the one worth pinning.
+            segments_match(&segs, &parts, true)
         };
         assert!(
             m("src/**", "src"),
@@ -3487,5 +4089,214 @@ mod tests {
             p.restrictive(&ctx, "Bash", &input),
             Verdict::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn a_glob_operand_is_matched_against_a_path_deny() {
+        // The shell expands `cat .en?` before `cat` sees it, so a rule
+        // comparing `.env` against the four characters `.en?` as a literal does
+        // not fire on a command that reads `.env`. Measured against a real
+        // shell: each of these printed the file.
+        let p = Policy::new(
+            &["Bash(cat *)".into(), "Bash(head *)".into()],
+            &["Read(.env)".into()],
+        );
+        for cmd in [
+            "cat .en?",
+            "cat .env*",
+            "head -c3 .en?",
+            "cat ./.en?",
+            "cat .en[v]",
+        ] {
+            assert!(
+                matches!(p.evaluate(&ctx(), "Bash", &bash(cmd)), Verdict::Deny { .. }),
+                "{cmd} reaches .env and must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wildcard_does_not_reach_a_dotfile_the_way_the_shell_does_not() {
+        // The other half of the same design, and the half that keeps it usable.
+        // POSIX will not expand `*` onto a name beginning with `.`, so `cat *`
+        // is not a way to read `.env` — and a `Read(.env)` deny that fired on
+        // `cat *`, `ls *` and `grep x *` is one people would delete.
+        let p = Policy::new(&[], &["Read(.env)".into()]);
+        for cmd in ["cat *", "grep TOKEN *", "cat *.txt", "head -n1 *"] {
+            assert!(
+                !matches!(p.evaluate(&ctx(), "Bash", &bash(cmd)), Verdict::Deny { .. }),
+                "{cmd} cannot expand onto .env, so denying it is a narrowing"
+            );
+        }
+        // A rule that does not name a dotfile is reached by a bare wildcard,
+        // because the shell reaches it too.
+        let p = Policy::new(&[], &["Read(secret.txt)".into()]);
+        assert!(matches!(
+            p.evaluate(&ctx(), "Bash", &bash("cat *.txt")),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn an_allow_rule_never_grants_on_a_glob() {
+        // The asymmetry is the design. Expanding a glob for a *deny* costs a
+        // prompt when it is wrong; expanding one for an *allow* grants over a
+        // set of files nobody wrote down, which is the widening this module
+        // exists to prevent. A shell operand that cannot be pinned to one file
+        // keeps being skipped on the allow side, so the call reaches a person.
+        let p = Policy::new(&["Read(logs/**)".into(), "Bash(cat *)".into()], &[]);
+        for cmd in ["cat logs/*", "cat logs/.en?", "cat ~/logs/x"] {
+            assert!(
+                !matches!(
+                    p.evaluate(&ctx(), "Bash", &bash(cmd)),
+                    Verdict::Allow { rule } if rule.starts_with("Read")
+                ),
+                "{cmd}: a path allow rule spoke for an unpinnable operand"
+            );
+        }
+        // A `Glob` or `Grep` call is a *pattern* by design, and an allow rule
+        // over the tree it searches does speak for it. That is not the same
+        // question and must not be broken by the answer to it.
+        assert!(matches!(
+            p.evaluate(&ctx(), "Grep", &json!({ "path": "logs/*" })),
+            Verdict::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn an_allowed_call_names_a_rule_that_really_covers_it() {
+        // Two failures came out of one line, and this pins both. With a single
+        // allow rule matching nothing, every command made entirely of
+        // self-approving parts came back `allow` — *attributed to that rule*.
+        // The verdict was wrong, because the same call with no rules at all is
+        // `undecided`; and the reason was wrong, which is worse, because the
+        // reason is what the decision log exists for.
+        let unrelated = Policy::new(&["Bash(zzz *)".into()], &[]);
+        let none = Policy::new(&[], &[]);
+        for cmd in [
+            "cat notes.txt",
+            "head -c3 README.md",
+            "ls -la",
+            "wc -l a.txt",
+        ] {
+            assert_eq!(
+                unrelated.evaluate(&ctx(), "Bash", &bash(cmd)),
+                none.evaluate(&ctx(), "Bash", &bash(cmd)),
+                "{cmd}: an unrelated rule changed the answer"
+            );
+        }
+        // The free-part reasoning still works where a rule covers a real part.
+        let p = Policy::new(&["Bash(pnpm test *)".into()], &[]);
+        assert!(matches!(
+            p.evaluate(&ctx(), "Bash", &bash("cd packages/api && pnpm test -- --run")),
+            Verdict::Allow { rule } if rule == "Bash(pnpm test *)"
+        ));
+    }
+
+    #[test]
+    fn a_named_rule_reproduces_the_verdict_it_is_credited_with() {
+        // The property that makes the class above impossible rather than fixed.
+        // Whatever a policy answers, the rule it names must produce the same
+        // answer **on its own** — a rule that cannot reproduce the verdict it
+        // is credited with did not give it.
+        //
+        // There is no external oracle for this: Claude Code does not publish
+        // which of its own rules answered, so the differential harness compares
+        // verdicts and would have called the bug above a clean agreement. This
+        // is the cheaper check anyway — one property over the whole matcher
+        // instead of a case per shape.
+        let allow = [
+            "Bash(zzz *)",
+            "Bash(pnpm test *)",
+            "Read(src/**)",
+            "Bash(cat *)",
+        ];
+        let deny = ["Read(.env)", "Bash(rm *)", "Edit(/etc/**)"];
+        let ask = ["Bash(git push *)"];
+        let p = Policy::with_ask(
+            &allow.map(String::from),
+            &deny.map(String::from),
+            &ask.map(String::from),
+        );
+        let calls = [
+            ("Bash", bash("cat .en?")),
+            ("Bash", bash("cd x && pnpm test")),
+            ("Bash", bash("ls -la")),
+            ("Bash", bash("git push origin main")),
+            ("Bash", bash("rm -rf node_modules")),
+            ("Bash", bash("cat notes.txt")),
+            ("Bash", bash("head -c3 .env*")),
+            ("Read", json!({ "file_path": "src/main.rs" })),
+            ("Read", json!({ "file_path": ".env" })),
+        ];
+        for (tool, input) in &calls {
+            let verdict = p.evaluate(&ctx(), tool, input);
+            let Some(named) = verdict.rule() else {
+                continue;
+            };
+            // The named rule, compiled alone into its own list.
+            let alone = match &verdict {
+                Verdict::Allow { .. } => Policy::new(&[named.to_string()], &[]),
+                Verdict::Deny { .. } => Policy::new(&[], &[named.to_string()]),
+                Verdict::Ask { .. } => Policy::with_ask(&[], &[], &[named.to_string()]),
+                Verdict::Undecided => unreachable!(),
+            };
+            assert_eq!(
+                alone.evaluate(&ctx(), tool, input),
+                verdict,
+                "{tool} {input}: credited to `{named}`, which does not reproduce it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reader_named_by_the_vendor_is_in_the_table() {
+        // 2.1.271: "Fixed Bash permission checks missing the file that `fmt`,
+        // `column` and similar commands read". `column` was already here and
+        // `fmt` was not, so `fmt .env` walked past `Read(.env)` — including
+        // after an option the matcher does not recognise, which is the shape
+        // the vendor's row is actually about.
+        let p = Policy::new(&["Bash(fmt *)".into()], &["Read(.env)".into()]);
+        for cmd in ["fmt .env", "fmt -w 80 .env", "fmt --nonesuch .env"] {
+            assert!(
+                matches!(p.evaluate(&ctx(), "Bash", &bash(cmd)), Verdict::Deny { .. }),
+                "{cmd} reads .env"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::*;
+
+    #[test]
+    fn a_newer_release_is_ahead_and_an_older_one_is_not() {
+        // The whole point of comparing as numbers: `2.1.9` is *older* than
+        // `2.1.270`, and a string comparison says the opposite — which would
+        // report a stale session as running ahead of the gate's baseline and
+        // teach somebody to ignore the warning.
+        assert!(is_ahead_of_baseline("2.1.272"));
+        assert!(is_ahead_of_baseline("2.2.0"));
+        assert!(is_ahead_of_baseline("3.0.0"));
+        // Against the constant rather than a copy of it, so raising the
+        // baseline does not leave a test asserting the old one.
+        assert!(!is_ahead_of_baseline(VERIFIED_AGAINST));
+        assert!(!is_ahead_of_baseline("2.1.9"));
+        assert!(!is_ahead_of_baseline("2.1.269"));
+        assert!(!is_ahead_of_baseline("2.0.999"));
+        assert!(is_ahead_of_baseline("v2.1.271"));
+    }
+
+    #[test]
+    fn a_version_this_cannot_read_is_never_reported_as_ahead() {
+        // The provider's version string is somebody else's format. A warning
+        // nobody can act on is worse than silence, so an unparseable version
+        // is not news.
+        for v in ["", "nightly", "2.x", "2.1.270-beta.1+exp", "??"] {
+            assert!(!is_ahead_of_baseline(v), "{v}");
+        }
+        // A pre-release suffix on a *newer* number still reads as newer.
+        assert!(is_ahead_of_baseline("2.1.272-rc1"));
     }
 }

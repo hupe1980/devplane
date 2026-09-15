@@ -3,7 +3,7 @@
 //! This lives in the library rather than beside `main` for the reason the crate
 //! docs give: a seam that can only be exercised through a subprocess is a seam
 //! nobody exercises. `main.rs` is the argument parser it claims to be — it
-//! parses and calls [`run`].
+//! parses and calls [`crate::cli::run`].
 
 use crate::render::{DIM, paint};
 use crate::{client, config, daemon, poller};
@@ -63,6 +63,24 @@ pub enum Command {
     },
     /// Show what needs a human, most urgent first.
     Inbox,
+    /// Every open GitHub issue across every registered project, what needs you first.
+    ///
+    /// `--ready` narrows it to one repository's issues that are *offered as
+    /// work* — the ones carrying `[github].ready_label` — which is the list
+    /// `vibeplane work start --issue` picks from.
+    Issues {
+        /// Only the issues this repository offers as work.
+        #[arg(long)]
+        ready: bool,
+        /// The repository to ask. Defaults to the working directory. Implies `--ready`.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Only issues with this label. Defaults to `[github].ready_label`. Implies `--ready`.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Every open pull request across every registered project, what needs you first.
+    Prs,
     /// Show one run in detail.
     Show { run: String },
     /// Follow what a driven agent is saying, like `tail -f`.
@@ -271,14 +289,6 @@ pub enum WorkCmd {
     /// Show every piece of work.
     #[command(visible_alias = "ls")]
     List,
-    /// Show the issues this repository is offering as work.
-    Issues {
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        /// Only issues with this label. Defaults to `[github].ready_label`.
-        #[arg(long)]
-        label: Option<String>,
-    },
     /// Run the project's gates now.
     Verify { work: String },
     /// Release a pipeline that is waiting at a declared human step.
@@ -323,8 +333,12 @@ pub enum ConnectTarget {
 }
 
 /// Runs the parsed command.
-pub async fn run(_cli: Cli) -> Result<()> {
-    let cli = Cli::parse();
+///
+/// Takes the `Cli` rather than parsing one, which is the whole reason this
+/// lives in the library: a test can drive a subcommand without a subprocess.
+/// It used to re-parse the process's own argv and ignore the argument, so such
+/// a test would have run against the harness's command line.
+pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Command::Serve { port }) => cmd_serve(port).await,
         Some(Command::Ls {
@@ -334,6 +348,14 @@ pub async fn run(_cli: Cli) -> Result<()> {
         }) => cmd_ls(all, project.as_deref(), needs_you, cli.json).await,
         None => cmd_ls(false, None, false, cli.json).await,
         Some(Command::Inbox) => cmd_inbox(cli.json).await,
+        Some(Command::Issues { ready, cwd, label }) => {
+            if ready || cwd.is_some() || label.is_some() {
+                crate::cli::work::cmd_ready_issues(cwd, label, cli.json).await
+            } else {
+                crate::cli::board::cmd_forge_issues(cli.json).await
+            }
+        }
+        Some(Command::Prs) => crate::cli::board::cmd_forge_prs(cli.json).await,
         Some(Command::Show { run }) => cmd_show(&run, cli.json).await,
         Some(Command::Tail {
             run,
@@ -412,6 +434,7 @@ async fn cmd_serve(port: u16) -> Result<()> {
     let policy = load_policy();
     let home = config::home()?;
     let state = daemon::AppState::new(config::db_path()?, token, policy, home).await?;
+    drain_decision_spool(&state).await;
     poller::reconcile_at_startup(&state).await;
     // Fill the board before anyone can ask for it.
     poller::initial_poll(&state).await;
@@ -423,6 +446,29 @@ async fn cmd_serve(port: u16) -> Result<()> {
 /// Empty by default: no rule matches, so every permission prompt reaches the
 /// human exactly as it does today. A policy that guessed on the user's behalf
 /// would be a policy that approved something nobody chose.
+/// Writes down the decisions the `command` hook took while no daemon was
+/// listening.
+///
+/// The hook decides in its own process, so a stopped daemon costs the *record*
+/// and not the enforcement. This is the other half of that trade: without it,
+/// `vibeplane audit` would be missing exactly the refusals that happened when
+/// nobody was watching, and would not say so.
+async fn drain_decision_spool(state: &std::sync::Arc<daemon::AppState>) {
+    let pending = config::drain_spool();
+    if pending.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = pending.len(),
+        "filing decisions taken while the daemon was down"
+    );
+    for row in pending {
+        if let Ok(env) = serde_json::from_value::<crate::core::DecidedEnvelope>(row) {
+            crate::api::record_decided(state, env).await;
+        }
+    }
+}
+
 fn load_policy() -> crate::core::Policy {
     let Ok(home) = config::home() else {
         return crate::core::Policy::default();
@@ -508,60 +554,209 @@ unsafe extern "C" {
     fn libc_kill(pid: i32, sig: i32) -> i32;
 }
 
-/// The hook shim.
+/// The `command` hook: decide here, report afterwards.
 ///
-/// Reads the payload on stdin and posts it to the daemon. Never fails: the exit
-/// code of a hook is something the user's session reacts to, so a daemon that
-/// is not running must cost them nothing at all.
+/// The verdict is reached in this process, with no daemon and no network —
+/// evaluation is pure, synchronous and reads two small local files, and a cold
+/// process answers in about 26 ms. Claude Code walks past an unreachable HTTP
+/// hook (*"Connection failure: non-blocking error, execution continues"*), so a
+/// gate that needs a socket is absent whenever the daemon is.
+///
+/// The daemon is still what *sees*: board, transcript, decision log. That is
+/// reported afterwards, best-effort, and never blocks the answer.
+/// **Deciding must not depend on a network; seeing may.**
+///
+/// Never exits non-zero: a hook's exit code is something the user's session
+/// reacts to.
 async fn cmd_hook(gate: Option<String>) -> Result<()> {
     use std::io::Read;
     let mut body = String::new();
     std::io::stdin().read_to_string(&mut body).ok();
 
-    let Ok(Some(info)) = config::read_daemon_info() else {
-        return Ok(());
-    };
-    let Ok(token) = config::load_or_create_token() else {
-        return Ok(());
-    };
-
-    // The gate variant: post, and print whatever the daemon decided, because
-    // the provider reads this process's stdout as the verdict.
-    if gate.as_deref() == Some("copilot") {
-        let reply = reqwest::Client::new()
-            .post(format!("{}/vibeplane/copilot/gate", info.base_url()))
-            .bearer_auth(token)
-            .header("content-type", "application/json")
-            .body(body)
-            // Under Copilot's own timeout, which is 5 s as registered. A slow
-            // answer there is fail-open anyway, so being slower than the
-            // provider's patience buys nothing.
-            .timeout(std::time::Duration::from_millis(3000))
-            .send()
-            .await;
-        match reply {
-            Ok(r) => println!("{}", r.text().await.unwrap_or_else(|_| "{}".into())),
-            // **Nothing, and exit zero.** A command `preToolUse` hook is
-            // fail-closed on a non-zero exit, so erroring out here would deny
-            // every tool call on the machine the moment the daemon is not
-            // running — turning an observer that is merely absent into one that
-            // breaks the agent it was installed to watch. Saying nothing puts
-            // the call back into the provider's own permission flow, which is
-            // exactly where it would be with no hook installed at all.
-            Err(_) => println!("{{}}"),
-        }
-        return Ok(());
+    match gate.as_deref() {
+        Some("copilot") => decide_copilot(&body).await,
+        Some(_) | None => decide_claude(&body).await,
     }
+}
 
-    let _ = reqwest::Client::new()
-        .post(format!("{}/vibeplane/hook", info.base_url()))
+/// Claude Code's `PreToolUse` and `PermissionRequest`, answered here.
+async fn decide_claude(body: &str) -> Result<()> {
+    use crate::observe::hook::{HookPayload, PermissionResponse};
+
+    // An unparseable payload is not a decision. Saying nothing puts the call
+    // back into the provider's own permission flow, which is where it would be
+    // with no hook installed at all.
+    let Ok(payload) = serde_json::from_str::<HookPayload>(body) else {
+        println!(
+            "{}",
+            serde_json::to_string(&PermissionResponse::undecided())?
+        );
+        return Ok(());
+    };
+    let tool = payload.tool_name.clone().unwrap_or_default();
+    let input = payload
+        .tool_input
+        .clone()
+        .unwrap_or(serde_json::Value::Null);
+
+    let (cache, _) = crate::core::PolicyCache::from_disk();
+    let pre = payload.hook_event_name == "PreToolUse";
+    // `PreToolUse` fires on every call in every mode and may carry only a
+    // prohibition. `PermissionRequest` fires when a person was going to be
+    // asked, so the full verdict applies.
+    let verdict = match (&payload.cwd, pre) {
+        (Some(dir), true) => cache.restrictive(std::path::Path::new(dir), &tool, &input),
+        (Some(dir), false) => cache.evaluate(std::path::Path::new(dir), &tool, &input),
+        // No directory means no honest project answer, so the machine-wide
+        // rules decide alone. Falling back to this process's own directory
+        // would let one repository's rules answer another's session.
+        (None, true) => cache.restrictive_global_only(&tool, &input),
+        (None, false) => cache.evaluate_global_only(&tool, &input),
+    };
+
+    // Answer first. Everything below is bookkeeping the session is not waiting
+    // for, and a failure in it may not change what was decided.
+    if pre {
+        println!(
+            "{}",
+            serde_json::to_string(&crate::observe::hook::pre_tool_use_reply(&verdict))?
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string(&crate::observe::hook::permission_reply(&verdict))?
+        );
+    }
+    report(
+        body,
+        &verdict,
+        &payload.session_id,
+        &tool,
+        crate::observe::hook::describe_call(&tool, &input),
+        // A `PermissionRequest` nobody had a rule about means Claude Code is
+        // asking a person right now. `PreToolUse` fires on every call and
+        // implies nothing of the sort.
+        !pre && verdict.rule().is_none(),
+    )
+    .await;
+    Ok(())
+}
+
+/// GitHub Copilot's `preToolUse`, answered here. Its hook vocabulary differs;
+/// its verdict does not — one policy engine, in this process, and never a rule
+/// translated into a vendor's own configuration file.
+async fn decide_copilot(body: &str) -> Result<()> {
+    use crate::core::Verdict;
+    use crate::observe::copilot::{GateReply, HookPayload};
+
+    let Ok(payload) = serde_json::from_str::<HookPayload>(body) else {
+        println!("{}", GateReply::undecided().to_json());
+        return Ok(());
+    };
+    let tool = payload.tool();
+    let input = payload.input();
+    let (cache, _) = crate::core::PolicyCache::from_disk();
+    let verdict = match payload.cwd.as_deref() {
+        Some(dir) => cache.restrictive(std::path::Path::new(dir), &tool, &input),
+        None => cache.restrictive_global_only(&tool, &input),
+    };
+    let reply = match &verdict {
+        Verdict::Deny { rule } => {
+            GateReply::deny(format!("denied by Vibeplane policy rule {rule}"))
+        }
+        Verdict::Ask { rule } => GateReply::ask(format!("{rule} asks that a person decides this")),
+        _ => GateReply::undecided(),
+    };
+    println!("{}", reply.to_json());
+    report(
+        body,
+        &verdict,
+        &payload.session_id,
+        &tool,
+        crate::observe::hook::describe_call(&tool, &input),
+        false,
+    )
+    .await;
+    Ok(())
+}
+
+/// Hands the payload and the verdict to the daemon so the board, the transcript
+/// and the decision log see them — and spools the decision when there is no
+/// daemon to hand it to.
+///
+/// **The spool exists because this hook now decides without one.** A decision
+/// taken and not written down is the audit trail quietly acquiring holes, which
+/// is the same class of failure as a rule that quietly does not fire: nothing
+/// errors, and the gap is invisible from the inside. One append-only line per
+/// decision, drained at the next daemon start.
+///
+/// Only *decisions* are spooled, never observations: a tool call nobody had a
+/// rule about is re-derivable from the provider, and a board that missed an
+/// hour is a smaller loss than a log that cannot account for a refusal.
+async fn report(
+    body: &str,
+    verdict: &crate::core::Verdict,
+    session: &str,
+    tool: &str,
+    subject: String,
+    blocked: bool,
+) {
+    // `vibeplane doctor` runs this gate to check that it answers. The verdict
+    // is real and the call is not, so it is reported nowhere: a diagnostic that
+    // writes to the append-only log makes the log worse every time somebody
+    // checks the tool is working.
+    if session == crate::observe::hook::PROBE_SESSION {
+        return;
+    }
+    let env = crate::core::DecidedEnvelope {
+        session: session.to_string(),
+        verdict: verdict.as_str().to_string(),
+        rule: verdict.rule().map(str::to_string),
+        subject,
+        tool: tool.to_string(),
+        at: Some(jiff::Timestamp::now()),
+        late: false,
+        blocked,
+        payload: serde_json::from_str(body).ok(),
+    };
+    if post_decided(&env).await {
+        return;
+    }
+    // No daemon. A decision that was enforced and never written down is an
+    // audit trail quietly acquiring holes, which is the same class of failure
+    // as a rule that quietly does not fire — nothing errors, and the gap is
+    // invisible from the inside. Observations are not spooled: a tool call
+    // nobody had a rule about is re-derivable from the provider, and a board
+    // missing an hour is a smaller loss than a log that cannot account for a
+    // refusal.
+    if env.rule.is_some() {
+        let mut late = env;
+        late.late = true;
+        if let Ok(v) = serde_json::to_value(&late) {
+            let _ = crate::config::spool_decision(&v);
+        }
+    }
+}
+
+/// True when the daemon accepted it.
+async fn post_decided(env: &crate::core::DecidedEnvelope) -> bool {
+    let (Ok(Some(info)), Ok(token)) = (config::read_daemon_info(), config::load_or_create_token())
+    else {
+        return false;
+    };
+    let Ok(body) = serde_json::to_string(env) else {
+        return false;
+    };
+    reqwest::Client::new()
+        .post(format!("{}/vibeplane/decided", info.base_url()))
         .bearer_auth(token)
         .header("content-type", "application/json")
         .body(body)
         .timeout(std::time::Duration::from_millis(500))
         .send()
-        .await;
-    Ok(())
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 /// The status-line shim: forward the sample, then run whatever the user had

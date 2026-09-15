@@ -494,6 +494,29 @@ impl Store {
     ///
     /// One statement per tick rather than a read-then-write, so a run that
     /// unblocks between the two cannot be lost.
+    /// Resolves every open item whose id starts with `prefix`.
+    ///
+    /// The forge items are keyed `gh:<project>:<kind>:<number>`, and a snooze
+    /// dismisses a kind for a project — every number of it — so the match is
+    /// on the prefix rather than on a list of ids the caller would have to
+    /// reconstruct.
+    pub async fn attention_resolve_prefix(
+        &self,
+        prefix: &str,
+        resolution: crate::core::attention::Resolution,
+    ) -> Result<u64> {
+        Ok(sqlx::query(
+            "UPDATE attention_log SET resolved_at = ?, resolution = ?
+             WHERE resolved_at IS NULL AND item_id LIKE ? || '%'",
+        )
+        .bind(jiff::Timestamp::now().to_string())
+        .bind(resolution.as_str())
+        .bind(prefix)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
     pub async fn attention_sweep(&self, still_open: &[String]) -> Result<u64> {
         let ids = serde_json::to_string(still_open)?;
         Ok(sqlx::query(
@@ -645,6 +668,32 @@ impl Store {
     /// The search index goes with them, in the same transaction: it is the
     /// larger half of the file, and an index that outlives what it indexes is a
     /// search that finds things that are gone.
+    /// Removes everything a gate probe left behind in an earlier build: the
+    /// probe session's run, events and decisions, and the temporary project
+    /// its working directory was discovered as. Run once at start; a store
+    /// that never held any returns zero and costs a few statements.
+    pub async fn forget_probe(&self, session: &str) -> Result<u64> {
+        let mut n = 0;
+        for sql in [
+            "DELETE FROM events WHERE run_id = ?",
+            "DELETE FROM decisions WHERE run_id = ?",
+            "DELETE FROM runs WHERE id = ? OR session_id = ?",
+        ] {
+            let q = sqlx::query(sql).bind(session);
+            let q = if sql.contains("session_id") {
+                q.bind(session)
+            } else {
+                q
+            };
+            n += q.execute(&self.pool).await?.rows_affected();
+        }
+        n += sqlx::query("DELETE FROM projects WHERE root LIKE '%/vibeplane-probe-%'")
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        Ok(n)
+    }
+
     pub async fn prune_events(&self, days: i64) -> Result<u64> {
         let cutoff =
             (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * days)).to_string();

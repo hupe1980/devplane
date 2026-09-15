@@ -33,17 +33,35 @@ fn print_board(board: &render::BoardResponse) {
         if i > 0 {
             println!();
         }
+        // What GitHub says is open here, on the heading — the other half of
+        // what is waiting on the person, and the half no session reports.
+        let forge = rows
+            .iter()
+            .find_map(|r| r.project.as_deref())
+            .and_then(|id| board.forge.get(id))
+            .map(forge_suffix)
+            .unwrap_or_default();
         println!(
-            "{}{}",
+            "{}{}{}",
             paint(BOLD, project),
             if rows.len() > 1 {
                 paint(DIM, &format!("  ·  {} sessions", rows.len()))
             } else {
                 String::new()
-            }
+            },
+            paint(DIM, &forge)
         );
 
-        for r in rows {
+        // Two sessions of one project can share a short name — `acp-01a0`
+        // twice — and a label that names two rows names neither, so a
+        // repeated one falls back to the id the commands accept.
+        let labels: Vec<String> = rows.iter().map(|r| session_label(r, project)).collect();
+        for (r, label) in rows.iter().zip(&labels) {
+            let label = if labels.iter().filter(|l| *l == label).count() > 1 {
+                r.id.chars().take(8).collect()
+            } else {
+                label.clone()
+            };
             let ctx = r
                 .context_percent
                 .map(|p| format!("{p:3.0}%"))
@@ -55,7 +73,6 @@ fn print_board(board: &render::BoardResponse) {
             };
             // The project is on the header line, so the row carries only what
             // tells one of its sessions from another.
-            let label = session_label(r, project);
             // Trimmed: a working run with nothing to say would otherwise leave
             // two spaces at the end of every line, which shows up the moment
             // anyone pipes the board into a file.
@@ -75,6 +92,38 @@ fn print_board(board: &render::BoardResponse) {
             }
         }
     }
+}
+
+/// `  ·  4 issues · 2 PRs (1 need you)`, or nothing when nothing is open.
+///
+/// A project whose last poll failed says so, because the counts beside it are
+/// the last good ones rather than what GitHub says now — and a count that is
+/// quietly stale is worse than no count at all.
+fn forge_suffix(c: &render::ForgeCounts) -> String {
+    if c.issues == 0 && c.pull_requests == 0 {
+        return match &c.stale {
+            Some(_) => "  ·  github unreadable".into(),
+            None => String::new(),
+        };
+    }
+    let mut out = format!(
+        "  ·  {} issue{} · {} PR{}",
+        c.issues,
+        if c.issues == 1 { "" } else { "s" },
+        c.pull_requests,
+        if c.pull_requests == 1 { "" } else { "s" }
+    );
+    if c.needs_you > 0 {
+        out.push_str(&format!(
+            " ({} need{} you)",
+            c.needs_you,
+            if c.needs_you == 1 { "s" } else { "" }
+        ));
+    }
+    if c.stale.is_some() {
+        out.push_str(" · stale");
+    }
+    out
 }
 
 /// What distinguishes one session of a project from another.
@@ -145,7 +194,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             paint(
                 DIM,
                 &format!(
-                    "{} session(s) exist but have never reported — editor tabs left open.",
+                    "{} session(s) exist and have been quiet for hours — editor tabs, usually.",
                     board.summary.dormant
                 )
             ),
@@ -211,8 +260,12 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
     }
 
     let s = &board.summary;
+    // Every session is in exactly one of these, and the line says so: it used
+    // to print working + needs-you + idle against a total that also contained
+    // twelve failed sessions, so twelve of thirty-eight went unmentioned in a
+    // line that reads like a breakdown.
     println!(
-        "{} · {} · {} working · {} need you · {} idle{}",
+        "{} · {} · {} working · {} need you · {} idle{}{}{}",
         paint(BOLD, &format!("{} projects", s.projects)),
         format_args!("{} sessions", s.runs),
         s.working,
@@ -222,8 +275,26 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             "0".into()
         },
         s.idle,
+        if s.failed > 0 {
+            paint(render::RED, &format!(" · {} failed", s.failed))
+        } else {
+            String::new()
+        },
         if s.cost_usd > 0.0 {
             paint(DIM, &format!(" · ${:.2}", s.cost_usd))
+        } else {
+            String::new()
+        },
+        // GitHub's half of the picture, once the forge has been read.
+        if s.open_issues + s.open_prs > 0 {
+            let mut t = format!(" · {} issues · {} PRs", s.open_issues, s.open_prs);
+            if s.forge_needs_you > 0 {
+                t.push_str(&paint(
+                    render::YELLOW,
+                    &format!(" ({} need you)", s.forge_needs_you),
+                ));
+            }
+            paint(DIM, &t)
         } else {
             String::new()
         }
@@ -234,7 +305,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             paint(
                 DIM,
                 &format!(
-                    "{} dormant (never reported) — vibeplane ls --all",
+                    "{} quiet (nothing heard for hours) — vibeplane ls --all",
                     s.dormant
                 )
             )
@@ -303,6 +374,44 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         t["tool_calls"].as_u64().unwrap_or(0),
         t["errors"].as_u64().unwrap_or(0)
     );
+    // What the session actually changed. Cost and duration say how much it
+    // spent and how long it took; this is the only cheap signal on the machine
+    // about what came of it, and it arrives with the status line or not at all.
+    let (added, removed) = (
+        t["lines_added"].as_u64().unwrap_or(0),
+        t["lines_removed"].as_u64().unwrap_or(0),
+    );
+    if added > 0 || removed > 0 {
+        println!("  changed    +{added} −{removed} lines");
+    }
+    // A rate-limit percentage with no reset time is a number with no verb.
+    if let Some(pct) = t["rate_limit_percent"].as_f64() {
+        let window = match t["rate_limit_window"].as_str() {
+            Some("five_hour") => "5-hour",
+            Some("seven_day") => "7-day",
+            Some("spend_limit") => "spend limit",
+            other => other.unwrap_or("window"),
+        };
+        let when = match t["rate_limit_resets_at"].as_i64() {
+            Some(at) => match jiff::Timestamp::from_second(at) {
+                Ok(ts) => format!(", resets {}", render::until(ts)),
+                Err(_) => String::new(),
+            },
+            None => String::new(),
+        };
+        println!("  limits     {window} {pct:.0}% used{when}");
+    }
+    if let Some(v) = v["claude_version"].as_str() {
+        let note = if crate::core::policy::is_ahead_of_baseline(v) {
+            paint(
+                render::YELLOW,
+                " — newer than the release the gate was measured against",
+            )
+        } else {
+            String::new()
+        };
+        println!("  harness    Claude Code {v}{note}");
+    }
 
     if let Some(b) = v["blocked_on"].as_object() {
         println!("\n{}", paint(render::YELLOW, "blocked on"));
@@ -628,6 +737,219 @@ pub async fn cmd_watch() -> Result<()> {
                 what
             );
         }
+    }
+    Ok(())
+}
+
+/// What GitHub says across every project: one answer, both halves.
+///
+/// Each list has its own row type rather than sharing a generic one: a pull
+/// request row carries every field an issue row requires, so a generic version
+/// reads one as the other without complaining.
+#[derive(Debug, serde::Deserialize)]
+struct ForgeList {
+    #[serde(default)]
+    viewer: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    fetched_at: Option<String>,
+    #[serde(default)]
+    issues: Vec<ForgeIssueRow>,
+    #[serde(default)]
+    pull_requests: Vec<ForgePrRow>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ForgeIssueRow {
+    project_name: String,
+    number: u64,
+    title: String,
+    url: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    assigned_to_me: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ForgePrRow {
+    project_name: String,
+    number: u64,
+    title: String,
+    url: String,
+    status: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    mine: bool,
+    #[serde(default)]
+    review_requested: bool,
+}
+
+/// Why the list is empty, said plainly: no `gh`, not logged in, nothing polled
+/// yet, or genuinely nothing open. Four different afternoons.
+fn forge_preamble(viewer: Option<&str>, error: Option<&str>, fetched_at: Option<&str>) -> bool {
+    if let Some(e) = error {
+        println!(
+            "{}\n\n  {}\n",
+            paint(render::YELLOW, "GitHub could not be read."),
+            paint(DIM, e)
+        );
+        return false;
+    }
+    if fetched_at.is_none() {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                "GitHub has not been read yet — the daemon polls it a few seconds after it starts."
+            )
+        );
+        return false;
+    }
+    if let Some(v) = viewer {
+        println!("{}", paint(DIM, &format!("as {v} · what needs you first")));
+    }
+    true
+}
+
+pub async fn cmd_forge_issues(json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&raw(&c, "/api/forge").await?)?
+        );
+        return Ok(());
+    }
+    let list: ForgeList = c.get("/api/forge").await?;
+    if !forge_preamble(
+        list.viewer.as_deref(),
+        list.error.as_deref(),
+        list.fetched_at.as_deref(),
+    ) {
+        return Ok(());
+    }
+    if list.issues.is_empty() {
+        println!(
+            "{}",
+            paint(render::GREEN, "No open issues on any registered project.")
+        );
+        return Ok(());
+    }
+    let mut last = String::new();
+    for i in &list.issues {
+        if i.project_name != last {
+            if !last.is_empty() {
+                println!();
+            }
+            println!("{}", paint(BOLD, &i.project_name));
+            last = i.project_name.clone();
+        }
+        let mark = if i.assigned_to_me {
+            paint(render::YELLOW, "◆")
+        } else {
+            paint(DIM, "○")
+        };
+        let labels = if i.labels.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", i.labels.join(", "))
+        };
+        println!(
+            "  {} #{:<5} {}{}",
+            mark,
+            i.number,
+            clip(&i.title, 64),
+            paint(DIM, &labels)
+        );
+        println!("    {}", paint(DIM, &i.url));
+    }
+    println!(
+        "\n{}",
+        paint(
+            DIM,
+            "◆ assigned to you · vibeplane work start --issue <n> --cwd <project> turns one into work"
+        )
+    );
+    Ok(())
+}
+
+pub async fn cmd_forge_prs(json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&raw(&c, "/api/forge").await?)?
+        );
+        return Ok(());
+    }
+    let list: ForgeList = c.get("/api/forge").await?;
+    if !forge_preamble(
+        list.viewer.as_deref(),
+        list.error.as_deref(),
+        list.fetched_at.as_deref(),
+    ) {
+        return Ok(());
+    }
+    if list.pull_requests.is_empty() {
+        println!(
+            "{}",
+            paint(
+                render::GREEN,
+                "No open pull requests on any registered project."
+            )
+        );
+        return Ok(());
+    }
+    let mut last = String::new();
+    for p in &list.pull_requests {
+        if p.project_name != last {
+            if !last.is_empty() {
+                println!();
+            }
+            println!("{}", paint(BOLD, &p.project_name));
+            last = p.project_name.clone();
+        }
+        let needs_me = p.review_requested
+            || (p.mine
+                && matches!(
+                    p.status.as_str(),
+                    "failing" | "changes_requested" | "ready_to_merge"
+                ));
+        let mark = if needs_me {
+            paint(render::YELLOW, "◆")
+        } else {
+            paint(DIM, "○")
+        };
+        let status = match p.status.as_str() {
+            "failing" => paint(render::RED, "red"),
+            "ready_to_merge" => paint(render::GREEN, "approved · green"),
+            "changes_requested" => paint(render::YELLOW, "changes requested"),
+            other => paint(DIM, &other.replace('_', " ")),
+        };
+        let who = if p.review_requested {
+            "  review asked of you"
+        } else if p.mine {
+            "  yours"
+        } else {
+            ""
+        };
+        println!(
+            "  {} #{:<5} {:<44} {}{}{}",
+            mark,
+            p.number,
+            clip(&p.title, 44),
+            status,
+            if p.draft {
+                paint(DIM, " · draft")
+            } else {
+                String::new()
+            },
+            paint(DIM, who)
+        );
+        println!("    {}", paint(DIM, &p.url));
     }
     Ok(())
 }

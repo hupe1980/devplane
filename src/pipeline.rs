@@ -215,7 +215,7 @@ async fn start_step_inner(
 ///
 /// Cleared because the next round must start from a blank sheet: a file left
 /// behind would send the work back a second time for something already fixed.
-fn take_findings(dir: &Path, file: &str) -> Option<String> {
+fn take_findings(dir: &Path, file: &str, only: &[String]) -> Option<String> {
     let path = dir.join(file);
     let text = std::fs::read_to_string(&path).ok()?;
     // Not `.ok()`: the bounded loop rests on this removal. A file left behind is
@@ -232,9 +232,34 @@ fn take_findings(dir: &Path, file: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
+    // A graded reporter says everything it noticed and lets somebody else
+    // decide which of it matters. `only` is that decision, written by the
+    // project in its own tool's vocabulary: keep the lines that carry one of
+    // those words, and if none do, the step found nothing worth stopping for.
+    //
+    // Kept whole lines rather than extracted claims: the surrounding words are
+    // what make a finding actionable, and a parser that pulls them apart is one
+    // more thing to be silently wrong about — the same argument that has a
+    // reviewer write a file rather than prose, one level in.
+    let kept: String = if only.is_empty() {
+        trimmed.to_string()
+    } else {
+        let wanted: Vec<String> = only.iter().map(|w| w.to_lowercase()).collect();
+        let lines: Vec<&str> = trimmed
+            .lines()
+            .filter(|l| {
+                let lower = l.to_lowercase();
+                wanted.iter().any(|w| lower.contains(w.as_str()))
+            })
+            .collect();
+        if lines.is_empty() {
+            return None;
+        }
+        lines.join("\n")
+    };
     // Bounded: a reviewer that pastes the whole diff would otherwise fill the
     // next agent's context with what it already has.
-    Some(trimmed.chars().take(8000).collect())
+    Some(kept.chars().take(8000).collect())
 }
 
 /// Called when a step's agent stops. Decides what happens next.
@@ -347,7 +372,7 @@ async fn advance(state: &Shared, id: &WorkId) -> Result<()> {
 
     // 2. Findings, if this step is a reviewing one.
     if let Some(fd) = &step.findings
-        && let Some(text) = take_findings(&dir, &fd.file)
+        && let Some(text) = take_findings(&dir, &fd.file, &fd.only)
     {
         let target = {
             let works = state.works.lock().await;
@@ -537,6 +562,7 @@ mod tests {
             back_to: "implement".into(),
             max: 1,
             file: ".vibeplane/findings.md".into(),
+            only: Vec::new(),
         }
     }
 
@@ -693,11 +719,50 @@ mod tests {
         std::fs::write(&path, "  the error path is untested\n").unwrap();
 
         assert_eq!(
-            take_findings(&d, ".vibeplane/findings.md").as_deref(),
+            take_findings(&d, ".vibeplane/findings.md", &[]).as_deref(),
             Some("the error path is untested")
         );
         assert!(!path.exists());
-        assert_eq!(take_findings(&d, ".vibeplane/findings.md"), None);
+        assert_eq!(take_findings(&d, ".vibeplane/findings.md", &[]), None);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn only_keeps_the_grades_the_project_named() {
+        // Every spec-driven tool grades its findings and hands the decision
+        // back. `only` is that decision, in the project's own words — the
+        // levels are Spec Kit's here and would be something else for another
+        // tool, which is why nothing in the binary knows them.
+        let d = dir("only");
+        std::fs::create_dir_all(d.join(".vibeplane")).unwrap();
+        let path = d.join(".vibeplane/findings.md");
+        let report = "\
+- CRITICAL: FR-003 has no acceptance criteria
+- LOW: terminology drift between spec.md and plan.md
+- high: the auth requirement maps to no task
+";
+        let only = ["CRITICAL".to_string(), "HIGH".to_string()];
+
+        std::fs::write(&path, report).unwrap();
+        let kept = take_findings(&d, ".vibeplane/findings.md", &only).expect("two lines matched");
+        assert!(kept.contains("FR-003"));
+        // Case-insensitive: a grade is a word, not a shout.
+        assert!(kept.contains("maps to no task"));
+        assert!(
+            !kept.contains("terminology drift"),
+            "a LOW finding must not send the work back"
+        );
+
+        // A report with nothing at or above the named grades is *nothing
+        // found*: the step passes, exactly as an empty file does. Without this
+        // the loop spends its whole budget on style notes.
+        std::fs::write(&path, "- LOW: a heading is inconsistent\n").unwrap();
+        assert_eq!(take_findings(&d, ".vibeplane/findings.md", &only), None);
+
+        // And with no `only`, every finding still counts — which is what a
+        // reviewer writing prose produces, and the default.
+        std::fs::write(&path, "- LOW: a heading is inconsistent\n").unwrap();
+        assert!(take_findings(&d, ".vibeplane/findings.md", &[]).is_some());
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -708,7 +773,7 @@ mod tests {
         let d = dir("blank");
         std::fs::create_dir_all(d.join(".vibeplane")).unwrap();
         std::fs::write(d.join(".vibeplane/findings.md"), "\n  \n").unwrap();
-        assert_eq!(take_findings(&d, ".vibeplane/findings.md"), None);
+        assert_eq!(take_findings(&d, ".vibeplane/findings.md", &[]), None);
         std::fs::remove_dir_all(&d).ok();
     }
 }

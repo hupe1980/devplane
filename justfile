@@ -14,6 +14,10 @@ default:
 open: build
     ./target/debug/vibeplane open
 
+# The same, serving ui/index.html from disk: edit, save, reload. No rebuild.
+ui: build
+    VIBEPLANE_UI=$PWD/ui/index.html ./target/debug/vibeplane serve
+
 # The daemon in the foreground.
 serve: build
     ./target/debug/vibeplane serve
@@ -24,8 +28,13 @@ vp *ARGS: build
 
 # ── The loop ─────────────────────────────────────────────────────────────────
 
-# Everything CI runs, cheapest failure first — but for this host only. CI also
-# runs it on Linux, which is where a `cfg`-gated import goes unused unnoticed.
+# NOTE: `just --list` prints only the LAST comment line of a recipe. Keep the
+# summary on the final line — `check` used to advertise itself as "runs it on
+# Linux, which is where a `cfg`-gated import goes unused unnoticed."
+#
+# CI also runs this on Linux, where a `cfg`-gated unused import shows up and a
+# macOS-only run never would.
+# Everything CI runs, cheapest failure first — for this host.
 check: fmt-check clippy build test
 
 build:
@@ -40,7 +49,10 @@ fmt-check:
 clippy:
     cargo clippy --all-targets --all-features -- -D warnings
 
-# Builds first: `cargo test` never rebuilds examples, and a stale fixture is refused.
+# `cargo test` never rebuilds examples, so plain `cargo test` fails the
+# conformance suite on a clean tree with "build the fixture first" — deliberate,
+# since a silently stale fixture is worse than a loud missing one.
+# The whole suite. Builds the ACP fixture agent first; plain `cargo test` cannot.
 test: build
     cargo test --locked
 
@@ -63,8 +75,13 @@ concepts:
     bash scripts/concepts-check.sh
 
 # Every CHANGELOG row that could change a verdict, against its ledger.
+# Prints how old the corpus is: a clean run over a stale one means very little.
 rows:
     bash scripts/changelog-rows.sh
+
+# The same, over a freshly downloaded changelog. One file, not all 130.
+rows-fetch:
+    bash scripts/changelog-rows.sh --fetch
 
 # The rows not yet dispositioned, ready to paste into the ledger.
 rows-new:
@@ -81,6 +98,10 @@ perms-allow CASES="0": build
 # Deny axis only: does a `never_auto` rule stop what Claude Code refuses?
 perms-deny CASES="0": build
     VIBEPLANE_DIFF_AXIS=deny bash scripts/verify-permissions-diff.sh {{CASES}}
+
+# PowerShell, Monitor and LSP answered by this matcher alone: a checklist, not a measurement.
+perms-dialect: build
+    VIBEPLANE_DIFF_AXIS=dialect bash scripts/verify-permissions-diff.sh
 
 # The written-down permission rules against a real Claude Code. Needs `claude`.
 perms-live: build

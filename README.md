@@ -10,13 +10,13 @@ Gemini out of the box. One permission gate governs Claude Code and GitHub Copilo
 
 ```console
 $ vibeplane ls
-8 projects · 23 sessions · 5 working · 2 need you · 16 idle · $4.18
-17 dormant (never reported) — vibeplane ls --all
+8 projects · 23 sessions · 5 working · 2 need you · 4 idle · $4.18
+12 quiet (nothing heard for hours) — vibeplane ls --all
 
-saas
+saas  ·  4 issues · 2 PRs (1 needs you)
   ◆ 7c         vscode     62%   $1.04   3m  Keep the legacy /v1/login route?
 
-core-lib  ·  2 sessions
+core-lib  ·  2 sessions  ·  1 PR
   ● a1         vscode     88%   $0.41   2s  Bash: cargo test --workspace
   ○ 4f         vscode     12%   $0.02  41m  waiting for a prompt
 
@@ -26,13 +26,24 @@ mobile
 
 Two lines carry most of the value. **Grouped by project**, because that is the unit you think in —
 nine sessions open on one repository are one line of context, not nine rows that differ by a hash.
-And **dormant sessions are counted, not listed**: a machine that has been running agents all week
-has editor tabs whose processes are still alive. A dormant session that starts asking for something
-joins the working set immediately.
+And **quiet sessions are counted, not listed**: a machine that has been running agents all week has
+editor tabs whose processes are still alive. A session that is *doing* something or *asking* you
+something is always listed, however long it has been at it; everything else is on the board while it
+is still today's business and counted afterwards. A quiet session that starts asking for something
+joins the working set immediately. The numbers add up — every session is in exactly one of them.
+
+**GitHub is on the same board.** Half of what is waiting on you is not a session — it is the issues
+and pull requests on your repositories. Vibeplane reads them through your own `gh` for every
+registered project: the heading carries the counts, `g` on the board opens every issue and pull
+request across every project, `vibeplane issues` and `vibeplane prs` print the same two lists, and an
+issue assigned to you or a review requested from you is an inbox item. A draft of your own is not —
+you already said it is unfinished. Nothing is ever written to GitHub from a list; every action is a
+link.
 
 > **Status: early, but the whole loop runs** — watching, driving, verified work, declared pipelines,
 > resumable sessions, the decision log, and an inbox that measures whether it is worth reading.
-> Verified against Claude Code 2.1.270 on a machine with 23 live sessions.
+> Built against Claude Code 2.1.272 on a machine with 23 live sessions; the permission harness last
+> ran in full against 2.1.270.
 
 ## 🤔 Why
 
@@ -65,6 +76,8 @@ vibeplane ls                 # the working set — works immediately, no setup
 vibeplane connect claude     # add live state: hooks + telemetry, into your user settings
 vibeplane connect copilot    # the same for GitHub Copilot: one file, and two lines to export
 vibeplane inbox              # only what needs a human, most urgent first
+vibeplane issues             # every open issue across your projects, what needs you first
+vibeplane prs                # every open pull request, the same way
 vibeplane open               # the board in a browser, updating live
 
 vibeplane trust .            # once per repository, before any agent starts in it
@@ -136,6 +149,20 @@ otherwise surface several minutes and one model call later: a `back_to` naming a
 exist, a gate nobody declared, an `include` that leaves the repository, a review loop with no check
 behind it, and a permission rule that cannot match anything.
 
+**Spec-driven development gets the one thing the category leaves out.** Every spec tool ships a
+consistency checker and none of them decides: Spec Kit's `/speckit.analyze` is *"STRICTLY
+READ-ONLY"*, grades its findings and closes with a recommendation. If your tool has a CLI, drift is
+already a gate —
+
+```toml
+[gates]
+check = ["openspec validate --strict", "pnpm test -- --run"]
+```
+
+— and a red drift check behaves exactly like a red test: the lines go back to the same session, and
+the work never reaches `review`. The phases are a pipeline with human steps between them. Vibeplane
+learns no spec format and parses nobody's `tasks.md`.
+
 [Verified done →](https://hupe1980.github.io/vibeplane/docs/verified-done/) ·
 [Pipelines →](https://hupe1980.github.io/vibeplane/docs/pipelines/) ·
 [Configuration →](https://hupe1980.github.io/vibeplane/docs/configuration/)
@@ -154,6 +181,7 @@ Keyboard-first:
 | `1`–`9` | pick one of the answers the agent offered |
 | `y` `n` · `r` | allow · deny · reply |
 | `?` | why is this here — the decision log for that row |
+| `g` | every open issue and pull request, across every project |
 | `⌘N` | dispatch: prompt, project, kind, and this project's own prompts |
 | `⌘K` | jump to any project, session or piece of work by name |
 
@@ -215,7 +243,7 @@ stopping it.
 A rule moves between `settings.json` and `vibeplane.toml` by cutting and pasting it — all three
 lists, the `:*` form, gitignore paths with all four anchors, MCP server prefixes, and the
 allow/deny asymmetries. `Edit(…)` covers every built-in tool that writes files and `Read(…)` every
-one that reads them, so two rules cover eight tools.
+one that reads them — `Read`, `Grep`, `Glob` and `LSP` — so two rules cover nine tools.
 
 Rules are resolved **per repository**, evaluated **deny → ask → allow**, and a spelling that cannot
 match anything is **refused** rather than carried — because a deny rule that silently matches nothing
@@ -228,8 +256,9 @@ any disagreement — in either direction, because a rule that is quietly too str
 replace with a broader rule.
 
 It asks on **two axes**: an `auto_allow` list answering *did Claude Code run it?*, and a `never_auto`
-list answering *did Claude Code refuse?*. Against Claude Code 2.1.270 both are clean — **176 deny
-cases and 126 allow cases, no reproducible disagreement in either direction.**
+list answering *did Claude Code refuse?*. Its last full run, against Claude Code 2.1.270, was clean
+on both — 176 deny cases and 126 allow cases, no reproducible disagreement. **It has not been re-run
+since the current matcher shipped**, and a harness result is true only of the code it ran against.
 
 `scripts/changelog-rows.sh` covers the other half: it fails the build until every row of Claude
 Code's changelog that could change a verdict is written down as covered, or declined with a reason.
@@ -355,6 +384,7 @@ just check                   # what CI runs: fmt, clippy, build, test
 just verify                  # that, plus the claim and dependency ledgers and the site
 just open                    # the board in a browser
 just site                    # the documentation site, at http://127.0.0.1:1111
+just ui                      # the board served from ui/index.html — edit, reload, no rebuild
 
 VIBEPLANE_HOME=/tmp/vp just vp ls    # an isolated instance, touching nothing of yours
 ```
@@ -366,7 +396,8 @@ until every row in Claude Code's changelog that could change a verdict is dispos
 Two checks cost money and need a signed-in Claude Code, so they are not in CI and are run by hand
 when permissions change: `just perms-live` (fixed probes) and `just perms` (generated cases, both
 sides asked, any disagreement a failure). `just perms-allow` and `just perms-deny` run one half of the
-second; `just perms 20` caps the matrix for a quick pass. What fails the build is the *test* each
+second, `just perms-dialect` covers the tools that are not shells, and
+`just perms 20` caps the matrix for a quick pass. What fails the build is the *test* each
 finding leaves behind, never the harness itself.
 
 The protocol tests drive a real agent process — `examples/echo_agent` — rather than
@@ -380,6 +411,15 @@ another port rather than refusing to start.
 
 `VIBEPLANE_CLAUDE_BIN` points at a `claude` binary if yours is not on `PATH` — which is common, since
 the VS Code extension ships its own copy and installs nothing.
+
+`VIBEPLANE_UI` points the daemon at `ui/index.html` on disk, so editing the board is a browser reload
+rather than a rebuild and a restart — `just ui` is that with the path filled in. The copy compiled
+into the binary is what ships.
+
+`tests/ui_contract.rs` holds the page: that it serves every field it reads, escapes every value it
+prints, keeps its overlays dialogs that give focus back, and renders at all. That last one runs the
+page's script against a stub DOM with an `<img onerror=...>` in every readable field and checks what
+lands in the document; it needs `node`, and skips where there is none.
 
 ## 📓 Changes
 

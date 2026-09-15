@@ -4,7 +4,7 @@ use super::WorkCmd;
 use crate::render::{BOLD, DIM, YELLOW, clip, paint};
 use crate::{client, render};
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub async fn cmd_dispatch(
     agent: &str,
@@ -41,6 +41,106 @@ pub async fn cmd_dispatch(
         ),
     }
     Ok(())
+}
+
+/// Where the rules governing a directory came from, and whether they loaded.
+///
+/// `undecided` was one sentence covering three situations and only one of them
+/// is a fact about the call. Telling them apart is one rule, on the surface
+/// where it matters most: **a typo in a deny rule must never read as
+/// permission**, and "no rule answers this one" is exactly how it read.
+enum Rules {
+    /// No `vibeplane.toml` governs this directory at all.
+    None { root: PathBuf },
+    /// One was found and will not load, so *nothing* is in force here.
+    Broken { path: PathBuf, error: String },
+    /// Loaded. `problems` are the rules that cannot do what they say.
+    Loaded {
+        path: PathBuf,
+        count: usize,
+        problems: Vec<crate::core::config::Problem>,
+    },
+}
+
+impl Rules {
+    fn at(dir: &Path) -> Self {
+        let root = crate::core::project::governing_root(dir).unwrap_or_else(|| dir.to_path_buf());
+        let path = root.join(crate::core::config::CONFIG_FILE);
+        match crate::core::ProjectConfig::load(&root) {
+            Err(e) => Rules::Broken {
+                path,
+                error: e.to_string(),
+            },
+            Ok(_) if !path.is_file() => Rules::None { root },
+            Ok(c) => {
+                let p = c.policy();
+                Rules::Loaded {
+                    count: p.allow_rules().len() + p.deny_rules().len() + p.ask_rules().len(),
+                    problems: c.validate(),
+                    path,
+                }
+            }
+        }
+    }
+
+    fn problems(&self) -> Vec<crate::core::config::Problem> {
+        match self {
+            Rules::Loaded { problems, .. } => problems.clone(),
+            // A file that will not load has no rules to find problems in, and
+            // saying "0 problems" about it would be the same lie one level
+            // down. `load_error` is what that case reports.
+            _ => Vec::new(),
+        }
+    }
+
+    fn load_error(&self) -> Option<String> {
+        match self {
+            Rules::Broken { error, .. } => Some(error.clone()),
+            _ => None,
+        }
+    }
+
+    /// The sentence printed when no rule answered — one per situation.
+    fn why_nothing_answered(&self) -> &'static str {
+        match self {
+            Rules::None { .. } => {
+                "no vibeplane.toml governs this directory, so nothing here decides anything"
+            }
+            Rules::Broken { .. } => {
+                "this project's rules are NOT in force — the file below will not load"
+            }
+            Rules::Loaded { count: 0, .. } => {
+                "this project's vibeplane.toml declares no [policy] rules"
+            }
+            Rules::Loaded { .. } => {
+                "its rules loaded and none answers this one, so the provider's own \
+                 dialog decides and it reaches your inbox"
+            }
+        }
+    }
+
+    fn as_json(&self) -> serde_json::Value {
+        match self {
+            Rules::None { root } => serde_json::json!({
+                "state": "none", "searched_from": root.display().to_string()
+            }),
+            Rules::Broken { path, error } => serde_json::json!({
+                "state": "broken", "path": path.display().to_string(), "error": error,
+                // Spelled out so a script cannot read this as "nothing matched".
+                "in_force": false
+            }),
+            Rules::Loaded {
+                path,
+                count,
+                problems,
+            } => serde_json::json!({
+                "state": "loaded", "path": path.display().to_string(),
+                "rules": count,
+                "problems": problems.iter().map(|p| format!("{}: {}", p.where_, p.what)).collect::<Vec<_>>(),
+                "in_force": true
+            }),
+        }
+    }
 }
 
 /// `vibeplane explain` — what the gate would decide about one call, and why.
@@ -81,13 +181,27 @@ pub fn cmd_explain(
         }
     };
 
-    let cache = crate::core::PolicyCache::for_projects_only();
+    // The gate this machine actually enforces, not a project-only imitation of
+    // it: `explain` used `for_projects_only()` and so answered without
+    // `~/.vibeplane/policy.toml`, which let the surface built to say *what
+    // would the gate decide* answer `allow` for a call the machine denies.
+    let (cache, global_error) = crate::core::PolicyCache::from_disk();
     let verdict = cache.evaluate(&dir, &tool, &input);
     let restrictive = cache.restrictive(&dir, &tool, &input);
-    let root = crate::core::project::find_repo_root(&dir).unwrap_or_else(|| dir.clone());
-    let problems = crate::core::ProjectConfig::load(&root)
-        .map(|c| c.validate())
-        .unwrap_or_default();
+
+    // **Where the rules came from, and whether they loaded.** `undecided` used
+    // to be one sentence covering three different situations, and only one of
+    // them is a fact about the call: no rules here, rules that would not load,
+    // and rules that loaded and did not match. The middle one is the dangerous
+    // one — a `vibeplane.toml` with a typo in it has *no* rules in force, and
+    // reporting that as "no rule answers this one" is a typo in a deny rule
+    // reading as permission, which is the one thing this layer may never do.
+    //
+    // `vibeplane check` has always printed the parse error. This is the surface
+    // somebody uses *while editing the file*, so it is the surface most likely
+    // to meet a broken one.
+    let rules = Rules::at(&dir);
+    let problems = rules.problems();
 
     if json {
         println!(
@@ -101,6 +215,8 @@ pub fn cmd_explain(
                 // What a `PreToolUse` hook would answer, which is a different
                 // question and the one that holds in auto mode.
                 "restrictive": restrictive.as_str(),
+                // Which of the three `undecided` situations this is.
+                "rules": rules.as_json(),
             }))?
         );
         return Ok(());
@@ -115,14 +231,24 @@ pub fn cmd_explain(
     println!("{}  {}", paint(colour, headline), paint(BOLD, &tool));
     match verdict.rule() {
         Some(r) => println!("        {}", paint(DIM, &format!("by {r}"))),
-        None => println!(
-            "        {}",
+        None => println!("        {}", paint(DIM, rules.why_nothing_answered())),
+    }
+    if let Some(e) = &global_error {
+        println!(
+            "\n{}\n{}",
+            paint(render::RED, "the machine-wide rules are NOT in force"),
+            paint(DIM, e)
+        );
+    }
+    if let Some(broken) = rules.load_error() {
+        println!("\n{}", paint(render::RED, &broken));
+        println!(
+            "{}",
             paint(
                 DIM,
-                "no rule answers this one, so the provider's own dialog decides \
-                 and it reaches your inbox"
+                "every rule in this file is off until it parses — vibeplane check"
             )
-        ),
+        );
     }
     if !problems.is_empty() {
         println!(
@@ -429,14 +555,34 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         );
         // Printed in the order they are evaluated, because that order is the
         // thing most likely to surprise: a matching ask beats a narrower allow.
+        // A negation carves a hole in the list it sits in, so it is labelled
+        // `except` rather than by the list's own name: `deny  !Bash(git status)`
+        // reads at a glance as "deny this", which is the opposite of what it
+        // does, and a rule whose badge inverts its meaning is worse than one
+        // nobody printed.
+        let badge = |rule: &crate::core::policy::Rule, colour: &'static str, word: &'static str| {
+            if rule.is_negated() {
+                paint(render::DIM, "except")
+            } else {
+                paint(colour, word)
+            }
+        };
         for rule in policy.deny_rules() {
-            println!("            {} {}", paint(render::RED, "deny "), rule);
+            println!(
+                "            {} {}",
+                badge(rule, render::RED, "deny  "),
+                rule
+            );
         }
         for rule in policy.ask_rules() {
-            println!("            {} {}", paint(render::YELLOW, "ask  "), rule);
+            println!(
+                "            {} {}",
+                badge(rule, render::YELLOW, "ask   "),
+                rule
+            );
         }
         for rule in policy.allow_rules() {
-            println!("            {} {}", paint(render::GREEN, "allow"), rule);
+            println!("            {} {}", paint(render::GREEN, "allow "), rule);
         }
         // Advice, printed once and not per rule. A `Read` deny does exactly
         // what it says; what it does not say — that a shell redirection and
@@ -712,43 +858,6 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
             }
         }
 
-        WorkCmd::Issues { cwd, label } => {
-            let cwd = match cwd {
-                Some(p) => p,
-                None => std::env::current_dir()?,
-            };
-            let v: serde_json::Value = c
-                .post_json(
-                    "/api/issues",
-                    &serde_json::json!({ "cwd": cwd.to_string_lossy(), "label": label }),
-                )
-                .await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
-            }
-            if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
-                anyhow::bail!("{e}");
-            }
-            let empty = vec![];
-            let issues = v.as_array().unwrap_or(&empty);
-            if issues.is_empty() {
-                println!("{}", paint(DIM, "no issues are on offer here"));
-                return Ok(());
-            }
-            for i in issues {
-                println!(
-                    "{:>6}  {}",
-                    paint(BOLD, &format!("#{}", i["number"].as_u64().unwrap_or(0))),
-                    clip(i["title"].as_str().unwrap_or(""), 70)
-                );
-            }
-            println!(
-                "\n  {}",
-                paint(DIM, "vibeplane work start --issue <number> --kind bug")
-            );
-        }
-
         WorkCmd::Verify { work } => {
             println!("{}", paint(DIM, "running the project's gates…"));
             let v: serde_json::Value = c
@@ -968,4 +1077,53 @@ fn print_work(w: &serde_json::Value) {
             }
         }
     }
+}
+
+/// The issues one repository offers as work: `vibeplane issues --ready`.
+///
+/// Its own function rather than a `work` subcommand, because a reader should
+/// not have to know which of two commands called `issues` answers which
+/// question. The cross-project list lives in `cli::board`; this is the
+/// label-filtered one `work start --issue` picks from.
+pub async fn cmd_ready_issues(
+    cwd: Option<std::path::PathBuf>,
+    label: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let cwd = match cwd {
+        Some(p) => p,
+        None => std::env::current_dir()?,
+    };
+    let v: serde_json::Value = c
+        .post_json(
+            "/api/issues",
+            &serde_json::json!({ "cwd": cwd.to_string_lossy(), "label": label }),
+        )
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+        anyhow::bail!("{e}");
+    }
+    let empty = vec![];
+    let issues = v.as_array().unwrap_or(&empty);
+    if issues.is_empty() {
+        println!("{}", paint(DIM, "no issues are on offer here"));
+        return Ok(());
+    }
+    for i in issues {
+        println!(
+            "{:>6}  {}",
+            paint(BOLD, &format!("#{}", i["number"].as_u64().unwrap_or(0))),
+            clip(i["title"].as_str().unwrap_or(""), 70)
+        );
+    }
+    println!(
+        "\n  {}",
+        paint(DIM, "vibeplane work start --issue <number> --kind bug")
+    );
+    Ok(())
 }

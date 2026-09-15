@@ -124,7 +124,7 @@ plain `vibeplane` does.
 
 | Flag | What |
 |---|---|
-| `--all`, `-a` | include sessions that exist but have never reported — editor tabs, usually |
+| `--all`, `-a` | include sessions nothing has been heard from for hours — editor tabs, usually |
 | `--project <name>`, `-p` | one project; matches any part of the name, so `mat` finds `matter-kit` |
 | `--needs-you` | only what is waiting on a human |
 
@@ -146,6 +146,69 @@ A permission item also names **the rule that would have answered it**:
 That is the **exact call**, never a pattern: one interruption says nothing about the shape of the
 calls like it. [`vibeplane explain --replay`](#vibeplane-explain-replay) is where a pattern comes
 from, where the evidence is a count. Nothing is written for you either way.
+
+One item is about the machine rather than about any run, and it is the only thing Vibeplane raises
+about **itself**:
+
+```console
+ ! The permission gate is installed and not answering [gate_down]
+     No rule in any project is being enforced right now.
+     it will not start: No such file or directory
+```
+
+A broken gate and a quiet machine look identical from the outside: no hook arrives either way. The
+daemon runs the installed gate on a timer for that reason. Critical, and no action offered — the fix
+is `vibeplane connect claude`, and this is not a product that rewrites your `settings.json` from a
+list.
+
+### `vibeplane issues` · `vibeplane prs`
+
+Every open issue, and every open pull request, across **every registered project** — read through
+your own `gh`, grouped by project, with what needs you first:
+
+```console
+$ vibeplane prs
+as hupe1980 · what needs you first
+
+saas
+  ◆ #142   Fix the flaky login test                     red  yours
+    https://github.com/acme/saas/pull/142
+  ◆ #150   Add rate limiting                            approved · green  review asked of you
+    https://github.com/acme/saas/pull/150
+
+core-lib
+  ○ #31    Bump tokio                                   pending
+    https://github.com/acme/core-lib/pull/31
+```
+
+The board has the same two lists behind `g`, and the counts in a project heading open them.
+
+`◆` marks what is waiting on you: an issue assigned to you, a review requested from you, or your own
+pull request that is red, has changes requested, or is approved and unmerged. A draft of your own is
+never one of them — you marked it unfinished — but a review requested of you, or changes requested on
+your own, reaches you through a draft. These are inbox items at normal urgency, so none of them
+raises a desktop notification.
+
+The daemon reads GitHub a few seconds after it starts and every five minutes after that. A project it
+could not read keeps its last good numbers and is marked `· stale`. A project with no GitHub remote
+is ruled out and asked again an hour later. `vibeplane doctor` says whose `gh` this is, when it last
+read, and which projects were ruled out and why.
+
+**Nothing here writes to GitHub** — every action is a link, and `vibeplane work start --issue <n>` is
+how an issue becomes work.
+
+`vibeplane issues --ready` asks a different question of one repository: which of its issues are
+*offered* as work — the ones carrying `[github].ready_label` — which is the list
+`work start --issue` picks from. It reads that repository live rather than serving the poller's
+cached counts.
+
+| Flag | What |
+|---|---|
+| `--ready` | only what this repository offers as work |
+| `--label <l>` | default: `[github].ready_label`; implies `--ready` |
+| `--cwd <path>` | which repository; implies `--ready` |
+
+A project whose directory has no GitHub remote is asked once and then left alone.
 
 ### `vibeplane show <run>`
 
@@ -226,6 +289,33 @@ bar, so it cannot end up in a screenshot or a bookmark.
 Whether the tool itself is telling you the truth: hook latency, when telemetry was last seen, the
 roster, each channel's last error **with the date it happened**, and any project whose
 `vibeplane.toml` will not parse — whose permission rules are therefore not in force.
+
+**It runs the gate rather than reading about it.** No hook can enforce its own presence, so a
+settings file containing the right line is evidence about a settings file. `doctor` writes a
+throwaway project with one deny rule, runs the **installed command** with a real `PreToolUse`
+payload, and says whether a refusal came back:
+
+```console
+claude code
+  settings  ~/.claude/settings.json
+  hooks     installed (22 events)
+  gate      answering (21 ms, measured just now)
+```
+
+or, when something is wrong with it:
+
+```console
+  gate      INSTALLED AND NOT ANSWERING — every prohibition on this machine is inert
+            /usr/local/bin/vibeplane hook
+            it will not start: No such file or directory
+            a hook that does not answer never blocks — the provider carries on
+```
+
+The probe is recorded nowhere: a diagnostic that files decisions would make the audit trail worse
+every time you checked the tool was working.
+
+If the gate has been deciding while no daemon was running, `doctor` says how many decisions are
+waiting to be filed. Starting the daemon files them.
 
 It starts with **which model provider you are on**, because that decides which of Claude Code's own
 supervision surfaces exist here at all. On Bedrock, Google Cloud's Agent Platform, Microsoft Foundry,
@@ -373,15 +463,6 @@ doing either because a machine rebooted is a decision nobody made.
 | `--force` | discard uncommitted changes in it |
 
 Without `--force`, removal refuses to destroy uncommitted or unpushed work.
-
-### `vibeplane work issues`
-
-What this repository labels as ready for an agent.
-
-| Flag | What |
-|---|---|
-| `--label <l>` | default: `[github] ready_label` |
-| `--cwd <path>` | which repository |
 
 ## Setup and health
 

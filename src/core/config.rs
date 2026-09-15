@@ -263,6 +263,25 @@ pub struct Findings {
     /// Where the reviewer writes them, relative to the worktree.
     #[serde(default = "findings_file")]
     pub file: String,
+    /// Words that make a finding worth returning the work for.
+    ///
+    /// Empty — the default — means every finding counts, which is what a
+    /// reviewer writing prose produces. It exists for the *graded* reporters:
+    /// every spec-driven tool in the field ships a consistency checker that
+    /// grades what it finds and then hands the decision back, so a step whose
+    /// prompt is one of those needs a line saying which grades stop the work.
+    ///
+    /// **The words are the project's, never Vibeplane's.** `CRITICAL` and
+    /// `HIGH` are Spec Kit's vocabulary; another tool grades differently and a
+    /// third will rename its levels next month. Holding a table of somebody
+    /// else's nouns is the mistake this project refuses everywhere else, so the
+    /// repository writes the words it means and the matching is
+    /// case-insensitive and per line.
+    ///
+    /// A findings file with no matching line is *nothing found*: the step
+    /// passes, exactly as an empty file does.
+    #[serde(default)]
+    pub only: Vec<String>,
 }
 
 fn one() -> u32 {

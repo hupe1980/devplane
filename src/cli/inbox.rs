@@ -46,15 +46,22 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
         }
         // A work item has no run of its own once the agent is gone, and
         // printing `run ` followed by nothing helps nobody.
-        let subject = match (i.work_id.as_deref(), i.run_id.as_str()) {
+        let subject = match (i.work_id.as_deref(), i.run_id.as_deref()) {
             (Some(w), _) => format!("work {}", clip(w, 14)),
-            (None, r) if !r.is_empty() => format!("run {}", clip(r, 12)),
+            (None, Some(r)) if !r.is_empty() => format!("run {}", clip(r, 12)),
             _ => String::new(),
         };
-        println!(
-            "     {}",
-            paint(DIM, &format!("{subject} · {}", i.actions.join(", ")))
-        );
+        // An item about the machine has neither a subject nor an action, and
+        // `     · ` is a line that says nothing and looks like a bug.
+        let trailer = match (subject.is_empty(), i.actions.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => i.actions.join(", "),
+            (false, true) => subject,
+            (false, false) => format!("{subject} · {}", i.actions.join(", ")),
+        };
+        if !trailer.is_empty() {
+            println!("     {}", paint(DIM, &trailer));
+        }
         if let Some(url) = &i.url {
             println!("     {}", paint(DIM, url));
         }
@@ -68,15 +75,12 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
         // Spell out the command only when Vibeplane can actually run it. For a
         // session it merely watches there is nothing to decide from here, and
         // printing a command that would fail is worse than printing none.
-        if let Some(req) = &i.request_id {
+        if let (Some(req), Some(run)) = (&i.request_id, &i.run_id) {
             println!(
                 "     {}",
                 paint(
                     DIM,
-                    &format!(
-                        "vibeplane decide {} --request {} --decision allow",
-                        i.run_id, req
-                    )
+                    &format!("vibeplane decide {run} --request {req} --decision allow")
                 )
             );
         }

@@ -1274,6 +1274,11 @@ const FILE_COMMANDS: &[(&str, Access)] = &[
     ("comm", Access::Read),
     ("paste", Access::Read),
     ("fold", Access::Read),
+    // Named by the vendor's own 2.1.271 row — *"Fixed Bash permission checks
+    // missing the file that `fmt`, `column` and similar commands read"* — which
+    // is a measurement somebody else paid for. `column` was already here and
+    // `fmt` was not, so `fmt .env` walked past `Read(.env)`.
+    ("fmt", Access::Read),
     // ── inferred from a measured sibling ─────────────────────────────────
     // The same program under another name, or the same tool at another
     // digest width. Weaker than a measurement and stronger than a guess.
@@ -1300,6 +1305,9 @@ const FILE_COMMANDS: &[(&str, Access)] = &[
     ("column", Access::Read),
     ("csplit", Access::Read),
     ("split", Access::Read),
+    // The same family as `fmt` and `fold`: a text reformatter that opens its
+    // operands. Unmeasured, so it is here and in `DENY_SHAPES`.
+    ("pr", Access::Read),
     ("most", Access::Read),
     ("bat", Access::Read),
     ("xmllint", Access::Read),
@@ -1349,6 +1357,7 @@ const SCRIPT_FIRST: &[&str] = &[
 const GIT_FILE_SUBCOMMANDS: &[(&str, usize)] = &[
     ("diff", 0),
     ("show", 0),
+    ("cat-file", 0),
     ("blame", 0),
     ("log", 0),
     ("add", 0),
@@ -1693,6 +1702,27 @@ fn git_targets(words: &[String], out: &mut Vec<FileTarget>) {
             }
         }
         push_target(out, w, Access::Read, Via::FileCommand, false);
+        // `git show HEAD:.env` and `git cat-file -p HEAD:.env` name a path
+        // *inside a revision*, which is the same secret arriving through git's
+        // object store rather than through the working tree. The operand is
+        // emitted whole above — a path called `HEAD:.env` — and the path after
+        // the revision separator is emitted here as well, so `Read(.env)`
+        // reaches it. A colon is legal in a filename, so both forms are
+        // offered rather than one replacing the other.
+        // ── inferred from a measured sibling, and not yet measured itself ──
+        // `show` is in the table above because deny rules were measured
+        // reaching its operands. `HEAD:.env` is that same subcommand naming
+        // that same file through git's object store instead of the working
+        // tree, so the path after the revision separator is emitted too.
+        // Whether the running product agrees is a question for the differential
+        // harness and is listed there; until it answers, this is the weaker
+        // tier — stronger than a guess, weaker than a measurement.
+        if let Some((rev, path)) = w.split_once(':')
+            && !path.is_empty()
+            && !rev.contains('/')
+        {
+            push_target(out, path, Access::Read, Via::FileCommand, false);
+        }
     }
 }
 
@@ -1961,7 +1991,13 @@ fn web_host(url: &str) -> Option<String> {
 /// nothing: a person pastes `Read(src/main.rs)` into their config and is asked
 /// again about the next file in the same directory.
 pub fn suggest_rule_for(tool: &str, calls: &[String]) -> Option<String> {
-    if tool.eq_ignore_ascii_case("Bash") {
+    // Every tool whose rules carry a command pattern, not just `Bash`:
+    // `PowerShell` and `Monitor` are command tools too, and offering somebody
+    // the literal command line as their rule is offering a rule that covers
+    // the call they just saw and nothing else. The suggestion is validated by
+    // deterministic replay before it is shown, so a prefix that turns out not
+    // to reproduce the verdict is never offered.
+    if crate::core::policy::is_command_tool(tool) {
         return suggest_rule(calls);
     }
     if tool.eq_ignore_ascii_case("Read") || tool.eq_ignore_ascii_case("Edit") {
@@ -2081,5 +2117,64 @@ pub fn rule_family(tool: &str, content: &str) -> String {
     match words.get(1).filter(|w| !w.starts_with('-')) {
         Some(sub) => format!("{program} {sub}"),
         None => program.clone(),
+    }
+}
+
+#[cfg(test)]
+mod suggestion_reach_tests {
+    use super::*;
+
+    #[test]
+    fn a_rule_is_suggested_for_every_command_tool_not_only_bash() {
+        // `PowerShell` and `Monitor` carry command patterns like `Bash`, so the
+        // rule offered for one of their calls has to be a *pattern*. This used
+        // to fall through to the opaque branch and offer the literal command
+        // line, which covers the call somebody just saw and nothing else — the
+        // shape of rule that gets written once and never fires again.
+        // One call is its own narrowest rule, which was already true. The
+        // difference is *several* calls that share a program and a subcommand:
+        // a command tool gets one pattern spanning them, where the opaque
+        // branch gave up because the strings differ. The vendor's own example
+        // of a PowerShell rule is `PowerShell(git commit *)`, which is this.
+        let calls = [
+            "git commit -m one".to_string(),
+            "git commit -m two".to_string(),
+        ];
+        for tool in ["Bash", "PowerShell", "Monitor"] {
+            let s = suggest_rule_for(tool, &calls)
+                .unwrap_or_else(|| panic!("{tool} should get a suggestion"));
+            assert_eq!(s, "git commit *", "{tool} was offered `{s}`");
+        }
+        // A tool whose specifier is opaque still needs the calls to agree, and
+        // these do not.
+        assert_eq!(suggest_rule_for("Agent", &calls), None);
+        // The conservatism is shared too, and that is the point of routing
+        // them through one function: no tool is offered a cmdlet-wide or
+        // program-wide grant to answer a prompt about one operand.
+        for tool in ["Bash", "PowerShell"] {
+            assert_eq!(
+                suggest_rule_for(tool, &["rm a".to_string(), "rm b".to_string()]),
+                None,
+                "{tool} must not be offered `rm *`"
+            );
+        }
+        // And a tool whose rules are not command patterns is unaffected.
+        assert_eq!(
+            suggest_rule_for("Agent", &["Explore".to_string()]).as_deref(),
+            Some("Explore")
+        );
+    }
+
+    #[test]
+    fn the_command_tools_are_the_ones_the_policy_calls_command_shaped() {
+        // Two lists that must not drift: `shape_of` decides how a rule's
+        // specifier is *parsed*, and this decides which tools get a pattern
+        // *offered*. They were one list and a hardcoded `"Bash"` before.
+        for tool in ["Bash", "PowerShell", "Monitor"] {
+            assert!(crate::core::policy::is_command_tool(tool), "{tool}");
+        }
+        for tool in ["Read", "Edit", "Glob", "LSP", "WebFetch", "Agent"] {
+            assert!(!crate::core::policy::is_command_tool(tool), "{tool}");
+        }
     }
 }

@@ -472,6 +472,70 @@ impl PreToolUseResponse {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Deciding, in whichever process is holding the payload
+// ---------------------------------------------------------------------------
+
+/// The session id `vibeplane doctor` uses when it runs the gate to see whether
+/// it answers.
+///
+/// The gate is a real gate however it was started, so the probe gets a real
+/// verdict — and a real verdict used to get a real row in the decision log.
+/// **A diagnostic must not write history.** Running `vibeplane doctor` three
+/// times left three refusals of a command nobody ran, in the one table that is
+/// never pruned and exists to answer "why did that happen".
+pub const PROBE_SESSION: &str = "vibeplane-doctor";
+
+/// What a tool call is called in the decision log: the tool, and as much of its
+/// specifier as fits.
+///
+/// Here rather than in the API because the process that *decides* is now the
+/// one that names the subject, and the daemon only writes down what it is told.
+pub fn describe_call(tool: &str, input: &serde_json::Value) -> String {
+    match crate::core::policy::rule_content(tool, input) {
+        Some(c) => format!("{tool}: {}", crate::core::text::clip(&c, 120)),
+        None => tool.to_string(),
+    }
+}
+
+/// Turns a verdict into what a Claude Code `PermissionRequest` hook returns.
+///
+/// Extracted so the daemon and the `command` hook cannot drift: two processes
+/// answering the same question in two spellings is a difference nobody would
+/// see until it mattered.
+pub fn permission_reply(verdict: &crate::core::Verdict) -> PermissionResponse {
+    use crate::core::Verdict;
+    match verdict {
+        Verdict::Allow { .. } => PermissionResponse::allow(),
+        Verdict::Deny { rule } => {
+            PermissionResponse::deny(format!("denied by Vibeplane policy rule {rule}"))
+        }
+        // A project said a person decides this one. The reply is the same as
+        // `Undecided` — Claude Code prompts exactly as it would have — but the
+        // rule is recorded, because "nobody had an opinion" and "the project
+        // asked to be asked" are different facts.
+        Verdict::Ask { .. } | Verdict::Undecided => PermissionResponse::undecided(),
+    }
+}
+
+/// Turns a verdict into what a Claude Code `PreToolUse` hook returns.
+///
+/// Only ever a prohibition. An `allow` here skips the permission system
+/// altogether, the auto-mode classifier included, so a rule that merely meant
+/// "no need to ask me" would switch off a safety layer the user chose.
+pub fn pre_tool_use_reply(verdict: &crate::core::Verdict) -> PreToolUseResponse {
+    use crate::core::Verdict;
+    match verdict {
+        Verdict::Deny { rule } => {
+            PreToolUseResponse::deny(format!("denied by Vibeplane policy rule {rule}"))
+        }
+        Verdict::Ask { rule } => {
+            PreToolUseResponse::ask(format!("{rule} asks that a person decides this"))
+        }
+        _ => PreToolUseResponse::undecided(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,11 +29,18 @@ use serde_json::{Map, Value, json};
 
 /// Copilot's runtime tool names, mapped to the names the policy already uses.
 ///
-/// The vendor's own table, `powershell` → `Bash` included: Copilot reports both
-/// shells under one Claude name, so a `Bash(…)` rule governs both here.
+/// `powershell` maps to `PowerShell` and **not** to `Bash`, which is what it
+/// used to do on the strength of the vendor's own table putting both under one
+/// heading. The table is about which shell Copilot ran; the policy engine's
+/// name decides which *language* the command is parsed as, and
+/// `Get-Content .env` read by a POSIX parser is a confident wrong answer in
+/// both directions — no `Read(.env)` deny reaches it, and a `Bash(...)` allow
+/// rule speaks for a line it cannot parse. Claude Code documents `PowerShell`
+/// as a tool with its own rule syntax, so the honest mapping already exists.
 const TOOL_NAMES: &[(&str, &str)] = &[
     ("bash", "Bash"),
-    ("powershell", "Bash"),
+    ("powershell", "PowerShell"),
+    ("pwsh", "PowerShell"),
     ("view", "Read"),
     ("create", "Write"),
     ("edit", "Edit"),

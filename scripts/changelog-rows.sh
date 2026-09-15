@@ -35,6 +35,21 @@ cd "$(dirname "$0")/.." || exit 1
 CHANGELOG="specs/claude-code/CHANGELOG.md"
 LEDGER="scripts/changelog-ledger.txt"
 MODE="${1:-check}"
+CHANGELOG_URL="https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md"
+
+# `--fetch` re-downloads the one file this script reads. It is separate from
+# `fetch-specs.sh`, which re-downloads all 130 and needs a minute.
+#
+# This exists because the script was green and wrong. It reported "41 rule rows,
+# all accounted for" while measuring a corpus pinned two releases behind the
+# vendor; one `curl` over this single file turned the same unchanged script into
+# four unaccounted rows and three reproducible defects. **A checker over a cached
+# corpus reports on the cache**, and its green is indistinguishable from the real
+# thing — so the cache's age is printed on every run, whatever the verdict.
+if [ "$MODE" = "--fetch" ]; then
+  curl -fsSL "$CHANGELOG_URL" -o "$CHANGELOG" || { echo "changelog-rows: could not fetch $CHANGELOG_URL"; exit 2; }
+  MODE=check
+fi
 
 [ -f "$CHANGELOG" ] || {
   echo "changelog-rows: $CHANGELOG is missing — run scripts/fetch-specs.sh"
@@ -83,6 +98,11 @@ if [ "$MODE" = "--new" ]; then
   printf '%s' "$new"
   exit 0
 fi
+
+newest=$(grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' "$CHANGELOG" | awk '{print $2}')
+age_days=$(( ( $(date +%s) - $(stat -f %m "$CHANGELOG" 2>/dev/null || stat -c %Y "$CHANGELOG") ) / 86400 ))
+echo "changelog-rows: corpus is at ${newest:-unknown}, fetched ${age_days}d ago — \`$0 --fetch\` to refresh"
+[ "${age_days:-0}" -lt 7 ] || echo "changelog-rows: WARNING — a week-old corpus makes a clean run mean very little"
 
 if [ "$missing" -eq 0 ]; then
   echo "changelog-rows: $total rule rows since $FLOOR, all accounted for"

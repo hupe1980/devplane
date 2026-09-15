@@ -42,6 +42,19 @@ pub struct BoardResponse {
     pub runs: Vec<RunView>,
     #[serde(default)]
     pub projects: Vec<serde_json::Value>,
+    /// Per project id: what GitHub says is open there.
+    #[serde(default)]
+    pub forge: std::collections::BTreeMap<String, ForgeCounts>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ForgeCounts {
+    pub issues: usize,
+    pub pull_requests: usize,
+    pub needs_you: usize,
+    /// Why this project's last poll failed. The counts are the last good ones.
+    #[serde(default)]
+    pub stale: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,12 +70,21 @@ pub struct Summary {
     #[serde(default)]
     pub dormant: usize,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub open_issues: usize,
+    #[serde(default)]
+    pub open_prs: usize,
+    #[serde(default)]
+    pub forge_needs_you: usize,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct RunView {
     pub id: String,
+    /// The project's id, which is what the forge counts are keyed by.
+    #[serde(default)]
+    pub project: Option<String>,
     pub project_name: Option<String>,
     pub agent: String,
     pub mode: String,
@@ -85,7 +107,17 @@ pub struct RunView {
 pub struct InboxItem {
     pub kind: String,
     pub level: String,
-    pub run_id: String,
+    /// `None` for an item that is not about a session: a piece of work whose
+    /// runs have all ended, or the `gate_down` item, which is about the
+    /// machine.
+    ///
+    /// **This was `String`, and the API has always sent `null` here**, so
+    /// `vibeplane inbox` failed to decode the whole response the moment one
+    /// such item existed — which `AttentionItem` calls "the ordinary case, not
+    /// an edge one". The renderer below already had a branch for a missing run;
+    /// the type stopped it ever being reached.
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub title: String,
     pub detail: Option<String>,
     #[serde(default)]
@@ -143,6 +175,18 @@ pub fn ago(seconds: i64) -> String {
         s if s < 86400 => format!("{}h", s / 3600),
         s => format!("{}d", s / 86400),
     }
+}
+
+/// How long until a moment in the future, or how long since one in the past.
+///
+/// `ago` answers "how long since"; a rate-limit window resets *ahead* of now,
+/// and rendering that with `ago` prints `0s` for every window on the machine.
+pub fn until(at: jiff::Timestamp) -> String {
+    let seconds = (at - jiff::Timestamp::now()).get_seconds();
+    if seconds <= 0 {
+        return "now".into();
+    }
+    format!("in {}", ago(seconds))
 }
 
 /// Truncates to a display width, with an ellipsis when it had to cut.

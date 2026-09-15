@@ -3,7 +3,7 @@
 # Usage: scripts/fetch-specs.sh
 set -u
 cd "$(dirname "$0")/.."
-mkdir -p specs/claude-code specs/claude-agent-sdk specs/copilot specs/codex specs/opencode specs/symphony specs/sdd specs/mcp specs/jsonrpc specs/acp
+mkdir -p specs/claude-code specs/claude-agent-sdk specs/copilot specs/codex specs/opencode specs/symphony specs/sdd specs/mcp specs/jsonrpc specs/acp specs/standards
 UA='vibeplane-specs-fetch'
 # The test is "did we get the document or an error page", and size was a bad proxy for it:
 # a `-gt 500` floor deleted 83 of the 130 generated Codex schema files, because a generated
@@ -67,6 +67,9 @@ fetch https://raw.githubusercontent.com/openai/symphony/main/README.md specs/sym
 fetch https://raw.githubusercontent.com/Fission-AI/OpenSpec/main/README.md specs/sdd/openspec-README.md
 fetch https://raw.githubusercontent.com/github/spec-kit/main/README.md specs/sdd/spec-kit-README.md
 fetch https://raw.githubusercontent.com/github/spec-kit/main/spec-driven.md specs/sdd/spec-kit-spec-driven.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/analyze.md specs/sdd/spec-kit-analyze.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/converge.md specs/sdd/spec-kit-converge.md
+fetch https://agents.md/ specs/standards/agents-md.md
 # Codex app-server (JSON-RPC)
 fetch https://raw.githubusercontent.com/openai/codex/main/codex-rs/app-server/README.md specs/codex/app-server-README.md
 # Codex app-server protocol: generated JSON Schema + TypeScript types (listed via GitHub API)

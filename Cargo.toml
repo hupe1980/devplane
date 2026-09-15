@@ -1,7 +1,7 @@
 [package]
 name = "vibeplane"
-description = "The local-first control plane for AI coding agents: see every Claude Code session on your machine and know which ones need you."
-version = "0.2.0"
+description = "The local-first control plane for AI coding agents: see every session on your machine, gate what they may do, and make \"done\" mean your project's checks passed."
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -82,8 +82,8 @@ ci = ["github"]
 installers = ["shell"]
 # musl rather than gnu so one Linux artifact runs everywhere. `libsqlite3-sys`
 # is C, so a musl build needs a musl C toolchain. No `x86_64-apple-darwin`:
-# Intel Macs build from source, which `docs/install.md` says rather than
-# leaving somebody to find out from a failing installer.
+# Intel Macs build from source, which the install docs say rather than leaving
+# somebody to find out from a failing installer.
 targets = [
   "aarch64-apple-darwin",
   "aarch64-unknown-linux-musl",

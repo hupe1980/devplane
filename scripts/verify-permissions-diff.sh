@@ -14,7 +14,9 @@
 #   scripts/verify-permissions-diff.sh [cases]
 #
 # `cases` caps how many are run, for a quick pass. `VIBEPLANE_DIFF_AXIS=allow`
-# or `=deny` runs one half; the default runs both.
+# or `=deny` runs one half and the default runs both; `=dialect` runs this
+# matcher alone over the non-Bash tools and prints a checklist to put to the
+# running product.
 #
 # Costs a few cents per run and needs a signed-in Claude Code, so it is not part
 # of CI.
@@ -92,7 +94,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 CASES="${1:-0}"            # 0 = the full built-in matrix
-AXIS="${VIBEPLANE_DIFF_AXIS:-both}"   # allow | deny | both
+AXIS="${VIBEPLANE_DIFF_AXIS:-both}"   # allow | deny | both | dialect
 
 CLAUDE="${VIBEPLANE_CLAUDE_BIN:-$(command -v claude || true)}"
 if [ -z "$CLAUDE" ]; then
@@ -243,10 +245,16 @@ DENY_SHAPES=(
   'comm .env .env > /dev/null'
   'paste .env > /dev/null'
   'fold -w 8 .env > /dev/null'
+  # Named by the vendor's 2.1.271 row alongside `column`, which was already
+  # here. `fmt` was not, and `fmt .env` read the file under `Read(.env)`.
+  'fmt .env > /dev/null'
+  'fmt -w 80 .env > /dev/null'                 # after an option it takes
+  'fmt --nonesuch .env > /dev/null'            # after one it does not
   # Still unmeasured, and in the table because the errors are not symmetric: a
   # WIDER row fails the release and a narrower one is reported, so a candidate
   # stays until a measurement takes it out. These are the measurements.
   'uniq .env > /dev/null'
+  'pr .env > /dev/null'
   'expand .env > /dev/null'
   'column .env > /dev/null'
   # Writing **inside** the working directory, so the probe isolates the deny
@@ -256,6 +264,75 @@ DENY_SHAPES=(
   'cmp .env .env > /dev/null'
   'wc -l .env > /dev/null'
   'mv .env .env.bak'
+  # **Globs, which no generated shape had ever carried.** The shell expands
+  # these before the program sees them, so the matcher is comparing a rule
+  # against a pattern rather than against a path — and for two passes it
+  # compared them as literals and the prohibition did not fire. `cat .en?` and
+  # `cat .env*` both printed the file under `never_auto = ["Read(.env)"]`.
+  # Claude Code fixed the same class in 2.1.271.
+  #
+  # The leading dot is deliberate in each: POSIX will not expand a wildcard
+  # onto a name beginning with `.` unless the pattern spells the dot, so
+  # `cat *` is *not* a way to read `.env` and must not be denied as if it were.
+  # That row is in EXPECTED_SAME rather than here.
+  'cat .en? > /dev/null'
+  'cat .env* > /dev/null'
+  'head -c 3 .en? > /dev/null'
+  'grep -l TOKEN .en?'
+  'cat ./.en? > /dev/null'
+  # **The bare wildcard, which is the case that decides how generous the
+  # intersection may be.** POSIX will not expand `*` onto a name beginning with
+  # `.`, so this must *not* be refused under `Read(.env)` — and the matcher
+  # implements that rule. What is unmeasured is the other half: under a rule
+  # naming a **directory**, `cat *` names the directory itself, and this matcher
+  # currently refuses it. That is a narrowing by construction rather than by
+  # choice, so it is here to be settled rather than declared.
+  'cat * > /dev/null'
+  'grep -l TOKEN * > /dev/null'
+  # **The git object store**, which is the same secret arriving through a
+  # revision rather than the working tree. The matcher refuses both on the
+  # strength of `show` already being in its git-operand table; whether the
+  # running product agrees has never been asked, which makes these the two rows
+  # in this file that are *inferred from a measured sibling* rather than
+  # measured. If Claude Code runs them, the entries come out — a measurement
+  # takes an entry out, the way `xxd` and `less` came out.
+  'git show HEAD:.env'
+  'git cat-file -p HEAD:.env'
+)
+
+# ---------------------------------------------------------------------------
+# The dialect axis: the tools a rule reaches that are not `Bash`.
+#
+# Claude Code's rule-format table gives `Bash(npm run *)` to Bash **and
+# Monitor**, `Read(~/secrets/**)` to Read, Grep, Glob **and LSP**, and
+# `PowerShell(...)` its own syntax with alias canonicalisation and
+# case-insensitive matching. The matcher implements all of it from that table;
+# none of it has been asked of the running product.
+#
+# It cannot be: `Monitor` and `LSP` are not shells, and PowerShell needs a
+# Windows host or `pwsh`. So `VIBEPLANE_DIFF_AXIS=dialect` runs this side alone
+# and prints a checklist to put to a running product on a machine that has the
+# tool. It is not a measurement, and says so in its own output.
+PS_RULESETS=(
+  'PowerShell(Remove-Item *)'
+  'PowerShell(Get-ChildItem *)'
+)
+PS_SHAPES=(
+  'Remove-Item vp-ran.txt'
+  'remove-item vp-ran.txt'
+  'ri vp-ran.txt'
+  'rm vp-ran.txt'
+  'del vp-ran.txt'
+  'Get-ChildItem .'
+  'gci .'
+  'dir .'
+  'Get-ChildItem .; Remove-Item vp-ran.txt'
+)
+# `Monitor` takes the same `command` field as `Bash`, so a `Bash(...)` rule has
+# to reach it. The question is whether the running product agrees.
+MONITOR_SHAPES=(
+  'git config --local vp.ran 1'
+  'cat .env'
 )
 
 # A deny shape whose program is not installed here is not a verdict either.
@@ -391,6 +468,40 @@ ask_vibeplane() { # ruleset command -> yes|no
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
   [ "$v" = allow ] && echo yes || echo no
 }
+
+# ---------------------------------------------------------------------------
+if [ "$AXIS" = dialect ]; then
+  echo "dialect axis — this matcher's answers, for a human to put to a running product"
+  echo "NOT a measurement: nothing here has been asked of Claude Code."
+  echo
+  for rule in "${PS_RULESETS[@]}"; do
+    class=never_auto
+    case "$rule" in *Get-ChildItem*) class=auto_allow ;; esac
+    printf '[project]\nname = "diff"\n\n[policy]\n%s = ["%s"]\n' "$class" "$rule" > "$W/vibeplane.toml"
+    for shape in "${PS_SHAPES[@]}"; do
+      v=$("$VP" --json explain --dir "$W" --tool PowerShell --input "$(printf '{"command":"%s"}' "$shape")" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+      printf '  %-28s %-34s -> %s\n' "$rule" "$shape" "${v:-?}"
+    done
+  done
+  printf '[project]\nname = "diff"\n\n[policy]\nnever_auto = ["Bash(rm *)", "Read(.env)"]\nauto_allow = ["Bash(git config *)"]\n' > "$W/vibeplane.toml"
+  for shape in "${MONITOR_SHAPES[@]}"; do
+    for tool in Bash Monitor; do
+      v=$("$VP" --json explain --dir "$W" --tool "$tool" --input "$(printf '{"command":"%s"}' "$shape")" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+      printf '  %-28s %-34s -> %s\n' "$tool" "$shape" "${v:-?}"
+    done
+  done
+  for f in file_path path uri; do
+    v=$("$VP" --json explain --dir "$W" --tool LSP --input "$(printf '{"%s":".env"}' "$f")" 2>/dev/null \
+          | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+    printf '  %-28s %-34s -> %s\n' "LSP Read(.env)" "$f=.env" "${v:-?}"
+  done
+  echo
+  echo "Every row above should read the same on the running product. A Bash row"
+  echo "and its Monitor twin disagreeing is the widening this axis exists for."
+  exit 0
+fi
 
 if [ "$AXIS" != deny ]; then
 echo "allow axis — ${#RULESETS[@]} rule sets × $((${#SHAPES[@]} + ${#WRITE_SHAPES[@]})) shapes"

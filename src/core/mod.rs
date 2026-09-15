@@ -30,6 +30,7 @@
 //! * [`deeplink`](crate::core::deeplink) — links that open a coding agent.
 //! * [`text`](crate::core::text) — cutting strings a human reads and an agent wrote.
 //! * [`transcript`](crate::core::transcript) — what a driven agent said.
+//! * [`forge`](crate::core::forge) — a project's open issues and pull requests, and what of them needs a person.
 
 pub mod attention;
 pub mod command;
@@ -37,6 +38,7 @@ pub mod config;
 pub mod decision;
 pub mod deeplink;
 pub mod event;
+pub mod forge;
 pub mod ids;
 pub mod policy;
 pub mod policy_cache;
@@ -52,8 +54,9 @@ pub mod world;
 
 pub use attention::{Action, AttentionConfig, AttentionItem, AttentionKind, Level};
 pub use config::{ConfigError, GlobalConfig, Problem, ProjectConfig};
-pub use decision::{Actor, Decision};
+pub use decision::{Actor, DecidedEnvelope, Decision};
 pub use event::{ApiUsage, Choice, Event, EventEnvelope, Source, WaitingFor};
+pub use forge::{ForgeCounts, ForgeIssue, ForgePullRequest, ProjectForge};
 pub use ids::{AttentionId, ProjectId, RunId, SessionId, WorkId};
 pub use policy::{Policy, Rule, Verdict};
 pub use policy_cache::PolicyCache;

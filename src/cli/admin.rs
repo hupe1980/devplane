@@ -110,6 +110,14 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
     let settings_path = crate::observe::connect::settings_path()?;
     let settings = crate::observe::connect::read_settings(&settings_path).unwrap_or_default();
     let state = crate::observe::connect::inspect(&settings, &settings_path);
+    // Not "is a line in the settings file", which is what every previous
+    // version of this check answered: **run it**. Every way this layer has been
+    // wrong was a gate that read as installed and decided nothing.
+    let probe = crate::observe::connect::probe_gate(&settings);
+    // Decisions the gate took while no daemon was listening. They are enforced
+    // and not yet written down, which is a state worth naming: the audit trail
+    // is behind, and the only thing that catches it up is starting the daemon.
+    let spooled = config::drain_spool_count();
 
     let daemon = config::read_daemon_info()?;
     let diag = match client::Client::connect() {
@@ -124,6 +132,8 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "daemon": daemon,
                 "connect": state,
+                "gate": probe,
+                "spooled_decisions": spooled,
                 "diagnostics": diag,
                 "provider": {
                     "name": provider.as_str(),
@@ -203,6 +213,44 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             state.hooks_installed.len()
         );
     }
+    match (&probe.command, probe.answered) {
+        (None, _) => println!(
+            "  gate      {} — run `vibeplane connect claude`",
+            paint(render::RED, "not installed")
+        ),
+        (Some(_), true) => println!(
+            "  gate      {} {}",
+            paint(render::GREEN, "answering"),
+            paint(DIM, &format!("({} ms, measured just now)", probe.millis))
+        ),
+        (Some(cmd), false) => {
+            println!(
+                "  gate      {} — every prohibition on this machine is inert",
+                paint(render::RED, "INSTALLED AND NOT ANSWERING")
+            );
+            println!("            {}", paint(DIM, cmd));
+            if let Some(e) = &probe.error {
+                println!("            {}", paint(DIM, e));
+            }
+            println!(
+                "            {}",
+                paint(
+                    DIM,
+                    "a hook that does not answer never blocks — the provider carries on"
+                )
+            );
+        }
+    }
+    if spooled > 0 {
+        println!(
+            "  pending   {} {}",
+            paint(
+                render::YELLOW,
+                &format!("{spooled} decision(s) taken while no daemon was running")
+            ),
+            paint(DIM, "— they are enforced; start the daemon to file them")
+        );
+    }
     if state.gate_is_stale {
         println!(
             "  gate      {} — run `vibeplane connect claude`",
@@ -234,6 +282,43 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
     }
 
     if let Some(d) = diag {
+        // GitHub, read for every registered project. Its own section because
+        // the failure that matters — `gh` not logged in — is one no hook or
+        // roster line would ever mention.
+        println!("\n{}", paint(BOLD, "github"));
+        let f = &d["forge"];
+        match (f["viewer"].as_str(), f["error"].as_str()) {
+            (_, Some(e)) if !e.is_empty() => {
+                println!(
+                    "  {}  {}",
+                    paint(render::YELLOW, "not read"),
+                    paint(DIM, &clip(e, 70))
+                )
+            }
+            (Some(v), _) => println!(
+                "  as {} · {} project(s) with a forge · {} ruled out · last read {}",
+                v,
+                f["projects"].as_u64().unwrap_or(0),
+                f["skipped"].as_u64().unwrap_or(0),
+                f["last_poll_at"]
+                    .as_str()
+                    .and_then(|t| t.get(11..19))
+                    .unwrap_or("never")
+            ),
+            (None, _) => println!("  {}", paint(DIM, "not read yet")),
+        }
+        // "3 skipped" is a number a person can do nothing with. The reason is
+        // the value: usually "no GitHub remote", and when it is not, this is
+        // where a wrong guess about what is permanent becomes visible.
+        for p in f["skipped_projects"].as_array().unwrap_or(&vec![]) {
+            println!(
+                "  {}  {}  {}",
+                paint(DIM, "ruled out"),
+                p["project"].as_str().unwrap_or(""),
+                paint(DIM, &clip(p["reason"].as_str().unwrap_or(""), 60))
+            );
+        }
+
         println!("\n{}", paint(BOLD, "channels"));
         let empty = vec![];
         let channels = d["channels"].as_array().unwrap_or(&empty);
@@ -270,6 +355,62 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                     paint(render::RED, &clip(err, 60))
                 );
             }
+        }
+
+        // What the gate was measured against, and what is actually running.
+        // The count of sessions *reporting* a version is printed too: without
+        // the status-line shim there is nothing to compare, and silence must
+        // not read as "all clear".
+        let g = &d["gate"];
+        println!("\n{}", paint(BOLD, "gate"));
+        println!(
+            "  verified against Claude Code {}",
+            paint(BOLD, g["verified_against"].as_str().unwrap_or("?"))
+        );
+        let ahead = g["sessions_ahead_of_baseline"]
+            .as_array()
+            .unwrap_or(&empty)
+            .clone();
+        let reporting = g["sessions_reporting_a_version"].as_i64().unwrap_or(0);
+        if reporting == 0 {
+            println!(
+                "  {}",
+                paint(
+                    DIM,
+                    "no session reports its version — install the status-line shim to find out"
+                )
+            );
+        } else if ahead.is_empty() {
+            println!(
+                "  {}",
+                paint(
+                    DIM,
+                    &format!("{reporting} session(s) report a version; none is ahead of it")
+                )
+            );
+        } else {
+            println!(
+                "  {} {}",
+                paint(render::YELLOW, &format!("{} session(s)", ahead.len())),
+                paint(
+                    render::YELLOW,
+                    "are running a newer Claude Code than the gate was measured against"
+                )
+            );
+            for a in &ahead {
+                println!(
+                    "    {}  {}",
+                    a["run"].as_str().unwrap_or(""),
+                    paint(BOLD, a["version"].as_str().unwrap_or(""))
+                );
+            }
+            println!(
+                "  {}",
+                paint(
+                    DIM,
+                    "rules are still enforced; nobody has checked that they agree"
+                )
+            );
         }
 
         // The other gate. Vibeplane's own prohibitions reach auto mode, and in

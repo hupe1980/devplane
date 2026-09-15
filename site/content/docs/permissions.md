@@ -35,7 +35,7 @@ A machine-wide set with the same shape lives in `~/.vibeplane/policy.toml`.
 
 A rule moves between `settings.json` and `vibeplane.toml` by cutting and pasting it. Every row below
 is pinned by a test against the published specification, and the rules that decide most calls are
-additionally checked against a **running Claude Code 2.1.270** — that a deny matching one subcommand
+additionally checked against a **running Claude Code** (last full run: 2.1.270) — that a deny matching one subcommand
 blocks the whole line, that an allow does not approve a compound command it only half-covers, that an
 ask outranks the allow beside it, and that a single-segment directory pattern anchors as an allow
 while the same pattern floats to any depth as a deny — and that an `Edit` deny covers the target of a
@@ -60,8 +60,12 @@ once. A glob is only read on the allow side after a literal `mcp__<server>__` pr
 
 ### Commands
 
-For `Bash` and `PowerShell`, the specifier is a command pattern. `*` matches any text, including
-spaces.
+For `Bash`, `PowerShell` and `Monitor`, the specifier is a command pattern. `*` matches any text,
+including spaces.
+
+`Monitor` runs a command in the background and feeds its output back to the agent, so a `Bash(…)`
+rule governs it as well — `never_auto = ["Bash(rm *)"]` stops the foreground `rm` and the background
+one, and a redirection inside a `Monitor` command is checked like any other.
 
 | You write | Matches | Does not match |
 |---|---|---|
@@ -71,6 +75,16 @@ spaces.
 | `Bash(ls *)` | `ls -la`, **`ls`** | `lsof` |
 | `Bash(ls*)` | `ls -la`, `lsof` | |
 | `Bash(* --help *)` | `npm --help x` | `npm --help` |
+
+**PowerShell is matched in PowerShell's terms**, as Claude Code matches it: command names resolve to
+their cmdlet and case is ignored. `PowerShell(Remove-Item *)` in `never_auto` also stops `rm`, `del`,
+`ri`, `rd` and `erase`; `PowerShell(Get-ChildItem *)` in `auto_allow` also covers `gci`, `ls` and
+`dir`.
+
+A PowerShell command's *operands* are not read. Path rules reach the file operands of a **Bash**
+command (below); PowerShell's redirection and cmdlet vocabulary is a different language, and a guess
+at it would be confidently wrong rather than absent. So `Read(.env)` stops `Bash(cat .env)` and says
+nothing about `PowerShell(Get-Content .env)` — write a `PowerShell(Get-Content *)` rule for that.
 
 Two subtleties worth knowing:
 
@@ -138,7 +152,8 @@ are exactly the commands somebody writes a prohibition for.
 
 For `Read` and `Edit`, the specifier is a **gitignore pattern**. `*` stays inside one path segment;
 `**` crosses them. One `Edit(…)` rule covers every built-in tool that writes files and one `Read(…)`
-rule every one that reads them, so two rules cover eight tools.
+rule every one that reads them — `Read`, `Grep`, `Glob` and `LSP` included — so two rules cover nine
+tools.
 
 Four anchors, and confusing them is the most common mistake:
 
@@ -158,7 +173,7 @@ copy — while `Edit(src/**)` as an *allow* matches only `<cwd>/src`, so a grant
 
 > [!IMPORTANT]
 > `Edit(path)` governs **every built-in tool that edits files**, and `Read(path)` every one that
-> reads them — so two rules cover eight tools. A `Read` **deny** additionally blocks writing to that
+> reads them, `LSP` included — so two rules cover nine tools. A `Read` **deny** additionally blocks writing to that
 > path *with a file tool*, because “never look at `.env`” plainly also means “never replace it”. A
 > `Read` *allow* does not reach across: reading is not writing. The one documented exception: a
 > `Read` deny does **not** reach `NotebookEdit`, so a path no tool may change needs an `Edit` deny of
@@ -363,10 +378,10 @@ failure is silent, and on `never_auto` silence reads as permission. `vibeplane c
 | `mcp__github(create_issue)` | an `mcp__` rule with brackets is skipped on load |
 | `Bash(command:rm *)` | bypassable by a compound command, so it is ignored; write `Bash(rm *)` |
 | `Agent(model:opus)` in `auto_allow` | parameter rules are deny-side only |
+| `!Bash(ls *)` in `auto_allow` | an allow list is already the list of what is permitted, so an exception to it means nothing. In `never_auto` and `always_ask` a `!` rule **is** an exception and is honoured — see [Exceptions, with `!`](#exceptions-with) |
 | `*` or `mcp__*` in `auto_allow` | an unanchored wildcard approves nothing |
 | `Agent(researcher)` | that tool has no field for a bare specifier to match |
 | `Bash(rm -rf *` | the bracket was never closed — and a malformed **allow** rule grants nothing |
-| `!Bash(ls *)` | Claude Code reads a leading `!` as a negation scoped to the settings file it is written in. Vibeplane does not implement it, and carried as written it would name a tool called `!Bash` and match nothing. Keep such a rule in `settings.json`, where Claude Code evaluates it |
 
 And one **warning**, because the list behind it is a snapshot of somebody else's tool reference:
 
@@ -396,6 +411,20 @@ that does not belong refuses a call your own settings allow. Twenty-two are conf
 running Claude Code; `xxd`, `zcat`, `join`, `less`, `more` and `truncate` are **not** recognised by it
 and so are not here.
 
+**The release it was measured against is a number you can check.** A session running a newer Claude
+Code is governed by rules nobody has checked against it. `vibeplane doctor` prints the baseline and
+names any such session — only for sessions running the
+[status-line shim](/docs/observe/#the-status-line), the one channel reporting a version per session:
+
+```console
+$ vibeplane doctor
+gate
+  verified against Claude Code 2.1.270
+  1 session(s) are running a newer Claude Code than the gate was measured against
+    7c4a1b  2.1.272
+  rules are still enforced; nobody has checked that they agree
+```
+
 ## The one place Vibeplane is stricter than Claude Code, on purpose
 
 The rules here are Claude Code's, so a rule you move between `settings.json` and `vibeplane.toml`
@@ -424,6 +453,26 @@ vibeplane check
 
 also prints the rules back, allow and deny, because a rule that parses, is legal and still covers
 nothing anybody expected is only visible by reading it.
+
+## Globs in a command
+
+The shell expands a wildcard before the program sees it, so a **deny** rule asks of an operand
+carrying one: *could this expand onto something I protect?*
+
+```console
+$ vibeplane explain 'cat .en?'      # never_auto = ["Read(.env)"]
+deny  Bash
+        by Read(.env)
+```
+
+`cat .env*`, `head -c3 .en?` and `cat .en[v]` are refused the same way.
+
+A wildcard still cannot reach a dotfile, exactly as your shell will not: POSIX expands `*` onto a
+name beginning with `.` only when the pattern spells the dot. `cat *` is not a way to read `.env`.
+
+**Allow rules do not work this way.** A deny that matches too eagerly costs you a prompt; an allow
+that expanded a glob would grant over a set of files nobody wrote down. A command whose operands
+cannot be pinned to a file is never approved by a path rule — it reaches you.
 
 ## Auto mode
 
@@ -463,9 +512,28 @@ and ten thousand checks are not ten thousand file reads.
 A malformed `vibeplane.toml` **keeps the rules it had**. A typo in a deny rule must never read as
 “no rules”.
 
-That is only half an answer, because a daemon restarted against a broken file has no previous rules
-to keep — so `vibeplane doctor` names the project and says its rules are not in force, rather than
-leaving it to a log line.
+That is only half an answer, because a process starting fresh against a broken file has no previous
+rules to keep — so `vibeplane doctor` names the project and says its rules are not in force, rather
+than leaving it to a log line.
+
+`vibeplane explain` says it too, and it is the one that matters while you are editing:
+
+```console
+$ vibeplane explain 'cat .env'
+undecided  Bash
+        this project's rules are NOT in force — the file below will not load
+
+vibeplane.toml is not valid: TOML parse error at line 3, column 2
+  |
+3 | [polcy]
+  |  ^^^^^
+unknown field `polcy`, expected one of `project`, `workspace`, `gates`, `policy`, …
+
+every rule in this file is off until it parses — vibeplane check
+```
+
+Three situations end in `undecided` and only one of them is a fact about the call — no rules here,
+rules that will not load, rules that loaded and did not match. `explain` says which.
 
 ## Driven runs speak the same vocabulary
 

@@ -1201,49 +1201,64 @@ async fn an_approved_and_green_pull_request_asks_for_nothing() {
 async fn a_projects_own_rules_decide_its_agents() {
     // `[policy]` in vibeplane.toml was parsed and then ignored, which is worse
     // than not offering it: a rule someone wrote did nothing at all.
+    //
+    // Driven through the binary rather than an HTTP handler, because that is
+    // what Claude Code runs now: the gate is a `command` hook so that a stopped
+    // daemon cannot switch every prohibition off without saying so.
     let repo = scratch_repo("policy", "escalate", 0);
     std::fs::write(
         repo.join("vibeplane.toml"),
         "[policy]\nauto_allow = [\"Bash(echo *)\"]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
     )
     .unwrap();
-    let (addr, c, _state) = boot().await;
+    let home = std::env::temp_dir().join(format!(
+        "vp-projpolicy-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
 
-    let ask = |command: &str| {
+    let ask = |command: &str| -> Value {
         let body = serde_json::json!({
             "hook_event_name": "PermissionRequest",
             "session_id": "s1",
             "cwd": repo.to_string_lossy(),
             "tool_name": "Bash",
             "tool_input": { "command": command }
-        });
-        let c = c.clone();
-        async move {
-            c.post(format!("http://{addr}/vibeplane/policy"))
-                .bearer_auth("tok")
-                .json(&body)
-                .send()
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap()
-        }
+        })
+        .to_string();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_vibeplane"))
+            .arg("hook")
+            .env("VIBEPLANE_HOME", &home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut ch| {
+                use std::io::Write;
+                ch.stdin.as_mut().unwrap().write_all(body.as_bytes())?;
+                ch.wait_with_output()
+            })
+            .expect("the gate runs");
+        serde_json::from_slice(&out.stdout).expect("the gate answers with JSON")
     };
 
-    let allowed: Value = serde_json::from_str(&ask("echo hello").await).unwrap();
     assert_eq!(
-        allowed["hookSpecificOutput"]["decision"]["behavior"], "allow",
+        ask("echo hello")["hookSpecificOutput"]["decision"]["behavior"],
+        "allow",
         "the project's own allow rule must answer"
     );
-
-    let denied: Value = serde_json::from_str(&ask("rm -rf node_modules").await).unwrap();
-    assert_eq!(denied["hookSpecificOutput"]["decision"]["behavior"], "deny");
-
-    let neither = ask("curl example.com").await;
-    assert_eq!(neither, "{}", "and anything else still reaches the human");
+    assert_eq!(
+        ask("rm -rf node_modules")["hookSpecificOutput"]["decision"]["behavior"],
+        "deny"
+    );
+    assert_eq!(
+        ask("curl example.com"),
+        serde_json::json!({}),
+        "and anything else still reaches the human"
+    );
 
     std::fs::remove_dir_all(&repo).ok();
+    std::fs::remove_dir_all(&home).ok();
 }
 
 #[tokio::test]
@@ -1834,7 +1849,7 @@ steps = [
         "what the reviewer found has to outlive the file it was written to: {settled}"
     );
     // Every gate here passed, which is exactly why guessing the reason was
-    // wrong: the judged verdict the board reads says so (D60 keeps that in one
+    // wrong: the judged verdict the board reads says so (one judgement, in one
     // place), and inferring from it would have announced `check` as the thing
     // that failed.
     assert_eq!(
@@ -1963,4 +1978,72 @@ fn a_standing_grant_is_recorded_as_one() {
         always.reason.is_some(),
         "and the standing one has to say what it means"
     );
+}
+
+/// `undecided` used to be one sentence covering three different situations, and
+/// only one of them is a fact about the call.
+///
+/// The dangerous one is a `vibeplane.toml` that will not parse: there are then
+/// **no** rules in force, and reporting that as "no rule answers this one" is a
+/// typo in a deny rule reading as permission. `vibeplane check` had always
+/// printed the parse error; `explain` is the surface somebody uses *while
+/// editing the file*, so it is the one most likely to meet a broken one.
+#[test]
+fn explain_says_why_nothing_answered() {
+    let dir = std::env::temp_dir().join(format!(
+        "vp-explain-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let explain = |dir: &std::path::Path| -> Value {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_vibeplane"))
+            .args(["--json", "explain", "--dir"])
+            .arg(dir)
+            .arg("cat .env")
+            .env("VIBEPLANE_HOME", &home)
+            .output()
+            .expect("explain runs");
+        serde_json::from_slice(&out.stdout).expect("explain answers with JSON")
+    };
+
+    // 1. No rules anywhere.
+    let r = explain(&dir);
+    assert_eq!(r["verdict"], "undecided");
+    assert_eq!(r["rules"]["state"], "none");
+
+    // 2. A file that will not parse: the rules are NOT in force, and the
+    //    difference is the whole point.
+    std::fs::write(
+        dir.join("vibeplane.toml"),
+        "[project]\nname=\"x\"\n[polcy]\nnever_auto=[\"Read(.env)\"]\n",
+    )
+    .unwrap();
+    let r = explain(&dir);
+    assert_eq!(r["verdict"], "undecided");
+    assert_eq!(r["rules"]["state"], "broken");
+    assert_eq!(r["rules"]["in_force"], false);
+    assert!(
+        r["rules"]["error"].as_str().unwrap().contains("polcy"),
+        "it has to name what is wrong, like `vibeplane check` does"
+    );
+
+    // 3. Rules that load. Found without a git repository above them, which they
+    //    were not: `check` read this file happily while `explain`, in the same
+    //    directory, answered as though it did not exist.
+    std::fs::write(
+        dir.join("vibeplane.toml"),
+        "[project]\nname=\"x\"\n[policy]\nnever_auto=[\"Read(.env)\"]\n",
+    )
+    .unwrap();
+    let r = explain(&dir);
+    assert_eq!(r["verdict"], "deny");
+    assert_eq!(r["rule"], "Read(.env)");
+    assert_eq!(r["rules"]["state"], "loaded");
+    assert_eq!(r["rules"]["in_force"], true);
+
+    std::fs::remove_dir_all(&dir).ok();
 }

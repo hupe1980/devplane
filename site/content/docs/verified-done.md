@@ -209,7 +209,7 @@ durable unit and the session is not. An approved, green pull request asks for no
 of the inbox.
 
 ```sh
-vibeplane work issues       # what this repository labels as ready
+vibeplane issues --ready    # what this repository labels as ready
 vibeplane work start --issue 7 --kind bug
 ```
 

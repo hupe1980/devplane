@@ -22,6 +22,13 @@
       --accent: #e8e6e3;
     }
   }
+  /* Visible to a screen reader, and to nothing else. Every glyph that carries
+     state has one of these beside it, because "every state has a glyph and a
+     word" is a rule this page states and has to keep. */
+  .sr {
+    position: absolute; width: 1px; height: 1px; margin: -1px;
+    padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
@@ -148,6 +155,28 @@
   #whybody .e .t { color: var(--faint); flex: none; }
   #whybody .e .who { width: 4rem; flex: none; color: var(--dim); }
   #whybody .r { color: var(--faint); padding: 0 0 .3rem 4.8rem; }
+  /* The forge view: every open issue and pull request, across every project.
+     The board's headings carry the counts; this is what the counts are of. */
+  .ghhead { display: flex; gap: .6rem; align-items: baseline; padding: .6rem .9rem; border-bottom: 1px solid var(--line); }
+  .ghhead .tabs { display: flex; gap: .35rem; }
+  #ghbody { max-height: 58vh; overflow-y: auto; }
+  #ghbody .proj { padding: .5rem .9rem .2rem; color: var(--dim); font-size: 12px; }
+  .ghrow { display: flex; gap: .6rem; align-items: baseline; padding: .3rem .9rem; text-decoration: none; color: inherit; }
+  .ghrow:hover, .ghrow:focus-visible { background: var(--line); }
+  .ghrow .num { color: var(--faint); width: 3.6rem; flex: none; text-align: right; }
+  .ghrow .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ghrow .tag { flex: none; color: var(--faint); font-size: 11px; }
+  .ghrow .you { flex: none; color: var(--wait); font-size: 11px; }
+  .ghempty { padding: 1rem .9rem; color: var(--dim); }
+  /* A count that opens something. Reads as text, behaves as a button — which
+     means it is a real <button>, so the keyboard reaches it like everything
+     else rather than needing a tabindex nobody maintains. */
+  .linkish {
+    border: 0; background: none; padding: 0; font: inherit; color: inherit;
+    cursor: pointer; text-decoration: underline; text-decoration-style: dotted;
+    text-underline-offset: 3px;
+  }
+  .linkish:hover, .linkish:focus-visible { color: var(--ink); }
 
   /* The transcript. Only driven runs have one: a session somebody started in
      an editor is already showing its own, and `focus` raises that window. */
@@ -174,29 +203,33 @@
   <div class="counts" id="counts"></div>
   <input id="q" type="search" placeholder="search tool calls, questions, errors  /"
          autocomplete="off" spellcheck="false" size="34">
-  <div class="live"><span class="dot" id="dot"></span><span id="livetext">connecting</span></div>
+  <div class="live"><span class="dot" id="dot" aria-hidden="true"></span><span id="livetext">connecting</span></div>
 </header>
+
+<!-- The one live region. Polite, atomic, and it says the number that decides
+     whether to look — never the thing that changed. -->
+<p id="announce" class="sr" role="status" aria-live="polite" aria-atomic="true"></p>
 
 <main>
   <section id="needs">
-    <h2>Needs you</h2>
-    <div id="inbox"></div>
+    <h2 id="needshead">Needs you</h2>
+    <div id="inbox" role="list" aria-labelledby="needshead"></div>
   </section>
   <section id="worksec" hidden>
-    <h2>Work</h2>
-    <div id="work"></div>
+    <h2 id="workhead">Work</h2>
+    <div id="work" role="list" aria-labelledby="workhead"></div>
   </section>
   <section id="hitsec" hidden>
     <h2 id="hitshead">Matches</h2>
     <div id="hits"></div>
   </section>
   <section>
-    <h2>Sessions</h2>
-    <div id="board"></div>
+    <h2 id="boardhead">Sessions</h2>
+    <div id="board" role="list" aria-labelledby="boardhead"></div>
   </section>
 </main>
 
-<section id="talk" hidden>
+<section id="talk" role="dialog" aria-modal="true" aria-label="What the agent is saying" hidden>
   <div id="talkhead">
     <span class="who" id="talkwho"></span>
     <span class="meta" id="talkmode"></span>
@@ -209,15 +242,15 @@
 <!-- Two launchers and one explainer. They are the only things allowed to cover
      the page, and the exemption is a rule rather than an exception: neither is
      a decision, so neither has evidence that has to stay beside it. -->
-<div id="veil" hidden></div>
+<div id="veil" aria-hidden="true" hidden></div>
 
-<div id="palette" class="over" hidden>
+<div id="palette" class="over" role="dialog" aria-modal="true" aria-label="Jump to a project, a piece of work or a session" hidden>
   <input id="pq" type="search" placeholder="jump to a project, a piece of work, a session…"
          autocomplete="off" spellcheck="false">
   <div id="phits"></div>
 </div>
 
-<div id="dispatch" class="over" hidden>
+<div id="dispatch" class="over" role="dialog" aria-modal="true" aria-label="Start work" hidden>
   <textarea id="dprompt" rows="3" placeholder="what should the agent do?"></textarea>
   <div class="drow" id="dprojects"></div>
   <div class="drow" id="dopts"></div>
@@ -231,7 +264,20 @@
   </div>
 </div>
 
-<div id="why" class="over" hidden>
+<div id="github" class="over" role="dialog" aria-modal="true" aria-label="Open issues and pull requests" hidden>
+  <div class="ghhead">
+    <b>GitHub</b>
+    <div class="tabs">
+      <button id="ghtabi" class="chip" title="i">issues</button>
+      <button id="ghtabp" class="chip" title="p">pull requests</button>
+    </div>
+    <span id="ghwho" class="tag"></span>
+    <button id="ghclose" style="margin-left:auto">close</button>
+  </div>
+  <div id="ghbody" role="list"></div>
+</div>
+
+<div id="why" class="over" role="dialog" aria-modal="true" aria-label="Why this is here" hidden>
   <div class="whyhead"><b>Why this is here</b><button id="whyclose" style="margin-left:auto">close</button></div>
   <div id="whybody"></div>
 </div>
@@ -246,6 +292,7 @@
   <span><kbd>r</kbd> reply</span>
   <span><kbd>enter</kbd> what it is saying</span>
   <span><kbd>?</kbd> why</span>
+  <span><kbd>g</kbd> issues &amp; PRs</span>
   <span><kbd>&#8984;K</kbd> jump</span>
   <span><kbd>&#8984;N</kbd> dispatch</span>
   <span><kbd>/</kbd> search</span>
@@ -309,21 +356,43 @@ function render() {
   if (!b) return;
   const s = b.summary;
   $("counts").innerHTML =
-    `<span><b>${s.projects}</b> projects</span>` +
-    `<span><b>${s.runs}</b> sessions</span>` +
-    `<span><b>${s.working}</b> working</span>` +
-    (s.needs_you ? `<span style="color:var(--wait)"><b>${s.needs_you}</b> need you</span>` : "") +
-    (s.cost_usd > 0 ? `<span>$${s.cost_usd.toFixed(2)}</span>` : "") +
-    // Editor tabs whose processes are still alive. Counted, not listed: twenty
-    // rows that all look equally alive answer no question at all.
+    `<span><b>${esc(s.projects)}</b> projects</span>` +
+    `<span><b>${esc(s.runs)}</b> sessions</span>` +
+    `<span><b>${esc(s.working)}</b> working</span>` +
+    (s.needs_you ? `<span style="color:var(--wait)"><b>${esc(s.needs_you)}</b> need you</span>` : "") +
+    // Every session is in exactly one of these. Naming three of five above a
+    // total reads as a breakdown and is not one.
+    (s.idle ? `<span><b>${esc(s.idle)}</b> idle</span>` : "") +
+    (s.failed ? `<span style="color:var(--fail)"><b>${esc(s.failed)}</b> failed</span>` : "") +
+    (s.cost_usd > 0 ? `<span>$${esc(s.cost_usd.toFixed(2))}</span>` : "") +
+    // GitHub's half of the picture: what is open across every project, and
+    // how much of it is waiting on you. Zero when the forge has not been read.
+    // A button, not a span: the number is the affordance, and `g` does the
+    // same from the keyboard.
+    (s.open_issues + s.open_prs > 0
+      ? `<button id="ghopen" class="linkish" title="every open issue and pull request (g)"><b>${esc(s.open_issues)}</b> issues · <b>${esc(s.open_prs)}</b> PRs${
+          s.forge_needs_you ? ` <span style="color:var(--wait)">(<b>${esc(s.forge_needs_you)}</b> need you)</span>` : ""}</button>`
+      : "") +
+    // Sessions nothing has been heard from for hours — editor tabs, usually.
+    // Counted, not listed: twenty rows that all look equally alive answer no
+    // question at all.
     (s.dormant
-      ? `<button id="dormant">${state.showAll ? "hide" : "show"} ${s.dormant} dormant</button>`
+      ? `<button id="dormant">${state.showAll ? "hide" : "show"} ${esc(s.dormant)} quiet</button>`
       : "");
+
+  // ── The one live region ───────────────────────────────────────────────────
+  // Twenty sessions changing state must not become twenty announcements, so
+  // what is announced is the count that matters and only when it changes.
+  const asking = state.inbox.filter((i) => i.level !== "normal").length;
+  const say = asking
+    ? `${asking} item${asking === 1 ? "" : "s"} need${asking === 1 ? "s" : ""} you`
+    : "nothing needs you";
+  if ($("announce").textContent !== say) $("announce").textContent = say;
 
   // The inbox first, because it is the only part that is asking for something.
   $("inbox").innerHTML = state.inbox.length
     ? state.inbox.map((i, n) => `
-        <div class="card item ${i.level}" data-sel="${n}" data-run="${esc(i.run_id || "")}" tabindex="0">
+        <div class="card item ${esc(i.level)}" role="listitem" data-sel="${n}" data-run="${esc(i.run_id || "")}" tabindex="0">
           <div class="t">${esc(i.title)}</div>
           ${i.detail ? `<div class="d">${esc(i.detail)}</div>` : ""}
           ${i.options?.length ? (
@@ -347,9 +416,10 @@ function render() {
             ${i.actions.includes("retry") ? `<button data-act="retry" data-work="${esc(i.work_id || "")}">hand back again</button>` : ""}
             ${i.actions.includes("resume") ? `<button data-act="resume" data-work="${esc(i.work_id || "")}">pick it back up</button>` : ""}
             ${i.actions.includes("open_pr") && i.url ? `<a class="gate" href="${esc(i.url)}" target="_blank" rel="noreferrer">open pull request</a>` : ""}
+            ${i.actions.includes("open_issue") && i.url ? `<a class="gate" href="${esc(i.url)}" target="_blank" rel="noreferrer">open issue</a>` : ""}
             ${i.launch ? `<a class="gate launch" href="${esc(i.launch)}">open an agent on it</a>` : ""}
             ${i.actions.includes("attach") ? `<button data-act="attach" data-run="${esc(i.run_id || "")}">copy attach</button>` : ""}
-            ${i.actions.includes("snooze") ? `<button data-act="snooze" data-run="${esc(i.run_id || "")}" data-work="${esc(i.work_id || "")}">snooze 1h</button>` : ""}
+            ${i.actions.includes("snooze") ? `<button data-act="snooze" data-run="${esc(i.run_id || "")}" data-work="${esc(i.work_id || "")}" data-opt="${esc(i.work_id || i.run_id ? "" : (i.project_id || ""))}">snooze 1h</button>` : ""}
           </div>
         </div>`).join("")
     : `<div class="empty">Nothing needs you.</div>`;
@@ -372,7 +442,7 @@ function render() {
     const pr = w.pull_request
       ? `<a class="gate ${w.pull_request.status === "failing" ? "red" : w.pull_request.status.startsWith("ready") ? "green" : ""}"
             href="${esc(w.pull_request.url)}" target="_blank" rel="noreferrer"
-         >#${w.pull_request.number} ${esc(w.pull_request.status.replace(/_/g, " "))}</a>`
+         >#${esc(w.pull_request.number)} ${esc(w.pull_request.status.replace(/_/g, " "))}</a>`
       : "";
     // The stepper is the whole story of a pipeline in one line: what is done,
     // where it is, and what is left.
@@ -389,8 +459,8 @@ function render() {
       : w.can_retry
       ? `<button data-act="retry" data-work="${esc(w.id)}" title="${esc(w.stopped_summary || w.gate?.summary || "")}">hand back again</button>`
       : "";
-    return `<div class="card row">
-      <span class="s ${w.phase}">${GLYPH[w.phase] || "\u25CF"}</span>
+    return `<div class="card row" role="listitem">
+      <span class="s ${esc(w.phase)}"><span aria-hidden="true">${GLYPH[w.phase] || "\u25CF"}</span><span class="sr">${esc(w.phase)}</span></span>
       <span class="name">${esc(w.title)}</span>
       <span class="meta">${esc(w.phase)}</span>
       <span class="sum">${step || esc(w.branch || "")}</span>
@@ -405,25 +475,47 @@ function render() {
   let n = offset;
   $("board").innerHTML = Object.entries(byProject)
     .sort((a, c) => c[1].length - a[1].length)
-    .map(([proj, runs]) => `
-      <div class="proj">${esc(proj)} · ${runs.length}</div>
+    .map(([proj, runs]) => {
+      // What GitHub says is open here, beside the session count.
+      const pid = runs.find((r) => r.project)?.project;
+      const f = pid ? b.forge?.[pid] : null;
+      // Why this project's last poll failed. The counts beside it are the
+      // last good ones, and a count that is quietly out of date is worse than
+      // no count.
+      const old_ = f?.stale ? ` <span class="err" title="${esc(f.stale)}">stale</span>` : "";
+      const forge = f && (f.issues || f.pull_requests)
+        ? ` · <button class="linkish ghopen" title="every open issue and pull request (g)">${esc(f.issues)} issues · ${esc(f.pull_requests)} PRs${f.needs_you ? ` <span style="color:var(--wait)">(${esc(f.needs_you)} need you)</span>` : ""}</button>${old_}`
+        : f?.stale
+        ? ` · <span class="err" title="${esc(f.stale)}">github unreadable</span>`
+        : "";
+      return `
+      <div class="proj">${esc(proj)} · ${esc(runs.length)}${forge}</div>
       ${runs.map((r) => {
         const pct = r.context_percent;
-        return `<div class="card row" data-sel="${n++}" data-run="${esc(r.id)}" tabindex="0">
-          <span class="s ${r.state}">${GLYPH[r.state] || "·"}</span>
+        return `<div class="card row" role="listitem" data-sel="${n++}" data-run="${esc(r.id)}" tabindex="0">
+          <span class="s ${esc(r.state)}"><span aria-hidden="true">${GLYPH[r.state] || "·"}</span><span class="sr">${esc(r.state)}</span></span>
           <span class="name">${esc(r.name || r.id.slice(0, 8))}</span>
           <span class="meta">${esc(r.entrypoint || r.mode)}</span>
           <span class="gauge ${pct >= 85 ? "high" : ""}">${pct != null ? Math.round(pct) + "%" : ""}</span>
           <span class="cost">${r.cost_usd > 0 ? "$" + r.cost_usd.toFixed(2) : ""}</span>
           <span class="meta">${ago(r.idle_seconds)}</span>
           <span class="sum">${esc(r.summary || SUMMARY_FALLBACK[r.state] || "")}</span>
-          ${r.plan_total ? `<span class="meta">${r.plan_done}/${r.plan_total}</span>` : ""}
+          ${r.plan_total ? `<span class="meta">${esc(r.plan_done)}/${esc(r.plan_total)}</span>` : ""}
         </div>`;
-      }).join("")}`).join("");
+      }).join("")}`;
+    }).join("");
 
   const sel = document.querySelector(`[data-sel="${state.sel}"]`);
-  document.querySelectorAll(".sel").forEach((e) => e.classList.remove("sel"));
-  if (sel) sel.classList.add("sel");
+  document.querySelectorAll(".sel").forEach((e) => {
+    e.classList.remove("sel");
+    e.removeAttribute("aria-current");
+  });
+  if (sel) {
+    sel.classList.add("sel");
+    // Selection is a position in a list, and that is what `aria-current`
+    // means. Without it the highlight is colour alone, which §10 forbids.
+    sel.setAttribute("aria-current", "true");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +562,9 @@ async function openTalk(run) {
     );
     return;
   }
+  const cameFrom = document.activeElement;
   closeTalk();
+  talk.cameFrom = cameFrom;
   talk.run = run;
   talk.messages = await api(`/api/runs/${run}/messages?limit=200`).catch(() => []);
   $("talk").hidden = false;
@@ -491,8 +585,10 @@ async function openTalk(run) {
 
 function closeTalk() {
   talk.es?.close();
-  talk = { run: null, messages: [], thinking: talk.thinking, es: null };
+  const back = talk.cameFrom;
+  talk = { run: null, messages: [], thinking: talk.thinking, es: null, cameFrom: null };
   $("talk").hidden = true;
+  if (back && document.contains(back)) back.focus();
 }
 
 // Search, debounced.
@@ -513,7 +609,7 @@ function showHits(hits, query) {
   }
   sec.hidden = false;
   $("hitshead").textContent = hits.length
-    ? `Matches for “${query}” (${hits.length})`
+    ? `Matches for “${query}” (${esc(hits.length)})`
     : `Nothing matches “${query}”`;
   $("hits").innerHTML = hits
     .map(
@@ -615,10 +711,12 @@ async function act(kind, run, req, opt) {
     await api(`/api/work/${req}/${kind}`, { method: "POST" }).catch((e) => alert(e.message));
     refresh();
   } else if (kind === "snooze") {
-    // Work and runs snooze separately. An item a pull request produced has
-    // often outlived every session that worked on it, so there is no run left
-    // to quieten — `req` carries the work id for exactly those.
-    const where_ = req ? `/api/work/${req}` : `/api/runs/${run}`;
+    // Work, runs and projects snooze separately. An item a pull request
+    // produced has often outlived every session that worked on it, so there
+    // is no run left to quieten — `req` carries the work id for exactly those;
+    // an item GitHub produced has no run and no work, and `opt` carries its
+    // project.
+    const where_ = req ? `/api/work/${req}` : run ? `/api/runs/${run}` : `/api/projects/${opt}`;
     await api(`${where_}/snooze?minutes=60`, { method: "POST" }).catch((e) => alert(e.message));
     refresh();
   } else if (kind === "attach") {
@@ -643,14 +741,114 @@ let over = { which: null, sel: 0, hits: [], dispatch: null };
 const openOver = (which) => {
   over.which = which;
   over.sel = 0;
+  // Where the keyboard was, so closing puts it back. A dialog that drops focus
+  // on the document body leaves a keyboard or screen-reader user at the top of
+  // the page with no idea where they were.
+  over.cameFrom = document.activeElement;
   $("veil").hidden = false;
-  for (const id of ["palette", "dispatch", "why"]) $(id).hidden = id !== which;
+  for (const id of ["palette", "dispatch", "why", "github"]) $(id).hidden = id !== which;
 };
 const closeOver = () => {
   over.which = null;
   $("veil").hidden = true;
-  for (const id of ["palette", "dispatch", "why"]) $(id).hidden = true;
+  for (const id of ["palette", "dispatch", "why", "github"]) $(id).hidden = true;
+  const back = over.cameFrom;
+  over.cameFrom = null;
+  if (back && document.contains(back)) back.focus();
 };
+
+// ── g: what GitHub is holding, across every project ─────────────────────────
+//
+// Every open issue and pull request on every registered project, what needs
+// you first, each row a link to the forge. It is what the counts on the
+// project headings are counts of.
+//
+// Behind a key rather than on the board: the inbox holds what needs this
+// person, and a list of every open issue in eight repositories needs nobody.
+let gh = { tab: "issues", data: null, error: null, loading: false };
+
+async function openGithub() {
+  openOver("github");
+  gh.loading = !gh.data;
+  renderGithub();
+  try {
+    gh.data = await api("/api/forge");
+    gh.error = null;
+  } catch (e) {
+    gh.error = String(e && e.message ? e.message : e);
+  }
+  gh.loading = false;
+  renderGithub();
+  $("ghclose").focus();
+}
+
+function renderGithub() {
+  $("ghtabi").classList.toggle("on", gh.tab === "issues");
+  $("ghtabp").classList.toggle("on", gh.tab === "prs");
+  // Concatenated, not interpolated: `textContent` escapes by construction, so
+  // `esc()` here would print `&lt;` at a reader — and the page's rule is that
+  // every `${…}` path is escaped, with no exceptions to argue about.
+  $("ghwho").textContent = gh.data?.viewer ? "as " + gh.data.viewer : "";
+
+  if (gh.loading) return $("ghbody").innerHTML = `<div class="ghempty">reading GitHub…</div>`;
+  if (gh.error) return $("ghbody").innerHTML = `<div class="ghempty err">${esc(gh.error)}</div>`;
+  // A poll that failed is a fact worth showing, and it sits above whatever the
+  // last good poll left behind rather than replacing it with an empty list.
+  // A failed poll is shown twice: once for `gh` itself, and once per project,
+  // so hour-old numbers are not mistaken for fresh ones.
+  const trouble = (gh.data?.error
+    ? `<div class="ghempty err">${esc(gh.data.error)}</div>`
+    : "") + (gh.data?.stale || []).map((p) =>
+      `<div class="ghempty err">${esc(p.project_name || p.project)}: ${esc(p.error)} — showing what was there at ${esc(p.last_good)}</div>`
+    ).join("");
+
+  const issues = gh.data?.issues || [];
+  const prs = gh.data?.pull_requests || [];
+  const rows = gh.tab === "issues" ? issues : prs;
+  if (!rows.length) {
+    const what = gh.tab === "issues" ? "issues" : "pull requests";
+    return $("ghbody").innerHTML = trouble + `<div class="ghempty">No open ${what} on any registered project.</div>`;
+  }
+
+  let last = "";
+  let out = trouble;
+  for (const row of rows) {
+    if (row.project_name !== last) {
+      last = row.project_name;
+      out += `<div class="proj">${esc(last)}</div>`;
+    }
+    // Why this row is here, in the person's own terms — the same vocabulary
+    // the inbox uses, so the two never describe one thing two ways.
+    const you = gh.tab === "issues"
+      ? (row.assigned_to_me ? "assigned to you" : "")
+      : row.review_requested ? "review requested"
+      : !row.mine ? ""
+      : row.status === "failing" && !row.draft ? "checks red"
+      : row.status === "changes_requested" ? "changes requested"
+      : row.status === "ready_to_merge" && !row.draft ? "approved"
+      : "";
+    const tag = gh.tab === "issues"
+      ? esc((row.labels || []).join(" · "))
+      : esc(row.draft ? "draft" : String(row.status || "").replace(/_/g, " "));
+    out += `<a class="ghrow" role="listitem" href="${esc(row.url)}" target="_blank" rel="noreferrer">
+      <span class="num">#${esc(row.number)}</span>
+      <span class="t">${esc(row.title)}</span>
+      <span class="tag">${tag}</span>
+      <span class="you">${esc(you)}</span>
+    </a>`;
+  }
+  $("ghbody").innerHTML = out;
+}
+
+// Delegated: the counts are rebuilt on every render, so a listener bound to
+// the element itself would be bound to an element that no longer exists.
+document.addEventListener("click", (e) => {
+  if (e.target instanceof Element && e.target.closest("#ghopen, .ghopen")) openGithub();
+});
+
+$("ghtabi").addEventListener("click", () => { gh.tab = "issues"; renderGithub(); });
+$("ghtabp").addEventListener("click", () => { gh.tab = "prs"; renderGithub(); });
+$("ghclose").addEventListener("click", closeOver);
 
 // ── ⌘K: everything by name ───────────────────────────────────────────────────
 //
@@ -863,6 +1061,18 @@ document.addEventListener("keydown", (e) => {
         const r = over.hits[over.sel]; closeOver(); r?.go(); return e.preventDefault();
       }
     }
+    if (over.which === "github") {
+      // Two lists behind one key, so the key that opened it moves between
+      // them. Everything here is a link; nothing is a text field, so letters
+      // are commands rather than typing.
+      if (e.key === "g" || e.key === "ArrowRight" || e.key === "ArrowLeft" || e.key === "Tab") {
+        gh.tab = gh.tab === "issues" ? "prs" : "issues";
+        renderGithub();
+        return e.preventDefault();
+      }
+      if (e.key === "i") { gh.tab = "issues"; renderGithub(); return e.preventDefault(); }
+      if (e.key === "p") { gh.tab = "prs"; renderGithub(); return e.preventDefault(); }
+    }
     // Everything else inside an overlay is text.
     return;
   }
@@ -885,6 +1095,7 @@ document.addEventListener("keydown", (e) => {
     showWhy(state.inbox[+cur?.dataset.sel]);
     e.preventDefault();
   }
+  else if (e.key === "g") { openGithub(); e.preventDefault(); }
   else if (e.key === "Escape") closeTalk();
   else if (e.key === "Enter" && run) { openTalk(run); e.preventDefault(); }
   else if (e.key >= "1" && e.key <= "9") {
@@ -901,7 +1112,9 @@ document.addEventListener("keydown", (e) => {
     const item = state.inbox[+cur?.dataset.sel];
     const want = { f: "focus", a: "attach", s: "snooze", y: "allow", n: "deny", r: "reply" }[e.key];
     if (item?.actions?.includes(want)) {
-      act(want, item.run_id, want === "snooze" ? item.work_id : item.request_id);
+      // A GitHub item has neither run nor work; its project is what a snooze names.
+      act(want, item.run_id, want === "snooze" ? item.work_id : item.request_id,
+          want === "snooze" && !item.run_id && !item.work_id ? item.project_id : undefined);
     }
   }
 });

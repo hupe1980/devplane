@@ -134,13 +134,21 @@ attached, running, with nothing left on the machine that knows it is there.
 | Store | SQLite via `sqlx`, WAL, FTS5 |
 | Telemetry ingest | a hand-written OTLP/HTTP **JSON** reader behind `axum` — the exporter is configured for JSON, so the four record shapes are about sixty lines of serde rather than a protobuf toolchain |
 | Git / GitHub | the `git` and `gh` CLIs, for parity with what agents and people run by hand |
-| UI | one embedded HTML file, no build step — about three hundred lines of plain JavaScript against the same JSON the CLI reads |
+| UI | one embedded HTML file, no build step — a thousand lines of plain HTML, CSS and JavaScript against the same JSON the CLI reads |
 | Notifications | the platform's own notifier: `osascript`, `notify-send`, PowerShell toast |
 
 The UI has no build step on purpose. A dashboard that cannot be opened without `npm install` rots the
 first time the toolchain moves, and a Rust build that depends on a JavaScript build is a Rust build
-that breaks for everyone. The day it needs a terminal emulator and a diff viewer is the day a bundler
-earns its place.
+that breaks for everyone. The two things that usually demand a bundler need none here: the daemon
+renders the diff it already computes, and `vibeplane attach` hands your terminal to `claude --resume`
+rather than owning one.
+
+A test holds the page under 100 KB and three thousand lines, and requires that it fetch nothing — no
+CDN, no font, no second file. A page that reaches the network breaks the board over Tailscale on a
+phone, and `curl` when you are debugging it, on someone else's network where you will not see it.
+
+`VIBEPLANE_UI=/path/to/index.html vibeplane serve` reads the page from disk instead of the binary,
+which makes the edit loop a browser reload.
 
 ## Performance
 
