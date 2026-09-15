@@ -139,6 +139,176 @@ pub fn cmd_explain(
     Ok(())
 }
 
+/// Replay every tool call this machine has seen against the rules as they are
+/// now, and say which rule would stop the interruptions.
+///
+/// The product measures its own inbox (`vibeplane attention`); this is the
+/// other half — what to *do* about it. A permission prompt that has appeared
+/// forty times is forty interruptions a person could have answered once, and
+/// the thing standing between them and answering it once is knowing that the
+/// `*` goes after the subcommand and that a rule which cannot match anything
+/// reads as protection and is none.
+///
+/// Offline on purpose, like the rest of `explain`: it opens the store
+/// read-only and asks no agent anything, so it costs nothing and can be run
+/// while a rule is still being written.
+pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
+    let dir = dir.canonicalize().context("that path does not exist")?;
+    let store = crate::store::Store::open(&crate::config::db_path()?).await?;
+    // `--dir` scopes the replay to the calls made inside it, so
+    // `--replay --dir ~/work/saas` asks "what rules should *this* project
+    // have". The default is the working directory, and an answer about every
+    // project at once would be a list nobody can paste anywhere — so the
+    // scope is the repository root when there is one, not the exact directory,
+    // because a session started in `src/` belongs to the same project.
+    let scope = crate::core::project::find_repo_root(&dir).unwrap_or_else(|| dir.clone());
+    // The name rather than the path: a board groups by project name and this
+    // is the same question, and an absolute path in a headline is noise.
+    let named = scope
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| scope.display().to_string());
+    let calls = store.observed_tool_calls(Some(&scope), limit).await?;
+
+    let cache = crate::core::PolicyCache::for_projects_only();
+    let mut counts = [0usize; 4]; // allow, ask, deny, undecided
+    // Commands that reached a person, grouped by the rule that would answer
+    // them. `BTreeMap` so two runs of this print the same thing.
+    let mut open: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+
+    for c in &calls {
+        let verdict = cache.evaluate(&c.cwd, &c.tool, &c.input);
+        let slot = match verdict {
+            crate::core::Verdict::Allow { .. } => 0,
+            crate::core::Verdict::Ask { .. } => 1,
+            crate::core::Verdict::Deny { .. } => 2,
+            crate::core::Verdict::Undecided => 3,
+        };
+        counts[slot] += 1;
+        if slot != 3 {
+            continue;
+        }
+        let Some(text) = crate::core::policy::rule_content(&c.tool, &c.input) else {
+            continue;
+        };
+        // Grouped by the *family* a rule would name — the program and its
+        // subcommand — rather than by tool. One bucket per tool asks
+        // `suggest_rule_for` to find a single rule covering `pnpm test` and
+        // `rm -rf node_modules`, which it rightly refuses, and the answer is
+        // then "nothing worth writing" for a screen full of interruptions.
+        let family = crate::core::command::rule_family(&c.tool, &text);
+        open.entry(format!("{}\u{0}{}", c.tool, family))
+            .or_default()
+            .push(text);
+    }
+
+    // One suggestion per family, and only where a rule really would cover it.
+    //
+    // **A rule is worth writing when the prompt keeps coming back.** Below
+    // that, a standing grant costs more than the interruption it saves — and
+    // suggesting one for a call somebody made once is how a list like this
+    // ends up recommending `rm -rf node_modules`. Three is the smallest number
+    // that means "again".
+    const WORTH_A_RULE: usize = 3;
+    let mut advice: Vec<(usize, String, String)> = Vec::new();
+    for (key, commands) in &open {
+        let (tool, _) = key.split_once('\u{0}').unwrap_or((key.as_str(), ""));
+        if commands.len() < WORTH_A_RULE {
+            continue;
+        }
+        if let Some(sp) = crate::core::command::suggest_rule_for(tool, commands) {
+            advice.push((commands.len(), tool.to_string(), sp));
+        }
+    }
+    advice.sort_by(|a, b| b.0.cmp(&a.0).then(a.2.cmp(&b.2)));
+
+    let total = calls.len();
+    let answerable: usize = advice.iter().map(|a| a.0).sum();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dir": scope.display().to_string(),
+                "calls": total,
+                "allow": counts[0], "ask": counts[1],
+                "deny": counts[2], "undecided": counts[3],
+                "suggestions": advice.iter().map(|(n, tool, rule)| serde_json::json!({
+                    "calls": n, "tool": tool, "rule": format!("{tool}({rule})"),
+                })).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+
+    if total == 0 {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "no tool calls observed in {named} — `vibeplane connect claude`, then come back"
+                )
+            )
+        );
+        return Ok(());
+    }
+
+    let pct = |n: usize| (n as f64 * 100.0 / total as f64).round() as u64;
+    println!("{total} tool calls in {named} replayed against the rules as they are now\n");
+    for (n, label, colour) in [
+        (counts[0], "allow", render::GREEN),
+        (counts[1], "ask", YELLOW),
+        (counts[2], "deny", render::RED),
+        (counts[3], "reached you", DIM),
+    ] {
+        if n > 0 {
+            println!("  {:>6}  {:>3}%  {}", n, pct(n), paint(colour, label));
+        }
+    }
+
+    if advice.is_empty() {
+        println!(
+            "\n{}",
+            paint(DIM, "nothing that reached you has a rule worth writing")
+        );
+        return Ok(());
+    }
+
+    const SHOWN: usize = 12;
+    println!(
+        "\n{}",
+        paint(BOLD, "one rule each, most interruptions first")
+    );
+    for (n, tool, rule) in advice.iter().take(SHOWN) {
+        println!(
+            "  {:>5}×  {}",
+            n,
+            paint(render::GREEN, &format!("{tool}({rule})"))
+        );
+    }
+    if advice.len() > SHOWN {
+        println!(
+            "  {}",
+            paint(DIM, &format!("… and {} more", advice.len() - SHOWN))
+        );
+    }
+    let shown: usize = advice.iter().take(SHOWN).map(|a| a.0).sum();
+    println!(
+        "\n{}",
+        paint(
+            DIM,
+            &format!(
+                "{shown} of the {} calls that reached you would stop asking · \
+                 paste into [policy] auto_allow, then vibeplane check",
+                counts[3]
+            )
+        )
+    );
+    let _ = answerable;
+    Ok(())
+}
+
 pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
     let root = path.canonicalize().context("that path does not exist")?;
     let root = crate::core::project::find_repo_root(&root).unwrap_or(root);
@@ -267,6 +437,30 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         }
         for rule in policy.allow_rules() {
             println!("            {} {}", paint(render::GREEN, "allow"), rule);
+        }
+        // Advice, printed once and not per rule. A `Read` deny does exactly
+        // what it says; what it does not say — that a shell redirection and
+        // `touch` are `Edit` business — is the part people get wrong, and
+        // `Read(.env)` is the most common rule anybody writes. As a per-rule
+        // warning this would fire on the canonical example and teach people to
+        // ignore warnings.
+        let half = policy.half_protected_paths();
+        if !half.is_empty() {
+            let add = half
+                .iter()
+                .map(|p| format!("\"Edit({p})\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let first = &half[0];
+            println!(
+                "\n  {:<10}those denies stop reads only — `echo x > {first}` and `touch {first}` still run",
+                paint(BOLD, "note")
+            );
+            println!(
+                "  {:<10}{}",
+                "",
+                paint(DIM, &format!("add {add} to never_auto to stop writes too"))
+            );
         }
     }
     if !problems.is_empty() {

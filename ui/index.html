@@ -828,8 +828,8 @@ document.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-act]");
   if (btn) return act(btn.dataset.act, btn.dataset.run, btn.dataset.work || btn.dataset.req, btn.dataset.opt);
   // A match is only useful if it takes you to the session it came from.
-  const hit = e.target.closest(".hit[data-run]");
-  if (hit) return openTalk(hit.dataset.run);
+  const searchHit = e.target.closest(".hit[data-run]");
+  if (searchHit) return openTalk(searchHit.dataset.run);
   const card = e.target.closest("[data-sel]");
   if (card) { state.sel = +card.dataset.sel; render(); }
 });

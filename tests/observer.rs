@@ -745,13 +745,18 @@ async fn a_prohibition_reaches_a_session_that_is_never_going_to_prompt() {
 /// `cat .env` is reading `.env` by any honest reading of the rule.
 #[tokio::test]
 async fn a_file_rule_reaches_the_files_a_shell_command_names() {
+    // `Read` covers the read and `Edit` covers the write, because that is where
+    // the running product draws the line: under `Read(.env)` alone it refuses
+    // `cat .env` and runs `echo pwned > .env`. Both halves are needed to
+    // protect a file from a shell, and saying so is the honest version of a
+    // test that used to assert `Read` did both (D147).
     let policy = Policy::new(
         &["Bash(cat *)".into(), "Bash(echo *)".into()],
-        &["Read(.env)".into()],
+        &["Read(.env)".into(), "Edit(.env)".into()],
     );
     let (addr, token, c) = boot(policy).await;
 
-    for cmd in ["cat .env", "echo pwned > .env"] {
+    for cmd in ["cat .env", "echo pwned > .env", "echo pwned | tee .env"] {
         let body = format!(
             r#"{{"hook_event_name":"PreToolUse","session_id":"sh","cwd":"/tmp/repo",
                 "tool_name":"Bash","tool_input":{{"command":"{cmd}"}}}}"#

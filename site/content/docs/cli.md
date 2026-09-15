@@ -77,7 +77,43 @@ are invisible from reading a rule list, and they are where a permission layer is
 | `--tool <name>` | the tool, default `Bash`. `Read`, `Edit` and `WebFetch` take their specifier directly: `vibeplane explain --tool Read .env` |
 | `--input '<json>'` | the whole tool input, for a call a specifier cannot express: `--tool Agent --input '{"isolation":"worktree"}'` |
 | `--dir <path>` | the directory the agent would be working in, which decides whose rules apply. Default `.` |
+| `--replay` | ask the same question of every call already observed, and name the rule that would answer the ones that reached you |
+| `--limit <n>` | how many of the most recent calls `--replay` reads. Default 5000 |
 | `--json` | the verdict, the rule, and what a `PreToolUse` hook would answer — which is a different question, and the one that holds in auto mode |
+
+### `vibeplane explain --replay`
+
+Which rule to write next, from the calls this machine has already made. It replays every observed
+tool call against the rules **as they are now**, and groups the ones that reached you by the rule
+that would have answered them.
+
+```console
+$ vibeplane explain --replay
+1284 tool calls in saas replayed against the rules as they are now
+
+     912   71%  allow
+      14    1%  ask
+     358   28%  reached you
+
+one rule each, most interruptions first
+   118×  Bash(pnpm typecheck)
+    94×  Bash(git status)
+    62×  Bash(cargo test *)
+    41×  Read(src/**)
+    12×  WebFetch(docs.rs)
+
+315 of the 358 calls that reached you would stop asking · paste into [policy] auto_allow, then vibeplane check
+```
+
+Each suggestion is in the vocabulary that tool's rules use: a command prefix with the `*` after the
+subcommand, a directory glob for a path rule, a domain for `WebFetch`.
+
+- **Offline**, like the rest of `explain`: it opens the store read-only and asks no agent anything.
+- **Nothing is written for you.** Paste what you want into `[policy] auto_allow`.
+- A rule is offered only where one covers the set, and only after a command has interrupted you
+  **three times** — which is what keeps `Bash(rm -rf node_modules)` off the list.
+
+`--dir` scopes it to one project; the default is the repository you are standing in.
 
 ## Looking
 
@@ -96,6 +132,20 @@ plain `vibeplane` does.
 
 What needs a human, most urgent first. Derived from state rather than stored, so it is correct after
 a restart. Ranked by level, then age, oldest first.
+
+A permission item also names **the rule that would have answered it**:
+
+```console
+ ! Permission: Bash [permission]
+     pnpm test --run
+     1. Yes
+     2. No
+     never asked again: auto_allow = ["Bash(pnpm test --run)"]
+```
+
+That is the **exact call**, never a pattern: one interruption says nothing about the shape of the
+calls like it. [`vibeplane explain --replay`](#vibeplane-explain-replay) is where a pattern comes
+from, where the evidence is a count. Nothing is written for you either way.
 
 ### `vibeplane show <run>`
 
@@ -176,6 +226,23 @@ bar, so it cannot end up in a screenshot or a bookmark.
 Whether the tool itself is telling you the truth: hook latency, when telemetry was last seen, the
 roster, each channel's last error **with the date it happened**, and any project whose
 `vibeplane.toml` will not parse — whose permission rules are therefore not in force.
+
+It starts with **which model provider you are on**, because that decides which of Claude Code's own
+supervision surfaces exist here at all. On Bedrock, Google Cloud's Agent Platform, Microsoft Foundry,
+an Anthropic Console key or a corporate gateway they are unavailable, while hooks, OpenTelemetry,
+workflows and skills all still work:
+
+```console
+provider
+  Amazon Bedrock  (CLAUDE_CODE_USE_BEDROCK is set)
+  Vibeplane is the only gate on this machine.
+  off here   Remote Control · Routines (/schedule) · ultrareview · Code Review · Channels · …
+  partial    auto mode — fewer models, and sessions start in Manual
+  still on   hooks · OpenTelemetry metrics · workflows · skills and commands · sandboxing · …
+```
+
+On a claude.ai sign-in it is one line. It names the variable that decided, and a variable exported
+empty reads as unset.
 
 It also reads back **Claude Code's own auto-mode classifier**, because in that mode the thing
 actually deciding is configured somewhere Vibeplane does not write:

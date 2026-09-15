@@ -117,6 +117,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
         Err(_) => None,
     };
 
+    let provider = crate::core::provider::from_env();
     if json {
         println!(
             "{}",
@@ -124,6 +125,14 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                 "daemon": daemon,
                 "connect": state,
                 "diagnostics": diag,
+                "provider": {
+                    "name": provider.as_str(),
+                    "because": provider.because(),
+                    "vendor_supervision": provider.has_vendor_supervision(),
+                    "off": provider.missing(),
+                    "partial": provider.partial(),
+                    "intact": provider.intact(),
+                },
             }))?
         );
         return Ok(());
@@ -141,6 +150,43 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             d.pid
         ),
         None => println!("  {}", paint(render::RED, "not running")),
+    }
+
+    // Which world this machine is in, before anything about channels — because
+    // on four of the six providers the vendor's whole supervision layer is off
+    // and Vibeplane is the only gate here, and a person needs telling that
+    // before they are told a hook is installed.
+    println!("\n{}", paint(BOLD, "provider"));
+    println!(
+        "  {}  {}",
+        paint(
+            if provider.has_vendor_supervision() {
+                render::GREEN
+            } else {
+                render::YELLOW
+            },
+            provider.as_str()
+        ),
+        paint(DIM, &format!("({})", provider.because()))
+    );
+    if !provider.has_vendor_supervision() {
+        println!(
+            "  {}",
+            paint(BOLD, "Vibeplane is the only gate on this machine.")
+        );
+        println!(
+            "  {} {}",
+            paint(DIM, "off here  "),
+            paint(DIM, &provider.missing().join(" · "))
+        );
+        for row in provider.partial() {
+            println!("  {} {}", paint(DIM, "partial   "), paint(DIM, row));
+        }
+        println!(
+            "  {} {}",
+            paint(DIM, "still on  "),
+            paint(DIM, &provider.intact().join(" · "))
+        );
     }
 
     println!("\n{}", paint(BOLD, "claude code"));

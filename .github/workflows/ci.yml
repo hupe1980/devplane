@@ -73,3 +73,14 @@ jobs:
           else
             echo "specs/ is gitignored and absent; nothing to verify here."
           fi
+
+      # The ledger is committed and the changelog is not, so this runs only
+      # where the corpus has been fetched. Locally that is `just rows`; here it
+      # is the job that says the world changed under us.
+      - name: Every rule row in the changelog is accounted for
+        run: |
+          if [ -f specs/claude-code/CHANGELOG.md ]; then
+            bash scripts/changelog-rows.sh
+          else
+            echo "specs/ is gitignored and absent; nothing to account for here."
+          fi

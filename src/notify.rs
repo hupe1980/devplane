@@ -150,6 +150,7 @@ mod tests {
             url: None,
             launch: None,
             work_id: None,
+            suggested_rule: None,
             since: jiff::Timestamp::now(),
         }
     }

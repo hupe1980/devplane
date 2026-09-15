@@ -5,7 +5,7 @@
 # in the vendored specification. This script asks the *running product* instead,
 # because a specification is a description and the thing that matters is the
 # behaviour. It exists because reading the spec against the implementation found
-# three disagreements (D79, D80) — all silent, two of them widening — and being
+# three disagreements — all silent, two of them widening — and being
 # right about the spec is not the same as being right.
 #
 # It costs a few cents and needs a signed-in Claude Code. It is NOT part of CI:
@@ -126,7 +126,7 @@ writeprobe no  "paths: the same pattern FLOATS as a deny, to any depth" \
       '{"allow":["Edit(nested/**)"],"deny":["Edit(secrets/**)"],"ask":[]}' 'nested/secrets/d.txt'
 
 # ---------------------------------------------------------------------------
-# The files a shell command touches (D82).
+# The files a shell command touches.
 #
 # Claude Code checks a redirection's target against the `Edit` rules "as if
 # Claude wrote or read that file directly", and applies `Read`/`Edit` deny

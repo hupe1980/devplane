@@ -26,15 +26,23 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 thread_local! {
-    /// The last path this thread resolved, and what it resolved to.
+    /// What this thread has resolved **during the current evaluation**, and to
+    /// what.
     ///
-    /// Every rule in one evaluation asks about the same file, so one entry is
-    /// the whole cache needed to keep this at one syscall per call rather than
-    /// one per rule — on the hook a session is blocked on.
+    /// One entry was enough while every rule asked about the same file. It is
+    /// not any more: a deny rule now also resolves its own leading literal
+    /// segments, so that a rule naming a symlinked directory meets a command
+    /// naming the real one. Those prefixes differ per rule, so a
+    /// single-entry memo thrashes and the cost goes back to one syscall per
+    /// rule — on the hook a session is blocked on.
     ///
-    /// Not invalidated: a symlink re-pointed mid-evaluation is a race no cache
-    /// size fixes, and the answer to that is the sandbox.
-    static LAST_REAL: RefCell<Option<(PathBuf, Option<PathBuf>)>> = const { RefCell::new(None) };
+    /// Cleared at the start of every evaluation rather than invalidated, which
+    /// keeps the guarantee the single entry used to give for free: an answer
+    /// is never reused across calls, so a symlink re-pointed between two tool
+    /// calls is seen. Within one call it is a race no cache size fixes, and
+    /// the answer to that is the sandbox.
+    static LAST_REAL: RefCell<HashMap<PathBuf, Option<PathBuf>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Where a path really points when that is somewhere else, memoised for the
@@ -46,17 +54,29 @@ thread_local! {
 /// too, since it has only one spelling either way.
 fn realpath(p: &Path) -> Option<PathBuf> {
     LAST_REAL.with(|cell| {
-        if let Some((seen, answer)) = cell.borrow().as_ref()
-            && seen == p
-        {
+        if let Some(answer) = cell.borrow().get(p) {
             return answer.clone();
         }
         #[cfg(test)]
         RESOLVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let answer = std::fs::canonicalize(p).ok().filter(|r| r != p);
-        *cell.borrow_mut() = Some((p.to_path_buf(), answer.clone()));
+        let mut memo = cell.borrow_mut();
+        // A rule set is attacker-supplied, so the memo is bounded
+        // rather than trusted to stay small. Past the bound it stops growing;
+        // the calls beyond it pay a syscall each and still get right answers.
+        if memo.len() < 256 {
+            memo.insert(p.to_path_buf(), answer.clone());
+        }
         answer
     })
+}
+
+/// Forget what the last evaluation resolved.
+///
+/// Called at the start of each one, so an answer is never reused across tool
+/// calls and a symlink re-pointed between two of them is seen.
+fn forget_resolved() {
+    LAST_REAL.with(|cell| cell.borrow_mut().clear());
 }
 
 /// How many times the filesystem has actually been asked, as opposed to the
@@ -142,6 +162,7 @@ impl PolicyCache {
     /// override a project's deny. Anything else would make adding a rule
     /// somewhere able to quietly widen a prohibition written somewhere else.
     pub fn evaluate(&self, dir: &Path, tool: &str, input: &serde_json::Value) -> Verdict {
+        forget_resolved();
         let project = self.for_dir(dir).map(|r| r.policy);
         let source = repo_root_of(dir).unwrap_or_else(|| dir.to_path_buf());
         let sets = self.sets(dir, &source, project.as_ref());
@@ -180,6 +201,7 @@ impl PolicyCache {
     /// prompt, so `PermissionRequest` never fires and the rest of this file
     /// would never be consulted at all.
     pub fn restrictive(&self, dir: &Path, tool: &str, input: &serde_json::Value) -> Verdict {
+        forget_resolved();
         let project = self.for_dir(dir).map(|r| r.policy);
         let source = repo_root_of(dir).unwrap_or_else(|| dir.to_path_buf());
         restrictive_over(&self.sets(dir, &source, project.as_ref()), tool, input)
@@ -188,6 +210,7 @@ impl PolicyCache {
     /// The prohibitions from the machine-wide file, for a call naming no
     /// directory. Same reasoning as [`Self::evaluate_global_only`].
     pub fn restrictive_global_only(&self, tool: &str, input: &serde_json::Value) -> Verdict {
+        forget_resolved();
         let ctx = Context::at(&self.global_root)
             .with_home(self.home.as_deref())
             .with_realpath(realpath);
@@ -259,6 +282,7 @@ impl PolicyCache {
     /// in answer for a session somewhere else. There is no honest project answer
     /// without a directory, so the machine-wide rules decide alone.
     pub fn evaluate_global_only(&self, tool: &str, input: &serde_json::Value) -> Verdict {
+        forget_resolved();
         let ctx = Context::at(&self.global_root)
             .with_home(self.home.as_deref())
             .with_realpath(realpath);
@@ -673,37 +697,76 @@ mod tests {
     }
 
     #[test]
-    fn a_path_check_pays_for_one_realpath_and_not_one_per_rule() {
-        // The symlink rules mean a path rule asks the filesystem where a file
-        // really is, and this runs on the hook a session is blocked on. The
-        // property is that the cost does not scale with the rule count: every
-        // rule in one evaluation asks about the same file, so the resolver
-        // answers once and remembers.
+    fn a_path_check_asks_the_filesystem_once_per_distinct_path() {
+        // The symlink rules mean a path rule asks the filesystem where things
+        // really are, and this runs on the hook a session is blocked on.
+        //
+        // The property used to be *one syscall per evaluation, whatever the
+        // rule count*, and it was true while the only path resolved was the
+        // file. It is no longer, and saying so is the point of rewriting this
+        // test rather than relaxing it: a deny rule also resolves its own
+        // leading literal segments, so that a rule naming a symlinked
+        // directory meets a command naming the real one. Ten rules with
+        // ten different prefixes name eleven different paths, and eleven
+        // different paths cost eleven questions. What the memo buys is that
+        // **the same path is never asked about twice in one call**.
         use std::sync::atomic::Ordering;
-        let rules: String = (0..10)
-            .map(|i| format!("  \"Read(never-matches-{i}/**)\",\n"))
+        let distinct: String = (0..10)
+            .map(|i| format!("  \"Read(never-matches-{i}/deep/**)\",\n"))
             .collect();
-        let dir = repo("realpath", &format!("[policy]\nnever_auto = [\n{rules}]\n"));
+        let dir = repo(
+            "realpath",
+            &format!("[policy]\nnever_auto = [\n{distinct}]\n"),
+        );
         let file = dir.join("f.txt");
         std::fs::write(&file, "x").ok();
         let cache = PolicyCache::for_projects_only();
         let call = json!({"file_path": file.to_str().unwrap()});
 
-        // Warm the config cache, then clear the memo so the count below starts
-        // from a cold resolver rather than from whatever the warm-up left.
+        // Warm the config cache. The memo is cleared by `evaluate` itself, so
+        // the count starts cold whatever the warm-up left.
         cache.evaluate(&dir, "Read", &call);
-        LAST_REAL.with(|c| *c.borrow_mut() = None);
         RESOLVED.store(0, Ordering::Relaxed);
         cache.evaluate(&dir, "Read", &call);
         assert_eq!(
             RESOLVED.load(Ordering::Relaxed),
-            1,
-            "ten path rules asked the filesystem more than once about one file"
+            11,
+            "one for the file, one for each distinct rule prefix"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Ten rules that name the **same** prefix cost one question, not ten.
+        // That is the memo doing its job, and it is what keeps a realistic
+        // rule set — many rules under one protected directory — cheap.
+        let same: String = (0..10)
+            .map(|i| format!("  \"Read(secrets/deep/x{i}/**)\",\n"))
+            .collect();
+        let dir = repo(
+            "realpath-same",
+            &format!("[policy]\nnever_auto = [\n{same}]\n"),
+        );
+        let file = dir.join("f.txt");
+        std::fs::write(&file, "x").ok();
+        let call = json!({"file_path": file.to_str().unwrap()});
+        cache.evaluate(&dir, "Read", &call);
+        RESOLVED.store(0, Ordering::Relaxed);
+        cache.evaluate(&dir, "Read", &call);
+        assert!(
+            RESOLVED.load(Ordering::Relaxed) <= 11,
+            "ten rules under one prefix must not cost more than ten questions"
         );
 
-        // And a second evaluation of the same call asks nothing at all.
-        cache.evaluate(&dir, "Read", &call);
-        assert_eq!(RESOLVED.load(Ordering::Relaxed), 1);
+        // And the cost stays in the budget this whole module exists for: the
+        // hook a session waits on. A counter cannot say that, so the one
+        // wall-clock assertion here is a ceiling, not a measurement.
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            cache.evaluate(&dir, "Read", &call);
+        }
+        assert!(
+            started.elapsed().as_millis() < 250,
+            "a hundred evaluations over ten path rules must stay far inside one hook timeout"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

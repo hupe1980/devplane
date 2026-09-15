@@ -32,6 +32,18 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
         for (n, o) in i.options.iter().enumerate() {
             println!("     {}. {}", n + 1, o.label);
         }
+        // The rule that would have answered this one, where one would. It is
+        // the exact call and never a pattern: being interrupted once says this
+        // command needed a decision and says nothing about the shape of the
+        // ones like it. `vibeplane explain --replay` is where a pattern comes
+        // from, because there the evidence is a count.
+        if let Some(rule) = &i.suggested_rule {
+            println!(
+                "     {} {}",
+                paint(DIM, "never asked again:"),
+                paint(render::GREEN, &format!("auto_allow = [\"{rule}\"]"))
+            );
+        }
         // A work item has no run of its own once the agent is gone, and
         // printing `run ` followed by nothing helps nobody.
         let subject = match (i.work_id.as_deref(), i.run_id.as_str()) {

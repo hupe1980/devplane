@@ -61,6 +61,30 @@ const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir", "-delete", "-ok", "
 /// parses"* — so an allow rule must not answer for one either.
 pub const MAX_ANALYSED: usize = 10_000;
 
+/// Whether any part of this line hands its arguments to something else to run.
+///
+/// The reference's escape hatch for an exec wrapper is *"write an exact-match
+/// rule for the full command string"*, and it works there. It measurably does
+/// **not** work for these: the running product refuses
+/// `env -C . cat .env ; git config …` under an allow rule naming that exact
+/// line. So a whole-line rule stops short of them, while the wrappers the
+/// reference names keep their escape hatch.
+pub fn contains_analysis_barrier(command: &str) -> bool {
+    // A substring scan before the parse. This is reached once per allow rule
+    // per evaluation, and almost no command contains any of these words.
+    if !ANALYSIS_BARRIERS.iter().any(|b| command.contains(b)) {
+        return false;
+    }
+    nested_commands(command).iter().any(|part| {
+        let stripped = strip(part, false);
+        stripped
+            .split_whitespace()
+            .next()
+            .map(|p| p.rsplit('/').next().unwrap_or(p))
+            .is_some_and(|p| ANALYSIS_BARRIERS.contains(&p))
+    })
+}
+
 /// Why no *prefix* allow rule may answer for this command, if there is a reason.
 ///
 /// These are the forms Claude Code puts in front of a person whatever an allow
@@ -84,6 +108,17 @@ pub fn unapprovable_by_prefix(command: &str) -> Option<String> {
         };
         if EXEC_WRAPPERS.contains(&program) {
             return Some(format!("`{program}` runs the command that follows it"));
+        }
+        // The same reasoning, one step further: these assemble a command from
+        // their own arguments, so a prefix rule naming them grants whatever they
+        // turn out to run. The
+        // running product refuses `env -C . cat .env` under an allow rule
+        // naming the whole line, which is what put `env` here rather than an
+        // argument about it.
+        if ANALYSIS_BARRIERS.contains(&program) {
+            return Some(format!(
+                "`{program}` runs a command assembled from its own arguments"
+            ));
         }
         if program == "find"
             && let Some(p) = words.find(|w| FIND_EXEC_PREDICATES.contains(w))
@@ -163,6 +198,16 @@ pub fn never_asks_about(command: &str) -> bool {
         return false;
     };
     parts.iter().all(|part| {
+        // An assignment that *runs something* is what stops this being a
+        // read-only command, and only that: with the permissive strip
+        // `DIRSTACKSIZE=$(id) ls` and `OPTIND=1/0 ls` were looked past and what
+        // remained read as read-only, so a rule about `ls` auto-approved them
+        // (2.1.251, 2.1.260). Refusing *every* non-safe assignment instead
+        // would be the other failure — `SECRET=x ls` is still `ls`, and this
+        // question is not about which rule covers the call.
+        if !leading_assignments_are_inert(part) {
+            return false;
+        }
         let stripped = strip(part, true);
         let words = words_of(&stripped);
         let Some(first) = words.first() else {
@@ -548,9 +593,10 @@ pub fn strip(command: &str, any_assignment: bool) -> String {
     loop {
         // `FOO=bar cmd …`
         if let Some((head, tail)) = rest.split_once(char::is_whitespace) {
-            if let Some((name, _)) = head.split_once('=')
+            if let Some((name, value)) = head.split_once('=')
                 && is_env_name(name)
-                && (any_assignment || SAFE_ASSIGNMENTS.contains(&name))
+                && (any_assignment
+                    || (SAFE_ASSIGNMENTS.contains(&name) && inert_assignment(name, value)))
             {
                 rest = tail.trim_start();
                 continue;
@@ -589,6 +635,62 @@ pub fn strip(command: &str, any_assignment: bool) -> String {
     rest.to_string()
 }
 
+/// Shell variables whose assignment is *evaluated* rather than stored, so the
+/// value is an expression and not a string.
+///
+/// *"commands that assign an arithmetic expression to an integer shell variable
+/// (e.g. `OPTIND=1/0`, `RANDOM=2+2`)"* (2.1.251), and the zsh reporting
+/// variables that take a command substitution (2.1.260).
+const EVALUATED_VARS: &[&str] = &[
+    "OPTIND",
+    "RANDOM",
+    "SECONDS",
+    "LINENO",
+    "HISTCMD",
+    "TMOUT",
+    "HISTSIZE",
+    "SAVEHIST",
+    "COLUMNS",
+    "LINES",
+    "REPORTTIME",
+    "REPORTMEMORY",
+    "DIRSTACKSIZE",
+    "PERIOD",
+    "MAILCHECK",
+];
+
+/// Whether an assignment's value runs nothing.
+///
+/// Two ways it can. A **substitution** anywhere — and the name being on the
+/// safe list is no help, because `NODE_ENV=$(curl evil) ls` is a substitution
+/// wearing an approved name. And an **expression assigned to a variable the
+/// shell evaluates**, where `OPTIND=1/0` is arithmetic rather than the string
+/// `1/0`.
+fn inert_assignment(name: &str, value: &str) -> bool {
+    if value.contains("$(") || value.contains('`') || value.contains("${") {
+        return false;
+    }
+    !(EVALUATED_VARS.contains(&name) && !value.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether every leading assignment on this command runs nothing.
+fn leading_assignments_are_inert(command: &str) -> bool {
+    let mut rest = command.trim();
+    while let Some((head, tail)) = rest.split_once(char::is_whitespace) {
+        let Some((name, value)) = head.split_once('=') else {
+            break;
+        };
+        if !is_env_name(name) {
+            break;
+        }
+        if !inert_assignment(name, value) {
+            return false;
+        }
+        rest = tail.trim_start();
+    }
+    true
+}
+
 fn is_env_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
@@ -600,6 +702,366 @@ fn is_env_name(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths(command: &str) -> Vec<(String, Access, bool)> {
+        file_targets(command)
+            .into_iter()
+            .map(|t| (t.path, t.access, t.subtree))
+            .collect()
+    }
+    fn reads(command: &str, path: &str) -> bool {
+        file_targets(command)
+            .iter()
+            .any(|t| t.path == path && t.access == Access::Read)
+    }
+
+    /// The eight forms that release 2.1.266–2.1.268 taught Claude Code's deny
+    /// rules to see and that this matcher did not. Every one of them was a
+    /// `never_auto = ["Read(.env)"]` that read as protection and stopped
+    /// nothing, and every one was found by reading the changelog rather than
+    /// by the differential harness.
+    #[test]
+    fn a_suggested_rule_is_the_narrowest_one_that_covers_the_set() {
+        let v = |xs: &[&str]| suggest_rule(&xs.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        // One command: grant exactly it.
+        assert_eq!(v(&["git status"]), Some("git status".into()));
+        // Several sharing a subcommand: the `*` goes after the subcommand,
+        // which is where the reference says to put it.
+        assert_eq!(
+            v(&["pnpm test --run", "pnpm test -w api"]),
+            Some("pnpm test *".into())
+        );
+        assert_eq!(
+            v(&["cargo test --workspace", "cargo test -p core"]),
+            Some("cargo test *".into())
+        );
+        // Different subcommands of the same program: `Bash(git *)` is a much
+        // larger grant than the prompt asked about, so nothing is suggested.
+        assert_eq!(v(&["git status", "git push origin main"]), None);
+        // A bare program with no subcommand may take the program-wide form.
+        assert_eq!(v(&["ls", "ls"]), Some("ls".into()));
+        // Nothing is suggested where the rule would not work: a compound, and
+        // a form no prefix rule may approve.
+        assert_eq!(v(&["pnpm test && rm -rf /"]), None);
+        assert_eq!(v(&["watch pnpm test", "watch pnpm build"]), None);
+        assert_eq!(v(&[]), None);
+    }
+
+    #[test]
+    fn a_command_an_agent_wrote_cannot_crash_the_matcher() {
+        // The text is attacker-supplied in the sense that matters: an agent
+        // chose it, and the matcher runs on the synchronous hook every tool
+        // call on the machine waits for. A panic here is not a wrong answer,
+        // it is every session blocked. `grep -é.env x` did exactly that —
+        // `&w[2..]` is a *byte* index and `é` is two bytes.
+        for command in [
+            "grep -é.env x",
+            "grep -\u{0}x y",
+            "cat --π=.env",
+            "head -日本語",
+            "sed -\u{1F600}x .env",
+            "env -C ｜ cat .env",
+            "git diff é",
+            "(((((",
+            "cat \"",
+            "$(",
+            "cmd > ",
+            "-",
+            "--",
+            "",
+        ] {
+            // The assertion is that these return at all.
+            let _ = file_targets(command);
+            let _ = subcommands(command);
+            let _ = nested_commands(command);
+            let _ = strip(command, true);
+            let _ = without_redirections(command);
+            let _ = unapprovable_by_prefix(command);
+            let _ = rule_family("Bash", command);
+            let _ = suggest_rule(&[command.to_string()]);
+        }
+    }
+
+    #[test]
+    fn a_suggestion_is_written_in_the_vocabulary_that_tool_uses() {
+        let v = |tool: &str, xs: &[&str]| {
+            suggest_rule_for(tool, &xs.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        // A path rule is about a directory. Offering the file gives a person
+        // one rule per file, and the next file in the same directory asks
+        // again — which is not a suggestion, it is a treadmill.
+        assert_eq!(
+            v("Read", &["src/main.rs", "src/lib.rs"]),
+            Some("src/**".into())
+        );
+        assert_eq!(v("Edit", &["a/b/x.rs"]), Some("a/b/**".into()));
+        // A bare filename at the root is its own rule: `Read(.env)` is a rule
+        // somebody would really write.
+        assert_eq!(v("Read", &[".env", ".env"]), Some(".env".into()));
+        // Two directories share no rule worth guessing at.
+        assert_eq!(v("Read", &["src/a.rs", "docs/b.md"]), None);
+        // A WebFetch rule takes a domain, never a URL.
+        assert_eq!(
+            v(
+                "WebFetch",
+                &["https://docs.rs/x", "https://docs.rs/y/z?q=1"]
+            ),
+            Some("docs.rs".into())
+        );
+        assert_eq!(v("WebFetch", &["https://a.com/x", "https://b.com/y"]), None);
+        // Port and credentials are not part of the host.
+        assert_eq!(
+            v("WebFetch", &["https://u:p@Docs.RS:8443/x"]),
+            Some("docs.rs".into())
+        );
+        // Anything else is matched whole, so several distinct values are not
+        // one rule.
+        assert_eq!(
+            v("WebSearch", &["rust async", "rust async"]),
+            Some("rust async".into())
+        );
+        assert_eq!(v("WebSearch", &["a", "b"]), None);
+    }
+
+    #[test]
+    fn calls_are_grouped_by_the_rule_that_could_cover_them() {
+        // One bucket per tool asks `suggest_rule` to find a single rule
+        // covering `pnpm test` and `rm -rf node_modules`, which it rightly
+        // refuses — so a screen full of interruptions reports that nothing is
+        // worth writing. The family is what makes the question answerable.
+        assert_eq!(rule_family("Bash", "pnpm test --run"), "pnpm test");
+        assert_eq!(rule_family("Bash", "pnpm test -w api"), "pnpm test");
+        assert_eq!(rule_family("Bash", "git status"), "git status");
+        assert_eq!(rule_family("Bash", "ls -la"), "ls");
+        // A wrapper is not the family: `timeout 5 pnpm test` is `pnpm test`.
+        assert_eq!(rule_family("Bash", "timeout 5 pnpm test"), "pnpm test");
+        // Not a shell: the family is whatever that tool's rules are written
+        // about — a directory for a path rule, a host for a URL.
+        assert_eq!(rule_family("Read", "src/main.rs"), "src");
+        assert_eq!(rule_family("Edit", "a/b/c.rs"), "a/b");
+        assert_eq!(rule_family("Read", ".env"), ".env");
+        assert_eq!(rule_family("WebFetch", "https://docs.rs/x?q=1"), "docs.rs");
+    }
+
+    #[test]
+    fn an_option_value_is_a_path_the_way_2_1_266_made_it_one() {
+        // "Fixed Bash `Read()` deny rules missing option values
+        // (`--ignore-revs-file=.env`, `-f.env`, `@file`)."
+        assert!(reads("grep -f.env README.md", ".env"));
+        assert!(reads("sed --file=.env x", ".env"));
+        assert!(reads("cat @.env", ".env"));
+        // …and only for the commands Claude Code recognises by name. Its own
+        // example is `git blame --ignore-revs-file=.env`, and the running
+        // product runs that under `Read(.env)` — so the fix lives inside the
+        // file-command scan and `git` is reached through operands only. The
+        // harness's deny axis is what said so.
+        assert!(!reads(
+            "git blame --ignore-revs-file=.env README.md",
+            ".env"
+        ));
+        // Generosity is free: a value that is not a path costs one target no
+        // rule matches, and `-n 5` must still not read `5` as a filename.
+        assert!(
+            !paths("head -n 5 README.md")
+                .iter()
+                .any(|(p, _, _)| p == "5")
+        );
+    }
+
+    #[test]
+    fn git_operands_are_paths_the_way_2_1_268_made_them_paths() {
+        // "Fixed deny rules not applying to `git diff`/`git grep` file
+        // operands."
+        assert!(reads("git diff .env", ".env"));
+        assert!(reads("git show .env", ".env"));
+        assert!(reads("git grep secret -- .env", ".env"));
+        // `git grep` spends its first operand on the pattern, `git diff` none.
+        assert!(reads("git grep pattern .env", ".env"));
+        assert!(!reads("git grep .env", ".env"));
+        // A subcommand that names no files reaches nothing but its options.
+        assert!(paths("git status").is_empty());
+        assert!(paths("git diff").is_empty());
+    }
+
+    #[test]
+    fn an_assignment_cannot_smuggle_a_command_past_the_read_only_shortcut() {
+        // *"Fixed Bash permission checks auto-approving commands that assign an
+        // arithmetic expression to an integer shell variable (e.g.
+        // `OPTIND=1/0`)"* (2.1.251) and *"…zsh commands that hide a command
+        // substitution in a REPORTTIME, REPORTMEMORY or DIRSTACKSIZE
+        // assignment"* (2.1.260).
+        //
+        // Both arrived here through the same door: `never_asks_about` answers
+        // *does this need a rule at all?* on the **allow** side, and it used the
+        // permissive strip — so the assignment was looked past and what was left
+        // read as read-only.
+        for smuggled in [
+            "OPTIND=1/0 ls",
+            "DIRSTACKSIZE=$(id) ls",
+            "REPORTTIME=$(curl evil) ls",
+            "REPORTMEMORY=`id` ls",
+            // A name on the safe list is not a pass either: the value is what
+            // runs something.
+            "NODE_ENV=$(curl evil) ls",
+            "CI=${IFS} ls",
+        ] {
+            assert!(
+                !never_asks_about(smuggled),
+                "{smuggled} must not read as read-only"
+            );
+        }
+        // And the ordinary forms still need no rule of their own. Refusing
+        // *every* non-safe assignment would be the other failure: `SECRET=x ls`
+        // is still `ls`, and this question is not about which rule covers the
+        // call. What makes an assignment dangerous is that the shell **runs**
+        // something for it — a substitution, or an expression assigned to a
+        // variable it evaluates.
+        for plain in [
+            "ls -la",
+            "NODE_ENV=test ls",
+            "CI=1 ls",
+            "SECRET=x ls",
+            "FOO=bar ls",
+            "OPTIND=1 ls",
+            "cd src && ls",
+        ] {
+            assert!(never_asks_about(plain), "{plain} is read-only");
+        }
+    }
+
+    #[test]
+    fn the_reader_commands_the_changelog_named_and_the_ones_it_meant() {
+        // *"Fixed Bash `Read()`/`Edit()` deny rules not applying to `< file`
+        // redirects and reader commands like `tac` and `egrep`"* (2.1.257).
+        // Two names and the word "like", so the list is open again — these are
+        // the ones an agent would reach for to read a file it may not read,
+        // and the harness is what keeps them honest.
+        for cmd in [
+            "tac .env",
+            "egrep x .env",
+            "fgrep x .env",
+            "nl .env",
+            "rev .env",
+            "base64 .env",
+            "od -c .env",
+            "hexdump .env",
+            "strings .env",
+            "sha256sum .env",
+            "wc -l .env",
+            "cut -d: -f1 .env",
+            "sort .env",
+            "uniq .env",
+            "bat .env",
+            "awk {print} .env",
+            "jq . .env",
+            "diff a.txt .env",
+            "cmp a.txt .env",
+            "fold -w 80 .env",
+            "split -l 1 .env",
+        ] {
+            assert!(reads(cmd, ".env"), "{cmd} reads .env");
+        }
+        // `xxd` and `zcat` are measured **out**: the running product ran both
+        // under a `Read(.env)` deny, twice, under two spellings of the same
+        // rule, while refusing the eight commands beside them. An entry the
+        // product does not recognise refuses a call the user's own settings
+        // allow — so a measurement takes an entry out, where no amount of
+        // reasoning about hex dumps or gzip would have.
+        for absent in [
+            "xxd .env",
+            "bzcat .env",
+            "join .env .env",
+            "less .env",
+            "more .env",
+            "truncate -s 0 .env",
+        ] {
+            assert!(!reads(absent, ".env"), "{absent} was measured out");
+        }
+        // `mv` is not `cp`: it removes its source, so an `Edit` deny reaches
+        // it. Measured — the product refuses `mv .env .env.bak` under
+        // `Edit(.env)`.
+        assert!(
+            file_targets("mv .env .env.bak")
+                .iter()
+                .any(|t| t.path == ".env" && t.access == Access::Write),
+            "mv removes its source"
+        );
+        assert!(
+            file_targets("cp .env .env.bak")
+                .iter()
+                .all(|t| t.access == Access::Read),
+            "cp leaves its source alone"
+        );
+
+        // And the operand that is a script or a pattern is still not a file,
+        // for every command that spends one.
+        for cmd in [
+            "grep .env README.md",
+            "awk .env README.md",
+            "jq .env README.md",
+        ] {
+            assert!(!reads(cmd, ".env"), "{cmd} spends .env on the script");
+        }
+        // A flag value that is not a path costs a target nothing matches, and
+        // must not be mistaken for the filename.
+        assert!(reads("sort -k2 .env", ".env"));
+        assert!(reads("cut -d: -f1 .env", ".env"));
+        assert!(reads("head -n 5 .env", ".env"));
+    }
+
+    #[test]
+    fn a_pattern_supplied_by_a_flag_does_not_eat_the_filename() {
+        // `sed` and `grep` spend their first operand on the script or the
+        // pattern, so it is skipped — and when a flag already supplied it, the
+        // thing in that position is a file, and skipping it loses the path.
+        assert!(reads("grep -f pats.txt .env", ".env"));
+        assert!(reads("sed -e s/a/b/ .env", ".env"));
+        assert!(reads("grep --file=pats.txt .env", ".env"));
+        // The ordinary forms are unchanged: the pattern is still not a file.
+        assert!(reads("grep TOKEN .env", ".env"));
+        assert!(!reads("grep .env README.md", ".env"));
+        assert!(reads("sed -n 1p .env", ".env"));
+    }
+
+    #[test]
+    fn a_recursive_command_carries_its_subtree() {
+        // "Fixed `grep -r`/`cp -r` over directories with denied files."
+        assert_eq!(
+            paths("grep -r pattern secrets"),
+            [("secrets".into(), Access::Read, true)]
+        );
+        // `cp` reads its operands. The destination *looks* like a write
+        // `Edit` rules should reach and measurably is not: under an allow rule
+        // naming the command, the running product copies outside the working
+        // directory with no prompt. Modelling it as a write refused a call the
+        // product runs, which the harness's deny axis reported.
+        assert_eq!(
+            paths("cp -r secrets /tmp/x"),
+            [
+                ("secrets".into(), Access::Read, true),
+                ("/tmp/x".into(), Access::Read, true)
+            ]
+        );
+        // Without the flag there is no subtree to reach.
+        assert_eq!(
+            paths("grep pattern secrets/key"),
+            [("secrets/key".into(), Access::Read, false)]
+        );
+    }
+
+    #[test]
+    fn a_barrier_command_is_looked_through() {
+        // "Fixed Bash permission checks missing deny rules with `env -C`,
+        // `eval`, or similar unanalyzable commands."
+        assert!(reads("env -C . cat .env", ".env"));
+        assert!(reads("env FOO=bar cat .env", ".env"));
+        assert!(reads("env -u PATH -C /tmp cat .env", ".env"));
+        assert!(reads("eval \"cat .env\"", ".env"));
+        assert!(reads("sudo -u root cat .env", ".env"));
+        // A barrier with nothing behind it names nothing.
+        assert!(paths("env").is_empty());
+        assert!(paths("env -i").is_empty());
+    }
 
     /// Every case here is an example from Claude Code's own permission
     /// documentation, quoted in the comment that introduces it.
@@ -694,23 +1156,55 @@ pub enum Access {
 
 /// How the command names the file.
 ///
-/// Kept for the audit trail and for messages; **it is no longer what decides
-/// which rules reach the target.** It used to be, and that was wrong in the
-/// direction this layer is always wrong in. The asymmetry Claude Code
-/// documents is about whether anybody was going to be *asked*: a recognised
-/// file command like `cat` is in the built-in read-only set, so there is no
-/// prompt for an allow rule to skip and only a deny rule applies. That
-/// reasoning is about the **access**, not about the syntax — and `tee` is a
-/// recognised file command that *writes*, for which Claude Code checks the
-/// destination against `Edit` rules and the working directories exactly as if
-/// it were a redirect (2.1.269). Keying the asymmetry on `Via` meant
-/// `Edit(.env)` stopped `echo x > .env` and not `echo x | tee .env`.
+/// It decides **one** thing and deliberately not the other, and the two were
+/// confused in both directions before they were measured.
+///
+/// It does **not** decide whether the allow side speaks: that is
+/// [`FileTarget::allow_side_applies`], keyed on the *access*, because the
+/// asymmetry Claude Code documents is about whether anybody was going to be
+/// asked. A recognised file command like `cat` is in the built-in read-only
+/// set, so there is no prompt for an allow rule to skip — while `tee` is a
+/// recognised file command that *writes*, and its destination is checked
+/// against `Edit` rules exactly as a redirect's is (2.1.269). Keying that on
+/// `Via` meant `Edit(.env)` stopped `echo x > .env` and not
+/// `echo x | tee .env`.
+///
+/// It **does** decide whether `Read` rules reach a *write*, through
+/// [`Via::read_rules_apply`]. Under `Read(.env)` the running product refuses
+/// `echo x | tee .env` and runs `echo x > .env` and `touch .env`, so the reach
+/// stops at the commands it recognises by name. Keying that on the access
+/// instead made this matcher refuse calls the product runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Via {
     /// `> file`, `>> file`, `2> file`, `< file`.
     Redirect,
     /// An operand of a file command Claude Code recognises.
     FileCommand,
+    /// The value of an option rather than a positional operand:
+    /// `--ignore-revs-file=.env`, `-f.env`, `@file`. Claude Code applies
+    /// `Read` and `Edit` deny rules to these (2.1.266); they are never a
+    /// prompt anybody was going to see, so the allow side stays out.
+    OptionValue,
+    /// A file the command writes without being one of the commands Claude Code
+    /// recognises by name — `touch f`, the destination of `cp`. Checked
+    /// against `Edit` rules exactly like a redirection target, and **not**
+    /// against `Read` rules.
+    WritePath,
+}
+
+impl Via {
+    /// Whether `Read` rules reach a target named this way.
+    ///
+    /// Only the commands Claude Code recognises by name. The reference says
+    /// `Read` and `Edit` deny rules apply *"to the targets of Bash
+    /// redirections such as `> file`"* as well — and the running product
+    /// disagrees: under `Read(.env)` it refuses `echo x | tee .env` and runs
+    /// `echo x > .env` and `touch .env`. `tee` is on its list and a
+    /// redirection is not, so the reference is wrong about the redirect and
+    /// the measurement decides.
+    pub fn read_rules_apply(self) -> bool {
+        matches!(self, Via::FileCommand | Via::OptionValue)
+    }
 }
 
 /// One file a shell command names.
@@ -723,6 +1217,12 @@ pub struct FileTarget {
     /// a glob character, or is a variable. Claude Code asks about these
     /// whatever the rules say, so an allow rule must never cover one.
     pub unresolvable: bool,
+    /// The command reaches everything *underneath* this path, not only the
+    /// path itself — `grep -r`, `cp -r`, `rm -r`. A deny rule naming a file
+    /// inside the directory stops the call (2.1.268), which is a question
+    /// about the rule's shape rather than about this string, so it is answered
+    /// where the pattern is, in `PathPattern::covers_under`.
+    pub subtree: bool,
 }
 
 impl FileTarget {
@@ -746,10 +1246,83 @@ impl FileTarget {
 /// floor; `scripts/verify-permissions-diff.sh` is what keeps them honest, by
 /// asking a running Claude Code about commands nobody wrote down.
 const FILE_COMMANDS: &[(&str, Access)] = &[
+    // ── named by the vendor ──────────────────────────────────────────────
+    // The reference: *"file commands Claude Code recognizes in Bash, such as
+    // `cat`, `head`, `tail`, and `sed`"*. The changelog: *"reader commands
+    // like `tac` and `egrep`"* (2.1.257). Six names and two open lists.
     ("cat", Access::Read),
     ("head", Access::Read),
     ("tail", Access::Read),
     ("sed", Access::Read),
+    ("tac", Access::Read),
+    ("egrep", Access::Read),
+    // ── measured against a running Claude Code ───────────────────────────
+    // Each refused under `never_auto = ["Read(.env)"]` on both spellings of
+    // the rule, by `scripts/verify-permissions-diff.sh`.
+    ("grep", Access::Read),
+    ("nl", Access::Read),
+    ("sort", Access::Read),
+    ("cut", Access::Read),
+    ("awk", Access::Read),
+    ("sha256sum", Access::Read),
+    ("base64", Access::Read),
+    ("od", Access::Read),
+    ("hexdump", Access::Read),
+    ("strings", Access::Read),
+    ("rev", Access::Read),
+    ("jq", Access::Read),
+    ("comm", Access::Read),
+    ("paste", Access::Read),
+    ("fold", Access::Read),
+    // ── inferred from a measured sibling ─────────────────────────────────
+    // The same program under another name, or the same tool at another
+    // digest width. Weaker than a measurement and stronger than a guess.
+    ("fgrep", Access::Read),
+    ("rgrep", Access::Read),
+    ("zgrep", Access::Read),
+    ("gawk", Access::Read),
+    ("mawk", Access::Read),
+    ("yq", Access::Read),
+    ("md5sum", Access::Read),
+    ("sha1sum", Access::Read),
+    ("sha512sum", Access::Read),
+    ("shasum", Access::Read),
+    ("cksum", Access::Read),
+    ("b2sum", Access::Read),
+    ("base32", Access::Read),
+    // ── unmeasured, and kept because the errors are not symmetric ────────
+    // A WIDER row fails the release and a narrower one is reported, so an
+    // unmeasured candidate stays until a measurement takes it out — and goes
+    // into `DENY_SHAPES` so that one eventually does.
+    ("uniq", Access::Read),
+    ("expand", Access::Read),
+    ("unexpand", Access::Read),
+    ("column", Access::Read),
+    ("csplit", Access::Read),
+    ("split", Access::Read),
+    ("most", Access::Read),
+    ("bat", Access::Read),
+    ("xmllint", Access::Read),
+    ("uuencode", Access::Read),
+    ("diff", Access::Read),
+    ("diff3", Access::Read),
+    ("cmp", Access::Read),
+    ("wc", Access::Read),
+    // Not here, and measured rather than overlooked: `xxd`, `zcat`, `join`,
+    // `less`, `more` and `truncate` all run under a deny that stops the
+    // commands beside them.
+    //
+    // `cp` and `mv` read their operands, and with `-r`/`-R` everything beneath
+    // them (2.1.268). `cp`'s *destination* is not a target: the running product
+    // copies outside the working directory under an allow rule naming the
+    // command, with no prompt.
+    ("cp", Access::Read),
+    // `mv` **removes** its source, so every operand is a write. A `Read` deny
+    // still reaches them, since it reaches a write by a command on the list.
+    ("mv", Access::Write),
+    ("rsync", Access::Read),
+    ("install", Access::Read),
+    // ── writers ──────────────────────────────────────────────────────────
     // Writes every operand. `-a` and `-i` take no value, so no flag here
     // consumes the word after it.
     ("tee", Access::Write),
@@ -759,9 +1332,88 @@ const FILE_COMMANDS: &[(&str, Access)] = &[
     ("touch", Access::Write),
 ];
 
-/// Flags of those commands that consume the word after them, so that the `5`
-/// in `head -n 5 f` is not mistaken for a filename.
-const VALUE_FLAGS: &[&str] = &["-n", "-c", "-e", "-f", "--lines", "--bytes", "--expression"];
+/// Commands whose first positional operand is a script, a pattern or an
+/// expression rather than a file.
+///
+/// `sed 's/a/b/' f`, `grep TOKEN f`, `awk '{print}' f`, `jq . f`. Skipping it
+/// is right until a flag supplies the thing instead, which is what
+/// `pattern_supplied_by_flag` is for.
+const SCRIPT_FIRST: &[&str] = &[
+    "sed", "grep", "egrep", "fgrep", "rgrep", "zgrep", "awk", "gawk", "mawk", "jq", "yq",
+];
+
+/// `git` subcommands whose operands name files, with the operand index at
+/// which paths begin. `git grep PATTERN -- path` spends its first operand on
+/// the pattern; the rest name paths directly. Deny rules reach all of them
+/// (2.1.268); no allow rule is affected, because these read.
+const GIT_FILE_SUBCOMMANDS: &[(&str, usize)] = &[
+    ("diff", 0),
+    ("show", 0),
+    ("blame", 0),
+    ("log", 0),
+    ("add", 0),
+    ("checkout", 0),
+    ("restore", 0),
+    ("grep", 1),
+];
+
+/// Flags that make a command reach the whole subtree under its operands.
+const RECURSIVE_FLAGS: &[&str] = &["-r", "-R", "--recursive", "-rn", "-nr", "-ri", "-ir"];
+
+/// Programs that run a command assembled from their own arguments. Claude Code
+/// applies deny rules to what they actually run (2.1.268), so the file
+/// extraction looks through them.
+///
+/// They are deliberately **not** in `WRAPPERS`: the reference's wrapper list is
+/// fixed and does not contain them, so stripping them for an *allow* rule
+/// would make `Bash(env *)` narrower here than there. Looking through them
+/// only ever adds targets, which only ever reaches deny rules and writes.
+///
+/// **`eval` is here on purpose and is the one measured divergence.** The
+/// running product treats the string it is handed as opaque and runs
+/// `eval "cat .env"` under a `Read(.env)` deny; this does not. A prohibition
+/// that any agent can step around by quoting is not a prohibition, and the
+/// cost of the divergence is a prompt rather than a refusal. It is declared in
+/// `scripts/verify-permissions-diff.sh` so the harness reports it as a choice
+/// rather than as a finding.
+const ANALYSIS_BARRIERS: &[&str] = &["env", "eval", "exec", "sudo", "doas"];
+
+/// Flags that consume the word after them, **per command**, so that the `5` in
+/// `head -n 5 f` is not mistaken for a filename.
+///
+/// One shared list was wrong in the direction this layer is always wrong in.
+/// `-n` takes a value for `head` and takes none for `sed` and `grep`, so
+/// `sed -n 1p .env` spent `1p` on the flag, then spent `.env` on the script,
+/// and named no file at all — `Read(.env)` read as protection and was none.
+/// Found by the harness's deny axis.
+fn value_flags(program: &str) -> &'static [&'static str] {
+    match program {
+        "head" | "tail" => &["-n", "-c", "--lines", "--bytes"],
+        "sed" => &["-e", "-f", "--expression", "--file"],
+        "grep" | "egrep" | "fgrep" | "rgrep" | "zgrep" => &[
+            "-e",
+            "-f",
+            "-m",
+            "-A",
+            "-B",
+            "-C",
+            "--regexp",
+            "--file",
+            "--max-count",
+        ],
+        "awk" | "gawk" | "mawk" => &["-f", "-v", "--file", "--assign"],
+        "jq" | "yq" => &["-f", "--from-file", "--arg", "--argjson"],
+        "cut" => &["-d", "-f", "-b", "-c", "--delimiter", "--fields"],
+        "sort" => &["-k", "-t", "-o", "-S", "--key", "--output"],
+        "od" | "hexdump" => &["-N", "-j", "-t", "-A", "-e", "-s", "-n"],
+        "xxd" => &["-l", "-s", "-c", "-g"],
+        "split" | "csplit" => &["-b", "-l", "-n", "-a", "--bytes", "--lines"],
+        "fold" | "column" => &["-w", "-c", "-s", "-t"],
+        "cp" | "mv" | "install" | "rsync" => &["-t", "--target-directory", "--suffix"],
+        "truncate" => &["-s", "-r", "--size", "--reference"],
+        _ => &[],
+    }
+}
 
 /// Targets Claude Code does not check because no file is behind them.
 fn no_file_behind(target: &str) -> bool {
@@ -884,58 +1536,249 @@ fn redirect_targets(text: &str, out: &mut Vec<FileTarget>) {
             path: word,
             access,
             via: Via::Redirect,
+            subtree: false,
         });
     }
 }
 
-/// The file arguments of `cat`, `head`, `tail` and `sed`.
+/// Every file an operand or an option value of a recognised command names.
+///
+/// Five families, each pinned to the release that put it in Claude Code:
+/// the table in `FILE_COMMANDS`; `cp`-shaped commands whose last operand is
+/// written; `git` subcommands whose operands are paths (2.1.268); option
+/// *values* such as `--ignore-revs-file=.env`, `-f.env` and `@file` (2.1.266);
+/// and the subtree a `-r` reaches (2.1.268).
+///
+/// The extraction looks through `env`, `eval` and `sudo`, which assemble a
+/// command from their own arguments and which Claude Code's deny rules now see
+/// past. It does **not** strip them for allow matching — the reference's
+/// wrapper list is fixed and does not contain them.
 fn file_command_targets(text: &str, out: &mut Vec<FileTarget>) {
+    file_command_targets_at(text, out, 0);
+}
+
+fn file_command_targets_at(text: &str, out: &mut Vec<FileTarget>, depth: usize) {
+    if depth > 4 || out.len() > 64 {
+        return;
+    }
     // Redirections first: their targets are not operands. `touch f > /dev/null`
     // names one file, and `cat secrets > out` reads one and writes the other.
     let stripped = strip(&without_redirections(text), true);
     let words = words_of(&stripped);
     let Some(first) = words.first() else { return };
     let program = first.rsplit('/').next().unwrap_or(first);
+
+    // `env -C dir cat .env`, `eval "cat .env"`, `sudo cat .env`. Drop the
+    // barrier and its own options, then analyse what is left.
+    if ANALYSIS_BARRIERS.contains(&program) {
+        if let Some(inner) = past_barrier(program, &words) {
+            file_command_targets_at(&inner, out, depth + 1);
+        }
+        return;
+    }
+
+    if program == "git" {
+        git_targets(&words, out);
+        return;
+    }
+
+    let recursive = words.iter().any(|w| RECURSIVE_FLAGS.contains(&w.as_str()));
+
     let Some((_, base_access)) = FILE_COMMANDS.iter().find(|(n, _)| *n == program) else {
         return;
     };
     // `sed -i` rewrites the files it is given; `sed 's/a/b/' f` reads them, and
-    // its first non-flag argument is the script rather than a file.
-    let in_place = program == "sed" && words.iter().any(|w| w == "-i" || w.starts_with("-i"));
-    let mut skip_script = program == "sed";
+    // its first non-flag argument is the script rather than a file. `grep`
+    // spends its first operand on the pattern the same way.
+    // `sed -i` rewrites the files it is given; so does `-i.bak`.
+    let in_place = program == "sed" && words.iter().any(|w| w.starts_with("-i"));
+    let access = if in_place {
+        Access::Write
+    } else {
+        *base_access
+    };
+    // `sed` spends its first operand on the script and `grep` on the pattern —
+    // **unless a flag already supplied it**. `grep -f pats.txt .env` and
+    // `sed -e s/a/b/ .env` name a file in the position the skip would eat, so
+    // skipping it there loses the path entirely.
+    let supplied = words.iter().skip(1).any(|w| {
+        matches!(w.as_str(), "-e" | "-f" | "--regexp" | "--file")
+            || w.starts_with("-e")
+            || w.starts_with("-f")
+            || w.starts_with("--regexp=")
+            || w.starts_with("--file=")
+    });
+    let skip = usize::from(SCRIPT_FIRST.contains(&program) && !supplied);
+    let operands = positional(&words, out, access);
+    // `touch` creates its operands and is not a command Claude Code recognises
+    // by name, so only `Edit` rules reach them.
+    let via = if program == "touch" {
+        Via::WritePath
+    } else {
+        Via::FileCommand
+    };
+    for w in operands.iter().skip(skip) {
+        push_target(out, w, access, via, recursive);
+    }
+}
+
+/// The command a barrier program will actually run, or `None` when there is
+/// nothing left of it.
+fn past_barrier(program: &str, words: &[String]) -> Option<String> {
+    let mut rest = &words[1..];
+    if program == "env" {
+        // `-i`, `-0`, `-u NAME`, `-C DIR`, `--chdir=DIR`, and `NAME=value`.
+        while let Some(w) = rest.first() {
+            if w == "-u" || w == "-C" || w == "--unset" || w == "--chdir" {
+                rest = rest.get(2..)?;
+            } else if w.starts_with('-') || w.split_once('=').is_some_and(|(n, _)| is_env_name(n)) {
+                rest = rest.get(1..)?;
+            } else {
+                break;
+            }
+        }
+    } else if program == "sudo" || program == "doas" {
+        while let Some(w) = rest.first() {
+            if w == "-u" || w == "-g" {
+                rest = rest.get(2..)?;
+            } else if w.starts_with('-') {
+                rest = rest.get(1..)?;
+            } else {
+                break;
+            }
+        }
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    // `eval "cat .env"` and `sh -c 'cat .env'` carry their command as one
+    // quoted word; `words_of` has already removed the quotes.
+    Some(rest.join(" "))
+}
+
+/// `git diff .env`, `git grep x -- .env`, `git blame --ignore-revs-file=.env`.
+///
+/// Everything past `--` is a path by definition. Before it, the subcommand's
+/// own arity decides: `git grep` spends one operand on the pattern and `git
+/// diff` spends none, which is the difference between the two entries in
+/// `GIT_FILE_SUBCOMMANDS`.
+fn git_targets(words: &[String], out: &mut Vec<FileTarget>) {
+    // No option-value scan. `git blame --ignore-revs-file=.env` is the
+    // changelog's own example of the 2.1.266 fix and the running product
+    // **runs** it under `Read(.env)` — so the fix was inside the recognised
+    // file commands, and `git` is reached through its operands only. Scanning
+    // it here made this matcher stricter than the product, which refuses calls
+    // the user's own settings allow.
+    let Some(pos) = words.iter().skip(1).position(|w| !w.starts_with('-')) else {
+        return;
+    };
+    let sub = &words[pos + 1];
+    let Some((_, arity)) = GIT_FILE_SUBCOMMANDS.iter().find(|(n, _)| n == sub) else {
+        return;
+    };
+    let mut spent = 0usize;
+    let mut only_paths = false;
+    for w in words.iter().skip(pos + 2) {
+        if w == "--" {
+            only_paths = true;
+            continue;
+        }
+        if !only_paths {
+            if w.starts_with('-') {
+                continue;
+            }
+            if spent < *arity {
+                spent += 1;
+                continue;
+            }
+        }
+        push_target(out, w, Access::Read, Via::FileCommand, false);
+    }
+}
+
+/// The positional operands of a command, emitting any option values on the way.
+fn positional(words: &[String], out: &mut Vec<FileTarget>, access: Access) -> Vec<String> {
+    option_values(words, out, access);
+    let program = words
+        .first()
+        .map(|w| w.rsplit('/').next().unwrap_or(w))
+        .unwrap_or_default();
+    let flags = value_flags(program);
+    let mut operands = Vec::new();
     let mut skip_next = false;
+    let mut only_operands = false;
     for w in words.iter().skip(1) {
         if skip_next {
             skip_next = false;
             continue;
         }
         if w == "--" {
+            only_operands = true;
             continue;
         }
-        if w.starts_with('-') && w.len() > 1 {
-            if VALUE_FLAGS.contains(&w.as_str()) {
+        if !only_operands && w.starts_with('-') && w.len() > 1 {
+            if flags.contains(&w.as_str()) {
                 skip_next = true;
             }
-            continue;
-        }
-        if skip_script {
-            skip_script = false;
             continue;
         }
         if w.starts_with('>') || w.starts_with('<') {
             continue;
         }
-        out.push(FileTarget {
-            unresolvable: unresolvable(w),
-            path: w.clone(),
-            access: if in_place {
-                Access::Write
-            } else {
-                *base_access
-            },
-            via: Via::FileCommand,
-        });
+        operands.push(w.clone());
     }
+    operands
+}
+
+/// Paths hidden in option values, which a positional scan skips entirely:
+/// *"Fixed Bash `Read()` deny rules missing option values
+/// (`--ignore-revs-file=.env`, `-f.env`, `@file`)"* (2.1.266).
+///
+/// Generous on purpose. A value that is not a path — the `5` in `-n5` — costs
+/// one target that no rule matches, while a value that is one and goes
+/// unextracted is a deny rule that reads as protection and is none. It reaches
+/// deny rules only: `Via::OptionValue` is excluded from `allow_side_applies`.
+fn option_values(words: &[String], out: &mut Vec<FileTarget>, access: Access) {
+    for w in words.iter().skip(1) {
+        let value = if let Some(rest) = w.strip_prefix('@') {
+            rest
+        } else if w.starts_with("--") {
+            match w.split_once('=') {
+                Some((_, v)) => v,
+                None => continue,
+            }
+        } else if w.starts_with('-') {
+            // `-f.env`, `-I/etc`: one flag letter, then the value. Counted in
+            // **characters**, not bytes. `&w[2..]` panics when the second
+            // character is multi-byte, and the text is a command an agent
+            // wrote — a crash in the matcher is not a wrong answer, it is
+            // every tool call on the machine blocked, on the hook the session
+            // waits for.
+            let mut rest = w.chars();
+            rest.next();
+            rest.next();
+            rest.as_str()
+        } else {
+            continue;
+        };
+        if value.is_empty() || no_file_behind(value) {
+            continue;
+        }
+        push_target(out, value, access, Via::OptionValue, false);
+    }
+}
+
+fn push_target(out: &mut Vec<FileTarget>, path: &str, access: Access, via: Via, subtree: bool) {
+    if out.len() > 64 {
+        return;
+    }
+    out.push(FileTarget {
+        unresolvable: unresolvable(path),
+        path: path.to_string(),
+        access,
+        via,
+        subtree,
+    });
 }
 
 /// The command with its redirections removed.
@@ -1072,4 +1915,171 @@ fn word_at(b: &[char], from: usize) -> (String, usize) {
         }
     }
     (s, i)
+}
+
+// ---------------------------------------------------------------------------
+// Suggesting a rule from calls that reached a person.
+
+/// The rule that would have answered every one of these commands, if one
+/// sensible rule does.
+///
+/// This is the inverse of everything else in this module. The matcher asks
+/// *does this rule cover that command*; a person looking at an inbox full of
+/// the same permission prompt is asking *what rule do I write so this stops*,
+/// and answering it by hand means knowing that `*` goes after the subcommand
+/// and that a rule which cannot match anything is worse than no rule.
+///
+/// Returns the **narrowest** rule that covers the set:
+///
+/// * one distinct command → that exact command, which approves nothing else;
+/// * several sharing a program and subcommand → `prog sub *`, the form the
+///   reference asks for (*"put the `*` after the subcommand"*);
+/// * several sharing only a program → `prog *`, and only when the program has
+///   no subcommand to speak of, because `Bash(git *)` is a much larger grant
+///   than the person is asking for.
+///
+/// `None` when the set has no shape worth suggesting, which is the honest
+/// answer far more often than a clever one would be.
+/// The host of a URL, without scheme, credentials, port or path.
+fn web_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()?
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?;
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// The rule that would answer these calls to `tool`, in the vocabulary that
+/// tool's rules are written in.
+///
+/// A shell rule is a command prefix; a path rule is a directory glob; a
+/// `WebFetch` rule is a domain. Offering the wrong one is worse than offering
+/// nothing: a person pastes `Read(src/main.rs)` into their config and is asked
+/// again about the next file in the same directory.
+pub fn suggest_rule_for(tool: &str, calls: &[String]) -> Option<String> {
+    if tool.eq_ignore_ascii_case("Bash") {
+        return suggest_rule(calls);
+    }
+    if tool.eq_ignore_ascii_case("Read") || tool.eq_ignore_ascii_case("Edit") {
+        let family = rule_family(tool, calls.first()?);
+        if calls.iter().any(|c| rule_family(tool, c) != family) {
+            return None;
+        }
+        // A bare filename is its own rule; a directory takes everything under
+        // it, which is the shape gitignore syntax is for.
+        return Some(
+            if family.contains('/') || calls.iter().any(|c| c.contains('/')) {
+                format!("{family}/**")
+            } else {
+                family
+            },
+        );
+    }
+    if tool.eq_ignore_ascii_case("WebFetch") {
+        let host = web_host(calls.first()?)?;
+        return calls
+            .iter()
+            .all(|c| web_host(c).as_deref() == Some(host.as_str()))
+            .then_some(host);
+    }
+    // Everything else is matched on its whole specifier, so one distinct value
+    // is a rule and several are not.
+    let first = calls.first()?;
+    calls.iter().all(|c| c == first).then(|| first.clone())
+}
+
+pub fn suggest_rule(commands: &[String]) -> Option<String> {
+    let mut distinct: Vec<&str> = Vec::new();
+    for c in commands {
+        let t = c.trim();
+        if t.is_empty() || t.chars().count() > MAX_ANALYSED {
+            return None;
+        }
+        if !distinct.contains(&t) {
+            distinct.push(t);
+        }
+    }
+    let first = *distinct.first()?;
+    // A command no prefix rule may approve is a command no suggestion should
+    // offer: the person would paste it in and it would still prompt.
+    if distinct.iter().any(|c| unapprovable_by_prefix(c).is_some()) {
+        return None;
+    }
+    // Never suggest a rule for a compound: the parts are separate grants and
+    // the person should see them separately.
+    if distinct.iter().any(|c| match subcommands(c) {
+        Some(parts) => parts.len() > 1,
+        None => true,
+    }) {
+        return None;
+    }
+    if distinct.len() == 1 {
+        return Some(first.to_string());
+    }
+
+    let words = |c: &str| -> Vec<String> { words_of(&strip(c, false)) };
+    let head = words(first);
+    let program = head.first()?.clone();
+    if distinct.iter().any(|c| words(c).first() != Some(&program)) {
+        return None;
+    }
+    // The subcommand is the word that decides what the program does, so it is
+    // part of the grant. A leading `-flag` is not one.
+    let subcommand = head
+        .get(1)
+        .filter(|w| !w.starts_with('-'))
+        .filter(|_| distinct.iter().all(|c| words(c).get(1) == head.get(1)));
+    match subcommand {
+        Some(sub) => Some(format!("{program} {sub} *")),
+        // `Bash(git *)` grants every git command to answer a prompt about
+        // `git status`. A person may still want it; suggesting it is another
+        // matter.
+        None if head.len() == 1 => Some(format!("{program} *")),
+        None => None,
+    }
+}
+
+/// The family a call belongs to when grouping calls that reached a person:
+/// the program and the subcommand that decides what it does.
+///
+/// Two calls in the same family can plausibly share one rule; two in different
+/// families cannot, and asking [`suggest_rule`] to find one spanning them
+/// returns `None` for a screen full of interruptions that each had an obvious
+/// answer.
+///
+/// For a tool that is not a shell the family is the whole specifier, because a
+/// path or a URL has no head to group by that a person would recognise.
+pub fn rule_family(tool: &str, content: &str) -> String {
+    // A path rule is written about a *directory*, so two calls in one directory
+    // share a rule and two in different ones do not. Suggesting the file
+    // instead gives a person one rule per file, which is not a suggestion.
+    if tool.eq_ignore_ascii_case("Read") || tool.eq_ignore_ascii_case("Edit") {
+        return match content.rsplit_once('/') {
+            Some((dir, _)) if !dir.is_empty() => dir.to_string(),
+            // A bare filename at the working-directory root: the file is the
+            // family, and `Read(.env)` is a rule somebody would really write.
+            _ => content.to_string(),
+        };
+    }
+    // A `WebFetch` rule takes a **domain**, so the host is the family and the
+    // URL is noise: `WebFetch(docs.rs)`, not `WebFetch(https://docs.rs/x)`.
+    if tool.eq_ignore_ascii_case("WebFetch") {
+        return web_host(content).unwrap_or_else(|| content.to_string());
+    }
+    if !tool.eq_ignore_ascii_case("Bash") {
+        return content.to_string();
+    }
+    let stripped = strip(content.trim(), false);
+    let words = words_of(&stripped);
+    let Some(program) = words.first() else {
+        return content.to_string();
+    };
+    match words.get(1).filter(|w| !w.starts_with('-')) {
+        Some(sub) => format!("{program} {sub}"),
+        None => program.clone(),
+    }
 }

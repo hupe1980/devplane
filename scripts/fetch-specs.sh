@@ -42,7 +42,7 @@ done
 # A week with no digest is normal and is not an absence of change: the digest stopped at week
 # 34 while the product reached 2.1.270, so thirty releases — including a sixth permission-rule
 # widening — exist only in the CHANGELOG. The digest tells you what the vendor thought was
-# notable; the changelog is the enumerated table (R26).
+# notable; the changelog is the enumerated table.
 fetch https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md specs/claude-code/CHANGELOG.md
 # Claude Agent SDK docs
 for p in overview permissions user-input streaming-output structured-outputs sessions mcp hooks typescript python cost-tracking \
@@ -50,7 +50,7 @@ for p in overview permissions user-input streaming-output structured-outputs ses
   fetch "https://code.claude.com/docs/en/agent-sdk/$p.md" "specs/claude-agent-sdk/$p.md"
 done
 fetch https://raw.githubusercontent.com/Roasbeef/claude-agent-sdk-go/main/docs/cli-protocol.md specs/claude-agent-sdk/community-cli-wire-protocol.md
-# GitHub Copilot: the second provider that documents all three channels (D116).
+# GitHub Copilot: the second provider that documents all three channels.
 # GitHub publishes its docs as markdown in github/docs, so these are the source files
 # rather than a rendered page.
 CPD=https://raw.githubusercontent.com/github/docs/main/content/copilot

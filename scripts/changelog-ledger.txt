@@ -1,0 +1,94 @@
+floor: 2.1.240
+
+# Every CHANGELOG row since the floor that could change what a permission rule
+# decides, and what was done about it. `scripts/changelog-rows.sh` fails until
+# every one has a line here.
+#
+#   case     — a test or a harness shape covers it; it names what.
+#   declined — it cannot change a verdict here; it says why.
+#
+# A declined row is a decision. An unread row is a gap wearing a decision's
+# clothes, and eight widenings came out of the gap this file closes.
+
+2.1.269 | case | Fixed a deny or ask permission rule starting with `!` applying beyond the settings source that wrote it; such a rule now applies only within its own source, and a bare `!` negation is ignored
+        ^ `!` scoping — `a_bang_rule_is_scoped_to_its_own_source`
+2.1.269 | declined | Fixed `permission_denials` in `--output-format stream-json` results omitting Read, Edit and Write calls blocked by a path-scoped deny rule
+        ^ `permission_denials` is a field of the vendor's own stream-json output; Vibeplane never reads it
+2.1.269 | case | Fixed `Edit()` deny rules and the write-path check not applying to the file a Bash `tee` command writes; a `Bash(tee:*)` allow rule no longer covers destinations outside the working directories
+        ^ `tee` writes — `a_read_deny_reaches_a_write_by_a_command_on_the_list_and_no_further`
+2.1.269 | declined | [VSCode] Added a Permission rules dialog that lists permission rules and adds or removes them in user, project, and local settings; startup-option, session-only, and managed rules stay read-only
+        ^ a VS Code dialog for editing settings.json; no rule semantics
+2.1.268 | case | Fixed deny and ask permission rules on symlinked directories (`/etc`, `/tmp`, `/var` on macOS; `/bin` on Linux) not applying when a path was given by its real location, and Bash commands ignoring deny rules written on a symlinked path spelling
+        ^ symlinked directories from both ends — `a_deny_rule_reaches_a_file_named_by_its_real_location`
+2.1.268 | case | Fixed a case where a Read or Edit deny rule did not apply when an `env -C`, `eval` or similar command the permission checker cannot analyze was on the same line
+        ^ `env -C`/`eval` barriers — ANALYSIS_BARRIERS + the harness's declared list
+2.1.268 | case | Changed plain `WebFetch` deny and ask rules to no longer apply to Artifact tool reads and updates; use an `Artifact` rule (or `WebFetch(domain:claude.ai)`) to block or gate them
+        ^ a plain `WebFetch` deny must not reach `Artifact`; measured undecided, `shape_of` maps them separately
+2.1.268 | declined | [VSCode] Added Left and Right arrow keys to change where an always-allow permission rule is saved, for keyboard and screen reader users
+        ^ a VS Code keyboard affordance for choosing a settings file
+2.1.268 | declined | [Claude Tag] Improved how Claude explains a blocked action: it now says whether a permission check, its own decision to confirm first, or missing access stopped it
+        ^ Claude Tag's explanation text for a blocked action
+2.1.267 | declined | Fixed Remote Control clients that join a Claude Desktop or VS Code session showing a stale permission mode until it was changed again
+        ^ Remote Control's display of the mode; Vibeplane reads the mode from the hook payload
+2.1.261 | declined | Fixed Remote Control showing a stale permission mode when a phone, browser, or claude.ai app attaches to a terminal session or after the mode changes in the terminal
+        ^ as 2.1.267: a Remote Control display staleness
+2.1.261 | declined | Changed auto mode to treat a link that packs content into a public diagram renderer's URL as an upload to that site: no longer auto-approved unless you asked for it
+        ^ an auto-mode prose rule evaluated by the vendor's classifier, which Vibeplane never writes
+2.1.260 | case | Fixed `Edit`/`Write`/`Read` permission rules whose path contains parentheses being dropped as invalid or ignored by the Bash sandbox, which left "read-only" folders writable
+        ^ parentheses in a path rule — `an_edit_rule_with_parentheses_in_its_path_matches_as_spelled`
+2.1.260 | declined | Fixed one file permission rule with an uncompilable pattern (e.g. an unclosed `[`) making every file edit fail with `Invalid regular expression`; such a deny rule now guards the literal path it spells
+        ^ this matcher compiles no regex, so no pattern can make every edit fail; an unclosed `[` guards the literal path, measured
+2.1.260 | case | Fixed Bash permission checks auto-approving zsh commands that hide a command substitution in a REPORTTIME, REPORTMEMORY or DIRSTACKSIZE assignment; these now prompt for approval
+        ^ assignments hiding a substitution — `an_assignment_cannot_smuggle_a_command_past_the_read_only_shortcut`
+2.1.260 | declined | Fixed managed `skillOverrides` entries keyed on a bundled skill's alias (e.g. `checkup` for `/doctor`) not applying, and `Skill(name)` deny rules not covering a nested skill listed as `<dir>:name`
+        ^ `Skill(...)` rules and managed `skillOverrides` are the vendor's skill resolution; Vibeplane matches `Skill` as a bare tool name only
+2.1.260 | declined | Glob/Grep: Fixed the search path being probed on disk before the permission check; a missing path is now reported after permission is decided, as Read does
+        ^ the order Glob/Grep probe the disk against their own permission check; not a rule shape
+2.1.260 | case | Reverted the 2.1.259 change applying `Read()` deny rules to Bash arguments; it denied `npm run build` under a `Read(./**/build/**)` rule in every mode and made `cd … && grep` prompt even in auto mode
+        ^ the revert: a `Read` deny reaches recognised file commands and not arbitrary Bash arguments; measured — `npm run build` allows, `grep x build/out.js` denies
+2.1.260 | declined | Improved the settings error for rules such as `Edit(C:\dir\(name)\**)`, where `\(` is read as an escaped parenthesis rather than a path separator, to suggest an unambiguous spelling
+        ^ the wording of the vendor's own settings error for a Windows path
+2.1.260 | case | Changed permission rules with text after the closing parenthesis (e.g. `Bash(ls) x`), which never matched anything, to be reported as invalid settings instead of being silently ignored
+        ^ text after the closing parenthesis is refused — `Rule::parse` returns None and `check` reports it
+2.1.259 | declined | Added `--permission-prompts none` for unattended headless hosts: anything that would prompt is denied automatically while the active permission mode (including auto mode) keeps deciding
+        ^ a CLI flag for the vendor's headless hosts; Vibeplane's own gate is unaffected
+2.1.259 | case | Fixed Bash `Read()` deny rules not covering files given as option values (`--ignore-revs-file=.env`, `-f.env`, `@file`), `git diff`/`git grep` file operands, or `cd DIR && cat FILE` compounds; `grep -r`/`cp -r` over a directory holding a denied file now asks
+        ^ option values, git operands, compounds and recursion — four tests plus DENY_SHAPES
+2.1.257 | declined | Added a Containment Escape rule to auto mode so cloud metadata-credential fetches, egress evasion, and cross-tenant reach are no longer auto-approved unless your environment marks them expected
+        ^ an auto-mode classifier rule; Vibeplane's rules resolve before the classifier and it writes none
+2.1.257 | declined | Fixed sessions dispatched from an agent view opened with `←` always starting in the original session's permission mode, overriding the target directory's `defaultMode` and the agent's `permissionMode`
+        ^ which mode a dispatched session starts in; a vendor session-setup detail
+2.1.257 | declined | Fixed `--disallowedTools` and session deny rules being dropped after the first settings reload when `allowManagedPermissionRulesOnly` is enabled
+        ^ `allowManagedPermissionRulesOnly` governs the vendor's own settings reload; Vibeplane holds its rules in process
+2.1.257 | case | Fixed Bash `Read()`/`Edit()` deny rules not applying to `< file` redirects and reader commands like `tac` and `egrep`; a deny rule on any argument or redirect target now refuses the command
+        ^ reader commands and `< file` redirects — `the_reader_commands_the_changelog_named_and_the_ones_it_meant`
+2.1.257 | case | Fixed Bash permission checks auto-approving certain `[[ ]]` conditionals that zsh parses differently from bash; these commands now prompt for approval
+        ^ `[[ ]]` conditionals are not auto-approved; measured undecided on the allow side
+2.1.251 | declined | Fixed file tools (Read, Write, Edit) following a symlink swapped inside the working directory after the permission check, which could read or write outside the approved location
+        ^ a TOCTOU race inside the vendor's own file tools, after its check; containment is the sandbox (SECURITY.md)
+2.1.251 | declined | Fixed the Workflow tool reading (and quoting in errors) a `scriptPath` outside what the session may read before the permission check ran
+        ^ the Workflow tool reading its own script path; not a rule shape
+2.1.251 | declined | Fixed Grep and Glob not applying `Read(...)` deny rules to files reached through a symlinked search path
+        ^ Grep/Glob resolving a symlinked search path inside the vendor's tools; Vibeplane sees the tool call, not its traversal
+2.1.251 | case | Fixed Bash permission checks auto-approving commands that assign an arithmetic expression to an integer shell variable (e.g. `OPTIND=1/0`, `RANDOM=2+2`); these now prompt for approval
+        ^ arithmetic assignments — same test as row 15; `RANDOM=2+2` and `SECONDS=1/0` measured undecided
+2.1.251 | declined | Changed Claude in Chrome so browser actions always go through Claude Code's permission checks, including in sessions with telemetry disabled, which previously used the Chrome extension's own prompts
+        ^ Claude in Chrome routing through the vendor's checks; a browser surface Vibeplane does not observe
+2.1.248 | declined | Fixed the trust dialog's list of repo permission rules showing a garbled character when a long rule was cut off in the middle of an emoji
+        ^ an emoji truncation bug in the vendor's trust dialog
+2.1.248 | declined | Fixed the permission mode indicator staying hidden behind the "Press Ctrl-C again to exit" hint when you press shift+tab right after ctrl+c
+        ^ a terminal indicator overlapping a hint
+2.1.247 | declined | Fixed cloud sessions (Claude Code on the web, desktop and mobile apps) sometimes showing the previous permission mode when you switch modes right after sending a message
+        ^ cloud sessions displaying a stale mode
+2.1.246 | case | Added a startup warning for Bash allow rules with a wildcard before the subcommand (e.g. `Bash(git * main)`), since they also match options inserted before the subcommand
+        ^ wildcard before the subcommand is warned about — `Rule::problems`, measured
+2.1.246 | declined | Fixed sessions that ended in plan mode resuming outside plan mode in the VS Code extension, and in `claude -p --continue`/`--resume` with a permission prompt tool, when no permission mode was set
+        ^ which mode a resumed session starts in; a vendor session-setup detail
+2.1.246 | case | Fixed Bash permission checks to always require approval for malformed commands with a dangling `&&` or `||` operator
+        ^ a dangling `&&` approves nothing — `a_compound_command_splits_the_way_the_documentation_says`
+2.1.246 | declined | Fixed MCP tools marked `requiresUserInteraction` still offering "Yes, and don't ask again" in their permission prompt; the option wrote an allow rule the tool then ignored
+        ^ an MCP prompt option writing a rule the vendor's tool then ignores; Vibeplane offers no such option
+2.1.243 | case | Fixed hook `if` conditions like `Bash(cat *)` firing on unrelated Bash commands when the command contained `$()` or backtick command substitution followed by more arguments
+        ^ substitutions inside a command do not widen a pattern match — `a_deny_rule_reaches_into_substitutions_and_bodies`
+2.1.243 | declined | [VSCode] Fixed sessions started before feature flags were first fetched (for example right after install) opening in the default permission mode instead of auto mode or your configured default mode
+        ^ which mode a VS Code session opens in before feature flags load

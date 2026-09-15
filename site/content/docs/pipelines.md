@@ -126,7 +126,15 @@ A `prompt` is looked up in one order, the same for every agent:
 2. `.claude/skills/<name>/SKILL.md`, project then personal — **your Claude Code Skills work as
    pipeline prompts**, so a project that already keeps its prompts there needs no second copy. Only
    the body is used; markdown is portable, so this works for a step running on Codex too.
-3. The literal text, so a one-line pipeline needs no files at all.
+3. `REVIEW.md` at the repository root, **for a step that reports findings only** — the file Claude
+   Code's Code Review reads. A project that has one has already written down what it wants flagged,
+   at what severity, with a verification bar, and every sentence of that is one a review prompt
+   would otherwise have to invent. It is markdown addressed to a reviewer, so it reaches a reviewer
+   running on Codex too.
+4. The literal text, so a one-line pipeline needs no files at all.
+
+`REVIEW.md` is offered only to a step with a `findings` block. Handing a reviewer's brief to the step
+that is *writing* the code is a different instruction wearing the same words.
 
 A skill's frontmatter — `allowed-tools`, `context: fork`, `model` — are directives the Claude
 harness applies when *it* loads the skill by name. Inlining the body takes the instructions without

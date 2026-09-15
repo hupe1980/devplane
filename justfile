@@ -62,16 +62,32 @@ specs:
 concepts:
     bash scripts/concepts-check.sh
 
-# Differential test against a real `claude`. `just perms 20` narrows the matrix.
+# Every CHANGELOG row that could change a verdict, against its ledger.
+rows:
+    bash scripts/changelog-rows.sh
+
+# The rows not yet dispositioned, ready to paste into the ledger.
+rows-new:
+    bash scripts/changelog-rows.sh --new
+
+# Both axes against a real `claude`. `just perms 20` caps it for a quick pass.
 perms CASES="0": build
     bash scripts/verify-permissions-diff.sh {{CASES}}
+
+# Allow axis only: does an `auto_allow` rule approve what Claude Code runs?
+perms-allow CASES="0": build
+    VIBEPLANE_DIFF_AXIS=allow bash scripts/verify-permissions-diff.sh {{CASES}}
+
+# Deny axis only: does a `never_auto` rule stop what Claude Code refuses?
+perms-deny CASES="0": build
+    VIBEPLANE_DIFF_AXIS=deny bash scripts/verify-permissions-diff.sh {{CASES}}
 
 # The written-down permission rules against a real Claude Code. Needs `claude`.
 perms-live: build
     bash scripts/verify-permissions-live.sh
 
 # check, plus everything above that can run without a live agent.
-verify: check deps concepts claims site-check
+verify: check deps concepts rows claims site-check
 
 # ── The site ─────────────────────────────────────────────────────────────────
 

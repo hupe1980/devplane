@@ -101,6 +101,9 @@ pub struct InboxItem {
     /// Set when the item is about a piece of work rather than a session.
     #[serde(default)]
     pub work_id: Option<String>,
+    /// The rule that would have answered this call, on a permission item.
+    #[serde(default)]
+    pub suggested_rule: Option<String>,
 }
 
 /// One fragment of a driven run's conversation, as the API serves it.

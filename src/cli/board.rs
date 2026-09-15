@@ -240,6 +240,25 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             )
         );
     }
+    // Sessions are discovered from Claude Code's own roster, which carries no
+    // cost and no context figure — so on a machine that has never run
+    // `connect`, two columns are `-` on every row and nothing says why. The
+    // empty-board path already explains this; the populated one did not, which
+    // is the path somebody with twenty sessions open is actually on.
+    if !board.runs.is_empty()
+        && board
+            .runs
+            .iter()
+            .all(|r| r.cost_usd == 0.0 && r.context_percent.is_none())
+    {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                "cost and context are blank — vibeplane connect claude adds them",
+            )
+        );
+    }
     println!();
 
     print_board(&board);

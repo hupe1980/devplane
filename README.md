@@ -1,10 +1,10 @@
 # Vibeplane
 
-**The local-first control plane for AI coding agents.** One binary that **watches** the Claude Code
-and GitHub Copilot sessions already running on your machine — terminal, VS Code, desktop — tells you
-which ones need you, and **drives** any agent that speaks the
+**The local-first control plane for AI coding agents.** One binary that **watches** every Claude Code
+session already running on your machine — terminal, VS Code, desktop — tells you which ones need you,
+and **drives** any agent that speaks the
 [Agent Client Protocol](https://agentclientprotocol.com): Claude Code, Codex, Copilot, OpenCode and
-Gemini out of the box.
+Gemini out of the box. One permission gate governs Claude Code and GitHub Copilot alike.
 
 **[Documentation → hupe1980.github.io/vibeplane](https://hupe1980.github.io/vibeplane)**
 
@@ -46,7 +46,7 @@ Vibeplane watches all of them, on documented interfaces, and stays out of the wa
 ## 📦 Install
 
 ```sh
-# a prebuilt binary, any platform
+# a prebuilt binary: macOS (Apple Silicon), Linux, Windows
 curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh
 
 # from source, needs Rust 1.90+
@@ -72,6 +72,7 @@ vibeplane work start "fix the flaky login test" --kind bug
 vibeplane work show <id>     # where it got to, what it cost, what the checks said
 vibeplane audit              # what Vibeplane decided, and on whose authority
 vibeplane attention          # whether the inbox is worth reading, per kind
+vibeplane explain --replay   # which rule to write so it stops asking
 ```
 
 `vibeplane ls` works before you connect anything: sessions are discovered from Claude Code's own
@@ -141,7 +142,11 @@ behind it, and a permission rule that cannot match anything.
 
 ## 🖥️ The board
 
-`vibeplane open` serves one page from the daemon on loopback. Keyboard-first:
+`vibeplane open` serves one page from the daemon on loopback.
+
+![The Vibeplane board: four projects, six sessions, one permission waiting and one session at 89% context](https://raw.githubusercontent.com/hupe1980/vibeplane/main/site/static/board.png)
+
+Keyboard-first:
 
 | Key | What |
 |---|---|
@@ -177,6 +182,29 @@ stalled                12       0          2         10      0      0%
 `context_high` is dismissed four times in five — that threshold is wrong, and now you can see it.
 `acted` is recorded the moment you answer, so it is counted rather than inferred.
 
+And the other half — **which rule to write so it stops**:
+
+```console
+$ vibeplane explain --replay
+1284 tool calls in saas replayed against the rules as they are now
+
+     912   71%  allow
+     358   28%  reached you
+
+one rule each, most interruptions first
+   118×  Bash(pnpm typecheck)
+    94×  Bash(git status)
+    62×  Bash(cargo test *)
+    41×  Read(src/**)
+
+315 of the 358 calls that reached you would stop asking · paste into [policy] auto_allow
+```
+
+Offline, like the rest of `explain` — no daemon, no agent, no bill. Each suggestion is in the
+vocabulary that tool's rules use: a command prefix, a directory glob, a domain. A rule is offered
+only where one really covers the set, and only after a command has interrupted you three times —
+which is what stops a list like this recommending `Bash(rm -rf node_modules)`.
+
 `refused` is the one row about a session that is **not** blocked. A refused agent does not stop, it
 tries something else — so a rule that is too tight and a rule that is working look identical on the
 board, and the difference only shows up on the bill. Five refusals in one run says which rule keeps
@@ -199,6 +227,13 @@ The rules are checked against a *running* Claude Code, not only against its docu
 any disagreement — in either direction, because a rule that is quietly too strict is one people
 replace with a broader rule.
 
+It asks on **two axes**: an `auto_allow` list answering *did Claude Code run it?*, and a `never_auto`
+list answering *did Claude Code refuse?*. Against Claude Code 2.1.270 both are clean — **176 deny
+cases and 126 allow cases, no reproducible disagreement in either direction.**
+
+`scripts/changelog-rows.sh` covers the other half: it fails the build until every row of Claude
+Code's changelog that could change a verdict is written down as covered, or declined with a reason.
+
 Commands are matched the way Claude Code matches them: **per subcommand**, not against the whole
 line. `never_auto = ["Bash(rm -rf *)"]` stops `ls && rm -rf /`, and `auto_allow = ["Bash(pnpm test
 *)"]` will *not* answer for `pnpm test && rm -rf /` — that one reaches you as a question.
@@ -209,15 +244,27 @@ rules say: an exec wrapper (`watch`, `setsid`, `ionice`, `flock`) that runs what
 naming the exact command still works; `Bash(watch *)` does not, and `vibeplane check` says so rather
 than letting it look like protection.
 
-A path rule also reaches **the files a command names** — the target of a redirection and the operands
-of the file commands Claude Code recognises — so `Read(.env)` stops `cat .env`, and `Edit(.env)`
-stops both `echo pwned > .env` and `echo pwned | tee .env`. And an allow rule covers the command,
-not what it writes: `Bash(echo *)` does not answer for `echo x > ~/.ssh/authorized_keys`.
+A path rule also reaches **the files a command names**: the operands of the commands Claude Code
+recognises — `grep`, `awk`, `sort`, `od`, `strings`, `jq`, `base64`, `git diff`, `git grep` and
+twenty more — a path hidden in an option value like `grep -f.env x`, everything under a directory a
+`grep -r` walks, the target of a redirection, and whatever `env` or `sudo` turns out to be running.
+`mv` is there because it **removes** its source; `cp` is not, because it does not.
 
-**Symlinks are followed, and the two sides read the pair differently.** A deny applies when *either*
-the link or its target matches, so a repository that ships `config/key -> ~/.ssh/id_rsa` does not
-walk past `Read(~/.ssh/**)`. An allow applies only when *both* match, so a link pointing out of an
-approved directory stops being approved.
+That list is measured against a running Claude Code rather than transcribed: `xxd`, `zcat`, `join`,
+`less`, `more` and `truncate` are **not** recognised by it and so are not in it. And an allow rule
+covers the command, not what it writes: `Bash(echo *)` does not answer for
+`echo x > ~/.ssh/authorized_keys`.
+
+**`Read` and `Edit` are two halves and you want both.** `Read(.env)` stops `cat .env` and
+`echo x | tee .env`; it does *not* stop `echo x > .env` or `touch .env`, which are `Edit` business.
+`vibeplane check` prints a note when only one half is present.
+
+**Symlinks are followed from both ends, and the two sides read the pair differently.** A deny applies
+when *either* the link or its target matches, so a repository that ships `config/key -> ~/.ssh/id_rsa`
+does not walk past `Read(~/.ssh/**)`. An allow applies only when *both* match, so a link pointing out
+of an approved directory stops being approved. And **the rule can be the end holding the link**:
+`/tmp` and `/etc` are symlinks on macOS, so `Read(//tmp/**)` has to stop `cat /private/tmp/x` too —
+resolving only the accessed path leaves every such rule evadable by spelling the real location.
 
 ```console
 $ vibeplane explain 'echo x | tee /etc/hosts'
@@ -234,6 +281,26 @@ prompt ever appears. Denies and asks go out on a hook that fires before every to
 mode; grants stay on the one that fires only when you were going to be asked anyway.
 
 [The rule syntax →](https://hupe1980.github.io/vibeplane/docs/permissions/)
+
+## 🌍 Which world is this machine in?
+
+Claude Code's own availability matrix splits cleanly: everything it ships to **run** an agent works
+on every provider, and everything it ships to **supervise, schedule, review and audit** one needs a
+claude.ai sign-in. On Amazon Bedrock, Google Cloud's Agent Platform, Microsoft Foundry, a Console API
+key or a corporate gateway, the vendor's whole supervision layer is off — and hooks, OpenTelemetry,
+workflows, skills and sandboxing all still work, which is exactly Vibeplane's substrate.
+
+```console
+$ vibeplane doctor
+provider
+  Amazon Bedrock  (CLAUDE_CODE_USE_BEDROCK is set)
+  Vibeplane is the only gate on this machine.
+  off here   Remote Control · Routines · ultrareview · Code Review · Channels · analytics
+  partial    auto mode — fewer models, and sessions start in Manual
+  still on   hooks · OpenTelemetry metrics · workflows · skills · sandboxing · MCP servers
+```
+
+[Which surfaces →](https://hupe1980.github.io/vibeplane/docs/cli/#vibeplane-doctor)
 
 ## ⚙️ How it works
 
@@ -292,9 +359,15 @@ just site                    # the documentation site, at http://127.0.0.1:1111
 VIBEPLANE_HOME=/tmp/vp just vp ls    # an isolated instance, touching nothing of yours
 ```
 
+`just rows` is the cheapest of the three permission checks and the one that runs in CI: it fails
+until every row in Claude Code's changelog that could change a verdict is dispositioned in
+`scripts/changelog-ledger.txt`. `just rows-new` prints the ones that are not, ready to paste.
+
 Two checks cost money and need a signed-in Claude Code, so they are not in CI and are run by hand
 when permissions change: `just perms-live` (fixed probes) and `just perms` (generated cases, both
-sides asked, any disagreement a failure).
+sides asked, any disagreement a failure). `just perms-allow` and `just perms-deny` run one half of the
+second; `just perms 20` caps the matrix for a quick pass. What fails the build is the *test* each
+finding leaves behind, never the harness itself.
 
 The protocol tests drive a real agent process — `examples/echo_agent` — rather than
 a vendor's, and the GitHub tests parse captured `gh` output rather than calling GitHub. That is what
@@ -307,6 +380,11 @@ another port rather than refusing to start.
 
 `VIBEPLANE_CLAUDE_BIN` points at a `claude` binary if yours is not on `PATH` — which is common, since
 the VS Code extension ships its own copy and installs nothing.
+
+## 📓 Changes
+
+[CHANGELOG.md](CHANGELOG.md). 0.2.0 changes what two permission rules cover; read
+**Changed** before upgrading.
 
 ## ⚖️ License
 

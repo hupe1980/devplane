@@ -26,14 +26,28 @@ cited=$(grep -oh '\bD[0-9]\+\b' *.md | sort -u); defined=$(grep -o '^| D[0-9]\+ 
 for id in $cited; do echo "$defined" | grep -qx "$id" || { echo "cited but undefined: $id"; fail=1; }; done
 cited=$(grep -oh '\bR[0-9]\+\b' *.md | sort -u); defined=$(grep -o '^| R[0-9]\+ ' RISKS.md | tr -d '| ' | sort -u)
 for id in $cited; do echo "$defined" | grep -qx "$id" || { echo "cited but undefined: $id"; fail=1; }; done
-# Nothing in the published tree may cite a D or R id. These notes are gitignored, so a
-# `(D34)` in a doc comment renders on docs.rs — and on the documentation site — as a
-# reference to a document the reader cannot open. The rule was written here from the
-# start and nothing enforced it; five citations had leaked into the crate.
-leaked=$(cd .. && grep -rnoE '\((D|R)[0-9]+(, ?(D|R)[0-9]+)*\)' \
-  crates site README.md 2>/dev/null | grep -v '/target/')
+# Nothing a reader of the published product sees may point at these notes.
+# `concepts/` and `specs/` are gitignored, so a decision id or a "see the
+# architecture notes" in a doc comment renders on docs.rs — and on the site — as
+# a reference to a document the reader cannot open.
+#
+# Two things this guard has been wrong about, both silent: it named a `crates/`
+# directory that the single-crate layout removed, so it greped nothing and
+# passed; and its own word-boundary filter matched every three-digit id, because
+# digits are alphanumeric. Hence the explicit path list, checked for existence.
+published="src ui examples site README.md"
+for path in $published; do
+  [ -e "../$path" ] || { echo "concepts-check: published path '$path' is missing"; fail=1; }
+done
+leaked=$(cd .. && grep -rInoE '\b(D|R)[0-9]+\b' $published 2>/dev/null \
+  | grep -vE '/target/|site/public/' \
+  | grep -vE '[A-Za-z0-9_](D|R)[0-9]|(D|R)[0-9]+[A-Za-z_]')
+# The same rule, spelled out rather than numbered: a path into a gitignored
+# directory, or a phrase that sends the reader to a document they do not have.
+leaked="$leaked$(cd .. && grep -rInoE 'concepts/|specs/|architecture notes|these notes|design notes' \
+  $published 2>/dev/null | grep -vE '/target/|site/public/')"
 if [ -n "$leaked" ]; then
-  echo "published tree cites an internal decision id:"
+  echo "published tree points at these notes (gitignored — the reader has neither):"
   echo "$leaked" | sed 's/^/  /'
   fail=1
 fi
@@ -50,7 +64,7 @@ if command -v cargo >/dev/null 2>&1; then
 fi
 
 # The storage decision carries numbers, so the numbers are recomputed rather than
-# trusted (D70, D78).
+# trusted.
 if command -v cargo >/dev/null 2>&1; then
   ../scripts/deps-count.sh >/dev/null 2>&1 \
     || { echo "the dependency figures in D70/D78 have drifted (scripts/deps-count.sh)"; fail=1; }

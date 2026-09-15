@@ -523,8 +523,8 @@ impl Work {
     /// The most recent gate verdict, which is what the board shows.
     /// Whether handing this back to the agent once more would actually do
     /// something — the *domain's* answer, so the API, the inbox and the CLI
-    /// cannot disagree about which rows offer a Retry button (D60's rule: one
-    /// definition of every derived value, served already judged).
+    /// cannot disagree about which rows offer a Retry button. One definition of
+    /// every derived value, served already judged.
     ///
     /// `can_drive` is the caller's: whether the session that wrote the code is
     /// still there. Nothing in here can see that.

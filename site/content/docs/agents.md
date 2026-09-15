@@ -83,8 +83,8 @@ resume.
 > [!NOTE]
 > **Driving an agent and watching one are different things.** Every agent here can be *started* by
 > Vibeplane. A session **you** started, in your own terminal, is only visible where its vendor
-> publishes a channel for it — hooks, telemetry, a roster. Today that means Claude Code, and GitHub
-> Copilot next. The [observe](/docs/observe/) page says which channels each one has.
+> publishes a channel for it — hooks, telemetry, a roster. That means Claude Code, and GitHub Copilot
+> once connected. The [observe](/docs/observe/) page says which channels each one has.
 
 Pinned on purpose: an agent that silently upgrades under a conformance suite is an agent whose suite
 proves nothing, and `npx` will happily fetch a new major version overnight otherwise.

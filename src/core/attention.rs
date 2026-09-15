@@ -326,6 +326,18 @@ pub struct AttentionItem {
     /// pipeline, and the run that was doing the last step may already be gone.
     #[serde(default)]
     pub work_id: Option<crate::core::ids::WorkId>,
+    /// The rule that would have answered this call, on a permission item.
+    ///
+    /// **The exact call, never a pattern.** One interruption is evidence that
+    /// this command needed a decision and no evidence at all about the shape of
+    /// the ones like it, and a control plane that answers "you were asked about
+    /// `pnpm test --run`" with "grant every `pnpm test`" is guessing on
+    /// somebody's behalf about the thing it exists to be careful about.
+    /// `vibeplane explain --replay` is where a *pattern* comes from, because
+    /// there the evidence is a count: the inbox answers **this one**, the
+    /// replay answers **this kind**.
+    #[serde(default)]
+    pub suggested_rule: Option<String>,
     pub since: Timestamp,
 }
 
@@ -435,6 +447,22 @@ impl Default for AttentionConfig {
 /// the two disagreeing is worse than either being wrong: a repository whose
 /// suite takes forty minutes set `stall_timeout = "45m"`, the event log
 /// correctly said nothing, and the inbox raised a stall at ten minutes anyway.
+/// The rule that would have answered the call this run is blocked on.
+///
+/// The **exact** call, never a pattern — see `AttentionItem::suggested_rule`.
+/// `None` when the call cannot be pinned to one rule: a compound command, an
+/// exec wrapper no prefix rule may approve, a tool whose rules take no
+/// specifier. Offering a rule that would not work is worse than offering none,
+/// because the person pastes it, is asked again, and stops believing the
+/// suggestion.
+fn rule_that_would_answer(run: &Run) -> Option<String> {
+    let b = run.blocked_on.as_ref()?;
+    let tool = b.tool.as_deref()?;
+    let content = crate::core::policy::rule_content(tool, b.input.as_ref()?)?;
+    let spec = crate::core::command::suggest_rule_for(tool, &[content])?;
+    Some(format!("{tool}({spec})"))
+}
+
 pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Vec<AttentionItem> {
     let mut out = Vec::new();
     let mut push = |kind: AttentionKind,
@@ -448,6 +476,10 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
         if run.snoozed.hides(&kind) {
             return;
         }
+        // Computed before the literal, which moves `kind`.
+        let suggested_rule = (kind == AttentionKind::Permission)
+            .then(|| rule_that_would_answer(run))
+            .flatten();
         out.push(AttentionItem {
             id: AttentionItem::make_id(&run.id, &kind),
             level: kind.default_level(),
@@ -465,6 +497,8 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
             launch: None,
             // A run item is about a session, not a piece of work.
             work_id: None,
+            // Only a permission item has a rule that would have answered it.
+            suggested_rule,
             since,
         });
     };
@@ -717,6 +751,8 @@ pub fn items_for_work_in(
             actions,
             request_id: None,
             work_id: Some(work.id.clone()),
+            // A work item is not about a tool call, so no rule answers it.
+            suggested_rule: None,
             since: work.updated_at,
         })
     };
@@ -1191,6 +1227,59 @@ mod tests {
                 .any(|i| i.kind == AttentionKind::Stalled),
             "a project that allows forty-five minutes of quiet meant it"
         );
+    }
+
+    #[test]
+    fn a_permission_item_names_the_rule_that_would_have_answered_it() {
+        use serde_json::json;
+        let ask = |tool: &str, input: serde_json::Value| {
+            let mut r = run(RunMode::Observed);
+            r.state = RunState::Waiting(WaitingFor::Permission);
+            r.blocked_on = Some(BlockedOn {
+                waiting_for: WaitingFor::Permission,
+                message: None,
+                request_id: Some("req-1".into()),
+                tool: Some(tool.into()),
+                input: Some(input),
+                options: vec![],
+                since: Timestamp::now(),
+            });
+            items(&r)[0].suggested_rule.clone()
+        };
+
+        // The **exact** call, never a pattern. One interruption says this
+        // command needed a decision and says nothing about the shape of the
+        // ones like it; `explain --replay` is where a pattern comes from,
+        // because there the evidence is a count.
+        assert_eq!(
+            ask("Bash", json!({"command": "pnpm test --run"})),
+            Some("Bash(pnpm test --run)".into())
+        );
+        // A path rule is still written about a directory, because that is the
+        // vocabulary `Read` rules use.
+        assert_eq!(
+            ask("Read", json!({"file_path": "src/main.rs"})),
+            Some("Read(src/**)".into())
+        );
+        assert_eq!(
+            ask("WebFetch", json!({"url": "https://docs.rs/x"})),
+            Some("WebFetch(docs.rs)".into())
+        );
+
+        // Nothing is offered where the rule would not work, because a
+        // suggestion that gets pasted and then asked about again is worse than
+        // no suggestion.
+        assert_eq!(
+            ask("Bash", json!({"command": "pnpm test && rm -rf /"})),
+            None
+        );
+        assert_eq!(ask("Bash", json!({"command": "watch pnpm test"})), None);
+
+        // And no other kind carries one: the rest are not about a tool call.
+        let mut idle = run(RunMode::Observed);
+        idle.state = RunState::Waiting(WaitingFor::Question);
+        idle.blocked_on = Some(blocked(WaitingFor::Question, vec![]));
+        assert!(items(&idle)[0].suggested_rule.is_none());
     }
 
     #[test]

@@ -51,7 +51,7 @@ reading.
 
 Untrusted projects are observe-only, which is still the whole of the observer.
 
-## The policy cannot fail open — or fail silently
+## Where the policy can fail open, and where it cannot
 
 Prohibitions are enforced through **two** synchronous hooks, not one. `PermissionRequest` fires only
 when Claude Code is about to ask a human; `PreToolUse` fires before every tool call in every mode,
@@ -60,8 +60,13 @@ approves routine calls and no prompt — and so no `PermissionRequest` — ever 
 carries a prohibition or nothing, never a grant: an allow there would skip the classifier as well as
 the prompt.
 
-Evaluation is total, synchronous and in-process. There is no “policy service unreachable” path, and
-the build fails if anything in the pure half grows one.
+**Evaluation itself cannot fail open.** It is total, synchronous and in-process: there is no “policy
+service unreachable” path, and the build fails if anything in the pure half grows one. Given the
+call, the answer is always a verdict.
+
+**Delivering that verdict depends on the vendor's hook.** On Claude Code the gate rides an HTTP hook
+the session waits for, so a verdict that exists is one that arrives. On GitHub Copilot it does not —
+see below. *The rules cannot fail open; a channel can.*
 
 `never_auto` cannot be overridden by `auto_allow`, in either direction.
 
@@ -70,9 +75,14 @@ none, and nothing errors. So the rule syntax implements the published specificat
 the spellings that cannot work — a path rule on `Write`, an `mcp__` rule with brackets, a bare
 wildcard in `auto_allow` — are **refused** by `vibeplane check` rather than carried. And because
 reading a specification is not the same as agreeing with the product, `scripts/verify-permissions-diff.sh`
-**generates** calls and fails on any disagreement with a running Claude Code — which is how the last
-four differences were found, including one introduced by the fix for the other three. See
-[Permissions](/docs/permissions/).
+**generates** calls and fails on any disagreement with a running Claude Code.
+
+It asks on two axes: an `auto_allow` list answering *did Claude Code run it?*, and a `never_auto`
+list answering *did Claude Code refuse?*. The oracle is a model, so a disagreement is re-asked once
+and reported only if it reproduces.
+
+Against Claude Code 2.1.270 both axes are clean: 176 deny cases and 126 allow cases, with no
+reproducible disagreement in either direction. See [Permissions](/docs/permissions/).
 
 A malformed `vibeplane.toml` keeps the rules it had. Because a restarted daemon has none to keep,
 `vibeplane doctor` names the project whose rules are not in force.

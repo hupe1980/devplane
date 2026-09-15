@@ -10,6 +10,8 @@ Vibeplane's first job is to know what is happening without changing how you work
 sessions it did not start, on documented interfaces only, through four channels — each of which
 answers a different question.
 
+![The board: sessions grouped by project, with what each one is doing, its context use and its cost](/board.png)
+
 ## The four channels
 
 | Channel | Answers | Needs `connect`? |
@@ -123,6 +125,9 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:47831/vibeplane/otel
 > **There is no session roster for Copilot.** `claude agents --json` is what makes `vibeplane ls`
 > work before anything is configured; Copilot publishes no equivalent, so the sequence here is
 > connect first, then see. A Copilot session appears once it does something.
+>
+> These channels are implemented and **not yet verified against a live Copilot account** — the same
+> state `vibeplane agents` reports for it.
 
 Your `vibeplane.toml` rules govern it unchanged. Copilot's own tool names are mapped to the ones the
 rules use — `view` is `Read`, `create` is `Write`, `bash` is `Bash` — so `never_auto = ["Read(.env)"]`

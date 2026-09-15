@@ -45,13 +45,19 @@ fn step_at<'a>(config: &'a crate::core::config::Pipeline, role: &str) -> Option<
 ///    own prompt-template format, which a project very likely already has.
 ///    Only the **body** is taken, and the body is portable: markdown is
 ///    markdown, and an agent that is not Claude reads it fine.
-/// 3. The literal text, so a one-line pipeline needs no files at all.
+/// 3. `REVIEW.md` at the repository root, for a step that **reports findings**
+///    and nothing else — Claude Code's Code Review reads it, so a project that
+///    has one has already written down what it wants flagged, at what severity,
+///    with a verification bar. Every sentence of that is a sentence a review
+///    prompt would otherwise have to invent, and the body is portable: it is
+///    markdown addressed to a reviewer, not to a vendor.
+/// 4. The literal text, so a one-line pipeline needs no files at all.
 ///
 /// The honest limit of step 2, stated rather than discovered: a skill's
 /// frontmatter — `allowed-tools`, `context: fork`, `model`, `effort` — are
 /// directives the Claude harness applies when *it* loads the skill by name.
 /// Inlining the body takes the instructions and none of that.
-fn template(dir: &Path, name: &str) -> Option<String> {
+fn template(dir: &Path, name: &str, reviewing: bool) -> Option<String> {
     let portable = dir.join(".vibeplane/prompts").join(format!("{name}.md"));
     if let Ok(text) = std::fs::read_to_string(&portable) {
         return Some(text);
@@ -64,12 +70,21 @@ fn template(dir: &Path, name: &str) -> Option<String> {
             return Some(body.to_string());
         }
     }
+    // Only for a step that reports findings. `REVIEW.md` says what this
+    // repository wants flagged; handing it to an *implementing* step would be
+    // handing a reviewer's brief to somebody writing the code, which is a
+    // different instruction wearing the same words.
+    if reviewing && let Ok(text) = std::fs::read_to_string(dir.join("REVIEW.md")) {
+        let (_, body) = crate::core::text::split_frontmatter(&text);
+        return Some(body.to_string());
+    }
     None
 }
 
 /// Builds the text a step's agent is given.
 fn compose(dir: &Path, step: &RoleStep, title: &str, task: &str, findings: Option<&str>) -> String {
-    let base = template(dir, &step.prompt).unwrap_or_else(|| step.prompt.clone());
+    let base =
+        template(dir, &step.prompt, step.findings.is_some()).unwrap_or_else(|| step.prompt.clone());
 
     let mut text = base
         .replace("{title}", title)
@@ -548,6 +563,53 @@ mod tests {
         .unwrap();
         let templated = compose(&d, &step("review", None), "rate limiting", "add it", None);
         assert_eq!(templated, "Review rate limiting. The ask was: add it");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_review_step_reads_the_repositorys_own_review_md() {
+        // The vendor shipped a committed, project-authored file saying what
+        // this repository wants flagged, at what severity, with a verification
+        // bar — every sentence of which a review prompt would otherwise have to
+        // invent. It is markdown addressed to a reviewer, so it is portable to
+        // an agent that is not Claude.
+        let d = dir("reviewmd");
+        std::fs::write(
+            d.join("REVIEW.md"),
+            "---\nseverity: important\n---\n\nFlag unwrap() in {title}.",
+        )
+        .unwrap();
+
+        // A step that reports findings is a reviewer, so it gets it.
+        let reviewing = compose(
+            &d,
+            &step("review", Some(sends_back())),
+            "the parser",
+            "x",
+            None,
+        );
+        assert!(
+            reviewing.contains("Flag unwrap() in the parser."),
+            "{reviewing}"
+        );
+
+        // A step that does **not** report findings is writing the code, and
+        // handing it a reviewer's brief is a different instruction wearing the
+        // same words. It falls through to the literal prompt.
+        let implementing = compose(&d, &step("review", None), "the parser", "x", None);
+        assert!(!implementing.contains("Flag unwrap()"), "{implementing}");
+
+        // And anything the project wrote for this chain still wins over it.
+        std::fs::create_dir_all(d.join(".vibeplane/prompts")).unwrap();
+        std::fs::write(d.join(".vibeplane/prompts/review.md"), "Ours: {title}").unwrap();
+        let ours = compose(
+            &d,
+            &step("review", Some(sends_back())),
+            "the parser",
+            "x",
+            None,
+        );
+        assert!(ours.contains("Ours: the parser"), "{ours}");
         std::fs::remove_dir_all(&d).ok();
     }
 

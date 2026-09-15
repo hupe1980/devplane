@@ -115,9 +115,15 @@ pub struct Context<'a> {
     ///
     /// Supplied by the caller because this half may not touch a disk, and a
     /// function pointer rather than a closure so the context stays `Copy` and
-    /// the caller can memoise: every rule in one evaluation asks about the same
-    /// file, and the memo is what keeps that one syscall per call rather than
-    /// one per rule (`a_path_check_pays_for_one_realpath_and_not_one_per_rule`).
+    /// the caller can memoise.
+    ///
+    /// Two kinds of path reach it, and the second is why the memo is a map
+    /// rather than one slot: the **file** every rule in an evaluation asks
+    /// about, and each deny rule's own leading literal segments, resolved so
+    /// that a rule naming a symlinked directory meets a command naming the real
+    /// one. The cost is therefore one question per *distinct* path, not
+    /// one per rule and not one per call
+    /// (`a_path_check_asks_the_filesystem_once_per_distinct_path`).
     ///
     /// With no resolver the symlink rules are off and a path is matched as the
     /// agent spelled it — right for a pure test, wrong for a daemon, which is
@@ -603,6 +609,24 @@ impl Rule {
                     .any(|c| one(c, true));
         }
 
+        // A rule with **no wildcard** names one exact command, and a compound
+        // written out in full is one exact command. It is matched against the
+        // whole line before any splitting, because splitting it would ask each
+        // half to be covered by a pattern that names both — so an exact rule
+        // for `a ; b` approved neither `a` nor `b` and therefore not `a ; b`.
+        //
+        // Three guards, and the last two were measured rather than reasoned.
+        // The rule must have **no wildcard**: `Bash(pnpm test *)` against
+        // `pnpm test && rm -rf /` is precisely the widening the split exists to
+        // prevent, and its `*` would swallow the `&& rm -rf /`. And the line
+        // must have no **nesting or pipe**: the running product does not honour
+        // a whole-line rule over `(cat x)`, `a | b` or a substitution, so doing
+        // it here auto-approved four calls it puts in front of a person — every
+        // WIDER row of the first full deny run.
+        if !pattern.contains('*') && !Self::nested_or_piped_impl(command) && one(command, false) {
+            return true;
+        }
+
         // An allow rule approves a compound command when every part **that
         // needs approval** is covered: `ls`, `cd` and `true` need no rule of
         // their own, so `Bash(pnpm test *)` covers
@@ -618,6 +642,33 @@ impl Rule {
                 .all(|c| one(c, false) || crate::core::command::never_asks_about(c)),
             None => false,
         }
+    }
+
+    /// Whether the line contains a shape a whole-line rule must not answer for:
+    /// a subshell, a command substitution or a pipe.
+    /// Cheap scans first: this runs once per allow rule per evaluation, on the
+    /// hook a session is blocked on, and only the last test parses anything.
+    fn nested_or_piped_impl(command: &str) -> bool {
+        if command.contains('`') || command.contains('|') {
+            return true;
+        }
+        // A **subshell** is a nesting a whole-line rule must not answer for; a
+        // **command substitution** is not, and the running product honours a
+        // whole-line rule over one. The two are spelled `(` and `$(`, so the
+        // test is whether a `(` is preceded by a `$`.
+        if command
+            .char_indices()
+            .filter(|(_, c)| *c == '(')
+            .any(|(i, _)| i == 0 || !command[..i].ends_with('$'))
+        {
+            return true;
+        }
+        // `env`, `sudo` and their kind hand their arguments to something else,
+        // and the running product refuses a line containing one even under an
+        // allow rule naming that exact line — unlike the exec wrappers, whose
+        // exact-match escape hatch the reference documents and honours. Two
+        // WIDER rows of the first clean full deny run.
+        crate::core::command::contains_analysis_barrier(command)
     }
 
     /// Whether a path rule written on this tool governs a call to `tool`.
@@ -672,11 +723,26 @@ impl Rule {
             let governs = if named.eq_ignore_ascii_case("Edit") {
                 t.access == Access::Write
             } else if named.eq_ignore_ascii_case("Read") {
-                t.access == Access::Read || (restrictive && t.access == Access::Write)
+                // "Never read this" also means "never replace it" — but only
+                // for the commands Claude Code recognises by name. It refuses
+                // `echo x | tee .env` under `Read(.env)` and runs
+                // `echo x > .env` and `touch .env`, so a redirect and a bare
+                // create are `Edit` business only.
+                t.access == Access::Read
+                    || (restrictive && t.access == Access::Write && t.via.read_rules_apply())
             } else {
                 false
             };
-            if governs && p.matches(ctx, Path::new(&t.path), self.class) {
+            if !governs {
+                continue;
+            }
+            let path = Path::new(&t.path);
+            if p.matches(ctx, path, self.class) {
+                return true;
+            }
+            // `grep -r pattern secrets` names the directory and reads every
+            // file in it, so a deny naming one of those files stops the call.
+            if restrictive && t.subtree && p.covers_under(ctx, path) {
                 return true;
             }
         }
@@ -725,7 +791,20 @@ impl Rule {
         let named = self.tool.as_str();
 
         if raw.contains('(') && !raw.ends_with(')') {
-            out.push((true, format!("`{raw}` is missing its closing bracket")));
+            // Two different mistakes wear the same shape, and telling somebody
+            // the wrong one costs them the afternoon: a bracket that was never
+            // closed, and text left after one that was. Claude Code reports the
+            // second as invalid settings since 2.1.260, having silently ignored
+            // it before.
+            out.push((
+                true,
+                if raw.rfind(')').is_some_and(|i| i + 1 < raw.len()) {
+                    let upto = &raw[..=raw.rfind(')').unwrap_or(0)];
+                    format!("`{raw}` has text after its closing bracket and matches nothing — did you mean `{upto}`?")
+                } else {
+                    format!("`{raw}` is missing its closing bracket")
+                },
+            ));
             return out;
         }
 
@@ -1139,6 +1218,14 @@ impl PathPattern {
     ///
     /// When nothing resolves — no resolver, or a file this call is about to
     /// create — there is one spelling and both readings collapse onto it.
+    ///
+    /// **Both sides are resolved, because either can be the one holding the
+    /// link.** Resolving only the accessed path leaves the rule evadable from
+    /// the other end: `Read(//tmp/**)` names a directory that is a symlink on
+    /// every Mac, so `cat /private/tmp/x` reaches the same file and matched
+    /// nothing. Claude Code fixed the same asymmetry in 2.1.268 — *"deny/ask
+    /// rules on symlinked directories (`/etc`, `/tmp`, `/var`) not applying
+    /// when the path was given by its real location"*.
     fn matches(&self, ctx: &Context<'_>, file: &Path, class: Class) -> bool {
         let named = self.matches_one(ctx, file, class);
         // The second spelling can only ever change the answer in one direction
@@ -1156,15 +1243,102 @@ impl PathPattern {
         } else {
             ctx.cwd.join(file)
         };
-        let Some(real) = resolve(&absolute) else {
-            return named;
+        let real_file = resolve(&absolute).unwrap_or(absolute);
+        let resolved = match self.resolved_base(ctx, resolve) {
+            Some((base, skip)) => self.matches_from(&base, &self.segments[skip..], &real_file),
+            None => self.matches_one(ctx, &real_file, class),
         };
-        let real = self.matches_one(ctx, &real, class);
         if class.is_restrictive() {
-            named || real
+            named || resolved
         } else {
-            named && real
+            named && resolved
         }
+    }
+
+    /// The pattern's own leading literal segments, resolved, with the number of
+    /// segments they consumed.
+    ///
+    /// `None` when there is nothing to resolve — a floating pattern, whose
+    /// segments match at any depth and therefore have no fixed prefix, or a
+    /// prefix that does not exist on this machine.
+    fn resolved_base(
+        &self,
+        ctx: &Context<'_>,
+        resolve: fn(&Path) -> Option<PathBuf>,
+    ) -> Option<(PathBuf, usize)> {
+        if self.any_depth || self.single_segment_dir {
+            return None;
+        }
+        let mut base = self.base(ctx)?;
+        let mut taken = 0;
+        for seg in &self.segments {
+            if seg.contains('*') || seg.contains('?') || seg.contains('[') {
+                break;
+            }
+            base.push(seg);
+            taken += 1;
+        }
+        if taken == 0 {
+            return None;
+        }
+        let real = resolve(&base)?;
+        (real != base).then_some((real, taken))
+    }
+
+    /// Whether this pattern names anything strictly beneath `dir`.
+    ///
+    /// A recursive command — `grep -r`, `cp -r` — reaches every file under the
+    /// directory it is given, so a deny rule naming one of them stops the call
+    /// (2.1.268). Claude Code answers that by looking at the filesystem; with
+    /// no walk available this answers it from the rule's own shape, which is
+    /// exact for an anchored pattern and needs one `stat` for a floating one
+    ///.
+    fn covers_under(&self, ctx: &Context<'_>, dir: &Path) -> bool {
+        let Some(base) = self.base(ctx) else {
+            return false;
+        };
+        let dir = normalise(&if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            ctx.cwd.join(dir)
+        });
+        if self.any_depth {
+            // A bare filename floats to every depth, so the rule names
+            // something under `dir` exactly when such a file is there. Only the
+            // immediate child is checkable without walking, which is the common
+            // case and the documented limit.
+            let Some(resolve) = ctx.realpath else {
+                return false;
+            };
+            return resolve(&dir.join(&self.segments[0])).is_some();
+        }
+        // Anchored: the pattern's fixed prefix is what it can reach.
+        let mut prefix = base;
+        for seg in &self.segments {
+            if seg.contains('*') || seg.contains('?') || seg.contains('[') {
+                break;
+            }
+            prefix.push(seg);
+        }
+        let prefix = normalise(&prefix);
+        prefix != dir && prefix.starts_with(&dir)
+    }
+
+    /// `matches_one` with the base and remaining segments supplied, so a
+    /// resolved prefix can stand in for the spelled one.
+    fn matches_from(&self, base: &Path, segments: &[String], file: &Path) -> bool {
+        let file = normalise(file);
+        let base = normalise(base);
+        let Ok(rel) = file.strip_prefix(&base) else {
+            return false;
+        };
+        let parts: Vec<&str> = rel
+            .to_str()
+            .unwrap_or_default()
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        segments_match(segments, &parts)
     }
 
     /// Whether this pattern covers one spelling of a file.
@@ -1549,12 +1723,53 @@ impl Policy {
 
     /// Every rule in this policy that cannot do what it says.
     pub fn problems(&self) -> Vec<(bool, String)> {
-        self.deny
+        let out: Vec<(bool, String)> = self
+            .deny
             .iter()
             .chain(&self.ask)
             .chain(&self.allow)
             .flat_map(Rule::problems)
-            .collect()
+            .collect();
+        out
+    }
+
+    /// Paths a `Read` deny protects from being read and not from being
+    /// overwritten.
+    ///
+    /// A `Read` deny stops a *file tool* writing the path, and in a shell it
+    /// reaches only the commands Claude Code recognises by name: it refuses
+    /// `echo x | tee .env` and runs `echo x > .env` and `touch .env`. The
+    /// reference says otherwise, and the running product is what this matcher
+    /// has to agree with — so `never_auto = ["Read(.env)"]` on its own reads
+    /// like "nothing may touch `.env`" and is not that.
+    ///
+    /// **Deliberately not a `problem`.** `problems()` answers "which rules
+    /// cannot do what they say", and this rule does exactly what it says. It
+    /// is a suggestion about a gap between the rule and what people expect,
+    /// and `Read(.env)` is the most common rule anybody writes — so raising it
+    /// as a warning would fire on the canonical example and teach people to
+    /// ignore warnings. `vibeplane check` prints it once, as advice.
+    pub fn half_protected_paths(&self) -> Vec<String> {
+        fn spelled(r: &Rule) -> Option<&str> {
+            match &r.spec {
+                Spec::Path(_) => Some(r.as_str().split_once('(')?.1.trim_end_matches(')')),
+                _ => None,
+            }
+        }
+        let mut out = Vec::new();
+        for rule in &self.deny {
+            if !rule.tool.as_str().eq_ignore_ascii_case("Read") {
+                continue;
+            }
+            let Some(path) = spelled(rule) else { continue };
+            let covered = self.deny.iter().any(|other| {
+                other.tool.as_str().eq_ignore_ascii_case("Edit") && spelled(other) == Some(path)
+            });
+            if !covered {
+                out.push(path.to_string());
+            }
+        }
+        out
     }
 }
 
@@ -1613,14 +1828,118 @@ mod tests {
     }
 
     #[test]
-    fn a_read_deny_also_stops_a_shell_command_writing_that_file() {
-        // "Never look at `.env`" plainly also means "never replace it", and
-        // that reach has to survive the trip through a redirection too.
+    fn the_two_bracket_mistakes_are_told_apart() {
+        // Both are fatal and they are different mistakes; telling somebody the
+        // wrong one costs them the afternoon. Claude Code reports text after a
+        // closing bracket as invalid settings since 2.1.260, having silently
+        // ignored it before — and silently ignored is the shape this whole
+        // layer exists to refuse.
+        let after = Rule::parse("Bash(ls) x", Class::Allow);
+        let unclosed = Rule::parse("Bash(ls", Class::Allow);
+        let say = |r: &Option<Rule>| {
+            r.as_ref()
+                .map(|r| {
+                    r.problems()
+                        .iter()
+                        .map(|(_, m)| m.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+                .join(" ")
+        };
+        assert!(
+            say(&after).contains("text after its closing bracket"),
+            "got: {}",
+            say(&after)
+        );
+        assert!(say(&after).contains("did you mean `Bash(ls)`"));
+        assert!(say(&unclosed).contains("missing its closing bracket"));
+        // Both are errors rather than notes: the rule does nothing at all.
+        for r in [&after, &unclosed].into_iter().flatten() {
+            assert!(r.problems().iter().any(|(fatal, _)| *fatal));
+        }
+    }
+
+    #[test]
+    fn a_read_deny_on_its_own_says_so() {
+        // The rule does what it says; what it does not say is the part people
+        // get wrong, and a supervision tool whose prohibition is half a
+        // prohibition should be the one to mention it.
+        let half = Policy::new(&[], &["Read(.env)".into()]);
+        assert_eq!(half.half_protected_paths(), vec![".env".to_string()]);
+        // Both halves present: nothing to say.
+        let whole = Policy::new(&[], &["Read(.env)".into(), "Edit(.env)".into()]);
+        assert!(whole.half_protected_paths().is_empty());
+        // An allow rule is not a prohibition, so it is not mentioned.
+        let allow = Policy::new(&["Read(src/**)".into()], &[]);
+        assert!(allow.half_protected_paths().is_empty());
+        // And it stays out of `problems`, which answers a different question —
+        // "which rules cannot do what they say" — because `Read(.env)` does
+        // exactly what it says. Raising it there would fire on the most common
+        // rule anybody writes and teach people to ignore warnings.
+        assert!(!half.problems().iter().any(|(_, m)| m.contains("Edit(")));
+    }
+
+    #[test]
+    fn a_read_deny_reaches_a_write_by_a_command_on_the_list_and_no_further() {
+        // "Never look at `.env`" also means "never replace it" — for the
+        // commands Claude Code recognises by name, and for nothing else.
+        //
+        // This test used to assert the tidier rule, that a `Read` deny covers
+        // every write to the path, and the reference supports it: *"Read and
+        // Edit deny rules apply … to the targets of Bash redirections such as
+        // `> file`"*. The running product disagrees on two of the three, and
+        // the harness's deny axis is what surfaced it: under `Read(.env)` it
+        // refuses `echo x | tee .env` and **runs** `echo x > .env` and
+        // `touch .env`. `tee` is on its list; a redirect and a bare create are
+        // `Edit` business.
         let p = Policy::new(&[], &["Read(.env)".into()]);
-        assert!(matches!(
-            p.evaluate(&ctx(), "Bash", &bash("echo x > .env")),
-            Verdict::Deny { .. }
-        ));
+        assert!(
+            matches!(
+                p.evaluate(&ctx(), "Bash", &bash("echo x | tee .env")),
+                Verdict::Deny { .. }
+            ),
+            "tee is a recognised file command"
+        );
+        for runs in ["echo x > .env", "touch .env"] {
+            assert_eq!(
+                p.evaluate(&ctx(), "Bash", &bash(runs)),
+                Verdict::Undecided,
+                "{runs} is a write no Read rule speaks for"
+            );
+        }
+        // An `Edit` deny is what covers those, and it still does.
+        let e = Policy::new(&[], &["Edit(.env)".into()]);
+        for blocked in ["echo x > .env", "touch .env", "echo x | tee .env"] {
+            assert!(
+                matches!(
+                    e.evaluate(&ctx(), "Bash", &bash(blocked)),
+                    Verdict::Deny { .. }
+                ),
+                "{blocked} writes .env"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_flag_is_a_property_of_the_command_not_of_the_spelling() {
+        // `-n` takes a value for `head` and takes none for `sed`. One shared
+        // list meant `sed -n 1p .env` spent `1p` on the flag and `.env` on the
+        // script, so it named no file and `Read(.env)` stopped nothing.
+        // A WIDER row from the harness's deny axis.
+        let p = Policy::new(&[], &["Read(.env)".into()]);
+        for cmd in ["sed -n 1p .env", "grep -n TOKEN .env", "head -n 1 .env"] {
+            assert!(
+                matches!(p.evaluate(&ctx(), "Bash", &bash(cmd)), Verdict::Deny { .. }),
+                "{cmd} reads .env"
+            );
+        }
+        // And the value must still be skipped where it is one.
+        assert!(
+            !crate::core::command::file_targets("head -n 5 README.md")
+                .iter()
+                .any(|t| t.path == "5")
+        );
     }
 
     #[test]
@@ -1852,6 +2171,139 @@ mod tests {
             p.evaluate(&linked_ctx(), "Read", &escaping),
             Verdict::Undecided,
             "a link out of the approved tree stops being approved"
+        );
+    }
+
+    #[test]
+    fn an_exact_rule_naming_a_compound_approves_that_compound() {
+        // Found by the harness's deny axis on its first run: the probe grants
+        // `Bash(<exact line>)` for a line ending `; git config …`, Claude Code
+        // ran it, and this matcher said `undecided` — because the allow side
+        // only ever matched the *split parts*, and neither part is the rule.
+        // A rule with no wildcard in it names one command, and a compound
+        // spelled out in full is one command.
+        let p = Policy::new(&["Bash(cat a.txt ; echo done)".into()], &[]);
+        assert!(matches!(
+            p.evaluate(&ctx(), "Bash", &bash("cat a.txt ; echo done")),
+            Verdict::Allow { .. }
+        ));
+        // …and only for a line with no nesting and no pipe. The running
+        // product does not honour a whole-line rule over a subshell, a
+        // substitution or a pipe, and honouring one here auto-approved four
+        // calls it puts in front of a person.
+        // A **command substitution** is not a nesting a whole-line rule has to
+        // refuse: the running product honours one. A **subshell** and a
+        // **pipe** are, and honouring those auto-approved four calls it puts
+        // in front of a person.
+        assert!(matches!(
+            Policy::new(&["Bash(cat \"$(echo a.txt)\" ; npm run build)".into()], &[]).evaluate(
+                &ctx(),
+                "Bash",
+                &bash("cat \"$(echo a.txt)\" ; npm run build")
+            ),
+            Verdict::Allow { .. }
+        ));
+        // The second half must be something that needs a rule, or the
+        // read-only shortcut approves the line and the guard is untested.
+        //
+        // `env` and `sudo` are here for a measured reason and not a symmetric
+        // one: the reference's escape hatch for an exec wrapper — *"write an
+        // exact-match rule for the full command string"* — works for `watch`
+        // and measurably does not work for these. Both were WIDER rows of the
+        // first clean full deny run.
+        for line in [
+            "(cat a.txt) ; npm run build",
+            "cat a.txt | npm run build",
+            "env -C . cat a.txt ; npm run build",
+            "sudo -n cat a.txt ; npm run build",
+        ] {
+            let q = Policy::new(&[format!("Bash({line})")], &[]);
+            assert_eq!(
+                q.evaluate(&ctx(), "Bash", &bash(line)),
+                Verdict::Undecided,
+                "{line} is not answered by a whole-line rule"
+            );
+        }
+        // And the widening the split exists to prevent must stay prevented: a
+        // pattern rule's `*` must never swallow a separator.
+        let w = Policy::new(&["Bash(pnpm test *)".into()], &[]);
+        assert_eq!(
+            w.evaluate(&ctx(), "Bash", &bash("pnpm test && rm -rf /")),
+            Verdict::Undecided,
+            "a wildcard must not reach past a separator"
+        );
+        assert!(matches!(
+            w.evaluate(&ctx(), "Bash", &bash("cd packages/api && pnpm test")),
+            Verdict::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn a_deny_rule_reaches_a_file_named_by_its_real_location() {
+        // The other direction, and the one resolving the accessed path leaves
+        // open: the *rule* names the link. `/tmp` is a symlink to
+        // `/private/tmp` on every Mac, so
+        // `Read(//tmp/**)` stopped `cat /tmp/x` and let `cat /private/tmp/x`
+        // through — the same file, spelled the way the shell prints it.
+        // "Fixed deny/ask rules on symlinked directories (`/etc`, `/tmp`,
+        // `/var`) not applying when the path was given by its real location"
+        // (2.1.268).
+        fn linked_tmp(p: &Path) -> Option<PathBuf> {
+            let s = p.to_str()?;
+            // `/tmp` and everything under it live at `/private/tmp`; every
+            // other path is already where it says it is. Idempotent, because a
+            // resolver is asked about both spellings.
+            for link in ["/tmp", "/etc"] {
+                if s == link || s.starts_with(&format!("{link}/")) {
+                    return Some(PathBuf::from(format!("/private{s}")));
+                }
+            }
+            Some(PathBuf::from(s))
+        }
+        let p = Policy::new(&[], &["Read(//tmp/**)".into()]);
+        let c = ctx().with_realpath(linked_tmp);
+        for spelling in ["/tmp/x", "/private/tmp/x"] {
+            assert!(
+                matches!(
+                    p.evaluate(&c, "Read", &json!({"file_path": spelling})),
+                    Verdict::Deny { .. }
+                ),
+                "{spelling} is the same file"
+            );
+        }
+        // And it reaches a shell command naming either spelling.
+        for cmd in ["cat /tmp/x", "cat /private/tmp/x"] {
+            assert!(
+                matches!(p.evaluate(&c, "Bash", &bash(cmd)), Verdict::Deny { .. }),
+                "{cmd} should be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recursive_command_is_stopped_by_a_deny_on_what_is_inside() {
+        // "Fixed `grep -r`/`cp -r` over directories with denied files"
+        // (2.1.268). Claude Code answers this by looking; with no walk in the
+        // pure half it is answered from the rule's shape, which is exact for an
+        // anchored pattern.
+        let p = Policy::new(
+            &["Bash(grep *)".into(), "Bash(cp *)".into()],
+            &["Read(secrets/**)".into()],
+        );
+        for cmd in ["grep -r pattern secrets", "cp -r secrets /tmp/x"] {
+            assert!(
+                matches!(p.evaluate(&ctx(), "Bash", &bash(cmd)), Verdict::Deny { .. }),
+                "{cmd} reads every file under secrets/"
+            );
+        }
+        // And must not reach a directory the rule says nothing about, or every
+        // recursive command in a repository with one deny rule would stop.
+        assert!(
+            matches!(
+                p.evaluate(&ctx(), "Bash", &bash("grep -r pattern src")),
+                Verdict::Allow { .. }
+            ),
+            "a deny on secrets/ says nothing about src/"
         );
     }
 

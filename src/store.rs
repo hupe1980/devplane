@@ -15,7 +15,7 @@ use crate::core::run::Run;
 use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// A handle on the observation store.
@@ -139,6 +139,71 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_event).collect()
+    }
+
+    /// Every tool call this machine has observed, newest first, with the
+    /// directory the session was working in.
+    ///
+    /// The directory is what decides whose rules apply, so it comes from the
+    /// run rather than from the event. A run whose row has been pruned is
+    /// dropped rather than evaluated against the wrong project's rules.
+    ///
+    /// Only the tools a path or command rule can speak for; a replay that
+    /// counted `TodoWrite` would report a coverage figure nobody can act on.
+    /// `under` scopes the query to one directory tree. It is applied **in the
+    /// query** rather than after it, because a limit that runs first would
+    /// return the most recent calls on the whole machine and then throw most of
+    /// them away — so a person asking about one project on a busy laptop would
+    /// be told they have no history.
+    pub async fn observed_tool_calls(
+        &self,
+        under: Option<&Path>,
+        limit: i64,
+    ) -> Result<Vec<ObservedCall>> {
+        // `LIKE` with the tree as a prefix. The escape keeps a `%` or `_` in a
+        // real directory name from turning into a wildcard.
+        let prefix = under.map(|p| {
+            let mut t = p.to_string_lossy().into_owned();
+            t = t
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            if !t.ends_with('/') {
+                t.push('/');
+            }
+            format!("{t}%")
+        });
+        let rows = sqlx::query(
+            "SELECT e.payload AS payload, r.cwd AS cwd
+             FROM events e JOIN runs r ON r.id = e.run_id
+             WHERE e.kind = 'tool_started'
+               AND (?1 IS NULL OR r.cwd = ?2 OR r.cwd LIKE ?1 ESCAPE '\\')
+             ORDER BY e.at DESC LIMIT ?3",
+        )
+        .bind(prefix)
+        .bind(under.map(|p| p.to_string_lossy().into_owned()))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let payload: serde_json::Value = serde_json::from_str(&r.get::<String, _>("payload"))?;
+            let Some(tool) = payload.get("tool").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            if crate::core::policy::rule_content_field(tool).is_none() {
+                continue;
+            }
+            out.push(ObservedCall {
+                cwd: PathBuf::from(r.get::<String, _>("cwd")),
+                tool: tool.to_string(),
+                input: payload
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            });
+        }
+        Ok(out)
     }
 
     /// Full-text search across tool commands, questions and summaries.
@@ -597,11 +662,10 @@ impl Store {
             .await?;
         // The attention log goes too, and this is where it was supposed to
         // have been going all along: it is an observation about what Vibeplane
-        // *showed*, one row per item raised, and nothing was removing it. The
-        // architecture notes said it was pruned with the events, `vibeplane
-        // attention` only ever looks back a fixed number of days, and the table
-        // grew without bound on exactly the machines this product is for —
-        // twenty agents raising items all day.
+        // *showed*, one row per item raised, and nothing was removing it.
+        // `vibeplane attention` only ever looks back a fixed number of days,
+        // and the table grew without bound on exactly the machines this product
+        // is for — twenty agents raising items all day.
         //
         // Only rows that have been **resolved**. An item still open is a
         // question somebody has not answered, and age is not an answer.
@@ -677,6 +741,14 @@ fn decode_rows<T: serde::de::DeserializeOwned>(
 }
 
 /// Liveness of one observation channel.
+/// One tool call as it was observed, with the directory whose rules govern it.
+#[derive(Debug, Clone)]
+pub struct ObservedCall {
+    pub cwd: PathBuf,
+    pub tool: String,
+    pub input: serde_json::Value,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChannelHealth {
     pub channel: String,
@@ -751,6 +823,71 @@ fn searchable_text(e: &crate::core::event::Event) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_replay_reads_the_directory_from_the_run_not_the_event() {
+        // The directory decides whose rules apply, and the event does not
+        // carry one. A tool call whose run row is gone is dropped rather than
+        // evaluated against some other project's rules, which would report a
+        // coverage figure about a repository the call never touched.
+        let s = Store::open_in_memory().await.unwrap();
+        let run = crate::core::run::Run::new(
+            crate::core::ids::SessionId::new("s1"),
+            PathBuf::from("/repo"),
+            crate::core::run::RunMode::Observed,
+            "claude",
+        );
+        let run_id = run.id.to_string();
+        s.save_run(&run).await.unwrap();
+        for (rid, tool, input) in [
+            (
+                run_id.as_str(),
+                "Bash",
+                serde_json::json!({"command": "pnpm test"}),
+            ),
+            (
+                run_id.as_str(),
+                "TodoWrite",
+                serde_json::json!({"todos": []}),
+            ),
+            ("gone", "Bash", serde_json::json!({"command": "rm -rf /"})),
+        ] {
+            sqlx::query(
+                "INSERT INTO events (id, at, run_id, project_id, source, kind, payload)
+                 VALUES (?, '2026-09-14T10:00:00Z', ?, NULL, 'hook', 'tool_started', ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(rid)
+            .bind(serde_json::json!({"tool": tool, "input": input}).to_string())
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        }
+
+        let calls = s.observed_tool_calls(None, 100).await.unwrap();
+        assert_eq!(calls.len(), 1);
+        // Scoping happens in the query, so a limit cannot spend itself on other
+        // projects' calls before the filter runs.
+        assert_eq!(
+            s.observed_tool_calls(Some(Path::new("/repo")), 100)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            s.observed_tool_calls(Some(Path::new("/elsewhere")), 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The `TodoWrite` is dropped because no path or command rule can speak
+        // for it, and counting it would make the coverage figure unactionable.
+        // The orphan is dropped because its directory is unknown.
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "Bash");
+        assert_eq!(calls[0].cwd, PathBuf::from("/repo"));
+    }
 
     #[tokio::test]
     async fn a_channel_error_is_kept_with_the_date_it_happened() {
@@ -1012,6 +1149,7 @@ mod tests {
             url: None,
             launch: None,
             work_id: None,
+            suggested_rule: None,
             since: jiff::Timestamp::now(),
         }
     }
@@ -1076,10 +1214,10 @@ mod tests {
     #[tokio::test]
     async fn a_resolved_attention_row_is_pruned_and_an_open_one_is_not() {
         // One row per item raised, on a machine running twenty agents all day,
-        // and nothing was removing them. The architecture notes said this table
-        // was pruned with the events; the sweep never touched it. A documented
-        // behaviour with no code behind it, in the table that measures whether
-        // the inbox is worth reading.
+        // and nothing was removing them: this table was meant to be pruned with
+        // the events and the sweep never touched it. A documented behaviour
+        // with no code behind it, in the table that measures whether the inbox
+        // is worth reading.
         //
         // Resolved rows only. An item still open is a question nobody has
         // answered, and age is not an answer.
@@ -1093,6 +1231,7 @@ mod tests {
             project_id: None,
             run_id: Some(RunId::new("r1")),
             work_id: None,
+            suggested_rule: None,
             since: jiff::Timestamp::now(),
             options: Vec::new(),
             actions: Vec::new(),

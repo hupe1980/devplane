@@ -152,6 +152,10 @@ pub enum Command {
     ///   vibeplane explain 'pnpm test && rm -rf /'
     ///   vibeplane explain --tool Read .env
     ///   vibeplane explain --tool Agent --input '{"isolation":"worktree"}'
+    ///   vibeplane explain --replay
+    ///
+    /// `--replay` asks the same question of every call already observed and
+    /// names the rule that would stop the interruptions.
     Explain {
         /// The call, for a tool with a plain specifier: a command for `Bash`,
         /// a path for `Read` and `Edit`, a URL for `WebFetch`.
@@ -166,6 +170,13 @@ pub enum Command {
         /// rules apply.
         #[arg(long, default_value = ".")]
         dir: PathBuf,
+        /// Replay every tool call already observed against the current rules,
+        /// and say which rule would answer the ones that reached you.
+        #[arg(long, conflicts_with_all = ["call", "input"])]
+        replay: bool,
+        /// How many of the most recent calls to replay.
+        #[arg(long, default_value_t = 5000)]
+        limit: i64,
     },
     /// Allow Vibeplane to start agents in a repository.
     ///
@@ -351,7 +362,15 @@ pub async fn run(_cli: Cli) -> Result<()> {
             tool,
             input,
             dir,
-        }) => crate::cli::work::cmd_explain(dir, tool, call, input, cli.json),
+            replay,
+            limit,
+        }) => {
+            if replay {
+                crate::cli::work::cmd_replay(dir, limit, cli.json).await
+            } else {
+                crate::cli::work::cmd_explain(dir, tool, call, input, cli.json)
+            }
+        }
         Some(Command::Trust { path }) => cmd_trust(path, cli.json).await,
         Some(Command::Work { what }) => cmd_work(what, cli.json).await,
         Some(Command::Snooze { id, minutes }) => cmd_snooze(&id, minutes, cli.json).await,

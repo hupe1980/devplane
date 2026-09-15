@@ -409,3 +409,49 @@ fn the_work_card_reads_only_fields_the_api_serves() {
         "the work card reads fields the API does not serve: {missing:?}"
     );
 }
+
+/// The board's script has to *parse*.
+///
+/// It shipped not parsing. Two `const hit` in one block scope is a
+/// `SyntaxError`, which takes the whole `<script>` with it — so `vibeplane
+/// open` served a page that rendered its chrome, said "connecting", and never
+/// fetched anything. Every other test here reads the page as *text*: they
+/// check that the fields the page names match the ones the API serves, which
+/// stays true of a file that cannot run at all.
+///
+/// Shelling out to `node --check` rather than linking a JavaScript parser: the
+/// page is 900 lines of plain script, the check is the one a browser does, and
+/// a parser crate would be a dependency bought for a single assertion. Skipped
+/// with a printed note where `node` is absent, and CI has it.
+#[test]
+fn the_board_script_parses() {
+    let script = PAGE
+        .split_once("<script>")
+        .and_then(|(_, rest)| rest.split_once("</script>"))
+        .map(|(body, _)| body)
+        .expect("the board has one inline <script>");
+    assert!(
+        script.len() > 10_000,
+        "extracted {} bytes — the script tags moved",
+        script.len()
+    );
+
+    let dir = std::env::temp_dir().join("vibeplane-ui-contract");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let js = dir.join("board.js");
+    std::fs::write(&js, script).expect("write the extracted script");
+
+    match std::process::Command::new("node")
+        .arg("--check")
+        .arg(&js)
+        .output()
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => panic!(
+            "the board's script does not parse, so the whole page is inert:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(_) => eprintln!("node is not installed; the board's script was not parsed"),
+    }
+    std::fs::remove_file(&js).ok();
+}

@@ -41,6 +41,7 @@ pub mod ids;
 pub mod policy;
 pub mod policy_cache;
 pub mod project;
+pub mod provider;
 pub mod reduce;
 pub mod run;
 pub mod templates;

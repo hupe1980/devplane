@@ -6,7 +6,7 @@ set -u
 cd "$(dirname "$0")/../specs" || { echo "no specs/ (run scripts/fetch-specs.sh)"; exit 1; }
 fail=0; n=0
 chk() { n=$((n+1)); if grep -q -i -E "$3" $2 2>/dev/null; then printf 'OK   %s\n' "$1"; else printf 'MISS %s  (%s ~ /%s/)\n' "$1" "$2" "$3"; fail=1; fi; }
-# ── GitHub Copilot: the second provider that documents all three channels (D116) ─────
+# ── GitHub Copilot: the second provider that documents all three channels ─────
 chk "copilot: hooks accept an http handler"           copilot/hooks-reference.md '"type": "http"'
 chk "copilot: a permission hook must use https"       copilot/hooks-reference.md 'must use .https://. because the response can grant tool permissions'
 chk "copilot: an http preToolUse hook fails open"     copilot/hooks-reference.md 'HTTP .preToolUse. hooks are \*\*fail-open\*\*'
@@ -27,7 +27,7 @@ chk "copilot: prompt content is off by default"       copilot/cli-command-refere
 chk "copilot: the service name names the vendor"      copilot/cli-command-reference.md 'github-copilot'
 chk "copilot: tool rules are kind(specifier)"         copilot/allowing-tools.md "shell\(git:\*\)"
 chk "copilot: deny beats allow"                       copilot/allowing-tools.md 'Deny rules always take precedence'
-# ── The parity rows the CHANGELOG carries and the weekly digest does not (R26) ────────
+# ── The parity rows the CHANGELOG carries and the weekly digest does not ────────
 chk "cc: a Bash tee target is checked as a write"     claude-code/CHANGELOG.md 'the file a Bash .tee. command writes'
 chk "cc: file-command coverage is an open list"       claude-code/permissions.md 'such as .cat., .head., .tail., and .sed.'
 chk "cc: a deny rule reaches a symlink's target"      claude-code/permissions.md 'apply when either the symlink path or its target matches'
@@ -37,7 +37,7 @@ chk "cc: a negation rule is scoped to its source"     claude-code/CHANGELOG.md '
 chk "cc: Cd rules are directory-anchored, not gitignore" claude-code/permissions.md 'anchored to the whole directory path rather than gitignore-style'
 chk "cc: an unparsed command always prompts"          claude-code/permissions.md 'Commands the analysis can.t parse'
 chk "cc: read-only git forms need no prompt"          claude-code/permissions.md 'read-only forms of .git.'
-# ── The surfaces the third index pass found (R22) ────────────────────────────────
+# ── The surfaces the third index pass found ────────────────────────────────
 chk "ultrareview: findings are independently verified"  claude-code/ultrareview.md 'independently reproduced and verified'
 chk "ultrareview: runs in a remote cloud sandbox"       claude-code/ultrareview.md 'remote sandbox|cloud sandbox'
 chk "ultrareview: a non-interactive subcommand exists"  claude-code/ultrareview.md 'claude ultrareview'
@@ -71,7 +71,7 @@ chk "hooks: PostModelSwitch after a model change"   claude-code/hooks.md 'PostMo
 chk "hooks: Elicitation when MCP asks the user"     claude-code/hooks.md 'Elicitation.*\| *When an MCP server requests user input'
 chk "hooks: PermissionDenied on an auto denial"     claude-code/hooks.md 'PermissionDenied.*\| *When auto mode denies'
 # The permission-rule syntax. Six of these were claimed as implemented for months and were
-# not; each row is one way for a deny rule to match nothing without saying so (D72).
+# not; each row is one way for a deny rule to match nothing without saying so.
 chk "policy: :* is a trailing wildcard"             claude-code/permissions.md 'The .:\*. suffix is an equivalent way to write a trailing wildcard'
 chk "policy: :* only at the end"                    claude-code/permissions.md 'only recognized at the end of a pattern'
 chk "policy: a trailing * covers the bare command"  claude-code/permissions.md 'also matches the bare command'
@@ -82,7 +82,7 @@ chk "policy: a bare filename matches any depth"     claude-code/permissions.md '
 chk "policy: single-segment dir floats on deny"     claude-code/permissions.md 'matches a directory named .secrets. at any depth'
 chk "policy: Edit covers every editing tool"        claude-code/permissions.md 'Edit. rules apply to all built-in tools that edit files'
 
-# The files a shell command names (D82). Each of these was a prohibition that
+# The files a shell command names. Each of these was a prohibition that
 # read as protection and provided none until the matcher reached them.
 chk "policy: an output redirect is checked as a write"  claude-code/permissions.md 'as if Claude wrote or read that file directly'
 chk "policy: output redirects use Edit rules"           claude-code/permissions.md 'the check covers your .Edit. allow and deny rules'
@@ -92,7 +92,7 @@ chk "policy: deny rules reach Bash file commands"       claude-code/permissions.
 chk "policy: a Read deny does not reach NotebookEdit"   claude-code/permissions.md 'NotebookEdit isn.t covered'
 chk "policy: no file behind these targets"              claude-code/permissions.md 'aren.t checked'
 
-# The second gate (D87). `PermissionRequest` does not fire in auto mode, so a
+# The second gate. `PermissionRequest` does not fire in auto mode, so a
 # prohibition answered only there does not run in the mode people pick when
 # they are not watching.
 chk "hooks: PreToolUse runs before every tool call"     claude-code/hooks.md 'PreToolUse hooks run before every tool call'
@@ -177,7 +177,7 @@ chk "sdk: settingSources default all"               claude-agent-sdk/typescript.
 # These are documented on the site's v2 pages, which is where the claim that they were
 # "v2, behind unstable_protocol_v2" came from. They are in the *schema's* ungated v1 module,
 # advertised per agent as an initialize capability, and reachable on the SDK's default
-# features — so they are unbuilt here, not unavailable (D76). The SDK checks below pin that.
+# features — so they are unbuilt here, not unavailable. The SDK checks below pin that.
 chk "acp: session/resume"                           acp/v2-session-list.md 'session/resume'
 chk "acp: replayFrom"                               acp/v2-session-list.md 'replayFrom'
 chk "acp: elicitation requestedSchema"              acp/v2-elicitation.md 'requestedSchema'
@@ -197,7 +197,7 @@ chk "opencode openapi: /session"                    opencode/openapi.json '"/ses
 sdk=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'agent-client-protocol-schema-*' 2>/dev/null | sort | tail -1)
 # The provider surfaces added through 2026 that these notes now rest on. Each row was
 # absent from the ledger while its page sat unread in specs/ — the gap R19 is about, and
-# the reason the unit of verification is the row rather than the page (D98).
+# the reason the unit of verification is the row rather than the page.
 chk "hooks: the prompt handler type exists"         claude-code/hooks.md '"type": "prompt"'
 chk "hooks: the agent handler type exists"          claude-code/hooks.md '"type": "agent"'
 chk "hooks: the mcp_tool handler type exists"       claude-code/hooks.md '"type": "mcp_tool"'
