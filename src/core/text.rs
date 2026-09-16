@@ -42,6 +42,39 @@ pub fn tail(s: &str, n: usize) -> String {
     format!("…\n{}", &s[start..])
 }
 
+/// Breaks prose onto lines no wider than `width`, for a terminal.
+///
+/// Word-wrapping rather than clipping, because these are *sentences*: a
+/// finding that explains why a rule grants more than it looks like is useless
+/// with its reason cut off, and a terminal that soft-wraps it puts the
+/// continuation under the left margin where the label column is.
+///
+/// A word longer than `width` — a path, a URL — is left whole on its own line.
+/// Breaking it would make it uncopyable, which is worse than one long line.
+pub fn wrap(s: &str, width: usize) -> Vec<String> {
+    let width = width.max(16);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if line.is_empty() {
+            line.push_str(word);
+        } else if line.chars().count() + 1 + word.chars().count() <= width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut line));
+            line.push_str(word);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// Splits YAML frontmatter from a markdown body.
 ///
 /// Claude Code Skills are `---`-delimited frontmatter followed by the
@@ -129,6 +162,36 @@ mod tests {
             let out = clip(s, w);
             assert!(out.chars().count() <= w.max(1));
         }
+    }
+
+    #[test]
+    fn wrapping_keeps_every_word_and_never_exceeds_the_width() {
+        let s = "a rule that grants more than it looks like is worth a whole sentence";
+        for w in [16, 24, 40, 76] {
+            let lines = wrap(s, w);
+            for l in &lines {
+                assert!(l.chars().count() <= w, "{w}: {l:?}");
+            }
+            assert_eq!(
+                lines.join(" ").split_whitespace().collect::<Vec<_>>(),
+                s.split_whitespace().collect::<Vec<_>>(),
+                "no word may be lost or split"
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_is_left_whole() {
+        // Breaking a path or a URL makes it uncopyable, which is worse than one
+        // long line.
+        let long = "/a/very/long/path/that/exceeds/the/width/entirely";
+        let lines = wrap(&format!("see {long} now"), 20);
+        assert!(lines.iter().any(|l| l == long), "{lines:?}");
+    }
+
+    #[test]
+    fn wrapping_nothing_yields_one_empty_line_rather_than_none() {
+        assert_eq!(wrap("", 40), vec![String::new()]);
     }
 
     #[test]

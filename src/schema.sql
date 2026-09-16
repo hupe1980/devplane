@@ -123,6 +123,11 @@ CREATE TABLE IF NOT EXISTS decisions (
     subject      TEXT NOT NULL,
     outcome      TEXT NOT NULL,
     reason       TEXT,
+    -- The tool the call was, where there was one. Recorded rather than inferred
+    -- from `subject`, because the question `vibeplane rewind` asks -- which of
+    -- these wrote a file through a *shell* -- is answerable exactly from the
+    -- tool name and only guessable from the text.
+    tool         TEXT,
     project_id   TEXT,
     run_id       TEXT,
     work_id      TEXT

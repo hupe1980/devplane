@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Holds concepts/ to its own rules: every cross-file link resolves, every D/R id is unique,
 # every file carries the header block, and no file but ROADMAP.md records unfinished work.
+# The three documents that used to be one: DIRECTION.md is the argument, STATE.md is
+# the authority for every figure, ROADMAP.md is the backlog (D193).
 # A recipe rather than a CI stage because concepts/ is untracked.
 set -u
 cd "$(dirname "$0")/../concepts" || { echo "no concepts/ directory"; exit 1; }
@@ -128,8 +130,11 @@ EOF
 # repeated in twenty files is a figure that rots in nineteen of them, so each one
 # now has a single authority and the rest are checked against it.
 #
-# The authority is the tree where there is one (Cargo.toml), and ROADMAP.md §2
-# otherwise — it is the section a reader is sent to for "what is true today".
+# The authority is the tree where there is one (Cargo.toml), and STATE.md
+# otherwise — the document a reader is sent to for "what is true today". It was
+# ROADMAP.md §2 until the roadmap was split into the argument (DIRECTION.md), the
+# figures (STATE.md) and the backlog; a figures table buried inside a backlog is
+# read on the wrong errand, and it had nowhere to put a date per row.
 # A roadmap item is cited by a stable anchor, never by its position. Five
 # references were pointing at the wrong item before this check existed:
 # PROVIDERS.md sent a reader to "§3 item 5" three times for review-comment
@@ -138,24 +143,50 @@ EOF
 for a in $(grep -rhoE '`#[a-z][a-z-]+`' *.md | sort -u); do
   grep -qF "$a" ROADMAP.md || { echo "unknown roadmap anchor: $a"; fail=1; }
 done
-# And the other direction: a numbered item with no anchor cannot be cited safely.
+# And the other direction: a roadmap heading with no anchor cannot be cited
+# safely. Items used to be numbered (`**7 · Title**`) and are now headings that
+# lead with the anchor (`### #work-view · Title`), which is what made the reorder
+# in this pass free — the numbers were the only thing a reorder could break.
 while read -r item; do
-  echo "$item" | grep -qE '`#[a-z][a-z-]+`' || { echo "ROADMAP.md: item has no anchor -> ${item:0:60}"; fail=1; }
-done < <(grep -E '^\*\*[0-9]+ · ' ROADMAP.md)
+  echo "$item" | grep -qE '^### `?#[a-z][a-z-]+' || { echo "ROADMAP.md: item heading has no anchor -> ${item:0:60}"; fail=1; }
+done < <(grep -E '^### ' ROADMAP.md | grep -v '^### M[0-9]')
 # The positional form these anchors replaced, so it cannot come back.
 if grep -rnE '§[0-9]+ item [0-9]+' *.md | grep -v '"§'; then
   echo "a roadmap item is cited by position; cite its \`#anchor\` instead"; fail=1
 fi
 
-# The released version, against the manifest — the only authority there is.
+# Three versions, and conflating any two of them is how a release goes wrong.
+#
+#   * the **manifest** version — what a build of this tree produces;
+#   * the version these notes **call released** — a claim;
+#   * the version the **forge serves** — the world, checked over the network
+#     further down.
+#
+# They are equal between releases, which is why this guard used to compare the
+# claim straight to the manifest. They are *not* equal while a release is being
+# prepared: the manifest moves first, and for the length of that pass the notes
+# still correctly say the older one is what is published. Comparing the two then
+# fails a tree that is right.
+#
+# What is true at every point: the manifest is never **behind** the version the
+# notes call released. A build older than the published release is the one state
+# that cannot be explained.
 cargo_version=$(grep -m1 '^version = ' ../Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-if [ -n "$cargo_version" ]; then
-  stale=$(grep -lE '\*\*[0-9]+\.[0-9]+\.[0-9]+ (is released|shipped)' *.md 2>/dev/null \
+claimed_release=$(grep -hoE '\*\*[0-9]+\.[0-9]+\.[0-9]+ (is released|shipped)' *.md 2>/dev/null \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+if [ -n "$cargo_version" ] && [ -n "$claimed_release" ]; then
+  # Every file has to agree on which version is the released one.
+  disagree=$(grep -lE '\*\*[0-9]+\.[0-9]+\.[0-9]+ (is released|shipped)' *.md 2>/dev/null \
     | while read -r f; do
         grep -oE '\*\*[0-9]+\.[0-9]+\.[0-9]+ (is released|shipped)' "$f" \
-          | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | grep -qx "$cargo_version" || echo "$f"
+          | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | grep -qx "$claimed_release" || echo "$f"
       done)
-  [ -z "$stale" ] || { echo "the released version is $cargo_version; these say otherwise: $(echo $stale)"; fail=1; }
+  [ -z "$disagree" ] || { echo "these notes call $claimed_release released; these say otherwise: $(echo $disagree)"; fail=1; }
+  # And the manifest may be ahead of it, never behind.
+  if [ "$(printf '%s\n%s\n' "$claimed_release" "$cargo_version" | sort -V | tail -1)" != "$cargo_version" ]; then
+    echo "the manifest is $cargo_version, behind the $claimed_release these notes call released"
+    fail=1
+  fi
 fi
 
 # The widening count (R24) and the provider release behaviour was verified
@@ -164,9 +195,16 @@ fi
 # The count word is matched without its emphasis, since README.md wrote
 # `**fourteen times**` and OVERVIEW.md `**eighteen** times` and the two
 # disagreed for a whole pass under different markup.
-widen=$(grep -rhoiE '(wrong|widened?)[^.]{0,60}?\*{0,2}(four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two)(teen)?\*{0,2} times' *.md \
-  | grep -oiE '(four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-one|twenty-two)(teen)? times' \
+widen=$(grep -rhoiE '(wrong|widened?)[^.]{0,60}?\*{0,2}(four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-(one|two|three|four|five|six|seven|eight|nine)|thirty|thirty-(one|two|three|four|five|six|seven|eight|nine)|forty)(teen)?\*{0,2} times' *.md \
+  | grep -oiE '(four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|twenty-(one|two|three|four|five|six|seven|eight|nine)|thirty|thirty-(one|two|three|four|five|six|seven|eight|nine)|forty)(teen)? times' \
   | tr 'A-Z' 'a-z' | sort -u)
+# The word list above is finite, and a figure that grows past its end makes this
+# check silently stop checking — which is the same failure mode as every other
+# thing in here. So the figure has to be *found*, not merely agree with itself.
+if [ -z "$widen" ]; then
+  echo "the widening count (R24) matched no known number word; extend the list in this script"
+  fail=1
+fi
 if [ "$(echo "$widen" | grep -c .)" -gt 1 ]; then
   echo "the widening count (R24) disagrees with itself: $(echo $widen | sed 's/ times//g')"
   grep -rniE '(wrong|widened?)[^.]{0,60}?\*{0,2}[a-z]+\*{0,2} times' *.md | cut -c1-110 | sed 's/^/  /'
@@ -182,6 +220,100 @@ if [ "$(echo "$provider" | grep -c .)" -gt 1 ]; then
   echo "the provider version verified against disagrees with itself:"
   grep -rniE 'verified against[^|]*Claude Code \*\*[0-9]+\.[0-9]+\.[0-9]+\*\*' *.md | cut -c1-110 | sed 's/^/  /'
   fail=1
+fi
+
+# ── Facts about somebody else's server ───────────────────────────────────────
+# Every guard above is a guard over *this* repository: the test count against the
+# tree, the page against the page, the released version against `Cargo.toml`, the
+# widening count and the anchors against each other. That is why the two wrong
+# figures in the 2026-09-16 pass were both external and neither failed anything —
+# `v0.3.0` was published while STATE.md's ancestor said the tag was unpushed (the guard
+# compared the claim to the manifest, which agreed, because the claim was about
+# GitHub), and Claude Code 2.1.273 had shipped while §2 called 2.1.272 "the
+# current release" (nothing was the authority for that at all).
+#
+# Three requests close them. They are skipped without a word when the network is
+# unavailable, so a clean offline checkout stays green; `VIBEPLANE_NO_NET=1`
+# skips them on purpose.
+#
+# The third was added after the first two had already been written *from a
+# post-mortem*: they fixed the two facts that had just been wrong and not the
+# class, and the class is "any figure about somebody else's machine". The next
+# member showed up one pass later and by hand — the conformance suite pins
+# `@github/copilot@1.0.83` while npm publishes 1.0.85, and a note said the pin
+# "is still the published version". Nothing failed, and nothing could.
+#
+# What is still refused, and the reason has not changed: a link-checker over
+# REFERENCES.md and a star-count refresher. A guard that is slow or flaky is a
+# guard people start skipping, and a skipped guard is how the internal figures
+# rotted before any of this existed. Those stay a person's job once per pass.
+if [ -z "${VIBEPLANE_NO_NET:-}" ] && command -v curl >/dev/null 2>&1; then
+  get() { curl -fsS --max-time 8 "$1" 2>/dev/null; }
+
+  # 1. The release these notes call released, against what the forge serves.
+  #    `releases/latest` redirects to the tag, which is the one answer that
+  #    reflects a *published* release rather than a pushed tag: a tag with no
+  #    release behind it leaves the installer serving the release before it.
+  #    The **claim** is what is compared, never the manifest: during a version
+  #    bump the manifest is deliberately ahead of what is published, and a guard
+  #    that compared it would fail every release preparation.
+  if [ -n "${claimed_release:-}" ]; then
+    latest=$(curl -fsS -o /dev/null -w '%{redirect_url}' --max-time 8 \
+      https://github.com/hupe1980/vibeplane/releases/latest 2>/dev/null | sed 's|.*/tag/||')
+    if [ -n "$latest" ] && [ "$latest" != "v$claimed_release" ]; then
+      echo "these notes call $claimed_release released; the forge serves $latest"
+      fail=1
+    fi
+  fi
+
+  # 2. The changelog floor, against the vendor's changelog head. This is the
+  #    figure `#harness-clock` acts on: a release above the floor is a run owed,
+  #    and the gap between the floor and the head is where a widening — or, in
+  #    2.1.273, a revert that made this matcher stricter than the product — lives
+  #    unseen. One home for the figure, STATE.md, same as every other.
+  read_through=$(grep -E '^\| Changelog read through \|' STATE.md 2>/dev/null \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  if [ -n "$read_through" ]; then
+    head_ver=$(get https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md \
+      | grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    if [ -n "$head_ver" ] && [ "$head_ver" != "$read_through" ]; then
+      echo "the changelog floor is $read_through; Claude Code is at $head_ver — those rows are unread"
+      echo "  (scripts/changelog-rows.sh, then STATE.md 'Changelog read through')"
+      fail=1
+    fi
+  fi
+
+  # 3. What these notes say a registry publishes, against what it publishes.
+  #
+  #    **The pin itself does not move**: nothing here auto-updates, and a
+  #    conformance suite's value is that it ran against a known version. What
+  #    goes stale is the sentence beside it — `#copilot` said the pin "is still
+  #    the published version" while npm had moved on twice, in exactly the blind
+  #    spot the two checks above were written to close and did not generalise
+  #    out of.
+  #
+  #    So this is a *figure* check like every other one here, not a phrase
+  #    heuristic: the first attempt grepped for "still the published version"
+  #    and fired on two files that were *quoting* the stale claim in order to
+  #    retire it. One home for the number — STATE.md — and the rest is
+  #    comparison.
+  #    The pattern was wrong on its first outing, in the way every guard here
+  #    has been wrong at least once: it assumed the bold wrapped the *number*
+  #    (`npm publishes **1.0.85**`) where the file bolds the whole phrase, so it
+  #    matched nothing and passed. A guard that reads as installed and checks
+  #    nothing is the failure this whole file exists to make loud, and it is
+  #    why the check below was run against a deliberately wrong figure before
+  #    being believed.
+  published_claim=$(grep -oE 'npm publishes [0-9]+\.[0-9]+\.[0-9]+' STATE.md 2>/dev/null \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  if [ -n "$published_claim" ]; then
+    published=$(get https://registry.npmjs.org/@github/copilot/latest \
+      | grep -oE '"version":"[0-9]+\.[0-9]+\.[0-9]+"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    if [ -n "$published" ] && [ "$published" != "$published_claim" ]; then
+      echo "these notes say npm publishes @github/copilot $published_claim; it publishes $published"
+      fail=1
+    fi
+  fi
 fi
 
 [ $fail = 0 ] && echo "concepts-check: ok ($(ls *.md | wc -l | tr -d ' ') files)"

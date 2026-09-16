@@ -454,6 +454,69 @@ vibeplane check
 also prints the rules back, allow and deny, because a rule that parses, is legal and still covers
 nothing anybody expected is only visible by reading it.
 
+## Rules that do nothing
+
+`vibeplane check` reports a rule that provably cannot matter, which is a different
+thing from a rule that is malformed:
+
+```console
+$ vibeplane check
+  policy    3 deny, 0 ask, 2 allow
+            deny   Read(*.env)
+            deny   Bash(rm *)
+            allow  Bash(rm -rf /tmp/build)
+            allow  Bash(npm *)
+
+  unused    `Bash(rm -rf /tmp/build)` can never take effect: `Bash(rm *)` is
+            consulted first and answers every call it speaks for
+```
+
+Two findings. An **allow rule a prohibition already covers** can never take
+effect, because deny and ask are consulted first — almost always somebody wrote
+the permission and did not notice the refusal above it. And a **rule an earlier
+rule in the same list already covers** does nothing at all; that is tidiness
+rather than a defect, and it is worth saying because a rule table people keep
+adding to is one nobody removes from.
+
+This is answered by pattern containment — *does every call this rule speaks for
+also reach that one* — rather than by comparing the text, so `Read(.env)` is
+reported as covered by `Read(*.env)`, and `Bash(npm test)` by `Bash(npm *)`.
+
+**It stays quiet when it cannot prove the claim.** A list containing a `!`
+exception, two rules on different tools, a shape the analysis does not handle —
+all produce nothing. Reporting a rule as unused invites you to delete it, so the
+only mistake this is allowed to make is silence.
+
+## Rules that grant more than they look like
+
+The mirror of the check above. In a scan of 3,171 public agent setups, **3.1 % pre-approved arbitrary
+execution through a grant that reads as scoped** — `Bash(python:*)` being the canonical shape.
+
+```console
+$ vibeplane check
+  policy    0 deny, 0 ask, 2 allow
+            allow  Bash(python:*)
+            allow  Bash(npm test *)
+
+  overbroad Bash(python:*)
+            `python` runs whatever follows `-c`, so this approves `python -c
+            '…'` — any code at all. Claude Code reads it the same way
+            narrow it, e.g. Bash(python <the subcommand you mean> *)
+```
+
+**It reports and never decides.** `Bash(python:*)` allows `python -c '…'` here *and in Claude Code*,
+so refusing it would make this gate stricter than the product it mirrors, on a rule you wrote.
+
+**Two shapes only**, so it under-reports rather than guesses: the interpreter with nothing after it
+(`Bash(python:*)`, `Bash(sh -c *)`), and the code flag with a wildcard after it (`Bash(python -c *)`).
+`Bash(python -m pytest *)` and `Bash(python manage.py *)` stay quiet — whether a named script is
+narrow enough is a question about the script.
+
+Rules the gate already refuses to honour are not repeated: `Bash(watch *)` and `Bash(env *)` approve
+nothing whatever they say ([the veto](#the-syntax-is-claude-code-s)), and `Bash(xargs *)` grants
+nothing extra because the wrapper is stripped first. `vibeplane trust` prints the same finding for a
+repository's own `vibeplane.toml`.
+
 ## Globs in a command
 
 The shell expands a wildcard before the program sees it, so a **deny** rule asks of an operand
@@ -467,12 +530,64 @@ deny  Bash
 
 `cat .env*`, `head -c3 .en?` and `cat .en[v]` are refused the same way.
 
+**The rule may carry a wildcard too, and then the question is whether the two can meet.** A rule and
+an operand that are both patterns do not have to look alike to name the same file:
+
+```console
+$ vibeplane explain 'cat conf*'    # never_auto = ["Read(*.env)"]
+deny  Bash
+        by Read(*.env)
+```
+
+Neither pattern matches the other as text, and `conf.env` satisfies both — so the rule fires. The
+same holds for `Read(*.pem)` against `cat server*` and `Read(*.key)` against `cat id_*`.
+
 A wildcard still cannot reach a dotfile, exactly as your shell will not: POSIX expands `*` onto a
 name beginning with `.` only when the pattern spells the dot. `cat *` is not a way to read `.env`.
 
 **Allow rules do not work this way.** A deny that matches too eagerly costs you a prompt; an allow
 that expanded a glob would grant over a set of files nobody wrote down. A command whose operands
 cannot be pinned to a file is never approved by a path rule — it reaches you.
+
+## Quoting does not get past a deny
+
+A shell removes quotes before it decides which program to run, so `r''m -rf /` runs `rm`. A rule is
+matched against the command as written **and** against the command with its quoting removed, so
+neither spelling gets past a prohibition:
+
+```console
+$ vibeplane explain "r''m -rf /tmp/x"    # never_auto = ["Bash(rm *)"]
+deny  Bash
+        by Bash(rm *)
+```
+
+The same applies to operands: `cat '.env'`, `cat .e''nv` and `cat .en\v` are all refused by
+`Read(.env)`.
+
+**Only deny and ask rules read the unquoted form.** Removing quotes can only make more text match,
+and on the allow side that would approve a call whose spelling you never wrote a rule for.
+
+What quoting cannot do, *expansion* still can: `$IFS`, `$(echo rm)` and a backtick name a program
+that is only chosen when the shell runs, and nothing here guesses what it will be. No allow rule
+answers for a call like that — it reaches you, or your provider's own rules decide it.
+
+## Commands too long or too tangled to read
+
+Every analysis has a bound: the number of files one command may name, how deep a substitution is
+followed, and Claude Code's own limit of 10,000 characters past which it *"always prompts"*.
+
+Reaching a bound is reported rather than ignored. A deny rule treats the part nobody read as though
+it could be anything, so a protected file cannot be hidden behind a long enough command line:
+
+```console
+$ vibeplane explain 'cat f1 f2 … f600 .env'   # never_auto = ["Read(.env)"]
+deny  Bash
+        by Read(.env)
+```
+
+This is the conservative direction on purpose. It costs a prompt on a command nobody writes by hand,
+and it closes the alternative — a prohibition that silently stops applying once the command is long
+enough.
 
 ## Auto mode
 

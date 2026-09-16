@@ -2,6 +2,106 @@
 
 Notable changes per release. Dates are UTC.
 
+## 0.4.0 — 2026-09-16
+
+**If you rely on `[policy]`, this is the most important release so far.** Four
+ways a `never_auto` rule could read as protection and not fire, and one way the
+gate could be made slow enough to stop deciding at all — every one a prohibition
+that was written, was legal, and silently did not apply.
+
+Alongside them, four things the tool knew and kept to itself: what trusting a
+repository actually loads, which rules grant more than they look like, how old
+the gate's own measurement is, and which files a shell command wrote past
+Claude Code's checkpoint.
+
+**Upgrading.** `vibeplane trust` now asks, so a script that calls it needs
+`--yes`; without it, a non-interactive stdin is an error rather than a silent
+yes. Your rules are unchanged but may prompt where they did not — that is the
+point of **Fixed**. The decision log gains a column and keeps its rows.
+
+### Fixed
+
+- **A deny rule with a wildcard did not meet an operand with a wildcard.** The
+  matcher asked whether either pattern matched the other *as text*, when the
+  question is whether any filename satisfies both. `never_auto = ["Read(*.env)"]`
+  did not stop `cat conf*`, though the shell expands it onto `conf.env`; the same
+  held for `Read(*.pem)` against `cat server*` and `Read(*.key)` against
+  `cat id_*`. It is now a real pattern intersection, and the property is
+  brute-forced against every name over a small alphabet in the test suite.
+- **A protected file could be pushed past the analysis bounds.** The parser
+  stopped collecting after 64 files or four levels of nesting and said nothing,
+  so `cat f1 … f80 .env` and a substitution nested deeply enough both reached
+  *undecided* under `Read(.env)`. The bounds are higher and, more importantly,
+  reaching one is now reported: a deny rule treats the part nobody read as
+  though it could be anything.
+- **Quoting got past a deny.** A shell removes quotes before choosing the
+  program, so `r''m -rf /` runs `rm` — and a `Bash(rm *)` deny matched against
+  the text as written did not see it. Deny and ask rules are now matched against
+  the unquoted form as well. Allow rules are not: removing quotes can only make
+  more text match, which on that side would approve a spelling nobody wrote a
+  rule for. This is the quote-removal class from the **GuardFall** study of
+  eleven coding agents' command guards, ten of which had it.
+- **A long command line could make the gate slow enough to stop deciding.**
+  Every rule re-parsed the whole command, so a forty-rule policy parsed it forty
+  times — 97 ms on a long line, on the synchronous hook your session is blocked
+  on, where a hook that reaches its timeout renders no decision and the call
+  proceeds. A command is now parsed once however many rules ask about it, and a
+  line past the 10,000 characters the analysis reads is answered without being
+  parsed at all. Worst case measured: **0.11 ms**.
+
+### Added
+
+- **`vibeplane rewind <run>`** names the files a shell command wrote that
+  Claude Code's `/rewind` will not restore — its checkpoint tracks only what its
+  own editing tools touched. A read over the decision log; no snapshots and no
+  copies of your files. It says *named for writing* rather than *changed*,
+  because the gate sees a call before it runs, and it leaves out refused calls
+  and paths nothing can pin to one file.
+- **`vibeplane doctor` says how old the gate's measurement is.** Two numbers:
+  `measured`, the last release the full differential run was green against, and
+  `rows`, the last release whose rule-relevant changelog entries are all
+  accounted for — the second is not a compatibility claim and says so. When no
+  session reports a version it says that rather than implying no gap. The board
+  shows it too, and only when there is one.
+- **`vibeplane trust` lists what it is about to trust** before it asks: every
+  `command` hook and its event, every MCP server with the unpinned ones named,
+  every skill whose front matter pre-approves the shell, and every `[policy]`
+  rule that grants more than it looks like. `--dry-run` prints it and trusts
+  nothing; `--yes` skips the prompt. It reports and refuses nothing, and a
+  repository that declares none of this says so in one line.
+- **`vibeplane check` reports a rule that grants more than it looks like.**
+  `Bash(python:*)` reads as a permission for one interpreter and approves
+  `python -c '…'`. Claude Code reads it the same way, so this is reported and
+  **not** refused. Two shapes only — the interpreter alone, and the code flag
+  with a wildcard after it — so `Bash(python -m pytest *)` stays quiet. In
+  `--json` as `overbroad`.
+- **`vibeplane check` reports rules that provably do nothing**: an `auto_allow`
+  a `never_auto` already covers, and a rule an earlier one in the same list
+  covers. Answered by pattern containment, so `Read(.env)` is reported as
+  covered by `Read(*.env)`. Silent on anything it cannot prove. In `--json` as
+  `unused`.
+- **An agent-facing index at `/llms.txt`**, held to the command list by a test.
+
+### Changed
+
+- **`vibeplane diagnostics` is now `vibeplane doctor`**, which is what the
+  documentation has always called it. Both spellings still work.
+- **The board reads as a table again.** Costs and context percentages sat behind
+  a cell with no width, so one session on `cli` rather than `claude-vscode`
+  shifted every number after it. Rows are also denser — twenty sessions fit on a
+  screen — and quieter: the session id is no longer the brightest thing on a row,
+  and a run whose state wants a person carries the same left accent bar as the
+  inbox card above it.
+- **The board works on a narrow screen**, where it used to scroll sideways.
+  Below 46rem the scanning columns give way and the summary takes its own line.
+- **Accessibility: the page declares a language, Tab stays inside an open
+  dialog, and a dialog dims the page behind it in dark mode as well as light.**
+- **Findings wrap** instead of handing the terminal one long line whose
+  continuation lands under the label.
+- **The gate is stricter in four places and looser in none.** Each fix above
+  costs at most a prompt on a call that used to run unasked. If a rule of yours
+  starts prompting where it did not, that is a call it was always meant to cover.
+
 ## 0.3.0 — 2026-09-15
 
 The permission gate runs as a `command` hook instead of reaching the daemon, and

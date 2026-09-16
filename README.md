@@ -42,7 +42,7 @@ link.
 
 > **Status: early, but the whole loop runs** — watching, driving, verified work, declared pipelines,
 > resumable sessions, the decision log, and an inbox that measures whether it is worth reading.
-> Built against Claude Code 2.1.272 on a machine with 23 live sessions; the permission harness last
+> Built against Claude Code 2.1.273 on a machine with 23 live sessions; the permission harness last
 > ran in full against 2.1.270.
 
 ## 🤔 Why
@@ -80,9 +80,10 @@ vibeplane issues             # every open issue across your projects, what needs
 vibeplane prs                # every open pull request, the same way
 vibeplane open               # the board in a browser, updating live
 
-vibeplane trust .            # once per repository, before any agent starts in it
+vibeplane trust .            # shows the hooks, MCP servers and skills you are about to allow
 vibeplane work start "fix the flaky login test" --kind bug
 vibeplane work show <id>     # where it got to, what it cost, what the checks said
+vibeplane rewind <run>       # files a shell command wrote past Claude Code's checkpoint
 vibeplane audit              # what Vibeplane decided, and on whose authority
 vibeplane attention          # whether the inbox is worth reading, per kind
 vibeplane explain --replay   # which rule to write so it stops asking
@@ -148,6 +149,13 @@ steps = [
 otherwise surface several minutes and one model call later: a `back_to` naming a step that does not
 exist, a gate nobody declared, an `include` that leaves the repository, a review loop with no check
 behind it, and a permission rule that cannot match anything.
+
+It also reports the two kinds of rule that are *legal* and wrong: one that **provably does nothing**,
+because a prohibition above it already answers every call it speaks for, and one that **grants more
+than it looks like** — `Bash(python:*)` reads as a narrow permission for one interpreter and approves
+`python -c '…'`, which is any code at all. Claude Code reads that rule the same way, so Vibeplane
+reports it and does not refuse it; the narrowing is yours to write. In a scan of 3,171 public agent
+setups, 3.1 % carried a grant of exactly that shape.
 
 **Spec-driven development gets the one thing the category leaves out.** Every spec tool ships a
 consistency checker and none of them decides: Spec Kit's `/speckit.analyze` is *"STRICTLY
@@ -259,6 +267,15 @@ It asks on **two axes**: an `auto_allow` list answering *did Claude Code run it?
 list answering *did Claude Code refuse?*. Its last full run, against Claude Code 2.1.270, was clean
 on both — 176 deny cases and 126 allow cases, no reproducible disagreement. **It has not been re-run
 since the current matcher shipped**, and a harness result is true only of the code it ran against.
+Seven deny shapes have been added since that run and have never been put to a running Claude Code.
+
+It is also not the only instrument, and this month it was not the one that found anything. Four ways
+a rule could read as protection and not fire were found by stating what the matcher claims to
+guarantee and checking it exhaustively — a brute-force reference for the pattern matchers, a
+soundness test for what it means for two wildcards to meet, a fuzzer that asserts the evaluator never
+panics, and a counter holding it to one parse per command. The differential harness cannot find a
+defect on a shape neither side generates: there, this matcher and Claude Code are wrong together and
+the run comes back clean.
 
 `scripts/changelog-rows.sh` covers the other half: it fails the build until every row of Claude
 Code's changelog that could change a verdict is written down as covered, or declined with a reason.
@@ -330,6 +347,53 @@ provider
 ```
 
 [Which surfaces →](https://hupe1980.github.io/vibeplane/docs/cli/#vibeplane-doctor)
+
+## ⏱ The gate says how old its own measurement is
+
+The permission rules are written in **Claude Code's own syntax**, so the running product can be asked
+the same question and a disagreement fails the build. That check is only true on the day it runs, so
+its age is printed rather than hidden:
+
+```console
+$ vibeplane doctor
+gate
+  measured  Claude Code 2.1.270
+            3 releases behind a session on this machine (2.1.273)
+  rows      changelog rows cleared through 2.1.273 (not a compatibility claim)
+```
+
+`measured` is the last release the full differential run was green against. `rows` is the last
+release whose rule-relevant changelog entries are all accounted for — a statement about the ledger,
+not a compatibility claim. The board shows the gap too, and only when there is one.
+
+## 🔍 Trust is a decision, so it shows you the evidence
+
+`vibeplane trust` is the one deliberate act here: it lets headless agents start in a directory, and a
+headless agent runs **that repository's own hooks and MCP servers** with no dialog of its own. So it
+prints what those are before it asks.
+
+```console
+$ vibeplane trust .
+  starting an agent here loads this repository's own:
+
+  hook    ./scripts/guard.sh
+          runs on every PreToolUse in this repository
+  mcp     notes
+          `notes-mcp` has no version pin, so starting an agent fetches and
+          runs whatever is published at that name today
+  skill   Bash
+          this skill pre-approves Bash for whoever installs it, so those
+          calls are not asked about
+
+  Trust this repository? [y/N]
+```
+
+In a scan of 3,171 public agent setups, **16.0 % carried a confirmed defect** of one of these kinds.
+`--dry-run` prints the list and trusts nothing — the form to run on somebody else's repository before
+you clone it.
+
+It **reports and refuses nothing**: a `PreToolUse` hook is a normal thing to ship. It is shallow on
+purpose, too — it does not open the script a hook names.
 
 ## ⚙️ How it works
 
@@ -423,8 +487,9 @@ lands in the document; it needs `node`, and skips where there is none.
 
 ## 📓 Changes
 
-[CHANGELOG.md](CHANGELOG.md). 0.2.0 changes what two permission rules cover; read
-**Changed** before upgrading.
+[CHANGELOG.md](CHANGELOG.md). The unreleased entry fixes four ways a `never_auto`
+rule could read as protection and not fire — read **Fixed** before upgrading if
+you rely on `[policy]`.
 
 ## ⚖️ License
 

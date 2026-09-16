@@ -129,6 +129,50 @@ pub fn unapprovable_by_prefix(command: &str) -> Option<String> {
     None
 }
 
+/// Programs that take the code they run **on their own command line**, so a
+/// prefix rule naming one grants whatever that code turns out to be.
+///
+/// `Bash(python:*)` matches `python -c 'import os; os.system("…")'` and answers
+/// `allow`, because the command *is* the one the rule names. **Claude Code
+/// allows it too** — which is why this list may only ever produce a *report*
+/// and must never change a verdict. A scan of 3,171 public agent setups found
+/// **3.1 %** pre-approving arbitrary execution through a grant of this shape.
+///
+/// Deliberately absent: [`EXEC_WRAPPERS`] and [`ANALYSIS_BARRIERS`], which
+/// [`unapprovable_by_prefix`] already refuses to approve; and `xargs`,
+/// `timeout` and `nohup`, which [`strip`] removes before matching. Reporting
+/// either would be warning about a hole that is closed.
+const RUNS_GIVEN_CODE: &[(&str, &str)] = &[
+    ("sh", "-c"),
+    ("bash", "-c"),
+    ("zsh", "-c"),
+    ("dash", "-c"),
+    ("ksh", "-c"),
+    ("fish", "-c"),
+    ("python", "-c"),
+    ("python3", "-c"),
+    ("node", "-e"),
+    ("deno", "eval"),
+    ("bun", "-e"),
+    ("ruby", "-e"),
+    ("perl", "-e"),
+    ("php", "-r"),
+    ("Rscript", "-e"),
+    ("osascript", "-e"),
+];
+
+/// Whether `program` runs code handed to it on the command line, and the flag
+/// that does it — for the sentence a report prints.
+///
+/// See [`RUNS_GIVEN_CODE`]: this drives `vibeplane check` and the trust scan,
+/// and nothing that decides a call.
+pub fn runs_given_code(program: &str) -> Option<&'static str> {
+    RUNS_GIVEN_CODE
+        .iter()
+        .find(|(p, _)| *p == program)
+        .map(|(_, flag)| *flag)
+}
+
 /// The programs Claude Code documents by name as read-only.
 ///
 /// The reference's set is *"`ls`, `cat`, `echo`, `pwd`, `head`, `tail`,
@@ -346,15 +390,33 @@ fn balanced_group(body: &str) -> bool {
 ///
 /// What a deny or ask rule is matched against, one at a time.
 pub fn nested_commands(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    collect(text, &mut out, 0);
-    out
+    nested_commands_bounded(text).0
 }
 
-fn collect(text: &str, out: &mut Vec<String>, depth: usize) {
+/// The same split, with whether it ran out of room.
+///
+/// A caller matching rule *text* can ignore the flag: an unread command is one
+/// more string that might have matched, and missing it costs the same prompt
+/// the unread command would have cost. A caller collecting *file targets*
+/// cannot, because there the unread remainder is the difference between "names
+/// no protected file" and "nobody looked".
+pub fn nested_commands_bounded(text: &str) -> (Vec<String>, bool) {
+    memo(&SPLITS, text, nested_commands_bounded_uncached)
+}
+
+fn nested_commands_bounded_uncached(text: &str) -> (Vec<String>, bool) {
+    let mut out = Vec::new();
+    let mut truncated = false;
+    collect(text, &mut out, 0, &mut truncated);
+    (out, truncated)
+}
+
+fn collect(text: &str, out: &mut Vec<String>, depth: usize, truncated: &mut bool) {
     // Bounded: a command an agent wrote is untrusted input, and this runs on a
-    // hook a session is blocked on.
-    if depth > 8 || out.len() > 256 {
+    // hook a session is blocked on. Reaching a bound is reported rather than
+    // swallowed — see `Targets`.
+    if depth > MAX_DEPTH || out.len() >= MAX_COMMANDS {
+        *truncated = true;
         return;
     }
     for part in split_top_level(text) {
@@ -378,7 +440,7 @@ fn collect(text: &str, out: &mut Vec<String>, depth: usize) {
         out.push(part.clone());
         // And anything nested inside it.
         for inner in nested_spans(&part) {
-            collect(&inner, out, depth + 1);
+            collect(&inner, out, depth + 1, truncated);
         }
     }
 }
@@ -571,6 +633,51 @@ fn split_top_level(text: &str) -> Vec<String> {
         i += 1;
     }
     out.push(b[start..].iter().collect::<String>());
+    out
+}
+
+/// The command with shell quoting removed, so a rule is matched against the
+/// word the shell will build rather than the spelling the model produced.
+///
+/// `r''m -rf /home` runs `rm`; a deny written `Bash(rm *)` is matched against
+/// the text and therefore does not see it. The published name for the class is
+/// **GuardFall** — eleven agents tested, ten with the gap, and the one that
+/// closed it did so by evaluating *"the way bash does, before applying security
+/// rules"*. Operand matching here has always dequoted, because targets are
+/// extracted word by word; the command **text** path had not, and that
+/// asymmetry is the whole bug.
+///
+/// Used for **restrictive rules only**. Removing quotes can only make more
+/// text match, so on the allow side it would approve a call whose spelling
+/// nobody wrote a rule for — the one direction this module is never allowed to
+/// be wrong in.
+///
+/// Quote removal as the shell does it: a `'` outside double quotes and a `"`
+/// outside single quotes are syntax and disappear; a backslash outside single
+/// quotes escapes the next character and disappears. What is deliberately *not*
+/// done is expansion — `$IFS` and `$(echo rm)` name something known only at
+/// runtime, and inventing a value for them would be guessing rather than
+/// canonicalising. Those stay unanalysable, and `unapprovable_by_prefix` is
+/// what keeps an allow rule off them.
+pub fn dequoted(command: &str) -> String {
+    if !command.contains(['\'', '"', '\\']) {
+        return command.to_string();
+    }
+    let mut out = String::with_capacity(command.len());
+    let (mut single, mut double) = (false, false);
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '\\' if !single => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
     out
 }
 
@@ -1051,8 +1158,10 @@ mod tests {
 
     #[test]
     fn a_barrier_command_is_looked_through() {
-        // "Fixed Bash permission checks missing deny rules with `env -C`,
-        // `eval`, or similar unanalyzable commands."
+        // A deliberate narrowing, not a vendor behaviour being tracked: the
+        // product hands a barrier's argument through opaquely, and 2.1.268's
+        // claim to the contrary was reverted in 2.1.273. These stay because a
+        // deny a quote can step around is not a deny; the cost is a prompt.
         assert!(reads("env -C . cat .env", ".env"));
         assert!(reads("env FOO=bar cat .env", ".env"));
         assert!(reads("env -u PATH -C /tmp cat .env", ".env"));
@@ -1378,13 +1487,19 @@ const RECURSIVE_FLAGS: &[&str] = &["-r", "-R", "--recursive", "-rn", "-nr", "-ri
 /// would make `Bash(env *)` narrower here than there. Looking through them
 /// only ever adds targets, which only ever reaches deny rules and writes.
 ///
-/// **`eval` is here on purpose and is the one measured divergence.** The
-/// running product treats the string it is handed as opaque and runs
-/// `eval "cat .env"` under a `Read(.env)` deny; this does not. A prohibition
-/// that any agent can step around by quoting is not a prohibition, and the
-/// cost of the divergence is a prompt rather than a refusal. It is declared in
-/// `scripts/verify-permissions-diff.sh` so the harness reports it as a choice
-/// rather than as a finding.
+/// **Every one of them is a measured divergence, and looking through them is a
+/// choice rather than a reading.** The running product treats what a barrier is
+/// handed as opaque: it runs `eval "cat .env"` and `env -C . cat .env` under a
+/// `Read(.env)` deny, and this does not. A prohibition that any agent can step
+/// around by quoting is not a prohibition, and the cost is a prompt rather than
+/// a refusal. All five shapes are declared in
+/// `scripts/verify-permissions-diff.sh` so the harness reports them as choices
+/// rather than as findings.
+///
+/// Claude Code 2.1.268 announced that deny rules would reach these lines and
+/// 2.1.273 reverted it, so the product's documented behaviour now matches what
+/// the deny axis measured against 2.1.270 all along. The list is unchanged by
+/// either release: it was never derived from the changelog.
 const ANALYSIS_BARRIERS: &[&str] = &["env", "eval", "exec", "sudo", "doas"];
 
 /// Flags that consume the word after them, **per command**, so that the `5` in
@@ -1453,22 +1568,165 @@ fn unresolvable(path: &str) -> bool {
 /// The honest limit, which is Claude Code's limit too: a file a program opens
 /// itself is not named here, so a script that writes `.env` is not covered by
 /// anything short of the sandbox.
-pub fn file_targets(text: &str) -> Vec<FileTarget> {
-    let mut out = Vec::new();
-    for part in nested_commands(text) {
+pub fn file_targets(text: &str) -> Targets {
+    memo(&TARGETS, text, file_targets_uncached)
+}
+
+// How many times a command has actually been parsed, as opposed to the memo
+// answering.
+//
+// A counter rather than a stopwatch, for the reason `policy_cache` gives: the
+// property is *one parse per command per evaluation, whatever the rule count*,
+// and a wall-clock assertion for it would be flaky on a loaded machine and
+// fail for reasons that have nothing to do with parsing.
+// Thread-local, because the memo is: a global counter would be inflated by
+// every other test parsing on another thread at the same time.
+#[cfg(test)]
+thread_local! {
+    pub static PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn file_targets_uncached(text: &str) -> Targets {
+    #[cfg(test)]
+    PARSES.with(|c| c.set(c.get() + 1));
+
+    // Claude Code states that a command past this length *"always prompts
+    // because it exceeds what the analysis parses"*. Nothing here reads it
+    // either, so the honest answer is the empty set marked unread: an allow
+    // rule may not speak for it, and a restrictive one may not conclude it
+    // names nothing. Answering before parsing also keeps a 10 KB line from
+    // costing 60 ms on the hook.
+    if text.len() > MAX_ANALYSED {
+        return Targets {
+            list: Vec::new(),
+            truncated: true,
+        };
+    }
+    let mut out = Targets::default();
+    let (commands, split_truncated) = nested_commands_bounded(text);
+    out.truncated |= split_truncated;
+    for part in commands {
         redirect_targets(&part, &mut out);
         file_command_targets(&part, &mut out);
-        if out.len() > 64 {
-            break;
-        }
     }
-    out.dedup();
+    out.list.dedup();
     out
 }
 
+// ---------------------------------------------------------------------------
+// One parse per command, not one per rule
+// ---------------------------------------------------------------------------
+
+/// Every rule in a policy asks about the **same** command line, and each of the
+/// questions below used to re-parse it: `file_targets` for path rules,
+/// `nested_commands` for text rules, once per rule. On a forty-rule policy that
+/// is forty parses of one string, and a line an agent wrote can be long — a
+/// thousand chained commands measured at **97 ms** per evaluation, on the
+/// synchronous hook a session is blocked on.
+///
+/// That is not only slow, it is the shape [the guardrail-timeout
+/// literature](https://arxiv.org/abs/2606.14517) warns about: a `command` hook
+/// that reaches its timeout *renders no decision*, which is fail-open by
+/// another name, and the input that gets it there is chosen by the thing being
+/// governed.
+///
+/// These are **pure functions of their argument**, so a memo keyed on the text
+/// is sound with no invalidation at all — there is nothing to go stale. Four
+/// entries, because one evaluation asks about one command and a pipeline step
+/// may interleave a second.
+fn memo<T: Clone + 'static>(
+    cell: &'static std::thread::LocalKey<Memo<T>>,
+    key: &str,
+    compute: fn(&str) -> T,
+) -> T {
+    if let Some(hit) = cell.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }) {
+        return hit;
+    }
+    let value = compute(key);
+    cell.with(|c| {
+        let mut b = c.borrow_mut();
+        if b.len() >= 4 {
+            b.remove(0);
+        }
+        b.push((key.to_string(), value.clone()));
+    });
+    value
+}
+
+/// One command's split, and whether the split ran out of room.
+type Split = (Vec<String>, bool);
+/// A few recent answers, keyed by the text they were derived from.
+type Memo<T> = std::cell::RefCell<Vec<(String, T)>>;
+
+thread_local! {
+    static TARGETS: Memo<Targets> = const { std::cell::RefCell::new(Vec::new()) };
+    static SPLITS: Memo<Split> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every file a command names, and whether the parse ran out of room.
+///
+/// The second field is the whole point. Each cap below exists because a command
+/// is untrusted input on a synchronous hook, and for a long time each of them
+/// simply stopped collecting — which drops a target, and a dropped target is a
+/// `never_auto` that does not fire. `cat f0 … f79 .env` reached `Undecided`
+/// under `Read(.env)`, and so did a substitution nested past the depth cap.
+///
+/// A cap is now a *fact the caller is told*, so a restrictive rule can treat the
+/// unread remainder as "might be anything" instead of as "nothing". That is the
+/// direction this module is allowed to be wrong in; silence was the other one.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Targets {
+    pub list: Vec<FileTarget>,
+    /// An operand, nesting or command cap was reached, so there is command
+    /// left that nothing here has looked at.
+    pub truncated: bool,
+}
+
+impl std::ops::Deref for Targets {
+    type Target = [FileTarget];
+    fn deref(&self) -> &[FileTarget] {
+        &self.list
+    }
+}
+
+impl IntoIterator for Targets {
+    type Item = FileTarget;
+    type IntoIter = std::vec::IntoIter<FileTarget>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.into_iter()
+    }
+}
+
+impl Targets {
+    /// Room for one more target, and a truncation flag when there is not.
+    ///
+    /// The bound is high enough that no command a person writes reaches it and
+    /// low enough that a generated one cannot make the hook slow: the cost of a
+    /// target is a string and a few segment comparisons per rule.
+    fn room(&mut self) -> bool {
+        if self.list.len() >= MAX_TARGETS {
+            self.truncated = true;
+            return false;
+        }
+        true
+    }
+}
+
+/// The most files one command may name before the parse gives up and says so.
+pub const MAX_TARGETS: usize = 512;
+/// The deepest substitution or subshell the parse descends into.
+const MAX_DEPTH: usize = 16;
+/// The most separate commands one line may split into.
+const MAX_COMMANDS: usize = 1024;
+
 /// The targets of `>`, `>>`, `2>`, `&>` and `<`, ignoring the forms with no
 /// file behind them: `/dev/null`, `2>&1`, `<&3`, here-docs and here-strings.
-fn redirect_targets(text: &str, out: &mut Vec<FileTarget>) {
+fn redirect_targets(text: &str, out: &mut Targets) {
     let b: Vec<char> = text.chars().collect();
     let mut i = 0;
     let mut quote: Option<char> = None;
@@ -1540,7 +1798,10 @@ fn redirect_targets(text: &str, out: &mut Vec<FileTarget>) {
         if word.is_empty() || no_file_behind(&word) {
             continue;
         }
-        out.push(FileTarget {
+        if !out.room() {
+            return;
+        }
+        out.list.push(FileTarget {
             unresolvable: unresolvable(&word),
             path: word,
             access,
@@ -1562,12 +1823,18 @@ fn redirect_targets(text: &str, out: &mut Vec<FileTarget>) {
 /// command from their own arguments and which Claude Code's deny rules now see
 /// past. It does **not** strip them for allow matching — the reference's
 /// wrapper list is fixed and does not contain them.
-fn file_command_targets(text: &str, out: &mut Vec<FileTarget>) {
+fn file_command_targets(text: &str, out: &mut Targets) {
     file_command_targets_at(text, out, 0);
 }
 
-fn file_command_targets_at(text: &str, out: &mut Vec<FileTarget>, depth: usize) {
-    if depth > 4 || out.len() > 64 {
+fn file_command_targets_at(text: &str, out: &mut Targets, depth: usize) {
+    if depth > MAX_DEPTH {
+        // There is command in here that nothing has read. Saying so is what
+        // keeps a deny rule from concluding this line names no protected file.
+        out.truncated = true;
+        return;
+    }
+    if !out.room() {
         return;
     }
     // Redirections first: their targets are not operands. `touch f > /dev/null`
@@ -1671,7 +1938,7 @@ fn past_barrier(program: &str, words: &[String]) -> Option<String> {
 /// own arity decides: `git grep` spends one operand on the pattern and `git
 /// diff` spends none, which is the difference between the two entries in
 /// `GIT_FILE_SUBCOMMANDS`.
-fn git_targets(words: &[String], out: &mut Vec<FileTarget>) {
+fn git_targets(words: &[String], out: &mut Targets) {
     // No option-value scan. `git blame --ignore-revs-file=.env` is the
     // changelog's own example of the 2.1.266 fix and the running product
     // **runs** it under `Read(.env)` — so the fix was inside the recognised
@@ -1727,7 +1994,7 @@ fn git_targets(words: &[String], out: &mut Vec<FileTarget>) {
 }
 
 /// The positional operands of a command, emitting any option values on the way.
-fn positional(words: &[String], out: &mut Vec<FileTarget>, access: Access) -> Vec<String> {
+fn positional(words: &[String], out: &mut Targets, access: Access) -> Vec<String> {
     option_values(words, out, access);
     let program = words
         .first()
@@ -1768,7 +2035,7 @@ fn positional(words: &[String], out: &mut Vec<FileTarget>, access: Access) -> Ve
 /// one target that no rule matches, while a value that is one and goes
 /// unextracted is a deny rule that reads as protection and is none. It reaches
 /// deny rules only: `Via::OptionValue` is excluded from `allow_side_applies`.
-fn option_values(words: &[String], out: &mut Vec<FileTarget>, access: Access) {
+fn option_values(words: &[String], out: &mut Targets, access: Access) {
     for w in words.iter().skip(1) {
         let value = if let Some(rest) = w.strip_prefix('@') {
             rest
@@ -1798,11 +2065,11 @@ fn option_values(words: &[String], out: &mut Vec<FileTarget>, access: Access) {
     }
 }
 
-fn push_target(out: &mut Vec<FileTarget>, path: &str, access: Access, via: Via, subtree: bool) {
-    if out.len() > 64 {
+fn push_target(out: &mut Targets, path: &str, access: Access, via: Via, subtree: bool) {
+    if !out.room() {
         return;
     }
-    out.push(FileTarget {
+    out.list.push(FileTarget {
         unresolvable: unresolvable(path),
         path: path.to_string(),
         access,

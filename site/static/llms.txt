@@ -1,0 +1,58 @@
+# Vibeplane
+
+> A local-first control plane for AI coding agents. One Rust binary that watches every coding-agent session on a machine, drives any agent speaking the Agent Client Protocol, arbitrates each tool call against rules committed to the repository, runs the project's own checks before anything is called done, and writes every decision to an append-only log that names the rule or check behind it. No account, no cloud relay, loopback only.
+
+The one property no other tool in this category has: the permission rules are written in **Claude Code's own syntax**, so the running vendor can be asked the same question and a disagreement fails the build. `vibeplane doctor` prints how stale that measurement is.
+
+## Start here
+
+- [Quickstart](https://hupe1980.github.io/vibeplane/docs/quickstart/): install, connect a provider, reach a populated board.
+- [Install](https://hupe1980.github.io/vibeplane/docs/install/): prebuilt binaries for macOS, Linux and Windows; the shell installer; building from source.
+- [CLI reference](https://hupe1980.github.io/vibeplane/docs/cli/): every command, its flags, its exit codes and its `--json` shape.
+
+## Commands
+
+Every command takes a global `--json` that prints machine-readable output instead of a table. Exit codes: `0` success, non-zero on error; `vibeplane check` exits non-zero when the configuration is unusable.
+
+- `vibeplane serve`: run the daemon in the foreground.
+- `vibeplane ls` (alias `ps`): sessions in play, and anything asking for a person.
+- `vibeplane inbox`: only what needs a human, most urgent first.
+- `vibeplane issues`, `vibeplane prs`: every open GitHub issue or pull request across every registered project.
+- `vibeplane show <run>`: one run in detail — state, cost, context, what its checks said.
+- `vibeplane tail <run>`: follow what a driven agent is saying.
+- `vibeplane search <query>`: tool calls, questions and errors across every session.
+- `vibeplane rewind <run>`: files a shell command named for writing, which Claude Code's own `/rewind` checkpoint does not restore.
+- `vibeplane audit`: what Vibeplane decided, and on whose authority.
+- `vibeplane attention`: whether the inbox is worth reading, per kind.
+- `vibeplane focus <run>`, `vibeplane attach <run>`: raise the editor window that owns a run, or attach a terminal to it.
+- `vibeplane dispatch`: start an agent on a project with something to do.
+- `vibeplane say <run>`, `vibeplane decide <run>`: send a prompt to, or answer a permission from, a driven run.
+- `vibeplane agents`: the agents Vibeplane can drive.
+- `vibeplane check [path]`: read the repository's `vibeplane.toml` and say what it will do. Offline, daemon-free, CI-safe.
+- `vibeplane explain <call>`: what the gate would decide about one call, and why. `--replay` asks it of every call already observed.
+- `vibeplane trust [path]`: allow agents to start in a repository, after printing its hooks, MCP servers, skills and overbroad rules. `--dry-run` prints and trusts nothing.
+- `vibeplane work start|list|show|verify|approve|retry|resume|finish`: work that outlives a session, with the project's gates between steps.
+- `vibeplane snooze <id>`: hide a run's inbox items for a while.
+- `vibeplane open`, `vibeplane watch`: the board in a browser; events as they arrive.
+- `vibeplane doctor` (alias `diagnostics`): channel health, provider, gate staleness, daemon status.
+- `vibeplane connect <provider>`, `vibeplane disconnect <provider>`: install or remove hooks and telemetry, with a backup.
+- `vibeplane stop`: stop the running daemon.
+- `vibeplane hook`, `vibeplane statusline`: read a payload on stdin and forward it. Used by the installed hooks, not typed by a person.
+
+## Configuration
+
+- [Configuration reference](https://hupe1980.github.io/vibeplane/docs/configuration/): the full `vibeplane.toml` — `[gates]`, `[pipelines]`, `[policy]`, `[budget]`, `[workspace]`, `[github]`, `[transcripts]`.
+- [Permissions](https://hupe1980.github.io/vibeplane/docs/permissions/): the rule syntax, which is Claude Code's own; `never_auto`, `always_ask`, `auto_allow`; deny wins in both directions; what a rule cannot see.
+- [Verified done](https://hupe1980.github.io/vibeplane/docs/verified-done/): gates, the done certificate, and why an agent's own report is not one.
+- [Pipelines](https://hupe1980.github.io/vibeplane/docs/pipelines/): declared chains of runs with gates between them, including spec-driven drift checking.
+
+## How it works
+
+- [Architecture](https://hupe1980.github.io/vibeplane/docs/architecture/): one binary, two stores, an event log reduced to state, an append-only decision log.
+- [Observing](https://hupe1980.github.io/vibeplane/docs/observe/): hooks, OpenTelemetry, the agent roster, the optional status-line shim.
+- [Security](https://hupe1980.github.io/vibeplane/docs/security/): the trust gate, loopback-only, where the policy can and cannot fail open, telemetry privacy.
+- [Agents](https://hupe1980.github.io/vibeplane/docs/agents/): driving any ACP agent; the four built in and how to name another.
+
+## Optional
+
+- [Decisions](https://hupe1980.github.io/vibeplane/docs/decisions/): the decision log, what it records and what it deliberately does not.

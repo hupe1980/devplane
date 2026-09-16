@@ -442,7 +442,7 @@ fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
     // why the count is asserted too.
     //
     // Only the phrasings that state the **harness baseline**. "Built against
-    // Claude Code 2.1.272" is a different fact — the release the product was
+    // Claude Code 2.1.273" is a different fact — the release the product was
     // developed and read against — and the two are deliberately different
     // numbers, because one costs a grep and the other costs a signed-in agent
     // and real money. Collapsing them is the mistake this project already made
@@ -492,5 +492,67 @@ fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
         found >= 4,
         "only {found} statements of the gate baseline were found in the published tree; \
          the phrasing changed and this test stopped reading them"
+    );
+}
+
+/// The agent-facing index names every command the binary has.
+///
+/// Agents consult agent-facing documentation 60.5 % of the time against 10.6 %
+/// for ordinary technical docs, and this product's audience is people running
+/// agents — so `llms.txt` is the page most likely to be *read* and the one
+/// nothing was checking. A hand-written index of a thirty-command CLI drifts on
+/// the first rename, and the drift is silent: the file still parses, still
+/// reads well, and describes a binary that no longer exists.
+///
+/// So the list is checked against the source of truth rather than against a
+/// copy of it. `clap` owns the command names; this reads them out of the same
+/// enum the parser is built from.
+#[test]
+fn the_agent_facing_index_names_every_command() {
+    let llms = include_str!("../site/static/llms.txt");
+    let cli = include_str!("../src/cli/mod.rs");
+
+    // The variants of `enum Command`, which is what `--help` prints and what a
+    // person types. Read from the enum body only, so a struct field or a match
+    // arm elsewhere in the file cannot be mistaken for a command.
+    let body = cli
+        .split_once("pub enum Command {")
+        .expect("src/cli/mod.rs must declare `pub enum Command`")
+        .1;
+    let body = &body[..body.find("\n}").expect("the enum must close")];
+
+    let mut missing = Vec::new();
+    for line in body.lines() {
+        let t = line.trim();
+        // A variant sits at one level of indentation and starts with a capital.
+        if !line.starts_with("    ") || line.starts_with("     ") {
+            continue;
+        }
+        let Some(name) = t
+            .split(['{', '(', ','])
+            .next()
+            .map(str::trim)
+            .filter(|n| n.chars().next().is_some_and(char::is_uppercase))
+        else {
+            continue;
+        };
+        // clap's default rename: `WorkStart` -> `work-start`, `Ls` -> `ls`.
+        let mut kebab = String::new();
+        for (i, c) in name.chars().enumerate() {
+            if c.is_uppercase() && i > 0 {
+                kebab.push('-');
+            }
+            kebab.extend(c.to_lowercase());
+        }
+        // `hook` and `statusline` are typed by a hook, never by a person, and
+        // the index says so rather than pretending they are user commands.
+        if !llms.contains(&format!("`vibeplane {kebab}")) {
+            missing.push(kebab);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "site/static/llms.txt does not name: {missing:?} — an agent reading it \
+         would be told about a binary that does not exist"
     );
 }

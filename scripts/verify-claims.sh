@@ -290,6 +290,13 @@ chk "ps: a cmdlet rule matches its aliases"       claude-code/permissions.md 'ma
 chk "ps: matching ignores case"                   claude-code/permissions.md 'Matching is case-insensitive'
 chk "ps: compound commands split like Bash"       claude-code/permissions.md 'A rule must match every subcommand'
 chk "ps: rules use the Bash rule shape"           claude-code/permissions.md 'PowerShell permission rules use the same shape as Bash rules'
+# ── Why an interpreter grant is overbroad *there* as well as here (D200) ──────
+# `vibeplane check` tells people `Bash(python:*)` approves `python -c '…'` and
+# that Claude Code reads it the same way. That second half is a claim about
+# somebody else's product, published in our own README, so it is pinned to the
+# sentence it follows from rather than left as a reading.
+chk "cc: :* is a trailing wildcard"              claude-code/permissions.md 'The `:\*` suffix is an equivalent way to write a trailing wildcard'
+chk "cc: a trailing wildcard takes any argument" claude-code/permissions.md 'npm run test --watch'
 # ── What a path deny does NOT reach, stated by the vendor ─────────────────────
 chk "cc: a deny misses an interpreter's own reads" claude-code/permissions.md 'like a Python or Node script that opens files itself'
 # ── Spec-driven development: the category's analysers report and never decide (D178) ─

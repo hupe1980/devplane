@@ -236,6 +236,31 @@ phrase, not a query language.
 The board has the same search — press <kbd>/</kbd>, or click the box in the header. A match names the
 session it came from and opens it.
 
+### `vibeplane rewind <run>`
+
+Which of a session's files Claude Code's own checkpoint will **not** bring back.
+
+Claude Code snapshots the files its own editing tools touch before each turn, and `/rewind` restores
+them. Its documentation is explicit about the limit: *"files modified by bash commands are not
+tracked."* That is the one class Vibeplane has a complete record of — every tool call the gate saw,
+with the files the command named.
+
+```console
+$ vibeplane rewind s-4f2a
+outside Claude Code's checkpoint for this session
+  build/report.json
+  notes.md
+
+  a shell command named these for writing; /rewind restores only what
+  Claude Code's own editing tools touched
+```
+
+It is a query over the decision log: no snapshots, no storage, no second copy of your files. It says
+**named for writing** rather than *changed*, and the wording is deliberate — the gate sees a call
+before the tool runs, so claiming the file changed would be an answer this evidence does not support.
+A refused call is not listed, and a path nothing can pin to one file — a glob, a `~`, a variable — is
+left out rather than printed as though it named a file.
+
 ### `vibeplane audit [id]`
 
 What Vibeplane decided, and on whose authority. Narrow to a run or a piece of work by id. See
@@ -286,9 +311,28 @@ bar, so it cannot end up in a screenshot or a bookmark.
 
 ### `vibeplane doctor`
 
+Aliased as `vibeplane diagnostics`.
+
 Whether the tool itself is telling you the truth: hook latency, when telemetry was last seen, the
 roster, each channel's last error **with the date it happened**, and any project whose
 `vibeplane.toml` will not parse — whose permission rules are therefore not in force.
+
+**It also says how old the gate's measurement is.** The rules are Claude Code's own syntax, so the
+running product can be asked the same question — and that check is only true on the day it runs.
+
+```console
+gate
+  measured  Claude Code 2.1.270
+            3 releases behind a session on this machine (2.1.273)
+  rows      changelog rows cleared through 2.1.273 (not a compatibility claim)
+```
+
+`measured` is the last release the full differential run was green against. `rows` is the last
+release whose rule-relevant changelog entries are all accounted for — cheaper, moves more often, and
+a statement about the ledger rather than a compatibility claim.
+
+Only the status-line shim reports a version, so with none installed `doctor` says nothing is
+reporting rather than implying there is no gap.
 
 **It runs the gate rather than reading about it.** No hook can enforce its own presence, so a
 settings file containing the right line is evidence about a settings file. `doctor` writes a
@@ -469,7 +513,40 @@ Without `--force`, removal refuses to destroy uncommitted or unpushed work.
 ### `vibeplane trust [path]`
 
 Allow Vibeplane to start agents in a repository. Required once per repository, because a headless
-agent runs that repository's own hooks and MCP servers without asking.
+agent runs that repository's own hooks and MCP servers without asking — and it prints what those are
+before it asks you.
+
+```console
+$ vibeplane trust .
+  starting an agent here loads this repository's own:
+
+  hook    ./scripts/guard.sh
+          runs on every PreToolUse in this repository
+  mcp     notes
+          `notes-mcp` has no version pin, so starting an agent fetches and
+          runs whatever is published at that name today
+  skill   Bash
+          this skill pre-approves Bash for whoever installs it, so those
+          calls are not asked about
+  policy  Bash(python:*)
+          `python` runs whatever follows `-c`, so this approves `python -c
+          '…'` — any code at all. Claude Code reads it the same way
+
+  Trust this repository? [y/N]
+```
+
+It **reports and refuses nothing** — a `PreToolUse` hook is a normal thing to ship. It is also
+shallow on purpose: it does not read the script a hook names.
+
+A repository that declares none of this says so in one line and asks nothing further.
+
+| Flag | What it does |
+|---|---|
+| `--dry-run` | Print the same thing and trust nothing. The form to run on somebody else's repository before you clone it. |
+| `--yes`, `-y` | Trust without asking. For scripts, and for a directory you wrote. |
+| `--json` | The findings as data, with `trusted` and `unreadable`. |
+
+Without `--yes`, a non-interactive stdin is an error rather than a silent yes.
 
 ### `vibeplane check [path]`
 

@@ -16,7 +16,9 @@ mod board;
 mod inbox;
 mod work;
 
-use admin::{cmd_agents, cmd_audit, cmd_connect, cmd_diagnostics, cmd_disconnect, cmd_search};
+use admin::{
+    cmd_agents, cmd_audit, cmd_connect, cmd_diagnostics, cmd_disconnect, cmd_rewind, cmd_search,
+};
 use board::{cmd_attach, cmd_focus, cmd_ls, cmd_open, cmd_show, cmd_tail, cmd_watch};
 use inbox::{cmd_attention, cmd_decide, cmd_inbox, cmd_say, cmd_snooze};
 use work::{cmd_check, cmd_dispatch, cmd_trust, cmd_work};
@@ -100,6 +102,20 @@ pub enum Command {
     },
     /// Search tool calls, questions and errors across every session.
     Search { query: String },
+    /// Which of a run's files the vendor's checkpoint will not bring back.
+    ///
+    /// Claude Code snapshots the files its own editing tools touch and
+    /// `/rewind` restores them. Its documentation is explicit that files
+    /// modified by bash commands are not tracked — and that is the one class
+    /// the decision log has a complete record of.
+    ///
+    /// It says `named for writing`, never `changed`: the gate sees a call
+    /// before the tool runs, so claiming the second would be a confident answer
+    /// this evidence does not support.
+    Rewind {
+        /// The run, or a unique prefix of it, as `vibeplane ls` prints it.
+        run: String,
+    },
     /// Show what Vibeplane decided, and on whose authority.
     ///
     /// Answers the two questions the event log cannot: why a command ran
@@ -199,10 +215,22 @@ pub enum Command {
     /// Allow Vibeplane to start agents in a repository.
     ///
     /// A headless agent runs that repository's own hooks and MCP servers
-    /// without asking, so this is a deliberate act rather than a default.
+    /// without asking, so this is a deliberate act rather than a default — and
+    /// it prints what those are before it asks. Answering a question about a
+    /// directory you have not looked inside is a consent dialog, not a
+    /// decision.
+    ///
+    /// `--dry-run` prints the same thing and trusts nothing, which is the form
+    /// worth running on somebody else's repository before you clone it.
     Trust {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Trust without asking. For scripts and for a directory you wrote.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Print what is there and trust nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Start work: an isolated checkout, an agent in it, and the project's
     /// gates when the agent says it is finished.
@@ -223,8 +251,14 @@ pub enum Command {
     /// Follow events as they arrive.
     Watch,
     /// Channel health, latency and daemon status.
-    #[command(visible_alias = "doctor")]
-    Diagnostics,
+    ///
+    /// Named `doctor` because that is what every page of the documentation,
+    /// every quickstart and every error message in this product already called
+    /// it while the command was spelled `diagnostics`. The canonical name being
+    /// the one nobody writes is a small thing that costs somebody a search
+    /// every time.
+    #[command(visible_alias = "diagnostics")]
+    Doctor,
     /// Install Vibeplane's hooks into a provider.
     Connect {
         #[command(subcommand)]
@@ -363,6 +397,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             history,
         }) => cmd_tail(&run, thinking, history).await,
         Some(Command::Search { query }) => cmd_search(&query, cli.json).await,
+        Some(Command::Rewind { run }) => cmd_rewind(&run, cli.json).await,
         Some(Command::Audit { about, limit }) => cmd_audit(about.as_deref(), limit, cli.json).await,
         Some(Command::Attention { days }) => cmd_attention(days, cli.json).await,
         Some(Command::Focus { run }) => cmd_focus(&run).await,
@@ -393,12 +428,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                 crate::cli::work::cmd_explain(dir, tool, call, input, cli.json)
             }
         }
-        Some(Command::Trust { path }) => cmd_trust(path, cli.json).await,
+        Some(Command::Trust { path, yes, dry_run }) => {
+            cmd_trust(path, yes, dry_run, cli.json).await
+        }
         Some(Command::Work { what }) => cmd_work(what, cli.json).await,
         Some(Command::Snooze { id, minutes }) => cmd_snooze(&id, minutes, cli.json).await,
         Some(Command::Open) => cmd_open().await,
         Some(Command::Watch) => cmd_watch().await,
-        Some(Command::Diagnostics) => cmd_diagnostics(cli.json).await,
+        Some(Command::Doctor) => cmd_diagnostics(cli.json).await,
         Some(Command::Connect { what, statusline }) => {
             cmd_connect(what, statusline, cli.json).await
         }

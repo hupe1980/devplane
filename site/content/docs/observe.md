@@ -246,7 +246,7 @@ Three failures are invisible on the board, because in each one the symptom is an
 |---|---|
 | `channels` | which observation channels are arriving, how fast, and the worst latency seen. A channel that stopped is silence, and silence is what a quiet machine looks like too |
 | `unreadable configuration` | a repository whose `vibeplane.toml` will not load. The rules it had stay cached — but a restarted daemon has none to cache, so that project's `never_auto` list is simply not in force |
-| `unreadable rows` | stored runs or work this build can no longer decode. The schema changes here without migrations on purpose, so a changed shape makes rows vanish from the board. A **work** row is the one to read first: it names a branch and a worktree, so losing it orphans a checkout nobody is left to tell you about. Observations rebuild from the providers, so deleting the database is safe |
+| `unreadable rows` | stored runs or work this build can no longer decode. The schema changes here without migrations on purpose, so a changed shape makes rows vanish from the board. A **work** row is the one to read first: it names a branch and a worktree, so losing it orphans a checkout nobody is left to tell you about. Observations rebuild from the providers, so deleting the database costs you nothing *except the decision log*, which is in the same file and is the one thing that cannot be re-derived from anything |
 
 ## Who wins when channels disagree
 

@@ -133,6 +133,10 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                 "daemon": daemon,
                 "connect": state,
                 "gate": probe,
+                "measurement": {
+                    "verified_against": crate::core::policy::VERIFIED_AGAINST,
+                    "rows_cleared_through": crate::core::policy::ROWS_CLEARED_THROUGH,
+                },
                 "spooled_decisions": spooled,
                 "diagnostics": diag,
                 "provider": {
@@ -198,6 +202,66 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             paint(DIM, &provider.intact().join(" · "))
         );
     }
+
+    // How old the central claim is, in the only unit a person can act on.
+    //
+    // *The rule table is differentially measured against the running vendor*
+    // is a claim in the present tense. The vendor ships most days; the matrix
+    // runs when somebody remembers. Every other tool in this category is
+    // further behind than this one and none of them has to print a number,
+    // because none of them has ever measured — so printing it is the claim
+    // rather than a confession, and hiding it would be the vendor's own
+    // "neutral conclusion" problem in this product's voice.
+    println!("\n{}", paint(BOLD, "gate"));
+    let running = diag
+        .as_ref()
+        .and_then(|d| d["gate"]["sessions_ahead_of_baseline"].as_array())
+        .and_then(|a| a.iter().filter_map(|x| x["version"].as_str()).max())
+        .map(str::to_string);
+    let behind = running.as_deref().and_then(|v| {
+        crate::core::policy::releases_ahead(v, crate::core::policy::VERIFIED_AGAINST)
+    });
+    println!(
+        "  measured  Claude Code {}",
+        crate::core::policy::VERIFIED_AGAINST
+    );
+    match (&running, behind) {
+        (Some(v), Some(n)) => println!(
+            "            {}",
+            paint(
+                render::YELLOW,
+                &format!(
+                    "{n} release{} behind a session on this machine ({v})",
+                    if n == 1 { "" } else { "s" }
+                )
+            )
+        ),
+        (Some(v), None) => println!(
+            "            {}",
+            paint(render::YELLOW, &format!("a session here runs {v}"))
+        ),
+        // The honest third case, and the one a status line makes disappear:
+        // nothing is reporting a version, so this says nothing about the gap
+        // rather than implying there is none.
+        (None, _) => println!(
+            "            {}",
+            paint(
+                DIM,
+                "no session is reporting its version — install the status-line shim to see the gap"
+            )
+        ),
+    }
+    // The second, weaker floor. Labelled rather than printed as a number,
+    // because it is a statement about the ledger and not about the matcher, and
+    // the two being confusable is exactly why they are separate constants.
+    println!(
+        "  rows      {} {}",
+        format_args!(
+            "changelog rows cleared through {}",
+            crate::core::policy::ROWS_CLEARED_THROUGH
+        ),
+        paint(DIM, "(not a compatibility claim)")
+    );
 
     println!("\n{}", paint(BOLD, "claude code"));
     println!("  settings  {}", state.settings_path.display());
@@ -705,5 +769,57 @@ pub async fn cmd_disconnect(what: ConnectTarget, json: bool) -> Result<()> {
             path.display()
         );
     }
+    Ok(())
+}
+
+/// `vibeplane rewind` — the files the vendor's checkpoint will not restore.
+///
+/// A query over rows that already exist, and deliberately not a feature: no
+/// snapshots, no storage, no second copy of anybody's files. Claude Code
+/// checkpoints what its own editing tools touch; this names what a shell
+/// command wrote past it, which is the gap its own documentation states.
+pub async fn cmd_rewind(run: &str, json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let v: serde_json::Value = c
+        .get(&format!("/api/runs/{run}/rewind-gap"))
+        .await
+        .context("that run is not on the board")?;
+    let files: Vec<&str> = v["files"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|f| f.as_str()).collect())
+        .unwrap_or_default();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    if files.is_empty() {
+        println!(
+            "  {}",
+            paint(
+                DIM,
+                "no shell command in this session named a file for writing — /rewind covers it"
+            )
+        );
+        return Ok(());
+    }
+    println!(
+        "{}",
+        paint(BOLD, "outside Claude Code's checkpoint for this session")
+    );
+    for f in &files {
+        println!("  {f}");
+    }
+    println!();
+    println!(
+        "  {}",
+        paint(
+            DIM,
+            "a shell command named these for writing; /rewind restores only what"
+        )
+    );
+    println!(
+        "  {}",
+        paint(DIM, "Claude Code's own editing tools touched")
+    );
     Ok(())
 }

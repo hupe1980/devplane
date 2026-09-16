@@ -703,3 +703,132 @@ fn the_page_is_one_small_self_contained_file() {
         );
     }
 }
+
+/// The page says what language it is in.
+///
+/// A screen reader picks its voice and its pronunciation from `lang`, and with
+/// no `<html>` element at all there was nothing to read it from. The page was
+/// otherwise careful about accessibility — roles, a live region, `aria-current`,
+/// visually-hidden text beside every glyph — which is what made the omission
+/// easy to keep: everything a sighted reviewer checks was already there.
+#[test]
+fn the_page_declares_its_language() {
+    assert!(
+        PAGE.contains("<html lang="),
+        "the board must declare a language for a screen reader to read it in"
+    );
+}
+
+/// Tab cannot leave an open dialog.
+///
+/// `aria-modal="true"` is a promise that the rest of the page is inert. The
+/// veil makes that true for a mouse and did nothing for a keyboard: Tab walked
+/// out of the palette into the board behind it, where every row is focusable
+/// and none of it is announced.
+#[test]
+fn a_modal_dialog_keeps_the_keyboard() {
+    let modals = PAGE.matches("aria-modal=\"true\"").count();
+    assert!(modals >= 4, "expected the page's dialogs, found {modals}");
+    assert!(
+        PAGE.contains("const trapTab"),
+        "a dialog that claims aria-modal has to hold the keyboard"
+    );
+    assert!(
+        PAGE.contains("trapTab(e)"),
+        "the trap has to be wired into the keydown handler, not merely defined"
+    );
+}
+
+/// The gate's staleness is shown only when there is staleness to show.
+///
+/// This is the product's one unoccupied claim — the rule table is measured
+/// against the vendor it answers for — and it is true on the day the harness
+/// runs and decays after. The board is where a person decides whether to trust
+/// a verdict, so the age belongs there. It is also a number that is usually
+/// zero, and a field that is always present would put noise in the one row
+/// reserved for things that need you.
+#[test]
+fn the_board_shows_the_gate_s_age_only_when_it_is_behind() {
+    assert!(
+        PAGE.contains("b.gate_behind"),
+        "the board has to read the gap the API serves"
+    );
+    // The property, not the spelling: there is a branch that hides it. The first
+    // version of this check matched the exact punctuation of the expression and
+    // broke the moment the same behaviour was written a different way, which is
+    // a test about a formatter rather than about the page.
+    assert!(
+        PAGE.contains("age.hidden = true"),
+        "and hide it when the API sends no gap — a number that is usually zero \
+         is noise in the one row reserved for things that need you"
+    );
+}
+
+/// Every cell a session row puts between the name and the summary has a width.
+///
+/// The design language says *"every number is tabular and right-aligned, so a
+/// column of costs and a column of context percentages can be scanned rather
+/// than read"* — and that is a property of the **column**, not of the cell.
+/// `.gauge` and `.cost` were right-aligned with fixed widths while the cell in
+/// front of them had none, so a session on `cli` instead of `claude-vscode`
+/// shifted every number after it ten characters to the left. The rule was
+/// stated, the cells obeyed it individually, and the column it exists for did
+/// not survive one short word.
+///
+/// A property nobody can see in a screenshot of a machine where every session
+/// happens to run the same surface needs a mechanism, not an intention.
+#[test]
+fn every_column_between_the_name_and_the_summary_is_sized() {
+    let row = PAGE
+        .split_once("card row ${esc(r.state)}")
+        .expect("the session row template")
+        .1;
+    let row = &row[..row.find("</div>").expect("the row closes")];
+
+    let mut unsized_cells = Vec::new();
+    for class in ["name", "surface", "gauge", "cost", "since"] {
+        assert!(
+            row.contains(&format!("class=\"{class}\""))
+                || row.contains(&format!("class=\"{class} ")),
+            "the session row no longer has a `{class}` cell — if it was renamed, \
+             rename it here too rather than deleting the check"
+        );
+        // A width for that class, anywhere in the stylesheet.
+        let sized = PAGE
+            .lines()
+            .filter(|l| l.contains(&format!(".{class} ")) || l.contains(&format!(".{class},")))
+            .any(|l| l.contains("width:"));
+        if !sized {
+            unsized_cells.push(class);
+        }
+    }
+    assert!(
+        unsized_cells.is_empty(),
+        "these cells sit in a column a person is meant to scan and have no width: \
+         {unsized_cells:?} — one short value in an earlier cell moves every number after it"
+    );
+}
+
+/// The viewport tag has a breakpoint behind it.
+///
+/// The page has declared `width=device-width` since its first commit and had a
+/// single media query — `prefers-color-scheme` — behind it. A viewport tag is a
+/// promise that the layout responds to the width, and the fixed column widths
+/// that make twenty sessions scannable on a monitor are exactly what makes one
+/// row wider than a phone: measured at a 500 px viewport, the document scrolled
+/// to 547.
+///
+/// This pins the *mechanism*, not the layout — nothing in this suite runs a
+/// layout engine, and a test that claimed to check the rendered width would be
+/// claiming more than it can see.
+#[test]
+fn the_page_has_a_breakpoint_behind_its_viewport_tag() {
+    assert!(
+        PAGE.contains("width=device-width"),
+        "the page claims to respond to the viewport"
+    );
+    assert!(
+        PAGE.contains("@media (max-width:"),
+        "and has to have something behind that claim"
+    );
+}

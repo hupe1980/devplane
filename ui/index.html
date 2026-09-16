@@ -1,4 +1,5 @@
 <!doctype html>
+<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Vibeplane</title>
@@ -43,7 +44,13 @@
   h1 { font-size: 13px; margin: 0; letter-spacing: .12em; text-transform: uppercase; }
   .counts { color: var(--dim); display: flex; gap: .9rem; flex-wrap: wrap; }
   .counts b { color: var(--ink); font-weight: 600; }
-  .live { margin-left: auto; color: var(--faint); display: flex; align-items: center; gap: .4rem; }
+  .live { margin-left: auto; color: var(--faint); display: flex; align-items: center; gap: .6rem; white-space: nowrap; }
+  /* The header degrades by shrinking the search field rather than stacking: a
+     sticky header that wraps costs a row of the board on every scroll. */
+  header input[type="search"] { flex: 0 1 20rem; min-width: 7rem; }
+  /* Quiet on purpose: the contrast budget belongs to what a person has to
+     decide, and this is what you check before believing a verdict. */
+  .stale { color: var(--wait); border-bottom: 1px dotted var(--wait); cursor: help; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--done); }
   .dot.off { background: var(--fail); }
   main { padding: 1rem; max-width: 1100px; }
@@ -57,6 +64,9 @@
     padding: .6rem .75rem; margin-bottom: .4rem; cursor: default;
   }
   .card:focus-visible, .card.sel { outline: 2px solid var(--work); outline-offset: 1px; }
+  /* A one-line card is not padded like the multi-line inbox card above it:
+     twenty sessions is the persona, and they have to fit on a screen. */
+  .card.row { padding: .3rem .75rem; margin-bottom: .2rem; }
   .item { border-left: 3px solid var(--wait); }
   .item.critical { border-left-color: var(--fail); }
   .item .t { font-weight: 600; }
@@ -67,9 +77,23 @@
   .opts.picks .num { color: var(--faint); }
   .opt-dead { color: var(--faint); border: 1px dashed var(--line); border-radius: 4px; padding: .1rem .5rem; }
   .row { display: flex; gap: .6rem; align-items: baseline; }
-  .row .name { font-weight: 600; min-width: 13rem; }
+  /* The id is legible and not loud: it is the field carrying the least
+     information on the row, and nine sessions on one repository must not read
+     as nine near-identical lines differing by a hash. */
+  .row .name { width: 13rem; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .meta { color: var(--faint); }
+  /* Every cell before the summary has a width. "Tabular and right-aligned so a
+     column can be scanned" is a property of the column, not of the cell: one
+     unsized cell shifts every number after it by however much its content
+     happens to differ. `ui_contract` holds each of them to a width. */
+  .row .surface { width: 8.5rem; flex: none; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .since { width: 3rem; flex: none; text-align: right; color: var(--faint); }
   .row .sum { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Where the contrast goes instead: the state that wants a person. The inbox
+     above already carries the item; this is so the same run is findable on the
+     board without reading every row. */
+  .row.waiting { border-left: 3px solid var(--wait); }
+  .row.failed, .row.lost { border-left: 3px solid var(--fail); }
   .s { width: .8rem; display: inline-block; }
   .s.working { color: var(--work); } .s.starting { color: var(--work); }
   .s.waiting { color: var(--wait); } .s.failed, .s.lost { color: var(--fail); }
@@ -113,12 +137,33 @@
     font: inherit; border: 1px solid var(--line); border-bottom-width: 2px;
     border-radius: 3px; padding: 0 .3rem; color: var(--dim);
   }
+  /* The fixed widths above are what makes a column scannable on a monitor and
+     what makes one row wider than a phone. Below this width the row keeps what
+     answers "what is this and what is it doing" and drops the rest. */
+  @media (max-width: 46rem) {
+    main { padding: .75rem; }
+    .row { flex-wrap: wrap; }
+    .row .name { width: auto; flex: 1 1 auto; }
+    /* Which editor a session is in is a column for comparing twenty rows, not
+       a fact worth a third of a phone screen. */
+    .row .surface { display: none; }
+    /* The summary is the sentence, so it gets a line rather than an ellipsis. */
+    .row .sum { flex: 1 0 100%; white-space: normal; overflow: visible; }
+    .counts { gap: .6rem; }
+    footer { gap: .6rem; }
+  }
   .empty { color: var(--faint); padding: .5rem 0; }
   footer { color: var(--faint); padding: 0 1rem; display: flex; gap: 1rem; flex-wrap: wrap; }
   .err { color: var(--fail); padding: 1rem; }
 
   /* The launchers. Deliberately the only things that cover the page. */
-  #veil { position: fixed; inset: 0; background: rgba(0,0,0,.38); z-index: 8; }
+  /* Black over a light page separates by luminance; over a near-black one it
+     barely moves the pixels. A small blur separates either way, and it is a
+     static filter rather than motion. */
+  #veil {
+    position: fixed; inset: 0; background: rgba(0,0,0,.38); z-index: 8;
+    backdrop-filter: blur(2px);
+  }
   #veil[hidden] { display: none; }
   .over {
     position: fixed; left: 50%; top: 12vh; transform: translateX(-50%);
@@ -203,7 +248,12 @@
   <div class="counts" id="counts"></div>
   <input id="q" type="search" placeholder="search tool calls, questions, errors  /"
          autocomplete="off" spellcheck="false" size="34">
-  <div class="live"><span class="dot" id="dot" aria-hidden="true"></span><span id="livetext">connecting</span></div>
+  <div class="live">
+    <!-- In the health corner rather than among the counts: a fact about
+         whether to trust this tool, not a number of things waiting. -->
+    <span id="gateage" class="stale" hidden></span>
+    <span class="dot" id="dot" aria-hidden="true"></span><span id="livetext">connecting</span>
+  </div>
 </header>
 
 <!-- The one live region. Polite, atomic, and it says the number that decides
@@ -355,6 +405,28 @@ function render() {
   const b = state.board;
   if (!b) return;
   const s = b.summary;
+  // How stale the gate's measurement is, shown only when it is stale: a field
+  // that is usually zero is a number nobody can act on.
+  //
+  // Concatenated rather than a template literal on purpose. `textContent` and
+  // `title` cannot become markup, but writing them as templates would make them
+  // look like the interpolations that *do* need `esc()`, and "every `${...}` of
+  // an API value is wrapped, no exceptions" is the rule that keeps this page
+  // safe.
+  const age = $("gateage");
+  const gap = b.gate_behind;
+  if (gap) {
+    age.textContent = gap.releases
+      ? "gate " + gap.releases + " release" + (gap.releases === 1 ? "" : "s") + " behind"
+      : "gate measured on " + gap.measured;
+    age.title =
+      "the permission gate was last differentially tested against Claude Code " +
+      gap.measured + "; a session here runs " + gap.running;
+    age.hidden = false;
+  } else {
+    age.hidden = true;
+  }
+
   $("counts").innerHTML =
     `<span><b>${esc(s.projects)}</b> projects</span>` +
     `<span><b>${esc(s.runs)}</b> sessions</span>` +
@@ -365,6 +437,17 @@ function render() {
     (s.idle ? `<span><b>${esc(s.idle)}</b> idle</span>` : "") +
     (s.failed ? `<span style="color:var(--fail)"><b>${esc(s.failed)}</b> failed</span>` : "") +
     (s.cost_usd > 0 ? `<span>$${esc(s.cost_usd.toFixed(2))}</span>` : "") +
+    // How old the gate's measurement is, and **only when it is old**.
+    //
+    // The one claim this product makes that nobody else can is that its rule
+    // table is measured against the vendor it answers for — which is true on
+    // the day the harness runs and decays every day after. A user is entitled
+    // to know how stale it is before trusting a verdict.
+    //
+    // Absent when nothing reports a version and absent when nothing is ahead,
+    // because a field that is usually zero is a number nobody can act on, which
+    // is this product's own rule about its own inbox applied to itself.
+
     // GitHub's half of the picture: what is open across every project, and
     // how much of it is waiting on you. Zero when the forge has not been read.
     // A button, not a span: the number is the affordance, and `g` does the
@@ -492,13 +575,13 @@ function render() {
       <div class="proj">${esc(proj)} · ${esc(runs.length)}${forge}</div>
       ${runs.map((r) => {
         const pct = r.context_percent;
-        return `<div class="card row" role="listitem" data-sel="${n++}" data-run="${esc(r.id)}" tabindex="0">
+        return `<div class="card row ${esc(r.state)}" role="listitem" data-sel="${n++}" data-run="${esc(r.id)}" tabindex="0">
           <span class="s ${esc(r.state)}"><span aria-hidden="true">${GLYPH[r.state] || "·"}</span><span class="sr">${esc(r.state)}</span></span>
           <span class="name">${esc(r.name || r.id.slice(0, 8))}</span>
-          <span class="meta">${esc(r.entrypoint || r.mode)}</span>
+          <span class="surface">${esc(r.entrypoint || r.mode)}</span>
           <span class="gauge ${pct >= 85 ? "high" : ""}">${pct != null ? Math.round(pct) + "%" : ""}</span>
           <span class="cost">${r.cost_usd > 0 ? "$" + r.cost_usd.toFixed(2) : ""}</span>
-          <span class="meta">${ago(r.idle_seconds)}</span>
+          <span class="since">${ago(r.idle_seconds)}</span>
           <span class="sum">${esc(r.summary || SUMMARY_FALLBACK[r.state] || "")}</span>
           ${r.plan_total ? `<span class="meta">${esc(r.plan_done)}/${esc(r.plan_total)}</span>` : ""}
         </div>`;
@@ -748,6 +831,32 @@ const openOver = (which) => {
   $("veil").hidden = false;
   for (const id of ["palette", "dispatch", "why", "github"]) $(id).hidden = id !== which;
 };
+// Tab stays inside an open dialog.
+//
+// `aria-modal="true"` promises a screen reader that the rest of the page is
+// inert. The veil makes that true for a mouse and nothing for a keyboard.
+const FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+const trapTab = (e) => {
+  if (e.key !== "Tab") return;
+  const box = over.which ? $(over.which) : (!$("talk").hidden ? $("talk") : null);
+  if (!box) return;
+  const items = [...box.querySelectorAll(FOCUSABLE)].filter((el) => el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0], last = items[items.length - 1];
+  const here = document.activeElement;
+  // Wrap at both ends, and pull focus in when it has already escaped — which
+  // is the case a naive trap misses, because the dialog opened with focus on
+  // the body.
+  if (e.shiftKey && (here === first || !box.contains(here))) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (here === last || !box.contains(here))) {
+    e.preventDefault();
+    first.focus();
+  }
+};
+
 const closeOver = () => {
   over.which = null;
   $("veil").hidden = true;
@@ -1035,6 +1144,11 @@ document.addEventListener("click", (e) => {
 $("pq").addEventListener("input", renderPalette);
 
 document.addEventListener("keydown", (e) => {
+  // Before anything reads the key: if a modal is open, Tab may not leave it.
+  // `aria-modal` says the rest of the page is inert and this is what makes that
+  // true for a keyboard.
+  trapTab(e);
+  if (e.defaultPrevented) return;
   // The launchers are modal, so they take the keyboard before anything else.
   if ((e.metaKey || e.ctrlKey) && e.key === "k") {
     e.preventDefault();
@@ -1150,3 +1264,4 @@ connect();
 // left open overnight should still be right in the morning.
 setInterval(refresh, 30000);
 </script>
+</html>

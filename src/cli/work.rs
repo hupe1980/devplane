@@ -59,6 +59,13 @@ enum Rules {
         path: PathBuf,
         count: usize,
         problems: Vec<crate::core::config::Problem>,
+        /// Rules that provably do nothing — see `Policy::redundancies`. Carried
+        /// here so `--json` says it too: a finding only the terminal prints is
+        /// one no script can act on.
+        unused: Vec<String>,
+        /// Allow rules that grant an arbitrary program — see
+        /// `Policy::overbroad`. Here for the same reason `unused` is.
+        overbroad: Vec<crate::core::policy::Overbroad>,
     },
 }
 
@@ -77,6 +84,8 @@ impl Rules {
                 Rules::Loaded {
                     count: p.allow_rules().len() + p.deny_rules().len() + p.ask_rules().len(),
                     problems: c.validate(),
+                    unused: p.redundancies(),
+                    overbroad: p.overbroad(),
                     path,
                 }
             }
@@ -133,10 +142,16 @@ impl Rules {
                 path,
                 count,
                 problems,
+                unused,
+                overbroad,
             } => serde_json::json!({
                 "state": "loaded", "path": path.display().to_string(),
                 "rules": count,
                 "problems": problems.iter().map(|p| format!("{}: {}", p.where_, p.what)).collect::<Vec<_>>(),
+                "unused": unused,
+                "overbroad": overbroad.iter().map(|o| serde_json::json!({
+                    "rule": o.rule, "why": o.why, "suggestion": o.suggestion
+                })).collect::<Vec<_>>(),
                 "in_force": true
             }),
         }
@@ -590,6 +605,43 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         // `Read(.env)` is the most common rule anybody writes. As a per-rule
         // warning this would fire on the canonical example and teach people to
         // ignore warnings.
+        // A rule that provably does nothing. Unlike the note below it, this is
+        // a *finding* rather than a suggestion: it is answered by pattern
+        // containment rather than by a heuristic, and it under-reports on
+        // purpose, so anything it prints is worth a person's attention.
+        let dead = policy.redundancies();
+        if !dead.is_empty() {
+            println!();
+        }
+        for finding in &dead {
+            let mut lines = crate::core::text::wrap(finding, 66).into_iter();
+            if let Some(first) = lines.next() {
+                println!("  {:<10}{}", paint(BOLD, "unused"), first);
+            }
+            for rest in lines {
+                println!("  {:<10}{}", "", rest);
+            }
+        }
+        // A rule that provably grants more than it reads as granting. A
+        // *finding* like `unused` and for the same reason — pattern
+        // containment, not a heuristic — and printed above the advice below
+        // because it is the only line here that is about somebody getting more
+        // than they asked for.
+        let wide = policy.overbroad();
+        if !wide.is_empty() {
+            println!();
+        }
+        for finding in &wide {
+            println!("  {:<10}{}", paint(BOLD, "overbroad"), finding.rule);
+            for line in crate::core::text::wrap(&finding.why, 66) {
+                println!("  {:<10}{}", "", line);
+            }
+            println!(
+                "  {:<10}{}",
+                "",
+                paint(DIM, &format!("narrow it, e.g. {}", finding.suggestion))
+            );
+        }
         let half = policy.half_protected_paths();
         if !half.is_empty() {
             let add = half
@@ -615,19 +667,75 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_trust(path: PathBuf, json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+/// `vibeplane trust` — show what a repository's agent configuration does, then
+/// let a person decide.
+///
+/// The scan is the point. `trust` has always been the one deliberate act in
+/// this product, and for as long as it has existed it asked a person to make
+/// that decision with nothing in front of them. A gate whose evidence is the
+/// word "trusted" is a consent dialog.
+///
+/// Three rules, and the first is the one that keeps the other two worth having.
+/// **It reports and refuses nothing** — plenty of repositories legitimately
+/// ship a `PreToolUse` hook, and a tool that graded them would teach people to
+/// skip the one prompt here that matters. **A repository with none of this
+/// prints nothing extra**, so the common case is not made noisy by a feature
+/// aimed at the uncommon one. And **`--dry-run` trusts nothing**, which is the
+/// form to run on somebody else's repository.
+pub async fn cmd_trust(path: PathBuf, yes: bool, dry_run: bool, json: bool) -> Result<()> {
     let root = path.canonicalize().context("that path does not exist")?;
-    let v: serde_json::Value = c
-        .post_json(
-            "/api/projects/trust",
-            &serde_json::json!({ "path": root.to_string_lossy() }),
-        )
-        .await?;
+    let setup = crate::core::setup::scan(&root);
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        let findings: Vec<serde_json::Value> = setup
+            .findings
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "kind": f.kind.as_str(), "source": f.source,
+                    "subject": f.subject, "detail": f.detail
+                })
+            })
+            .collect();
+        if dry_run {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "path": root.display().to_string(),
+                    "trusted": false,
+                    "findings": findings,
+                    "unreadable": setup.unreadable,
+                }))?
+            );
+            return Ok(());
+        }
+        let v = trust_call(&root).await?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "path": root.display().to_string(),
+                "trusted": v.get("error").is_none(),
+                "error": v.get("error"),
+                "findings": findings,
+                "unreadable": setup.unreadable,
+            }))?
+        );
         return Ok(());
     }
+
+    print_setup(&root, &setup);
+
+    if dry_run {
+        println!("  {}", paint(DIM, "nothing was trusted (--dry-run)"));
+        return Ok(());
+    }
+    // A repository with nothing in it is not worth a second keystroke: the
+    // prompt exists to make evidence unskippable, and there is no evidence.
+    if !yes && !setup.is_empty() && !confirm("Trust this repository?")? {
+        println!("  {}", paint(DIM, "not trusted"));
+        return Ok(());
+    }
+    let v = trust_call(&root).await?;
     match v.get("error").and_then(|e| e.as_str()) {
         Some(e) => anyhow::bail!("{e}"),
         None => println!(
@@ -638,6 +746,77 @@ pub async fn cmd_trust(path: PathBuf, json: bool) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+async fn trust_call(root: &Path) -> Result<serde_json::Value> {
+    let c = client::Client::connect_or_start().await?;
+    c.post_json(
+        "/api/projects/trust",
+        &serde_json::json!({ "path": root.to_string_lossy() }),
+    )
+    .await
+}
+
+/// What starting an agent here will load, grouped the way a person reads it.
+fn print_setup(root: &Path, setup: &crate::core::setup::Setup) {
+    if setup.is_empty() {
+        println!(
+            "  {}",
+            paint(
+                DIM,
+                &format!(
+                    "{} declares no hooks, MCP servers or skills",
+                    root.display()
+                )
+            )
+        );
+        return;
+    }
+    println!(
+        "  {}",
+        paint(DIM, "starting an agent here loads this repository's own:")
+    );
+    println!();
+    for f in &setup.findings {
+        println!(
+            "  {:<8}{}",
+            paint(BOLD, f.kind.as_str()),
+            crate::core::text::clip(&f.subject, 66)
+        );
+        for line in crate::core::text::wrap(&f.detail, 66) {
+            println!("  {:<8}{}", "", paint(DIM, &line));
+        }
+    }
+    for u in &setup.unreadable {
+        println!(
+            "  {:<8}{}",
+            paint(BOLD, "unread"),
+            format_args!("{u} exists and could not be parsed")
+        );
+        println!(
+            "  {:<8}{}",
+            "",
+            paint(DIM, "the agent will read it and this could not")
+        );
+    }
+    println!();
+}
+
+/// A yes/no question on the terminal. Default no.
+///
+/// Not a prompt library: one question, one line, and a non-interactive stdin
+/// answers *no* rather than hanging — a script that pipes nothing into `trust`
+/// should fail closed and be told to pass `--yes`.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::Write;
+    print!("  {question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer)? == 0 {
+        println!();
+        anyhow::bail!("nothing on stdin to answer with — pass --yes to trust without asking");
+    }
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {

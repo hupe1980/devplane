@@ -62,6 +62,13 @@ pub struct Decision {
     /// exists for: "auto-approved" is not an answer, "auto-approved by
     /// `Bash(pnpm test *)`" is.
     pub reason: Option<String>,
+    /// The tool this call was, where it was a tool call at all.
+    ///
+    /// `Bash`, `Read`, `Edit`, `mcp__…`. Empty for a gate verdict, a push or a
+    /// pipeline advancing, which are decisions about something other than a
+    /// tool.
+    #[serde(default)]
+    pub tool: Option<String>,
     #[serde(default)]
     pub project_id: Option<ProjectId>,
     #[serde(default)]
@@ -80,6 +87,7 @@ impl Decision {
             subject: subject.into(),
             outcome: outcome.to_string(),
             reason: None,
+            tool: None,
             project_id: None,
             run_id: None,
             work_id: None,
@@ -95,6 +103,15 @@ impl Decision {
 
     pub fn because(mut self, reason: impl Into<String>) -> Self {
         self.reason = Some(reason.into());
+        self
+    }
+
+    /// Names the tool this decision was about.
+    pub fn by_tool(mut self, tool: impl Into<String>) -> Self {
+        let tool = tool.into();
+        if !tool.is_empty() {
+            self.tool = Some(tool);
+        }
         self
     }
 
@@ -203,4 +220,113 @@ pub struct DecidedEnvelope {
     /// The raw hook payload, for the observation half.
     #[serde(default)]
     pub payload: Option<serde_json::Value>,
+}
+
+/// Files a **shell** call in these decisions named for writing.
+///
+/// The one class Claude Code's own checkpointing documents that it does not
+/// cover: *"files modified by bash commands are not tracked."* Everything
+/// needed to answer it is already here — every tool call the gate saw, the
+/// command text, and the tool it was — so this is a query rather than a
+/// feature, with no snapshots and no second copy of anybody's files.
+///
+/// Three things it is careful about, and each is a way the answer could be a
+/// confident lie:
+///
+/// * **A refused call wrote nothing.** A `deny` row is a call that did not
+///   happen, so it is not in the list.
+/// * **A path nothing can pin is not a filename.** A glob, a `~` or a variable
+///   is left out rather than printed as though it named a file.
+/// * **The gate saw the call, not the write.** `PreToolUse` fires *before* the
+///   tool, so the honest sentence is *named for writing*, never *changed*.
+///   Everything downstream of this function has to keep that wording.
+pub fn files_a_shell_call_named_for_writing(decisions: &[Decision]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for d in decisions {
+        if d.action != "agent:tool.use" || d.outcome == "deny" {
+            continue;
+        }
+        let Some(tool) = d.tool.as_deref() else {
+            continue;
+        };
+        if !crate::core::policy::is_shell(tool) {
+            continue;
+        }
+        for t in crate::core::command::file_targets(&d.subject).list.iter() {
+            if t.access == crate::core::command::Access::Write
+                && !t.unresolvable
+                && !out.iter().any(|p| p == &t.path)
+            {
+                out.push(t.path.clone());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use super::*;
+    use crate::core::ids::RunId;
+
+    fn call(tool: &str, subject: &str, outcome: &str) -> Decision {
+        Decision::new(Actor::Policy, "agent:tool.use", subject, outcome)
+            .by_tool(tool)
+            .for_run(&RunId::new("s1"))
+    }
+
+    #[test]
+    fn a_shell_redirect_is_outside_the_vendors_checkpoint_and_an_edit_is_not() {
+        let rows = vec![
+            call("Bash", "echo x > notes.md", "allow"),
+            // The vendor's own editing tools *are* checkpointed, so naming
+            // them here would tell somebody to worry about a file that will
+            // come back.
+            call("Edit", "src/main.rs", "allow"),
+        ];
+        assert_eq!(
+            files_a_shell_call_named_for_writing(&rows),
+            vec!["notes.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_refused_call_wrote_nothing_so_it_is_not_listed() {
+        let rows = vec![call("Bash", "echo x > .env", "deny")];
+        assert!(files_a_shell_call_named_for_writing(&rows).is_empty());
+    }
+
+    #[test]
+    fn a_path_nothing_can_pin_is_not_printed_as_a_filename() {
+        // A glob, a `~` or a variable names no single file. Printing one as
+        // though it did would be a confident answer whose evidence does not
+        // support it.
+        let rows = vec![
+            call("Bash", "echo x > $OUT", "allow"),
+            call("Bash", "echo x > ~/notes.md", "allow"),
+            call("Bash", "echo x > build/*.log", "allow"),
+        ];
+        assert!(files_a_shell_call_named_for_writing(&rows).is_empty());
+    }
+
+    #[test]
+    fn a_decision_that_is_not_a_tool_call_is_ignored() {
+        let rows = vec![Decision::new(
+            Actor::Daemon,
+            "gh:pr.create",
+            "fix/login",
+            "done",
+        )];
+        assert!(files_a_shell_call_named_for_writing(&rows).is_empty());
+    }
+
+    #[test]
+    fn the_same_file_written_twice_is_named_once() {
+        let rows = vec![
+            call("Bash", "echo a > notes.md", "allow"),
+            call("Bash", "echo b >> notes.md", "allow"),
+        ];
+        assert_eq!(files_a_shell_call_named_for_writing(&rows).len(), 1);
+    }
 }

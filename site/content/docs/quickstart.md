@@ -107,7 +107,8 @@ vibeplane trust .                  # once per repository
 ```
 
 Trust is deliberate: a headless agent runs *that repository's* own hooks and MCP servers without
-asking, so somebody has to decide the directory is theirs.
+asking. The command lists them — and any unpinned MCP server, shell-granting skill or overbroad
+`[policy]` rule — before it asks.
 
 Write a definition of done:
 

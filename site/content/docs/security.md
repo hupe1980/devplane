@@ -45,9 +45,16 @@ through the same check — a check one caller can skip is not a check.
 
 The reason is specific: a headless agent runs **that repository's own hooks and MCP servers** with no
 dialog of its own. The decision to allow that has to be one somebody made deliberately, once, for
-that directory. A worktree inherits the trust of the checkout that owns it, because trusting a
-project and then being asked again for each of its checkouts teaches people to say yes without
-reading.
+that directory — so the command shows you what those are first. Every `command` hook and the event it
+fires on, every MCP server with the unpinned ones named, every skill whose front matter pre-approves
+the shell, and every rule in the repository's own `[policy]` that grants more than it looks like.
+`--dry-run` prints it and trusts nothing.
+
+It reports and refuses nothing, on purpose: a `PreToolUse` hook is a normal thing to ship, and a
+tool that graded repositories would teach you to stop reading.
+
+A worktree inherits the trust of the checkout that owns it, because trusting a project and then
+being asked again for each of its checkouts teaches people to say yes without reading.
 
 Untrusted projects are observe-only, which is still the whole of the observer.
 
@@ -98,7 +105,15 @@ says in its own output that it is not a measurement.
 
 Its last full run, against Claude Code 2.1.270, was clean on both: 176 deny cases and 126 allow
 cases, with no reproducible disagreement. **It has not been re-run since the current matcher
-shipped**, and a harness result is true only of the code it ran against.
+shipped**, and a harness result is true only of the code it ran against. Seven deny shapes added
+since that run have never been put to a running Claude Code.
+
+**Agreement is not correctness.** On a shape neither side generates, this matcher and Claude Code
+can be wrong together and the run still comes back clean — which is what happened over a wildcard
+rule that never met a wildcard operand. So the matcher is also held to properties checked
+exhaustively rather than by example: a brute-force reference for its pattern matching, a soundness
+test for what it means for two wildcards to meet, a fuzzer asserting it never panics on anything an
+agent can type, and a counter holding it to one parse per command however many rules ask.
 See [Permissions](/docs/permissions/).
 
 A malformed `vibeplane.toml` keeps the rules it had. Because a process starting fresh has none to

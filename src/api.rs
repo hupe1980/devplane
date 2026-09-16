@@ -58,6 +58,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/inbox", get(inbox))
         .route("/api/runs/{id}", get(run_detail))
         .route("/api/runs/{id}/events", get(run_events))
+        .route("/api/runs/{id}/rewind-gap", get(run_rewind_gap))
         .route("/api/runs/{id}/messages", get(run_messages))
         .route("/api/runs/{id}/snooze", post(snooze))
         .route("/api/runs/{id}/focus", post(focus_run))
@@ -331,6 +332,7 @@ pub async fn record_decided(state: &Shared, env: crate::core::DecidedEnvelope) {
         } else {
             rule.to_string()
         })
+        .by_tool(env.tool.clone())
         .for_run(&run);
         if let Some(at) = env.at {
             d = d.at(at);
@@ -606,6 +608,27 @@ struct BoardResponse {
     /// Per project id: open issues, open pull requests, and how many of them
     /// are waiting on the person. Absent for a project with no forge.
     forge: std::collections::BTreeMap<String, crate::core::ForgeCounts>,
+    /// How stale the gate's measurement is, **when it is stale at all**.
+    ///
+    /// `None` when no session reports a version, and `None` when every one that
+    /// does is at or below the release the matrix ran against. A field that is
+    /// always present would put a number on the board that is usually zero, and
+    /// a number nobody can act on is noise — which is this product's own rule
+    /// about its own inbox, applied to itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gate_behind: Option<GateGap>,
+}
+
+/// The gap between the release the gate was measured against and the newest one
+/// actually running here.
+#[derive(Serialize)]
+struct GateGap {
+    measured: &'static str,
+    running: String,
+    /// `None` across a minor or major boundary, where nothing here can count
+    /// releases and a number would be a guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    releases: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -712,9 +735,26 @@ async fn board(
         summary.open_prs += c.pull_requests;
         summary.forge_needs_you += c.needs_you;
     }
+    // The newest release any session here reports, when it is ahead of the one
+    // the matrix ran against. Only the status-line shim reports a version, so
+    // absence means *nothing is telling us*, never *there is no gap*.
+    let gate_behind = w
+        .runs()
+        .filter_map(|r| r.claude_version.as_deref())
+        .filter(|v| crate::core::policy::is_ahead_of_baseline(v))
+        .max()
+        .map(|running| GateGap {
+            measured: crate::core::policy::VERIFIED_AGAINST,
+            releases: crate::core::policy::releases_ahead(
+                running,
+                crate::core::policy::VERIFIED_AGAINST,
+            ),
+            running: running.to_string(),
+        });
     Json(BoardResponse {
         summary,
         runs,
+        gate_behind,
         projects: w.projects().cloned().collect(),
         forge: forge
             .into_iter()
@@ -917,6 +957,35 @@ async fn run_events(
     let id = run_id!(state, id);
     match state.store.events_for_run(&id, q.limit).await {
         Ok(evs) => Json(evs).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Files a shell call in this run named for writing — the class Claude Code's
+/// own checkpointing documents that it does not cover.
+///
+/// A read over the decision log and nothing else. The wording in every surface
+/// downstream of this is *named for writing* rather than *changed*, because a
+/// `PreToolUse` record is a call the gate saw before the tool ran.
+async fn run_rewind_gap(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = run_id!(state, id);
+    // Every decision for the run: the gap is about the whole session, and a
+    // limit here would silently answer about part of it.
+    match state.store.decisions(Some(id.as_str()), i64::MAX).await {
+        Ok(rows) => Json(json!({
+            "run": id.to_string(),
+            "files": crate::core::decision::files_a_shell_call_named_for_writing(&rows),
+        }))
+        .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),

@@ -85,7 +85,7 @@ a URL, and SSE is one line in a browser and needs no client library.
 
 | | |
 |---|---|
-| **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/runs/{id}`, `/api/runs/{id}/events`, `/api/runs/{id}/messages`, `/api/agents`, `/api/work`, `/api/decisions`, `/api/search`, `/api/diagnostics`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz` |
+| **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/runs/{id}`, `/api/runs/{id}/events`, `/api/runs/{id}/messages`, `/api/runs/{id}/rewind-gap`, `/api/agents`, `/api/work`, `/api/decisions`, `/api/search`, `/api/diagnostics`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz` |
 | **Write** | `/api/dispatch`, `/api/work`, `/api/work/{id}/{verify,finish,approve,retry}`, `/api/issues`, `/api/projects/trust`, `/api/runs/{id}/{prompt,decide,stop,snooze,focus}`, `/api/shutdown` |
 | **Receivers** | `/vibeplane/hook`, `/vibeplane/policy`, `/vibeplane/statusline`, `/vibeplane/otel/v1/{logs,metrics}` |
 

@@ -66,9 +66,17 @@ impl Store {
         Ok(store)
     }
 
-    /// Applies the schema. There is no migration machinery on purpose: the
-    /// project is unreleased, the store is rebuildable, and a hard cut is
-    /// cheaper than carrying a migration for a shape nobody depends on.
+    /// Applies the schema. There is no migration machinery on purpose: almost
+    /// everything here is a projection of the event log, and a row this build
+    /// cannot decode is dropped and counted (`unreadable rows`) rather than
+    /// migrated.
+    ///
+    /// **`decisions` is the exception, because it cannot be rebuilt.**
+    /// `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a column
+    /// added to the file never reaches a database somebody already has and the
+    /// first write naming it fails. Additive columns for that one table are
+    /// applied explicitly below; SQLite has no `ADD COLUMN IF NOT EXISTS`, so a
+    /// duplicate-column error is the success case.
     async fn migrate(&self) -> Result<()> {
         // `raw_sql` runs the whole file, comments and all, in one round trip.
         // Hand-splitting on `;` is how a schema loses the statement that a
@@ -77,6 +85,11 @@ impl Store {
             .execute(&self.pool)
             .await
             .context("applying schema")?;
+        // Columns added to `decisions` after a release. Ignored when already
+        // present, which is what makes this safe to run on every open.
+        for statement in ["ALTER TABLE decisions ADD COLUMN tool TEXT"] {
+            let _ = sqlx::raw_sql(statement).execute(&self.pool).await;
+        }
         Ok(())
     }
 
@@ -414,8 +427,8 @@ impl Store {
     pub async fn append_decision(&self, d: &crate::core::Decision) -> Result<()> {
         sqlx::query(
             "INSERT OR IGNORE INTO decisions
-               (id, at, actor, action, subject, outcome, reason, project_id, run_id, work_id)
-             VALUES (?,?,?,?,?,?,?,?,?,?)",
+               (id, at, actor, action, subject, outcome, reason, tool, project_id, run_id, work_id)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
         .bind(d.at.to_string())
@@ -424,6 +437,7 @@ impl Store {
         .bind(&d.subject)
         .bind(&d.outcome)
         .bind(d.reason.as_deref())
+        .bind(d.tool.as_deref())
         .bind(d.project_id.as_ref().map(|p| p.as_str()))
         .bind(d.run_id.as_ref().map(|r| r.as_str()))
         .bind(d.work_id.as_ref().map(|w| w.as_str()))
@@ -602,6 +616,7 @@ impl Store {
                 subject: r.get("subject"),
                 outcome: r.get("outcome"),
                 reason: r.get("reason"),
+                tool: r.get("tool"),
                 project_id: r.get::<Option<String>, _>("project_id").map(ProjectId::new),
                 run_id: r.get::<Option<String>, _>("run_id").map(RunId::new),
                 work_id: r
@@ -1302,6 +1317,77 @@ mod tests {
         let stats = s.attention_stats(long_ago).await.unwrap();
         let raised: i64 = stats.values().map(|r| r.raised).sum();
         assert_eq!(raised, 1, "the resolved row went and the open one stayed");
+    }
+
+    #[tokio::test]
+    async fn a_decision_log_written_by_an_older_release_still_opens_and_still_writes() {
+        // `decisions` is the one table that cannot be rebuilt, and
+        // `CREATE TABLE IF NOT EXISTS` leaves an existing one alone — so a
+        // column added to `schema.sql` never reaches a database somebody
+        // already has, and the first write naming it fails. Upgrading would
+        // have cost the audit trail, which is the one thing here that is not
+        // re-derivable from anything.
+        let dir = std::env::temp_dir().join(format!("vp-upgrade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.db");
+
+        // A store as an older release left it: the table without `tool`, and a
+        // row in it.
+        {
+            let s = Store::open(&path).await.unwrap();
+            sqlx::raw_sql("DROP TABLE decisions")
+                .execute(&s.pool)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                "CREATE TABLE decisions (
+                   id TEXT PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
+                   action TEXT NOT NULL, subject TEXT NOT NULL, outcome TEXT NOT NULL,
+                   reason TEXT, project_id TEXT, run_id TEXT, work_id TEXT)",
+            )
+            .execute(&s.pool)
+            .await
+            .unwrap();
+            sqlx::raw_sql(
+                "INSERT INTO decisions (id, at, actor, action, subject, outcome)
+                 VALUES ('d1', '2026-09-15T00:00:00Z', 'policy', 'agent:tool.use', 'cat a', 'allow')",
+            )
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        }
+
+        // This release opens it, keeps the old row, and can write a new one.
+        let s = Store::open(&path).await.unwrap();
+        s.append_decision(
+            &crate::core::Decision::new(
+                crate::core::Actor::Policy,
+                "agent:tool.use",
+                "echo x > notes.md",
+                "allow",
+            )
+            .by_tool("Bash")
+            .for_run(&RunId::new("s1")),
+        )
+        .await
+        .unwrap();
+
+        let rows = s.decisions(None, 10).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "the older release's row survives the upgrade"
+        );
+        assert!(
+            rows.iter().any(|d| d.tool.as_deref() == Some("Bash")),
+            "and this release's column is writable: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|d| d.id == "d1" && d.tool.is_none()),
+            "a row written before the column exists reads as having no tool"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

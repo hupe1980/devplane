@@ -46,6 +46,7 @@ pub mod project;
 pub mod provider;
 pub mod reduce;
 pub mod run;
+pub mod setup;
 pub mod templates;
 pub mod text;
 pub mod transcript;
