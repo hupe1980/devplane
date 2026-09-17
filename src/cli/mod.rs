@@ -17,7 +17,8 @@ mod inbox;
 mod work;
 
 use admin::{
-    cmd_agents, cmd_audit, cmd_connect, cmd_diagnostics, cmd_disconnect, cmd_rewind, cmd_search,
+    cmd_agents, cmd_audit, cmd_connect, cmd_diagnostics, cmd_disconnect, cmd_gate, cmd_rewind,
+    cmd_search,
 };
 use board::{cmd_attach, cmd_focus, cmd_ls, cmd_open, cmd_show, cmd_tail, cmd_watch};
 use inbox::{cmd_attention, cmd_decide, cmd_inbox, cmd_say, cmd_snooze};
@@ -250,6 +251,17 @@ pub enum Command {
     Open,
     /// Follow events as they arrive.
     Watch,
+    /// What the permission gate is, and how much of it is measured.
+    ///
+    /// `doctor` answers *is it working*. This answers the other question:
+    /// **how much should I trust the thing that decides?** The release the
+    /// rules were last measured against, how far the vendor has moved since,
+    /// and the gate scored against a published conformance profile rather than
+    /// a list this project wrote for itself.
+    ///
+    /// The failures are the point. A card with nothing missing on it is a
+    /// marketing document.
+    Gate,
     /// Channel health, latency and daemon status.
     ///
     /// Named `doctor` because that is what every page of the documentation,
@@ -276,6 +288,16 @@ pub enum Command {
     },
     /// Stop the running daemon.
     Stop,
+    /// Serve Vibeplane's read-only surface to an agent over MCP, on stdio.
+    ///
+    /// Four questions — `inbox`, `work`, `explain`, `audit` — and nothing that
+    /// acts. The surface is read-only because it implements no mutating tool,
+    /// which is a property of the code rather than of a `readOnlyHint` a client
+    /// may ignore.
+    ///
+    /// Register it with your agent as a `command` MCP server running
+    /// `vibeplane mcp`.
+    Mcp,
     /// Read a hook payload on stdin and forward it to the daemon.
     ///
     /// Used for `SessionStart`, the one hook event that does not accept HTTP
@@ -319,6 +341,15 @@ pub enum WorkCmd {
         /// Start from a GitHub issue. Its title and body become the work.
         #[arg(long)]
         issue: Option<u64>,
+        /// The specification this work answers — a file, or the folder your
+        /// spec tool wrote — relative to the repository.
+        ///
+        /// Stamped onto the done certificate, with what its task list said when
+        /// each gate ran. No methodology is learned: the outline is the
+        /// Markdown headings, the progress is the `- [ ]` boxes, and the
+        /// `[gates]` commands you declare are what actually check the work.
+        #[arg(long)]
+        spec: Option<String>,
     },
     /// Show every piece of work.
     #[command(visible_alias = "ls")]
@@ -435,12 +466,14 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Command::Snooze { id, minutes }) => cmd_snooze(&id, minutes, cli.json).await,
         Some(Command::Open) => cmd_open().await,
         Some(Command::Watch) => cmd_watch().await,
+        Some(Command::Gate) => cmd_gate(cli.json).await,
         Some(Command::Doctor) => cmd_diagnostics(cli.json).await,
         Some(Command::Connect { what, statusline }) => {
             cmd_connect(what, statusline, cli.json).await
         }
         Some(Command::Disconnect { what }) => cmd_disconnect(what, cli.json).await,
         Some(Command::Stop) => cmd_stop().await,
+        Some(Command::Mcp) => crate::mcp::Server::run().await,
         Some(Command::Hook { gate }) => cmd_hook(gate).await,
         Some(Command::Statusline { then }) => cmd_statusline(then).await,
     }

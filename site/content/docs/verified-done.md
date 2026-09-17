@@ -16,6 +16,26 @@ vibeplane work list
 vibeplane work show <id>
 ```
 
+## The agent's account, beside what was measured
+
+When a gate goes red, the board and `vibeplane work show` print what the agent last said — under the
+verdict, quiet, in its own line:
+
+```console
+  rate limiter    implement  feat/ratelimit   $0.44   specs/limits.md   gates red
+  │ All tests pass and the rate limiter is complete. I ran the suite and everything is green.
+```
+
+**Both, and no judgement.** An agent's end-of-task report references about one action in eleven across
+5,851 measured sessions, and drifts toward its *plan* as execution leaves it — so the report is worth
+very little on its own and is the whole point next to an exit code that contradicts it. Vibeplane does
+not decide which is right: no model separates a truthful trajectory report from an untruthful one
+better than a bag-of-words detector does. It puts the sentence and the exit code on one screen.
+
+It appears **only beside a failed gate**. Alone it reads as a summary and is not one. It is also absent
+when no transcript was kept — a session Vibeplane only watched, or `[transcripts] keep = false` — and
+that is *nothing was recorded*, never *the agent said nothing*.
+
 ## What `work start` does
 
 1. **Validates the configuration** — before a worktree exists, so a broken chain costs nothing.

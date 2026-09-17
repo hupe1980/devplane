@@ -69,6 +69,10 @@ fetch https://raw.githubusercontent.com/github/spec-kit/main/README.md specs/sdd
 fetch https://raw.githubusercontent.com/github/spec-kit/main/spec-driven.md specs/sdd/spec-kit-spec-driven.md
 fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/analyze.md specs/sdd/spec-kit-analyze.md
 fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/converge.md specs/sdd/spec-kit-converge.md
+# The two templates that carry the shape a work item names: what a specification
+# document holds, and how its task list is written. `--spec` reads the second.
+fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/spec-template.md specs/sdd/spec-kit-spec-template.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/tasks-template.md specs/sdd/spec-kit-tasks-template.md
 fetch https://agents.md/ specs/standards/agents-md.md
 # Codex app-server (JSON-RPC)
 fetch https://raw.githubusercontent.com/openai/codex/main/codex-rs/app-server/README.md specs/codex/app-server-README.md

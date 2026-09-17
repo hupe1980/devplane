@@ -308,6 +308,13 @@ chk "sdd: the extension hook has no executor"     sdd/spec-kit-analyze.md 'leave
 chk "sdd: a mandatory hook is optional: false"    sdd/spec-kit-analyze.md 'optional: false'
 chk "sdd: the analyser calls itself read-only"    sdd/spec-kit-analyze.md 'STRICTLY READ-ONLY'
 chk "sdd: requirements carry stable ids"          sdd/spec-kit-analyze.md 'FR-###.*SC-###|FR-/SC- identifiers'
+# The shape `--spec` actually reads. Not the section names, which differ per
+# tool and are deliberately not recognised — the folder, and the task list.
+chk "sdd: a specification is a folder per feature" sdd/spec-kit-tasks-template.md '/specs/\[###-feature-name\]/'
+chk "sdd: its progress is a markdown task list"   sdd/spec-kit-tasks-template.md '^- \[ \] T[0-9]+'
+chk "sdd: openspec writes a task list too"        sdd/openspec-README.md 'tasks\.md.*implementation checklist'
+chk "sdd: openspec's unit is a change folder"     sdd/openspec-README.md 'openspec/changes/'
+chk "sdd: NEEDS CLARIFICATION is spec kit's word" sdd/spec-kit-spec-template.md '\[NEEDS CLARIFICATION'
 # ── AGENTS.md: the one context file every vendor reads (D179) ────────────────
 chk "agents.md: stewarded by the AAIF"            standards/agents-md.md 'Agentic AI Foundation'
 chk "agents.md: over 60k repositories"            standards/agents-md.md 'over.{0,40}60k'

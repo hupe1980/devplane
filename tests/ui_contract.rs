@@ -396,7 +396,7 @@ fn the_work_card_reads_only_fields_the_api_serves() {
 
     // What `WorkView` adds on top, listed explicitly so that removing one is a
     // deliberate two-line change rather than something that stops being checked.
-    const VIEW_ONLY: &[&str] = &["gate", "can_retry", "stopped_summary"];
+    const VIEW_ONLY: &[&str] = &["gate", "can_retry", "stopped_summary", "claim"];
 
     let mut missing = Vec::new();
     for field in fields_read_by_page("w") {
@@ -830,5 +830,148 @@ fn the_page_has_a_breakpoint_behind_its_viewport_tag() {
     assert!(
         PAGE.contains("@media (max-width:"),
         "and has to have something behind that claim"
+    );
+}
+
+/// Closing works on every overlay, including the one somebody adds next.
+///
+/// `openOver` and `closeOver` walk a list, and a dialog missing from it opens
+/// and never closes — `esc` does nothing, the veil does nothing, and the page
+/// is stuck. The list is small enough to keep correct by hand and exactly the
+/// kind of thing nobody remembers, so it is checked against the page.
+#[test]
+fn every_overlay_is_in_the_list_that_closes_them() {
+    let declared = PAGE
+        .split("const OVERLAYS = [")
+        .nth(1)
+        .and_then(|r| r.split(']').next())
+        .expect("the page declares its overlays");
+    for (at, _) in PAGE.match_indices(r#"class="over""#) {
+        let tag_start = PAGE[..at].rfind('<').expect("an opening tag");
+        let id = PAGE[tag_start..at]
+            .split(r#"id=""#)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("an overlay has an id");
+        assert!(
+            declared.contains(&format!("\"{id}\"")),
+            "`{id}` covers the page and is not in OVERLAYS, so nothing closes it"
+        );
+    }
+}
+
+/// An empty board says *which* kind of empty it is.
+///
+/// "No sessions" and "no agents running on this machine" are different
+/// sentences and only one of them is reassuring. The board used to show a
+/// heading over blank space, which says neither — and it is the first screen
+/// anybody sees.
+#[test]
+fn the_empty_board_has_two_sentences_and_only_one_is_a_thing_to_do() {
+    let body = PAGE
+        .split("function emptyBoard(")
+        .nth(1)
+        .and_then(|r| r.split("\nfunction ").next())
+        .expect("the page has an empty-state function");
+    // The one that is a thing to do names the command that does it.
+    assert!(
+        body.contains("vibeplane connect claude"),
+        "the not-connected state has to name the command that fixes it"
+    );
+    // The reassuring one does not, and is reached when the answer is unknown:
+    // telling somebody to run a command they have already run is worse than
+    // saying nothing.
+    assert!(
+        body.contains("state.connected === false"),
+        "only a definite `no` earns the sentence that asks for work"
+    );
+    assert!(
+        body.contains("Nothing is running right now"),
+        "a working machine with nothing on it needs the reassuring sentence"
+    );
+    // Quiet sessions are the usual reason a working machine looks empty, and a
+    // count with nothing to click is a dead end.
+    assert!(
+        body.contains("class=\"linkish dormant\""),
+        "the quiet count has to be the way to see them"
+    );
+}
+
+/// The setup panel reads and never writes.
+///
+/// Not an unfinished form: the permission rules are committed files reviewed
+/// like code, and an agent on this machine runs as the same user and can read
+/// the token this page uses. A POST that edited `[policy]` would be the
+/// widening path the gate exists to close. The panel says so, in the panel.
+#[test]
+fn the_setup_panel_reads_the_configuration_and_never_writes_it() {
+    let body = PAGE
+        .split(r#"<div id="setup" class="over""#)
+        .nth(1)
+        .and_then(|r| r.split("</div>\n\n").next())
+        .expect("the page has a setup panel");
+    assert!(
+        body.contains("never writes them"),
+        "a person who came looking for a settings form is owed the reason there is none"
+    );
+    // The only request it may make, and the method it may not.
+    let script = PAGE
+        .split("async function openSetup(")
+        .nth(1)
+        .and_then(|r| r.split("\nfunction ").next())
+        .expect("the panel fetches something");
+    assert!(script.contains(r#"api("/api/setup")"#));
+    assert!(
+        !script.contains("POST"),
+        "nothing in this panel writes; the editing happens where the review does"
+    );
+}
+
+/// Nothing in this product is reachable by keyboard alone.
+///
+/// The board is keyboard-first and was, for a while, keyboard-only: five
+/// commands — the palette, dispatch, the forge list, the setup panel and the
+/// reason key — had a shortcut and no target anywhere on the page. A shortcut
+/// nobody can discover is a feature only its author has.
+///
+/// The footer carries the global ones, each as a button printing its own key,
+/// so the legend and the toolbar are the same thing. This checks the wiring
+/// rather than the list: a button added to the footer with no entry in `GO`
+/// does nothing when pressed, and that is silent.
+#[test]
+fn every_global_command_has_something_to_click() {
+    let footer = PAGE
+        .split("<footer>")
+        .nth(1)
+        .and_then(|r| r.split("</footer>").next())
+        .expect("the page has a footer");
+    let table = PAGE
+        .split("const GO = {")
+        .nth(1)
+        .and_then(|r| r.split("\n};").next())
+        .expect("the page declares what its footer buttons do");
+
+    let mut found = 0;
+    for (at, _) in footer.match_indices(r#"data-go=""#) {
+        let name = footer[at + 9..]
+            .split('"')
+            .next()
+            .expect("a data-go carries a name");
+        assert!(
+            table.contains(&format!("{name}:")),
+            "the footer offers `{name}` and nothing happens when it is pressed"
+        );
+        found += 1;
+    }
+    assert!(found >= 5, "only {found} global commands have a target");
+
+    // And the two row-scoped ones that had no target either.
+    assert!(
+        PAGE.contains(r#"button[data-why]"#) && PAGE.contains(r#"data-why="${n}""#),
+        "the decision log for a row was on the ? key and on nothing else"
+    );
+    assert!(
+        PAGE.contains(r#"card.classList.contains("row") && card.dataset.run"#),
+        "a session row has to open what it is saying, the way enter does"
     );
 }

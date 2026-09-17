@@ -146,25 +146,78 @@ code, so they are appended instead.
 
 ## Spec-driven development
 
-Vibeplane knows nothing about `.specify/`, `openspec/` or Kiro's steering files — three third-party
-layouts to track, for no capability `[gates]` and `[pipelines]` do not already have. It contributes
-the part the category leaves out: **every spec tool ships a consistency checker and none of them
-decides.** Spec Kit's `/speckit.analyze` is **"STRICTLY READ-ONLY"** and closes with a
+Vibeplane detects no spec-tool layout and recognises no framework's section names — unsettled
+third-party conventions to track, for no capability `[gates]` and `[pipelines]` do not already have.
+It contributes the part the category leaves out: **every spec tool ships a consistency checker and
+none of them decides.** Spec Kit's `/speckit.analyze` is **"STRICTLY READ-ONLY"** and closes with a
 *recommendation*; `/speckit.converge` appends the unbuilt work to `tasks.md` rather than failing.
 
-**If your spec tool has a CLI, drift is already a gate.** OpenSpec has one:
+**If your spec tool has a CLI, that CLI is already a gate.** OpenSpec has one, and it exits non-zero:
 
 ```toml
 [gates]
 check = ["openspec validate --strict", "pnpm test -- --run"]
 ```
 
-A red drift check behaves exactly like a red test: the lines go back to the same session, bounded by
+A red check behaves exactly like a red test: the lines go back to the same session, bounded by
 `max_feedback_rounds`, and the work never reaches `review`.
 
-**An analyser that runs inside a session reports in prose and grades it.** A step that returns the
-work for a `LOW` terminology note spends its budget on style, so `findings.only` says which grades
-stop it:
+**Be precise about what that buys you, because the two are easy to confuse.** `openspec validate`
+checks the *specifications against each other* — structural issues, and a change's modified
+requirements against the specs they would replace. That is spec **integrity**, and a gate gives you
+it for free. It is not spec-**code** drift: nothing there reads your source. Drift needs something
+that compares the two, which is the step below.
+
+**Name the specification, and the verdict records what it was.** A file, or the folder your spec tool
+wrote. One document is the exception in this category, not the shape.
+
+```sh
+vibeplane work start "password reset" --kind feature --spec specs/001-password-reset
+```
+
+Every gate stamps a fingerprint over every Markdown file under that path, as they were when it ran —
+and counts the task list:
+
+```console
+$ vibeplane work show w-3f9a
+  spec       specs/001-password-reset at 3f9a1c40b7e2d518 over 4 documents
+             20/31 tasks   11 still open in the specification
+```
+
+That fingerprint is what makes a done certificate worth reading. *Checked against
+`specs/001-password-reset`* stops being a claim you can act on the moment a file in it moves;
+*checked against it at `3f9a…`* does not. A work whose specification was **not there** when the gate
+ran says so rather than showing a blank — that is a finding, not a missing field.
+
+It is not a cryptographic hash. It detects change, not forgery; anyone who can rewrite those files
+can rewrite the machine your agents run on.
+
+### What is read, and what is not
+
+No methodology. Spec Kit puts a feature in `specs/NNN-name/`, Kiro in `.kiro/specs/<feature>/`,
+OpenSpec in `openspec/changes/<id>/`; a requirement is `FR-001`, an EARS sentence or a
+`### Requirement:` heading; the document names differ, and all of them are still moving. So nothing
+here recognises a section. What is read is what they *do* share: Markdown, a folder rather than a
+file, headings for structure, and a `tasks.md` whose progress is `- [ ]` and `- [x]`.
+
+**The boxes are the point.** An agent's own account of its work references about one action in
+eleven, so *gates green* beside *20/31 tasks* is a sentence neither the exit code nor the agent can
+produce alone. It is counted and never judged: both go on the board, and you read them.
+
+Words that mark a question the specification has not answered are yours, for the reason
+`findings.only` is:
+
+```toml
+[spec]
+open_questions = ["NEEDS CLARIFICATION", "TBD"]
+```
+
+`NEEDS CLARIFICATION` is Spec Kit's spelling and the next tool will have another, so the list is
+empty unless your repository writes one. Matched per line, case-insensitively.
+
+**Drift itself is an analyser that runs inside a session, reports in prose, and grades it.** A step
+that returns the work for a `LOW` terminology note spends its budget on style, so `findings.only`
+says which grades stop it:
 
 ```toml
 [pipelines.feature]

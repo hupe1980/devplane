@@ -2,6 +2,134 @@
 
 Notable changes per release. Dates are UTC.
 
+## 0.5.0 — 2026-09-17
+
+Surfaces that make the gate's own claim checkable: how old its measurement is,
+what it does and does not do, what every repository on the machine has it set to
+do, a way for your agents to ask it things rather than being told by you, and —
+where a gate went red — what the agent said about it, next to what was measured.
+
+**One thing here changes a verdict**, and in the direction that costs a prompt:
+a path grant like `Edit(out.txt)` no longer speaks for whatever command fills
+that file. If a rule of yours relied on that, the call now asks. No
+configuration breaks.
+
+### Added
+
+- **The gate's measurement is current for the first time.** The full
+  differential matrix ran green against Claude Code **2.1.273** — 126 allow
+  cases and 208 deny cases — so `vibeplane gate` no longer reports a gap between
+  the release the rules were measured against and the one the vendor ships.
+  Twelve deny shapes were **skipped rather than measured**, and the command says
+  so: a skipped shape is unmeasured, not clean.
+- **<kbd>,</kbd> on the board: what is configured, everywhere.** The machine —
+  hooks installed, the settings file, how stale the measurement is — and every
+  registered repository's `vibeplane.toml` read back: gates, pipelines, rules in
+  evaluation order, and the three findings nobody gets by reading the file (a
+  rule that covers nothing, one that grants more than it reads as granting, a
+  path denied for reading that is still writable). The same read-back
+  `vibeplane check --json` prints. **It reads and never writes**: an agent here
+  runs as you, so a route that edited `[policy]` would be a widening path.
+- **A `vibeplane.toml` that will not parse is now a critical inbox item.** The
+  last good rules are kept, and a daemon restarted against a broken file has
+  none to keep — so that repository's `never_auto` list was simply gone and
+  nothing on any screen said so. The item names the file and the parser's reason.
+- **The agent's account, beside what the gate measured.** When a gate goes red,
+  the board and `vibeplane work show` print what the agent last said, under the
+  verdict and judging neither — a report references about one action in eleven
+  and drifts toward its plan as the run leaves it, so it is worth very little
+  alone and is the whole point next to an exit code that contradicts it. Shown
+  **only** beside a failed gate; absent when no transcript was kept, which is
+  *nothing was recorded* rather than *the agent said nothing*.
+- **`vibeplane gate`** — how much the gate is worth, which `doctor` does not
+  answer. The release the rules were last measured against, how far the vendor
+  has moved since, and the gate scored against the EBL-Core execution-boundary
+  profile (arXiv:2609.11596) rather than a list written here. **The card shows
+  what is missing**, and a test fails if it ever stops doing so. Also a page:
+  the scorecard used to live where nobody outside the repository could read it.
+- **The measurement is on a clock.** `just owed` re-fetches the vendor's
+  changelog and exits non-zero when it has shipped past the release whose
+  rule-relevant rows are accounted for; a cron line is the whole mechanism.
+  `just advance` moves that floor and **refuses on a red ledger**.
+- **`vibeplane mcp`** serves a read-only surface to your agents over stdio:
+  `inbox`, `work`, `explain`, `audit`. The useful one daily is `explain` — an
+  agent can find out *before* running a command that a rule refuses it. It is
+  read-only because it **implements no mutating tool**, not because anything is
+  annotated. Every payload is framed as a report carrying other people's text,
+  and an `explain` asked this way is recorded in `vibeplane audit`.
+- **`vibeplane work start --spec specs/001-password-reset`** names the
+  specification a piece of work answers — a file, or the folder your spec tool
+  wrote, which is what Spec Kit, Kiro and OpenSpec all actually produce. Every
+  gate stamps a fingerprint over every document under it, so *checked against
+  `specs/001-password-reset`* stays a claim you can act on after a file moves,
+  and one that was not there when the gate ran says so rather than showing a
+  blank.
+- **The specification's own task list is counted, and shown beside the
+  verdict.** *Gates green, 20/31 tasks, 2 unanswered* is a sentence neither the
+  exit code nor the agent's account of its own work can produce alone. No
+  methodology is learned — the frameworks in this category agree on almost
+  nothing, so the outline is the Markdown headings and the progress is the
+  `- [ ]` boxes they do share. Words that mark an unanswered question are the
+  repository's: `[spec] open_questions`.
+
+### Fixed
+
+- **A path grant approved anything that wrote to that path.** With
+  `auto_allow = ["Edit(out.txt)"]` and nothing else, every command redirecting
+  into `out.txt` was auto-approved — `cat /etc/passwd > out.txt`,
+  `cat ~/.ssh/id_rsa > out.txt`. One grant for one output file was permission to
+  pipe any file on the machine into it, with no prompt. Two causes, both now
+  measured against Claude Code 2.1.273: a read by a read-only command was
+  treated as never needing a prompt, which is true inside the working directory
+  and false outside it; and `~` resolved as a path *under* the working directory
+  rather than as the home directory. A recognised file command writing through
+  an operand — `… | tee out.txt` — now wants a `Bash` rule of its own, which is
+  what the running product does. **Found by the differential harness on its
+  first full run**, which is what it was built for.
+- **An empty board said neither of the two things it could mean.** A heading
+  over blank space is not an answer: *nothing is running* is the tool working,
+  *nothing is connected* is a thing to do. It now says which, names the command
+  when there is one, and makes the quiet-session count the way to see them.
+- **The deny axis weighed "it ran" and "it did not run" as if they were the
+  same kind of answer.** Its evidence is *did the command run* and its oracle is
+  a language model, so a `yes` is a fact and a `no` has two causes that look
+  identical: the rule fired, or the model never tried. Asked to run
+  `hexdump .env > /dev/null` with an **empty** deny list it produced RAN,
+  blocked, RAN — and the first full run reported that shape, and `c''at .env`,
+  as **WIDER**, the loudest thing the harness can say. Neither was ever a
+  verdict. An absence is now believed only after the shape has been given five
+  chances to produce the evidence, and a shape that cannot produce it
+  unprohibited at all is skipped and counted, exactly as one whose program is
+  not installed already was.
+- **The differential permission harness was asking its two sides different
+  questions.** The extra grant a write-shape probe needs reached the vendor's
+  settings and not the `vibeplane.toml`, so those rows compared a rule set
+  against a different rule set and reported the difference as a finding. One
+  list behind both spellings now, and a `selftest` axis that refuses to run the
+  matrix when they diverge — it needs no model and no signed-in vendor, so it is
+  part of `just verify`.
+- **The harness picked the Claude Code binary by glob order, not by version.**
+  The editor keeps every release side by side and `2.1.9` sorts after `2.1.273`,
+  so a machine with an old build present would have measured against it and
+  reported a floor that never moved. It now sorts by version and prints the
+  release it measured against.
+- **The board was keyboard-first and, for five commands, keyboard-only.** The
+  palette, dispatch, the forge list, the setup panel and the reason key had a
+  shortcut and no target anywhere on the page, and clicking a session row only
+  selected it. The footer legend is now the toolbar — every global command is a
+  button printing its own key — a session row opens what it is saying, and each
+  inbox item carries `why`. A shortcut nobody can discover is a feature only its
+  author has.
+- **The quickstart's keyboard table was broken**, so its last three rows
+  rendered as prose with pipes in it.
+- **A pipeline step's gate verdict now carries the specification stamp** that
+  the work loop and `vibeplane work verify` already recorded. Two paths of three
+  read as evidence of absence on the third.
+- **The documentation said a spec tool's CLI made *drift* a gate.** It does not:
+  `openspec validate` checks specifications against each other and reads no
+  source. That is spec integrity, which a gate gives you free; spec-code drift
+  needs a step that compares the two.
+
 ## 0.4.0 — 2026-09-16
 
 **If you rely on `[policy]`, this is the most important release so far.** Four

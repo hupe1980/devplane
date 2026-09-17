@@ -49,8 +49,38 @@ leaked=$(cd .. && grep -rInoE '\b(D|R)[0-9]+\b' $published 2>/dev/null \
 # `tests/documentation.rs` is the one file that may name the notes: it reads
 # them to check every `vibeplane.toml` example parses, and skips when they are
 # absent — which is the whole reason a clean checkout stays green.
-leaked="$leaked$(cd .. && grep -rInoE 'concepts/|specs/|architecture notes|these notes|design notes' \
-  $published 2>/dev/null | grep -vE '/target/|site/public/|^tests/documentation\.rs:')"
+#
+# `specs/` is also what a *user's* specification directory is called — Spec Kit
+# puts them there — so a documentation example naming `specs/reset.md` is not a
+# reference to this repository's gitignored `specs/` at all. The distinguishing
+# feature is code: an example lives in a fenced block or a backticked span, and
+# a reference to our own notes is bare prose. Matches inside backticks are
+# therefore exempt, which keeps the thing this guard is for — "see specs/ for
+# the protocol" in a doc comment — and stops it failing an example.
+bt=$(printf '\140')
+fence="$bt$bt$bt"
+notes='concepts/|specs/|architecture notes|these notes|design notes'
+examples_excluded=$(cd .. && grep -rInoE "$notes" \
+  $published 2>/dev/null | grep -vE '/target/|site/public/|^tests/documentation\.rs:' \
+  | while IFS= read -r hit; do
+      file=${hit%%:*}; rest=${hit#*:}; line=${rest%%:*}
+      text=$(sed -n "${line}p" "$file" 2>/dev/null)
+      # Formatted as code on this line: an example, not a reference.
+      # A parameter expansion rather than `case`, because a `)` in a case
+      # pattern inside a command substitution confuses the parser.
+      [ "${text#*$bt}" != "$text" ] && continue
+      # Or a string literal, which is what an example path is in Rust. The
+      # quoted runs are removed and the line re-tested: if nothing matches any
+      # more it was only ever inside a string, and `// see specs/ for the
+      # protocol` — the thing this guard is for — still has nothing quoting it.
+      stripped=$(printf '%s' "$text" | sed 's/"[^"]*"//g')
+      printf '%s' "$stripped" | grep -qE "$notes" || continue
+      # Or inside a fenced block, where the line itself carries no backticks.
+      opens=$(head -n $((line - 1)) "$file" 2>/dev/null | grep -c "^$fence")
+      [ $((opens % 2)) -eq 1 ] && continue
+      echo "$hit"
+    done)
+leaked="$leaked$examples_excluded"
 if [ -n "$leaked" ]; then
   echo "published tree points at these notes (gitignored — the reader has neither):"
   echo "$leaked" | sed 's/^/  /'
@@ -222,6 +252,35 @@ if [ "$(echo "$provider" | grep -c .)" -gt 1 ]; then
   fail=1
 fi
 
+# ...and against the code, which is the authority for both floors.
+#
+# Agreeing with itself is not enough for these two. They are the only figures
+# here a *user* is shown — `vibeplane doctor` prints them, and the product's
+# central claim is how old they are — so the constant the binary reads is the
+# fact and these notes are a copy of it, exactly as the released version is a
+# copy of `Cargo.toml`. They could drift silently until this existed.
+for pair in "VERIFIED_AGAINST verified against" "ROWS_CLEARED_THROUGH rows cleared through"; do
+  set -- $pair
+  const=$1; shift
+  phrase="$*"
+  in_code=$(grep -oE "pub const $const: &str = \"[0-9]+\.[0-9]+\.[0-9]+\"" ../src/core/policy.rs \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+  [ -n "$in_code" ] || continue
+  # `.{0,40}` rather than `[^|]*`: the figure's own row in STATE.md is a table
+  # cell, so the phrase and the version sit either side of a `|` and a pattern
+  # that refuses pipes reads every occurrence *except* the authoritative one.
+  # That is how the first version of this check passed a deliberately wrong
+  # figure — it was matching prose elsewhere and never the row it is about.
+  in_notes=$(grep -rhoiE "$phrase.{0,40}Claude Code \*\*[0-9]+\.[0-9]+\.[0-9]+\*\*" *.md \
+    | grep -oE 'Claude Code \*\*[0-9]+\.[0-9]+\.[0-9]+' \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u)
+  [ -n "$in_notes" ] || continue
+  if [ "$in_notes" != "$in_code" ]; then
+    echo "policy::$const is $in_code; these notes say $(echo $in_notes) for '$phrase'"
+    fail=1
+  fi
+done
+
 # ── Facts about somebody else's server ───────────────────────────────────────
 # Every guard above is a guard over *this* repository: the test count against the
 # tree, the page against the page, the released version against `Cargo.toml`, the
@@ -271,14 +330,14 @@ if [ -z "${VIBEPLANE_NO_NET:-}" ] && command -v curl >/dev/null 2>&1; then
   #    and the gap between the floor and the head is where a widening — or, in
   #    2.1.273, a revert that made this matcher stricter than the product — lives
   #    unseen. One home for the figure, STATE.md, same as every other.
-  read_through=$(grep -E '^\| Changelog read through \|' STATE.md 2>/dev/null \
+  read_through=$(grep -E '^\| Changelog rows cleared through \|' STATE.md 2>/dev/null \
     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
   if [ -n "$read_through" ]; then
     head_ver=$(get https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md \
       | grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     if [ -n "$head_ver" ] && [ "$head_ver" != "$read_through" ]; then
       echo "the changelog floor is $read_through; Claude Code is at $head_ver — those rows are unread"
-      echo "  (scripts/changelog-rows.sh, then STATE.md 'Changelog read through')"
+      echo "  (scripts/changelog-rows.sh, then policy::ROWS_CLEARED_THROUGH and STATE.md)"
       fail=1
     fi
   fi

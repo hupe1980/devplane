@@ -35,7 +35,7 @@ A machine-wide set with the same shape lives in `~/.vibeplane/policy.toml`.
 
 A rule moves between `settings.json` and `vibeplane.toml` by cutting and pasting it. Every row below
 is pinned by a test against the published specification, and the rules that decide most calls are
-additionally checked against a **running Claude Code** (last full run: 2.1.270) — that a deny matching one subcommand
+additionally checked against a **running Claude Code** (last full run: 2.1.273) — that a deny matching one subcommand
 blocks the whole line, that an allow does not approve a compound command it only half-covers, that an
 ask outranks the allow beside it, and that a single-segment directory pattern anchors as an allow
 while the same pattern floats to any depth as a deny — and that an `Edit` deny covers the target of a
@@ -233,6 +233,12 @@ Three asymmetries, all Claude Code's:
   approve `echo x > ~/.ssh/authorized_keys`. A target outside the working directory needs its own
   rule, and one that cannot be pinned to a single file — a `~` prefix, a glob, a variable — goes in
   front of a person whatever the rules say.
+- **And the same in reverse: a path grant covers the file, not the command that fills it.**
+  `auto_allow = ["Edit(out.txt)"]` approves `echo hi > out.txt` and `ls > out.txt`, because those
+  commands need no permission of their own. It does not approve `cat /etc/passwd > out.txt`: the read
+  is outside your working directory and is a prompt whatever the rules say about the *output* file.
+  Nor does it approve `… | tee out.txt` — a recognised file command writing through an operand wants
+  a `Bash` rule of its own.
 
 > [!WARNING]
 > This covers files the command **names**. A program that opens a file itself — a Python script, a
@@ -389,7 +395,7 @@ And one **warning**, because the list behind it is a snapshot of somebody else's
 |---|---|
 | `Bahs(rm *)`, `Stop Task` in `never_auto` or `always_ask` | the tool name is not one Claude Code documents, so the rule matches nothing. A prohibition with a typo in it is a dead prohibition. The name shown in the transcript is not always the one rules use — `Stop Task` is written `TaskStop` |
 
-Verified against Claude Code 2.1.270: `claude doctor` reports the three refusals above that are
+Verified against Claude Code 2.1.273: `claude doctor` reports the three refusals above that are
 parse errors. The rest are spellings its own documentation describes as skipped, which `vibeplane
 check` reports before an agent starts rather than after one has been paid for.
 
@@ -403,7 +409,14 @@ than transcribed:
   call and fails on any disagreement, on the allow side and the deny side.
 - `scripts/changelog-rows.sh` fails the build until every rule-relevant row of Claude Code's
   changelog is written down as covered, or declined with a reason.
+- **`just owed` puts that on a clock.** It re-fetches the changelog and exits non-zero when the
+  vendor has shipped past the release whose rows are all accounted for. A cron line is the whole
+  mechanism — "measured against the running vendor" is a claim in the present tense, and the vendor
+  ships most days.
 - Every fix carries a test.
+
+`vibeplane gate` prints the age of that measurement and scores the gate against a published
+execution-boundary profile, failures included — [conformance](/vibeplane/docs/conformance/).
 
 Both mistakes cost something, which is why the list is neither transcribed nor guessed at: a command
 that belongs here and is missing leaves a prohibition that reads as protection and is none, and one
@@ -419,7 +432,7 @@ names any such session — only for sessions running the
 ```console
 $ vibeplane doctor
 gate
-  verified against Claude Code 2.1.270
+  verified against Claude Code 2.1.273
   1 session(s) are running a newer Claude Code than the gate was measured against
     7c4a1b  2.1.272
   rules are still enforced; nobody has checked that they agree

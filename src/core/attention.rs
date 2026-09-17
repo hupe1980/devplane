@@ -9,6 +9,7 @@ use crate::core::ids::{AttentionId, ProjectId, RunId};
 use crate::core::run::{Run, RunState};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// How loudly an item asks for the human. Only `High` and `Critical` are
 /// allowed to raise an OS notification.
@@ -135,6 +136,20 @@ pub enum AttentionKind {
     /// else in this list is one piece of work going wrong; this is every
     /// prohibition on the machine being inert while the board says all is well.
     GateDown,
+    /// **A repository's `vibeplane.toml` will not parse**, so the rules it
+    /// commits are not in force.
+    ///
+    /// The second kind about the machine rather than about a run, and it is
+    /// here for the reason the first one is: the safe half of the answer is
+    /// that the last good rules are kept, and the unsafe half is that a daemon
+    /// restarted against a broken file has none to keep. That repository's
+    /// `never_auto` list is simply gone, every call in it falls through to
+    /// asking, and the board looked exactly as it does when everything is
+    /// fine.
+    ///
+    /// Critical for the same reason as [`AttentionKind::GateDown`], and narrower:
+    /// prohibitions are inert in one repository rather than in all of them.
+    ConfigBroken,
 }
 
 impl AttentionKind {
@@ -161,6 +176,7 @@ impl AttentionKind {
             AttentionKind::PipelineBroken => "pipeline_broken",
             AttentionKind::Refused => "refused",
             AttentionKind::GateDown => "gate_down",
+            AttentionKind::ConfigBroken => "config_broken",
         }
     }
 
@@ -178,6 +194,9 @@ impl AttentionKind {
             // The board looks fine and nothing is enforced. There is no louder
             // thing this product can have to say.
             AttentionKind::GateDown => Level::Critical,
+            // One repository's committed prohibitions are not loaded and
+            // nothing else on the board would say so.
+            AttentionKind::ConfigBroken => Level::Critical,
             AttentionKind::Interrupted => Level::High,
             // Normal, not high: the pipeline stopped exactly where the project
             // asked it to. An expected pause is not an alarm.
@@ -512,6 +531,44 @@ pub fn gate_down_item(why: &str) -> AttentionItem {
             "No rule in any project is being enforced right now.\n{why}\n\n\
              Run `vibeplane doctor` for the command it tried, then \
              `vibeplane connect claude` to reinstall it."
+        )),
+        options: Vec::new(),
+        actions: Vec::new(),
+        request_id: None,
+        url: None,
+        launch: None,
+        work_id: None,
+        suggested_rule: None,
+        since: jiff::Timestamp::now(),
+    }
+}
+
+/// A repository whose `vibeplane.toml` will not parse, and the parser's reason.
+///
+/// No action, for the same reason [`gate_down_item`] offers none: the fix is a
+/// text editor and a person who can read TOML, and a button that rewrote
+/// somebody's committed rules from an inbox row is not something this product
+/// does. What it offers instead is the command that prints the whole answer.
+pub fn config_broken_item(root: &Path, why: &str) -> AttentionItem {
+    let where_ = root.display().to_string();
+    AttentionItem {
+        // Stable per repository, so a file that stays broken is one open item
+        // rather than one per poll.
+        id: AttentionId::from(format!("config-broken:{where_}")),
+        kind: AttentionKind::ConfigBroken,
+        level: AttentionKind::ConfigBroken.default_level(),
+        run_id: None,
+        project_id: None,
+        title: format!(
+            "{}/vibeplane.toml will not load",
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| where_.clone())
+        ),
+        detail: Some(format!(
+            "The rules this repository commits are not in force.\n{why}\n\n\
+             Run `vibeplane check {where_}` for the line, and the gates and \
+             prohibitions come back as soon as the file parses."
         )),
         options: Vec::new(),
         actions: Vec::new(),

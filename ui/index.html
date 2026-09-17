@@ -70,13 +70,19 @@
   .item { border-left: 3px solid var(--wait); }
   .item.critical { border-left-color: var(--fail); }
   .item .t { font-weight: 600; }
-  .item .d { color: var(--dim); margin-top: .2rem; overflow-wrap: anywhere; }
+  /* A detail is verbatim text somebody else wrote — a command, a parser's
+     error with a caret under the column, a build's output. Collapsing its
+     newlines throws away the half that locates the problem. */
+  .acts .why { color: var(--faint); }
+  .item .d { color: var(--dim); margin-top: .2rem; overflow-wrap: anywhere; white-space: pre-wrap; }
   .opts { margin: .35rem 0 0; padding-left: 1.1rem; color: var(--dim); }
   .opts.picks { padding-left: 0; display: flex; gap: .4rem; flex-wrap: wrap; }
   .opts.picks button { display: inline-flex; align-items: baseline; gap: .45rem; }
   .opts.picks .num { color: var(--faint); }
   .opt-dead { color: var(--faint); border: 1px dashed var(--line); border-radius: 4px; padding: .1rem .5rem; }
-  .row { display: flex; gap: .6rem; align-items: baseline; }
+  /* `wrap` so a full-width child — the agent's account — takes its own line.
+     The sized cells never wrap on their own: they fit, and `.sum` shrinks. */
+  .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: baseline; }
   /* The id is legible and not loud: it is the field carrying the least
      information on the row, and nine sessions on one repository must not read
      as nine near-identical lines differing by a hash. */
@@ -88,7 +94,12 @@
      happens to differ. `ui_contract` holds each of them to a width. */
   .row .surface { width: 8.5rem; flex: none; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .since { width: 3rem; flex: none; text-align: right; color: var(--faint); }
-  .row .sum { color: var(--dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The sentence is the row's content, so it does not shrink to nothing while
+     badges hold their width. Below the floor the badges wrap instead, which is
+     the right trade: `20/31 tasks` reads the same on a second line and a
+     pipeline clipped to `✓impl…` reads as nothing. */
+  .row .sum { color: var(--dim); flex: 1; min-width: 14rem; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
   /* Where the contrast goes instead: the state that wants a person. The inbox
      above already carries the item; this is so the same run is findable on the
      board without reading every row. */
@@ -112,6 +123,19 @@
      Code shows its own "prompt from an external link" warning until the person
      presses enter — so it is styled as an offer, not as an action. */
   a.gate.launch { color: var(--work); border-color: var(--work); }
+  /* What a piece of work answers. Quiet: it is context for the verdict beside
+     it, not a verdict of its own. */
+  .gate.spec { color: var(--faint); }
+  /* Work the specification still says is outstanding. A word is on the badge,
+     so the colour is never the only carrier. */
+  .gate.spec.open { color: var(--wait); border-color: var(--wait); }
+  /* The agent's own account of a run whose gate went red. Quiet and on its own
+     line: it is the half of the pair that is *not* measured, and the reader is
+     meant to compare it with the verdict beside it rather than believe it. */
+  .claim {
+    flex: 1 0 100%; color: var(--dim); font-style: italic;
+    border-left: 2px solid var(--line); padding-left: .6rem; margin-top: .3rem;
+  }
   .proj { color: var(--dim); margin: .9rem 0 .3rem; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
   .gauge { display: inline-block; width: 3.2rem; color: var(--faint); text-align: right; }
   .gauge.high { color: var(--wait); }
@@ -153,7 +177,30 @@
     footer { gap: .6rem; }
   }
   .empty { color: var(--faint); padding: .5rem 0; }
-  footer { color: var(--faint); padding: 0 1rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+  /* An empty board is the first screen anybody sees. The heading above it is
+     quiet by design, so this is the one place on the page where prose is the
+     content rather than the label. */
+  .empty b { color: var(--ink); font-weight: 600; display: block; margin-bottom: .3rem; }
+  .empty div { color: var(--dim); max-width: 46rem; }
+  .empty .then { margin-top: .4rem; }
+  code { color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+         border-radius: 3px; padding: 0 .3rem; }
+  /* Inside a panel the panel colour is the background, so the chip needs the
+     page colour to read as one. */
+  .over code { background: var(--bg); }
+  footer { color: var(--faint); padding: 0 1rem 1rem; display: flex; gap: 1rem .9rem;
+           flex-wrap: wrap; align-items: baseline; }
+  footer .rowkeys { display: contents; }
+  footer .tools { display: flex; gap: .35rem; flex-wrap: wrap; margin-left: auto; }
+  /* A legend entry you can press. Quiet until it is pointed at, because the
+     footer is a reference most of the time and a toolbar the rest. */
+  footer .tools button {
+    color: var(--faint); border: 1px solid transparent; border-radius: 4px;
+    padding: .1rem .45rem; cursor: pointer;
+  }
+  footer .tools button:hover, footer .tools button:focus-visible {
+    color: var(--ink); border-color: var(--line);
+  }
   .err { color: var(--fail); padding: 1rem; }
 
   /* The launchers. Deliberately the only things that cover the page. */
@@ -194,6 +241,32 @@
   #dtpl { max-height: 26vh; overflow-y: auto; }
   #dwill { padding: .5rem .9rem; background: var(--bg); border-top: 1px solid var(--line); color: var(--dim); }
   .dfoot { display: flex; gap: .9rem; align-items: center; padding: .5rem .9rem; border-top: 1px solid var(--line); color: var(--faint); }
+  /* Setup. A reading surface, so it is laid out as a definition list: a fixed
+     label column and the value beside it, the same shape `vibeplane check`
+     prints in a terminal. */
+  /* Wider than the launchers. This one is read rather than typed into, and a
+     gate command or a rule wrapping mid-pattern is harder to check than it is
+     to fit. */
+  #setup { width: min(56rem, 94vw); }
+  #setupbody { max-height: 62vh; overflow-y: auto; padding-bottom: .6rem; }
+  .setgrp { padding: .55rem .9rem .2rem; color: var(--faint); font-size: 11px;
+            text-transform: uppercase; letter-spacing: .08em; }
+  .setrow { display: flex; gap: .7rem; align-items: baseline; padding: .12rem .9rem; }
+  .setrow .k { color: var(--faint); width: 6.5rem; flex: none; }
+  .setrow .v { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .setrow .v.dim { color: var(--dim); }
+  /* A TOML parser points at the column it failed on, with a caret on its own
+     line. Collapsing that into one line throws away the half that locates it. */
+  .setrow .v.pre { white-space: pre-wrap; }
+  .setproj { display: flex; gap: .6rem; align-items: baseline; padding: .7rem .9rem .15rem;
+             border-top: 1px solid var(--line); margin-top: .4rem; }
+  .setproj b { font-weight: 600; }
+  .setproj .tag { color: var(--faint); }
+  .setproj .tag.no { color: var(--wait); }
+  /* The three findings. Colour is never the only carrier — each is labelled. */
+  .find { color: var(--wait); }
+  .find.bad { color: var(--fail); }
+  .setfoot { padding: .5rem .9rem; border-top: 1px solid var(--line); color: var(--dim); background: var(--bg); }
   .whyhead { display: flex; gap: .6rem; align-items: baseline; padding: .6rem .9rem; border-bottom: 1px solid var(--line); }
   #whybody { padding: .6rem .9rem 1rem; max-height: 52vh; overflow-y: auto; }
   #whybody .e { display: flex; gap: .6rem; align-items: baseline; padding: .15rem 0; }
@@ -327,25 +400,46 @@
   <div id="ghbody" role="list"></div>
 </div>
 
+<div id="setup" class="over" role="dialog" aria-modal="true" aria-label="What is configured" hidden>
+  <div class="whyhead"><b>Setup</b><span id="setupwhere" class="tag"></span>
+    <button id="setupclose" style="margin-left:auto">close</button></div>
+  <div id="setupbody"></div>
+  <!-- Why there is nothing to edit here. One sentence, because a person who
+       came looking for a settings form deserves an answer rather than a
+       missing button. -->
+  <div class="setfoot">Every value here is a file. Vibeplane reads them and never writes them:
+    the rules are committed and reviewed like code, and an agent on this machine runs as you.</div>
+</div>
+
 <div id="why" class="over" role="dialog" aria-modal="true" aria-label="Why this is here" hidden>
   <div class="whyhead"><b>Why this is here</b><button id="whyclose" style="margin-left:auto">close</button></div>
   <div id="whybody"></div>
 </div>
 
+<!-- The legend is the toolbar. Every command that is not about the row under
+     the cursor is a button here carrying its own shortcut, so nothing in this
+     product is reachable by keyboard alone and learning the key costs one
+     glance at the thing you just clicked. The row-scoped keys stay legend:
+     each already has a target on the row itself. -->
 <footer>
-  <span><kbd>j</kbd><kbd>k</kbd> move</span>
-  <span><kbd>f</kbd> focus window</span>
-  <span><kbd>a</kbd> copy attach</span>
-  <span><kbd>s</kbd> snooze 1h</span>
-  <span><kbd>y</kbd><kbd>n</kbd> allow / deny</span>
-  <span><kbd>1</kbd>&ndash;<kbd>9</kbd> pick an answer</span>
-  <span><kbd>r</kbd> reply</span>
-  <span><kbd>enter</kbd> what it is saying</span>
-  <span><kbd>?</kbd> why</span>
-  <span><kbd>g</kbd> issues &amp; PRs</span>
-  <span><kbd>&#8984;K</kbd> jump</span>
-  <span><kbd>&#8984;N</kbd> dispatch</span>
-  <span><kbd>/</kbd> search</span>
+  <span class="rowkeys">
+    <span><kbd>j</kbd><kbd>k</kbd> move</span>
+    <span><kbd>enter</kbd> what it is saying</span>
+    <span><kbd>y</kbd><kbd>n</kbd> allow / deny</span>
+    <span><kbd>1</kbd>&ndash;<kbd>9</kbd> pick an answer</span>
+    <span><kbd>r</kbd> reply</span>
+    <span><kbd>f</kbd> focus window</span>
+    <span><kbd>a</kbd> copy attach</span>
+    <span><kbd>s</kbd> snooze 1h</span>
+    <span><kbd>?</kbd> why</span>
+  </span>
+  <nav class="tools" aria-label="Everywhere">
+    <button data-go="search"><kbd>/</kbd> search</button>
+    <button data-go="github"><kbd>g</kbd> issues &amp; PRs</button>
+    <button data-go="palette"><kbd>&#8984;K</kbd> jump</button>
+    <button data-go="dispatch"><kbd>&#8984;N</kbd> dispatch</button>
+    <button data-go="setup"><kbd>,</kbd> setup</button>
+  </nav>
 </footer>
 
 <script>
@@ -383,10 +477,17 @@ const ago = (s) =>
   s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m"
   : s < 86400 ? Math.floor(s / 3600) + "h" : Math.floor(s / 86400) + "d";
 
-let state = { board: null, inbox: [], work: [], sel: 0, showAll: false };
+// `connected` is tri-state on purpose: `undefined` not asked, `null` asked and
+// unknown, a boolean answered. An empty board must not claim "nothing is
+// connected" on the strength of a request that failed.
+let state = { board: null, inbox: [], work: [], sel: 0, showAll: false, connected: undefined };
 // The open transcript: which run, what it has said, and whether to show the
 // agent's reasoning (usually not — a reader skips it far more often than reads).
 let talk = { run: null, messages: [], thinking: false, es: null };
+// What is configured, read once and kept. Declared here rather than beside
+// `openSetup` because the empty board fetches the same answer to decide which
+// sentence it is.
+let setup = { data: null, error: null, loading: false };
 
 // A missing summary is not a session with nothing to say — it is one we have
 // nothing about, usually because the roster found it before any hook did.
@@ -400,6 +501,34 @@ const SUMMARY_FALLBACK = {
   failed: "failed",
   lost: "gone",
 };
+
+// **An empty board is the most important screen in the product**, because it is
+// the first one. Two different sentences, and only one of them is reassuring:
+// *nothing is running* is the tool working, *nothing is connected* is a thing to
+// do. A heading over blank space says neither.
+//
+// `state.connected === false` is the only answer that earns the second sentence.
+// Unknown falls to the reassuring one rather than telling somebody to run a
+// command they have already run.
+function emptyBoard(b) {
+  if (state.connected === false) {
+    return `<div class="empty">
+      <b>No agent sessions here yet.</b>
+      <div>Vibeplane watches Claude Code in your terminal, VS Code and the desktop app —
+           start one and it appears.</div>
+      <div class="then">For permissions, cost and context as well, run
+           <code>vibeplane connect claude</code>.</div>
+    </div>`;
+  }
+  // Quiet sessions are the usual reason a working machine looks empty, and a
+  // count with no way to act on it is a dead end.
+  const quiet = b.summary.dormant || 0;
+  const rest = quiet
+    ? `${esc(quiet)} session${quiet === 1 ? " has" : "s have"} gone quiet —
+       <button class="linkish dormant">show them</button>.`
+    : "Start an agent anywhere and it appears here.";
+  return `<div class="empty"><b>Nothing is running right now.</b><div>${rest}</div></div>`;
+}
 
 function render() {
   const b = state.board;
@@ -473,11 +602,19 @@ function render() {
   if ($("announce").textContent !== say) $("announce").textContent = say;
 
   // The inbox first, because it is the only part that is asking for something.
+  //
+  // Every item ends with `why`, which is the one answer that is never an
+  // action: the decision log for that row. It was on the ? key and on nothing
+  // a mouse could reach.
   $("inbox").innerHTML = state.inbox.length
     ? state.inbox.map((i, n) => `
         <div class="card item ${esc(i.level)}" role="listitem" data-sel="${n}" data-run="${esc(i.run_id || "")}" tabindex="0">
           <div class="t">${esc(i.title)}</div>
           ${i.detail ? `<div class="d">${esc(i.detail)}</div>` : ""}
+          ${i.kind === "config_broken"
+            // The one item whose whole answer is a file. `,` is where the file
+            // is read back, so the row that names the problem opens it.
+            ? `<div class="acts"><button data-go="setup">show what is configured</button></div>` : ""}
           ${i.options?.length ? (
             i.actions.includes("choose")
               // The agent named the answers it will take, so those are the
@@ -503,9 +640,14 @@ function render() {
             ${i.launch ? `<a class="gate launch" href="${esc(i.launch)}">open an agent on it</a>` : ""}
             ${i.actions.includes("attach") ? `<button data-act="attach" data-run="${esc(i.run_id || "")}">copy attach</button>` : ""}
             ${i.actions.includes("snooze") ? `<button data-act="snooze" data-run="${esc(i.run_id || "")}" data-work="${esc(i.work_id || "")}" data-opt="${esc(i.work_id || i.run_id ? "" : (i.project_id || ""))}">snooze 1h</button>` : ""}
+            <button class="why" data-why="${n}" title="why is this here (?)">why</button>
           </div>
         </div>`).join("")
     : `<div class="empty">Nothing needs you.</div>`;
+  // "Nothing needs you" is reassuring above a board with sessions on it and
+  // noise above one with nothing on it at all, where it is a second heading
+  // over blank space before the sentence that actually explains the screen.
+  $("needs").hidden = state.inbox.length === 0 && b.runs.length === 0;
 
   const work = state.work.filter((w) => w.phase !== "done" && w.phase !== "cancelled");
   $("worksec").hidden = work.length === 0;
@@ -537,6 +679,48 @@ function render() {
       : "";
     // The two cards that are asking for something: a pipeline held where the
     // project said a person decides, and work whose checks kept failing.
+    // What this work answers, and — once a gate has run — what that
+    // specification *was* when it did. A path alone is not a claim a reviewer
+    // can act on after the file moves; the fingerprint is what makes it one.
+    // What the agent said, beside what the gate measured. Served only when the
+    // last gate failed, which is the one place the two are worth reading
+    // together: a report alone references about one action in eleven. The page
+    // shows both and judges neither.
+    const claim = w.claim
+      ? `<span class="claim"><span class="sr">the agent's account: </span>${esc(w.claim)}</span>`
+      : "";
+    const stamp = w.gate?.spec;
+    // Concatenated rather than a template literal, for the reason the gate-age
+    // line gives: every `${...}` of an API value on this page is wrapped in
+    // `esc()`, no exceptions and no judgement calls, and a nested template
+    // whose outer call happens to escape it reads like one that forgot.
+    const why = stamp
+      ? stamp.fingerprint
+        ? "checked against " + stamp.path + " at " + stamp.fingerprint
+        : stamp.path + " was not there when the gate ran"
+      : "no gate has run against " + w.spec + " yet";
+    const spec = w.spec
+      ? `<span class="gate spec" title="${esc(why)}">${esc(w.spec)}${
+          stamp && !stamp.fingerprint ? " (missing)" : ""
+        }</span>`
+      : "";
+    // What the specification's own task list said when the gate ran.
+    //
+    // The one figure on this row that neither the exit code nor the agent
+    // wrote: a checkbox in the repository. *Gates green, and eleven boxes still
+    // open* is a sentence nothing else here can produce, and it is shown
+    // without a verdict attached — counted, never judged. Amber only where
+    // there is something left, because a badge that is always present is one
+    // nobody reads.
+    // One badge, because both facts are about the same document and a row of
+    // them is a row nobody reads.
+    const asks = stamp && stamp.open_questions > 0
+      ? ", " + esc(stamp.open_questions) + " unanswered" : "";
+    const tasks = stamp && stamp.tasks_total > 0
+      ? `<span class="gate spec${stamp.tasks_done < stamp.tasks_total || asks ? " open" : ""}"
+               title="${esc("in " + stamp.path + ", when the gate ran")}">${
+          esc(stamp.tasks_done)}/${esc(stamp.tasks_total)} tasks${asks}</span>`
+      : "";
     const release = w.phase === "human"
       ? `<button data-act="approve" data-work="${esc(w.id)}">release</button>`
       : w.can_retry
@@ -548,7 +732,8 @@ function render() {
       <span class="meta">${esc(w.phase)}</span>
       <span class="sum">${step || esc(w.branch || "")}</span>
       <span class="cost">${w.cost_usd > 0 ? "$" + w.cost_usd.toFixed(2) : ""}</span>
-      ${badge}${pr}${release}
+      ${spec}${tasks}${badge}${pr}${release}
+      ${claim}
     </div>`;
   }).join("");
 
@@ -556,7 +741,9 @@ function render() {
   for (const r of b.runs) (byProject[r.project_name || "elsewhere"] ||= []).push(r);
   const offset = state.inbox.length;
   let n = offset;
-  $("board").innerHTML = Object.entries(byProject)
+  $("board").innerHTML = b.runs.length === 0
+    ? emptyBoard(b)
+    : Object.entries(byProject)
     .sort((a, c) => c[1].length - a[1].length)
     .map(([proj, runs]) => {
       // What GitHub says is open here, beside the session count.
@@ -751,6 +938,22 @@ async function refresh() {
     state.board = board;
     state.inbox = inbox;
     state.work = work;
+    // Only when there is nothing to show, and only once: the empty board is the
+    // one screen that has to say *which* kind of empty it is, and asking on
+    // every poll would be a request per five seconds to answer a question that
+    // changes when somebody runs `connect`.
+    if (board.runs.length === 0 && state.connected === undefined) {
+      state.connected = null;
+      api("/api/setup")
+        .then((d) => {
+          setup.data = d;
+          state.connected = (d?.connect?.hooks_installed || []).length > 0;
+          render();
+        })
+        .catch(() => {
+          state.connected = null;
+        });
+    }
     render();
   } catch (e) {
     document.querySelector("main").innerHTML = `<div class="err">${esc(e.message)}</div>`;
@@ -820,6 +1023,9 @@ async function act(kind, run, req, opt) {
 
 let projects = [];
 let over = { which: null, sel: 0, hits: [], dispatch: null };
+// Every dialog allowed to cover the page, in one list: a new one added here is
+// closed by `esc` and by the veil without anybody remembering to.
+const OVERLAYS = ["palette", "dispatch", "why", "github", "setup"];
 
 const openOver = (which) => {
   over.which = which;
@@ -829,7 +1035,7 @@ const openOver = (which) => {
   // the page with no idea where they were.
   over.cameFrom = document.activeElement;
   $("veil").hidden = false;
-  for (const id of ["palette", "dispatch", "why", "github"]) $(id).hidden = id !== which;
+  for (const id of OVERLAYS) $(id).hidden = id !== which;
 };
 // Tab stays inside an open dialog.
 //
@@ -860,7 +1066,7 @@ const trapTab = (e) => {
 const closeOver = () => {
   over.which = null;
   $("veil").hidden = true;
-  for (const id of ["palette", "dispatch", "why", "github"]) $(id).hidden = true;
+  for (const id of OVERLAYS) $(id).hidden = true;
   const back = over.cameFrom;
   over.cameFrom = null;
   if (back && document.contains(back)) back.focus();
@@ -951,13 +1157,210 @@ function renderGithub() {
 
 // Delegated: the counts are rebuilt on every render, so a listener bound to
 // the element itself would be bound to an element that no longer exists.
+// Everything the keyboard can reach, the mouse can too.
+//
+// A shortcut nobody can discover is a feature only its author has, so every
+// command that is not about the row under the cursor carries a target in the
+// footer, and each row-scoped one has a target on the row. `GO` is the whole
+// list — a command added to the footer and not to this table does nothing when
+// pressed, which `every_global_command_has_something_to_click` catches.
+const GO = {
+  search: () => { $("q").focus(); $("q").select(); },
+  github: openGithub,
+  setup: openSetup,
+  palette: () => { openOver("palette"); $("pq").value = ""; renderPalette(); $("pq").focus(); },
+  dispatch: () => startDispatch(),
+};
 document.addEventListener("click", (e) => {
-  if (e.target instanceof Element && e.target.closest("#ghopen, .ghopen")) openGithub();
+  if (!(e.target instanceof Element)) return;
+  if (e.target.closest("#ghopen, .ghopen")) openGithub();
+  const go = e.target.closest("[data-go]");
+  if (go) GO[go.dataset.go]?.();
 });
 
 $("ghtabi").addEventListener("click", () => { gh.tab = "issues"; renderGithub(); });
 $("ghtabp").addEventListener("click", () => { gh.tab = "prs"; renderGithub(); });
 $("ghclose").addEventListener("click", closeOver);
+
+// ── ,: what is configured, on this machine and in every repository ──────────
+//
+// The product could always answer this and only in a terminal, one repository
+// at a time: `vibeplane check` per project, `vibeplane doctor` for the machine.
+// Somebody with eight repositories had to visit eight of them to find the one
+// whose rules had stopped loading.
+//
+// **It reads and never writes.** Not an unfinished form — the rules are
+// committed files reviewed like code, and an agent here runs as the same user
+// and can read the token this page uses. A POST that edited `[policy]` would be
+// the widening path the gate exists to close. So every value arrives with the
+// file it came from, and the editing happens where the review does.
+
+async function openSetup() {
+  openOver("setup");
+  setup.loading = !setup.data;
+  renderSetup();
+  try {
+    setup.data = await api("/api/setup");
+    setup.error = null;
+    // The same answer the empty board asks for. Fetching it once here means
+    // opening this panel also settles that question.
+    state.connected = (setup.data.connect?.hooks_installed || []).length > 0;
+  } catch (e) {
+    setup.error = String(e && e.message ? e.message : e);
+  }
+  setup.loading = false;
+  renderSetup();
+}
+
+const row = (k, v, cls) =>
+  `<div class="setrow"><span class="k">${esc(k)}</span><span class="v${cls ? " " + cls : ""}">${v}</span></div>`;
+// Values are other people's text — a command from a repository, a parser's
+// error. Escaped here so no caller can forget.
+const val = (k, v, cls) => row(k, esc(v), cls);
+// Backticks are how the findings quote a rule for a terminal; in a browser they
+// are a chip. Applied *after* escaping, so it can only ever wrap text that is
+// already inert.
+const ticks = (v) => esc(v).replace(/`([^`]+)`/g, "<code>$1</code>");
+
+function renderSetup() {
+  const body = $("setupbody");
+  if (setup.error) return (body.innerHTML = `<div class="err">${esc(setup.error)}</div>`);
+  if (!setup.data) return (body.innerHTML = `<div class="ghempty">reading the files…</div>`);
+  const d = setup.data;
+  $("setupwhere").textContent = d.machine?.home || "";
+
+  let out = `<div class="setgrp">This machine</div>`;
+  out += val("vibeplane", `${d.machine?.version || "?"} · pid ${d.machine?.pid} · up ${ago(d.machine?.uptime_seconds || 0)}`);
+  out += val("database", d.machine?.database || "—", "dim");
+
+  // What the vendor's own settings file says. The distinction that matters is
+  // installed-and-deciding versus installed-and-stale: the second reads as
+  // working everywhere else.
+  const c = d.connect;
+  if (!c || !(c.hooks_installed || []).length) {
+    out += row("claude code", `nothing installed — <code>vibeplane connect claude</code>`, "dim");
+  } else {
+    out += val("claude code", c.hooks_installed.join(", ") + " installed");
+    if (c.gate_is_stale)
+      out += row("", `<span class="find bad">stale</span> installed before the gate became two hooks — prohibitions do not reach auto mode. <code>vibeplane connect claude</code>`);
+    if (c.allowlist_blocks_us)
+      out += row("", `<span class="find bad">blocked</span> <code>allowedHttpHookUrls</code> does not cover loopback, so every hook here is inert`);
+    out += val("", c.settings_path || "", "dim");
+    out += val("telemetry", c.telemetry_is_ours ? "to vibeplane" : c.telemetry_endpoint || "not exported", "dim");
+  }
+  out += val("gate", `rules checked against Claude Code ${d.gate?.verified_against} · rows cleared through ${d.gate?.rows_cleared_through}`, "dim");
+  out += val("agents", (d.agents || []).map((a) => a.name || a.id || a).join(", ") || "none", "dim");
+
+  // The machine-wide rules. Every repository inherits them, and a project can
+  // never widen them, so they are shown before any project.
+  const mp = d.machine_policy;
+  if (mp?.error) out += row("your rules", `<span class="find bad">will not load</span> ${esc(mp.error)}`);
+  else if (mp && !mp.exists) out += val("your rules", "no ~/.vibeplane/policy.toml — nothing decides on your behalf", "dim");
+  else if (mp) {
+    out += val("your rules", counts(mp));
+    out += rules(mp);
+    out += problems(mp.problems);
+  }
+
+  for (const p of d.projects || []) out += project(p);
+  body.innerHTML = out;
+}
+
+// Only the lists that hold something. "0 ask" is a fact about a list nobody
+// wrote, and three counts of which two are nought read as a form with gaps.
+const counts = (p) =>
+  [["deny", p.deny], ["ask", p.ask], ["allow", p.allow]]
+    .filter(([, l]) => (l || []).length)
+    .map(([w, l]) => `${esc(l.length)} ${esc(w)}`)
+    .join(" · ");
+
+// Rules in evaluation order — deny, then ask, then allow — because that order
+// is the thing most likely to surprise: a matching ask beats a narrower allow.
+// A negation carves a hole in the list it sits in, so it is labelled `except`
+// rather than by its list's name; `deny !Bash(git status)` reads at a glance as
+// the opposite of what it does.
+function rules(p) {
+  // `entry`, not `r`: the page's contract test reads every `r.<field>` here as
+  // a field the board must serve, and a rule is not a run.
+  const list = (rs, word, cls) => (rs || []).map((entry) => {
+    const raw = typeof entry === "string" ? entry : entry.rule;
+    const negated = typeof entry === "string" ? raw.startsWith("!") : entry.negated;
+    return row("", `<span class="${negated ? "" : cls}">${esc(negated ? "except" : word)}</span> ${esc(raw)}`, "dim");
+  }).join("");
+  return list(p.deny, "deny", "find bad") + list(p.ask, "ask", "find") + list(p.allow, "allow", "");
+}
+
+function problems(list) {
+  return (list || []).map((p) =>
+    row("", `<span class="find${p.fatal ? " bad" : ""}">${p.fatal ? "error" : "warning"}</span> ${esc(p.where)} ${esc(p.what)}`)
+  ).join("");
+}
+
+function project(p) {
+  let out = `<div class="setproj"><b>${esc(p.name || p.id)}</b>
+    <span class="tag${p.trusted ? "" : " no"}">${p.trusted ? "trusted" : "not trusted"}</span>
+    <span class="tag">${p.config?.exists ? "vibeplane.toml" : "no vibeplane.toml"}</span></div>`;
+  out += val("", p.root || "", "dim");
+  // A repository whose rules will not parse is the one row in this panel that
+  // is about something being wrong right now: the prohibitions it commits are
+  // not in force. The parser's own words, laid out as it wrote them.
+  if (p.error)
+    return out +
+      row("rules", `<span class="find bad">will not load</span> — nothing in it is enforced`) +
+      row("", esc(p.error), "dim pre") +
+      row("", `<code>vibeplane check ${esc(p.root)}</code>`, "dim");
+  const d = p.describes;
+  if (!d) return out;
+
+  const g = d.gates || {};
+  out += (g.check || []).length
+    ? val("gates", g.check.join(" && ")) +
+      val("", `${esc(g.timeout)} · on failure, ${esc(g.on_fail)}${g.on_fail === "feedback" ? ` up to ${esc(g.max_feedback_rounds)}×` : ""}`, "dim")
+    : row("gates", `<span class="find">none</span> nothing is verified and nothing pretends to be`, "dim");
+  for (const n of g.named || [])
+    out += val("", `${esc(n.name)}: ${esc(n.run.join(" && "))}${n.expect === "fail" ? "  (must fail)" : ""}`, "dim");
+
+  for (const pl of d.pipelines || [])
+    out += val(pl.name, pl.steps.map((st) => (st.kind === "human" ? GLYPH.human + " " : "") + st.name).join(" › "));
+
+  const pol = d.policy || {};
+  const n = (pol.deny || []).length + (pol.ask || []).length + (pol.allow || []).length;
+  if (n) {
+    out += val("rules", counts(pol));
+    out += rules(pol);
+  }
+  // The three things a person cannot get by reading the file. Findings, not
+  // advice: each is answered by pattern containment rather than a heuristic,
+  // and each under-reports on purpose.
+  for (const u of pol.unused || []) out += row("", `<span class="find">unused</span> ${ticks(u)}`, "dim");
+  for (const o of pol.overbroad || [])
+    out += row("", `<span class="find bad">overbroad</span> <code>${esc(o.rule)}</code> — ${ticks(o.why)}. Narrow it, e.g. <code>${esc(o.suggestion)}</code>`, "dim");
+  if ((pol.half_protected || []).length)
+    out += row("", `<span class="find">note</span> those denies stop reads only — <code>echo x &gt; ${esc(pol.half_protected[0])}</code> still runs. Add <code>Edit(${esc(pol.half_protected[0])})</code> to never_auto`, "dim");
+
+  const b = d.budget || {};
+  const money = [["", b.default_usd], ["quick", b.quick_usd], ["chore", b.chore_usd], ["bug", b.bug_usd], ["feature", b.feature_usd]]
+    .filter(([, v]) => v != null)
+    .map(([k, v]) => `${k ? k + " " : ""}$${Number(v).toFixed(2)}`);
+  const bounds = [b.max_turns ? `${esc(b.max_turns)} turns` : "", b.max_runtime || ""].filter(Boolean);
+  if (money.length || bounds.length) {
+    out += val("budget", [...money, ...bounds].join(" · "));
+    // A ceiling in dollars binds only an agent that reports what it spent. The
+    // one line in this panel that is about a guard not being one.
+    if (money.length && !b.has_observable_bound)
+      out += row("", `<span class="find">advisory</span> a dollar ceiling only bites when the agent reports its cost — add <code>max_turns</code> or <code>max_runtime</code>`, "dim");
+  }
+  if (d.github?.pull_request)
+    out += val("pull req", `opened when the gates pass${d.github.draft ? ", as a draft" : ""}${d.github.ready_label ? ` · issues labelled ${esc(d.github.ready_label)}` : ""}`);
+  if (d.workspace?.setup) out += val("worktree", d.workspace.setup, "dim");
+  if ((d.workspace?.include || []).length) out += val("", "copies in " + d.workspace.include.join(", "), "dim");
+  if (d.transcripts && d.transcripts.keep === false)
+    out += val("transcripts", "not kept — the board can say a tool ran and not why", "dim");
+  out += problems(d.problems);
+  return out;
+}
+
+$("setupclose").addEventListener("click", closeOver);
 
 // ── ⌘K: everything by name ───────────────────────────────────────────────────
 //
@@ -988,6 +1391,7 @@ function paletteRows() {
   }
   rows.push({ kind: "action", name: "dispatch work", detail: "⌘N", go: () => startDispatch() });
   rows.push({ kind: "action", name: "show all sessions", detail: "the dormant ones too", go: () => { state.showAll = true; refresh(); } });
+  rows.push({ kind: "action", name: "setup", detail: "what is configured, here and in every repository", go: () => openSetup() });
   return rows;
 }
 
@@ -1123,7 +1527,7 @@ document.addEventListener("click", (e) => {
     return renderDispatch();
   }
   if (e.target.id === "dgo") return sendDispatch();
-  if (e.target.id === "dormant") {
+  if (e.target instanceof Element && e.target.closest("#dormant, .dormant")) {
     state.showAll = !state.showAll;
     return refresh();
   }
@@ -1132,13 +1536,22 @@ document.addEventListener("click", (e) => {
     talk.thinking = !talk.thinking;
     return renderTalk();
   }
+  const why = e.target.closest("button[data-why]");
+  if (why) { state.sel = +why.dataset.why; return showWhy(state.inbox[+why.dataset.why]); }
   const btn = e.target.closest("button[data-act]");
   if (btn) return act(btn.dataset.act, btn.dataset.run, btn.dataset.work || btn.dataset.req, btn.dataset.opt);
   // A match is only useful if it takes you to the session it came from.
   const searchHit = e.target.closest(".hit[data-run]");
   if (searchHit) return openTalk(searchHit.dataset.run);
   const card = e.target.closest("[data-sel]");
-  if (card) { state.sel = +card.dataset.sel; render(); }
+  if (!card) return;
+  state.sel = +card.dataset.sel;
+  // A session row opens what it is saying, which is what `enter` does on it.
+  // Selecting and nothing else left the transcript reachable by keyboard only.
+  // An inbox item is not the same gesture: it carries its own buttons, and a
+  // stray click on one must not navigate away from the thing being decided.
+  if (card.classList.contains("row") && card.dataset.run) return openTalk(card.dataset.run);
+  render();
 });
 
 $("pq").addEventListener("input", renderPalette);
@@ -1210,6 +1623,7 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
   }
   else if (e.key === "g") { openGithub(); e.preventDefault(); }
+  else if (e.key === ",") { openSetup(); e.preventDefault(); }
   else if (e.key === "Escape") closeTalk();
   else if (e.key === "Enter" && run) { openTalk(run); e.preventDefault(); }
   else if (e.key >= "1" && e.key <= "9") {

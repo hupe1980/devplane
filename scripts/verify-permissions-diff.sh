@@ -16,7 +16,9 @@
 # `cases` caps how many are run, for a quick pass. `VIBEPLANE_DIFF_AXIS=allow`
 # or `=deny` runs one half and the default runs both; `=dialect` runs this
 # matcher alone over the non-Bash tools and prints a checklist to put to the
-# running product.
+# running product; `=selftest` checks the harness against itself and asks
+# nothing. `VIBEPLANE_DIFF_ONLY=<substring>` runs the rule sets that match,
+# which is how a finding is re-asked without paying for the matrix again.
 #
 # Costs a few cents per run and needs a signed-in Claude Code, so it is not part
 # of CI.
@@ -94,17 +96,44 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 CASES="${1:-0}"            # 0 = the full built-in matrix
-AXIS="${VIBEPLANE_DIFF_AXIS:-both}"   # allow | deny | both | dialect
+AXIS="${VIBEPLANE_DIFF_AXIS:-both}"   # allow | deny | both | dialect | selftest
+# One rule set, by substring. The full matrix costs hours and a finding has to
+# be re-asked several times before it is believed, so re-running the one rule it
+# came from is the difference between a minute and an afternoon.
+ONLY="${VIBEPLANE_DIFF_ONLY:-}"
 
-CLAUDE="${VIBEPLANE_CLAUDE_BIN:-$(command -v claude || true)}"
-if [ -z "$CLAUDE" ]; then
-  for d in "$HOME/.claude/local/claude" \
-           "$HOME"/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude; do
-    [ -x "$d" ] && CLAUDE="$d"
-  done
+# A rule the caller asked to skip.
+skip_rule() { [ -n "$ONLY" ] && case "$1" in *"$ONLY"*) return 1 ;; *) return 0 ;; esac; return 1; }
+
+# The selftest asks no model and needs no vendor, so it runs where CI runs:
+# requiring a signed-in Claude Code for a check that only compares two strings
+# would take `just verify` off every machine that does not have one.
+if [ "$AXIS" != selftest ]; then
+  CLAUDE="${VIBEPLANE_CLAUDE_BIN:-$(command -v claude || true)}"
+  if [ -z "$CLAUDE" ]; then
+    # The editor keeps every version it has ever installed side by side, so the
+    # choice is which one to measure against — and it must be the newest, because
+    # the number this harness produces is "the release the rules were checked
+    # against". Sorted by version rather than by glob order: lexicographically
+    # `2.1.9` comes after `2.1.273`, so taking the last match would silently
+    # measure against an old build and report a floor that never moved.
+    newest=$(printf '%s\n' "$HOME"/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude 2>/dev/null \
+             | while IFS= read -r p; do
+                 [ -x "$p" ] || continue
+                 v=${p#*claude-code-}; v=${v%%-*}
+                 printf '%s\t%s\n' "$v" "$p"
+               done | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -f2)
+    [ -n "$newest" ] && CLAUDE="$newest"
+    [ -x "$HOME/.claude/local/claude" ] && [ -z "$newest" ] && CLAUDE="$HOME/.claude/local/claude"
+  fi
+  [ -x "${CLAUDE:-}" ] || { echo "no claude binary found; set VIBEPLANE_CLAUDE_BIN"; exit 2; }
+  "$CLAUDE" auth status >/dev/null 2>&1 || { echo "claude is not signed in; nothing to ask"; exit 2; }
+  # The release this run measures against. Printed, because a clean run is a claim
+  # about a *version* and a number with no version beside it is not a measurement.
+  MEASURED=$("$CLAUDE" --version 2>/dev/null | sed 's/ .*//')
+  echo "measuring against Claude Code ${MEASURED:-unknown}  ($CLAUDE)"
+  echo
 fi
-[ -x "${CLAUDE:-}" ] || { echo "no claude binary found; set VIBEPLANE_CLAUDE_BIN"; exit 2; }
-"$CLAUDE" auth status >/dev/null 2>&1 || { echo "claude is not signed in; nothing to ask"; exit 2; }
 
 VP="${VIBEPLANE_BIN:-target/debug/vibeplane}"
 [ -x "$VP" ] || cargo build -q || exit 2
@@ -371,36 +400,69 @@ deny_program_present() { # shape -> 0 when runnable here
   [ "$code" -ne 127 ]
 }
 
-# Narrowings this project chose, with the reason. A row here is reported as a
-# declared divergence rather than as a finding — but only ever a *narrowing*: a
-# WIDER row is a call Vibeplane would auto-approve and the product would not,
-# and nothing may excuse one.
+# Narrowings this project chose, each with the reason it was chosen. A row here
+# is reported as a declared divergence rather than as a finding — but only ever
+# a *narrowing*: a WIDER row is a call Vibeplane would auto-approve and the
+# product would not, and nothing may excuse one.
 #
-# There is one rule behind every row, rather than four case-by-case choices:
-# **Vibeplane is exactly as strict as Claude Code, except for commands that
-# exist to defeat text matching, where it is stricter by declaration.** `eval`,
-# `sudo`, `doas` and `exec` take a command and run it under another name; the
-# running product treats what they are handed as opaque, and a `never_auto`
-# rule that quoting steps around is not a prohibition. The cost is a prompt,
-# never a refusal.
-# One row per barrier shape in DENY_SHAPES. The list was short of `env` for a
-# run, which is the failure mode a declared-divergence list has: the rule above
-# covered it all along and the enumeration did not, so a row that was a *choice*
-# was reported as a *finding*. A shape belongs here when `ANALYSIS_BARRIERS`
-# names its program — nothing else may be added.
+# **One rule behind every row**: Vibeplane is exactly as strict as Claude Code,
+# except where matching it would make a prohibition trivially avoidable. The
+# cost is always a prompt, never a refusal. Three measured classes, and a shape
+# belongs here only when it is an instance of one of them:
+#
+#   1. **A command that runs another command under its own name.** `eval`,
+#      `sudo`, `doas`, `exec`, `env -C`: the running product treats what they
+#      are handed as opaque, and a rule that quoting steps around is not a
+#      prohibition. These are exactly the programs `ANALYSIS_BARRIERS` names.
+#   2. **An operand that reaches a file without spelling its name.** Measured
+#      against 2.1.273: the product refuses `cat .env*` and runs `cat .en?`,
+#      because it compares the pattern's literal text against the rule. This
+#      matcher intersects the patterns, so a `?` does not step around a deny.
+#      `git show HEAD:.env` is the same thing through a revision rather than a
+#      glob — the product runs it, and a prohibition the object store walks
+#      around is not one.
+#   3. **A write outside the working directory.** The product runs
+#      `cp -r secrets /tmp/…` under an exact whole-line rule; this matcher asks,
+#      because the destination is outside the directory the session reported and
+#      no rule names it. Surfaced here by a deny rule that is irrelevant to the
+#      call, so it is a statement about the allow path.
+#   4. **A read the product reaches under one spelling of a rule and not the
+#      other.** `split -l 1 .env` is refused here under both `Read(.env)` and
+#      `Read(./.env)`; measured twice, the product runs it under the first and
+#      refuses it under the second. Two spellings of one rule disagreeing is the
+#      product's gap, and a file `split` reads is a file that was read.
+#
+# The enumeration is the failure mode of this list — it was once short of `env`,
+# so a row that was a *choice* got reported as a *finding*. Each entry therefore
+# carries its class, and anything not an instance of one of the three belongs in
+# the output as a finding rather than here.
 EXPECTED_NARROWER=(
-  'eval "cat .env"'
-  'env -C . cat .env'
-  'sudo -n cat .env'
-  'exec cat .env'
-  'doas cat .env'
+  'eval "cat .env"|runs another command under its own name'
+  'env -C . cat .env|runs another command under its own name'
+  'sudo -n cat .env|runs another command under its own name'
+  'exec cat .env|runs another command under its own name'
+  'doas cat .env|runs another command under its own name'
+  'cat .en? > /dev/null|a glob the product compares as text'
+  'head -c 3 .en? > /dev/null|a glob the product compares as text'
+  'grep -l TOKEN .en?|a glob the product compares as text'
+  'cat ./.en? > /dev/null|a glob the product compares as text'
+  'git show HEAD:.env|the file through a revision rather than a path'
+  'git cat-file -p HEAD:.env|the file through a revision rather than a path'
+  'cp -r secrets /tmp/vp-secrets-copy|a write outside the working directory'
+  'split -l 1 .env vp-split- > /dev/null|the product reaches this input under one spelling of the rule and not the other'
 )
 
-declared_narrowing() { # shape -> 0 when declared
+# The reason a shape is a declared narrowing, printed so a reader can check the
+# claim rather than take the word "declared" for it.
+narrowing_reason() { # shape -> reason, empty when not declared
   for e in "${EXPECTED_NARROWER[@]}"; do
-    [ "$e" = "$1" ] && return 0
+    [ "${e%%|*}" = "$1" ] && { printf '%s' "${e#*|}"; return 0; }
   done
   return 1
+}
+
+declared_narrowing() { # shape -> 0 when declared
+  narrowing_reason "$1" >/dev/null
 }
 
 # Evidence for the deny axis: the call was permitted as a whole.
@@ -418,14 +480,48 @@ deny_reset() {
 # `"` inside a shape has to survive being written into a JSON settings blob.
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
-ask_claude_deny() { # deny-rule command -> yes|no   (yes = it ran, i.e. not blocked)
+ask_claude_deny() { # deny-json command -> yes|no   (yes = it ran, i.e. not blocked)
   deny_reset
   full="$2 ; git config --local vp.ran 1"
   ( cd "$W" && "$CLAUDE" -p "Run this exact bash command and nothing else, then stop: $full" \
-      --settings "{\"permissions\":{\"allow\":[\"Bash($(json_escape "$full"))\"],\"deny\":[\"$1\"],\"ask\":[]}}" \
+      --settings "{\"permissions\":{\"allow\":[\"Bash($(json_escape "$full"))\"],\"deny\":$1,\"ask\":[]}}" \
       --permission-mode dontAsk --model "$MODEL" \
       --output-format stream-json --verbose >/dev/null 2>&1 )
   deny_ran
+}
+
+# **`yes` is proof; `no` is only the absence of proof**, and the two must not be
+# weighed the same.
+#
+# The evidence this axis reads is *did the command run*, and the thing being
+# asked is a language model. A `yes` is a fact — the file changed, nothing else
+# could have done it. A `no` has two causes that look identical: the deny fired,
+# or the model never tried. So an absence is only believed after the shape has
+# been given several chances to produce the evidence, and a single appearance
+# settles it.
+#
+# The first full deny run had one retry and no control, and reported
+# `hexdump .env` and `c''at .env` as **WIDER** — the loudest thing this harness
+# says. Both produced RAN, blocked, RAN with an *empty* deny list, so neither
+# was ever a verdict.
+claude_deny_ran_within() { # tries deny-json shape -> yes|no
+  local i tries=$1
+  for (( i = 0; i < tries; i++ )); do
+    [ "$(ask_claude_deny "$2" "$3")" = yes ] && { echo yes; return; }
+  done
+  echo no
+}
+
+# Can the model run this shape at all, with nothing forbidden?
+#
+# The same rule the shell pre-flight already applies, extended from the machine
+# to the model: a shape that cannot produce its own evidence unprohibited cannot
+# say whether a prohibition fired, so it is skipped and counted — never
+# reported. Three chances, because requiring two *consecutive* successes threw
+# away eighteen shapes of sixty-four, several of which had just measured the
+# same answer under two different rules.
+deny_model_will_run() { # shape -> 0 when it is a usable probe
+  [ "$(claude_deny_ran_within 3 '[]' "$1")" = yes ]
 }
 
 ask_vibeplane_deny() { # deny-rule command -> yes|no
@@ -447,10 +543,11 @@ ask_vibeplane_deny() { # deny-rule command -> yes|no
 # permission decision.
 # Did the payload run? Two kinds of evidence, one per payload.
 ran() { # shape -> yes|no
-  case " ${WRITE_SHAPES[*]} " in
-    *" $1 "*) [ -f "$W/ran.txt" ] && echo yes || echo no ;;
-    *) git -C "$W" config --get vp.ran >/dev/null 2>&1 && echo yes || echo no ;;
-  esac
+  if is_write_shape "$1"; then
+    [ -f "$W/ran.txt" ] && echo yes || echo no
+  else
+    git -C "$W" config --get vp.ran >/dev/null 2>&1 && echo yes || echo no
+  fi
 }
 
 reset() {
@@ -460,11 +557,31 @@ reset() {
 }
 
 # The extra grant a write shape needs, and nothing else gets.
-extra_allow() { # shape -> json fragment
+#
+# **Both sides get it, and that took a run to notice.** It was written into the
+# Claude settings blob and not into the `vibeplane.toml`, so every write-shape
+# row asked the two sides *different questions* — Claude with `Edit(ran.txt)`,
+# this matcher without — and the first real run reported the artefact as a
+# narrowing. A differential harness whose two probes do not carry the same rules
+# is not measuring a disagreement; it is manufacturing one, and the output reads
+# identically either way. One list, two spellings, one place to change.
+WRITE_GRANT='Edit(ran.txt)'
+
+is_write_shape() { # shape -> 0 when it is one
   case " ${WRITE_SHAPES[*]} " in
-    *" $1 "*) printf ',"Edit(ran.txt)"' ;;
-    *) printf '' ;;
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
   esac
+}
+
+extra_allow() { # shape -> json fragment for the settings blob
+  is_write_shape "$1" && printf ',"%s"' "$WRITE_GRANT"
+  return 0
+}
+
+extra_allow_toml() { # shape -> toml fragment for auto_allow
+  is_write_shape "$1" && printf ', "%s"' "$WRITE_GRANT"
+  return 0
 }
 
 runnable() { # command -> 0|1
@@ -483,13 +600,45 @@ ask_claude() { # ruleset command -> yes|no
 }
 
 ask_vibeplane() { # ruleset command -> yes|no
-  printf '[project]\nname = "diff"\n\n[policy]\nauto_allow = ["%s"]\n' "$1" > "$W/vibeplane.toml"
+  printf '[project]\nname = "diff"\n\n[policy]\nauto_allow = ["%s"%s]\n' \
+    "$1" "$(extra_allow_toml "$2")" > "$W/vibeplane.toml"
   v=$("$VP" --json explain --dir "$W" "$2" 2>/dev/null \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
   [ "$v" = allow ] && echo yes || echo no
 }
 
 # ---------------------------------------------------------------------------
+# The harness measuring itself.
+#
+# `VIBEPLANE_DIFF_AXIS=selftest` asks the one question that has no oracle: **are
+# the two probes being handed the same rules?** A differential harness whose
+# sides carry different rule sets is not measuring a disagreement, it is
+# manufacturing one, and its output reads exactly like a finding — which is how
+# a write-shape grant that reached only the vendor's settings blob survived
+# until the first real run. Costs nothing and asks no model, so it runs first on
+# every invocation rather than on request.
+selftest() {
+  local bad=0 shape mine theirs
+  for shape in "${SHAPES[@]}" "${WRITE_SHAPES[@]}"; do
+    theirs="$(extra_allow "$shape")"
+    mine="$(extra_allow_toml "$shape")"
+    # One is JSON and one is TOML, so they are compared with the spacing
+    # removed rather than as strings.
+    if [ "$(printf '%s' "$theirs" | tr -d ' ')" != "$(printf '%s' "$mine" | tr -d ' ')" ]; then
+      printf 'SELFTEST  the two probes disagree about %s: claude=[%s] vibeplane=[%s]\n' \
+        "$shape" "$theirs" "$mine"
+      bad=1
+    fi
+  done
+  return $bad
+}
+selftest || { echo "the harness is asking two different questions; nothing below is a measurement"; exit 3; }
+
+if [ "$AXIS" = selftest ]; then
+  echo "selftest: both probes carry the same rules for all ${#SHAPES[@]} + ${#WRITE_SHAPES[@]} shapes"
+  exit 0
+fi
+
 if [ "$AXIS" = dialect ]; then
   echo "dialect axis — this matcher's answers, for a human to put to a running product"
   echo "NOT a measurement: nothing here has been asked of Claude Code."
@@ -540,6 +689,7 @@ done
 echo
 
 for rule in "${RULESETS[@]}"; do
+  skip_rule "$rule" && continue
   for shape in "${USABLE[@]}"; do
     [ "$CASES" != 0 ] && [ "$n" -ge "$CASES" ] && break 2
     n=$((n+1))
@@ -580,23 +730,37 @@ echo "deny axis — ${#DENY_RULESETS[@]} rules × ${#DENY_SHAPES[@]} shapes"
 echo
 USABLE_DENY=()
 for shape in "${DENY_SHAPES[@]}"; do
-  if deny_program_present "$shape"; then
-    USABLE_DENY+=("$shape")
-  else
+  if ! deny_program_present "$shape"; then
     printf 'skip   %s\n' "$shape  (that program is not installed here; not a verdict)"
     skipped=$((${skipped:-0}+1))
+  elif ! deny_model_will_run "$shape"; then
+    printf 'skip   %s\n' "$shape  (the model does not reliably run it unprohibited; not a verdict)"
+    skipped=$((${skipped:-0}+1))
+  else
+    USABLE_DENY+=("$shape")
   fi
 done
 
 for rule in "${DENY_RULESETS[@]}"; do
+  skip_rule "$rule" && continue
   for shape in "${USABLE_DENY[@]}"; do
     [ "$CASES" != 0 ] && [ "$n" -ge "$CASES" ] && break 2
     n=$((n+1))
-    theirs=$(ask_claude_deny "$rule" "$shape")
+    theirs=$(ask_claude_deny "[\"$rule\"]" "$shape")
     ours=$(ask_vibeplane_deny "$rule" "$shape")
     # A model answered the first one. Ask again before believing it.
     if [ "$theirs" != "$ours" ]; then
-      theirs=$(ask_claude_deny "$rule" "$shape")
+      # Four more chances for the evidence to appear, so a reported absence has
+      # survived **five** asks.
+      #
+      # Three was not enough, and the arithmetic says why. Some shapes the model
+      # runs about two times in three whatever the rules say —
+      # `cat a b … z .env` is one — so three consecutive absences come up once
+      # in twenty-seven, and a matrix of a few hundred rows finds that twice.
+      # Both were reported as WIDER, the loudest thing here, and both were the
+      # model. Five asks puts it at one in two hundred and forty-three, and only
+      # a disagreement pays for them.
+      theirs=$(claude_deny_ran_within 4 "[\"$rule\"]" "$shape")
       retried=$((${retried:-0}+1))
     fi
     if [ "$theirs" = "$ours" ]; then
@@ -611,7 +775,7 @@ for rule in "${DENY_RULESETS[@]}"; do
         disagreements="$disagreements\n  WIDER  $rule  ::  $shape"
         fail=1
       elif declared_narrowing "$shape"; then
-        printf ' decl  %-18s %s   (stricter on purpose)\n' "$rule" "$shape"
+        printf ' decl  %-18s %-34s %s\n' "$rule" "$shape" "($(narrowing_reason "$shape"))"
         declared=$((${declared:-0}+1))
       else
         printf 'DIFF   %-18s %s   (claude ran=%s, vibeplane allow=%s)\n' \

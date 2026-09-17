@@ -128,7 +128,8 @@
         Claude&nbsp;Code’s rule syntax, implemented in full and resolved per repository. Deny always
         wins, and holds in auto mode too, where a classifier approves routine calls and no prompt
         ever appears. A rule that cannot match anything is refused rather than carried, because a
-        deny rule that silently matches nothing reads as protection and is none.
+        deny rule that silently matches nothing reads as protection and is none. The board reads
+        every repository’s rules back in the order they are evaluated, and writes none of them.
       </p>
       <a class="more" href="{{ get_url(path='/docs/permissions/') }}">The rule syntax</a>
     </article>

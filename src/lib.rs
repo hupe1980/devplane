@@ -19,8 +19,9 @@ pub mod api;
 pub mod cli;
 /// The CLI's view of the daemon.
 pub mod client;
-/// Where Vibeplane keeps its own state, and how a client finds the daemon.
 pub mod config;
+/// Where Vibeplane keeps its own state, and how a client finds the daemon.
+pub mod conformance;
 /// Types and the pure logic over them. Reaches nothing outside the process.
 pub mod core;
 /// The daemon: receivers, API and the authoritative state.
@@ -38,6 +39,7 @@ pub mod git;
 /// GitHub, through the `gh` command: issues, pull requests, checks.
 pub mod github;
 /// Desktop notifications.
+pub mod mcp;
 pub mod notify;
 /// Observation channels: hooks, OpenTelemetry, the roster, the status line.
 pub mod observe;

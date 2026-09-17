@@ -25,8 +25,8 @@ cd "$(dirname "$0")/.." || exit 1
 
 # What concepts/DECISIONS.md D70 and D78 assert, re-measured.
 TARGET=x86_64-unknown-linux-musl
-WANT_TOTAL=210
-WANT_ONLY_SQLX=29
+WANT_TOTAL=214
+WANT_ONLY_SQLX=28
 
 tree=$(mktemp)
 trap 'rm -f "$tree"' EXIT

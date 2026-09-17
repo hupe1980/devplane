@@ -214,7 +214,7 @@ impl PolicyCache {
         // the moment `Monitor` was added — leaving the redirect check running
         // per rule set here and across both sets there, for the same call.
         if crate::core::policy::is_shell(tool)
-            && crate::core::policy::uncovered_targets(input, |side, file| {
+            && crate::core::policy::uncovered_targets(input, dir, |side, file| {
                 sets.iter().any(|(p, c)| p.allows_path(side, c, file))
                     || crate::core::policy::within(dir, file)
             })

@@ -86,6 +86,10 @@ pub async fn run_expecting(
 
     GateReport {
         expect_fail,
+        // Stamped by the caller, which knows the work and its project root.
+        // The gate runner is given commands and a directory and deliberately
+        // knows nothing about what the work is answering.
+        spec: None,
         gate: gate.to_string(),
         at: jiff::Timestamp::now(),
         duration_ms: started.elapsed().as_millis() as u64,

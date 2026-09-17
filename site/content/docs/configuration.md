@@ -13,6 +13,11 @@ something an agent wrote for itself.
 A repository with no `vibeplane.toml` still works — the gates are empty, no rule auto-decides
 anything, and nothing changes.
 
+**Vibeplane reads this file and never writes it.** `vibeplane check` prints it back in a terminal;
+<kbd>,</kbd> on the board does the same for every registered repository at once, including the one
+whose file stopped parsing. There is no settings form on purpose: an agent here runs as you, so a
+write path to `[policy]` would be the widening path the gate exists to close.
+
 > [!IMPORTANT]
 > **This is the whole file format.** Every key below is read by the code and there are no others. An
 > unknown key is a **parse error**, not a silent default — so one key that does not exist fails the
@@ -57,6 +62,9 @@ max_runtime = "45m"       # likewise
 
 [transcripts]
 keep = true               # the default
+
+[spec]                    # words that mark a question your spec has not answered
+open_questions = ["NEEDS CLARIFICATION", "TBD"]
 
 [github]                  # off by default: a push is visible
 pull_request = true
@@ -205,6 +213,23 @@ Vibeplane regardless, so discarding it was never a privacy measure.
 
 Off writes nothing, including the prompts Vibeplane itself sent, and does not stop the agent reading
 anything. Sessions Vibeplane merely watches are unaffected either way.
+
+## `[spec]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `open_questions` | list of strings | empty | words that mark a question the specification has not answered |
+
+Counted per gate for the specification a piece of work names with
+[`--spec`](/vibeplane/docs/pipelines/#spec-driven-development), alongside its `- [ ]` task list, and
+shown on the board beside the verdict.
+
+The words are yours. `NEEDS CLARIFICATION` is Spec Kit's spelling, `TBD` is everybody's, and the
+next tool will have a third — so the list is empty unless your repository writes one. Matched per
+line and case-insensitively.
+
+Nothing else about the specification is interpreted: the outline is the Markdown headings and the
+progress is the boxes, because those are the only things the frameworks in this category agree on.
 
 ## `[github]`
 

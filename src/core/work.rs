@@ -188,6 +188,92 @@ impl CommandResult {
     }
 }
 
+/// The specification a gate ran against, as it was at that moment.
+///
+/// **The path is the project's, and nothing here opens it for meaning.** No
+/// format is known, no layout is detected, no checkbox is parsed — that is the
+/// subsystem this design deleted and keeps deleted. What is recorded is the
+/// file the work says it is answering, and a fingerprint of its bytes when the
+/// gate ran.
+///
+/// The fingerprint is the half that makes the certificate worth anything.
+/// *Checked against `spec.md`* is not a claim a reviewer can act on once
+/// `spec.md` has moved; *checked against `spec.md` at `3f9a…`* is. It is the
+/// drift problem applied to the record of the drift check.
+///
+/// **Not a cryptographic hash, and the reason is the one the decision log
+/// already gives.** This detects *change*, not forgery: an adversary with write
+/// access to this file has write access to the machine the agents run on, which
+/// is not a threat model this product claims to defend against. A 64-bit
+/// content hash costs no dependency; `#audit-chain` is where a stronger one
+/// would arrive if that threat model ever changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpecStamp {
+    /// As the work named it, relative to the project root.
+    pub path: String,
+    /// Of every document under it when the gate ran. `None` when the work names
+    /// a specification that was not there — which is a finding, not a blank.
+    pub fingerprint: Option<String>,
+    /// How many documents it covered. One for a file; more for the folder every
+    /// spec-driven framework in the field actually produces.
+    #[serde(default)]
+    pub files: u32,
+    /// Ticked boxes, and how many there were, at the moment the gate ran.
+    ///
+    /// **The number that can contradict a report.** An agent's account of its
+    /// own work references about one action in eleven, so *the gate passed and
+    /// the specification it answers has eleven boxes unticked* is a sentence
+    /// neither the exit code nor the agent can produce alone. Counted, never
+    /// interpreted: a task list is the one thing these frameworks spell the
+    /// same way.
+    #[serde(default)]
+    pub tasks_done: u32,
+    #[serde(default)]
+    pub tasks_total: u32,
+    /// Questions the specification says it has not answered, in the words the
+    /// project chose. Zero unless it chose some.
+    #[serde(default)]
+    pub open_questions: u32,
+}
+
+impl SpecStamp {
+    /// Reads and fingerprints the specification a work names.
+    ///
+    /// A missing or unreadable specification is recorded as
+    /// present-but-unfingerprinted rather than dropped: *the work says it
+    /// answers `specs/reset/` and there was no such folder* is exactly the kind
+    /// of thing a done certificate exists to say out loud.
+    pub fn of(path: &str, root: &std::path::Path, markers: &[String]) -> Self {
+        let spec = crate::core::spec::Spec::read(root, path, markers);
+        let (tasks_done, tasks_total) = spec.tasks();
+        Self {
+            path: path.to_string(),
+            fingerprint: spec.fingerprint(),
+            files: spec.docs.len() as u32,
+            tasks_done,
+            tasks_total,
+            open_questions: spec.questions() as u32,
+        }
+    }
+
+    /// What the boxes say, when there are any.
+    ///
+    /// `None` rather than `0/0`: a specification with no task list has not
+    /// reported no progress, it has reported nothing, and the two must not read
+    /// the same.
+    pub fn tasks(&self) -> Option<(u32, u32)> {
+        (self.tasks_total > 0).then_some((self.tasks_done, self.tasks_total))
+    }
+
+    /// Whether the boxes contradict a passing gate.
+    ///
+    /// The product judges nothing here — it puts the two on one screen and the
+    /// person reads, which is the same rule the agent's own account follows.
+    pub fn has_unticked_work(&self) -> bool {
+        self.tasks_total > self.tasks_done
+    }
+}
+
 /// The verdict of one gate run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GateReport {
@@ -202,6 +288,9 @@ pub struct GateReport {
     /// report so that `passed` means the same thing everywhere it is read.
     #[serde(default)]
     pub expect_fail: bool,
+    /// The specification this work is answering, stamped when the gate ran.
+    #[serde(default)]
+    pub spec: Option<SpecStamp>,
 }
 
 impl GateReport {
@@ -432,6 +521,12 @@ pub struct Work {
     /// What the agent was asked for.
     pub prompt: String,
     /// The isolated checkout, when the work has one.
+    /// The specification this work answers, relative to the project root.
+    ///
+    /// A path and nothing else: the project's own file, never opened here for
+    /// meaning. It is what the gate stamps onto the done certificate.
+    #[serde(default)]
+    pub spec: Option<String>,
     pub worktree: Option<PathBuf>,
     pub branch: Option<String>,
     /// Runs that have worked on this, oldest first.
@@ -498,6 +593,7 @@ impl Work {
             phase: Phase::Ready,
             title,
             prompt,
+            spec: None,
             worktree: None,
             branch: None,
             runs: Vec::new(),
@@ -544,6 +640,57 @@ impl Work {
             // one.
             Some(Stopped::GateFailed { .. }) => self.last_gate().is_some(),
         }
+    }
+
+    /// Records the specification this work answers.
+    ///
+    /// **A file or a folder.** One document is the exception: Spec Kit writes
+    /// `specs/NNN-name/`, Kiro `.kiro/specs/<feature>/`, OpenSpec
+    /// `openspec/changes/<id>/`, and a flag that took only a file made a person
+    /// pick one of the three or four documents the tool had just written.
+    ///
+    /// Refused unless it exists **inside the project**, for the reason
+    /// `[workspace] include` is: the path arrives from a command line or a
+    /// committed file, and a certificate naming `../../etc/passwd` is worse
+    /// than one naming nothing. The check is the same containment rule, and a
+    /// path that fails it is an error rather than a silently dropped field.
+    pub fn with_spec(root: &std::path::Path, spec: &str) -> Result<String, String> {
+        let joined = root.join(spec);
+        if !crate::core::policy::within(root, &joined) {
+            return Err(format!("{spec} is outside the project"));
+        }
+        if !joined.exists() {
+            return Err(format!("{spec} is not in this project"));
+        }
+        // A folder with no Markdown in it is a path somebody mistyped, and
+        // finding that out when the first gate runs costs an agent's turn.
+        if joined.is_dir()
+            && crate::core::spec::Spec::read(root, spec, &[])
+                .docs
+                .is_empty()
+        {
+            return Err(format!("{spec} holds no markdown"));
+        }
+        // Stored relative, so the certificate reads the same on any machine.
+        Ok(joined
+            .strip_prefix(root)
+            .unwrap_or(&joined)
+            .to_string_lossy()
+            .replace('\\', "/"))
+    }
+
+    /// Whether the agent's own account of this work is worth showing.
+    ///
+    /// Only beside a **failed** gate. An end-of-task report references about
+    /// one action in eleven and drifts toward the plan as the run leaves it, so
+    /// on its own it is worse than nothing — it reads as a summary and is not
+    /// one. Next to an exit code that contradicts it, it is the whole point.
+    ///
+    /// The product judges neither: no model separates a truthful trajectory
+    /// report from an untruthful one better than a bag-of-words detector does,
+    /// so both go on screen and the person reads.
+    pub fn claim_is_worth_showing(&self) -> bool {
+        self.last_gate().is_some_and(|g| !g.passed())
     }
 
     pub fn last_gate(&self) -> Option<&GateReport> {
@@ -595,6 +742,125 @@ impl Work {
 
 #[cfg(test)]
 mod tests {
+
+    fn specdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("vp-spec-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_agents_account_is_shown_beside_a_failed_gate_and_nowhere_else() {
+        let mut w = Work::new(
+            crate::core::ids::ProjectId::from_path(std::path::Path::new("/tmp/x")),
+            WorkKind::Quick,
+            "t".into(),
+            "p".into(),
+        );
+        // No gate has run: there is nothing measured to read it against, and a
+        // report on its own reads as a summary and is not one.
+        assert!(!w.claim_is_worth_showing());
+
+        let report = |ok: bool| GateReport {
+            gate: "check".into(),
+            at: Timestamp::now(),
+            duration_ms: 1,
+            attempt: 1,
+            expect_fail: false,
+            spec: None,
+            commands: vec![CommandResult {
+                command: "cargo test".into(),
+                exit_code: Some(if ok { 0 } else { 101 }),
+                duration_ms: 1,
+                output_tail: String::new(),
+                failures: vec![],
+                timed_out: false,
+            }],
+        };
+
+        // Green: the account adds nothing the exit code has not already said.
+        w.gates.push(report(true));
+        assert!(!w.claim_is_worth_showing());
+
+        // Red: this is the one place the two are worth reading together.
+        w.gates.push(report(false));
+        assert!(w.claim_is_worth_showing());
+    }
+
+    #[test]
+    fn a_work_item_may_name_a_specification_inside_its_own_project() {
+        let root = specdir("ok");
+        std::fs::write(root.join("spec.md"), "# it must log in\n").unwrap();
+        assert_eq!(Work::with_spec(&root, "spec.md").unwrap(), "spec.md");
+
+        // And a folder, which is what every spec-driven framework in the field
+        // actually produces — a flag that took only a file made a person pick
+        // one of the four documents their tool had just written.
+        let feature = root.join("specs/001-login");
+        std::fs::create_dir_all(&feature).unwrap();
+        std::fs::write(feature.join("spec.md"), "# Login\n").unwrap();
+        std::fs::write(feature.join("tasks.md"), "- [ ] T001\n").unwrap();
+        assert_eq!(
+            Work::with_spec(&root, "specs/001-login").unwrap(),
+            "specs/001-login"
+        );
+
+        // A folder with nothing to read in it is a mistyped path, and finding
+        // that out when the first gate runs costs an agent's turn.
+        std::fs::create_dir_all(root.join("specs/002-empty")).unwrap();
+        assert!(Work::with_spec(&root, "specs/002-empty").is_err());
+    }
+
+    #[test]
+    fn a_specification_outside_the_project_is_refused_rather_than_dropped() {
+        // The path arrives from a command line or a committed file. A
+        // certificate naming `../../etc/passwd` is worse than one naming
+        // nothing, and a silently dropped field is worse than both.
+        let root = specdir("escape");
+        std::fs::write(root.join("spec.md"), "x").unwrap();
+        assert!(Work::with_spec(&root, "../outside.md").is_err());
+        assert!(Work::with_spec(&root, "/etc/passwd").is_err());
+        std::fs::create_dir_all(root.join("specs")).unwrap();
+        // An empty folder and an absent path: both refused at the point the
+        // person can still fix the typo.
+        assert!(Work::with_spec(&root, "specs").is_err());
+        assert!(Work::with_spec(&root, "nope.md").is_err());
+    }
+
+    #[test]
+    fn the_stamp_records_what_the_specification_was_and_says_when_it_was_not_there() {
+        let root = specdir("stamp");
+        std::fs::write(root.join("spec.md"), "# One\n\n- [x] a\n- [ ] b\n").unwrap();
+        let first = SpecStamp::of("spec.md", &root, &[]);
+        assert_eq!(first.path, "spec.md");
+        assert_eq!(first.files, 1);
+        // What the boxes said when the gate ran — the figure an agent's own
+        // account of the same work cannot move.
+        assert_eq!(first.tasks(), Some((1, 2)));
+        assert!(first.has_unticked_work());
+        let a = first
+            .fingerprint
+            .clone()
+            .expect("a present file is fingerprinted");
+
+        // The whole point: the same path after the file moves is a different
+        // stamp, so a certificate cannot quietly refer to different content.
+        std::fs::write(root.join("spec.md"), "# One\n\n- [x] a\n- [x] b\n").unwrap();
+        let second = SpecStamp::of("spec.md", &root, &[]);
+        assert_ne!(Some(a), second.fingerprint, "a ticked box is a change");
+        assert_eq!(second.tasks(), Some((2, 2)));
+        assert!(!second.has_unticked_work());
+
+        // A work that names a specification which is not there is a finding,
+        // not a blank: the path is kept and the fingerprint is absent.
+        std::fs::remove_file(root.join("spec.md")).unwrap();
+        let gone = SpecStamp::of("spec.md", &root, &[]);
+        assert_eq!(gone.path, "spec.md");
+        assert!(gone.fingerprint.is_none());
+        // And no task list is not the same as no progress.
+        assert_eq!(gone.tasks(), None);
+    }
     use super::*;
 
     fn work(title: &str) -> Work {
@@ -631,6 +897,7 @@ mod tests {
             attempt: 1,
             expect_fail: true,
             commands,
+            spec: None,
         };
         assert!(repro(vec![bad.clone()]).passed(), "failing is the point");
         assert!(!repro(vec![ok.clone()]).passed());
@@ -773,6 +1040,7 @@ mod tests {
             commands: cmds,
             attempt: 1,
             expect_fail: false,
+            spec: None,
         };
         assert!(report(vec![ok.clone()]).passed());
         assert!(!report(vec![ok.clone(), bad.clone()]).passed());
@@ -789,6 +1057,7 @@ mod tests {
             duration_ms: 1,
             attempt: 1,
             expect_fail: false,
+            spec: None,
             commands: vec![CommandResult {
                 command: "cargo test".into(),
                 exit_code: Some(101),
@@ -815,6 +1084,7 @@ mod tests {
             duration_ms: 1,
             attempt: 2,
             expect_fail: false,
+            spec: None,
             commands: vec![CommandResult {
                 command: "cargo test".into(),
                 exit_code: None,

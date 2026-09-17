@@ -1376,3 +1376,87 @@ async fn a_project_ruled_out_of_the_forge_is_re_checked_and_says_why() {
     drop(f);
     std::fs::remove_file(&db).ok();
 }
+
+/// What is configured, answered for the whole machine in one request.
+///
+/// The product could always answer this and only in a terminal, one repository
+/// at a time. The failure that made it worth an endpoint is the last assertion
+/// here: a `vibeplane.toml` that will not parse takes that repository's
+/// prohibitions with it, and nothing on any screen said so.
+#[tokio::test]
+async fn setup_reads_every_registered_repository_and_names_the_one_that_will_not_parse() {
+    let (addr, token, c) = boot(Policy::default()).await;
+
+    let root = std::env::temp_dir().join(format!("vp-setup-{}", uuid::Uuid::new_v4().simple()));
+    let broken = root.join("broken");
+    let good = root.join("good");
+    for d in [&broken, &good] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        good.join("vibeplane.toml"),
+        "[gates]\ncheck = [\"cargo test\"]\n\n[policy]\nnever_auto = [\"Bash(git push:*)\"]\n",
+    )
+    .unwrap();
+    std::fs::write(broken.join("vibeplane.toml"), "[gates]\ncheck = \"oops\"\n").unwrap();
+
+    for d in [&broken, &good] {
+        c.post(format!("http://{addr}/api/projects/trust"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "path": d.to_string_lossy() }))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let s = get_json(&c, &addr, "/api/setup", &token).await;
+    assert!(s["machine"]["version"].is_string());
+    assert!(s["machine"]["database"].is_string());
+
+    let projects = s["projects"].as_array().expect("projects");
+    let find = |name: &str| {
+        projects
+            .iter()
+            .find(|p| p["root"].as_str().unwrap_or_default().ends_with(name))
+            .unwrap_or_else(|| panic!("no project for {name}"))
+    };
+
+    // The file read back: the gate it will run and the rule it will enforce,
+    // in the order the rules are evaluated.
+    let ok = find("good");
+    assert_eq!(ok["config"]["exists"], true);
+    assert_eq!(ok["verified"], true);
+    assert_eq!(ok["describes"]["gates"]["check"][0], "cargo test");
+    assert_eq!(
+        ok["describes"]["policy"]["deny"][0]["rule"],
+        "Bash(git push:*)"
+    );
+
+    // And the one that cannot. The parser's own reason, not a boolean: a person
+    // who is told only that a file is broken has to go and find out why.
+    let bad = find("broken");
+    let why = bad["error"].as_str().expect("the parser's reason");
+    assert!(
+        why.contains("invalid type") || why.contains("expected"),
+        "{why}"
+    );
+    assert!(
+        bad["describes"].is_null(),
+        "a file that will not parse describes nothing"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// The setup endpoint is a credential like every other read on this surface.
+#[tokio::test]
+async fn setup_requires_the_token() {
+    let (addr, _token, c) = boot(Policy::default()).await;
+    let status = c
+        .get(format!("http://{addr}/api/setup"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, 401);
+}

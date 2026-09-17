@@ -27,6 +27,7 @@ pub struct ProjectConfig {
     pub budget: Budget,
     pub transcripts: Transcripts,
     pub github: GitHub,
+    pub spec: SpecSection,
     /// Declared chains of agent runs, keyed by the Work kind they serve
     /// (`quick`, `chore`, `bug`, `feature`) or by any name for a standing one.
     pub pipelines: BTreeMap<String, Pipeline>,
@@ -437,6 +438,26 @@ impl Default for GitHub {
     }
 }
 
+/// How to read the specification a piece of work names.
+///
+/// **One key, and it holds the project's words rather than this tool's.** The
+/// spec-driven frameworks disagree on almost everything — the folder layout,
+/// the requirement identifiers and the section names all differ, and all of
+/// them are still moving. So nothing here recognises a section: the outline is
+/// the Markdown headings, the progress is the `- [ ]` boxes they do share, and
+/// the rest is the repository's to name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SpecSection {
+    /// Words that mark a question the specification has not answered yet.
+    ///
+    /// `NEEDS CLARIFICATION` is Spec Kit's spelling, `TBD` is everybody's, and
+    /// the next tool will have a third — which is why the list is empty by
+    /// default and the repository writes what it means. Matched
+    /// case-insensitively, per line, exactly as a reviewer's findings are.
+    pub open_questions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PolicySection {
@@ -727,10 +748,124 @@ impl ProjectConfig {
     }
 }
 
+/// A duration in the spelling the file uses, so what is shown back is what
+/// somebody would type.
+fn human(d: Duration) -> String {
+    let s = d.as_secs();
+    match (s / 3600, (s % 3600) / 60, s % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (h, 0, 0) => format!("{h}h"),
+        (0, m, s) => format!("{m}m{s}s"),
+        (h, m, 0) => format!("{h}h{m}m"),
+        (h, m, s) => format!("{h}h{m}m{s}s"),
+    }
+}
+
+impl ProjectConfig {
+    /// This file read back: what it will actually do, and everything in it that
+    /// cannot do what it says.
+    ///
+    /// One derivation, for the same reason the inbox has one: `vibeplane check`
+    /// and the board answering "what is configured here" from two different
+    /// projections is how a terminal and a browser end up disagreeing about a
+    /// repository's own rules.
+    ///
+    /// The rules are listed in **evaluation order** — deny, then ask, then
+    /// allow — because that order is the thing most likely to surprise, and
+    /// beside them the three findings a person cannot get by reading the file:
+    /// a rule that covers nothing, a rule that grants more than it reads as
+    /// granting, and a path denied for reading that is still writable.
+    pub fn describe(&self) -> serde_json::Value {
+        use serde_json::json;
+        let policy = self.policy();
+        let rules = |rs: &[crate::core::policy::Rule]| {
+            rs.iter()
+                .map(|r| json!({"rule": r.to_string(), "negated": r.is_negated()}))
+                .collect::<Vec<_>>()
+        };
+        json!({
+            "project": {
+                "name": self.project.name,
+                "base_branch": self.project.base_branch,
+                "default_agent": self.project.default_agent,
+            },
+            "gates": {
+                "check": self.gates.check,
+                "timeout": human(self.gates.timeout),
+                "on_fail": match self.gates.on_fail {
+                    OnFail::Feedback => "feedback",
+                    OnFail::Escalate => "escalate",
+                    OnFail::Ignore => "ignore",
+                },
+                "max_feedback_rounds": self.gates.max_feedback_rounds,
+                "named": self.gates.named.iter().map(|(name, g)| json!({
+                    "name": name,
+                    "run": g.run,
+                    // A reproduction gate is the one whose *failure* is the
+                    // pass, and a list of commands that does not say so reads
+                    // as exactly backwards.
+                    "expect": match g.expect { Expect::Fail => "fail", Expect::Pass => "pass" },
+                    "timeout": g.timeout.map(human),
+                })).collect::<Vec<_>>(),
+            },
+            "pipelines": self.pipelines.iter().map(|(name, p)| json!({
+                "name": name,
+                "steps": p.steps.iter().map(|s| match s {
+                    Step::Human(h) => json!({"kind": "human", "name": h.human}),
+                    Step::Role(r) => json!({
+                        "kind": "role",
+                        "name": r.role,
+                        "agent": r.agent,
+                        "gate": r.gate,
+                        "back_to": r.findings.as_ref().map(|f| f.back_to.clone()),
+                        "max": r.findings.as_ref().map(|f| f.max),
+                    }),
+                }).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "policy": {
+                "deny": rules(policy.deny_rules()),
+                "ask": rules(policy.ask_rules()),
+                "allow": rules(policy.allow_rules()),
+                "max_parallel_runs": self.policy.max_parallel_runs,
+                "stall_timeout": self.policy.stall_timeout.map(human),
+                "unused": policy.redundancies(),
+                "overbroad": policy.overbroad().into_iter().map(|o| json!({
+                    "rule": o.rule, "why": o.why, "suggestion": o.suggestion,
+                })).collect::<Vec<_>>(),
+                "half_protected": policy.half_protected_paths(),
+            },
+            "budget": {
+                "default_usd": self.budget.default_usd,
+                "quick_usd": self.budget.quick_usd,
+                "chore_usd": self.budget.chore_usd,
+                "bug_usd": self.budget.bug_usd,
+                "feature_usd": self.budget.feature_usd,
+                "max_turns": self.budget.max_turns,
+                "max_runtime": self.budget.max_runtime.map(human),
+                // A ceiling in dollars binds only an agent that reports what it
+                // spent, so whether this project bounds work by something
+                // always observable is a fact about the file worth stating.
+                "has_observable_bound": self.budget.has_observable_bound(),
+            },
+            "github": {
+                "pull_request": self.github.pull_request,
+                "draft": self.github.draft,
+                "ready_label": self.github.ready_label,
+            },
+            "workspace": {"setup": self.workspace.setup, "include": self.workspace.include},
+            "spec": {"open_questions": self.spec.open_questions},
+            "transcripts": {"keep": self.transcripts.keep},
+            "problems": self.validate(),
+        })
+    }
+}
+
 /// Something in a configuration file that parses but cannot work.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Problem {
     /// Where it is, in the file's own words: `[pipelines.feature] review`.
+    #[serde(rename = "where")]
     pub where_: String,
     pub what: String,
     /// An error makes the file unusable for the thing it configures; a warning

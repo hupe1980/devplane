@@ -1339,11 +1339,30 @@ impl FileTarget {
     /// may speak for this target.
     ///
     /// Everything a command writes, and everything a redirect names. What is
-    /// excluded is exactly the case where no prompt was ever coming: an
-    /// operand of a recognised file command that only *reads*, all of which
-    /// are in Claude Code's built-in read-only set.
-    pub fn allow_side_applies(&self) -> bool {
-        self.access == Access::Write || self.via == Via::Redirect
+    /// excluded is the case where no prompt was ever coming: an operand of a
+    /// recognised file command that only *reads*, inside the working directory.
+    ///
+    /// **`cwd` is why this takes an argument, and it was a widening.** The
+    /// exemption used to be unconditional — a read by a read-only command was
+    /// assumed never to prompt — and the differential harness measured
+    /// otherwise against Claude Code 2.1.273: under `auto_allow =
+    /// ["Edit(ran.txt)"]` the running product blocks `cat /etc/passwd >
+    /// ran.txt` and runs `cat README.md > ran.txt`. A read is free *inside* the
+    /// working directory and is a prompt outside it, so an unconditional
+    /// exemption turned any path grant into permission to pipe any file on the
+    /// machine into it.
+    ///
+    /// A path that cannot be resolved to one file stays exempt on this side.
+    /// That is measured too, from the other direction: the running product
+    /// honours an exact whole-line rule over a command substitution, so
+    /// treating `cat "$(echo a.txt)"` as an uncovered read would refuse a call
+    /// it runs. What `within` must not do is mistake a `~` for a path under the
+    /// working directory, which it does not — see [`crate::core::policy::within`].
+    pub fn allow_side_applies(&self, cwd: &std::path::Path) -> bool {
+        if self.access == Access::Write || self.via == Via::Redirect {
+            return true;
+        }
+        !crate::core::policy::within(cwd, std::path::Path::new(&self.path))
     }
 }
 

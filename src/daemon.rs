@@ -371,13 +371,20 @@ impl AppState {
         let works: Vec<_> = self.works.lock().await.values().cloned().collect();
         let drivable = self.drivable_runs().await;
         let gate_down = self.gate_down.lock().await.clone();
+        // From the policy cache rather than from disk: it holds exactly the
+        // repositories a rule was asked for and the file would not load, which
+        // is the set where a missing `never_auto` is actually costing something.
+        let broken_configs = self.policy.broken();
         let forge = self.forge.lock().await.items(&works);
         let w = self.world.lock().await;
-        w.inbox_with_gate(
+        w.inbox_with_health(
             &works,
             &drivable,
             &|dir| self.policy.stall_seconds(dir),
-            gate_down.as_deref(),
+            &crate::core::world::Health {
+                gate_down: gate_down.as_deref(),
+                broken_configs: &broken_configs,
+            },
             forge,
         )
     }

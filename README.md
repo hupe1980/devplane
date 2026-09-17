@@ -43,7 +43,7 @@ link.
 > **Status: early, but the whole loop runs** — watching, driving, verified work, declared pipelines,
 > resumable sessions, the decision log, and an inbox that measures whether it is worth reading.
 > Built against Claude Code 2.1.273 on a machine with 23 live sessions; the permission harness last
-> ran in full against 2.1.270.
+> ran in full against 2.1.273.
 
 ## 🤔 Why
 
@@ -157,6 +157,11 @@ than it looks like** — `Bash(python:*)` reads as a narrow permission for one i
 reports it and does not refuse it; the narrowing is yours to write. In a scan of 3,171 public agent
 setups, 3.1 % carried a grant of exactly that shape.
 
+[Verified done →](https://hupe1980.github.io/vibeplane/docs/verified-done/) ·
+[Configuration →](https://hupe1980.github.io/vibeplane/docs/configuration/)
+
+## 📐 Spec-driven, with no format to adopt
+
 **Spec-driven development gets the one thing the category leaves out.** Every spec tool ships a
 consistency checker and none of them decides: Spec Kit's `/speckit.analyze` is *"STRICTLY
 READ-ONLY"*, grades its findings and closes with a recommendation. If your tool has a CLI, drift is
@@ -167,13 +172,32 @@ already a gate —
 check = ["openspec validate --strict", "pnpm test -- --run"]
 ```
 
-— and a red drift check behaves exactly like a red test: the lines go back to the same session, and
-the work never reaches `review`. The phases are a pipeline with human steps between them. Vibeplane
-learns no spec format and parses nobody's `tasks.md`.
+That gives you spec **integrity** — the tool checking its own artefacts — for free. Spec-*code* drift
+needs something that reads both, which is a pipeline step with a severity threshold. A red drift
+check then behaves exactly like a red test: the lines go back to the same session, and the work never
+reaches `review`.
 
-[Verified done →](https://hupe1980.github.io/vibeplane/docs/verified-done/) ·
-[Pipelines →](https://hupe1980.github.io/vibeplane/docs/pipelines/) ·
-[Configuration →](https://hupe1980.github.io/vibeplane/docs/configuration/)
+And a work item can name what it answers — a file, or the folder your tool wrote:
+
+```sh
+vibeplane work start "password reset" --kind feature --spec specs/001-password-reset
+```
+
+Every gate stamps a fingerprint over every document under it, so *checked against
+`specs/001-password-reset`* stays a claim you can act on after a file moves — and counts the task
+list, which is the one thing these tools spell the same way:
+
+```
+password reset flow   human  ✓implement › ✓drift › ▸merge   specs/001-password-reset
+                                              20/31 tasks, 2 unanswered   gates green
+```
+
+**That pair is the point.** An agent's own account of its work references about one action in eleven,
+so *gates green* beside *eleven boxes still open* is a sentence neither the exit code nor the agent
+can produce alone. No methodology is learned: the outline is the Markdown headings, the progress is
+the `- [ ]` boxes, and nothing here knows what a requirement is.
+
+[Pipelines →](https://hupe1980.github.io/vibeplane/docs/pipelines/)
 
 ## 🖥️ The board
 
@@ -189,6 +213,7 @@ Keyboard-first:
 | `1`–`9` | pick one of the answers the agent offered |
 | `y` `n` · `r` | allow · deny · reply |
 | `?` | why is this here — the decision log for that row |
+| `,` | what is configured — this machine, and every repository's `vibeplane.toml` read back |
 | `g` | every open issue and pull request, across every project |
 | `⌘N` | dispatch: prompt, project, kind, and this project's own prompts |
 | `⌘K` | jump to any project, session or piece of work by name |
@@ -264,10 +289,14 @@ any disagreement — in either direction, because a rule that is quietly too str
 replace with a broader rule.
 
 It asks on **two axes**: an `auto_allow` list answering *did Claude Code run it?*, and a `never_auto`
-list answering *did Claude Code refuse?*. Its last full run, against Claude Code 2.1.270, was clean
-on both — 176 deny cases and 126 allow cases, no reproducible disagreement. **It has not been re-run
-since the current matcher shipped**, and a harness result is true only of the code it ran against.
-Seven deny shapes have been added since that run and have never been put to a running Claude Code.
+list answering *did Claude Code refuse?*. Its last full run, against Claude Code 2.1.273, was clean
+on both — 208 deny cases and 126 allow cases, no undeclared disagreement. That run found a real
+widening, which is the point of having it: a path grant like `Edit(out.txt)` was approving whatever
+command filled the file.
+
+**Twelve deny shapes were skipped rather than measured** — one because macOS lacks `tac`, eleven
+because the model that answers the probe does not reliably run them even with nothing forbidden. Those
+are unmeasured, not clean.
 
 It is also not the only instrument, and this month it was not the one that found anything. Four ways
 a rule could read as protection and not fire were found by stating what the matcher claims to
@@ -350,21 +379,21 @@ provider
 
 ## ⏱ The gate says how old its own measurement is
 
-The permission rules are written in **Claude Code's own syntax**, so the running product can be asked
-the same question and a disagreement fails the build. That check is only true on the day it runs, so
-its age is printed rather than hidden:
+The rules are written in **Claude Code's own syntax**, so the running product can be asked the same
+question and a disagreement fails the build. That check is only true on the day it runs, so its age
+is printed rather than hidden:
 
 ```console
-$ vibeplane doctor
-gate
-  measured  Claude Code 2.1.270
-            3 releases behind a session on this machine (2.1.273)
+$ vibeplane gate
+measurement
+  measured  Claude Code 2.1.273
   rows      changelog rows cleared through 2.1.273 (not a compatibility claim)
 ```
 
-`measured` is the last release the full differential run was green against. `rows` is the last
-release whose rule-relevant changelog entries are all accounted for — a statement about the ledger,
-not a compatibility claim. The board shows the gap too, and only when there is one.
+Beside it, the gate scored against a published execution-boundary profile — **including the two
+properties it does not have**, because a conformance report with no failures in it is a marketing
+document. `just owed` fails on a cron line when the vendor ships past the floor.
+[Conformance →](https://hupe1980.github.io/vibeplane/docs/conformance/)
 
 ## 🔍 Trust is a decision, so it shows you the evidence
 
@@ -394,6 +423,17 @@ you clone it.
 
 It **reports and refuses nothing**: a `PreToolUse` hook is a normal thing to ship. It is shallow on
 purpose, too — it does not open the script a hook names.
+
+## 🤖 Your agents can ask it things
+
+```json
+{ "mcpServers": { "vibeplane": { "command": "vibeplane", "args": ["mcp"] } } }
+```
+
+Four questions — `inbox`, `work`, `explain`, `audit` — and nothing that acts. The useful one daily is
+`explain`: an agent finds out *before* running a command that a rule refuses it, instead of burning a
+turn. It is read-only because it **implements no mutating tool**, not because anything is labelled.
+[MCP →](https://hupe1980.github.io/vibeplane/docs/cli/#vibeplane-mcp)
 
 ## ⚙️ How it works
 

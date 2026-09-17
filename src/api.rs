@@ -80,8 +80,10 @@ pub fn router(state: Shared) -> Router {
         .route("/api/issues", post(list_issues))
         .route("/api/forge", get(forge))
         .route("/api/decisions", get(decisions))
+        .route("/api/explain", get(explain))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
+        .route("/api/setup", get(setup))
         .route("/api/attention", get(attention))
         .route("/api/shutdown", post(shutdown))
         .route("/api/stream", get(stream))
@@ -965,6 +967,94 @@ async fn run_events(
     }
 }
 
+/// What the gate would decide about one call, and which rule decides it.
+///
+/// The same evaluation `vibeplane explain` does, with one difference that is
+/// the whole reason this endpoint exists: **it leaves a row.** A read-only
+/// interrogation is also a way to probe for a command the rules happen to
+/// allow, and a gate that answers questions should be able to say it was asked.
+///
+/// The CLI's `explain` stays offline and unrecorded, and the asymmetry is
+/// deliberate: a person at a terminal asking *what would this do* is not the
+/// party the rules govern. An agent asking through MCP is.
+#[derive(Deserialize)]
+struct ExplainQuery {
+    call: String,
+    #[serde(default = "default_tool")]
+    tool: String,
+    #[serde(default = "default_dir")]
+    dir: String,
+    /// Who asked. Recorded, so the log distinguishes a probe from a person.
+    #[serde(default)]
+    asked_by: Option<String>,
+}
+fn default_tool() -> String {
+    "Bash".into()
+}
+fn default_dir() -> String {
+    ".".into()
+}
+
+async fn explain(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<ExplainQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(dir) = std::path::PathBuf::from(&q.dir).canonicalize() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("{} does not exist", q.dir)})),
+        )
+            .into_response();
+    };
+    let Some(field) = crate::core::policy::rule_content_field(&q.tool) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("`{}` takes no plain specifier", q.tool)})),
+        )
+            .into_response();
+    };
+    let input = json!({ field: q.call });
+
+    // The gate this machine enforces, machine-wide rules included — not a
+    // project-only imitation that would answer `allow` for a call the machine
+    // denies.
+    let (cache, _) = crate::core::PolicyCache::from_disk();
+    let verdict = cache.evaluate(&dir, &q.tool, &input);
+    let restrictive = cache.restrictive(&dir, &q.tool, &input);
+
+    let asked_by = q.asked_by.as_deref().unwrap_or("api");
+    state
+        .record(
+            crate::core::Decision::new(
+                crate::core::Actor::Policy,
+                "policy:explain",
+                format!("{}: {}", q.tool, q.call),
+                verdict.as_str(),
+            )
+            .because(match verdict.rule() {
+                Some(r) => format!("{r} (asked by {asked_by}, nothing ran)"),
+                None => format!("no rule answers it (asked by {asked_by}, nothing ran)"),
+            }),
+        )
+        .await;
+
+    Json(json!({
+        "dir": dir.display().to_string(),
+        "tool": q.tool,
+        "call": q.call,
+        "verdict": verdict.as_str(),
+        "rule": verdict.rule(),
+        // What a `PreToolUse` hook would answer, which is not the same thing:
+        // that hook may never grant, so a call this says `allow` for still
+        // reaches the vendor's own permission system.
+        "before_the_tool_runs": restrictive.as_str(),
+        "nothing_ran": true,
+    }))
+    .into_response()
+}
+
 /// Files a shell call in this run named for writing — the class Claude Code's
 /// own checkpointing documents that it does not cover.
 ///
@@ -1161,6 +1251,10 @@ struct StartWorkBody {
     /// prompt, and the report is marked as untrusted for the agent.
     #[serde(default)]
     issue: Option<u64>,
+    /// The specification this work answers, relative to the repository — a
+    /// file, or the folder a spec tool wrote. Stamped, never interpreted.
+    #[serde(default)]
+    spec: Option<String>,
 }
 fn default_kind() -> String {
     "quick".into()
@@ -1210,13 +1304,26 @@ async fn start_work(
             }
         }
     }
+    // Resolved before the work exists, so a typo is an error the person can
+    // still fix rather than a field that silently went missing.
+    let root: std::path::PathBuf = body.cwd.into();
+    let spec = match body.spec.as_deref() {
+        Some(s) => match crate::core::Work::with_spec(&root, s) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+            }
+        },
+        None => None,
+    };
     let req = crate::work::StartRequest {
-        project_root: body.cwd.into(),
+        project_root: root,
         kind,
         title,
         prompt,
         agent: body.agent,
         worktree: body.worktree,
+        spec,
     };
     match crate::work::start(&state, req).await {
         Ok(id) => {
@@ -1258,6 +1365,16 @@ struct WorkView<'a> {
     /// two fields of one name in a flattened struct is a duplicate key and
     /// whichever the reader takes is luck.
     stopped_summary: Option<String>,
+    /// What the agent last said, for putting **beside** what the gate measured.
+    ///
+    /// Present only when the last gate **failed**, which is the one case the
+    /// two are worth reading together: an end-of-task report references about
+    /// one action in eleven and drifts toward its plan as the run leaves it, so
+    /// alone it is worse than nothing and next to an exit code it is the whole
+    /// point. Absent also when no transcript was kept, which is *nothing was
+    /// recorded* rather than *the agent said nothing*.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claim: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1269,6 +1386,11 @@ struct GateView {
     attempt: u32,
     /// Set when the gate was a reproduction: failing was the point.
     expect_fail: bool,
+    /// The specification this verdict was reached against, as it was then.
+    /// The half of a done certificate a reviewer can check without trusting
+    /// this tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spec: Option<crate::core::work::SpecStamp>,
 }
 
 impl<'a> WorkView<'a> {
@@ -1280,8 +1402,10 @@ impl<'a> WorkView<'a> {
                 summary: g.summary(),
                 attempt: g.attempt,
                 expect_fail: g.expect_fail,
+                spec: g.spec.clone(),
             }),
             can_retry,
+            claim: None,
             stopped_summary: work
                 .stopped
                 .as_ref()
@@ -1305,15 +1429,33 @@ async fn list_work(State(state): State<Shared>, headers: HeaderMap) -> impl Into
     let works = state.works.lock().await;
     let mut all: Vec<_> = works.values().collect();
     all.sort_by_key(|w| std::cmp::Reverse(w.updated_at));
-    Json(
-        all.iter()
-            .map(|w| {
-                let can_retry = w.retryable(w.current_run().is_some_and(|r| live.contains(r)));
-                WorkView::of(w, can_retry)
-            })
-            .collect::<Vec<_>>(),
-    )
-    .into_response()
+    let mut views: Vec<WorkView> = all
+        .iter()
+        .map(|w| {
+            let can_retry = w.retryable(w.current_run().is_some_and(|r| live.contains(r)));
+            WorkView::of(w, can_retry)
+        })
+        .collect();
+
+    // The agent's claim, fetched **only** where a gate failed — which is the one
+    // place it is worth reading, and which keeps this to zero queries on the
+    // ordinary board. A report alone references about one action in eleven; a
+    // report beside an exit code that contradicts it is the thing worth showing.
+    for (view, w) in views.iter_mut().zip(all.iter()) {
+        if !w.claim_is_worth_showing() {
+            continue;
+        }
+        if let Some(run) = w.runs.last() {
+            view.claim = state
+                .store
+                .last_agent_message(run)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| crate::core::text::clip(t.trim(), 400));
+        }
+    }
+    Json(views).into_response()
 }
 
 async fn verify_work(
@@ -1881,6 +2023,124 @@ async fn shutdown(State(state): State<Shared>, headers: HeaderMap) -> impl IntoR
         st.stopping.notify_waiters();
     });
     Json(json!({"stopping": true, "pid": std::process::id()})).into_response()
+}
+
+/// Everything that is configured, on this machine and in every registered
+/// repository.
+///
+/// The product had no answer to *what is set up here* outside a terminal:
+/// `vibeplane check` reads one repository at a time, `doctor` reads the
+/// machine, and a person with eight projects had to visit eight of them to find
+/// the one whose rules stopped loading. This is that answer in one request.
+///
+/// **It reads and never writes**, by design rather than by omission. The rules
+/// are committed files reviewed like code, an agent here runs as the same user
+/// and can read the bearer token, and a `POST` that edited `[policy]` would be
+/// the widening path the gate exists to close. Every value arrives with the
+/// file it came from; the editing happens where the review does.
+///
+/// Health is [`diagnostics`]'s job and stays there: a dead gate is already the
+/// loudest thing in the inbox, and two endpoints answering "is it working"
+/// would eventually disagree.
+async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+
+    // The vendor's settings file, read fresh: it is the file `connect` writes
+    // and a person edits by hand between one board refresh and the next.
+    let settings_path = crate::observe::connect::settings_path().ok();
+    let connect = settings_path.as_ref().map(|p| {
+        let settings = crate::observe::connect::read_settings(p).unwrap_or_default();
+        crate::observe::connect::inspect(&settings, p)
+    });
+
+    let home = crate::config::home().ok();
+    let machine_policy = home.as_ref().map(|h| {
+        let path = h.join("policy.toml");
+        match crate::core::config::GlobalConfig::load(h) {
+            Ok(g) => {
+                let policy = g.policy();
+                json!({
+                    "path": path.display().to_string(),
+                    "exists": path.exists(),
+                    "deny": policy.deny_rules().iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                    "ask": policy.ask_rules().iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                    "allow": policy.allow_rules().iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                    "problems": g.validate(),
+                })
+            }
+            // A machine-wide file that will not parse is the worst of the three
+            // failures in this endpoint, because every repository inherits from
+            // it. Named, not swallowed.
+            Err(e) => json!({
+                "path": path.display().to_string(),
+                "exists": true,
+                "error": e.to_string(),
+            }),
+        }
+    });
+
+    let provider = crate::core::provider::from_env();
+
+    let projects: Vec<_> = {
+        let w = state.world.lock().await;
+        w.projects()
+            .map(|p| (p.id.to_string(), p.name.clone(), p.root.clone(), p.trusted))
+            .collect()
+    };
+    // Off the world lock: every entry reads a file, and holding the world
+    // across eight repository reads stalls the board for everyone.
+    let projects: Vec<_> = projects
+        .into_iter()
+        .map(|(id, name, root, trusted)| {
+            let file = root.join(crate::core::config::CONFIG_FILE);
+            let head = json!({
+                "id": id,
+                "name": name,
+                "root": root.display().to_string(),
+                "trusted": trusted,
+                "config": {"path": file.display().to_string(), "exists": file.exists()},
+            });
+            let mut out = head;
+            match crate::core::ProjectConfig::load(&root) {
+                Ok(cfg) => {
+                    out["describes"] = cfg.describe();
+                    // What the repository is missing, said once and plainly,
+                    // because a file full of correct values that verifies
+                    // nothing is the common case rather than the broken one.
+                    out["verified"] = json!(cfg.has_gates());
+                }
+                Err(e) => out["error"] = json!(e.to_string()),
+            }
+            out
+        })
+        .collect();
+
+    Json(json!({
+        "machine": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "pid": std::process::id(),
+            "started_at": state.started_at.to_string(),
+            "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
+            "home": home.as_ref().map(|h| h.display().to_string()),
+            "database": home.as_ref().map(|h| h.join("vibeplane.db").display().to_string()),
+        },
+        "provider": {
+            "name": provider.as_str(),
+            "because": provider.because(),
+            "vendor_supervision": provider.has_vendor_supervision(),
+            "off": provider.missing(),
+            "partial": provider.partial(),
+        },
+        "connect": connect,
+        "gate": {
+            "verified_against": crate::core::policy::VERIFIED_AGAINST,
+            "rows_cleared_through": crate::core::policy::ROWS_CLEARED_THROUGH,
+        },
+        "machine_policy": machine_policy,
+        "projects": projects,
+        "agents": state.agents.clone(),
+    }))
+    .into_response()
 }
 
 async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {

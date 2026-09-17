@@ -507,7 +507,7 @@ const KNOWN_TOOLS: &[&str] = &[
 /// in the present tense, so it decays every day the vendor ships and this does
 /// not run. It moves **only on a green full run**, never by editing a constant
 /// ahead of one.
-pub const VERIFIED_AGAINST: &str = "2.1.270";
+pub const VERIFIED_AGAINST: &str = "2.1.273";
 
 /// The release whose rule-relevant changelog rows have each been accounted for.
 ///
@@ -1165,7 +1165,22 @@ impl Rule {
             // no prompt was coming — a read by a command in the built-in
             // read-only set. Keyed on the access rather than on the syntax,
             // because `tee` is a file command that writes.
-            if !restrictive && !t.allow_side_applies() {
+            if !restrictive && !t.allow_side_applies(ctx.cwd) {
+                continue;
+            }
+            // **On the allow side a path rule never speaks for what a
+            // recognised file command writes through an operand.** Measured
+            // against 2.1.273: `auto_allow = ["Edit(ran.txt)"]` runs
+            // `echo hi > ran.txt` and does *not* run `echo hi | tee ran.txt`,
+            // which wants a `Bash` rule of its own — `Bash(tee *)` alone runs
+            // it. The shell's own redirection is file business; a command
+            // writing through its operands is command business.
+            //
+            // `Via::WritePath` — `touch f`, the destination of `cp` — is
+            // deliberately left alone. It has not been measured on this axis,
+            // and a narrowing nobody asked for costs a prompt on a call the
+            // vendor may well run.
+            if !restrictive && t.via == crate::core::command::Via::FileCommand {
                 continue;
             }
             let governs = if named.eq_ignore_ascii_case("Edit") {
@@ -1872,7 +1887,11 @@ impl PathPattern {
 ///
 /// Recognised file commands are skipped: they are in the built-in read-only
 /// set, so nobody was going to be asked and there is no prompt to skip.
-pub fn uncovered_targets(input: &Value, covered: impl Fn(&str, &Path) -> bool) -> Option<String> {
+pub fn uncovered_targets(
+    input: &Value,
+    cwd: &Path,
+    covered: impl Fn(&str, &Path) -> bool,
+) -> Option<String> {
     // Every shell tool carries its line under the same key, so the field is
     // named once here rather than the caller's tool being threaded through.
     let command = input.get("command").and_then(|v| v.as_str())?;
@@ -1883,7 +1902,7 @@ pub fn uncovered_targets(input: &Value, covered: impl Fn(&str, &Path) -> bool) -
         return Some("more of this command than the analysis reads".to_string());
     }
     for t in targets {
-        if !t.allow_side_applies() {
+        if !t.allow_side_applies(cwd) {
             continue;
         }
         if t.unresolvable {
@@ -1909,6 +1928,13 @@ pub fn uncovered_targets(input: &Value, covered: impl Fn(&str, &Path) -> bool) -
 /// `--add-dir` may have extended it with. Being wrong here costs a prompt that
 /// Claude Code would not have shown, which is the safe direction.
 pub fn within(dir: &Path, file: &Path) -> bool {
+    // `~/.ssh/id_rsa` is the home directory, not a file called `~` under this
+    // one. Joining it would put every `~` path "inside" whatever directory was
+    // asked about — and this function's answer is used to decide that a target
+    // needs no rule, so that mistake reads as *approved*.
+    if file.to_string_lossy().starts_with('~') {
+        return false;
+    }
     let resolved = if file.is_absolute() {
         file.to_path_buf()
     } else {
@@ -2481,7 +2507,7 @@ impl Policy {
             // here would skip a prompt Claude Code still intends to show,
             // which is a widening — the failure this layer exists to prevent.
             if is_shell(tool)
-                && uncovered_targets(input, |side, file| {
+                && uncovered_targets(input, ctx.cwd, |side, file| {
                     self.allows_path(side, ctx, file) || within(ctx.cwd, file)
                 })
                 .is_some()
@@ -3585,6 +3611,12 @@ mod tests {
     fn a_read_deny_reaches_a_path_inside_a_revision() {
         // `git show HEAD:.env` is the same secret arriving through git's object
         // store rather than the working tree.
+        //
+        // **A declared narrowing, and now a measured one.** The deny axis put
+        // both of these to Claude Code 2.1.273 and it *runs* them under
+        // `Read(.env)`. Keeping them refused here is deliberate: a prohibition
+        // the object store walks around is not a prohibition, and the cost is a
+        // prompt. Do not "fix" this to match the vendor.
         let p = Policy::new(&[], &["Read(.env)".into()]);
         for cmd in ["git show HEAD:.env", "git cat-file -p HEAD:.env"] {
             assert!(
@@ -4266,6 +4298,64 @@ mod tests {
                 "{cmd} must still be denied"
             );
         }
+    }
+
+    /// A path grant is not a licence to run anything that writes there.
+    ///
+    /// **Measured against Claude Code 2.1.273, and it was a widening of the
+    /// worst available shape.** With `auto_allow = ["Edit(ran.txt)"]` and
+    /// nothing else, this matcher answered `allow` for *every* command that
+    /// redirected into `ran.txt` — `cat /etc/passwd`, `cat ~/.ssh/id_rsa`,
+    /// `curl … | …`. One innocuous grant for one output file became permission
+    /// to pipe any file on the machine into it, with no prompt.
+    ///
+    /// The running product was asked each of these twice and agrees with every
+    /// row below.
+    #[test]
+    fn a_grant_for_a_written_file_does_not_approve_what_fills_it() {
+        let p = Policy::new(&["Edit(ran.txt)".into()], &[]);
+        let allows = |cmd: &str| {
+            matches!(
+                p.evaluate(&ctx(), "Bash", &bash(cmd)),
+                Verdict::Allow { .. }
+            )
+        };
+
+        // What the product runs: the command needs no permission of its own,
+        // and the only file it names outside the grant is inside the working
+        // directory.
+        for cmd in [
+            "echo hi > ran.txt",
+            "date > ran.txt",
+            "ls > ran.txt",
+            "cat README.md > ran.txt",
+            "echo hi | cat > ran.txt",
+        ] {
+            assert!(allows(cmd), "the product runs `{cmd}` under this grant");
+        }
+
+        // What it refuses. A read outside the working directory is a prompt
+        // whatever the rules say about the *output* file.
+        for cmd in [
+            "cat /etc/passwd > ran.txt",
+            "cat /etc/hosts | tee ran.txt",
+            // `~` is the home directory, not a file under the working one.
+            "cat ~/.ssh/id_rsa > ran.txt",
+        ] {
+            assert!(!allows(cmd), "`{cmd}` reads outside the working directory");
+        }
+
+        // And a recognised file command writing through an operand wants a
+        // rule of its own: `Bash(tee *)` runs this and a path grant does not.
+        assert!(!allows("echo hi | tee ran.txt"));
+        assert!(matches!(
+            Policy::new(&["Bash(tee *)".into(), "Edit(ran.txt)".into()], &[]).evaluate(
+                &ctx(),
+                "Bash",
+                &bash("echo hi | tee ran.txt")
+            ),
+            Verdict::Allow { .. }
+        ));
     }
 
     #[test]
@@ -5321,6 +5411,13 @@ mod tests {
         // comparing `.env` against the four characters `.en?` as a literal does
         // not fire on a command that reads `.env`. Measured against a real
         // shell: each of these printed the file.
+        //
+        // **The vendor compares the text, and that is now measured rather than
+        // assumed.** Claude Code 2.1.273 refuses `cat .env*` — whose literal
+        // prefix is the rule — and *runs* `cat .en?`. Its 2.1.271 fix is scoped
+        // to a wildcard in a pattern or option value, not a bare operand. This
+        // matcher intersects the patterns instead, so a `?` does not step around
+        // a deny. A declared narrowing; do not "fix" it to match.
         let p = Policy::new(
             &["Bash(cat *)".into(), "Bash(head *)".into()],
             &["Read(.env)".into()],
@@ -5494,22 +5591,44 @@ mod tests {
 mod baseline_tests {
     use super::*;
 
+    /// A release `n` patches either side of the baseline, spelled the way the
+    /// vendor spells one.
+    ///
+    /// **Derived rather than written down.** These tests used to name `2.1.272`
+    /// and `2.1.269` beside a constant that was `2.1.270`, so the day a green
+    /// differential run moved the baseline to `2.1.273` — which is the one
+    /// event this constant exists for — three tests failed for having been
+    /// correct about the old number. A test that breaks when the thing it
+    /// guards legitimately changes teaches people to edit tests.
+    fn patch_off(n: i64) -> String {
+        let mut parts: Vec<i64> = VERIFIED_AGAINST
+            .split('.')
+            .map(|p| p.parse().expect("the baseline is three numbers"))
+            .collect();
+        *parts.last_mut().expect("a patch number") += n;
+        parts
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     #[test]
     fn a_newer_release_is_ahead_and_an_older_one_is_not() {
         // The whole point of comparing as numbers: `2.1.9` is *older* than
         // `2.1.270`, and a string comparison says the opposite — which would
         // report a stale session as running ahead of the gate's baseline and
         // teach somebody to ignore the warning.
-        assert!(is_ahead_of_baseline("2.1.272"));
+        assert!(is_ahead_of_baseline(&patch_off(2)));
         assert!(is_ahead_of_baseline("2.2.0"));
         assert!(is_ahead_of_baseline("3.0.0"));
         // Against the constant rather than a copy of it, so raising the
         // baseline does not leave a test asserting the old one.
         assert!(!is_ahead_of_baseline(VERIFIED_AGAINST));
         assert!(!is_ahead_of_baseline("2.1.9"));
-        assert!(!is_ahead_of_baseline("2.1.269"));
+        assert!(!is_ahead_of_baseline(&patch_off(-1)));
         assert!(!is_ahead_of_baseline("2.0.999"));
-        assert!(is_ahead_of_baseline("v2.1.271"));
+        assert!(is_ahead_of_baseline(&format!("v{}", patch_off(1))));
     }
 
     #[test]
@@ -5517,10 +5636,14 @@ mod baseline_tests {
         // The provider's version string is somebody else's format. A warning
         // nobody can act on is worse than silence, so an unparseable version
         // is not news.
-        for v in ["", "nightly", "2.x", "2.1.270-beta.1+exp", "??"] {
+        for v in ["", "nightly", "2.x", "??"] {
             assert!(!is_ahead_of_baseline(v), "{v}");
         }
+        // A pre-release *of the baseline* is not ahead of it.
+        assert!(!is_ahead_of_baseline(&format!(
+            "{VERIFIED_AGAINST}-beta.1+exp"
+        )));
         // A pre-release suffix on a *newer* number still reads as newer.
-        assert!(is_ahead_of_baseline("2.1.272-rc1"));
+        assert!(is_ahead_of_baseline(&format!("{}-rc1", patch_off(2))));
     }
 }

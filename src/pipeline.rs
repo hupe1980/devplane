@@ -324,7 +324,7 @@ async fn advance(state: &Shared, id: &WorkId) -> Result<()> {
             bail!("`{gate}` has no commands, and an empty gate is not a pass");
         }
         crate::work::set_phase(state, id, Phase::Verify).await;
-        let report = crate::gates::run_expecting(
+        let mut report = crate::gates::run_expecting(
             gate,
             &commands,
             &dir,
@@ -333,6 +333,7 @@ async fn advance(state: &Shared, id: &WorkId) -> Result<()> {
             expect == Expect::Fail,
         )
         .await;
+        crate::work::stamp_spec(state, id, &mut report, &dir).await;
         let met = report.passed();
         let feedback = report.feedback();
         let summary = report.summary();

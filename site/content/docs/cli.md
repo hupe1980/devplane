@@ -147,19 +147,25 @@ That is the **exact call**, never a pattern: one interruption says nothing about
 calls like it. [`vibeplane explain --replay`](#vibeplane-explain-replay) is where a pattern comes
 from, where the evidence is a count. Nothing is written for you either way.
 
-One item is about the machine rather than about any run, and it is the only thing Vibeplane raises
-about **itself**:
+Two items are about the machine rather than about any run, and they are the only things Vibeplane
+raises about **itself**:
 
 ```console
  ! The permission gate is installed and not answering [gate_down]
      No rule in any project is being enforced right now.
      it will not start: No such file or directory
+
+ ! payments-api/vibeplane.toml will not load [config_broken]
+     The rules this repository commits are not in force.
+     TOML parse error at line 12, column 3
 ```
 
-A broken gate and a quiet machine look identical from the outside: no hook arrives either way. The
-daemon runs the installed gate on a timer for that reason. Critical, and no action offered — the fix
-is `vibeplane connect claude`, and this is not a product that rewrites your `settings.json` from a
-list.
+A broken gate and a quiet machine look identical from the outside: no hook arrives either way, so
+the daemon runs the installed gate on a timer. A file that will not parse is the same failure one
+repository wide — the last good rules are kept, and a daemon restarted against it has none to keep.
+
+Both are critical and neither offers an action: the fixes are `vibeplane connect claude` and a text
+editor, and this is not a product that rewrites your settings or your rules from a list.
 
 ### `vibeplane issues` · `vibeplane prs`
 
@@ -236,6 +242,19 @@ phrase, not a query language.
 The board has the same search — press <kbd>/</kbd>, or click the box in the header. A match names the
 session it came from and opens it.
 
+### `vibeplane work start --spec <path>`
+
+The specification this work answers, relative to the repository — a file, or the folder your spec
+tool wrote. Every gate stamps a fingerprint over every Markdown document under it and counts its
+`- [ ]` task list.
+
+**No methodology is learned**: no layout is detected and no section name is recognised, because the
+frameworks in this category agree on none of them. The outline is the headings, the progress is the
+boxes, and the `[gates]` commands you declare are what actually check the work.
+
+A path outside the repository, or a folder with no Markdown in it, is an error at the point you can
+still fix the typo. See [pipelines](/vibeplane/docs/pipelines/) for what the stamp buys you.
+
 ### `vibeplane rewind <run>`
 
 Which of a session's files Claude Code's own checkpoint will **not** bring back.
@@ -309,6 +328,16 @@ fragments of what a driven agent is saying.
 Open the board in a browser. The token is handed over once in the URL and stripped from the address
 bar, so it cannot end up in a screenshot or a bookmark.
 
+### `vibeplane gate`
+
+What the permission gate is, and how much of it is measured — the release the rules were last checked
+against, how far the vendor has moved since, and the gate scored against a published
+execution-boundary profile. `doctor` asks whether the channels are alive; this asks whether the
+verdicts are worth anything.
+
+The card shows what is **missing** as well as what is met: a conformance report with no failures in it
+is a marketing document. [The full page →](/vibeplane/docs/conformance/)
+
 ### `vibeplane doctor`
 
 Aliased as `vibeplane diagnostics`.
@@ -322,7 +351,7 @@ running product can be asked the same question — and that check is only true o
 
 ```console
 gate
-  measured  Claude Code 2.1.270
+  measured  Claude Code 2.1.273
             3 releases behind a session on this machine (2.1.273)
   rows      changelog rows cleared through 2.1.273 (not a compatibility claim)
 ```
@@ -553,9 +582,41 @@ Without `--yes`, a non-interactive stdin is an error rather than a silent yes.
 Read the repository's `vibeplane.toml` and say what it will do — and refuse what cannot work. Offline
 and daemon-free, so it runs in CI. Exits non-zero on an error.
 
+It also names the three things a person cannot get by reading the file: a rule that covers nothing, a
+rule that grants more than it reads as granting, and a path denied for reading that is still
+writable. `--json` returns the same read-back the board shows under `,`.
+
 ### `vibeplane agents`
 
 The agents Vibeplane can drive.
+
+### `vibeplane mcp`
+
+Serve Vibeplane's read-only surface to an agent over MCP, on stdio. Register it with your agent as a
+command MCP server:
+
+```json
+{ "mcpServers": { "vibeplane": { "command": "vibeplane", "args": ["mcp"] } } }
+```
+
+Four questions, and nothing that acts:
+
+| Tool | Answers |
+|---|---|
+| `inbox` | What needs a human right now, across every project. Worth asking before your agent asks *you* something you have already been asked. |
+| `work` | A piece of work: phase, gate verdicts, the specification it answers. |
+| `explain` | What the gate would decide about a call, and which rule decides it — **before** running it, so a refusal costs nothing. |
+| `audit` | What Vibeplane decided and on whose authority. |
+
+**It is read-only because it implements no mutating tool** — not because anything is labelled.
+`readOnlyHint` is metadata a client may act on and constrains no server, so it is not what this
+rests on. Anything that acts still goes through a person.
+
+Two things worth knowing. Every payload is framed as **a report containing other people's text** —
+commands an agent wrote, build output, issue bodies — because this surface is a conduit. And an
+`explain` asked here is **recorded** in `vibeplane audit`: a read-only interrogation is also a way to
+probe for a command the rules happen to allow. The CLI's `explain` stays offline and unrecorded — a
+person at a terminal is not the party the rules govern.
 
 ### `vibeplane connect claude` · `disconnect claude`
 

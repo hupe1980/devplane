@@ -83,6 +83,16 @@ detection is the defence. `vibeplane doctor` **runs** the installed gate with a 
 than checking a line exists in a settings file, and the daemon does the same on a timer and raises a
 critical `gate_down` item when it stops answering.
 
+A **`vibeplane.toml` that will not parse** is the same failure one repository wide: the last good
+rules are kept, and a daemon restarted against a broken file has none to keep, so that repository's
+`never_auto` list is simply gone. That raises a critical `config_broken` item naming the file and the
+parser's reason.
+
+**Nothing writes the rules back.** There is no API route and no button that edits `[policy]`, in a
+repository or in `~/.vibeplane/policy.toml`. An agent here runs as you and can read the bearer token,
+so a write path would be a widening path; the board's <kbd>,</kbd> panel reads every file and offers
+nothing to save.
+
 *The rules cannot fail open; a channel can, and the channel is a local process.*
 
 `never_auto` cannot be overridden by `auto_allow`, in either direction.
@@ -103,10 +113,14 @@ A third axis, `VIBEPLANE_DIFF_AXIS=dialect`, covers the tools that are not shell
 Windows host. It runs **this matcher alone** and prints a checklist to put to a running product, and
 says in its own output that it is not a measurement.
 
-Its last full run, against Claude Code 2.1.270, was clean on both: 176 deny cases and 126 allow
-cases, with no reproducible disagreement. **It has not been re-run since the current matcher
-shipped**, and a harness result is true only of the code it ran against. Seven deny shapes added
-since that run have never been put to a running Claude Code.
+Its last full run, against Claude Code 2.1.273, was clean on both: 208 deny cases and 126 allow
+cases, with no undeclared disagreement. It found a real widening on the way — a path grant approving
+whatever command wrote to the granted file — which is what a differential harness is for.
+
+**Twelve deny shapes were skipped rather than measured**: one because macOS lacks the program, eleven
+because the model answering the probe does not reliably run them even with nothing forbidden. A
+skipped shape is unmeasured, not clean, and a harness result is true only of the code it ran
+against.
 
 **Agreement is not correctness.** On a shape neither side generates, this matcher and Claude Code
 can be wrong together and the run still comes back clean — which is what happened over a wildcard

@@ -31,25 +31,28 @@ Every command takes a global `--json` that prints machine-readable output instea
 - `vibeplane check [path]`: read the repository's `vibeplane.toml` and say what it will do. Offline, daemon-free, CI-safe.
 - `vibeplane explain <call>`: what the gate would decide about one call, and why. `--replay` asks it of every call already observed.
 - `vibeplane trust [path]`: allow agents to start in a repository, after printing its hooks, MCP servers, skills and overbroad rules. `--dry-run` prints and trusts nothing.
-- `vibeplane work start|list|show|verify|approve|retry|resume|finish`: work that outlives a session, with the project's gates between steps.
+- `vibeplane work start|list|show|verify|approve|retry|resume|finish`: work that outlives a session, with the project's gates between steps. `--spec <file-or-folder>` names the specification it answers; no format is learned.
 - `vibeplane snooze <id>`: hide a run's inbox items for a while.
 - `vibeplane open`, `vibeplane watch`: the board in a browser; events as they arrive.
+- `vibeplane gate`: what the permission gate is and how much of it is measured — the release the rules were last checked against, how far the vendor has moved since, and the gate scored against the EBL-Core conformance profile. Shows what is missing, not only what is met.
 - `vibeplane doctor` (alias `diagnostics`): channel health, provider, gate staleness, daemon status.
 - `vibeplane connect <provider>`, `vibeplane disconnect <provider>`: install or remove hooks and telemetry, with a backup.
 - `vibeplane stop`: stop the running daemon.
+- `vibeplane mcp`: serve Vibeplane's read-only surface to an agent over MCP on stdio — `inbox`, `work`, `explain`, `audit`. No tool on it writes; anything that acts still goes through a person. Register it with your agent as a command MCP server.
 - `vibeplane hook`, `vibeplane statusline`: read a payload on stdin and forward it. Used by the installed hooks, not typed by a person.
 
 ## Configuration
 
-- [Configuration reference](https://hupe1980.github.io/vibeplane/docs/configuration/): the full `vibeplane.toml` — `[gates]`, `[pipelines]`, `[policy]`, `[budget]`, `[workspace]`, `[github]`, `[transcripts]`.
+- [Configuration reference](https://hupe1980.github.io/vibeplane/docs/configuration/): the full `vibeplane.toml` — `[gates]`, `[pipelines]`, `[policy]`, `[budget]`, `[workspace]`, `[github]`, `[transcripts]`. Vibeplane reads these files and never writes them; `vibeplane check --json` and the board's `,` panel print one back.
 - [Permissions](https://hupe1980.github.io/vibeplane/docs/permissions/): the rule syntax, which is Claude Code's own; `never_auto`, `always_ask`, `auto_allow`; deny wins in both directions; what a rule cannot see.
 - [Verified done](https://hupe1980.github.io/vibeplane/docs/verified-done/): gates, the done certificate, and why an agent's own report is not one.
-- [Pipelines](https://hupe1980.github.io/vibeplane/docs/pipelines/): declared chains of runs with gates between them, including spec-driven drift checking.
+- [Pipelines](https://hupe1980.github.io/vibeplane/docs/pipelines/): declared chains of runs with gates between them, including spec-driven drift checking and `--spec`, which stamps the specification a piece of work answers and counts its task list per gate.
 
 ## How it works
 
 - [Architecture](https://hupe1980.github.io/vibeplane/docs/architecture/): one binary, two stores, an event log reduced to state, an append-only decision log.
 - [Observing](https://hupe1980.github.io/vibeplane/docs/observe/): hooks, OpenTelemetry, the agent roster, the optional status-line shim.
+- [Conformance](https://hupe1980.github.io/vibeplane/docs/conformance/): the gate scored against a published execution-boundary profile, including the two properties it does not have.
 - [Security](https://hupe1980.github.io/vibeplane/docs/security/): the trust gate, loopback-only, where the policy can and cannot fail open, telemetry privacy.
 - [Agents](https://hupe1980.github.io/vibeplane/docs/agents/): driving any ACP agent; the four built in and how to name another.
 

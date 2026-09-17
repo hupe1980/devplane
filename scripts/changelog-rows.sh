@@ -100,6 +100,48 @@ if [ "$MODE" = "--new" ]; then
 fi
 
 newest=$(grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' "$CHANGELOG" | awk '{print $2}')
+
+# ── The clock ────────────────────────────────────────────────────────────────
+#
+# `--owed` answers one question with an exit code: **is anything owed?** The
+# vendor ships most days and this ledger is cleared when somebody remembers, so
+# the gap between the two is where every silent widening has been born. A cron
+# line on the machine with the signed-in agent runs this and says so.
+#
+# `--advance` moves the cheap floor, and **only on a green run**: a constant a
+# person edits is a claim about attention, and this one is supposed to be a
+# claim about measurement. Nothing here touches `VERIFIED_AGAINST`, which moves
+# only when the full differential matrix runs green and costs real money.
+POLICY="src/core/policy.rs"
+cleared=$(grep -oE 'pub const ROWS_CLEARED_THROUGH: &str = "[0-9.]+"' "$POLICY" \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+
+if [ "$MODE" = "--owed" ] || [ "$MODE" = "--advance" ]; then
+  if [ -z "$newest" ] || [ -z "$cleared" ]; then
+    echo "changelog-rows: cannot read the vendor head or $POLICY"; exit 2
+  fi
+  if [ "$newest" = "$cleared" ] && [ "$missing" -eq 0 ]; then
+    echo "changelog-rows: nothing owed — rows cleared through $cleared, which is the vendor's head"
+    exit 0
+  fi
+  behind=$(awk -v a="$newest" -v b="$cleared" 'BEGIN{
+    split(a,x,"."); split(b,y,".");
+    print (x[1]==y[1] && x[2]==y[2]) ? x[3]-y[3] : "?" }')
+  if [ "$MODE" = "--advance" ]; then
+    if [ "$missing" -ne 0 ]; then
+      echo "changelog-rows: $missing rows are not accounted for — the floor does not move on a red run"
+      exit 1
+    fi
+    sed -i.bak "s/pub const ROWS_CLEARED_THROUGH: &str = \"$cleared\"/pub const ROWS_CLEARED_THROUGH: \&str = \"$newest\"/" "$POLICY"
+    rm -f "$POLICY.bak"
+    echo "changelog-rows: rows cleared through $cleared -> $newest ($behind release(s)), ledger green"
+    echo "  now update STATE.md to match, which \`concepts-check.sh\` will insist on"
+    exit 0
+  fi
+  echo "changelog-rows: $behind release(s) owed — rows cleared through $cleared, vendor is at $newest"
+  [ "$missing" -eq 0 ] || echo "changelog-rows: and $missing rule row(s) in the gap are not accounted for"
+  exit 1
+fi
 age_days=$(( ( $(date +%s) - $(stat -f %m "$CHANGELOG" 2>/dev/null || stat -c %Y "$CHANGELOG") ) / 86400 ))
 echo "changelog-rows: corpus is at ${newest:-unknown}, fetched ${age_days}d ago — \`$0 --fetch\` to refresh"
 [ "${age_days:-0}" -lt 7 ] || echo "changelog-rows: WARNING — a week-old corpus makes a clean run mean very little"

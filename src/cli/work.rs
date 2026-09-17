@@ -479,7 +479,11 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
                 "file": file.display().to_string(),
                 "exists": file.exists(),
                 "ok": !problems.iter().any(|p| p.fatal),
-                "problems": problems,
+                // The same read-back the board shows, from the same function:
+                // a terminal and a browser disagreeing about a repository's own
+                // rules is the failure one derivation exists to prevent. It
+                // carries `problems` itself, so they are not repeated here.
+                "describes": config.describe(),
             }))?
         );
         if problems.iter().any(|p| p.fatal) {
@@ -829,6 +833,7 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
             cwd,
             no_worktree,
             issue,
+            spec,
         } => {
             let cwd = match cwd {
                 Some(p) => p,
@@ -851,6 +856,7 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
                         "agent": agent,
                         "worktree": !no_worktree,
                         "issue": issue,
+                        "spec": spec,
                     }),
                 )
                 .await?;
@@ -872,6 +878,9 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
             }
             if let Some(d) = w["worktree"].as_str() {
                 println!("  worktree  {d}");
+            }
+            if let Some(sp) = w["spec"].as_str() {
+                println!("  spec      {sp}");
             }
             println!(
                 "  {}",
@@ -1115,6 +1124,68 @@ fn print_work(w: &serde_json::Value) {
     if let Some(d) = w["worktree"].as_str() {
         println!("  worktree   {d}");
     }
+    // What this work answers, and what that specification *was* when the gate
+    // last ran. The path alone stops being a claim a reviewer can act on the
+    // moment the file moves.
+    if let Some(sp) = w["spec"].as_str() {
+        let stamp = &w["gate"]["spec"];
+        match (stamp["path"].as_str(), stamp["fingerprint"].as_str()) {
+            (Some(_), Some(fp)) => {
+                let files = stamp["files"].as_u64().unwrap_or(1);
+                let over = match files > 1 {
+                    true => format!(" over {files} documents"),
+                    false => String::new(),
+                };
+                println!(
+                    "  spec       {sp} {}",
+                    paint(DIM, &format!("at {fp}{over}"))
+                )
+            }
+            (Some(_), None) => println!(
+                "  spec       {sp} {}",
+                paint(render::RED, "— not there when the gate ran")
+            ),
+            _ => println!(
+                "  spec       {sp} {}",
+                paint(DIM, "— no gate has run against it yet")
+            ),
+        }
+        // What the specification's own task list said when the gate ran.
+        //
+        // Printed under the gate rather than beside the path, because the
+        // number is only worth anything next to a verdict: *the gate passed and
+        // eleven boxes are unticked* is a sentence neither the exit code nor
+        // the agent's own account can produce alone. Counted, never judged.
+        let total = stamp["tasks_total"].as_u64().unwrap_or(0);
+        if total > 0 {
+            let done = stamp["tasks_done"].as_u64().unwrap_or(0);
+            let left = total - done;
+            println!(
+                "             {} {}",
+                paint(BOLD, &format!("{done}/{total} tasks")),
+                match left {
+                    0 => paint(DIM, "every box ticked"),
+                    _ => paint(
+                        render::YELLOW,
+                        &format!("{left} still open in the specification")
+                    ),
+                }
+            );
+        }
+        let questions = stamp["open_questions"].as_u64().unwrap_or(0);
+        if questions > 0 {
+            println!(
+                "             {}",
+                paint(
+                    render::YELLOW,
+                    &format!(
+                        "{questions} unanswered question{} in the specification",
+                        if questions == 1 { "" } else { "s" }
+                    )
+                )
+            );
+        }
+    }
     if let Some(p) = w["pipeline"].as_object() {
         let roles: Vec<&str> = p["roles"]
             .as_array()
@@ -1255,6 +1326,25 @@ fn print_work(w: &serde_json::Value) {
                 println!("      {}", paint(DIM, f.as_str().unwrap_or("")));
             }
         }
+    }
+
+    // What the agent said, beside what the gate measured — and only there.
+    //
+    // An end-of-task report references about one action in eleven and drifts
+    // toward the plan as the run leaves it, so it is worth very little alone
+    // and is the whole point next to an exit code that contradicts it. This
+    // prints the two and judges neither: no model separates a truthful
+    // trajectory report from an untruthful one better than a bag-of-words
+    // detector does, so the reader decides.
+    if let Some(claim) = w["claim"].as_str() {
+        println!("\n{}", paint(BOLD, "the agent's account"));
+        for line in crate::core::text::wrap(claim, 68) {
+            println!("  {}", paint(DIM, &line));
+        }
+        println!(
+            "  {}",
+            paint(DIM, "— read beside the lines above, which are measured")
+        );
     }
 }
 

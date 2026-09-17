@@ -87,6 +87,23 @@ rows-fetch:
 rows-new:
     bash scripts/changelog-rows.sh --new
 
+# A cron line on the machine with the signed-in agent is the whole mechanism —
+# no scheduler, no daemon, no service:
+#
+#   0 9 * * *  cd /path/to/vibeplane && just owed || notify "vibeplane: rows owed"
+#
+# The clock: non-zero when the vendor has shipped past the cleared floor.
+owed:
+    bash scripts/changelog-rows.sh --fetch >/dev/null
+    bash scripts/changelog-rows.sh --owed
+
+# The expensive floor (`VERIFIED_AGAINST`) is not touched here: it moves only
+# when `just perms` runs green, which costs a signed-in agent and real money.
+#
+# Moves the cleared-rows floor to the vendor's head, only on a green ledger.
+advance:
+    bash scripts/changelog-rows.sh --advance
+
 # Both axes against a real `claude`. `just perms 20` caps it for a quick pass.
 perms CASES="0": build
     bash scripts/verify-permissions-diff.sh {{CASES}}
@@ -99,16 +116,24 @@ perms-allow CASES="0": build
 perms-deny CASES="0": build
     VIBEPLANE_DIFF_AXIS=deny bash scripts/verify-permissions-diff.sh {{CASES}}
 
+# One rule set, both axes, so a disagreement is re-asked cheaply: `just perms-only 'Read(.env)'`
+perms-only RULE: build
+    VIBEPLANE_DIFF_ONLY='{{RULE}}' bash scripts/verify-permissions-diff.sh
+
 # PowerShell, Monitor and LSP answered by this matcher alone: a checklist, not a measurement.
 perms-dialect: build
     VIBEPLANE_DIFF_AXIS=dialect bash scripts/verify-permissions-diff.sh
+
+# Are both probes handed the same rules? The one question the harness has no oracle for.
+perms-selftest:
+    VIBEPLANE_DIFF_AXIS=selftest bash scripts/verify-permissions-diff.sh
 
 # The written-down permission rules against a real Claude Code. Needs `claude`.
 perms-live: build
     bash scripts/verify-permissions-live.sh
 
 # check, plus everything above that can run without a live agent.
-verify: check deps concepts rows claims site-check
+verify: check deps concepts rows claims site-check perms-selftest
 
 # ── The site ─────────────────────────────────────────────────────────────────
 

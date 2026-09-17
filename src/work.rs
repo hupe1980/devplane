@@ -53,6 +53,43 @@ pub struct StartRequest {
     /// you are looking at, which is occasionally what you want and never the
     /// default.
     pub worktree: bool,
+    /// The specification this work answers, already validated as a path inside
+    /// the project. A file, or the folder every spec-driven framework produces.
+    pub spec: Option<String>,
+}
+
+/// Stamps the specification a work answers onto a gate's verdict.
+///
+/// Read from the **worktree**, not the main checkout: the gate ran there, and
+/// if the branch edited the specification then that is the text the code was
+/// checked against. Recording the other copy would name a file the verdict
+/// never saw.
+///
+/// One function for every gate in the product — the work loop, `work verify`
+/// and a pipeline step — because a certificate that carries the stamp on two
+/// of the three paths is worse than one that never does: it reads as evidence
+/// of absence.
+pub(crate) async fn stamp_spec(
+    state: &crate::daemon::Shared,
+    id: &WorkId,
+    report: &mut crate::core::work::GateReport,
+    dir: &std::path::Path,
+) {
+    let spec = state
+        .works
+        .lock()
+        .await
+        .get(id)
+        .and_then(|w| w.spec.clone());
+    if let Some(path) = spec {
+        // The words that mark an unanswered question are the repository's, and
+        // the repository here is the worktree the gate ran in — same file, same
+        // reasoning as the stamp itself.
+        let markers = crate::core::ProjectConfig::load(dir)
+            .map(|c| c.spec.open_questions)
+            .unwrap_or_default();
+        report.spec = Some(crate::core::work::SpecStamp::of(&path, dir, &markers));
+    }
 }
 
 /// Creates the work, its checkout, and the run that does it.
@@ -94,6 +131,7 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<WorkId> {
         req.title.clone(),
         req.prompt.clone(),
     );
+    work.spec = req.spec.clone();
 
     // The isolated checkout, named the way Claude Code names its own so the two
     // are indistinguishable on disk and its cleanup sweep understands both.
@@ -266,7 +304,7 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
     }
 
     state.notify_changed();
-    let report = crate::gates::run(
+    let mut report = crate::gates::run(
         "check",
         &config.gates.check,
         &dir,
@@ -274,6 +312,7 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
         attempt,
     )
     .await;
+    stamp_spec(state, &work_id, &mut report, &dir).await;
     let passed = report.passed();
     let feedback = report.feedback();
     let summary = report.summary();
@@ -818,7 +857,7 @@ pub async fn verify(state: &Shared, id: &WorkId) -> Result<crate::core::GateRepo
     if !config.has_gates() {
         bail!("{} defines no gates", root.display());
     }
-    let report = crate::gates::run(
+    let mut report = crate::gates::run(
         "check",
         &config.gates.check,
         &dir,
@@ -826,6 +865,7 @@ pub async fn verify(state: &Shared, id: &WorkId) -> Result<crate::core::GateRepo
         attempt,
     )
     .await;
+    stamp_spec(state, id, &mut report, &dir).await;
     let passed = report.passed();
     record_gate(state, id, &report).await;
     {

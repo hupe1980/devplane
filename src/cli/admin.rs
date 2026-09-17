@@ -823,3 +823,100 @@ pub async fn cmd_rewind(run: &str, json: bool) -> Result<()> {
     );
     Ok(())
 }
+
+/// `vibeplane gate` — what the gate is, and how much of it is measured.
+///
+/// Separate from `doctor` because it answers a different question. `doctor`
+/// asks whether the channels are alive; this asks whether the verdicts are
+/// worth anything, which is a question about a measurement's age and about a
+/// list of properties somebody else published.
+pub async fn cmd_gate(json: bool) -> Result<()> {
+    use crate::conformance::{GOVERNS, Met, PROPERTIES};
+
+    // The newest release any session here reports. Only the status-line shim
+    // reports one, so absence means *nothing is telling us*, never *no gap*.
+    let running = match client::Client::connect() {
+        Ok(c) => raw(&c, "/api/diagnostics").await.ok().and_then(|d| {
+            d["gate"]["sessions_ahead_of_baseline"]
+                .as_array()
+                .and_then(|a| a.iter().filter_map(|x| x["version"].as_str()).max())
+                .map(str::to_string)
+        }),
+        Err(_) => None,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::conformance::as_json(running.as_deref()))?
+        );
+        return Ok(());
+    }
+
+    println!("{}", paint(BOLD, "measurement"));
+    println!(
+        "  measured  Claude Code {} {}",
+        crate::core::policy::VERIFIED_AGAINST,
+        paint(
+            DIM,
+            "(the last release the full differential run was green against)"
+        )
+    );
+    match (&running, crate::conformance::behind(running.as_deref())) {
+        (Some(v), Some(n)) => println!(
+            "            {}",
+            paint(
+                render::YELLOW,
+                &format!(
+                    "{n} release{} behind a session here ({v})",
+                    if n == 1 { "" } else { "s" }
+                )
+            )
+        ),
+        (Some(v), None) => println!(
+            "            {}",
+            paint(render::YELLOW, &format!("a session here runs {v}"))
+        ),
+        (None, _) => println!(
+            "            {}",
+            paint(DIM, "no session is reporting its version")
+        ),
+    }
+    println!(
+        "  rows      {} {}",
+        format_args!(
+            "changelog rows cleared through {}",
+            crate::core::policy::ROWS_CLEARED_THROUGH
+        ),
+        paint(DIM, "(not a compatibility claim)")
+    );
+    println!("  governs   {}", GOVERNS.join(" · "));
+
+    println!("\n{}", paint(BOLD, "conformance"));
+    println!(
+        "  {}",
+        paint(
+            DIM,
+            "against EBL-Core, arXiv:2609.11596 — a profile written for others to score against"
+        )
+    );
+    for p in PROPERTIES {
+        let mark = match p.met {
+            Met::Yes => paint(render::GREEN, p.met.mark()),
+            Met::Partly => paint(render::YELLOW, p.met.mark()),
+            Met::No => paint(render::RED, p.met.mark()),
+        };
+        println!("  {mark} {}", paint(BOLD, p.name));
+        for line in crate::core::text::wrap(p.note, 68) {
+            println!("      {}", paint(DIM, &line));
+        }
+    }
+    println!(
+        "\n  {}",
+        paint(
+            DIM,
+            "A card with nothing missing on it is a marketing document."
+        )
+    );
+    Ok(())
+}

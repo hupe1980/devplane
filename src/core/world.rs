@@ -14,6 +14,22 @@ use crate::core::run::{Run, RunMode, RunState};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// What is wrong with the machine itself, rather than with anything running on
+/// it.
+///
+/// Both facts have the same shape and the same reason to exist: the board looks
+/// completely normal while a prohibition somebody wrote is not being enforced,
+/// and no run-derived item can say so. Default is a healthy machine.
+#[derive(Default)]
+pub struct Health<'a> {
+    /// Why the installed gate did not refuse a call its own rule denies, when
+    /// the daemon last asked it. `None` when it answered.
+    pub gate_down: Option<&'a str>,
+    /// Repository roots whose `vibeplane.toml` will not parse, with the
+    /// parser's reason.
+    pub broken_configs: &'a [(PathBuf, String)],
+}
+
 /// Everything the daemon knows right now.
 #[derive(Debug, Default)]
 pub struct World {
@@ -154,23 +170,22 @@ impl World {
         drivable: &std::collections::BTreeSet<RunId>,
         stall_for: &dyn Fn(&Path) -> Option<i64>,
     ) -> Vec<AttentionItem> {
-        self.inbox_with_gate(works, drivable, stall_for, None, Vec::new())
+        self.inbox_with_health(works, drivable, stall_for, &Health::default(), Vec::new())
     }
 
-    /// The inbox, plus the one item that is about the machine rather than about
+    /// The inbox, plus the items that are about the machine rather than about
     /// anything on it.
     ///
-    /// `gate_down` carries the reason the installed gate did not answer when the
-    /// daemon last ran it. It is threaded in here rather than derived, because
-    /// it is the one fact in the inbox that cannot be read off a run: nothing
-    /// happening is exactly what a working gate and a broken one both look like
-    /// from the event log.
-    pub fn inbox_with_gate(
+    /// [`Health`] is threaded in rather than derived, because neither of its
+    /// facts can be read off a run: nothing happening is exactly what a working
+    /// gate and a broken one both look like from the event log, and a
+    /// configuration file that will not parse leaves no event at all.
+    pub fn inbox_with_health(
         &self,
         works: &[crate::core::Work],
         drivable: &std::collections::BTreeSet<RunId>,
         stall_for: &dyn Fn(&Path) -> Option<i64>,
-        gate_down: Option<&str>,
+        health: &Health<'_>,
         forge: Vec<AttentionItem>,
     ) -> Vec<AttentionItem> {
         // The same runs the board shows, for the reason the notifier reads
@@ -199,7 +214,11 @@ impl World {
             let repo = self.projects.get(&w.project_id).and_then(|p| p.repo_slug());
             crate::core::attention::items_for_work_in(w, can_drive, can_resume, repo.as_deref())
         });
-        let gate = gate_down.map(crate::core::attention::gate_down_item);
+        let gate = health.gate_down.map(crate::core::attention::gate_down_item);
+        let configs = health
+            .broken_configs
+            .iter()
+            .map(|(root, why)| crate::core::attention::config_broken_item(root, why));
         // `forge` is derived by the caller from state this module cannot see
         // — the polled GitHub facts live on the other side of the purity line
         // — and ranked here so there is one list and one order.
@@ -207,6 +226,7 @@ impl World {
             from_runs
                 .chain(from_work)
                 .chain(gate)
+                .chain(configs)
                 .chain(forge)
                 .collect(),
         )
@@ -1001,6 +1021,80 @@ mod tests {
         // And only the loss reaches the inbox.
         let kinds: Vec<_> = w.inbox().into_iter().map(|i| i.kind).collect();
         assert_eq!(kinds, [crate::core::AttentionKind::Lost]);
+    }
+
+    /// A repository whose rules will not parse says so, at the top.
+    ///
+    /// The failure this covers is silence: the file is broken, the daemon kept
+    /// no previous rules to fall back on, every `never_auto` in that repository
+    /// is inert, and every other surface in the product looks exactly as it
+    /// does when the machine is healthy.
+    #[test]
+    fn a_configuration_that_will_not_parse_is_a_critical_item_on_a_quiet_machine() {
+        let w = World::new();
+        let broken = vec![(
+            PathBuf::from("/repos/payments-api"),
+            "TOML parse error at line 12".to_string(),
+        )];
+        let inbox = w.inbox_with_health(
+            &[],
+            &Default::default(),
+            &|_| None,
+            &Health {
+                gate_down: None,
+                broken_configs: &broken,
+            },
+            Vec::new(),
+        );
+        assert_eq!(inbox.len(), 1, "nothing else is wrong and this still shows");
+        let item = &inbox[0];
+        assert_eq!(item.kind, crate::core::AttentionKind::ConfigBroken);
+        assert_eq!(item.level, crate::core::attention::Level::Critical);
+        assert!(item.title.contains("payments-api"), "{}", item.title);
+        // The parser's own words, and the command that prints the line.
+        let detail = item.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("line 12"), "{detail}");
+        assert!(
+            detail.contains("vibeplane check /repos/payments-api"),
+            "{detail}"
+        );
+        // Nothing to click: rewriting somebody's committed rules from an inbox
+        // row is not something this product does.
+        assert!(item.actions.is_empty());
+
+        // Two broken repositories are two items, and the id is stable per
+        // repository so the attention log does not grow one row per poll.
+        let both = vec![
+            broken[0].clone(),
+            (
+                PathBuf::from("/repos/web"),
+                "unknown field `gate`".to_string(),
+            ),
+        ];
+        let inbox = w.inbox_with_health(
+            &[],
+            &Default::default(),
+            &|_| None,
+            &Health {
+                gate_down: None,
+                broken_configs: &both,
+            },
+            Vec::new(),
+        );
+        assert_eq!(inbox.len(), 2);
+        let again = w.inbox_with_health(
+            &[],
+            &Default::default(),
+            &|_| None,
+            &Health {
+                gate_down: None,
+                broken_configs: &both,
+            },
+            Vec::new(),
+        );
+        let ids: Vec<_> = inbox.iter().map(|i| i.id.clone()).collect();
+        let ids_again: Vec<_> = again.iter().map(|i| i.id.clone()).collect();
+        assert_eq!(ids, ids_again, "the id must not move between polls");
     }
 
     /// The numbers above the board add up to the board.

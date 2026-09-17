@@ -394,6 +394,28 @@ impl Store {
     ///
     /// `limit` takes the *newest* rows and hands them back in order, because a
     /// long conversation is read from the end — the same reason `tail` exists.
+    /// The last thing the agent said on a run.
+    ///
+    /// For putting a claim beside the evidence: an agent's end-of-task report
+    /// references about one action in eleven and drifts toward its plan as the
+    /// run leaves it, so the report is worth reading **next to** a gate's exit
+    /// code and worth very little on its own.
+    ///
+    /// `None` when there is no transcript — a run Vibeplane only watched, or a
+    /// repository with `[transcripts] keep = false`. That is *nothing was
+    /// recorded*, never *the agent said nothing*, and every surface that shows
+    /// this has to keep the two apart.
+    pub async fn last_agent_message(&self, run: &RunId) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT text FROM messages WHERE run_id = ? AND role = 'agent'
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(run.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get::<String, _>("text")))
+    }
+
     pub async fn messages_for_run(
         &self,
         run: &RunId,
