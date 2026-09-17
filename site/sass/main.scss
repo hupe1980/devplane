@@ -373,6 +373,11 @@ kbd {
   overflow-y: auto;
   padding-right: .5rem;
 }
+/* The gap above the first group belongs to the nav, not to the heading: the
+   search box always precedes it, and zeroing the heading's top margin — which
+   is right for a heading that starts the column — left "Getting started"
+   sitting on the input. One rule, so every group is spaced the same. */
+.sidebar-nav { margin-top: 1.6rem; }
 .sidebar-head {
   font: 550 .72rem/1 var(--mono);
   letter-spacing: .08em; text-transform: uppercase;
