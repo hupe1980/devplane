@@ -33,6 +33,7 @@
 //! * [`forge`](crate::core::forge) — a project's open issues and pull requests, and what of them needs a person.
 
 pub mod attention;
+pub mod certificate;
 pub mod command;
 pub mod config;
 pub mod decision;
@@ -40,6 +41,7 @@ pub mod deeplink;
 pub mod diff;
 pub mod event;
 pub mod forge;
+pub mod hash;
 pub mod ids;
 pub mod measured;
 pub mod offer;

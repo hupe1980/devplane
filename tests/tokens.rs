@@ -98,13 +98,16 @@ fn theme(block: &str) -> BTreeMap<String, (String, Role)> {
     out
 }
 
+/// One theme's tokens: name to (value, the role it plays).
+type Tokens = BTreeMap<String, (String, Role)>;
+
 /// Every block that declares tokens, with the selector that introduces it.
 ///
 /// There are three and they are two themes: the light default, the dark one
 /// under the system preference, and the dark one under an explicit choice. The
 /// last two carry the same values and **have to**, because a media query and an
 /// attribute cannot be one selector — so they are compared rather than trusted.
-fn token_blocks() -> Vec<(String, BTreeMap<String, (String, Role)>)> {
+fn token_blocks() -> Vec<(String, Tokens)> {
     let mut out = Vec::new();
     for (at, _) in PAGE.match_indices(":root") {
         let rest = &PAGE[at..];
@@ -122,7 +125,7 @@ fn token_blocks() -> Vec<(String, BTreeMap<String, (String, Role)>)> {
     out
 }
 
-fn themes() -> Vec<(&'static str, BTreeMap<String, (String, Role)>)> {
+fn themes() -> Vec<(&'static str, Tokens)> {
     let blocks = token_blocks();
     assert!(
         blocks.len() >= 3,

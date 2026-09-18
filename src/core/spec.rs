@@ -141,17 +141,23 @@ impl Spec {
     ///
     /// `None` when there is nothing to fingerprint, which is how *the
     /// specification was not there* stays distinguishable from *it was empty*.
+    /// **Stable across toolchains**, which the hasher this used to reach for
+    /// was not. `DefaultHasher`'s own documentation says its hashes *"should
+    /// not be relied upon over releases"* — fine for a hash map, wrong for a
+    /// value written into a record somebody reads later. The failure was
+    /// precise: two gates either side of a compiler upgrade would report a
+    /// specification change nobody made, and a test comparing two values from
+    /// one binary cannot see it.
     pub fn fingerprint(&self) -> Option<String> {
-        use std::hash::{Hash, Hasher};
         if self.docs.is_empty() {
             return None;
         }
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut h = crate::core::hash::Rolling::new();
         for d in &self.docs {
-            d.path.hash(&mut h);
-            d.fingerprint.hash(&mut h);
+            h.push_str(&d.path);
+            h.push_str(&d.fingerprint);
         }
-        Some(format!("{:016x}", h.finish()))
+        Some(h.hex())
     }
 }
 
@@ -200,11 +206,8 @@ fn is_markdown(p: &Path) -> bool {
 
 impl Doc {
     fn read(root: &Path, path: &Path, markers: &[String]) -> Option<Self> {
-        use std::hash::{Hash, Hasher};
         let bytes = std::fs::read(path).ok()?;
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut h);
-        let fingerprint = format!("{:016x}", h.finish());
+        let fingerprint = crate::core::hash::hex(&bytes);
         // Lossy on purpose: a specification is text somebody wrote, and a byte
         // that is not UTF-8 is a reason to render a replacement character
         // rather than to report no specification at all.

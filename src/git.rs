@@ -10,6 +10,7 @@
 //! so a worktree Devplane made and one Claude made are indistinguishable, and
 //! Claude's own cleanup sweep understands both.
 
+use crate::core::work::{CommitStamp, Reach};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,10 @@ pub const WORKTREE_DIR: &str = ".claude/worktrees";
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub branch: Option<String>,
+    /// The commit `HEAD` points at, from the same response as everything else
+    /// here. `None` means this repository has no commits yet — git says
+    /// `# branch.oid (initial)`, which is a state rather than a failure.
+    pub commit: Option<String>,
     pub changed_files: usize,
     pub untracked_files: usize,
     pub ahead: u32,
@@ -114,8 +119,15 @@ pub async fn status(dir: &Path) -> Result<Status> {
     .await?;
     let mut s = Status::default();
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# branch.head ") {
-            s.branch = Some(rest.trim().to_string());
+        if let Some(rest) = line.strip_prefix("# branch.oid ") {
+            let oid = rest.trim();
+            // `(initial)` is git's word for "no commits yet". Storing it as a
+            // string would be a value that looks like a commit and is not.
+            s.commit = (oid != "(initial)").then(|| oid.to_string());
+        } else if let Some(rest) = line.strip_prefix("# branch.head ") {
+            let head = rest.trim();
+            // `(detached)` is not a branch name.
+            s.branch = (head != "(detached)").then(|| head.to_string());
         } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
             let mut parts = rest.split_whitespace();
             s.ahead = parts
@@ -136,6 +148,59 @@ pub async fn status(dir: &Path) -> Result<Status> {
         }
     }
     Ok(s)
+}
+
+/// What the tree is right now: the commit, the branch, whether anything is
+/// uncommitted, and whether anybody else could obtain it.
+///
+/// **One call.** The commit and the cleanliness come out of a single
+/// `git status --porcelain=v2 --branch`, because two calls can straddle a commit
+/// and describe a moment nobody was ever in — *clean at `abc123`* about a state
+/// that never existed.
+pub async fn commit_stamp(dir: &Path) -> Option<CommitStamp> {
+    let status = status(dir).await.ok()?;
+    let reach = match &status.commit {
+        Some(sha) => reach_of(dir, sha).await,
+        // Nothing to be reachable. Distinct from a commit that exists and is
+        // not pushed.
+        None => Reach::NoRemote,
+    };
+    let remote = remote_url(dir).await;
+    let clean = status.is_clean();
+    let changed_files = (status.changed_files + status.untracked_files) as u32;
+    Some(CommitStamp {
+        commit: status.commit,
+        branch: status.branch,
+        clean,
+        changed_files,
+        reach,
+        remote,
+    })
+}
+
+/// Whether a commit exists anywhere but this machine.
+///
+/// **A certificate that tells a reviewer to check out a commit they cannot
+/// fetch is worse than one that says nothing.** Four states, because *this
+/// repository has no remote* is not a problem and *there is a remote and the
+/// commit is not on it* very much is.
+async fn reach_of(dir: &Path, sha: &str) -> Reach {
+    let Ok(remotes) = git(dir, &["remote"]).await else {
+        return Reach::Unknown;
+    };
+    if remotes.trim().is_empty() {
+        return Reach::NoRemote;
+    }
+    // Local refs under `refs/remotes`, so this stays offline. It answers the
+    // question that matters — *has this been pushed* — without a network call
+    // the product's own principles would refuse.
+    match git(dir, &["branch", "--remotes", "--contains", sha]).await {
+        Ok(out) if !out.trim().is_empty() => Reach::Remote,
+        Ok(_) => Reach::LocalOnly,
+        // `--contains` fails on an unknown object rather than printing nothing,
+        // and that is genuinely *could not tell* rather than *not pushed*.
+        Err(_) => Reach::Unknown,
+    }
 }
 
 /// A worktree that exists.

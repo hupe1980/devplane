@@ -157,6 +157,138 @@ impl Stopped {
     }
 }
 
+/// Why a piece of work counts as finished, written at the moment it finishes.
+///
+/// **The symmetry with `Stopped` is the whole argument, and the asymmetry was
+/// the bug.** Failure got a recorded reason because failure hurt first; success
+/// never did, so `Phase::Done` was written with nothing attached and every route
+/// to it rendered alike. A reader then cannot tell a checked claim from an
+/// unchecked one — and the unchecked one looks exactly like this product's
+/// headline sentence.
+///
+/// Four bases, legitimately different rather than degrees of one thing. What
+/// must never happen is that the record is silent about which.
+///
+/// **No person is named.** `Actor::Human` is the only notion of identity here,
+/// so a `who` field could not be filled with anything truthful, and a field that
+/// lies is worse than one that is absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "basis", rename_all = "snake_case")]
+pub enum Completion {
+    /// The project declares gates, and the run this names passed.
+    GatesPassed {
+        gate: String,
+        attempt: u32,
+        attempts: u32,
+        at: Timestamp,
+    },
+    /// The same, for a gate declared to expect failure — where a non-zero exit
+    /// *is* the pass. Rendering that as "exit 1 — failed" is lying in the
+    /// tidiest possible way.
+    Reproduced {
+        gate: String,
+        attempt: u32,
+        attempts: u32,
+        at: Timestamp,
+    },
+    /// The project never said what done means. Not a pass, and it must not read
+    /// as one.
+    NoGateDeclared { at: Timestamp },
+    /// Gates are declared, the evidence does not support them passing, and a
+    /// person finished it anyway. Legitimate — people finish work a gate cannot
+    /// judge. The record simply must not be quiet about it.
+    ByHand {
+        at: Timestamp,
+        /// What the last gate said, when there was one.
+        last_gate: Option<String>,
+    },
+}
+
+impl Completion {
+    /// What this work rests on, given what is true about it.
+    ///
+    /// **Total by construction.** It returns a basis rather than an `Option`,
+    /// which is what makes a finished work with nothing attached unreachable:
+    /// there is no value to forget to supply.
+    pub fn of(work: &Work, project_declares_gates: bool) -> Self {
+        let at = Timestamp::now();
+        if !project_declares_gates {
+            return Completion::NoGateDeclared { at };
+        }
+        let attempts = work.gates.len() as u32;
+        match work.last_gate() {
+            Some(report) if report.passed() => {
+                let gate = report.gate.clone();
+                let attempt = report.attempt;
+                match report.expect_fail {
+                    true => Completion::Reproduced {
+                        gate,
+                        attempt,
+                        attempts,
+                        at,
+                    },
+                    false => Completion::GatesPassed {
+                        gate,
+                        attempt,
+                        attempts,
+                        at,
+                    },
+                }
+            }
+            other => Completion::ByHand {
+                at,
+                last_gate: other.map(GateReport::summary),
+            },
+        }
+    }
+
+    /// One sentence, identifiable without the other three beside it.
+    pub fn headline(&self) -> String {
+        match self {
+            Completion::GatesPassed { gate, attempt, attempts, .. } => {
+                format!("gates passed — `{gate}`, attempt {attempt} of {attempts}")
+            }
+            Completion::Reproduced { gate, attempt, attempts, .. } => {
+                format!("reproduced the problem — `{gate}`, attempt {attempt} of {attempts}")
+            }
+            Completion::NoGateDeclared { .. } => {
+                "no gate declared — this project never said what done means, and nothing was checked"
+                    .into()
+            }
+            Completion::ByHand { last_gate, .. } => match last_gate {
+                Some(g) => format!("finished by hand — the gates did not pass ({g})"),
+                None => "finished by hand — no gate had run".into(),
+            },
+        }
+    }
+
+    /// Whether a check stands behind this, as opposed to a decision.
+    pub fn is_checked(&self) -> bool {
+        matches!(
+            self,
+            Completion::GatesPassed { .. } | Completion::Reproduced { .. }
+        )
+    }
+
+    pub fn at(&self) -> &Timestamp {
+        match self {
+            Completion::GatesPassed { at, .. }
+            | Completion::Reproduced { at, .. }
+            | Completion::NoGateDeclared { at }
+            | Completion::ByHand { at, .. } => at,
+        }
+    }
+
+    /// The gate run this basis points at, when it points at one.
+    pub fn gate(&self) -> Option<(&str, u32)> {
+        match self {
+            Completion::GatesPassed { gate, attempt, .. }
+            | Completion::Reproduced { gate, attempt, .. } => Some((gate.as_str(), *attempt)),
+            _ => None,
+        }
+    }
+}
+
 /// Another piece of work editing files this one is also editing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Overlap {
@@ -167,24 +299,185 @@ pub struct Overlap {
     pub files: Vec<String>,
 }
 
+/// How a command ended. Four states, and they are four *variants* rather than
+/// combinations of a missing number and a flag.
+///
+/// **The shape is the point.** This used to be `exit_code: Option<i32>` beside
+/// `timed_out: bool`, and two genuinely different things collapsed into one
+/// stored value: a command the shell could not start and a command whose result
+/// could not be collected were both `(None, false)`. Telling them apart meant
+/// reading the text of an error message out of the output — sniffing prose to
+/// recover a fact that should never have been lost. A certificate that renders
+/// *it never ran* and *I could not tell* alike is worthless in exactly the way
+/// this product refuses everywhere else: absence must be distinguishable from
+/// zero, and from other absences.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Outcome {
+    /// It ran and returned a code. The only state that carries a verdict.
+    Exited { code: i32 },
+    /// It ran out of time and was killed, with the whole process group.
+    TimedOut { after_secs: u64 },
+    /// The shell could not start it at all. Not a failure of the work — a
+    /// missing binary is a broken gate, not a broken change.
+    NeverStarted { reason: String },
+    /// It ran, and its result could not be collected. *"I could not tell"*
+    /// must never read as an answer.
+    Unknown { reason: String },
+}
+
+impl Outcome {
+    /// The word a person reads, and the one every surface uses.
+    pub fn headline(&self) -> String {
+        match self {
+            Outcome::Exited { code } => format!("exit {code}"),
+            Outcome::TimedOut { after_secs } => format!("timed out after {after_secs}s"),
+            Outcome::NeverStarted { .. } => "never started".into(),
+            Outcome::Unknown { .. } => "could not be determined".into(),
+        }
+    }
+
+    /// The exit code, when there is one. `None` here is not a fourth kind of
+    /// failure — it means this command did not reach the point of having one.
+    pub fn code(&self) -> Option<i32> {
+        match self {
+            Outcome::Exited { code } => Some(*code),
+            _ => None,
+        }
+    }
+}
+
 /// What one command in a gate did.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandResult {
     pub command: String,
-    pub exit_code: Option<i32>,
+    pub outcome: Outcome,
     pub duration_ms: u64,
     /// The tail of the output. Bounded, because a failing test suite can
     /// produce megabytes and none of it belongs in a database row.
     pub output_tail: String,
+    /// How much output there was in total, so a reader knows what the tail is a
+    /// tail *of*. Without it, eight kilobytes of a hundred megabytes and eight
+    /// kilobytes of eight kilobytes look the same.
+    pub output_bytes: u64,
+    /// Over the whole captured output, before the tail was cut.
+    ///
+    /// **This binds; it does not reproduce.** Both pipes are drained
+    /// concurrently into one buffer, so the interleaving is a property of
+    /// scheduling rather than of the command: two runs of a perfectly
+    /// deterministic command can differ. What it is for is tying this retained
+    /// tail and this record to that run. The claim a reviewer re-derives is the
+    /// outcome against the commit, and that one is exact.
+    pub output_digest: String,
     /// Lines that look like the actual failures, where the runner is
     /// recognised. Empty when it is not — an honest nothing beats a guess.
     pub failures: Vec<String>,
-    pub timed_out: bool,
 }
 
 impl CommandResult {
     pub fn passed(&self) -> bool {
-        self.exit_code == Some(0) && !self.timed_out
+        matches!(self.outcome, Outcome::Exited { code: 0 })
+    }
+
+    /// Whether this command produced a verdict at all.
+    ///
+    /// A gate none of whose commands ran has not said the work is bad; it has
+    /// said nothing, and the two must not read alike.
+    pub fn answered(&self) -> bool {
+        matches!(self.outcome, Outcome::Exited { .. })
+    }
+
+    /// A command that ran and returned a code.
+    ///
+    /// Convenience for callers and fixtures; the fields stay public so an
+    /// unusual outcome is still writable directly.
+    pub fn exited(command: impl Into<String>, code: i32) -> Self {
+        Self {
+            command: command.into(),
+            outcome: Outcome::Exited { code },
+            duration_ms: 0,
+            output_tail: String::new(),
+            output_bytes: 0,
+            output_digest: crate::core::hash::hex(b""),
+            failures: Vec::new(),
+        }
+    }
+
+    /// A command that never produced a verdict.
+    pub fn without_verdict(command: impl Into<String>, outcome: Outcome) -> Self {
+        Self {
+            outcome,
+            ..Self::exited(command, 0)
+        }
+    }
+
+    pub fn timed_out(&self) -> bool {
+        matches!(self.outcome, Outcome::TimedOut { .. })
+    }
+
+    /// Ran, and said no. The only thing that reproduces a problem.
+    pub fn refused(&self) -> bool {
+        matches!(self.outcome, Outcome::Exited { code } if code != 0)
+    }
+}
+
+/// Whether a commit is reachable by anybody other than the machine that made it.
+///
+/// **A certificate that tells a reviewer to check out a commit they cannot
+/// fetch is worse than one that says nothing**, and nothing in the first draft
+/// of this design would have noticed. The gap was found in somebody else's
+/// tool: `closeout-truth` audits an agent's completion claims against git and
+/// reports a **63.6 % truth rate across 22 verifiable claims**, with a category
+/// for exactly this — *"commit exists locally but is on no remote ref"*.
+///
+/// Four states rather than three, because *the repository has no remote* is not
+/// a problem and *the commit is not on the remote that exists* is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reach {
+    /// On at least one remote ref. The instructions in the certificate work.
+    Remote,
+    /// Here and nowhere else. Nobody else can check this.
+    LocalOnly,
+    /// This repository has no remote configured. Not a failure.
+    NoRemote,
+    /// The query failed. Never rendered as any of the other three.
+    Unknown,
+}
+
+/// What the working tree was at one moment, from one observation.
+///
+/// **The commit and the cleanliness come from a single `git status
+/// --porcelain=v2 --branch`.** Taking them from two calls could straddle a
+/// commit and describe a moment that never existed — *clean at `abc123`* about
+/// a state nobody was ever in. Porcelain v2 is the format with a stability
+/// promise attached, which is why the rest of this file already reads it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommitStamp {
+    /// `None` means this repository has no commits yet — git says `(initial)`,
+    /// and that is a state rather than a failure.
+    pub commit: Option<String>,
+    /// `None` on a detached head.
+    pub branch: Option<String>,
+    /// Whether anything was uncommitted or untracked. When false, **the commit
+    /// does not fully describe what was checked**, and every rendering says so
+    /// where the commit is rather than in a footnote.
+    pub clean: bool,
+    pub changed_files: u32,
+    pub reach: Reach,
+    /// Where a reviewer would obtain this, when there is anywhere.
+    ///
+    /// **Naming a commit without naming a repository is instructions nobody can
+    /// follow.** This was missing until somebody read the rendered artifact:
+    /// every test passed, the commit was right, and a stranger handed the page
+    /// still had no idea where to clone from.
+    pub remote: Option<String>,
+}
+
+impl CommitStamp {
+    /// Whether somebody else could obtain this commit and run the commands.
+    pub fn checkable_by_others(&self) -> bool {
+        self.commit.is_some() && matches!(self.reach, Reach::Remote)
     }
 }
 
@@ -291,6 +584,10 @@ pub struct GateReport {
     /// The specification this work is answering, stamped when the gate ran.
     #[serde(default)]
     pub spec: Option<SpecStamp>,
+    /// What the tree was when this gate ran. `None` when it did not run in a
+    /// repository at all — which is a finding a certificate states, not a blank.
+    #[serde(default)]
+    pub commit: Option<CommitStamp>,
 }
 
 impl GateReport {
@@ -309,13 +606,10 @@ impl GateReport {
             // let the fix step begin against a demonstration nobody has seen.
             // It is the rule the worktree code already follows in the other
             // direction: *"I could not tell" must never read as an answer.*
-            if self.commands.iter().any(|c| c.timed_out) {
+            if self.commands.iter().any(CommandResult::timed_out) {
                 return false;
             }
-            return self
-                .commands
-                .iter()
-                .any(|c| c.exit_code.is_some_and(|code| code != 0));
+            return self.commands.iter().any(CommandResult::refused);
         }
         self.commands.iter().all(CommandResult::passed)
     }
@@ -331,13 +625,13 @@ impl GateReport {
         if self.expect_fail {
             // The two ways a reproduction fails want different sentences: one
             // says the bug is not there, the other says nobody found out.
-            if let Some(c) = self.commands.iter().find(|c| c.timed_out) {
+            if let Some(c) = self.commands.iter().find(|c| c.timed_out()) {
                 return format!(
                     "{} timed out, so nothing was reproduced either way: {}",
                     self.gate, c.command
                 );
             }
-            if let Some(c) = self.commands.iter().find(|c| c.exit_code.is_none()) {
+            if let Some(c) = self.commands.iter().find(|c| !c.answered()) {
                 return format!("{} could not run: {}", self.gate, c.command);
             }
             return format!("{} did not reproduce the problem", self.gate);
@@ -345,7 +639,15 @@ impl GateReport {
         let failed: Vec<&CommandResult> = self.commands.iter().filter(|c| !c.passed()).collect();
         let first = failed.first();
         match first {
-            Some(c) if c.timed_out => format!("{} timed out: {}", self.gate, c.command),
+            Some(c) if c.timed_out() => format!("{} timed out: {}", self.gate, c.command),
+            Some(c) if !c.answered() => {
+                format!(
+                    "{} could not run: {} ({})",
+                    self.gate,
+                    c.command,
+                    c.outcome.headline()
+                )
+            }
             Some(c) if !c.failures.is_empty() => format!(
                 "{} failed: {} ({} failing)",
                 self.gate,
@@ -365,21 +667,13 @@ impl GateReport {
             // that ran and passed: telling an agent to "write a check that
             // fails" when its check timed out sends it to rewrite something
             // that may already be right.
-            if let Some(c) = self
-                .commands
-                .iter()
-                .find(|c| c.timed_out || c.exit_code.is_none())
-            {
+            if let Some(c) = self.commands.iter().find(|c| !c.answered()) {
                 return format!(
                     "`{}` did not finish, so nothing has been reproduced either way:\n\n$ {}\n{}\n\n\
                      Make it terminate — a reproduction nobody can run is not one.\n",
                     self.gate,
                     c.command,
-                    if c.timed_out {
-                        "timed out"
-                    } else {
-                        "could not run"
-                    }
+                    c.outcome.headline()
                 );
             }
             // Every command succeeded when the point was to fail. Handing back
@@ -396,8 +690,9 @@ impl GateReport {
         );
         for c in self.commands.iter().filter(|c| !c.passed()) {
             out.push_str(&format!("\n$ {}\n", c.command));
-            if c.timed_out {
-                out.push_str("timed out\n");
+            if !c.answered() {
+                out.push_str(&c.outcome.headline());
+                out.push('\n');
                 continue;
             }
             if c.failures.is_empty() {
@@ -557,6 +852,14 @@ pub struct Work {
     /// week and the bill does not stop being true.
     #[serde(default)]
     pub cost_usd: f64,
+    /// Why this work counts as finished, written at the moment it finishes.
+    ///
+    /// Always `Some` when the phase is `Done` and `None` otherwise — the
+    /// invariant `stopped` already carries for `Failed`, and for the same
+    /// reason: a reason written where the decision is made cannot disagree
+    /// with it.
+    #[serde(default)]
+    pub completion: Option<Completion>,
     /// Why the work stopped, written at the moment it stops.
     ///
     /// Always `Some` when the phase is `Failed` and `None` otherwise — the
@@ -602,6 +905,7 @@ impl Work {
             feedback_rounds: 0,
             overlaps: Vec::new(),
             cost_usd: 0.0,
+            completion: None,
             stopped: None,
             pull_request: None,
             pipeline: None,
@@ -769,13 +1073,10 @@ mod tests {
             attempt: 1,
             expect_fail: false,
             spec: None,
+            commit: None,
             commands: vec![CommandResult {
-                command: "cargo test".into(),
-                exit_code: Some(if ok { 0 } else { 101 }),
                 duration_ms: 1,
-                output_tail: String::new(),
-                failures: vec![],
-                timed_out: false,
+                ..CommandResult::exited("cargo test", if ok { 0 } else { 101 })
             }],
         };
 
@@ -878,16 +1179,9 @@ mod tests {
         // demonstrates a bug passes, the bug has not been demonstrated, and
         // letting that count as green would wave the whole class of "fixed it
         // by not testing it" straight through.
-        let ok = CommandResult {
-            command: "cargo test --test repro".into(),
-            exit_code: Some(0),
-            duration_ms: 1,
-            output_tail: String::new(),
-            failures: vec![],
-            timed_out: false,
-        };
+        let ok = CommandResult::exited("cargo test --test repro", 0);
         let bad = CommandResult {
-            exit_code: Some(101),
+            outcome: Outcome::Exited { code: 101 },
             ..ok.clone()
         };
         let repro = |commands| GateReport {
@@ -898,6 +1192,7 @@ mod tests {
             expect_fail: true,
             commands,
             spec: None,
+            commit: None,
         };
         assert!(repro(vec![bad.clone()]).passed(), "failing is the point");
         assert!(!repro(vec![ok.clone()]).passed());
@@ -909,13 +1204,13 @@ mod tests {
         // began against a demonstration nobody had seen. A reproduction is a
         // command that *ran and said no*.
         let hung = CommandResult {
-            exit_code: None,
-            timed_out: true,
+            outcome: Outcome::TimedOut { after_secs: 600 },
             ..ok.clone()
         };
         let unstartable = CommandResult {
-            exit_code: None,
-            timed_out: false,
+            outcome: Outcome::NeverStarted {
+                reason: "no such file".into(),
+            },
             ..ok.clone()
         };
         assert!(
@@ -1021,15 +1316,11 @@ mod tests {
     #[test]
     fn a_gate_passes_only_when_every_command_does() {
         let ok = CommandResult {
-            command: "cargo test".into(),
-            exit_code: Some(0),
             duration_ms: 10,
-            output_tail: String::new(),
-            failures: vec![],
-            timed_out: false,
+            ..CommandResult::exited("cargo test", 0)
         };
         let bad = CommandResult {
-            exit_code: Some(101),
+            outcome: Outcome::Exited { code: 101 },
             failures: vec!["test auth::login ... FAILED".into()],
             ..ok.clone()
         };
@@ -1041,6 +1332,7 @@ mod tests {
             attempt: 1,
             expect_fail: false,
             spec: None,
+            commit: None,
         };
         assert!(report(vec![ok.clone()]).passed());
         assert!(!report(vec![ok.clone(), bad.clone()]).passed());
@@ -1058,13 +1350,12 @@ mod tests {
             attempt: 1,
             expect_fail: false,
             spec: None,
+            commit: None,
             commands: vec![CommandResult {
-                command: "cargo test".into(),
-                exit_code: Some(101),
                 duration_ms: 1,
                 output_tail: "a hundred lines of noise".repeat(50),
                 failures: vec!["test auth::login ... FAILED".into()],
-                timed_out: false,
+                ..CommandResult::exited("cargo test", 101)
             }],
         };
         let f = report.feedback();
@@ -1085,13 +1376,13 @@ mod tests {
             attempt: 2,
             expect_fail: false,
             spec: None,
+            commit: None,
             commands: vec![CommandResult {
-                command: "cargo test".into(),
-                exit_code: None,
-                duration_ms: 600_000,
                 output_tail: String::new(),
-                failures: vec![],
-                timed_out: true,
+                ..CommandResult::without_verdict(
+                    "cargo test",
+                    Outcome::TimedOut { after_secs: 600 },
+                )
             }],
         };
         assert!(!report.passed());

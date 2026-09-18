@@ -313,7 +313,7 @@ async fn a_claim_of_done_that_fails_the_gates_does_not_become_done() {
     assert!(
         commands
             .iter()
-            .any(|c| c["exit_code"].as_i64().is_some_and(|code| code != 0)),
+            .any(|c| c["outcome"]["code"].as_i64().is_some_and(|code| code != 0)),
         "a failed gate names the command that failed: {gate}"
     );
     assert!(
@@ -368,6 +368,133 @@ async fn fixing_the_cause_lets_the_work_pass() {
     )
     .await;
     assert!(!worktree.exists(), "the checkout is gone");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// **The whole feature, through the real API**: fix the work, finish it, export
+/// the certificate, and check that a reviewer could act on what comes out.
+///
+/// Every other certificate test builds a `Work` by hand. This one is the only
+/// place the fields are filled in by the code that actually runs — so it is the
+/// only one that would notice the gate forgetting to stamp a commit, or `finish`
+/// recording a basis that disagrees with the gate it names.
+#[tokio::test]
+async fn a_finished_work_exports_a_certificate_a_stranger_could_check() {
+    let Some(agent) = echo_agent() else { return };
+    let repo = scratch_repo("cert", "feedback", 2);
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+
+    post(
+        &c,
+        &addr,
+        "/api/work",
+        serde_json::json!({
+            "cwd": repo.to_string_lossy(),
+            "title": "make the gate pass",
+            "agent": agent,
+        }),
+    )
+    .await;
+
+    // Let it fail its way to a human, then make the gate pass for real.
+    let w = await_phase(&c, &addr, &["failed", "review", "done"]).await;
+    let id = w["id"].as_str().unwrap().to_string();
+    let worktree = w["worktree"].as_str().map(PathBuf::from);
+    if let Some(dir) = &worktree {
+        std::fs::write(dir.join("fixed.txt"), "yes").ok();
+    }
+    post(
+        &c,
+        &addr,
+        &format!("/api/work/{id}/verify"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    // Before finishing, the export is honest about not being a certificate.
+    let pending: Value = c
+        .get(format!("http://{addr}/api/work/{id}/certificate"))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        pending["finished"], false,
+        "unfinished work claimed a completion"
+    );
+    assert!(
+        pending["markdown"]
+            .as_str()
+            .unwrap()
+            .contains("not finished"),
+        "{}",
+        pending["markdown"]
+    );
+
+    post(
+        &c,
+        &addr,
+        &format!("/api/work/{id}/finish"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let cert: Value = c
+        .get(format!("http://{addr}/api/work/{id}/certificate"))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cert["finished"], true);
+    let md = cert["markdown"].as_str().unwrap();
+    let st = &cert["statement"];
+
+    // It is an in-toto statement about a real commit.
+    assert_eq!(st["_type"], "https://in-toto.io/Statement/v1");
+    let sha = st["subject"][0]["digest"]["gitCommit"]
+        .as_str()
+        .expect("no commit was stamped by the code that actually runs");
+    assert_eq!(sha.len(), 40, "not a full object id: {sha}");
+    assert!(md.contains(sha), "the document and the statement disagree");
+
+    // The basis was decided where the decision was, and names a real gate.
+    let basis = &st["predicate"]["completion"]["basis"];
+    assert!(
+        basis == "gates_passed" || basis == "by_hand",
+        "unexpected basis {basis}"
+    );
+    if basis == "gates_passed" {
+        assert_eq!(st["predicate"]["evidence"]["passed"], true);
+        assert!(md.contains("gates passed"), "{md}");
+    }
+
+    // The steps are runnable, and every command carries a structured outcome.
+    let steps = st["predicate"]["verification"]["steps"].as_array().unwrap();
+    assert_eq!(steps[0], format!("git checkout {sha}"));
+    for cmd in st["predicate"]["evidence"]["commands"].as_array().unwrap() {
+        assert!(
+            cmd["outcome"]["outcome"].is_string(),
+            "a command with no structured outcome: {cmd}"
+        );
+        assert!(cmd["output_digest"].as_str().is_some_and(|d| d.len() == 16));
+    }
+
+    // It never oversells itself, and it is checkable-by-others or says why not.
+    assert!(md.contains("not evidence that the work is correct"), "{md}");
+    let caveat = &st["predicate"]["verification"]["caveat"];
+    assert!(
+        caveat.is_string(),
+        "a scratch repository has no remote, so the certificate owes the reader a caveat"
+    );
+    assert!(md.contains("no remote"), "{md}");
+
     std::fs::remove_dir_all(&repo).ok();
 }
 

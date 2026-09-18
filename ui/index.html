@@ -1501,14 +1501,30 @@ function renderWork(w) {
       out += row("", "The gate recorded no commands, which is not the same as passing.", "dim");
     }
     for (const c of cmds) {
+      // **Four outcomes, and only one of them is a verdict about the code.** A
+      // command that exited non-zero, one that ran out of time, one the shell
+      // never started and one whose result could not be collected are four
+      // different sentences — a missing binary is a broken gate, not a broken
+      // change. The glyph carries "did this meet what the project asked"; the
+      // word beside it carries which of the four it was, because a tick and a
+      // cross cannot say four things.
+      const o = c.outcome || {};
+      const exited = o.outcome === "exited";
       // What the project expected of this command, not merely its exit code:
       // under `expect_fail` a non-zero exit is the desired answer.
-      const met = g.expect_fail ? c.exit_code !== 0 : c.exit_code === 0;
-      out += `<div class="cmd"><span class="mark ${met ? "ok" : "bad"}" aria-hidden="true">${
-        met ? "✓" : "✗"}</span><span class="sr">${met ? "met" : "did not meet"}</span>` +
+      const met = exited && (g.expect_fail ? o.code !== 0 : o.code === 0);
+      const glyph = exited ? (met ? "✓" : "✗") : o.outcome === "timed_out" ? "⏱" : "–";
+      const word = exited ? (met ? "met" : "did not meet")
+        : o.outcome === "timed_out" ? "ran out of time"
+        : o.outcome === "never_started" ? "never started" : "no result";
+      const said = exited ? "exit " + esc(o.code)
+        : o.outcome === "timed_out" ? `timed out after ${esc(o.after_secs)}s`
+        : o.outcome === "never_started" ? "never started: " + esc(o.reason || "")
+        : "could not be determined: " + esc(o.reason || "");
+      out += `<div class="cmd"><span class="mark ${met ? "ok" : exited ? "bad" : "dim"}" aria-hidden="true">${
+        glyph}</span><span class="sr">${word}</span>` +
         `<span class="what"><code>${esc(c.command)}</code></span>` +
-        `<span class="took">${c.timed_out ? "timed out" : c.exit_code == null ? "did not start"
-          : "exit " + esc(c.exit_code)}${c.duration_ms ? " · " + took(c.duration_ms) : ""}</span></div>`;
+        `<span class="took">${said}${c.duration_ms ? " · " + took(c.duration_ms) : ""}</span></div>`;
       // The lines the agent was handed. Shown for what did not meet the
       // expectation, because that is the case a person is deciding about.
       if (!met) {
