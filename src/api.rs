@@ -74,6 +74,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/work/{id}/retry", post(retry_work))
         .route("/api/work/{id}/snooze", post(snooze_work))
         .route("/api/work/{id}/changes", get(work_changes))
+        .route("/api/work/{id}/certificate", get(work_certificate))
         .route("/api/work/{id}/resume", post(resume_work))
         .route("/api/projects", get(projects))
         .route("/api/projects/trust", post(trust_project))
@@ -1807,6 +1808,60 @@ async fn finish_work(
         )
             .into_response(),
     }
+}
+
+/// The done certificate for one piece of work, in both shapes.
+///
+/// **Built here because this is where the work is.** Both renderings come from
+/// one assembled value, so the document and the structured statement cannot
+/// drift into describing one thing two ways — which they would if the CLI
+/// rebuilt one of them from the other's JSON.
+///
+/// Exporting unfinished work is a legitimate question and answered honestly
+/// rather than refused: the reply says where the work is and what its last gate
+/// said. An error there would make the caller parse a message to learn
+/// something the artifact should simply state.
+async fn work_certificate(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = work_id!(state, id);
+    let work = {
+        let works = state.works.lock().await;
+        works.get(&id).cloned()
+    };
+    let Some(work) = work else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("no work `{id}`")})),
+        )
+            .into_response();
+    };
+    // The agent's account, under the rule that already governs it: shown only
+    // where a gate contradicts it, and never as a substitute for one. An absent
+    // transcript stays distinct from an agent that said nothing.
+    let claim = match work.claim_is_worth_showing() {
+        false => None,
+        true => match work.runs.last() {
+            Some(run) => state
+                .store
+                .last_agent_message(run)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| crate::core::text::clip(t.trim(), 400)),
+            None => None,
+        },
+    };
+    let cert = crate::core::certificate::Certificate::of(&work, claim.as_deref());
+    Json(json!({
+        "finished": cert.is_finished(),
+        "markdown": cert.markdown_bounded(),
+        "statement": cert.json(),
+    }))
+    .into_response()
 }
 
 /// Marks a project as one an agent may be started in.

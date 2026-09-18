@@ -11,7 +11,7 @@
 
 use crate::core::ProjectConfig;
 use crate::core::ids::{ProjectId, RunId, WorkId};
-use crate::core::work::{Phase, Stopped, Work, WorkKind};
+use crate::core::work::{Completion, Phase, Stopped, Work, WorkKind};
 use crate::daemon::Shared;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
@@ -258,7 +258,7 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
         )
     };
     let Some(dir) = dir else {
-        set_phase(state, &work_id, Phase::Implement).await;
+        set_phase(state, &work_id, Step::Implement).await;
         return;
     };
 
@@ -291,7 +291,7 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
         //
         // The bill is still real, and still worth showing.
         tally(state, &work_id).await;
-        set_phase(state, &work_id, Phase::Review).await;
+        set_phase(state, &work_id, Step::Review).await;
         retire_runs(state, &work_id).await;
         return;
     }
@@ -331,14 +331,14 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
         // Only now. A pull request opened before the checks pass is a
         // notification to other people that something is ready when it is not.
         open_pull_request(state, &work_id, &config).await;
-        set_phase(state, &work_id, Phase::Review).await;
+        set_phase(state, &work_id, Step::Review).await;
         retire_runs(state, &work_id).await;
         return;
     }
 
     use crate::core::config::OnFail;
     match config.gates.on_fail {
-        OnFail::Ignore => set_phase(state, &work_id, Phase::Review).await,
+        OnFail::Ignore => set_phase(state, &work_id, Step::Review).await,
         OnFail::Escalate => {
             tracing::info!(work = %work_id, %summary, "gates failed; asking a human");
             stop(
@@ -359,7 +359,7 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
                     w.feedback_rounds += 1;
                 }
             }
-            set_phase(state, &work_id, Phase::Implement).await;
+            set_phase(state, &work_id, Step::Implement).await;
             if let Err(e) = crate::driven::prompt(state, run, feedback).await {
                 tracing::warn!(error = %e, "could not hand the failures back");
                 stop(
@@ -678,7 +678,7 @@ pub(crate) async fn charge(state: &Shared, id: &WorkId, config: &ProjectConfig) 
     // The reason was written on the row a few lines above, before the phase
     // moved: `stopped` and `Phase::Failed` are set together everywhere, because
     // a failed row without one is a row the inbox has to guess about.
-    set_phase(state, id, Phase::Failed).await;
+    set_phase(state, id, Step::Failed).await;
     retire_runs(state, id).await;
     true
 }
@@ -809,7 +809,38 @@ pub(crate) async fn note_overlaps(state: &Shared, id: &WorkId) -> Vec<crate::cor
     out
 }
 
-pub(crate) async fn set_phase(state: &Shared, id: &WorkId, phase: Phase) {
+/// A phase this module may move work into without recording anything.
+///
+/// **`Done` is deliberately not in here.** It is the one transition that makes
+/// this product's headline claim, so it cannot be reachable by passing a value
+/// to a general-purpose setter — there is no way to *express* it through
+/// `set_phase`, and `finish` is the only door, which takes the basis as an
+/// argument it cannot be called without. A completion with nothing attached is
+/// therefore not something a caller can forget to supply; it is something they
+/// cannot write down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    Implement,
+    Verify,
+    Review,
+    Human,
+    Failed,
+}
+
+impl From<Step> for Phase {
+    fn from(s: Step) -> Phase {
+        match s {
+            Step::Implement => Phase::Implement,
+            Step::Verify => Phase::Verify,
+            Step::Review => Phase::Review,
+            Step::Human => Phase::Human,
+            Step::Failed => Phase::Failed,
+        }
+    }
+}
+
+pub(crate) async fn set_phase(state: &Shared, id: &WorkId, step: Step) {
+    let phase: Phase = step.into();
     // Asked once, where it is cheap and where the answer is worth the most: the
     // moment the code stops changing and before anybody is asked to look at it.
     let overlaps = if matches!(phase, Phase::Review | Phase::Human) {
@@ -890,12 +921,7 @@ pub async fn verify(state: &Shared, id: &WorkId) -> Result<crate::core::GateRepo
             }
         }
         // `set_phase` writes the whole row, gate report included.
-        set_phase(
-            state,
-            id,
-            if passed { Phase::Review } else { Phase::Failed },
-        )
-        .await;
+        set_phase(state, id, if passed { Step::Review } else { Step::Failed }).await;
     } else {
         // The phase is somebody's decision and is left alone — but the report
         // still has to reach disk. It did not, so running `work verify` on a
@@ -935,7 +961,7 @@ pub async fn resume(state: &Shared, id: &WorkId) -> Result<()> {
     // Back to `Implement`: the agent is in the worktree with the conversation
     // it had, and the next thing that happens is its turn ending, which is what
     // sends the work to the gates.
-    set_phase(state, id, Phase::Implement).await;
+    set_phase(state, id, Step::Implement).await;
     state
         .record(
             crate::core::Decision::new(
@@ -1072,7 +1098,7 @@ pub async fn retry(state: &Shared, id: &WorkId) -> Result<()> {
         )
         .await;
 
-    set_phase(state, id, Phase::Implement).await;
+    set_phase(state, id, Step::Implement).await;
     crate::driven::prompt(state, &run, feedback).await
 }
 
@@ -1090,7 +1116,7 @@ pub(crate) async fn stop(state: &Shared, id: &WorkId, why: Stopped) {
             w.stopped = Some(why.clone());
         }
     }
-    set_phase(state, id, Phase::Failed).await;
+    set_phase(state, id, Step::Failed).await;
     tracing::info!(work = %id, reason = %why.headline(), "work stopped");
 }
 
@@ -1100,11 +1126,61 @@ pub async fn finish(state: &Shared, id: &WorkId, remove_worktree: bool, force: b
         let works = state.works.lock().await;
         works.get(id).cloned().context("no such work")?
     };
+    // **The basis is decided here, where the decision is.** Deriving it later
+    // from the gate history is the mistake `stop` exists to prevent: a reason
+    // reconstructed afterwards disagrees with the moment it describes.
+    let declares_gates = match &work.worktree {
+        Some(dir) => {
+            let root = crate::git::repo_root(dir).await.unwrap_or(dir.clone());
+            ProjectConfig::load(&root)
+                .map(|c| c.has_gates())
+                .unwrap_or(false)
+        }
+        None => false,
+    };
+    let basis = Completion::of(&work, declares_gates);
+
     retire_runs(state, id).await;
     if remove_worktree && let Some(dir) = &work.worktree {
         let root = crate::git::repo_root(dir).await.unwrap_or(dir.clone());
         crate::git::remove_worktree(&root, dir, force).await?;
     }
-    set_phase(state, id, Phase::Done).await;
+    mark_done(state, id, basis).await;
     Ok(())
+}
+
+/// **The only writer of `Phase::Done` in this program.**
+///
+/// It takes the basis rather than deriving one, so there is no path to a
+/// finished piece of work whose record is silent about what it rests on. The
+/// general phase setter cannot express `Done` at all — see `Step`.
+async fn mark_done(state: &Shared, id: &WorkId, basis: Completion) {
+    let saved = {
+        let mut works = state.works.lock().await;
+        match works.get_mut(id) {
+            Some(w) => {
+                w.completion = Some(basis.clone());
+                w.phase = Phase::Done;
+                w.updated_at = jiff::Timestamp::now();
+                Some(w.clone())
+            }
+            None => None,
+        }
+    };
+    if let Some(w) = saved {
+        persist(state, &w).await;
+        state
+            .record(
+                crate::core::Decision::new(
+                    crate::core::Actor::Human,
+                    "work:done",
+                    w.title.clone(),
+                    "done",
+                )
+                .because(basis.headline())
+                .for_work(&w.id),
+            )
+            .await;
+        tracing::info!(work = %id, basis = %basis.headline(), "work finished");
+    }
 }

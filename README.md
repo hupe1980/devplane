@@ -40,7 +40,8 @@ issue assigned to you or a review requested from you is an inbox item. A draft o
 you already said it is unfinished. Nothing is ever written to GitHub from a list; every action is a
 link.
 
-> **Status: early, but the whole loop runs** — watching, driving, verified work, declared pipelines,
+> **Status: early, but the whole loop runs** — watching, driving, verified work, exportable done
+> certificates, declared pipelines,
 > resumable sessions, the decision log, and an inbox that measures whether it is worth reading.
 > Built against Claude Code 2.1.273 on a machine with 23 live sessions; the permission harness last
 > ran in full against 2.1.273.
@@ -196,6 +197,39 @@ password reset flow   human  ✓implement › ✓drift › ▸merge   specs/001-
 so *gates green* beside *eleven boxes still open* is a sentence neither the exit code nor the agent
 can produce alone. No methodology is learned: the outline is the Markdown headings, the progress is
 the `- [ ]` boxes, and nothing here knows what a requirement is.
+
+### The done certificate
+
+`done` is a claim, and a claim only you can check is one everybody else takes on trust. So it ships
+as a portable artifact instead:
+
+```sh
+devplane work export <id> > cert.md     # paste into the pull request
+devplane --json work export <id>        # an in-toto statement, for another tool
+```
+
+It names the repository, the commit, the gate commands, each command's outcome, and the digest and
+size of each command's output — then it names the steps:
+
+```
+## Check this yourself
+
+    git clone git@github.com:acme/widgets.git && cd widgets
+    git checkout 4f2a9c1e8b3d7a5069fe2c14b8d93a70e5c6f182
+    cargo test
+```
+
+**A reviewer runs that, and nothing in it passes through Devplane.** Which is also why it is
+unsigned: the standard for this shape — in-toto attestations carrying SLSA provenance — keeps the
+producer inside the trust boundary, and its own spec says the build platform *"is trusted to have
+correctly performed the operation."* This does not ask to be believed. That is only possible because
+a gate is a handful of commands rather than a build platform: where SLSA must attest because
+re-running a build is infeasible, this can instruct, because re-running a gate is a paste.
+
+It also says the things a green tick would hide — the commit is on no remote so you *cannot* check
+it, the tree was dirty so the commit is not what ran, it passed on the fourth attempt — and it states
+its own limits in the artifact, so they survive the paste: evidence that these commands ended as
+recorded against this commit, not that the work is correct.
 
 [Pipelines →](https://hupe1980.github.io/devplane/docs/pipelines/)
 

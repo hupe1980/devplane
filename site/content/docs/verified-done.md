@@ -263,3 +263,73 @@ devplane work finish <id> --remove-worktree
 a person asked for, so re-running the checks on a pipeline parked at a human step leaves it parked.
 
 `finish --remove-worktree` refuses to destroy uncommitted or unpushed work unless you add `--force`.
+
+## The done certificate
+
+`done` is a claim, and until it is checkable by somebody else it is a claim you have to take on
+trust. That is the shape this product refuses everywhere else — the permission gate does not ask a
+model what a rule means, the compatibility floor does not move by editing a constant — and it was
+true of the one sentence Devplane is named for.
+
+```sh
+devplane work export <id> > cert.md          # for a pull request body
+devplane --json work export <id>             # for another tool
+```
+
+The certificate carries the gate commands as they were run, each one's outcome, the commit they ran
+against, a digest of each command's output, and the fingerprint of the specification the work names.
+Then it carries the part that makes it worth reading:
+
+```
+## Check this yourself
+
+    git clone git@github.com:acme/widgets.git && cd widgets
+    git checkout 4f2a9c1e8b3d7a5069fe2c14b8d93a70e5c6f182
+    cargo fmt --check
+    cargo clippy -- -D warnings
+    cargo test
+```
+
+A reviewer runs that. Nothing in it passes through Devplane — which is the whole point, and the
+reason the certificate is unsigned. A signature would say *this came from a producer you trust*,
+which is the reading it exists to avoid.
+
+### Every route to done says which route it was
+
+Four bases, and they read differently on purpose:
+
+| Basis | What it means |
+|---|---|
+| **gates passed** | The project declares gates and the run this names passed |
+| **reproduced** | A gate declared to expect failure did fail — which is its pass |
+| **no gate declared** | This project never said what done means. **Nothing was checked** |
+| **finished by hand** | The gates did not pass and a person decided anyway |
+
+All four are legitimate; people finish work a gate cannot judge. What must never happen is that the
+record renders them alike, because then *nothing was checked* is indistinguishable from *everything
+passed*.
+
+### Four states, not a tick and a cross
+
+A command that exited non-zero, one that ran out of time, one the shell never started, and one whose
+result could not be collected are four different sentences, and only the first is a verdict about
+your code. A missing binary is a broken gate, not a broken change.
+
+### What it refuses to claim
+
+The certificate states its limits in its own text, so they travel with the paste. It is evidence that
+these commands ended as recorded against this commit. It is **not** evidence that the work is
+correct, that the commands check the right things, or that the record was never altered — the digests
+detect change, not forgery.
+
+It also tells you when you cannot check it:
+
+- **The commit is on no remote.** You cannot fetch it, so the steps will not work for you. Said where
+  the steps are.
+- **The tree was dirty.** The commit does not fully describe what was checked. Said where the commit
+  is.
+- **Unticked tasks beside a green gate.** *Gates green · 28 of 31 ticked* is a sentence neither the
+  exit code nor the agent can produce alone. Both numbers go in; Devplane judges neither.
+
+And the agent's own account, when it appears, appears beside an outcome and never instead of one —
+for the reason [the top of this page](#the-agent-s-account-beside-what-was-measured) already gives.

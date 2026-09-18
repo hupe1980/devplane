@@ -372,6 +372,15 @@ pub enum WorkCmd {
     Resume { work: String },
     /// Show one piece of work: its phase, its runs, and what its checks said.
     Show { work: String },
+    /// Print the done certificate: what was checked, against which commit, and
+    /// how to check it yourself.
+    ///
+    /// The artifact is meant to be pasted into a pull request. Everything a
+    /// reviewer needs to re-derive the outcomes is in it, and none of it
+    /// requires trusting Devplane — they check out the commit and run the
+    /// commands. `--json` gives the same facts as an in-toto statement for
+    /// another tool to read.
+    Export { work: String },
     /// Mark work finished, optionally removing its checkout.
     Finish {
         work: String,

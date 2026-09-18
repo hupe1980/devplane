@@ -1491,3 +1491,48 @@ fn the_default_surface_shows_both_of_the_boards_sections() {
         "the fallback surface `{fallback}` is not a section in the page"
     );
 }
+
+/// **The page must read a command's outcome, not the pair of fields it replaced.**
+///
+/// This is here because the change that removed `exit_code` and `timed_out`
+/// compiled, passed 668 tests, and left the board silently rendering a cross
+/// beside every command in every gate — JavaScript reading a field that no
+/// longer exists gets `undefined` and says nothing about it. Nothing in Rust can
+/// see that, and the render harness does not reach this function.
+#[test]
+fn the_gate_view_reads_the_structured_outcome() {
+    assert!(
+        !PAGE.contains("c.exit_code") && !PAGE.contains("c.timed_out"),
+        "the page still reads the fields the record no longer has, so every \
+         command renders as though it failed"
+    );
+    assert!(
+        PAGE.contains("c.outcome"),
+        "the page does not read a command's outcome at all"
+    );
+}
+
+/// A tick and a cross cannot say four things.
+///
+/// Exited, timed out, never started and could-not-be-determined are four
+/// different sentences, and only the first is a verdict about the code — a
+/// missing binary is a broken gate, not a broken change.
+#[test]
+fn every_command_outcome_has_a_word_the_page_can_say() {
+    for kind in ["timed_out", "never_started"] {
+        assert!(
+            PAGE.contains(kind),
+            "the page cannot distinguish `{kind}` from an ordinary failure"
+        );
+    }
+    for phrase in [
+        "never started",
+        "could not be determined",
+        "ran out of time",
+    ] {
+        assert!(
+            PAGE.contains(phrase),
+            "no words for an outcome that is not a verdict: {phrase}"
+        );
+    }
+}

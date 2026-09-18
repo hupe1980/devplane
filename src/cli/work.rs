@@ -949,6 +949,21 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
             }
         }
 
+        WorkCmd::Export { work } => {
+            let v: serde_json::Value = c
+                .get(&format!("/api/work/{work}/certificate"))
+                .await
+                .with_context(|| format!("no work `{work}`"))?;
+            if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                anyhow::bail!("{e}");
+            }
+            // Unfinished work is not an error: the reply says where it is, and
+            // saying so is the honest answer to a fair question.
+            match json {
+                true => println!("{}", serde_json::to_string_pretty(&v["statement"])?),
+                false => println!("{}", v["markdown"].as_str().unwrap_or("")),
+            }
+        }
         WorkCmd::Show { work } => {
             let all: serde_json::Value = c.get("/api/work").await?;
             let empty = vec![];
@@ -1285,7 +1300,7 @@ fn print_work(w: &serde_json::Value) {
     if let Some(setup) = w["setup"].as_object() {
         let ok = setup["commands"]
             .as_array()
-            .map(|c| c.iter().all(|r| r["exit_code"] == 0))
+            .map(|c| c.iter().all(|r| r["outcome"]["code"] == 0))
             .unwrap_or(false);
         println!(
             "\n{} {}",
@@ -1307,7 +1322,11 @@ fn print_work(w: &serde_json::Value) {
             paint(BOLD, g["gate"].as_str().unwrap_or("gate")),
             paint(
                 DIM,
-                &format!("attempt {}", g["attempt"].as_u64().unwrap_or(1))
+                &format!(
+                    "attempt {} of {}",
+                    g["attempt"].as_u64().unwrap_or(1),
+                    gates.len()
+                )
             ),
             if passed {
                 paint(render::GREEN, "passed")
@@ -1316,15 +1335,51 @@ fn print_work(w: &serde_json::Value) {
             }
         );
         for cmd in g["commands"].as_array().unwrap_or(&empty) {
-            let ok = cmd["exit_code"] == 0 && cmd["timed_out"] == false;
+            // **A tick and a cross cannot say four things.** A command that
+            // exited non-zero, one that ran out of time, one the shell never
+            // started and one whose result could not be collected are four
+            // different sentences, and only the first is a verdict about the
+            // work. The glyph carries the first distinction and the word beside
+            // it carries the rest.
+            let outcome = &cmd["outcome"];
+            let kind = outcome["outcome"].as_str().unwrap_or("");
+            let (glyph, colour, note) = match kind {
+                "exited" if outcome["code"] == 0 => ("✓", render::GREEN, String::new()),
+                "exited" => (
+                    "✗",
+                    render::RED,
+                    format!("exit {}", outcome["code"].as_i64().unwrap_or(-1)),
+                ),
+                "timed_out" => (
+                    "⏱",
+                    render::RED,
+                    format!(
+                        "timed out after {}s",
+                        outcome["after_secs"].as_u64().unwrap_or(0)
+                    ),
+                ),
+                "never_started" => (
+                    "–",
+                    DIM,
+                    format!(
+                        "never started: {}",
+                        outcome["reason"].as_str().unwrap_or("")
+                    ),
+                ),
+                _ => (
+                    "?",
+                    DIM,
+                    format!(
+                        "could not be determined: {}",
+                        outcome["reason"].as_str().unwrap_or("")
+                    ),
+                ),
+            };
             println!(
-                "  {} {}",
-                if ok {
-                    paint(render::GREEN, "✓")
-                } else {
-                    paint(render::RED, "✗")
-                },
-                cmd["command"].as_str().unwrap_or("")
+                "  {} {} {}",
+                paint(colour, glyph),
+                cmd["command"].as_str().unwrap_or(""),
+                paint(DIM, &note)
             );
             for f in cmd["failures"].as_array().unwrap_or(&empty).iter().take(8) {
                 println!("      {}", paint(DIM, f.as_str().unwrap_or("")));

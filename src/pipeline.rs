@@ -323,7 +323,7 @@ async fn advance(state: &Shared, id: &WorkId) -> Result<()> {
         if commands.is_empty() {
             bail!("`{gate}` has no commands, and an empty gate is not a pass");
         }
-        crate::work::set_phase(state, id, Phase::Verify).await;
+        crate::work::set_phase(state, id, crate::work::Step::Verify).await;
         let mut report = crate::gates::run_expecting(
             gate,
             &commands,
@@ -365,7 +365,7 @@ async fn advance(state: &Shared, id: &WorkId) -> Result<()> {
                 w.feedback_rounds += 1;
                 w.current_run().cloned().context("no run to tell")?
             };
-            crate::work::set_phase(state, id, Phase::Implement).await;
+            crate::work::set_phase(state, id, crate::work::Step::Implement).await;
             crate::driven::prompt(state, &run, feedback).await?;
             return Ok(());
         }
@@ -431,14 +431,14 @@ async fn advance(state: &Shared, id: &WorkId) -> Result<()> {
         // earlier: one opened before the last check passes tells other people
         // something is ready when it is not.
         crate::work::open_pull_request(state, id, &config).await;
-        crate::work::set_phase(state, id, Phase::Review).await;
+        crate::work::set_phase(state, id, crate::work::Step::Review).await;
         crate::work::retire_runs(state, id).await;
         tracing::info!(work = %id, "pipeline finished");
         return Ok(());
     };
 
     if matches!(step_at(&declared, &next), Some(Step::Human(_))) {
-        crate::work::set_phase(state, id, Phase::Human).await;
+        crate::work::set_phase(state, id, crate::work::Step::Human).await;
         // A chain can wait at a human step for days. Holding an agent open for
         // all of them is a model idling in memory for nothing.
         crate::work::retire_runs(state, id).await;
@@ -499,11 +499,11 @@ pub async fn approve(state: &Shared, id: &WorkId) -> Result<String> {
     match next {
         None => {
             crate::work::open_pull_request(state, id, &config).await;
-            crate::work::set_phase(state, id, Phase::Review).await;
+            crate::work::set_phase(state, id, crate::work::Step::Review).await;
             crate::work::retire_runs(state, id).await;
         }
         Some(n) if matches!(step_at(&declared, &n), Some(Step::Human(_))) => {
-            crate::work::set_phase(state, id, Phase::Human).await;
+            crate::work::set_phase(state, id, crate::work::Step::Human).await;
         }
         Some(_) => start_step(state, id, &config, &declared).await?,
     }
@@ -530,7 +530,7 @@ pub async fn begin(state: &Shared, id: &WorkId, config: &ProjectConfig, name: &s
         w.pipeline = Some(Pipeline::new(name.to_string(), role_list));
     }
     if matches!(step_at(&declared, &first), Some(Step::Human(_))) {
-        crate::work::set_phase(state, id, Phase::Human).await;
+        crate::work::set_phase(state, id, crate::work::Step::Human).await;
         return Ok(());
     }
     start_step(state, id, config, &declared).await

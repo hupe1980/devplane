@@ -548,6 +548,54 @@ doing either because a machine rebooted is a decision nobody made.
 
 Without `--force`, removal refuses to destroy uncommitted or unpushed work.
 
+Finishing records **why** the work counts as finished, and there are four answers: the gates passed,
+a reproduction gate reproduced, the project declares no gates, or a person decided it anyway. All
+four are legitimate. What cannot happen is a finished piece of work whose record is silent about
+which — because then a reviewer cannot tell a checked claim from an unchecked one, and the unchecked
+one looks exactly like this product's headline sentence.
+
+### `devplane work export <id>`
+
+The done certificate: what was checked, against which commit, and how to check it yourself.
+
+The point is what it does **not** require. A reviewer with the output needs git and a shell — not
+Devplane, not your database, not your machine, and no reason to trust any of them. They clone the
+repository it names, check out the commit it names, run the commands it names, and compare the
+outcomes.
+
+```console
+$ devplane work export w-01a0 > cert.md
+```
+
+Paste it into a pull request. With `--json` you get the same facts as an
+[in-toto statement](https://in-toto.io/Statement/v1) carrying a `DoneCertificate` predicate, for
+another tool to read — including a `verification.steps` array with the commands, a `rederivable`
+list naming which fields a reader can check for themselves, and `signed: false`.
+
+**It is deliberately unsigned, and that is the interesting part.** The industry standard for this
+shape — in-toto attestations carrying SLSA provenance — has the producer inside the trust boundary
+by construction; SLSA's own specification says the build platform *"is trusted to have correctly
+performed the operation."* A signature proves an attestation was not altered, never that the claim
+inside it is true. This does not ask to be believed at all, which is only possible because a gate is
+a handful of commands rather than a build platform: where SLSA must attest because re-running a build
+is infeasible, this can instruct, because re-running a gate is a paste.
+
+The certificate states its own limits, in the artifact rather than here, so they survive the paste:
+it is evidence that these commands ended as recorded against this commit — not that the work is
+correct, that the commands check the right things, or that the record was never altered.
+
+Four things it will tell you that a green tick would hide:
+
+- **A commit nobody else can fetch.** If the commit is on no remote, the instructions cannot work for
+  you, and it says so where the instructions are rather than in a footnote.
+- **A dirty tree.** Then the commit does not fully describe what was checked, said where the commit
+  is shown.
+- **Which attempt.** *"Passed on the fourth try"* and *"passed"* are different sentences.
+- **Unticked tasks beside a green gate.** Both numbers go in and neither is judged against the other.
+
+Exporting work that is not finished is a fair question with an honest answer: it says where the work
+is and what its last gate said, rather than erroring or inventing a certificate.
+
 ## Setup and health
 
 ### `devplane trust [path]`

@@ -12,7 +12,7 @@
 //! needs to do the fixing.
 
 use crate::core::text::tail;
-use crate::core::work::{CommandResult, GateReport};
+use crate::core::work::{CommandResult, CommitStamp, GateReport, Outcome};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -65,14 +65,17 @@ pub async fn run_expecting(
         if remaining.is_zero() {
             results.push(CommandResult {
                 command: command.clone(),
-                exit_code: None,
+                outcome: Outcome::NeverStarted {
+                    reason: format!(
+                        "`{gate}` was already past its {}s timeout",
+                        timeout.as_secs()
+                    ),
+                },
                 duration_ms: 0,
-                output_tail: format!(
-                    "not run: `{gate}` was already past its {}s timeout",
-                    timeout.as_secs()
-                ),
+                output_tail: String::new(),
+                output_bytes: 0,
+                output_digest: crate::core::hash::hex(b""),
                 failures: Vec::new(),
-                timed_out: true,
             });
             continue;
         }
@@ -90,6 +93,7 @@ pub async fn run_expecting(
         // The gate runner is given commands and a directory and deliberately
         // knows nothing about what the work is answering.
         spec: None,
+        commit: commit_stamp(dir).await,
         gate: gate.to_string(),
         at: jiff::Timestamp::now(),
         duration_ms: started.elapsed().as_millis() as u64,
@@ -98,17 +102,28 @@ pub async fn run_expecting(
     }
 }
 
+/// What the tree was when this gate ran.
+///
+/// `None` when the gate did not run in a repository at all — which a
+/// certificate states out loud rather than rendering as a blank.
+async fn commit_stamp(dir: &Path) -> Option<CommitStamp> {
+    crate::git::commit_stamp(dir).await
+}
+
 async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult {
     let started = Instant::now();
 
     if timeout.is_zero() {
         return CommandResult {
             command: command.to_string(),
-            exit_code: None,
+            outcome: Outcome::NeverStarted {
+                reason: "the gate ran out of time before this command started".into(),
+            },
             duration_ms: 0,
-            output_tail: "the gate ran out of time before this command started".into(),
+            output_tail: String::new(),
+            output_bytes: 0,
+            output_digest: crate::core::hash::hex(b""),
             failures: Vec::new(),
-            timed_out: true,
         };
     }
 
@@ -136,13 +151,19 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
+            // **Structurally distinct, not a message to be parsed later.** A
+            // missing binary is a broken gate, not a broken change, and a
+            // reader should never have to recover that from prose.
             return CommandResult {
                 command: command.to_string(),
-                exit_code: None,
+                outcome: Outcome::NeverStarted {
+                    reason: e.to_string(),
+                },
                 duration_ms: started.elapsed().as_millis() as u64,
-                output_tail: format!("could not start: {e}"),
+                output_tail: String::new(),
+                output_bytes: 0,
+                output_digest: crate::core::hash::hex(b""),
                 failures: Vec::new(),
-                timed_out: false,
             };
         }
     };
@@ -172,15 +193,26 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
     })
     .await;
 
-    let (exit_code, timed_out) = match status {
-        Ok(Ok(s)) => (s.code(), false),
-        Ok(Err(_)) => (None, false),
+    let outcome = match status {
+        Ok(Ok(s)) => match s.code() {
+            Some(code) => Outcome::Exited { code },
+            // Killed by a signal. It ran, and there is no verdict — which is
+            // its own state rather than a failure of the work.
+            None => Outcome::Unknown {
+                reason: "killed by a signal".into(),
+            },
+        },
+        Ok(Err(e)) => Outcome::Unknown {
+            reason: e.to_string(),
+        },
         Err(_) => {
             // The whole group, not just the shell: a test runner left behind by
             // a timed-out gate quietly eats the machine.
             terminate_group(pid);
             let _ = child.kill().await;
-            (None, true)
+            Outcome::TimedOut {
+                after_secs: timeout.as_secs(),
+            }
         }
     };
     // Decoded once, at the end. Decoding each chunk as it arrived would put a
@@ -193,22 +225,21 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
 
+    // **Digested before the tail is cut**, so the value covers what the command
+    // actually produced rather than what was kept. It binds this record to that
+    // run; it does not reproduce, because both pipes drain concurrently into one
+    // buffer and the interleaving belongs to the scheduler.
+    let output_digest = crate::core::hash::hex(buf.as_bytes());
+    let output_bytes = buf.len() as u64;
+
     CommandResult {
         command: command.to_string(),
-        exit_code,
+        outcome,
         duration_ms: started.elapsed().as_millis() as u64,
         failures: extract_failures(&buf),
-        output_tail: match timed_out {
-            // What it printed before it was killed, which is the only evidence
-            // there is about where it got stuck.
-            true => format!(
-                "killed after {}s\n{}",
-                timeout.as_secs(),
-                tail(&buf, OUTPUT_TAIL_BYTES)
-            ),
-            false => tail(&buf, OUTPUT_TAIL_BYTES),
-        },
-        timed_out,
+        output_tail: tail(&buf, OUTPUT_TAIL_BYTES),
+        output_bytes,
+        output_digest,
     }
 }
 
@@ -378,7 +409,7 @@ mod tests {
             1,
         )
         .await;
-        assert!(!report.commands[0].timed_out, "the gate deadlocked");
+        assert!(!report.commands[0].timed_out(), "the gate deadlocked");
         assert!(report.passed());
         assert!(
             report.commands[0].output_tail.contains("DRAINED"),
@@ -416,7 +447,7 @@ mod tests {
             1,
         )
         .await;
-        assert!(report.commands[0].timed_out);
+        assert!(report.commands[0].timed_out());
         assert!(!report.passed());
         assert!(report.summary().contains("timed out"));
     }
@@ -432,7 +463,7 @@ mod tests {
         )
         .await;
         assert_eq!(report.commands.len(), 1, "the gate stops at the timeout");
-        assert!(report.commands[0].timed_out);
+        assert!(report.commands[0].timed_out());
     }
 
     #[tokio::test]
@@ -448,7 +479,7 @@ mod tests {
             1,
         )
         .await;
-        assert!(report.commands[0].timed_out);
+        assert!(report.commands[0].timed_out());
         assert!(
             report.commands[0].output_tail.contains("auth::login"),
             "the last thing it printed is the only clue there is: {}",
