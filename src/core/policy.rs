@@ -1128,6 +1128,16 @@ impl Rule {
     }
 
     /// Whether this rule covers a tool call.
+    /// Whether this rule names a tool with no command pattern beside it —
+    /// `PowerShell` or `PowerShell(*)`, which parse to [`Spec::Any`], rather
+    /// than `PowerShell(Remove-Item *)`, which parses to [`Spec::Command`].
+    ///
+    /// Used by the allow path, where the running product was measured to honour
+    /// the first and refuse the second.
+    pub fn spec_is_bare_command(&self) -> bool {
+        !matches!(self.spec, Spec::Command { .. })
+    }
+
     pub fn matches(&self, ctx: &Context<'_>, tool: &str, input: &serde_json::Value) -> bool {
         if self.malformed && self.class == Class::Allow {
             return false;
@@ -2725,6 +2735,35 @@ impl Policy {
             decided => return decided,
         }
         if let Some(r) = first_match(&self.allow, ctx, tool, input) {
+            // **A `PowerShell(<pattern>)` allow rule does not auto-approve,
+            // because the running product does not honour one.**
+            //
+            // Measured on 2026-09-18 against Claude Code 2.1.267, and
+            // reproduced six times against a control that passed. Under
+            // `--permission-mode dontAsk` with `PowerShell(Remove-Item *)`
+            // allowed, the vendor called PowerShell with exactly
+            // `Remove-Item vp-ran.txt` and **refused it**; `Remove-Item:*` and
+            // `Remove-Item*` were refused too; a bare `PowerShell` allow rule
+            // ran the same call. Devplane approved all four.
+            //
+            // So Devplane auto-approved a destructive PowerShell command that
+            // Claude Code puts in front of a person — the one failure the
+            // narrower-never-wider principle forbids, and the first the dialect
+            // axis has ever found.
+            //
+            // **The documentation says the opposite**, describing wildcards at
+            // any position and alias canonicalisation. That is the shape the
+            // notes already record: a fetched and current reference page can
+            // still contradict the shipped product, and the running product is
+            // the authority. If a later release honours these rules, the
+            // measurement moves and so does this — which is why the refusal is
+            // here, with its date, rather than in the matcher's pattern logic.
+            //
+            // Deny is untouched: refusing more than the vendor is the safe
+            // direction, and a `PowerShell(...)` prohibition still fires.
+            if dialect_of(tool) == Dialect::PowerShell && !r.spec_is_bare_command() {
+                return Verdict::Undecided;
+            }
             // **An allow rule covers the command, not what it writes.** Claude
             // Code checks a redirection's target against the file rules as if
             // Claude had written it directly, so `Bash(echo *)` does not
@@ -3057,13 +3096,31 @@ mod tests {
         }
     }
 
+    /// **A `PowerShell(<pattern>)` allow rule does not auto-approve, because
+    /// the running product does not honour one.**
+    ///
+    /// This test used to assert the opposite, and said why in its own comment:
+    /// *"the reference's own example is that `PowerShell(Get-ChildItem *)`
+    /// matches `gci`, `ls` and `dir`."* It was written from the documentation
+    /// and nothing had ever asked the product.
+    ///
+    /// Asked on 2026-09-18 against 2.1.267, under `dontAsk` with
+    /// `PowerShell(Remove-Item *)` allowed, the vendor called PowerShell with
+    /// exactly `Remove-Item vp-ran.txt` and **refused it**. `Remove-Item:*` and
+    /// `Remove-Item*` were refused too. A bare `PowerShell` allow rule ran the
+    /// same call, so the probe was sound. Six asks, one control.
+    ///
+    /// Devplane had approved all of them — auto-approving a destructive
+    /// PowerShell command the vendor puts in front of a person, which is the
+    /// one failure the narrower-never-wider principle forbids.
+    ///
+    /// The documentation still says wildcards match at any position and
+    /// aliases are canonicalised. Where a fetched, current reference page
+    /// contradicts the shipped product, **the shipped product is the
+    /// authority**. If a later release honours these rules, the measurement
+    /// moves and so does this.
     #[test]
-    fn a_powershell_allow_covers_the_aliases_the_reference_names() {
-        // The same canonicalisation, the other way: the reference's own
-        // example is that `PowerShell(Get-ChildItem *)` matches `gci`, `ls`
-        // and `dir`. Both directions or neither — a rule that denies through
-        // aliases and does not allow through them is a rule that reads one way
-        // and behaves another.
+    fn a_powershell_pattern_does_not_auto_approve_because_the_product_does_not() {
         let p = Policy::new(&["PowerShell(Get-ChildItem *)".into()], &[]);
         for cmd in [
             "Get-ChildItem .",
@@ -3075,9 +3132,21 @@ mod tests {
             assert!(
                 matches!(
                     p.evaluate(&ctx(), "PowerShell", &bash(cmd)),
+                    Verdict::Undecided
+                ),
+                "{cmd}: a pattern rule auto-approved what the product refuses"
+            );
+        }
+        // A rule naming the whole tool is honoured, because that one was
+        // measured to work.
+        for rule in ["PowerShell", "PowerShell(*)"] {
+            let bare = Policy::new(&[rule.into()], &[]);
+            assert!(
+                matches!(
+                    bare.evaluate(&ctx(), "PowerShell", &bash("Remove-Item x")),
                     Verdict::Allow { .. }
                 ),
-                "{cmd} is Get-ChildItem"
+                "{rule} should still approve: the product ran the same call under it"
             );
         }
         // And a PowerShell rule still says nothing about a Bash call.
@@ -3085,6 +3154,24 @@ mod tests {
             p.evaluate(&ctx(), "Bash", &bash("ls .")),
             Verdict::Undecided
         ));
+    }
+
+    /// **Deny is untouched, and must be.** Refusing more than the vendor is the
+    /// safe direction, so a `PowerShell(...)` prohibition still fires — through
+    /// the aliases too, which is the half of canonicalisation that costs
+    /// nothing to keep.
+    #[test]
+    fn the_narrowing_is_on_the_allow_side_only() {
+        let p = Policy::new(&[], &["PowerShell(Remove-Item *)".into()]);
+        for cmd in ["Remove-Item x", "ri x", "rm x", "del x", "erase x"] {
+            assert!(
+                matches!(
+                    p.evaluate(&ctx(), "PowerShell", &bash(cmd)),
+                    Verdict::Deny { .. }
+                ),
+                "{cmd}: the prohibition stopped firing"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------
