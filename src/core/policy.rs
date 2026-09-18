@@ -696,6 +696,41 @@ impl Gap {
     }
 }
 
+/// Whether a run against `observed` may move a floor that currently names
+/// `baseline`.
+///
+/// **The machine that measures can be older than the thing it measures**, and
+/// on the day this was written it was: the signed-in agent sat three releases
+/// below the floor it exists to advance. A green matrix there is a true
+/// statement about the installed release and a false one about the floor, and
+/// the only thing standing between those two sentences is a constant somebody
+/// edits — which is the failure the measured-not-asserted principle names.
+///
+/// So the guard is on **movement**, not on running. A run below the floor is
+/// still worth doing and still worth reading; what it may not do is advance a
+/// claim about a release it never saw.
+///
+/// `Uncountable` is refused for the same reason a timed-out probe is not a
+/// verdict: *"I could not tell"* is never permission.
+pub fn may_move_floor(observed: &str, baseline: &str) -> bool {
+    matches!(gap(observed, baseline), Gap::At | Gap::Ahead(_))
+}
+
+/// Why a floor did not move, for a report that must say so rather than be
+/// silently quiet about it.
+pub fn refusal_to_move(observed: &str, baseline: &str) -> Option<String> {
+    match gap(observed, baseline) {
+        Gap::At | Gap::Ahead(_) => None,
+        Gap::Behind(n) => Some(format!(
+            "no floor moved: this ran against {observed}, which is {n} release{} behind the floor at {baseline}. A green run here says nothing about {baseline}",
+            if n == 1 { "" } else { "s" }
+        )),
+        Gap::Uncountable => Some(format!(
+            "no floor moved: {observed} and {baseline} are different release series, so the distance between them cannot be counted"
+        )),
+    }
+}
+
 /// Where `observed` sits relative to `baseline`, in all four directions.
 pub fn gap(observed: &str, baseline: &str) -> Gap {
     let parts = |v: &str| -> Option<Vec<u64>> {
@@ -1093,6 +1128,16 @@ impl Rule {
     }
 
     /// Whether this rule covers a tool call.
+    /// Whether this rule names a tool with no command pattern beside it —
+    /// `PowerShell` or `PowerShell(*)`, which parse to [`Spec::Any`], rather
+    /// than `PowerShell(Remove-Item *)`, which parses to [`Spec::Command`].
+    ///
+    /// Used by the allow path, where the running product was measured to honour
+    /// the first and refuse the second.
+    pub fn spec_is_bare_command(&self) -> bool {
+        !matches!(self.spec, Spec::Command { .. })
+    }
+
     pub fn matches(&self, ctx: &Context<'_>, tool: &str, input: &serde_json::Value) -> bool {
         if self.malformed && self.class == Class::Allow {
             return false;
@@ -2690,6 +2735,35 @@ impl Policy {
             decided => return decided,
         }
         if let Some(r) = first_match(&self.allow, ctx, tool, input) {
+            // **A `PowerShell(<pattern>)` allow rule does not auto-approve,
+            // because the running product does not honour one.**
+            //
+            // Measured on 2026-09-18 against Claude Code 2.1.267, and
+            // reproduced six times against a control that passed. Under
+            // `--permission-mode dontAsk` with `PowerShell(Remove-Item *)`
+            // allowed, the vendor called PowerShell with exactly
+            // `Remove-Item vp-ran.txt` and **refused it**; `Remove-Item:*` and
+            // `Remove-Item*` were refused too; a bare `PowerShell` allow rule
+            // ran the same call. Devplane approved all four.
+            //
+            // So Devplane auto-approved a destructive PowerShell command that
+            // Claude Code puts in front of a person — the one failure the
+            // narrower-never-wider principle forbids, and the first the dialect
+            // axis has ever found.
+            //
+            // **The documentation says the opposite**, describing wildcards at
+            // any position and alias canonicalisation. That is the shape the
+            // notes already record: a fetched and current reference page can
+            // still contradict the shipped product, and the running product is
+            // the authority. If a later release honours these rules, the
+            // measurement moves and so does this — which is why the refusal is
+            // here, with its date, rather than in the matcher's pattern logic.
+            //
+            // Deny is untouched: refusing more than the vendor is the safe
+            // direction, and a `PowerShell(...)` prohibition still fires.
+            if dialect_of(tool) == Dialect::PowerShell && !r.spec_is_bare_command() {
+                return Verdict::Undecided;
+            }
             // **An allow rule covers the command, not what it writes.** Claude
             // Code checks a redirection's target against the file rules as if
             // Claude had written it directly, so `Bash(echo *)` does not
@@ -3022,13 +3096,31 @@ mod tests {
         }
     }
 
+    /// **A `PowerShell(<pattern>)` allow rule does not auto-approve, because
+    /// the running product does not honour one.**
+    ///
+    /// This test used to assert the opposite, and said why in its own comment:
+    /// *"the reference's own example is that `PowerShell(Get-ChildItem *)`
+    /// matches `gci`, `ls` and `dir`."* It was written from the documentation
+    /// and nothing had ever asked the product.
+    ///
+    /// Asked on 2026-09-18 against 2.1.267, under `dontAsk` with
+    /// `PowerShell(Remove-Item *)` allowed, the vendor called PowerShell with
+    /// exactly `Remove-Item vp-ran.txt` and **refused it**. `Remove-Item:*` and
+    /// `Remove-Item*` were refused too. A bare `PowerShell` allow rule ran the
+    /// same call, so the probe was sound. Six asks, one control.
+    ///
+    /// Devplane had approved all of them — auto-approving a destructive
+    /// PowerShell command the vendor puts in front of a person, which is the
+    /// one failure the narrower-never-wider principle forbids.
+    ///
+    /// The documentation still says wildcards match at any position and
+    /// aliases are canonicalised. Where a fetched, current reference page
+    /// contradicts the shipped product, **the shipped product is the
+    /// authority**. If a later release honours these rules, the measurement
+    /// moves and so does this.
     #[test]
-    fn a_powershell_allow_covers_the_aliases_the_reference_names() {
-        // The same canonicalisation, the other way: the reference's own
-        // example is that `PowerShell(Get-ChildItem *)` matches `gci`, `ls`
-        // and `dir`. Both directions or neither — a rule that denies through
-        // aliases and does not allow through them is a rule that reads one way
-        // and behaves another.
+    fn a_powershell_pattern_does_not_auto_approve_because_the_product_does_not() {
         let p = Policy::new(&["PowerShell(Get-ChildItem *)".into()], &[]);
         for cmd in [
             "Get-ChildItem .",
@@ -3040,9 +3132,21 @@ mod tests {
             assert!(
                 matches!(
                     p.evaluate(&ctx(), "PowerShell", &bash(cmd)),
+                    Verdict::Undecided
+                ),
+                "{cmd}: a pattern rule auto-approved what the product refuses"
+            );
+        }
+        // A rule naming the whole tool is honoured, because that one was
+        // measured to work.
+        for rule in ["PowerShell", "PowerShell(*)"] {
+            let bare = Policy::new(&[rule.into()], &[]);
+            assert!(
+                matches!(
+                    bare.evaluate(&ctx(), "PowerShell", &bash("Remove-Item x")),
                     Verdict::Allow { .. }
                 ),
-                "{cmd} is Get-ChildItem"
+                "{rule} should still approve: the product ran the same call under it"
             );
         }
         // And a PowerShell rule still says nothing about a Bash call.
@@ -3050,6 +3154,24 @@ mod tests {
             p.evaluate(&ctx(), "Bash", &bash("ls .")),
             Verdict::Undecided
         ));
+    }
+
+    /// **Deny is untouched, and must be.** Refusing more than the vendor is the
+    /// safe direction, so a `PowerShell(...)` prohibition still fires — through
+    /// the aliases too, which is the half of canonicalisation that costs
+    /// nothing to keep.
+    #[test]
+    fn the_narrowing_is_on_the_allow_side_only() {
+        let p = Policy::new(&[], &["PowerShell(Remove-Item *)".into()]);
+        for cmd in ["Remove-Item x", "ri x", "rm x", "del x", "erase x"] {
+            assert!(
+                matches!(
+                    p.evaluate(&ctx(), "PowerShell", &bash(cmd)),
+                    Verdict::Deny { .. }
+                ),
+                "{cmd}: the prohibition stopped firing"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -5804,6 +5926,52 @@ mod tests {
 
 #[cfg(test)]
 mod baseline_tests {
+
+    /// A run against a release **older** than the floor may not move it, however
+    /// green it is. The measurement is about a product the floor does not name.
+    #[test]
+    fn a_run_below_the_floor_moves_nothing() {
+        for behind in ["2.1.272", "2.1.267", "2.1.100"] {
+            assert!(
+                !super::may_move_floor(behind, "2.1.273"),
+                "{behind} was allowed to advance a floor at 2.1.273"
+            );
+            assert!(
+                super::refusal_to_move(behind, "2.1.273")
+                    .is_some_and(|r| r.contains("no floor moved")),
+                "and it did not say why"
+            );
+        }
+    }
+
+    /// *"I could not tell"* is never permission.
+    #[test]
+    fn an_uncountable_gap_moves_nothing_either() {
+        assert!(!super::may_move_floor("3.0.1", "2.1.273"));
+        assert!(super::refusal_to_move("3.0.1", "2.1.273").is_some());
+        assert!(!super::may_move_floor("not-a-version", "2.1.273"));
+    }
+
+    /// At or ahead may move — and the floor takes the version that **ran**,
+    /// never the latest published.
+    #[test]
+    fn a_floor_takes_the_version_that_ran() {
+        assert!(super::may_move_floor("2.1.273", "2.1.273"));
+        assert!(super::may_move_floor("2.1.280", "2.1.273"));
+        assert!(super::refusal_to_move("2.1.280", "2.1.273").is_none());
+    }
+
+    /// The state this feature was written in, pinned so the guard is exercised
+    /// against the real numbers rather than invented ones.
+    #[test]
+    fn the_machine_that_measures_may_be_behind_what_it_measures() {
+        // 2.1.267 was installed while the full-matrix floor said 2.1.273.
+        assert!(!super::may_move_floor("2.1.267", super::VERIFIED_AGAINST));
+        let why = super::refusal_to_move("2.1.267", super::VERIFIED_AGAINST).unwrap();
+        assert!(why.contains("behind"), "{why}");
+        assert!(why.contains(super::VERIFIED_AGAINST), "{why}");
+    }
+
     use super::*;
 
     /// A release `n` patches either side of the baseline, spelled the way the

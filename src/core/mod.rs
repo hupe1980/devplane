@@ -51,6 +51,7 @@ pub mod project;
 pub mod provider;
 pub mod reduce;
 pub mod run;
+pub mod sequential;
 pub mod setup;
 pub mod spec;
 pub mod templates;

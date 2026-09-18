@@ -105,6 +105,12 @@ owed:
     bash scripts/changelog-rows.sh --fetch >/dev/null
     bash scripts/changelog-rows.sh --owed
 
+# The second ledger: the channels rather than the rules. Bounded on purpose —
+# everything permission-adjacent is 220 rows, and a ledger nobody finishes looks
+# like coverage.
+channels:
+    bash scripts/changelog-rows.sh --channels
+
 # The expensive floor (`VERIFIED_AGAINST`) is not touched here: it moves only
 # when `just perms` runs green, which costs a signed-in agent and real money.
 #
