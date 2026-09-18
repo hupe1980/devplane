@@ -2,24 +2,25 @@
 
 Notable changes per release. Dates are UTC.
 
-## 0.5.0 — 2026-09-17
+## Unreleased
 
-Surfaces that make the gate's own claim checkable: how old its measurement is,
-what it does and does not do, what every repository on the machine has it set to
-do, a way for your agents to ask it things rather than being told by you, and —
-where a gate went red — what the agent said about it, next to what was measured.
+**Renamed from Vibeplane, and every name moves with it.** The binary, the project
+file `devplane.toml`, the machine directory `~/.devplane/`, the `DEVPLANE_*`
+environment variables and the `devplane:ready` label. Nothing is read under the
+old names and nothing migrates itself:
 
-**One thing here changes a verdict**, and in the direction that costs a prompt:
-a path grant like `Edit(out.txt)` no longer speaks for whatever command fills
-that file. If a rule of yours relied on that, the call now asks. No
-configuration breaks.
+```sh
+mv ~/.vibeplane ~/.devplane && mv ~/.devplane/vibeplane.db ~/.devplane/devplane.db
+mv vibeplane.toml devplane.toml          # in each project
+devplane connect claude                  # the installed hooks name the old binary
+```
 
 **Two suggestion defects were shipped and are fixed.** A `WebFetch` rule was
 suggested as `WebFetch(docs.rs)`, missing the `domain:` the vendor's syntax
-requires — so pasting it granted nothing. And the suggestion itself never
-appeared for a session Devplane *watches* rather than drives, because the field
-it was read from was set to `None` at every site that built it. Both were found
-by making the product check its own suggestion before showing it.
+requires — so pasting it granted nothing. And the suggestion never appeared at
+all for a session Devplane *watches* rather than drives, because the field it was
+read from was `None` at every site that built it. Both were found by making the
+product check its own suggestion before showing it.
 
 ### Added
 
@@ -64,6 +65,63 @@ by making the product check its own suggestion before showing it.
   withheld and the command that shows the rest, rather than a silent subset. The
   release control is offered only where the work is actually held at a declared
   human step.
+
+### Changed
+
+- **The fetched third-party corpus moved from `specs/` to `reference/`**, and
+  `scripts/fetch-specs.sh` with it. Spec Kit hard-codes `specs/` for the
+  project's own feature specifications, and one directory cannot be both a
+  gitignored build artefact and committed source of truth. `just specs` is now
+  `just reference`.
+
+### Fixed
+
+- **The spec task count included the specification's own quality checklist.**
+  Pointed at a real Spec Kit feature, the reader counted **47**
+  tasks where the task list had 31 — Spec Kit writes a `checklists/` folder
+  whose boxes validate the *spec*, not the feature. Where a `tasks.md` exists it
+  is now the task list and the other documents are not; where there is none,
+  every box still counts, because a one-file specification reporting zero is a
+  worse answer than the one being fixed. A **ticked** box is also no longer read
+  as an open question: the checklist line *"No [NEEDS CLARIFICATION] markers
+  remain"* was being counted as one.
+- **A loop over a special shell variable was auto-approved.** `OPTIND=1/0 ls`
+  already asked — an expression assigned to a variable the shell evaluates is
+  arithmetic, not a string — but `for OPTIND in 1 2; do ls; done` did not,
+  because `for` and `in` are control words stripped before that check runs. The
+  `=` going out of sight was enough to walk past it. Claude Code 2.1.273 was
+  asked three times: it runs the ordinary loop and refuses this one.
+- **A cancelled turn is now tested, not just described.** The client sends
+  `session/cancel`, waits five seconds for the agent to end the turn with
+  `stop_reason: cancelled`, and tears the connection down if it does not — and
+  every fixture turn finished in microseconds, so only the *timeout* branch was
+  ever reachable. The test fixture can now be interrupted, and the new
+  conformance case fails in 5.8 seconds against an agent that ignores the
+  cancel and passes in 0.8 against one that answers it.
+- **The docs sidebar had no space between the search box and the first group.**
+  `:first-of-type` zeroed the heading's top margin, which is right for a heading
+  that starts a column and wrong once a search box sits above it.
+
+## 0.5.0 — 2026-09-17
+
+Surfaces that make the gate's own claim checkable: how old its measurement is,
+what it does and does not do, what every repository on the machine has it set to
+do, a way for your agents to ask it things rather than being told by you, and —
+where a gate went red — what the agent said about it, next to what was measured.
+
+**One thing here changes a verdict**, and in the direction that costs a prompt:
+a path grant like `Edit(out.txt)` no longer speaks for whatever command fills
+that file. If a rule of yours relied on that, the call now asks. No
+configuration breaks.
+
+### Added
+
+- **The gate's measurement is current for the first time.** The full
+  differential matrix ran green against Claude Code **2.1.273** — 126 allow
+  cases and 208 deny cases — so `devplane gate` no longer reports a gap between
+  the release the rules were measured against and the one the vendor ships.
+  Twelve deny shapes were **skipped rather than measured**, and the command says
+  so: a skipped shape is unmeasured, not clean.
 - **<kbd>,</kbd> on the board: what is configured, everywhere.** The machine —
   hooks installed, the settings file, how stale the measurement is — and every
   registered repository's `devplane.toml` read back: gates, pipelines, rules in
@@ -116,21 +174,6 @@ by making the product check its own suggestion before showing it.
 
 ### Fixed
 
-- **The spec task count included the specification's own quality checklist.**
-  Pointed at a real Spec Kit feature, the reader counted **47**
-  tasks where the task list had 31 — Spec Kit writes a `checklists/` folder
-  whose boxes validate the *spec*, not the feature. Where a `tasks.md` exists it
-  is now the task list and the other documents are not; where there is none,
-  every box still counts, because a one-file specification reporting zero is a
-  worse answer than the one being fixed. A **ticked** box is also no longer read
-  as an open question: the checklist line *"No [NEEDS CLARIFICATION] markers
-  remain"* was being counted as one.
-- **A loop over a special shell variable was auto-approved.** `OPTIND=1/0 ls`
-  already asked — an expression assigned to a variable the shell evaluates is
-  arithmetic, not a string — but `for OPTIND in 1 2; do ls; done` did not,
-  because `for` and `in` are control words stripped before that check runs. The
-  `=` going out of sight was enough to walk past it. Claude Code 2.1.273 was
-  asked three times: it runs the ordinary loop and refuses this one.
 - **A path grant approved anything that wrote to that path.** With
   `auto_allow = ["Edit(out.txt)"]` and nothing else, every command redirecting
   into `out.txt` was auto-approved — `cat /etc/passwd > out.txt`,
@@ -147,13 +190,6 @@ by making the product check its own suggestion before showing it.
   over blank space is not an answer: *nothing is running* is the tool working,
   *nothing is connected* is a thing to do. It now says which, names the command
   when there is one, and makes the quiet-session count the way to see them.
-- **A cancelled turn is now tested, not just described.** The client sends
-  `session/cancel`, waits five seconds for the agent to end the turn with
-  `stop_reason: cancelled`, and tears the connection down if it does not — and
-  every fixture turn finished in microseconds, so only the *timeout* branch was
-  ever reachable. The test fixture can now be interrupted, and the new
-  conformance case fails in 5.8 seconds against an agent that ignores the
-  cancel and passes in 0.8 against one that answers it.
 - **The deny axis weighed "it ran" and "it did not run" as if they were the
   same kind of answer.** Its evidence is *did the command run* and its oracle is
   a language model, so a `yes` is a fact and a `no` has two causes that look
@@ -185,19 +221,7 @@ by making the product check its own suggestion before showing it.
   inbox item carries `why`. A shortcut nobody can discover is a feature only its
   author has.
 - **The quickstart's keyboard table was broken**, so its last three rows
-  rendered as prose with pipes in it. The same defect was in the test fixture's
-  own header.
-- **The docs sidebar had no space between the search box and the first group.**
-  `:first-of-type` zeroed the heading's top margin, which is right for a heading
-  that starts a column and wrong once a search box sits above it.
-
-### Changed
-
-- **The fetched third-party corpus moved from `specs/` to `reference/`**, and
-  `scripts/fetch-specs.sh` with it. Spec Kit hard-codes `specs/` for the
-  project's own feature specifications, and one directory cannot be both a
-  gitignored build artefact and committed source of truth. `just specs` is now
-  `just reference`.
+  rendered as prose with pipes in it.
 - **A pipeline step's gate verdict now carries the specification stamp** that
   the work loop and `devplane work verify` already recorded. Two paths of three
   read as evidence of absence on the third.

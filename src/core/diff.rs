@@ -448,7 +448,7 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
     }
 }
 
-/// SC-004: every edge case gets its own sentence.
+/// Every edge case gets its own sentence.
 ///
 /// The failure this guards against is not a crash — it is four different
 /// situations rendering as the same blank region, so a reviewer reads *nothing
@@ -521,7 +521,7 @@ mod sc004 {
 
 #[cfg(test)]
 mod sc003 {
-    /// SC-003, measured rather than asserted — and reproducible.
+    /// The render budget, measured rather than asserted — and reproducible.
     ///
     /// The specification says the view opens in under two seconds for a change
     /// of up to 500 modified lines. That bound covers the whole round trip —

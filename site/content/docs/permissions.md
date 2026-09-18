@@ -679,6 +679,17 @@ A call that maps to none of them — and carries no recognisable arguments — i
 all**, and a person is asked. A rule cannot honestly be said to cover a call nobody can classify, and
 that is the direction it is safe to be wrong in.
 
+## Which rule to write next
+
+You do not have to guess. A permission in the inbox carries the rule that would stop it being asked
+again — the narrowest one covering the calls this machine has actually seen, with the count behind it
+and the file to paste it into. [`devplane inbox`](/docs/cli/#devplane-inbox) shows it;
+[`devplane explain --replay`](/docs/cli/#devplane-explain-replay) answers the same question over
+every call at once.
+
+**Nothing writes it for you.** An agent here runs as you and can read the daemon's token, so a route
+that edited `[policy]` would be reachable by the thing the rules govern.
+
 ## How you find out a rule is too tight
 
 **A refused agent does not stop — it tries something else.** So a rule that is exactly right and one

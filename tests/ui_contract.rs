@@ -987,7 +987,7 @@ fn every_global_command_has_something_to_click() {
 
 /// The work view shows what the gate measured, and says what it does not show.
 ///
-/// T004, T009 and the last row of the SC-004 walk. Two properties, and the
+/// Two properties, and the
 /// second is the one that matters: command output is the compiler's bytes and
 /// the agent's, so it is escaped like everything else the page prints — and
 /// every way the evidence can be missing is a sentence rather than a blank
@@ -1048,7 +1048,7 @@ fn the_work_view_shows_the_gate_evidence_and_names_what_is_missing() {
 
 /// The two ways an agent's account can be missing read differently.
 ///
-/// T025. `[transcripts] keep = false` means **nothing was recorded**; a kept
+/// `[transcripts] keep = false` means **nothing was recorded**; a kept
 /// transcript with no closing message means **the agent said nothing**. Both
 /// arrived as an absent `claim` until the API was made to say which, and a
 /// surface that renders them identically tells a reviewer something false about
@@ -1090,7 +1090,7 @@ fn the_two_ways_a_claim_can_be_absent_do_not_render_the_same() {
 
 /// The rule to paste, and the one thing this surface must never grow.
 ///
-/// T008 and T024. Two properties. The first is that an absent offer is a
+/// Two properties. The first is that an absent offer is a
 /// *sentence* — a blank where a rule belongs reads as a surface that failed
 /// rather than one with nothing to say. The second is the whole reason the
 /// feature hands over text instead of writing it: an agent on this machine runs

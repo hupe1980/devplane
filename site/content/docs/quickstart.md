@@ -74,13 +74,15 @@ many things need you — so it reads aloud, and it survives being screenshotted 
 | `tab` · `enter` on a work row | **what it changed** — the diff, the gate's commands, the agent's account |
 | `1`–`9` | pick one of the answers the agent offered |
 | `y` `n` · `r` | allow · deny a permission · reply |
-| — | a permission carries **the rule that stops it being asked again**, with the file to paste it into. Nothing here writes it |
 | `?` | **why is this here** — the decision log for the row under the cursor |
 | `,` | **what is configured** — this machine, and every repository's `devplane.toml` read back |
 | `g` | **every open issue and pull request**, across every registered project — `i` and `p` switch |
 | `⌘K` | jump to any project, piece of work or session by name |
 | `⌘N` | dispatch work: prompt, project, kind, and the project's own templates |
 | `f` · `s` · `/` | raise the editor window · snooze · search |
+
+A permission also carries **the rule that stops it being asked again**, with the file to paste it
+into — see [Permissions](/docs/permissions/#which-rule-to-write-next). Nothing here writes it.
 
 The counts are the same door: `4 issues · 2 PRs` in the header, and the same figures on a project
 heading, are buttons. A count you cannot open is a number telling you to go and look somewhere else.

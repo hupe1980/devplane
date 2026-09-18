@@ -152,7 +152,7 @@ The rule offered is the **narrowest** that covers what it was composed from, nev
 agent asked for, and it is replayed against the call before you are shown it: a rule that would not
 have decided it is refused rather than handed over. Where none can be, the item says which reason it
 is — several commands in one call, a construct no prefix rule may approve, a tool whose rules take no
-pattern.
+pattern, or a prompt Claude Code raised through its own dialog without naming the call.
 
 **Nothing is written for you.** No command and no route edits `[policy]`, and there will not be one:
 an agent on this machine runs as you and can read the daemon's token, so a write path to the rules

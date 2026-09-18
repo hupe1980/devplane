@@ -1599,7 +1599,7 @@ async fn a_permission_no_rule_can_cover_says_why() {
     );
 }
 
-/// SC-007, measured rather than asserted.
+/// What the offer costs, measured rather than asserted.
 ///
 /// The inbox is polled by every open board and this feature adds a store query
 /// per permission item. The number worth watching is not the endpoint's cost —
@@ -1673,7 +1673,7 @@ async fn sc007_the_offer_costs_one_query_per_permission_item() {
 
 /// Every row of the edge-case walk, through the daemon rather than the composer.
 ///
-/// SC-005 is about what a person reads, and the unit test beside `compose`
+/// The requirement is about what a person reads, and the unit test beside `compose`
 /// checks the sentences in isolation. This checks they survive the wire and
 /// that each input really produces its own — a variant nothing reaches is a
 /// sentence nobody will see.
@@ -1736,9 +1736,32 @@ async fn every_way_a_rule_cannot_be_offered_reads_differently() {
         said.push(sentence);
     }
 
+    // **A permission nobody named a call for.** Claude Code raises some through
+    // a notification that carries no tool input, and skipping those left the one
+    // blank this surface exists to avoid.
+    post(
+        &c,
+        &addr,
+        "/devplane/hook",
+        &token,
+        r#"{"hook_event_name":"Notification","session_id":"w-dialog","cwd":"/tmp/walk",
+            "notification_type":"permission_prompt","message":"Allow network access?"}"#,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let again = get_json(&c, &addr, "/api/inbox", &token).await;
+    let dialog = again
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["run_id"] == "w-dialog")
+        .unwrap_or_else(|| panic!("the dialog item reached the inbox: {again}"));
+    assert!(dialog["offer"].is_null(), "{dialog}");
+    assert_eq!(dialog["no_offer"]["reason"], "unknown_call", "{dialog}");
+
     // And the row that is about presence rather than absence: a session
     // Devplane only watches has no `allow` and no `deny`, and that is exactly
-    // where a rule is the only remedy (FR-013).
+    // where a rule is the only remedy.
     let watched = inbox
         .as_array()
         .unwrap()

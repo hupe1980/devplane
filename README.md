@@ -203,7 +203,7 @@ the `- [ ]` boxes, and nothing here knows what a requirement is.
 
 `devplane open` serves one page from the daemon on loopback.
 
-![The Devplane board: four projects, six sessions, one permission waiting and one session at 89% context](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/board.png)
+![The Devplane board: five projects, ten sessions, a permission waiting with the rule that would end it, and one session at 89% context](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/board.png)
 
 Keyboard-first:
 
@@ -213,12 +213,14 @@ Keyboard-first:
 | `tab` · `enter` on a work row | what it changed — diff, gate commands, the agent's account |
 | `1`–`9` | pick one of the answers the agent offered |
 | `y` `n` · `r` | allow · deny · reply |
-| — | a permission also carries the rule that stops it being asked again, and the file to paste it into |
 | `?` | why is this here — the decision log for that row |
 | `,` | what is configured — this machine, and every repository's `devplane.toml` read back |
 | `g` | every open issue and pull request, across every project |
 | `⌘N` | dispatch: prompt, project, kind, and this project's own prompts |
 | `⌘K` | jump to any project, session or piece of work by name |
+
+A permission also carries the rule that stops it being asked again — the narrowest one covering the
+calls this machine has seen, and the file to paste it into. Nothing writes it for you.
 
 `⌘N` tells you what it will do before it does it, and refuses an untrusted repository with the
 command that fixes it. `⌘K` matches by subsequence, so `crlb` finds `core-lib`.
@@ -474,7 +476,7 @@ One crate.
 | `src/` | Everything that does: daemon, receivers, HTTP API, protocol client, gates, git, GitHub, SQLite, CLI, and the board (`ui/index.html`) |
 | `tests/purity.rs` | Fails the build if `src/core/` ever breaks that rule |
 | `site/` | The documentation site (Zola) |
-| `scripts/` | Spec fetching and the checks that keep the claims honest |
+| `scripts/` | Fetching the third-party reference docs, and the checks that keep the claims honest |
 
 That one rule is why the board is rebuildable, the inbox is derived rather than stored, and the
 permission policy cannot fail open. A second crate would enforce it more strongly, by simply not
@@ -494,6 +496,11 @@ just ui                      # the board served from ui/index.html — edit, rel
 
 DEVPLANE_HOME=/tmp/vp just vp ls    # an isolated instance, touching nothing of yours
 ```
+
+`just make-og` and `just make-board` redraw the two images the site and this page use — the Open
+Graph card from `scripts/og-card.html`, and the board screenshot from a throwaway daemon fed through
+the real hook endpoints. Both carry the product's name, so both were wrong after the rename and no
+check could read either.
 
 `just rows` is the cheapest of the three permission checks and the one that runs in CI: it fails
 until every row in Claude Code's changelog that could change a verdict is dispositioned in
@@ -529,9 +536,11 @@ lands in the document; it needs `node`, and skips where there is none.
 
 ## 📓 Changes
 
-[CHANGELOG.md](CHANGELOG.md). The unreleased entry fixes four ways a `never_auto`
-rule could read as protection and not fire — read **Fixed** before upgrading if
-you rely on `[policy]`.
+[CHANGELOG.md](CHANGELOG.md) — breaking changes are called out at the top of each entry.
+
+**Coming from Vibeplane**: the binary, `devplane.toml`, `~/.devplane/`, the `DEVPLANE_*` variables
+and the `devplane:ready` label all renamed, and nothing migrates itself. The unreleased entry has the
+three commands.
 
 ## ⚖️ License
 

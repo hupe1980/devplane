@@ -87,6 +87,24 @@ if [ -n "$leaked" ]; then
   fail=1
 fi
 
+# A specification's identifiers are the same failure as a `(D9)`, one layer over:
+# `SC-007` and `T018` mean nothing to somebody without the folder that defines
+# them. Comment lines only, and backticked runs are exempt — `FR-001` inside a
+# sentence *about* the format Spec Kit writes is a fact about the world, and the
+# test fixtures that contain `- [ ] T001` are a user's specification, not ours.
+ids=$(cd .. && grep -rInE '^[[:space:]]*(//|///|//!)' $published 2>/dev/null \
+  | grep -vE '/target/|site/public/' \
+  | while IFS= read -r hit; do
+      text=${hit#*:}; text=${text#*:}
+      printf '%s' "$text" | sed "s/$bt[^$bt]*$bt//g" \
+        | grep -qE '\b(FR|SC)-[0-9]{3}\b|\bT[0-9]{3}\b' && echo "$hit"
+    done)
+if [ -n "$ids" ]; then
+  echo "published tree cites a specification's identifiers (gitignored):"
+  echo "$ids" | sed 's/^/  /'
+  fail=1
+fi
+
 # The same rule for this project's own specifications, and it needs a different
 # mechanism. `specs/NNN-name/` is also where a **user's** specifications live —
 # it is what `--spec` points at and it is documented as a product feature — so
@@ -258,6 +276,16 @@ if [ -n "$cargo_version" ] && [ -n "$claimed_release" ]; then
     fail=1
   fi
 fi
+
+# The site states the version too, in structured data on every page, and it is
+# the one copy no guard reached: it said 0.1.0 for four releases. It is the same
+# claim as the manifest's, so it is checked against it rather than trusted.
+site_version=$(grep -m1 '^version = ' ../site/zola.toml 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+if [ -n "$site_version" ] && [ -n "$cargo_version" ] && [ "$site_version" != "$cargo_version" ]; then
+  echo "site/zola.toml says $site_version; the manifest says $cargo_version"
+  fail=1
+fi
+
 
 # The widening count (R24) and the provider release behaviour was verified
 # against. Both are counted rather than compared to a constant, because the

@@ -34,7 +34,7 @@ pub const WORTH_A_RULE: usize = 3;
 /// Counting costs a policy evaluation each, and the figure is persuasive long
 /// before it is large: *covers 50+ calls like it* says everything *covers 401*
 /// would. Measured — an unbounded count made the inbox poll grow with the event
-/// log rather than with the number of items (SC-007).
+/// log rather than with the number of items.
 pub const MAX_KIN: usize = 50;
 
 /// What a rule was composed from.
@@ -90,6 +90,14 @@ pub enum NoOffer {
     /// A rule was composed and then refused: replayed against the call, it did
     /// not decide it.
     WouldNotDecide,
+    /// Nobody said which call this is about.
+    ///
+    /// Claude Code raises some permission prompts through a *notification*,
+    /// which names no tool and carries no input — a sandboxed command's network
+    /// request is one. The item is real and the person still has to answer it;
+    /// there is simply nothing to compose a rule from, and saying so beats the
+    /// blank that skipping it leaves.
+    UnknownCall,
 }
 
 impl NoOffer {
@@ -108,6 +116,10 @@ impl NoOffer {
             Self::WouldNotDecide => "A rule was composed for this and then refused — replayed \
                  against the call, it did not decide it. You would have pasted \
                  it in and been asked again."
+                .into(),
+            Self::UnknownCall => "Claude Code raised this through its own dialog and did not say \
+                 which call it is about, so there is nothing to write a rule \
+                 from."
                 .into(),
         }
     }
@@ -236,7 +248,7 @@ pub fn compose(
 
 /// The rule text, but only if it parses and actually matches the call.
 ///
-/// **This is the check a comment in `command.rs` claimed for years and nothing
+/// **This is the check a comment in `command.rs` claimed and nothing
 /// performed.** Composing a rule from a call and assuming it covers that call
 /// is the kind of assumption that holds until it does not, and the failure is
 /// the expensive one: somebody pastes the rule in, is asked again, and stops
@@ -377,6 +389,7 @@ mod tests {
             },
             NoOffer::Compound,
             NoOffer::WouldNotDecide,
+            NoOffer::UnknownCall,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(!a.sentence().trim().is_empty(), "a blank is not a reason");
@@ -391,7 +404,9 @@ mod tests {
     /// A variant nothing produces is a sentence nobody will ever read, which is
     /// the same defect as a wrong one.
     ///
-    /// **Three of the four, and the fourth is deliberate.** `WouldNotDecide`
+    /// **Three of the five, and the other two are deliberate.** `UnknownCall`
+    /// is the daemon's to raise — it is what *nothing said which call this is*
+    /// looks like, and `compose` is never reached for one. `WouldNotDecide`
     /// has no input that produces it, because producing it means the composer
     /// built a rule that does not cover the call it was built from — a bug,
     /// not a shape. It is a guard against this file being wrong, so a test
@@ -447,7 +462,7 @@ mod tests {
     }
 
     /// The offered rule is never wider than the narrowest one covering what it
-    /// was composed from (FR-006).
+    /// was composed from.
     ///
     /// `covers_rule` is the comparator the product already uses to decide one
     /// rule does nothing another does not, and it under-reports on purpose — so

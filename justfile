@@ -135,6 +135,20 @@ perms-live: build
 # check, plus everything above that can run without a live agent.
 verify: check deps concepts rows claims site-check perms-selftest
 
+# ── The two pictures ─────────────────────────────────────────────────────────
+#
+# Both carry the product's name, so a rename invalidates them and nothing
+# notices: no guard can read a PNG. Regenerating is a command rather than an
+# afternoon in a design tool.
+
+# The Open Graph card — what every shared link shows.
+make-og:
+    bash scripts/make-og.sh
+
+# The board screenshot, from a throwaway daemon fed through the real endpoints.
+make-board: build
+    bash scripts/make-board.sh
+
 # ── The site ─────────────────────────────────────────────────────────────────
 
 # Live reload on http://127.0.0.1:1111

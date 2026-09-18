@@ -418,28 +418,42 @@ impl AppState {
             return;
         }
         // The call each one is blocked on, read off the world once.
-        let asked: Vec<(usize, PathBuf, String, serde_json::Value)> = {
+        //
+        // **Not every permission item has one.** Claude Code raises some through
+        // a notification that names no tool — a sandboxed command's network
+        // request — and those still reach a person. Dropping them here left the
+        // one blank this whole surface exists to avoid, so they get the reason
+        // instead.
+        let mut asked: Vec<(usize, PathBuf, String, serde_json::Value)> = Vec::new();
+        {
             let w = self.world.lock().await;
-            wanted
-                .into_iter()
-                .filter_map(|n| {
-                    let run = w.run(items[n].run_id.as_ref()?)?;
-                    let b = run.blocked_on.as_ref()?;
-                    Some((n, run.cwd.clone(), b.tool.clone()?, b.input.clone()?))
-                })
-                .collect()
-        };
+            for n in wanted {
+                let call = items[n]
+                    .run_id
+                    .as_ref()
+                    .and_then(|id| w.run(id))
+                    .and_then(|run| {
+                        let b = run.blocked_on.as_ref()?;
+                        Some((run.cwd.clone(), b.tool.clone()?, b.input.clone()?))
+                    });
+                match call {
+                    Some((cwd, tool, input)) => asked.push((n, cwd, tool, input)),
+                    None => {
+                        items[n].no_offer = Some(crate::core::offer::NoOffer::UnknownCall.into())
+                    }
+                }
+            }
+        }
 
         for (n, cwd, tool, input) in asked {
             let root = crate::core::project::governing_root(&cwd);
             let scope = root.clone().unwrap_or_else(|| cwd.clone());
             // **Family first, verdict second, and the order is the whole cost.**
             // Reversing these evaluates every observed call through the policy
-            // to throw almost all of them away: measured at 152µs for a poll
-            // with no permission item against 61ms with one, over a log of 400
-            // calls — a cost growing with the event log rather than with the
-            // number of items, which is what SC-007 calls the defect. Narrowing
-            // by family is string comparison; evaluating is not.
+            // only to throw almost all of them away, which made the inbox poll
+            // grow with the size of the event log rather than with the number
+            // of items in it. Narrowing by family is string comparison;
+            // evaluating is not.
             let family = crate::core::command::rule_family(
                 &tool,
                 &policy::rule_content(&tool, &input).unwrap_or_default(),

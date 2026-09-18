@@ -182,7 +182,7 @@ $ devplane show 7c
   cost       $2.5000 over 41 requests
   changed    +156 −23 lines
   limits     5-hour 88% used, resets in 39m
-  harness    Claude Code 2.1.272 — newer than the release the gate was measured against
+  harness    Claude Code 2.1.276 — newer than the release the gate was measured against
 ```
 
 **Nothing depends on it.** It exists only in an interactive session that renders a status line, so

@@ -301,7 +301,7 @@ async fn a_claim_of_done_that_fails_the_gates_does_not_become_done() {
         "the failure the human sees is the one the runner printed"
     );
 
-    // T006 — and the *current* verdict carries its own evidence, so a reviewer
+    // And the *current* verdict carries its own evidence, so a reviewer
     // does not have to reach into the history and work out which element is the
     // last one. `passed` lives on this object for the same reason: the board
     // once re-derived it from exit codes and read a reproduction gate backwards.
@@ -1785,7 +1785,7 @@ steps = [
     .await;
     assert_eq!(released["released"], "merge", "{released}");
 
-    // T021 — and the release is **recorded as a person's decision**. The work
+    // And the release is **recorded as a person's decision**. The work
     // view offers this button, so the audit trail has to say who released it:
     // `devplane audit` answers *what was decided and on whose authority*, and a
     // human step released with no row would be the one decision missing from it.
@@ -2100,10 +2100,10 @@ fn explain_says_why_nothing_answered() {
 
 /// The change set, and the four answers it has to keep apart.
 ///
-/// T018. A reviewer approving work is entitled to know which of these they are
+/// A reviewer approving work is entitled to know which of these they are
 /// reading: *here is the change*, *the branch changed nothing*, *the checkout is
 /// gone*, and *there is more than this*. Rendering any two of them the same way
-/// is the failure the spec's SC-004 is about.
+/// is the failure this is about.
 #[tokio::test]
 async fn the_change_set_tells_its_four_answers_apart() {
     let Some(agent) = echo_agent() else { return };
