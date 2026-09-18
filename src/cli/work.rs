@@ -437,7 +437,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
             DIM,
             &format!(
                 "{shown} of the {} calls that reached you would stop asking · \
-                 paste into [policy] auto_allow, then devplane check",
+                 paste into permissions.allow in your agent's settings",
                 counts[2]
             )
         )

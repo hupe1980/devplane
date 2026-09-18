@@ -140,10 +140,12 @@ const item = {
     basis: "family",
     covers: 6,
     file: NASTY,
-    section: "[policy] auto_allow",
+    section: "permissions.allow",
   },
   no_offer: null,
   since: "2026-09-15T00:00:00Z",
+  // The project name comes from a repository, so it is somebody else's bytes.
+  project_name: NASTY,
 };
 const work = {
   id: "w1",
@@ -307,5 +309,96 @@ if (!el("ghbody").innerHTML.includes("gh: not logged in")) {
 
 // A state glyph reads as a word too.
 if (!board.includes('class="sr">working<')) fail("the board's state glyph has no word beside it");
+
+// ── The waiting row says where it came from and how long ───────────────────
+//
+// Both are what make the list readable without opening a row, and the project
+// name is repository-provided text, so it is in the escaping sweep above too.
+if (!inbox.includes("where")) fail("a waiting row does not name its project");
+if (!inbox.includes("waiting ")) fail("a waiting row does not say how long it has waited");
+
+// A row whose project the world no longer has renders without it rather than
+// rendering a raw id at a person.
+context.__ui.setState({
+  board: board_, inbox: [{ ...item, project_name: null }], work: [work], sel: 0, showAll: false,
+});
+context.__ui.render();
+const anon = el("inbox").innerHTML;
+if (!anon.includes("card item")) fail("a row with no project name vanished");
+if (anon.includes("p1")) fail("a row with no project name fell back to showing the raw id");
+
+// An unparseable timestamp yields no age rather than `NaN`.
+context.__ui.setState({
+  board: board_, inbox: [{ ...item, since: "not a date" }], work: [work], sel: 0, showAll: false,
+});
+context.__ui.render();
+if (el("inbox").innerHTML.includes("NaN")) fail("an unreadable timestamp rendered as NaN");
+
+// ── The three silences ─────────────────────────────────────────────────────
+//
+// Three different mornings, and the third used to render as the first — which
+// is the reassuring direction to be wrong in and therefore the worst.
+const silences = new Set();
+
+// 1. Nothing needs you, everything readable.
+context.__ui.setState({ board: { ...board_, coverage: { projects: 3, unreadable: [] } },
+                        inbox: [], work: [], sel: 0, showAll: false, checkedAt: Date.now() });
+context.__ui.render();
+silences.add(el("inbox").innerHTML);
+if (!el("inbox").innerHTML.includes("Nothing needs you")) fail("a quiet machine does not say so");
+if (el("cover").innerHTML !== "") fail("a fully-readable board warned about coverage");
+
+// 2. Some projects could not be read — and they are named.
+context.__ui.setState({
+  board: { ...board_, coverage: { projects: 3, unreadable: [{ name: NASTY, why: "gh: not logged in" }] } },
+  inbox: [], work: [], sel: 0, showAll: false, checkedAt: Date.now(),
+});
+context.__ui.render();
+silences.add(el("inbox").innerHTML);
+const cover = el("cover").innerHTML;
+if (!cover.includes("could not be read")) fail("an unreadable project is not reported");
+if (!cover.includes("gh: not logged in")) fail("an unreadable project does not say why");
+if (cover.includes("<img src=x")) fail("coverage: untrusted text reached the document as markup");
+if (el("inbox").innerHTML.includes("Nothing needs you.</b>"))
+  fail("an incomplete list claimed the reassuring silence");
+
+// 3. The daemon has not answered recently.
+context.__ui.setState({ board: { ...board_, coverage: { projects: 3, unreadable: [] } },
+                        inbox: [], work: [], sel: 0, showAll: false,
+                        checkedAt: Date.now() - 600000 });
+context.__ui.render();
+silences.add(el("inbox").innerHTML);
+if (!el("inbox").innerHTML.includes("has not answered recently"))
+  fail("a stale page does not say the daemon is quiet");
+if (el("inbox").innerHTML.includes("Nothing needs you"))
+  fail("a stale page claimed nothing needs you, which is the failure this exists to prevent");
+if (!el("fresh").innerHTML.includes("out of date")) fail("a stale list is not marked stale");
+
+if (silences.size !== 3) fail(`the three silences produced ${silences.size} distinct renderings`);
+
+// Coverage warns even when the list is not empty: a busy list can be just as
+// incomplete as an empty one.
+context.__ui.setState({
+  board: { ...board_, coverage: { projects: 3, unreadable: [{ name: "p", why: "gone" }] } },
+  inbox: [item], work: [work], sel: 0, showAll: false, checkedAt: Date.now(),
+});
+context.__ui.render();
+if (!el("cover").innerHTML.includes("could not be read"))
+  fail("a non-empty list stopped reporting what it could not see");
+
+// Never loaded is not an age of nought.
+context.__ui.setState({ board: board_, inbox: [], work: [], sel: 0, showAll: false, checkedAt: null });
+context.__ui.render();
+if (!el("fresh").innerHTML.includes("not loaded yet")) fail("a page that never loaded reported an age");
+
+// The offered rule must be valid **where it is going**. It emitted TOML into a
+// JSON settings file after the destination moved, and nothing failed.
+context.__ui.setState({ board: board_, inbox: [item], work: [work], sel: 0, showAll: false,
+                        checkedAt: Date.now() });
+context.__ui.render();
+const offered = el("inbox").innerHTML;
+if (!offered.includes("permissions")) fail("the offered rule does not name where it goes");
+if (offered.includes("auto_allow"))
+  fail("the offered rule is TOML for a key Devplane no longer reads");
 
 console.log("ui_render: ok");

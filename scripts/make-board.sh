@@ -117,8 +117,8 @@ sleep 1
 # **No `--virtual-time-budget`.** The board holds an SSE stream open, so virtual
 # time never advances past it and Chrome waits for ever. That is not a
 # hypothetical: it is how this script first hung.
-shoot() { # file-name  hash  height  [light|dark]
-  local name="$1" hash="$2" height="${3:-940}" scheme="${4:-}"
+shoot() { # file-name  hash  height  [light|dark]  [width]
+  local name="$1" hash="$2" height="${3:-940}" scheme="${4:-}" width="${5:-1240}"
   # Headless Chrome answers `prefers-color-scheme: dark`, so the default shots
   # are dark. `preferredColorScheme` drives the media query directly, which is
   # the only way to photograph the other theme without injecting a script —
@@ -128,12 +128,26 @@ shoot() { # file-name  hash  height  [light|dark]
   [ "$scheme" = light ] && flags+=(--blink-settings=preferredColorScheme=1)
   [ "$scheme" = dark ] && flags+=(--blink-settings=preferredColorScheme=2)
   "$CHROME" --headless --disable-gpu --hide-scrollbars "${flags[@]:+${flags[@]}}" \
-    --window-size="1240,$height" --screenshot="$tmp/$name.png" \
+    --window-size="$width,$height" --screenshot="$tmp/$name.png" \
     "http://127.0.0.1:$port/?token=$token#$hash" >/dev/null 2>&1 || true
   [ -s "$tmp/$name.png" ] || { echo "make-board: Chrome produced nothing for $name" >&2; return 1; }
   mv "$tmp/$name.png" "site/static/$name.png"
   echo "make-board: site/static/$name.png ($(du -k "site/static/$name.png" | cut -f1) KB)"
 }
+
+# **The narrow view, at 500 — which is as narrow as Chrome will go.**
+#
+# `--window-size` is clamped: asking for 390 gives a 500-point *layout* cropped
+# to a 390-wide PNG, which looks exactly like a page that scrolls sideways and
+# is not one. A whole phone-overflow "bug" was chased before a diagnostic
+# printed `vw500 sw500` and settled it — the page had never overflowed, and
+# `--headless=new` clamps the same way.
+#
+# 500 still exercises the narrow layout, because the media query turns over at
+# 46rem. What it does not prove is 390, and saying 390 when the tool gives 500
+# would be the kind of claim this project fails builds over.
+shoot narrow needs 900 "" 500
+shoot diag needs 900 "" 390
 
 shoot board boardsec 940
 # Straight after the dark one, so the two are the same board seconds apart and
@@ -144,7 +158,6 @@ shoot board-light boardsec 940 light
 [ "${SHOTS:-all}" = board ] || {
   # Gate is the surface nobody else in the field ships, and a README showing
   # only a session list is a README about the half that commoditised.
-  shoot gate  gatesec  820
   shoot audit auditsec 820
   shoot inbox needs    620
   shoot work  worksec  420

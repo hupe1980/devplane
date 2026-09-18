@@ -1409,11 +1409,16 @@ fn the_default_surface_shows_both_of_the_boards_sections() {
         .find("<nav class=\"rail\"")
         .map(|i| &PAGE[i..i + PAGE[i..].find("</nav>").expect("the rail closes")])
         .expect("the rail exists");
+    // **The board's entry, not the rail's first.** This read `nth(1)` — the
+    // first surface in the rail — while the board happened to be first. It
+    // stopped being first when the page started opening on what needs you, and
+    // a guard that silently retargets itself onto a different surface is worse
+    // than no guard: it would have gone on passing about the wrong thing.
     let rail_id = rail
-        .split("data-surface=\"")
-        .nth(1)
-        .and_then(|r| r.split('"').next())
-        .expect("the rail's first entry");
+        .split("href=\"#")
+        .filter_map(|r| r.split('"').next())
+        .find(|id| id.starts_with("board"))
+        .expect("the rail no longer offers the session list");
     assert!(
         js.contains(&format!("which === \"{rail_id}\"")),
         "the rail calls the default surface `{rail_id}` and the code checks for something else"
@@ -1480,4 +1485,136 @@ fn every_command_outcome_has_a_word_the_page_can_say() {
             "no words for an outcome that is not a verdict: {phrase}"
         );
     }
+}
+
+// ── The landing surface ─────────────────────────────────────────────────────
+//
+// The page used to open on the session list. Anthropic ships that surface as
+// `claude agents`, maintained by the people who own the session format, and
+// theirs is better. What only this product has — work that outlived the session
+// that made it — sat one click away.
+
+/// **The page opens on what needs a person, not on a list of sessions.**
+#[test]
+fn the_landing_surface_is_what_needs_you() {
+    let rail = PAGE
+        .split("<nav class=\"rail\"")
+        .nth(1)
+        .and_then(|s| s.split("</nav>").next())
+        .expect("the rail is gone");
+    let current = rail
+        .split("aria-current=\"page\"")
+        .next()
+        .expect("no surface is marked current");
+    assert!(
+        current.contains("#needs"),
+        "the page still opens on something other than the waiting list"
+    );
+    // And it is first in the rail, because a list somebody has to scroll a
+    // navigation bar to find is a list they will stop looking at.
+    let needs_at = rail.find("#needs").expect("no waiting list in the rail");
+    let board_at = rail.find("#boardsec").expect("no session list in the rail");
+    assert!(
+        needs_at < board_at,
+        "the session list is still above the thing this product is for"
+    );
+}
+
+/// The session list moved. It did not go, and it was not rewritten.
+#[test]
+fn the_session_list_is_still_reachable_and_unchanged() {
+    assert!(
+        PAGE.contains("href=\"#boardsec\""),
+        "the session list is no longer reachable from the rail"
+    );
+    assert!(
+        PAGE.contains("id=\"boardsec\"") && PAGE.contains("id=\"board\""),
+        "the session list's markup was changed by a feature that was only supposed to move it"
+    );
+}
+
+/// **A row names its project and how long it has waited**, or the reader has to
+/// open it to find out what it is — which is the whole cost the list exists to
+/// remove.
+#[test]
+fn a_waiting_row_says_where_it_came_from_and_how_long() {
+    let inbox = PAGE
+        .split("$(\"inbox\").innerHTML")
+        .nth(1)
+        .and_then(|s| s.split("$(\"needs\").dataset").next())
+        .expect("the inbox renderer is gone");
+    assert!(
+        inbox.contains("project_name"),
+        "a row does not name its project"
+    );
+    assert!(
+        inbox.contains("i.since"),
+        "a row does not say how long it has waited, which is what the order is by"
+    );
+}
+
+/// The list crosses projects; it is not a set of per-project lists.
+#[test]
+fn the_waiting_list_is_not_grouped_by_project() {
+    let inbox = PAGE
+        .split("$(\"inbox\").innerHTML")
+        .nth(1)
+        .and_then(|s| s.split("$(\"needs\").dataset").next())
+        .expect("the inbox renderer is gone");
+    for grouping in ["<h3", "group", "projhead"] {
+        assert!(
+            !inbox.contains(grouping),
+            "the waiting list groups rows by something: {grouping}"
+        );
+    }
+}
+
+/// **Three things that already worked, still working after the surface moved.**
+///
+/// Research found them built, and *built* and *still built after the default
+/// changed* are different claims. This is the regression guard on the move
+/// rather than a test of the behaviours themselves, which have their own.
+#[test]
+fn moving_the_default_surface_did_not_cost_the_inbox_its_actions() {
+    let inbox = PAGE
+        .split("$(\"inbox\").innerHTML")
+        .nth(1)
+        .and_then(|s| s.split("$(\"needs\").dataset").next())
+        .expect("the inbox renderer is gone");
+
+    // A row can still be answered, so it can still leave the list.
+    for act in ["allow", "deny", "reply"] {
+        assert!(
+            inbox.contains(&format!("data-act=\"{act}\"")),
+            "a waiting row can no longer be answered: {act}"
+        );
+    }
+    // A row can still be hidden rather than dropped.
+    assert!(
+        inbox.contains("data-act=\"snooze\""),
+        "a waiting row can no longer be snoozed, so hiding it would mean losing it"
+    );
+    // And a live session is still attachable from where it is shown.
+    assert!(
+        inbox.contains("data-act=\"attach\""),
+        "a live session is no longer attachable from the row that mentions it"
+    );
+}
+
+/// The order is level, then age — and it is the page's job not to re-sort it.
+///
+/// The daemon ranks the list before it is sent. A page that sorted it again
+/// would be a second authority on urgency, and the two would disagree the first
+/// time one of them changed.
+#[test]
+fn the_page_does_not_re_sort_what_the_daemon_ranked() {
+    let inbox = PAGE
+        .split("$(\"inbox\").innerHTML")
+        .nth(1)
+        .and_then(|s| s.split("$(\"needs\").dataset").next())
+        .expect("the inbox renderer is gone");
+    assert!(
+        !inbox.contains(".sort("),
+        "the page re-sorts the waiting list, so there are two authorities on what is urgent"
+    );
 }
