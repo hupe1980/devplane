@@ -132,11 +132,28 @@ if [ "$AXIS" != selftest ]; then
   # about a *version* and a number with no version beside it is not a measurement.
   MEASURED=$("$CLAUDE" --version 2>/dev/null | sed 's/ .*//')
   echo "measuring against Claude Code ${MEASURED:-unknown}  ($CLAUDE)"
-  echo
 fi
 
 VP="${DEVPLANE_BIN:-target/debug/devplane}"
 [ -x "$VP" ] || cargo build -q || exit 2
+
+# ---------------------------------------------------------------------------
+# **The instrument can be older than the thing it measures, and on the day this
+# was written it was.** The signed-in agent sat three releases below the floor
+# it exists to advance. A green run there is a true statement about the
+# installed release and a false one about the floor, and the only thing between
+# those two sentences is a constant somebody edits.
+#
+# So this is said **before anything is spent**, and the guard is on *movement*
+# rather than on running: a run below the floor is still worth doing and still
+# worth reading; what it may not do is advance a claim about a release it never
+# saw. `may_move_floor` is the domain's, so the script and the product cannot
+# disagree about it.
+if [ "$AXIS" != selftest ] && [ -n "${MEASURED:-}" ]; then
+  echo "floors, and what a run against ${MEASURED} may move:"
+  "$VP" floors --observed "$MEASURED" 2>/dev/null || echo "  (the floors could not be read)"
+fi
+echo
 
 MODEL="${DEVPLANE_PROBE_MODEL:-claude-haiku-4-5-20251001}"
 W="$(mktemp -d)"
@@ -484,13 +501,59 @@ deny_reset() {
 # `"` inside a shape has to survive being written into a JSON settings blob.
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
+# **Accumulated in a file, not a variable.** `note_spend` runs on the right of a
+# pipe, which bash puts in a subshell, so `SPENT=...` there would be discarded
+# the moment the probe returned — a cost line that always read zero, and looked
+# like a cheap run rather than a broken meter.
+SPEND_LOG="$W/.spend"
+: > "$SPEND_LOG"
+note_spend() { # stream-json on stdin
+  local c
+  c=$(python3 -c '
+import json,sys
+total = 0.0
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        m = json.loads(line)
+    except Exception:
+        continue
+    v = m.get("total_cost_usd")
+    if isinstance(v, (int, float)):
+        total = float(v)
+print(f"{total:.6f}")
+' 2>/dev/null || echo 0)
+  printf '%s\n' "${c:-0}" >> "$SPEND_LOG"
+}
+
+# What has been spent so far, and on how many vendor calls.
+spend_line() {
+  python3 - "$SPEND_LOG" <<'PYEOF'
+import sys
+try:
+    vals = [float(x) for x in open(sys.argv[1]) if x.strip()]
+except Exception:
+    vals = []
+n = len(vals)
+total = sum(vals)
+if n == 0:
+    print("no vendor calls were made, so nothing was spent")
+else:
+    per = total / n
+    print(f"estimated cost ${total:.4f} over {n} vendor call(s) (${per:.4f}/call, "
+          f"client-side estimate — the vendor says it can differ from the bill)")
+PYEOF
+}
+
 ask_claude_deny() { # deny-json command -> yes|no   (yes = it ran, i.e. not blocked)
   deny_reset
   full="$2 ; git config --local vp.ran 1"
   ( cd "$W" && "$CLAUDE" -p "Run this exact bash command and nothing else, then stop: $full" \
       --settings "{\"permissions\":{\"allow\":[\"Bash($(json_escape "$full"))\"],\"deny\":$1,\"ask\":[]}}" \
       --permission-mode dontAsk --model "$MODEL" \
-      --output-format stream-json --verbose >/dev/null 2>&1 )
+      --output-format stream-json --verbose 2>/dev/null ) | note_spend
   deny_ran
 }
 
@@ -594,12 +657,25 @@ runnable() { # command -> 0|1
   [ "$(ran "$1")" = yes ]
 }
 
+# ---------------------------------------------------------------------------
+# What a run cost, and how many vendor calls bought it.
+#
+# **The figure was already arriving and being thrown away.** Every probe runs
+# with `--output-format stream-json`, whose result message carries
+# `total_cost_usd`, and the harness discarded the whole stream. So *"priced out
+# of running weekly"* — a sentence in the notes for four passes — was a feeling
+# next to a number nobody read.
+#
+# It is the vendor's **client-side estimate**, which its own documentation says
+# "can differ from your actual bill". The report says estimated, because this
+# figure ends up quoted in notes that outlive the context that produced it.
+
 ask_claude() { # ruleset command -> yes|no
   reset
   ( cd "$W" && "$CLAUDE" -p "Run this exact bash command and nothing else, then stop: $2" \
       --settings "{\"permissions\":{\"allow\":[\"$1\"$(extra_allow "$2")],\"deny\":[],\"ask\":[]}}" \
       --permission-mode dontAsk --model "$MODEL" \
-      --output-format stream-json --verbose >/dev/null 2>&1 )
+      --output-format stream-json --verbose 2>/dev/null ) | note_spend
   ran "$2"
 }
 
@@ -777,6 +853,7 @@ if [ -n "${DEVPLANE_DIFF_PROBES:-}" ]; then
     exit $scoped_fail
   fi
   echo "verify-permissions-diff: scoped run, $scoped_n probe(s) asked of the running product"
+  echo "verify-permissions-diff: $(spend_line)"
   echo "verify-permissions-diff: this measured only what those rows announced; it says nothing about the rest of the matcher"
   exit $scoped_fail
 fi
@@ -831,6 +908,7 @@ fi
 if [ "$AXIS" = allow ]; then
   echo
   echo "verify-permissions-diff: $n cases on the allow axis, deny axis skipped"
+  echo "verify-permissions-diff: $(spend_line)"
   exit $fail
 fi
 
@@ -923,6 +1001,7 @@ python3 "$(dirname "$0")/write-matrix-record.py" \
 echo
 if [ "$fail" = 0 ]; then
   echo "verify-permissions-diff: $n cases, no undeclared disagreements (${skipped:-0} shapes unrunnable here, ${declared:-0} declared narrowings, ${retried:-0} reproduced)"
+  echo "verify-permissions-diff: $(spend_line)"
 else
   # shellcheck disable=SC2059
   printf "verify-permissions-diff: $n cases (${skipped:-0} shapes unrunnable here), disagreements:$disagreements\n"

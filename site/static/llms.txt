@@ -40,6 +40,8 @@ Every command takes a global `--json` that prints machine-readable output instea
 - `devplane stop`: stop the running daemon.
 - `devplane mcp`: serve Devplane's read-only surface to an agent over MCP on stdio — `inbox`, `work`, `explain`, `audit`. No tool on it writes; anything that acts still goes through a person. Register it with your agent as a command MCP server.
 - `devplane hook`, `devplane statusline`: read a payload on stdin and forward it. Used by the installed hooks, not typed by a person.
+- `devplane floors`: prints the three compatibility floors and, given a vendor version, whether a run against it may move one. Used by the permission harness, not typed by a person.
+- `devplane sequential`: says whether a differential probe has been asked enough times, given how many asks agreed and disagreed. Used by the permission harness, not typed by a person — it exists as a command so the rule has one implementation rather than one in the domain and another in a shell script.
 
 ## Configuration
 
