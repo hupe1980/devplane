@@ -83,7 +83,6 @@ pub fn router(state: Shared) -> Router {
         .route("/api/forge", get(forge))
         .route("/api/decisions", get(decisions))
         .route("/api/decisions/pane", get(decisions_pane))
-        .route("/api/gate/pane", get(gate_pane))
         .route("/api/explain", get(explain))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
@@ -2256,34 +2255,6 @@ async fn decisions_pane(
     }
 }
 
-/// The gate surface, rendered.
-///
-/// The product's one unoccupied claim, reachable without knowing a command
-/// exists. It renders what `devplane gate` prints, from the same constants.
-async fn gate_pane(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
-    guard!(state, headers);
-    let running = {
-        let w = state.world.lock().await;
-        w.runs()
-            .filter_map(|r| r.claude_version.as_deref())
-            .max()
-            .map(str::to_string)
-    };
-    let cadence =
-        crate::core::policy::cadence(running.as_deref(), Some(&crate::conformance::today()));
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        crate::render::gate_pane(
-            running.as_deref(),
-            &cadence,
-            crate::conformance::MEASURES_ONLY_WHAT_WAS_ANNOUNCED,
-        )
-        .as_str()
-        .to_string(),
-    )
-        .into_response()
-}
-
 /// Asks the daemon to stop.
 ///
 /// What `devplane stop` calls. A request rather than a signal to the pid in
@@ -2415,8 +2386,6 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
         // is relying on, which is the only thing worth knowing about them.
         "gate": {
             "verified_against": crate::core::policy::VERIFIED_AGAINST,
-            "rows_cleared_through": crate::core::policy::ROWS_CLEARED_THROUGH,
-            "rows_measured_through": crate::core::policy::ROWS_MEASURED_THROUGH,
         },
         "machine_policy": machine_policy,
         "projects": projects,

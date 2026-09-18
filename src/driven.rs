@@ -808,32 +808,6 @@ async fn handle(
             };
 
             match verdict {
-                Verdict::Allow { rule } => {
-                    // Prefer the narrowest grant the agent offers. `allow_always`
-                    // would persist a rule the project never wrote down.
-                    if let Some(opt) = pick(&options, "allow_once", "allow") {
-                        let _ = session.decide(&request_id, Some(opt.id)).await;
-                        state
-                            .record(
-                                crate::core::Decision::new(
-                                    crate::core::Actor::Policy,
-                                    "agent:tool.use",
-                                    title.clone(),
-                                    "allow",
-                                )
-                                .because(&rule)
-                                .for_run(run),
-                            )
-                            .await;
-                        ingest(Event::PermissionDecided {
-                            tool: title,
-                            decision: "allow".into(),
-                            by: format!("policy:{rule}"),
-                        })
-                        .await;
-                        return;
-                    }
-                }
                 Verdict::Deny { rule } => {
                     let _ = session
                         .decide(

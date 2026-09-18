@@ -495,7 +495,7 @@
      the inbox on the gate surface. Now each writes its own fact and CSS
      combines them. */
   #needs[data-surface="false"], #boardsec[data-surface="false"],
-  #worksec[data-surface="false"], #gatesec[data-surface="false"],
+  #worksec[data-surface="false"],
   #auditsec[data-surface="false"],
   section[data-empty="true"] { display: none; }
   .plan .done { color: var(--done); }
@@ -506,7 +506,6 @@
   <a href="#boardsec" data-surface="boardsec" aria-current="page">Board<span class="badge" id="railboard"></span></a>
   <a href="#needs" data-surface="needs">Inbox<span class="badge" id="railinbox"></span></a>
   <a href="#worksec" data-surface="worksec">Work<span class="badge" id="railwork"></span></a>
-  <a href="#gatesec" data-surface="gatesec">Gate<span class="badge" id="railgate"></span></a>
   <a href="#auditsec" data-surface="auditsec">Audit</a>
   <!-- Not built. A `<span>` rather than a link: not focusable, not pressable,
        and it says what is missing. An entry that looked enabled and did
@@ -522,7 +521,6 @@
   <div class="live">
     <!-- In the health corner rather than among the counts: a fact about
          whether to trust this tool, not a number of things waiting. -->
-    <span id="gateage" class="stale" hidden></span>
     <button id="theme" type="button" aria-label="Switch between the light and dark theme">theme</button>
     <span class="dot" id="dot" aria-hidden="true"></span><span id="livetext">connecting</span>
   </div>
@@ -553,9 +551,6 @@
   <!-- The surface nobody else in the field ships, and until now reachable only
        by knowing `devplane gate` exists. Rendered by the daemon from the same
        constants the command prints, so there is one home for each figure. -->
-  <section id="gatesec" data-surface="false" aria-labelledby="gatehead">
-    <div id="gatebody"></div>
-  </section>
 
   <!-- What Devplane decided, and on whose authority. The same renderer as the
        reason pane, without narrowing to one piece of work. -->
@@ -796,28 +791,6 @@ function render() {
   const b = state.board;
   if (!b) return;
   const s = b.summary;
-  // How stale the gate's measurement is, shown only when it is stale: a field
-  // that is usually zero is a number nobody can act on.
-  //
-  // Concatenated rather than a template literal on purpose. `textContent` and
-  // `title` cannot become markup, but writing them as templates would make them
-  // look like the interpolations that *do* need `esc()`, and "every `${...}` of
-  // an API value is wrapped, no exceptions" is the rule that keeps this page
-  // safe.
-  const age = $("gateage");
-  const gap = b.gate_behind;
-  if (gap) {
-    age.textContent = gap.releases
-      ? "gate " + gap.releases + " release" + (gap.releases === 1 ? "" : "s") + " behind"
-      : "gate measured on " + gap.measured;
-    age.title =
-      "the permission gate was last differentially tested against Claude Code " +
-      gap.measured + "; a session here runs " + gap.running;
-    age.hidden = false;
-  } else {
-    age.hidden = true;
-  }
-
   $("counts").innerHTML =
     `<span><b>${esc(s.projects)}</b> projects</span>` +
     `<span><b>${esc(s.runs)}</b> sessions</span>` +
@@ -1988,7 +1961,7 @@ document.addEventListener("click", (e) => {
 // Which surface is showing. The rail is chrome: it hides and shows sections
 // that already exist rather than fetching a page, so nothing is a route and
 // nothing costs a request.
-const SURFACES = ["boardsec", "needs", "worksec", "gatesec", "auditsec"];
+const SURFACES = ["boardsec", "needs", "worksec", "auditsec"];
 async function showSurface(which) {
   // The board is two sections — what needs you, and everything running — so it
   // is the one surface that shows more than one.
@@ -2006,9 +1979,8 @@ async function showSurface(which) {
     if (a.dataset.surface === which) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
-  // The two surfaces the daemon renders. Asked for when opened rather than on
-  // every refresh: neither changes while somebody is looking at the board.
-  if (which === "gatesec") $("gatebody").innerHTML = await apiHtml("/api/gate/pane");
+  // The surface the daemon renders. Asked for when opened rather than on every
+  // refresh: it does not change while somebody is looking at the board.
   if (which === "auditsec") $("auditbody").innerHTML = await apiHtml("/api/decisions/pane?limit=50");
 }
 
@@ -2031,7 +2003,7 @@ $("theme").addEventListener("click", () => {
 });
 
 // The rail's links are ordinary links, and the hash is what decides. That
-// makes a surface addressable — `#gatesec` opens the gate report for somebody
+// makes a surface addressable — `#auditsec` opens the decision log for somebody
 // you sent the link to — and it means the rail needs no click handler at all
 // beyond what the browser already does. It is also what lets the screenshot
 // script photograph a surface without injecting a script into the page.

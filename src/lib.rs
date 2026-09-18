@@ -21,7 +21,6 @@ pub mod cli;
 pub mod client;
 pub mod config;
 /// Where Devplane keeps its own state, and how a client finds the daemon.
-pub mod conformance;
 /// Types and the pure logic over them. Reaches nothing outside the process.
 pub mod core;
 /// The daemon: receivers, API and the authoritative state.

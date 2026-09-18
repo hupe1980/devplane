@@ -337,7 +337,7 @@ fi
 # central claim is how old they are — so the constant the binary reads is the
 # fact and these notes are a copy of it, exactly as the released version is a
 # copy of `Cargo.toml`. They could drift silently until this existed.
-for pair in "VERIFIED_AGAINST verified against" "ROWS_CLEARED_THROUGH rows cleared through"; do
+for pair in "VERIFIED_AGAINST verified against"; do
   set -- $pair
   const=$1; shift
   phrase="$*"
@@ -403,22 +403,16 @@ if [ -z "${DEVPLANE_NO_NET:-}" ] && command -v curl >/dev/null 2>&1; then
     fi
   fi
 
-  # 2. The changelog floor, against the vendor's changelog head. This is the
-  #    figure `#harness-clock` acts on: a release above the floor is a run owed,
-  #    and the gap between the floor and the head is where a widening — or, in
-  #    2.1.273, a revert that made this matcher stricter than the product — lives
-  #    unseen. One home for the figure, STATE.md, same as every other.
-  read_through=$(grep -E '^\| Changelog rows cleared through \|' STATE.md 2>/dev/null \
-    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  if [ -n "$read_through" ]; then
-    head_ver=$(get https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md \
-      | grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    if [ -n "$head_ver" ] && [ "$head_ver" != "$read_through" ]; then
-      echo "the changelog floor is $read_through; Claude Code is at $head_ver — those rows are unread"
-      echo "  (scripts/changelog-rows.sh, then policy::ROWS_CLEARED_THROUGH and STATE.md)"
-      fail=1
-    fi
-  fi
+  # 2. The rule-ledger floor guard was here until 2026-09-18, and went with the
+  #    obligation it enforced. It failed when the vendor shipped past the floor,
+  #    because rule-relevant rows were rows somebody owed a run on. Devplane no
+  #    longer mirrors anybody's permission semantics (D249), so a changed rule
+  #    shape is the vendor's business and nothing is owed.
+  #
+  #    What is still ours is the *hook contract*, because that is how Devplane
+  #    reaches a session at all. `just channels` reads it — as a reading with a
+  #    boundary rather than a floor with a debt attached, which is the shape
+  #    that kept failing.
 
   # 3. What these notes say a registry publishes, against what it publishes.
   #

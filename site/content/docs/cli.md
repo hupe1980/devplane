@@ -339,16 +339,6 @@ fragments of what a driven agent is saying.
 Open the board in a browser. The token is handed over once in the URL and stripped from the address
 bar, so it cannot end up in a screenshot or a bookmark.
 
-### `devplane gate`
-
-What the permission gate is, and how much of it is measured — the release the rules were last checked
-against, how far the vendor has moved since, and the gate scored against a published
-execution-boundary profile. `doctor` asks whether the channels are alive; this asks whether the
-verdicts are worth anything.
-
-The card shows what is **missing** as well as what is met: a conformance report with no failures in it
-is a marketing document. [The full page →](/devplane/docs/conformance/)
-
 ### `devplane doctor`
 
 Aliased as `devplane diagnostics`.

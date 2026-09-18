@@ -507,10 +507,14 @@ pub fn describe_call(tool: &str, input: &serde_json::Value) -> String {
 /// Extracted so the daemon and the `command` hook cannot drift: two processes
 /// answering the same question in two spellings is a difference nobody would
 /// see until it mattered.
+///
+/// **There is no allow arm, and there will not be one.** Answering *yes* here
+/// would mean Devplane claiming the vendor would also have said yes, which is a
+/// claim about somebody else's code that decays with every release. Devplane
+/// prohibits, defers, and reports; it does not approve.
 pub fn permission_reply(verdict: &crate::core::Verdict) -> PermissionResponse {
     use crate::core::Verdict;
     match verdict {
-        Verdict::Allow { .. } => PermissionResponse::allow(),
         Verdict::Deny { rule } => {
             PermissionResponse::deny(format!("denied by Devplane policy rule {rule}"))
         }

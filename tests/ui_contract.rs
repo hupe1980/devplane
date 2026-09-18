@@ -781,31 +781,6 @@ fn a_modal_dialog_keeps_the_keyboard() {
     );
 }
 
-/// The gate's staleness is shown only when there is staleness to show.
-///
-/// This is the product's one unoccupied claim — the rule table is measured
-/// against the vendor it answers for — and it is true on the day the harness
-/// runs and decays after. The board is where a person decides whether to trust
-/// a verdict, so the age belongs there. It is also a number that is usually
-/// zero, and a field that is always present would put noise in the one row
-/// reserved for things that need you.
-#[test]
-fn the_board_shows_the_gate_s_age_only_when_it_is_behind() {
-    assert!(
-        PAGE.contains("b.gate_behind"),
-        "the board has to read the gap the API serves"
-    );
-    // The property, not the spelling: there is a branch that hides it. The first
-    // version of this check matched the exact punctuation of the expression and
-    // broke the moment the same behaviour was written a different way, which is
-    // a test about a formatter rather than about the page.
-    assert!(
-        PAGE.contains("age.hidden = true"),
-        "and hide it when the API sends no gap — a number that is usually zero \
-         is noise in the one row reserved for things that need you"
-    );
-}
-
 /// Every cell a session row puts between the name and the summary has a width.
 ///
 /// The design language says *"every number is tabular and right-aligned, so a
@@ -1292,7 +1267,8 @@ fn no_rail_entry_offers_a_surface_that_cannot_be_opened() {
         );
         links += 1;
     }
-    assert!(links >= 5, "the rail lists only {links} reachable surfaces");
+    // Four since the gate surface went with the permission gate it reported on.
+    assert!(links >= 4, "the rail lists only {links} reachable surfaces");
 
     // And an unbuilt surface is not a control: not a link, not a button, so a
     // keyboard never lands on an offer that cannot be taken.
@@ -1316,39 +1292,6 @@ fn no_rail_entry_offers_a_surface_that_cannot_be_opened() {
     assert!(
         off.contains("not built"),
         "an unbuilt entry does not say so"
-    );
-}
-
-/// The gate report is reachable without knowing a command exists.
-///
-/// The product's one unoccupied claim is a measurement, and a measurement
-/// nobody can find is a measurement nobody is buying. This is the reason the
-/// shell outranked the feature backlog at all.
-#[test]
-fn the_gate_report_is_reachable_from_the_board() {
-    assert!(
-        PAGE.contains("data-surface=\"gatesec\""),
-        "the rail does not offer the gate report"
-    );
-    assert!(
-        PAGE.contains("/api/gate/pane"),
-        "nothing asks the daemon for the gate report"
-    );
-    // Its age is visible from the board, not only from inside the report.
-    assert!(
-        PAGE.contains("id=\"gateage\""),
-        "the gate's measurement age is not on the board"
-    );
-
-    // And the report renders every floor with what it does not claim — checked
-    // against the renderer, since that is where the sentences now live.
-    let render = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/render.rs"),
-    )
-    .expect("src/render.rs");
-    assert!(
-        render.contains("f.excludes"),
-        "the gate surface renders floors without their scope sentences"
     );
 }
 
@@ -1494,11 +1437,13 @@ fn the_default_surface_shows_both_of_the_boards_sections() {
 
 /// **The page must read a command's outcome, not the pair of fields it replaced.**
 ///
-/// This is here because the change that removed `exit_code` and `timed_out`
-/// compiled, passed 668 tests, and left the board silently rendering a cross
-/// beside every command in every gate — JavaScript reading a field that no
-/// longer exists gets `undefined` and says nothing about it. Nothing in Rust can
-/// see that, and the render harness does not reach this function.
+/// This is about the **work gate** — the project's own checks — which survives
+/// the permission gate's removal and is the thing a done certificate rests on.
+///
+/// It is here because the change that introduced the outcome enum compiled,
+/// passed the suite, and left the board silently rendering a cross beside every
+/// command in every gate: JavaScript reading a field that no longer exists gets
+/// `undefined` and says nothing about it.
 #[test]
 fn the_gate_view_reads_the_structured_outcome() {
     assert!(
@@ -1516,7 +1461,7 @@ fn the_gate_view_reads_the_structured_outcome() {
 ///
 /// Exited, timed out, never started and could-not-be-determined are four
 /// different sentences, and only the first is a verdict about the code — a
-/// missing binary is a broken gate, not a broken change.
+/// missing binary is a broken check, not a broken change.
 #[test]
 fn every_command_outcome_has_a_word_the_page_can_say() {
     for kind in ["timed_out", "never_started"] {

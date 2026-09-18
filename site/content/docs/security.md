@@ -115,7 +115,7 @@ says in its own output that it is not a measurement.
 
 Its last full run, against Claude Code 2.1.273, was clean on both: 208 deny cases and 126 allow
 cases, with no undeclared disagreement. It found a real widening on the way — a path grant approving
-whatever command wrote to the granted file — which is what a differential harness is for.
+whatever command wrote to the granted file — which is why a prohibition is checked against the file and not only against the command text. Note for.
 
 **Twelve deny shapes were skipped rather than measured**: one because macOS lacks the program, eleven
 because the model answering the probe does not reliably run them even with nothing forbidden. A
