@@ -259,6 +259,14 @@ DENY_SHAPES=(
   'touch .env'
   'git diff .env'                              # 2.1.268, git operands
   'git grep TOKEN -- .env'
+  # **A protected file read out of git's object store rather than off the
+  # path.** Every git shape above names `.env` as a working-tree operand, which
+  # a path rule can see. `HEAD:.env` is a *revision* — the same bytes, reached
+  # without the rule's spelling appearing as a path at all. If a `Read(.env)`
+  # deny does not cover it, a deny rule that reads as protection is none, and
+  # nothing in this matrix would have asked.
+  'git show HEAD:.env'
+  'git cat-file -p HEAD:.env'
   'git blame --ignore-revs-file=.env README.md' # 2.1.266, option values
   'grep -f.env README.md'                      # attached option value
   'grep -r key secrets'                        # 2.1.268, recursion
@@ -838,14 +846,56 @@ if [ -n "${DEVPLANE_DIFF_PROBES:-}" ]; then
         ;;
     esac
 
-    if [ "$theirs" = "$ours" ]; then
-      echo "PROBE $id agreed"
-    elif reason=$(narrowing_reason "$call"); then
-      echo "PROBE $id declared ($reason)"
-    else
-      echo "PROBE $id disagreed (claude=$theirs devplane=$ours) rule=[$rule] call=[$call]"
-      scoped_fail=1
-    fi
+    # -----------------------------------------------------------------------
+    # **One ask is not a measurement, and until today this path took one.**
+    #
+    # The full matrix re-asks a disagreement before believing it; this path
+    # reported one immediately. That mattered the first time it was used in
+    # anger: `git cat-file -p HEAD:.env` came back *agreed* on a single ask
+    # while sitting in the declared-narrowing list, which says the vendor allows
+    # it. One observation cannot tell vendor drift from the model having a bad
+    # day, and reporting either would have been a guess wearing a result's
+    # clothes.
+    #
+    # So the decision comes from `devplane sequential`, which is the domain's —
+    # not a second copy of the rule written in shell. It stops as soon as the
+    # evidence crosses a threshold, and says `inconclusive` rather than
+    # rounding to agreement when it cannot decide.
+    agreements=0; disagreements=0
+    while :; do
+      case "$theirs" in "$ours") agreements=$((agreements + 1)) ;; *) disagreements=$((disagreements + 1)) ;; esac
+      decision=$("$VP" sequential --agreements "$agreements" --disagreements "$disagreements" \
+                   ${DEVPLANE_DIFF_ALPHA:+--alpha "$DEVPLANE_DIFF_ALPHA"} \
+                   ${DEVPLANE_DIFF_BETA:+--beta "$DEVPLANE_DIFF_BETA"} \
+                   ${DEVPLANE_DIFF_MAX_ASKS:+--max-asks "$DEVPLANE_DIFF_MAX_ASKS"} 2>/dev/null)
+      [ "$decision" = continue ] || break
+      case "$axis" in
+        allow) theirs=$(ask_claude "$rule" "$call") ;;
+        deny)  theirs=$(ask_claude_deny "[\"$rule\"]" "$call") ;;
+      esac
+    done
+    asks=$((agreements + disagreements))
+
+    case "$decision" in
+      agree)
+        echo "PROBE $id agreed ($asks asks)" ;;
+      inconclusive)
+        # **Never rounded to agreement.** This is the outcome the fixed-retry
+        # rule had nowhere to put, and the one that says the oracle was noisy
+        # here rather than that the two sides match.
+        echo "PROBE $id inconclusive after $asks asks — the vendor answered both ways and neither threshold was reached; this is not agreement"
+        scoped_fail=1 ;;
+      disagree)
+        if reason=$(narrowing_reason "$call"); then
+          echo "PROBE $id declared after $asks asks ($reason)"
+        else
+          echo "PROBE $id disagreed after $asks asks (claude=$theirs devplane=$ours) rule=[$rule] call=[$call]"
+          scoped_fail=1
+        fi ;;
+      *)
+        echo "PROBE $id error (the sequential rule said [$decision])"
+        scoped_fail=1 ;;
+    esac
   done
 
   if [ -n "${DEVPLANE_DIFF_CHECK:-}" ]; then

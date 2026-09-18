@@ -36,3 +36,13 @@ read-deny-option-value  | deny  | Read(.env) | grep -f.env README.md
 reader-fmt-path-deny    | deny  | Read(.env) | fmt .env > /dev/null
 glob-operand-path-deny  | deny  | Read(.env) | cat .env* > /dev/null
 glob-operand-bare-star  | deny  | Read(.env) | grep -l TOKEN * > /dev/null
+
+# The first of the three dialect questions, and the only one askable with the
+# machinery exactly as it stands: a **Bash** call under a **Read** rule.
+#
+# Every other git shape in the deny table names `.env` as a working-tree
+# operand, which a path rule can see. `HEAD:.env` is a revision — the same
+# bytes, reached without the rule's spelling appearing as a path at all. This
+# matcher denies it; nothing had ever asked whether the vendor does.
+git-show-revision       | deny  | Read(.env) | git show HEAD:.env
+git-cat-file-revision   | deny  | Read(.env) | git cat-file -p HEAD:.env
