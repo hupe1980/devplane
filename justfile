@@ -71,83 +71,23 @@ reference:
     bash scripts/fetch-reference.sh
 
 
-# The span the measured floor could reach, and whether every probe still
-# resolves. Spends nothing. The run that *does* spend is not a recipe, for the
-# same reason publishing is not: a command that costs money is one somebody
-# types on purpose, looking at it.
-measured:
-    bash scripts/measured-through.sh --dry-run
-
 # concepts/ against its own rules: links resolve, D/R ids unique.
 concepts:
     bash scripts/concepts-check.sh
 
-# Every CHANGELOG row that could change a verdict, against its ledger.
-# Prints how old the corpus is: a clean run over a stale one means very little.
-rows:
-    bash scripts/changelog-rows.sh
 
-# The same, over a freshly downloaded changelog. One file, not all 130.
-rows-fetch:
-    bash scripts/changelog-rows.sh --fetch
-
-# The rows not yet dispositioned, ready to paste into the ledger.
-rows-new:
-    bash scripts/changelog-rows.sh --new
-
-# A cron line on the machine with the signed-in agent is the whole mechanism —
-# no scheduler, no daemon, no service:
+# What the vendor changed about the **channels Devplane actually uses** — hooks,
+# permission modes, the settings that decide whether a hook is consulted at all.
 #
-#   0 9 * * *  cd /path/to/devplane && just owed || notify "devplane: rows owed"
-#
-# The clock: non-zero when the vendor has shipped past the cleared floor.
-owed:
-    bash scripts/changelog-rows.sh --fetch >/dev/null
-    bash scripts/changelog-rows.sh --owed
-
-# The second ledger: the channels rather than the rules. Bounded on purpose —
-# everything permission-adjacent is 220 rows, and a ledger nobody finishes looks
-# like coverage.
+# The rule ledger that used to sit beside this is gone with the matcher it fed:
+# Devplane no longer mirrors anybody's permission semantics, so a changed rule
+# shape is the vendor's business. A changed *hook contract* is still ours.
 channels:
     bash scripts/changelog-rows.sh --channels
 
-# The expensive floor (`VERIFIED_AGAINST`) is not touched here: it moves only
-# when `just perms` runs green, which costs a signed-in agent and real money.
-#
-# Moves the cleared-rows floor to the vendor's head, only on a green ledger.
-advance:
-    bash scripts/changelog-rows.sh --advance
-
-# Both axes against a real `claude`. `just perms 20` caps it for a quick pass.
-perms CASES="0": build
-    bash scripts/verify-permissions-diff.sh {{CASES}}
-
-# Allow axis only: does an `auto_allow` rule approve what Claude Code runs?
-perms-allow CASES="0": build
-    DEVPLANE_DIFF_AXIS=allow bash scripts/verify-permissions-diff.sh {{CASES}}
-
-# Deny axis only: does a `never_auto` rule stop what Claude Code refuses?
-perms-deny CASES="0": build
-    DEVPLANE_DIFF_AXIS=deny bash scripts/verify-permissions-diff.sh {{CASES}}
-
-# One rule set, both axes, so a disagreement is re-asked cheaply: `just perms-only 'Read(.env)'`
-perms-only RULE: build
-    DEVPLANE_DIFF_ONLY='{{RULE}}' bash scripts/verify-permissions-diff.sh
-
-# PowerShell, Monitor and LSP answered by this matcher alone: a checklist, not a measurement.
-perms-dialect: build
-    DEVPLANE_DIFF_AXIS=dialect bash scripts/verify-permissions-diff.sh
-
-# Are both probes handed the same rules? The one question the harness has no oracle for.
-perms-selftest:
-    DEVPLANE_DIFF_AXIS=selftest bash scripts/verify-permissions-diff.sh
-
-# The written-down permission rules against a real Claude Code. Needs `claude`.
-perms-live: build
-    bash scripts/verify-permissions-live.sh
 
 # check, plus everything above that can run without a live agent.
-verify: check deps concepts rows claims site-check perms-selftest
+verify: check deps concepts channels claims site-check
 
 # ── The two pictures ─────────────────────────────────────────────────────────
 #

@@ -506,135 +506,6 @@ const KNOWN_TOOLS: &[&str] = &[
 /// ahead of one.
 pub const VERIFIED_AGAINST: &str = "2.1.273";
 
-/// The release whose rule-relevant changelog rows have each been accounted for.
-///
-/// Deliberately a **second, weaker** floor, because the two claims underneath
-/// them cannot share a number. The full matrix is expensive and moves rarely;
-/// clearing the rows of one release is cheap and moves often — and a floor
-/// advanced by three shapes would assert *measured against 2.1.276* on the
-/// strength of three cases, which is the overclaim the whole clock exists to
-/// prevent.
-///
-/// So this one says something narrower and true: **nothing the vendor
-/// announced has gone unlooked-at.** That is a statement about the ledger, not
-/// about the matcher, and `doctor` labels it as such.
-pub const ROWS_CLEARED_THROUGH: &str = "2.1.276";
-
-/// The release whose rule-relevant changelog rows have each produced a probe
-/// the **running vendor agreed with**.
-///
-/// The third floor, and it sits between the other two because the claim
-/// underneath it does. [`ROWS_CLEARED_THROUGH`] says *nothing the vendor
-/// announced has gone unlooked-at*, which a person reading can guarantee.
-/// [`VERIFIED_AGAINST`] says *the whole matcher agreed*, which costs 334 cases
-/// and real money. This one says something in between and true: **every row the
-/// vendor announced up to here was turned into a call, and the running product
-/// was asked about it.**
-///
-/// What it does **not** claim, and the report says so in these words: it
-/// measured only what the vendor announced. The thirtieth widening was found by
-/// a glob shape no changelog row asked for, so a floor built from release notes
-/// inherits every blind spot those notes have.
-///
-/// It moves only from a written measurement record, in the same commit as that
-/// record — the same discipline [`VERIFIED_AGAINST`] has. A row-scoped run can
-/// write this and nothing else; that separation is a property with a test
-/// rather than a convention.
-pub const ROWS_MEASURED_THROUGH: &str = "2.1.240";
-
-/// The day the full differential matrix last ran green, as `YYYY-MM-DD`.
-///
-/// Paired with [`VERIFIED_AGAINST`], which says *which release* — this says
-/// *when*, and the two are separate because the cadence in [`Cadence`] is
-/// counted in both units and neither may be derived from the other.
-pub const VERIFIED_ON: &str = "2026-09-17";
-
-/// How many releases may pass before the full matrix is owed.
-pub const FULL_MATRIX_RELEASES: u64 = 10;
-
-/// How many days may pass before the full matrix is owed.
-pub const FULL_MATRIX_DAYS: u64 = 28;
-
-/// The two bounds the full matrix is held to, reported separately and never
-/// averaged into one.
-///
-/// They answer to different risks and that is the whole reason there are two.
-/// The **release count** tracks unannounced drift in the matcher, which accrues
-/// per release and is exactly what a cheap per-release run cannot see. The
-/// **day count** stops a quiet month from letting the expensive clock stop
-/// altogether. A single "days until due" would hide whichever of the two is
-/// actually the reason, which is the same mistake as collapsing the floors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cadence {
-    /// Releases since the full matrix ran, when countable.
-    pub releases: Option<u64>,
-    pub releases_limit: u64,
-    /// Days since the full matrix ran, when a date was available.
-    pub days: Option<u64>,
-    pub days_limit: u64,
-}
-
-impl Cadence {
-    /// Which bounds are overdue, named. Empty means neither.
-    ///
-    /// Deliberately a list rather than a `bool`: *why* the matrix is owed is
-    /// the actionable half, and a caller that only wants "is it owed" can ask
-    /// whether this is empty.
-    pub fn overdue(&self) -> Vec<&'static str> {
-        let mut out = Vec::new();
-        if self.releases.is_some_and(|n| n >= self.releases_limit) {
-            out.push("releases");
-        }
-        if self.days.is_some_and(|n| n >= self.days_limit) {
-            out.push("days");
-        }
-        out
-    }
-}
-
-/// The cadence, computed from inputs the caller supplies.
-///
-/// `today` is a parameter rather than a clock read because this module may not
-/// reach the outside world — `tests/purity.rs` enforces it, and a date is I/O.
-/// An unparseable or absent date yields `None` for that bound rather than a
-/// zero, because *absence is distinguishable from zero* and a bound reported as
-/// `0 days` when nobody knows the date is a lie with a number on it.
-pub fn cadence(running: Option<&str>, today: Option<&str>) -> Cadence {
-    Cadence {
-        releases: running.and_then(|v| releases_ahead(v, VERIFIED_AGAINST)),
-        releases_limit: FULL_MATRIX_RELEASES,
-        days: today.and_then(|t| days_between(VERIFIED_ON, t)),
-        days_limit: FULL_MATRIX_DAYS,
-    }
-}
-
-/// Whole days from `from` to `to`, both `YYYY-MM-DD`, when both parse and `to`
-/// is not before `from`.
-///
-/// Civil-date arithmetic rather than a dependency: this is the only date maths
-/// in `core`, a crate for it would be a third-party thing between a claim and
-/// its evidence, and Howard Hinnant's `days_from_civil` is a dozen lines and is
-/// exact for every date this will ever see.
-fn days_between(from: &str, to: &str) -> Option<u64> {
-    let civil = |s: &str| -> Option<i64> {
-        let mut it = s.trim().split('-');
-        let y: i64 = it.next()?.parse().ok()?;
-        let m: i64 = it.next()?.parse().ok()?;
-        let d: i64 = it.next()?.split(['T', ' ']).next()?.parse().ok()?;
-        if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-            return None;
-        }
-        let y = if m <= 2 { y - 1 } else { y };
-        let era = if y >= 0 { y } else { y - 399 } / 400;
-        let yoe = y - era * 400;
-        let mp = (m + 9) % 12;
-        let doy = (153 * mp + 2) / 5 + d - 1;
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-        Some(era * 146_097 + doe - 719_468)
-    };
-    u64::try_from(civil(to)? - civil(from)?).ok()
-}
-
 /// Where a running release sits relative to a floor.
 ///
 /// **Four states, because there are four situations and one of them used to be
@@ -690,41 +561,6 @@ impl Gap {
     /// Whether this is a gap worth a person's attention.
     pub fn matters(self) -> bool {
         !matches!(self, Gap::At)
-    }
-}
-
-/// Whether a run against `observed` may move a floor that currently names
-/// `baseline`.
-///
-/// **The machine that measures can be older than the thing it measures**, and
-/// on the day this was written it was: the signed-in agent sat three releases
-/// below the floor it exists to advance. A green matrix there is a true
-/// statement about the installed release and a false one about the floor, and
-/// the only thing standing between those two sentences is a constant somebody
-/// edits — which is the failure the measured-not-asserted principle names.
-///
-/// So the guard is on **movement**, not on running. A run below the floor is
-/// still worth doing and still worth reading; what it may not do is advance a
-/// claim about a release it never saw.
-///
-/// `Uncountable` is refused for the same reason a timed-out probe is not a
-/// verdict: *"I could not tell"* is never permission.
-pub fn may_move_floor(observed: &str, baseline: &str) -> bool {
-    matches!(gap(observed, baseline), Gap::At | Gap::Ahead(_))
-}
-
-/// Why a floor did not move, for a report that must say so rather than be
-/// silently quiet about it.
-pub fn refusal_to_move(observed: &str, baseline: &str) -> Option<String> {
-    match gap(observed, baseline) {
-        Gap::At | Gap::Ahead(_) => None,
-        Gap::Behind(n) => Some(format!(
-            "no floor moved: this ran against {observed}, which is {n} release{} behind the floor at {baseline}. A green run here says nothing about {baseline}",
-            if n == 1 { "" } else { "s" }
-        )),
-        Gap::Uncountable => Some(format!(
-            "no floor moved: {observed} and {baseline} are different release series, so the distance between them cannot be counted"
-        )),
     }
 }
 
@@ -3130,19 +2966,6 @@ mod tests {
     }
 
     #[test]
-    fn the_two_floors_are_ordered_the_only_way_they_can_be() {
-        // The cheap floor may run ahead of the expensive one — that gap *is*
-        // the window a widening lives in. It may never be behind it: rows
-        // cleared through an older release than the full matrix ran against
-        // would mean the ledger had been rewound, which is not a state that
-        // exists.
-        assert!(
-            releases_ahead(VERIFIED_AGAINST, ROWS_CLEARED_THROUGH).is_none(),
-            "the full-matrix floor must not be ahead of the rows floor"
-        );
-    }
-
-    #[test]
     fn a_rule_naming_an_interpreter_is_reported_as_granting_anything() {
         let p = Policy::new(&["Bash(python:*)".into()], &[]);
         let found = p.overbroad();
@@ -5210,51 +5033,8 @@ mod tests {
 #[cfg(test)]
 mod baseline_tests {
 
-    /// A run against a release **older** than the floor may not move it, however
-    /// green it is. The measurement is about a product the floor does not name.
-    #[test]
-    fn a_run_below_the_floor_moves_nothing() {
-        for behind in ["2.1.272", "2.1.267", "2.1.100"] {
-            assert!(
-                !super::may_move_floor(behind, "2.1.273"),
-                "{behind} was allowed to advance a floor at 2.1.273"
-            );
-            assert!(
-                super::refusal_to_move(behind, "2.1.273")
-                    .is_some_and(|r| r.contains("no floor moved")),
-                "and it did not say why"
-            );
-        }
-    }
-
-    /// *"I could not tell"* is never permission.
-    #[test]
-    fn an_uncountable_gap_moves_nothing_either() {
-        assert!(!super::may_move_floor("3.0.1", "2.1.273"));
-        assert!(super::refusal_to_move("3.0.1", "2.1.273").is_some());
-        assert!(!super::may_move_floor("not-a-version", "2.1.273"));
-    }
-
-    /// At or ahead may move — and the floor takes the version that **ran**,
-    /// never the latest published.
-    #[test]
-    fn a_floor_takes_the_version_that_ran() {
-        assert!(super::may_move_floor("2.1.273", "2.1.273"));
-        assert!(super::may_move_floor("2.1.280", "2.1.273"));
-        assert!(super::refusal_to_move("2.1.280", "2.1.273").is_none());
-    }
-
     /// The state this feature was written in, pinned so the guard is exercised
     /// against the real numbers rather than invented ones.
-    #[test]
-    fn the_machine_that_measures_may_be_behind_what_it_measures() {
-        // 2.1.267 was installed while the full-matrix floor said 2.1.273.
-        assert!(!super::may_move_floor("2.1.267", super::VERIFIED_AGAINST));
-        let why = super::refusal_to_move("2.1.267", super::VERIFIED_AGAINST).unwrap();
-        assert!(why.contains("behind"), "{why}");
-        assert!(why.contains(super::VERIFIED_AGAINST), "{why}");
-    }
-
     use super::*;
 
     /// A release `n` patches either side of the baseline, spelled the way the

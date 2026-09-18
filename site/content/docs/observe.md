@@ -180,7 +180,7 @@ Several of its facts arrive through **no other channel** — no telemetry to ena
 | **The model** | Otherwise this needs OpenTelemetry, or a `SessionStart` hook the reference says Claude Code *"doesn't always include"*. |
 | **The context window's size** | 200 000, or 1 000 000 on an extended-context model — stated, rather than inferred from which model is in play. |
 | **Cost, and the lines it changed** | Cost without telemetry, and the only report of what a session changed rather than how long it took. |
-| **The Claude Code release this session runs** | The permission gate's behaviour is differentially tested against one release. A session ahead of it is governed by rules nobody has checked against it — `devplane doctor` says which, and `devplane show` marks it. |
+| **The Claude Code release this session runs** | Recorded so a session's behaviour can be attributed to a version. Devplane no longer mirrors the vendor's permission rules, so this is context rather than a compatibility claim |
 
 ```console
 $ devplane show 7c

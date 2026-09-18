@@ -34,14 +34,11 @@ Every command takes a global `--json` that prints machine-readable output instea
 - `devplane work start|list|show|verify|approve|retry|resume|finish`: work that outlives a session, with the project's gates between steps. `--spec <file-or-folder>` names the specification it answers; no format is learned.
 - `devplane snooze <id>`: hide a run's inbox items for a while.
 - `devplane open`, `devplane watch`: the board in a browser; events as they arrive.
-- `devplane gate`: what the permission gate is and how much of it is measured — the release the rules were last checked against, how far the vendor has moved since, and the gate scored against the EBL-Core conformance profile. Shows what is missing, not only what is met.
 - `devplane doctor` (alias `diagnostics`): channel health, provider, gate staleness, daemon status.
 - `devplane connect <provider>`, `devplane disconnect <provider>`: install or remove hooks and telemetry, with a backup.
 - `devplane stop`: stop the running daemon.
 - `devplane mcp`: serve Devplane's read-only surface to an agent over MCP on stdio — `inbox`, `work`, `explain`, `audit`. No tool on it writes; anything that acts still goes through a person. Register it with your agent as a command MCP server.
 - `devplane hook`, `devplane statusline`: read a payload on stdin and forward it. Used by the installed hooks, not typed by a person.
-- `devplane floors`: prints the three compatibility floors and, given a vendor version, whether a run against it may move one. Used by the permission harness, not typed by a person.
-- `devplane sequential`: says whether a differential probe has been asked enough times, given how many asks agreed and disagreed. Used by the permission harness, not typed by a person — it exists as a command so the rule has one implementation rather than one in the domain and another in a shell script.
 
 ## Configuration
 
@@ -54,7 +51,6 @@ Every command takes a global `--json` that prints machine-readable output instea
 
 - [Architecture](https://hupe1980.github.io/devplane/docs/architecture/): one binary, two stores, an event log reduced to state, an append-only decision log.
 - [Observing](https://hupe1980.github.io/devplane/docs/observe/): hooks, OpenTelemetry, the agent roster, the optional status-line shim.
-- [Conformance](https://hupe1980.github.io/devplane/docs/conformance/): the gate scored against a published execution-boundary profile, including the two properties it does not have.
 - [Security](https://hupe1980.github.io/devplane/docs/security/): the trust gate, loopback-only, where the policy can and cannot fail open, telemetry privacy.
 - [Agents](https://hupe1980.github.io/devplane/docs/agents/): driving any ACP agent; the four built in and how to name another.
 

@@ -62,10 +62,18 @@ fi
   echo "changelog-rows: $CHANGELOG is missing — run scripts/fetch-reference.sh"
   exit 2
 }
-[ -f "$LEDGER" ] || { echo "changelog-rows: $LEDGER is missing"; exit 2; }
+# The channel ledger needs the changelog and nothing else. The *rule* ledger it
+# used to sit beside is gone with the matcher it fed: Devplane no longer mirrors
+# anybody's permission semantics, so a changed rule shape is the vendor's
+# business. A changed hook contract is still ours, and that is what this reads.
+if [ "$MODE" != "--channels" ]; then
+  [ -f "$LEDGER" ] || { echo "changelog-rows: $LEDGER is missing"; exit 2; }
+fi
 
-FLOOR="$(grep -m1 '^floor:' "$LEDGER" | awk '{print $2}')"
-[ -n "$FLOOR" ] || { echo "changelog-rows: $LEDGER has no 'floor:' line"; exit 2; }
+FLOOR="$(grep -m1 '^floor:' "$LEDGER" 2>/dev/null | awk '{print $2}')"
+if [ "$MODE" != "--channels" ] && [ -z "$FLOOR" ]; then
+  echo "changelog-rows: $LEDGER has no 'floor:' line"; exit 2
+fi
 
 # What counts as a row that could change a verdict.
 #
@@ -190,7 +198,7 @@ if [ "$MODE" = "--channels" ]; then
     printf "  %-9s %s\n" "$v" "$(printf "%s" "$text" | cut -c1-140)"
   done
   echo
-  echo "changelog-rows: $n channel row(s) outside the rule ledger"
+  echo "changelog-rows: $n channel row(s): what the vendor changed about the hooks and modes Devplane uses"
   exit 0
 fi
 

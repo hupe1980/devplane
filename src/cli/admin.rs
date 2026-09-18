@@ -135,7 +135,6 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                 "gate": probe,
                 "measurement": {
                     "verified_against": crate::core::policy::VERIFIED_AGAINST,
-                    "rows_cleared_through": crate::core::policy::ROWS_CLEARED_THROUGH,
                 },
                 "spooled_decisions": spooled,
                 "diagnostics": diag,
@@ -252,27 +251,6 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             )
         ),
     }
-    // The other two floors. Labelled rather than printed as bare numbers,
-    // because each is a statement about something different — the ledger, the
-    // announced rows, the whole matcher — and the three being confusable is
-    // exactly why they are separate constants.
-    println!(
-        "  rows      {} {}",
-        format_args!(
-            "changelog rows cleared through {}",
-            crate::core::policy::ROWS_CLEARED_THROUGH
-        ),
-        paint(DIM, "(not a compatibility claim)")
-    );
-    println!(
-        "  probed    {} {}",
-        format_args!(
-            "announced rows probed through {}",
-            crate::core::policy::ROWS_MEASURED_THROUGH
-        ),
-        paint(DIM, "(only what the vendor announced)")
-    );
-
     println!("\n{}", paint(BOLD, "claude code"));
     println!("  settings  {}", state.settings_path.display());
     if state.hooks_installed.is_empty() {
@@ -830,152 +808,6 @@ pub async fn cmd_rewind(run: &str, json: bool) -> Result<()> {
     println!(
         "  {}",
         paint(DIM, "Claude Code's own editing tools touched")
-    );
-    Ok(())
-}
-
-/// `devplane gate` — what the gate is, and how much of it is measured.
-///
-/// Separate from `doctor` because it answers a different question. `doctor`
-/// asks whether the channels are alive; this asks whether the verdicts are
-/// worth anything, which is a question about a measurement's age and about a
-/// list of properties somebody else published.
-pub async fn cmd_gate(json: bool) -> Result<()> {
-    use crate::conformance::{GOVERNS, Met, PROPERTIES};
-
-    // The newest release any session here reports. Only the status-line shim
-    // reports one, so absence means *nothing is telling us*, never *no gap*.
-    let running = match client::Client::connect() {
-        Ok(c) => raw(&c, "/api/diagnostics").await.ok().and_then(|d| {
-            d["gate"]["sessions_ahead_of_baseline"]
-                .as_array()
-                .and_then(|a| a.iter().filter_map(|x| x["version"].as_str()).max())
-                .map(str::to_string)
-        }),
-        Err(_) => None,
-    };
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&crate::conformance::as_json(
-                running.as_deref(),
-                Some(&crate::conformance::today())
-            ))?
-        );
-        return Ok(());
-    }
-
-    println!("{}", paint(BOLD, "measurement"));
-    // Three floors, cheapest claim first, each with the half nobody else prints:
-    // what it does *not* say. A reader scanning down meets the weakest claim
-    // first, so the expensive one is never mistaken for a bigger number.
-    for f in crate::conformance::FLOORS {
-        println!(
-            "  {:<13} {} {}",
-            f.label,
-            f.release,
-            paint(DIM, &format!("— {}", f.claims))
-        );
-        println!("  {:<13} {}", "", paint(DIM, &format!("· {}", f.excludes)));
-    }
-    // What is actually running here, against the compatibility floor above.
-    // Its own labelled row rather than a continuation line, so it is not read
-    // as a footnote to whichever floor happened to be printed last.
-    // Four states, not two. A machine *behind* the floor is as unmeasured as one
-    // ahead of it and used to be told nothing at all, because the only question
-    // asked was "how far ahead", and behind answered `None` — the same `None` a
-    // different release series gives.
-    match &running {
-        Some(v) => {
-            let g = crate::core::policy::gap(v, crate::core::policy::VERIFIED_AGAINST);
-            match g.says() {
-                Some(sentence) => println!(
-                    "  {:<13} {}",
-                    "running",
-                    paint(render::YELLOW, &format!("{v} — {sentence}"))
-                ),
-                None => println!(
-                    "  {:<13} {}",
-                    "running",
-                    paint(
-                        DIM,
-                        &format!("{v} — exactly what the gate was measured against")
-                    )
-                ),
-            }
-        }
-        // Absence is not zero: nothing reporting a version says nothing about
-        // the gap rather than implying there is none.
-        None => println!(
-            "  {:<13} {}",
-            "running",
-            paint(DIM, "no session is reporting its version")
-        ),
-    }
-    // The full matrix's cadence, as two bounds. Never one "days until due":
-    // which of the two is overdue is the actionable half, and averaging them
-    // would hide it — the same mistake as collapsing the floors, one layer up.
-    let c =
-        crate::conformance::matrix_cadence(running.as_deref(), Some(&crate::conformance::today()));
-    let side = |elapsed: Option<u64>, limit: u64, unit: &str| match elapsed {
-        Some(n) => format!("{n}/{limit} {unit}"),
-        // Absence is not zero: nobody knowing is not the same as none elapsed.
-        None => format!("?/{limit} {unit}"),
-    };
-    let owed = c.overdue();
-    let cadence_line = format!(
-        "full matrix due at {} or {} — {}",
-        side(c.releases, c.releases_limit, "releases"),
-        side(c.days, c.days_limit, "days"),
-        if owed.is_empty() {
-            "not yet owed".to_string()
-        } else {
-            format!("owed on {}", owed.join(" and "))
-        }
-    );
-    println!(
-        "  {:<13} {}",
-        "cadence",
-        if owed.is_empty() {
-            paint(DIM, &cadence_line)
-        } else {
-            paint(render::YELLOW, &cadence_line)
-        }
-    );
-    println!("  {:<13} {}", "governs", GOVERNS.join(" · "));
-    // The half a green verdict must never be read without.
-    println!(
-        "  {:<13} {}",
-        "caveat",
-        paint(DIM, crate::conformance::MEASURES_ONLY_WHAT_WAS_ANNOUNCED)
-    );
-
-    println!("\n{}", paint(BOLD, "conformance"));
-    println!(
-        "  {}",
-        paint(
-            DIM,
-            "against EBL-Core, arXiv:2609.11596 — a profile written for others to score against"
-        )
-    );
-    for p in PROPERTIES {
-        let mark = match p.met {
-            Met::Yes => paint(render::GREEN, p.met.mark()),
-            Met::Partly => paint(render::YELLOW, p.met.mark()),
-            Met::No => paint(render::RED, p.met.mark()),
-        };
-        println!("  {mark} {}", paint(BOLD, p.name));
-        for line in crate::core::text::wrap(p.note, 68) {
-            println!("      {}", paint(DIM, &line));
-        }
-    }
-    println!(
-        "\n  {}",
-        paint(
-            DIM,
-            "A card with nothing missing on it is a marketing document."
-        )
     );
     Ok(())
 }

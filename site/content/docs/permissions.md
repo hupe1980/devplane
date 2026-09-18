@@ -415,8 +415,10 @@ than transcribed:
   ships most days.
 - Every fix carries a test.
 
-`devplane gate` prints the age of that measurement and scores the gate against a published
-execution-boundary profile, failures included — [conformance](/devplane/docs/conformance/).
+**That measurement is gone, and so is the thing it measured.** Devplane no longer approves a tool
+call at all: approving meant claiming Claude Code would have approved it too, and keeping that claim
+true meant mirroring the vendor's rule semantics for ever. What is left prohibits and defers, which
+claims nothing about anyone and cannot decay.
 
 Both mistakes cost something, which is why the list is neither transcribed nor guessed at: a command
 that belongs here and is missing leaves a prohibition that reads as protection and is none, and one

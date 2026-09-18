@@ -360,13 +360,12 @@ command filled the file.
 because the model that answers the probe does not reliably run them even with nothing forbidden. Those
 are unmeasured, not clean.
 
-It is also not the only instrument, and this month it was not the one that found anything. Four ways
-a rule could read as protection and not fire were found by stating what the matcher claims to
-guarantee and checking it exhaustively — a brute-force reference for the pattern matchers, a
+Four ways a rule could read as protection and not fire were found by stating what the matcher claims
+to guarantee and checking it exhaustively — a brute-force reference for the pattern matchers, a
 soundness test for what it means for two wildcards to meet, a fuzzer that asserts the evaluator never
-panics, and a counter holding it to one parse per command. The differential harness cannot find a
-defect on a shape neither side generates: there, this matcher and Claude Code are wrong together and
-the run comes back clean.
+panics, and a counter holding it to one parse per command. Those checks survive, because a
+prohibition still has to fire; what went with the approval path is every check that compared this
+matcher against somebody else's.
 
 `scripts/changelog-rows.sh` covers the other half: it fails the build until every row of Claude
 Code's changelog that could change a verdict is written down as covered, or declined with a reason.
@@ -439,23 +438,19 @@ provider
 
 [Which surfaces →](https://hupe1980.github.io/devplane/docs/cli/#devplane-doctor)
 
-## ⏱ The gate says how old its own measurement is
+## 🚫 Devplane never approves
 
-The rules are written in **Claude Code's own syntax**, so the running product can be asked the same
-question and a disagreement fails the build. That check is only true on the day it runs, so its age
-is printed rather than hidden:
+It can **prohibit** a call and **defer** one to you. It cannot approve one.
 
-```console
-$ devplane gate
-measurement
-  measured  Claude Code 2.1.273
-  rows      changelog rows cleared through 2.1.273 (not a compatibility claim)
-```
+Approving would mean claiming your agent would have approved it too — a claim about somebody else's
+code that goes stale every release. Keeping that claim honest here meant mirroring Claude Code's rule
+semantics, three compatibility floors, a differential harness and a release clock; it produced
+**thirty-three** occasions when the mirror was wrong in the dangerous direction, and cost a measured
+**$1,756–$3,511 a month** in probe spend to maintain.
 
-Beside it, the gate scored against a published execution-boundary profile — **including the two
-properties it does not have**, because a conformance report with no failures in it is a marketing
-document. `just owed` fails on a cron line when the vendor ships past the floor.
-[Conformance →](https://hupe1980.github.io/devplane/docs/conformance/)
+Prohibiting and deferring claim nothing about anyone, cost nothing, and cannot decay. Grants belong
+in your agent's own settings, where its own permission system enforces them — and `devplane check`
+reads them back to tell you what they actually grant.
 
 ## 🔍 Trust is a decision, so it shows you the evidence
 

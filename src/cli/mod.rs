@@ -17,8 +17,7 @@ mod inbox;
 mod work;
 
 use admin::{
-    cmd_agents, cmd_audit, cmd_connect, cmd_diagnostics, cmd_disconnect, cmd_gate, cmd_rewind,
-    cmd_search,
+    cmd_agents, cmd_audit, cmd_connect, cmd_diagnostics, cmd_disconnect, cmd_rewind, cmd_search,
 };
 use board::{cmd_attach, cmd_focus, cmd_ls, cmd_open, cmd_show, cmd_tail, cmd_watch};
 use inbox::{cmd_attention, cmd_decide, cmd_inbox, cmd_say, cmd_snooze};
@@ -251,17 +250,6 @@ pub enum Command {
     Open,
     /// Follow events as they arrive.
     Watch,
-    /// What the permission gate is, and how much of it is measured.
-    ///
-    /// `doctor` answers *is it working*. This answers the other question:
-    /// **how much should I trust the thing that decides?** The release the
-    /// rules were last measured against, how far the vendor has moved since,
-    /// and the gate scored against a published conformance profile rather than
-    /// a list this project wrote for itself.
-    ///
-    /// The failures are the point. A card with nothing missing on it is a
-    /// marketing document.
-    Gate,
     /// Channel health, latency and daemon status.
     ///
     /// Named `doctor` because that is what every page of the documentation,
@@ -303,42 +291,6 @@ pub enum Command {
     /// Used for `SessionStart`, the one hook event that does not accept HTTP
     /// hooks. Always exits 0: a hook that fails is a hook that interrupts the
     /// user's session, and an observer has no business doing that.
-    /// Print the compatibility floors, and whether a run against a given
-    /// version may move one.
-    ///
-    /// Harness plumbing, hidden for the same reason as `sequential`: the rule
-    /// about when a floor may move lives in the domain, and a shell script
-    /// re-deriving it is a second rule that drifts.
-    #[command(hide = true)]
-    Floors {
-        /// The vendor version a run was measured against.
-        #[arg(long)]
-        observed: Option<String>,
-    },
-    /// Decide whether a differential probe has been asked enough times.
-    ///
-    /// Harness plumbing, hidden because it is not an action a person takes. It
-    /// exists as a command so the decision has **one** implementation: the
-    /// permission harness is a shell script, and a sequential test rewritten in
-    /// awk beside the one in the domain is two rules that drift.
-    #[command(hide = true)]
-    Sequential {
-        /// Asks where the two sides gave the same answer.
-        #[arg(long, default_value_t = 0)]
-        agreements: u32,
-        /// Asks where they did not.
-        #[arg(long, default_value_t = 0)]
-        disagreements: u32,
-        /// How often it may report a disagreement that is not real.
-        #[arg(long, default_value_t = 5e-2)]
-        alpha: f64,
-        /// How often it may miss one that is. Tighter than `alpha` on purpose.
-        #[arg(long, default_value_t = 1e-3)]
-        beta: f64,
-        /// Asks before the answer is given up on as inconclusive.
-        #[arg(long, default_value_t = 12)]
-        max_asks: u32,
-    },
     #[command(hide = true)]
     Hook {
         /// Answer a provider's permission hook rather than only reporting it.
@@ -474,83 +426,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         }) => cmd_tail(&run, thinking, history).await,
         Some(Command::Search { query }) => cmd_search(&query, cli.json).await,
         Some(Command::Rewind { run }) => cmd_rewind(&run, cli.json).await,
-        Some(Command::Floors { observed }) => {
-            use crate::core::policy as p;
-            let obs = observed.as_deref();
-            let row = |name: &str, floor: &str| {
-                let may = obs.map(|o| p::may_move_floor(o, floor));
-                let why = obs.and_then(|o| p::refusal_to_move(o, floor));
-                (name.to_string(), floor.to_string(), may, why)
-            };
-            let rows = [
-                row("verified_against", p::VERIFIED_AGAINST),
-                row("rows_cleared_through", p::ROWS_CLEARED_THROUGH),
-                row("rows_measured_through", p::ROWS_MEASURED_THROUGH),
-            ];
-            match cli.json {
-                true => println!(
-                    "{}",
-                    serde_json::json!({
-                        "observed": obs,
-                        "floors": rows.iter().map(|(n, f, m, w)| serde_json::json!({
-                            "name": n, "floor": f, "may_move": m, "refusal": w
-                        })).collect::<Vec<_>>(),
-                    })
-                ),
-                false => {
-                    for (name, floor, may, why) in &rows {
-                        match (may, why) {
-                            (Some(false), Some(w)) => println!("  {name:<22} {floor}  — {w}"),
-                            (Some(true), _) => {
-                                println!("  {name:<22} {floor}  — a green run here may move it")
-                            }
-                            _ => println!("  {name:<22} {floor}"),
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-        Some(Command::Sequential {
-            agreements,
-            disagreements,
-            alpha,
-            beta,
-            max_asks,
-        }) => {
-            use crate::core::sequential::{Decision, ErrorBudget, Evidence, decide, targets};
-            let budget = ErrorBudget {
-                alpha,
-                beta,
-                max_asks,
-            };
-            let e = Evidence {
-                agreements,
-                disagreements,
-            };
-            let word = match decide(e, &budget) {
-                Decision::Disagree => "disagree",
-                Decision::Agree => "agree",
-                Decision::Continue => "continue",
-                Decision::Inconclusive => "inconclusive",
-            };
-            match cli.json {
-                true => println!(
-                    "{}",
-                    serde_json::json!({
-                        "decision": word,
-                        "asks": e.asks(),
-                        "alpha": alpha,
-                        "beta": beta,
-                        "asks_to_conclude_agreement": budget.asks_to_conclude_agreement(),
-                        "asks_to_conclude_disagreement": budget.asks_to_conclude_disagreement(),
-                        "targets": targets(&budget),
-                    })
-                ),
-                false => println!("{word}"),
-            }
-            Ok(())
-        }
         Some(Command::Audit { about, limit }) => cmd_audit(about.as_deref(), limit, cli.json).await,
         Some(Command::Attention { days }) => cmd_attention(days, cli.json).await,
         Some(Command::Focus { run }) => cmd_focus(&run).await,
@@ -588,7 +463,6 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Command::Snooze { id, minutes }) => cmd_snooze(&id, minutes, cli.json).await,
         Some(Command::Open) => cmd_open().await,
         Some(Command::Watch) => cmd_watch().await,
-        Some(Command::Gate) => cmd_gate(cli.json).await,
         Some(Command::Doctor) => cmd_diagnostics(cli.json).await,
         Some(Command::Connect { what, statusline }) => {
             cmd_connect(what, statusline, cli.json).await
