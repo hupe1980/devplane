@@ -522,6 +522,17 @@ json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 # like a cheap run rather than a broken meter.
 SPEND_LOG="$W/.spend"
 : > "$SPEND_LOG"
+# **Did the vendor actually use the tool we asked about?**
+#
+# Without this, *the vendor would not invoke Monitor at all* and *the vendor
+# invoked Monitor and was refused* produce the same absence of evidence — and
+# where this matcher also says no, the first one is reported as **agreement**.
+# That is the laundering this axis exists to prevent, applied to itself: an
+# oracle that never ran has not agreed with anything.
+#
+# Set by `note_spend`, which is already reading the stream.
+TOOL_LOG="$W/.tool"
+
 note_spend() { # stream-json on stdin
   local c
   c=$(python3 -c '
@@ -541,6 +552,31 @@ for line in sys.stdin:
 print(f"{total:.6f}")
 ' 2>/dev/null || echo 0)
   printf '%s\n' "${c:-0}" >> "$SPEND_LOG"
+}
+
+# The tools the last probe actually called, one per line.
+note_tools() { # stream-json on stdin -> tool names on stdout, and to TOOL_LOG
+  python3 -c '
+import json,sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        m = json.loads(line)
+    except Exception:
+        continue
+    msg = m.get("message")
+    if isinstance(msg, dict):
+        for c in msg.get("content") or []:
+            if isinstance(c, dict) and c.get("type") == "tool_use":
+                print(c.get("name", ""))
+' 2>/dev/null > "$TOOL_LOG" || : > "$TOOL_LOG"
+}
+
+# Whether the probe reached the tool it was about.
+tool_was_used() { # tool-name -> 0/1
+  grep -qx "$1" "$TOOL_LOG" 2>/dev/null
 }
 
 # What has been spent so far, and on how many vendor calls.
@@ -594,7 +630,9 @@ ask_claude_ps() { # rule command -> yes|no
       -p "Run this exact PowerShell command and nothing else, then stop: $2" \
       --settings "{\"permissions\":{\"allow\":[\"$(json_escape "$1")\"],\"deny\":[],\"ask\":[]}}" \
       --permission-mode dontAsk --model "$MODEL" \
-      --output-format stream-json --verbose 2>/dev/null ) | note_spend
+      --output-format stream-json --verbose 2>/dev/null ) \
+    | tee "$W/.stream" | note_spend
+  note_tools < "$W/.stream"
   ps_ran
 }
 
@@ -606,7 +644,9 @@ ask_claude_ps_deny() { # rule command -> yes|no   (yes = it ran, i.e. not blocke
       -p "Run this exact PowerShell command and nothing else, then stop: $2" \
       --settings "{\"permissions\":{\"allow\":[\"PowerShell\"],\"deny\":[\"$(json_escape "$1")\"],\"ask\":[]}}" \
       --permission-mode dontAsk --model "$MODEL" \
-      --output-format stream-json --verbose 2>/dev/null ) | note_spend
+      --output-format stream-json --verbose 2>/dev/null ) \
+    | tee "$W/.stream" | note_spend
+  note_tools < "$W/.stream"
   ps_ran
 }
 
@@ -619,7 +659,9 @@ ask_claude_monitor_deny() { # deny-rule command -> yes|no
       -p "Use the Monitor tool to run this exact command in the background and report its output, then stop: $full" \
       --settings "{\"permissions\":{\"allow\":[\"Bash($(json_escape "$full"))\",\"Monitor\"],\"deny\":[\"$(json_escape "$1")\"],\"ask\":[]}}" \
       --permission-mode dontAsk --model "$MODEL" \
-      --output-format stream-json --verbose 2>/dev/null ) | note_spend
+      --output-format stream-json --verbose 2>/dev/null ) \
+    | tee "$W/.stream" | note_spend
+  note_tools < "$W/.stream"
   sleep 2
   deny_ran
 }
@@ -816,10 +858,21 @@ if [ "$AXIS" = dialect ]; then
   d_agreed=0; d_narrower=0; d_wider=0; d_skipped=0; d_declined=0; d_incon=0
 
   # One row: both sides, then the sequential rule until it decides.
-  dialect_row() { # label rule call ours asker
-    local label="$1" rule="$2" call="$3" ours="$4" asker="$5"
+  dialect_row() { # label rule call ours asker tool
+    local label="$1" rule="$2" call="$3" ours="$4" asker="$5" tool="$6"
     local theirs agreements=0 disagreements=0 decision asks
     theirs=$("$asker" "$rule" "$call")
+    # **An oracle that never ran has not agreed with anything.** If the vendor
+    # did not reach for the tool this row is about — it answered in prose, used
+    # Bash instead, or declined — then the absence of evidence says nothing
+    # about the rule, and where this matcher also says no it would otherwise be
+    # counted as agreement. That is the laundering this axis exists to prevent,
+    # turned on the axis itself.
+    if ! tool_was_used "$tool"; then
+      printf '  %-28s %-38s %-5s  —    declined: the vendor did not use %s\n' "$rule" "$call" "$ours" "$tool"
+      d_declined=$((d_declined + 1))
+      return
+    fi
     while :; do
       case "$theirs" in "$ours") agreements=$((agreements + 1)) ;; *) disagreements=$((disagreements + 1)) ;; esac
       decision=$("$VP" sequential --agreements "$agreements" --disagreements "$disagreements" 2>/dev/null)
@@ -874,7 +927,7 @@ if [ "$AXIS" = dialect ]; then
       skip_rule "$rule" && continue
       for shape in "${PS_SHAPES[@]}"; do
         [ -n "${DEVPLANE_DIFF_SHAPES:-}" ] && case "$shape" in *"$DEVPLANE_DIFF_SHAPES"*) ;; *) continue ;; esac
-        dialect_row "ps-allow" "$rule" "$shape" "$(ps_devplane "$rule" "$shape" auto_allow)" ask_claude_ps
+        dialect_row "ps-allow" "$rule" "$shape" "$(ps_devplane "$rule" "$shape" auto_allow)" ask_claude_ps PowerShell
       done
     done
   fi
@@ -890,7 +943,7 @@ if [ "$AXIS" = dialect ]; then
     v=$("$VP" --json explain --dir "$W" --tool Monitor --input "$(printf '{"command":"%s"}' "$shape")" 2>/dev/null \
           | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
     ours=$([ "$v" = allow ] && echo yes || echo no)
-    dialect_row "monitor-deny" "$rule" "$shape" "$ours" ask_claude_monitor_deny
+    dialect_row "monitor-deny" "$rule" "$shape" "$ours" ask_claude_monitor_deny Monitor
   done
 
   echo
