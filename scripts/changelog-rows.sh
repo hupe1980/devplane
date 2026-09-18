@@ -18,6 +18,13 @@
 # (`--ignore-revs-file=.env`)" into a runnable case needs a person — but it can
 # guarantee that nobody silently skipped the row that would have told them to.
 #
+# **Half of that sentence stopped being true on 2026-09-18, and which half
+# matters.** Writing a probe is still a person's job and always will be: prose
+# does not become a runnable call by being parsed harder. What became mechanical
+# is *running* it. A row dispositioned `probe` names its shape by an identifier,
+# so the shape can be re-run against a new release and dated — which is the
+# difference between a floor and the word "measured" typed into a comment.
+#
 #   scripts/changelog-rows.sh          # check the ledger is complete
 #   scripts/changelog-rows.sh --new    # print the unaccounted rows, ready to paste
 #
@@ -32,7 +39,7 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-CHANGELOG="reference/claude-code/CHANGELOG.md"
+CHANGELOG="concepts/reference/claude-code/CHANGELOG.md"
 LEDGER="scripts/changelog-ledger.txt"
 MODE="${1:-check}"
 CHANGELOG_URL="https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md"
@@ -94,6 +101,34 @@ done < <(rows)
 
 total=$(rows | wc -l | tr -d ' ')
 
+# ── The second owed count, and why it is not the first ───────────────────────
+#
+# `missing` is what the **read** floor owes: rows nobody has dispositioned at
+# all. This is what the **measured** floor owes: rows dispositioned `case`,
+# whose evidence is a test over our own matcher and therefore says nothing about
+# the vendor. Two counts, never one — they are owed to two different claims and
+# a single number would hide which.
+PROBES="scripts/probes.txt"
+owed_measured=$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+ \| case \|' "$LEDGER" || true)
+
+# A `probe:<id>` that names nothing runnable is an error, not a silent skip.
+# The failure this whole layer exists to prevent is a check that stops checking
+# and stays green, so an unresolvable id fails rather than being ignored.
+bad_ids=""
+if [ -f "$PROBES" ]; then
+  while read -r id; do
+    [ -n "$id" ] || continue
+    grep -qE "^$id[[:space:]]*\|" "$PROBES" || bad_ids="$bad_ids $id"
+  done < <(grep -oE '\^ probe:[a-z0-9][a-z0-9_-]{2,63}' "$LEDGER" | sed 's/^\^ probe://' | sort -u)
+else
+  echo "changelog-rows: $PROBES is missing — a probe id cannot be checked against anything"
+  fail_probes=1
+fi
+if [ -n "$bad_ids" ]; then
+  echo "changelog-rows: the ledger cites probes that $PROBES does not declare:$bad_ids"
+  fail_probes=1
+fi
+
 if [ "$MODE" = "--new" ]; then
   printf '%s' "$new"
   exit 0
@@ -146,15 +181,30 @@ age_days=$(( ( $(date +%s) - $(stat -f %m "$CHANGELOG" 2>/dev/null || stat -c %Y
 echo "changelog-rows: corpus is at ${newest:-unknown}, fetched ${age_days}d ago — \`$0 --fetch\` to refresh"
 [ "${age_days:-0}" -lt 7 ] || echo "changelog-rows: WARNING — a week-old corpus makes a clean run mean very little"
 
+# Two owed counts, reported apart, because they are owed to two different
+# claims. Collapsing them would be the same mistake as collapsing the floors
+# they answer to, one layer down.
+probed=$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+ \| probe \|' "$LEDGER" || true)
+if [ "$owed_measured" -eq 0 ]; then
+  echo "changelog-rows: measured floor — nothing owed; $probed row(s) name a probe"
+else
+  echo "changelog-rows: measured floor — $owed_measured row(s) owed (dispositioned \`case\`: a test over our own matcher, which says nothing about the vendor); $probed row(s) name a probe"
+fi
+
+if [ -n "${fail_probes:-}" ]; then
+  exit 1
+fi
+
 if [ "$missing" -eq 0 ]; then
-  echo "changelog-rows: $total rule rows since $FLOOR, all accounted for"
+  echo "changelog-rows: read floor — $total rule rows since $FLOOR, all accounted for"
   exit 0
 fi
 
 echo "changelog-rows: $missing of $total rule rows since $FLOOR are not accounted for."
 echo
 echo "Read each one, decide whether it can change a verdict here, and add a line"
-echo "to $LEDGER with 'case <what covers it>' or 'declined <why not>':"
+echo "to $LEDGER with 'probe <id from scripts/probes.txt>', 'case <what covers it>'"
+echo "or 'declined <why not>':"
 echo
 printf '%s' "$new"
 exit 1

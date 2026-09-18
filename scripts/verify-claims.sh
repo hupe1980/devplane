@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The claim ledger of concepts/QUALITY.md §2: every load-bearing integration claim in the
-# concept notes is pinned to a file in reference/ and this script greps for it. Run
+# concept notes is pinned to a file in concepts/reference/ and this script greps for it. Run
 # scripts/fetch-reference.sh first. Exit 1 if any claim is missing from its source.
 set -u
-cd "$(dirname "$0")/../reference" || { echo "no reference/ (run scripts/fetch-reference.sh)"; exit 1; }
+cd "$(dirname "$0")/../concepts/reference" || { echo "no concepts/reference/ (run scripts/fetch-reference.sh)"; exit 1; }
 fail=0; n=0
 chk() { n=$((n+1)); if grep -q -i -E "$3" $2 2>/dev/null; then printf 'OK   %s\n' "$1"; else printf 'MISS %s  (%s ~ /%s/)\n' "$1" "$2" "$3"; fail=1; fi; }
 # ── GitHub Copilot: the second provider that documents all three channels ─────
@@ -130,10 +130,14 @@ chk "permissions: Stop Task is TaskStop"           claude-code/permissions.md 'c
 # used to catch a typo in a prohibition. It only ever warns, but a list that has
 # rotted warns about tools that exist — so the reference has to still contain
 # every name in it.
-# Paths are relative to reference/, because that is where this script runs.
-if [ -f claude-code/tools-reference.md ] && [ -f ../src/core/policy.rs ]; then
+# Paths are relative to concepts/reference/, because that is where this script runs — so the
+# tree is two levels up (`../../src`) and the notes are one (`../STATE.md`). Both were one
+# level closer until the corpus moved under concepts/ on 2026-09-18, and the KNOWN_TOOLS
+# check reported SKIP rather than failing when its source path stopped resolving, which is
+# the failure this file is otherwise built to prevent: a check that stops checking, quietly.
+if [ -f claude-code/tools-reference.md ] && [ -f ../../src/core/policy.rs ]; then
   missing=""
-  for t in $(sed -n '/^const KNOWN_TOOLS/,/^];/p' ../src/core/policy.rs \
+  for t in $(sed -n '/^const KNOWN_TOOLS/,/^];/p' ../../src/core/policy.rs \
              | grep -oE '"[A-Za-z]+"' | tr -d '"'); do
     case "$t" in
       MultiEdit) continue ;;   # Claude Code's legacy name, kept for pasted files
@@ -196,7 +200,7 @@ chk "opencode openapi: /session"                    opencode/openapi.json '"/ses
 # than its documentation — this is the claim that was wrong, so it is the one pinned hardest.
 sdk=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'agent-client-protocol-schema-*' 2>/dev/null | sort | tail -1)
 # The provider surfaces added through 2026 that these notes now rest on. Each row was
-# absent from the ledger while its page sat unread in reference/ — the gap R19 is about, and
+# absent from the ledger while its page sat unread in concepts/reference/ — the gap R19 is about, and
 # the reason the unit of verification is the row rather than the page.
 chk "hooks: the prompt handler type exists"         claude-code/hooks.md '"type": "prompt"'
 chk "hooks: the agent handler type exists"          claude-code/hooks.md '"type": "agent"'
@@ -258,7 +262,7 @@ fi
 # ── Counts, computed from the corpus rather than grepped from prose ──────────────
 # The whole ledger above asks "does the source say this", which cannot catch a number
 # these notes invented about somebody else's system. Four places said the ACP registry
-# held 51 agents while reference/acp/registry.json said 41, and nothing failed, because a
+# held 51 agents while concepts/reference/acp/registry.json said 41, and nothing failed, because a
 # count is not a sentence to grep for. A number about external data is now DERIVED here
 # and the notes are checked against it.
 countchk() { # label  actual  file-glob-in-concepts  regex-with-one-capture
@@ -268,7 +272,7 @@ countchk() { # label  actual  file-glob-in-concepts  regex-with-one-capture
   # turned out to be wrong, so they have to be able to quote the wrong number. Everywhere
   # else, a figure about an external system is an assertion and is checked. (Found the first
   # time this ran: the row describing the "51 agents" mistake failed the check for it.)
-  claimed=$(grep -rhoE "$4" $(ls ../concepts/*.md | grep -vE 'QUALITY|DECISIONS') 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  claimed=$(grep -rhoE "$4" $(ls ../*.md | grep -vE 'QUALITY|DECISIONS') 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')
   if [ -z "$claimed" ]; then
     printf 'SKIP %s (concepts/ not present)\n' "$1"
   elif [ "$claimed" = "$2" ]; then
@@ -319,7 +323,7 @@ chk "sdd: NEEDS CLARIFICATION is spec kit's word" sdd/spec-kit-spec-template.md 
 chk "agents.md: stewarded by the AAIF"            standards/agents-md.md 'Agentic AI Foundation'
 chk "agents.md: over 60k repositories"            standards/agents-md.md 'over.{0,40}60k'
 chk "agents.md: it mandates no structure"         standards/agents-md.md 'the agent simply parses the text you provide'
-if [ -d ../concepts ]; then
+if [ -d .. ]; then
   acp_agents=$(python3 -c 'import json;print(len(json.load(open("acp/registry.json"))["agents"]))' 2>/dev/null || echo '?')
   # Every spelling these notes use for the registry size, and only those: a loose pattern
   # picks up "21 agent permission systems" from a cited paper and reports a false miss,

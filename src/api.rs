@@ -2264,9 +2264,13 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
             "partial": provider.partial(),
         },
         "connect": connect,
+        // Three floors, three keys, and no key that combines them. A single
+        // "compatibility" figure would hide which of the three claims a reader
+        // is relying on, which is the only thing worth knowing about them.
         "gate": {
             "verified_against": crate::core::policy::VERIFIED_AGAINST,
             "rows_cleared_through": crate::core::policy::ROWS_CLEARED_THROUGH,
+            "rows_measured_through": crate::core::policy::ROWS_MEASURED_THROUGH,
         },
         "machine_policy": machine_policy,
         "projects": projects,

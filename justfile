@@ -1,7 +1,7 @@
 # Devplane tasks. `just` on its own lists them.
 #
 # `check` is exactly what .github/workflows/ci.yml runs; the rest are local,
-# because they need concepts/, reference/ or a real agent binary.
+# because they need concepts/, concepts/reference/ or a real agent binary.
 
 set shell := ["bash", "-uc"]
 
@@ -62,13 +62,21 @@ test: build
 deps:
     bash scripts/deps-count.sh
 
-# Every integration claim against its file in reference/. Run `just reference` first.
+# Every integration claim against its file in concepts/reference/. Run `just reference` first.
 claims:
     bash scripts/verify-claims.sh
 
-# Re-download the third-party reference docs into reference/ (gitignored).
+# Re-download the third-party reference docs into concepts/reference/ (gitignored).
 reference:
     bash scripts/fetch-reference.sh
+
+
+# The span the measured floor could reach, and whether every probe still
+# resolves. Spends nothing. The run that *does* spend is not a recipe, for the
+# same reason publishing is not: a command that costs money is one somebody
+# types on purpose, looking at it.
+measured:
+    bash scripts/measured-through.sh --dry-run
 
 # concepts/ against its own rules: links resolve, D/R ids unique.
 concepts:

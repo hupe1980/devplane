@@ -521,7 +521,200 @@ pub const VERIFIED_AGAINST: &str = "2.1.273";
 /// So this one says something narrower and true: **nothing the vendor
 /// announced has gone unlooked-at.** That is a statement about the ledger, not
 /// about the matcher, and `doctor` labels it as such.
-pub const ROWS_CLEARED_THROUGH: &str = "2.1.274";
+pub const ROWS_CLEARED_THROUGH: &str = "2.1.276";
+
+/// The release whose rule-relevant changelog rows have each produced a probe
+/// the **running vendor agreed with**.
+///
+/// The third floor, and it sits between the other two because the claim
+/// underneath it does. [`ROWS_CLEARED_THROUGH`] says *nothing the vendor
+/// announced has gone unlooked-at*, which a person reading can guarantee.
+/// [`VERIFIED_AGAINST`] says *the whole matcher agreed*, which costs 334 cases
+/// and real money. This one says something in between and true: **every row the
+/// vendor announced up to here was turned into a call, and the running product
+/// was asked about it.**
+///
+/// What it does **not** claim, and the report says so in these words: it
+/// measured only what the vendor announced. The thirtieth widening was found by
+/// a glob shape no changelog row asked for, so a floor built from release notes
+/// inherits every blind spot those notes have.
+///
+/// It moves only from a written measurement record, in the same commit as that
+/// record — the same discipline [`VERIFIED_AGAINST`] has. A row-scoped run can
+/// write this and nothing else; that separation is a property with a test
+/// rather than a convention.
+pub const ROWS_MEASURED_THROUGH: &str = "2.1.240";
+
+/// The day the full differential matrix last ran green, as `YYYY-MM-DD`.
+///
+/// Paired with [`VERIFIED_AGAINST`], which says *which release* — this says
+/// *when*, and the two are separate because the cadence in [`Cadence`] is
+/// counted in both units and neither may be derived from the other.
+pub const VERIFIED_ON: &str = "2026-09-17";
+
+/// How many releases may pass before the full matrix is owed.
+pub const FULL_MATRIX_RELEASES: u64 = 10;
+
+/// How many days may pass before the full matrix is owed.
+pub const FULL_MATRIX_DAYS: u64 = 28;
+
+/// The two bounds the full matrix is held to, reported separately and never
+/// averaged into one.
+///
+/// They answer to different risks and that is the whole reason there are two.
+/// The **release count** tracks unannounced drift in the matcher, which accrues
+/// per release and is exactly what a cheap per-release run cannot see. The
+/// **day count** stops a quiet month from letting the expensive clock stop
+/// altogether. A single "days until due" would hide whichever of the two is
+/// actually the reason, which is the same mistake as collapsing the floors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cadence {
+    /// Releases since the full matrix ran, when countable.
+    pub releases: Option<u64>,
+    pub releases_limit: u64,
+    /// Days since the full matrix ran, when a date was available.
+    pub days: Option<u64>,
+    pub days_limit: u64,
+}
+
+impl Cadence {
+    /// Which bounds are overdue, named. Empty means neither.
+    ///
+    /// Deliberately a list rather than a `bool`: *why* the matrix is owed is
+    /// the actionable half, and a caller that only wants "is it owed" can ask
+    /// whether this is empty.
+    pub fn overdue(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.releases.is_some_and(|n| n >= self.releases_limit) {
+            out.push("releases");
+        }
+        if self.days.is_some_and(|n| n >= self.days_limit) {
+            out.push("days");
+        }
+        out
+    }
+}
+
+/// The cadence, computed from inputs the caller supplies.
+///
+/// `today` is a parameter rather than a clock read because this module may not
+/// reach the outside world — `tests/purity.rs` enforces it, and a date is I/O.
+/// An unparseable or absent date yields `None` for that bound rather than a
+/// zero, because *absence is distinguishable from zero* and a bound reported as
+/// `0 days` when nobody knows the date is a lie with a number on it.
+pub fn cadence(running: Option<&str>, today: Option<&str>) -> Cadence {
+    Cadence {
+        releases: running.and_then(|v| releases_ahead(v, VERIFIED_AGAINST)),
+        releases_limit: FULL_MATRIX_RELEASES,
+        days: today.and_then(|t| days_between(VERIFIED_ON, t)),
+        days_limit: FULL_MATRIX_DAYS,
+    }
+}
+
+/// Whole days from `from` to `to`, both `YYYY-MM-DD`, when both parse and `to`
+/// is not before `from`.
+///
+/// Civil-date arithmetic rather than a dependency: this is the only date maths
+/// in `core`, a crate for it would be a third-party thing between a claim and
+/// its evidence, and Howard Hinnant's `days_from_civil` is a dozen lines and is
+/// exact for every date this will ever see.
+fn days_between(from: &str, to: &str) -> Option<u64> {
+    let civil = |s: &str| -> Option<i64> {
+        let mut it = s.trim().split('-');
+        let y: i64 = it.next()?.parse().ok()?;
+        let m: i64 = it.next()?.parse().ok()?;
+        let d: i64 = it.next()?.split(['T', ' ']).next()?.parse().ok()?;
+        if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+            return None;
+        }
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = y - era * 400;
+        let mp = (m + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        Some(era * 146_097 + doe - 719_468)
+    };
+    u64::try_from(civil(to)? - civil(from)?).ok()
+}
+
+/// Where a running release sits relative to a floor.
+///
+/// **Four states, because there are four situations and one of them used to be
+/// silent.** `releases_ahead` answers `None` for *at the floor*, *behind the
+/// floor* and *not comparable at all*, which made a user six releases behind the
+/// measurement indistinguishable from one exactly on it. That is the
+/// distinguish-absence-from-zero rule broken in the surface whose whole job is
+/// to say how much the gate can be trusted.
+///
+/// **Behind is not the safe direction.** It is tempting to think a gate measured
+/// against a newer release is "at least as good" for an older one, and it is
+/// not: rules changed between the two, and every one of those changes is
+/// unmeasured for that user in exactly the direction nobody looked. The vendor
+/// reverted a rule change at 2.1.273 that it had introduced at 2.1.268 — a gate
+/// measured at 2.1.273 and run on 2.1.270 is on the wrong side of that revert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gap {
+    /// Exactly the release the floor names. The only fully measured case.
+    At,
+    /// Newer than the floor by this many releases: the measurement has decayed.
+    Ahead(u64),
+    /// Older than the floor by this many: the measurement is about a product
+    /// this user is not running.
+    Behind(u64),
+    /// A different minor or major series. Nothing here can count, and a number
+    /// would be worse than the absence.
+    Uncountable,
+}
+
+impl Gap {
+    /// One sentence a person can act on, or `None` when there is nothing to say.
+    pub fn says(self) -> Option<String> {
+        match self {
+            Gap::At => None,
+            Gap::Ahead(n) => Some(format!(
+                "{n} release{} newer than the gate was measured against — that many releases of \
+                 rule changes are unmeasured here",
+                if n == 1 { "" } else { "s" }
+            )),
+            Gap::Behind(n) => Some(format!(
+                "{n} release{} older than the gate was measured against — the measurement is about \
+                 a product this machine is not running, and behind is not the safe direction",
+                if n == 1 { "" } else { "s" }
+            )),
+            Gap::Uncountable => Some(
+                "a different release series from the one the gate was measured against; nothing \
+                 here can count the distance"
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Whether this is a gap worth a person's attention.
+    pub fn matters(self) -> bool {
+        !matches!(self, Gap::At)
+    }
+}
+
+/// Where `observed` sits relative to `baseline`, in all four directions.
+pub fn gap(observed: &str, baseline: &str) -> Gap {
+    let parts = |v: &str| -> Option<Vec<u64>> {
+        let v = v.trim().trim_start_matches('v');
+        let core = v.split(['-', '+']).next().unwrap_or(v);
+        core.split('.').map(|p| p.parse::<u64>().ok()).collect()
+    };
+    let (Some(a), Some(b)) = (parts(observed), parts(baseline)) else {
+        return Gap::Uncountable;
+    };
+    if a.len() != 3 || b.len() != 3 || a[0] != b[0] || a[1] != b[1] {
+        return Gap::Uncountable;
+    }
+    match a[2].cmp(&b[2]) {
+        std::cmp::Ordering::Equal => Gap::At,
+        std::cmp::Ordering::Greater => Gap::Ahead(a[2] - b[2]),
+        std::cmp::Ordering::Less => Gap::Behind(b[2] - a[2]),
+    }
+}
 
 /// How many releases `observed` is ahead of `baseline`, when that is countable.
 ///
@@ -532,16 +725,13 @@ pub const ROWS_CLEARED_THROUGH: &str = "2.1.274";
 /// on. A wrong count in this field would be the failure this whole module is
 /// about, in the surface that reports it.
 pub fn releases_ahead(observed: &str, baseline: &str) -> Option<u64> {
-    let parts = |v: &str| -> Option<Vec<u64>> {
-        let v = v.trim().trim_start_matches('v');
-        let core = v.split(['-', '+']).next().unwrap_or(v);
-        core.split('.').map(|p| p.parse::<u64>().ok()).collect()
-    };
-    let (a, b) = (parts(observed)?, parts(baseline)?);
-    if a.len() != 3 || b.len() != 3 || a[0] != b[0] || a[1] != b[1] {
-        return None;
+    // One arithmetic, one home. This is the *ahead* face of [`gap`], kept
+    // because several surfaces ask exactly that question — but a caller that
+    // treats its `None` as "no gap" is the bug [`Gap`] exists to fix.
+    match gap(observed, baseline) {
+        Gap::Ahead(n) => Some(n),
+        _ => None,
     }
-    a[2].checked_sub(b[2]).filter(|n| *n > 0)
 }
 
 /// Whether `observed` is a Claude Code release newer than [`VERIFIED_AGAINST`].
@@ -2525,6 +2715,31 @@ impl Policy {
                 && r.has_wildcard()
                 && let Some(command) = rule_content(tool, input)
                 && crate::core::command::unapprovable_by_prefix(&command).is_some()
+            {
+                return Verdict::Undecided;
+            }
+            // **And nothing may be approved that this matcher cannot read.**
+            //
+            // The check above is a blocklist — allow unless one of the hazards
+            // somebody thought of is present — and every widening this gate has
+            // been found to have was a hazard nobody had thought of yet. This
+            // is the other half: a
+            // command carrying a construct this matcher does not model is not
+            // approvable, whatever the rules say, because its meaning is not
+            // known here at all.
+            //
+            // **A wildcard rule only**, and the line is the same one Claude
+            // Code draws. An exact-match rule names one literal call: the user
+            // wrote `$(echo a.txt)` into their own policy, so there is nothing
+            // unknown about which call they approved, and the running product
+            // honours it — measured, and pinned by
+            // `an_exact_rule_naming_a_compound_approves_that_compound`. A
+            // wildcard rule names a *family*, and a construct the shell expands
+            // means the family's members are not knowable from the text.
+            if is_shell(tool)
+                && r.has_wildcard()
+                && let Some(command) = rule_content(tool, input)
+                && crate::core::command::unmodelled_construct(&command).is_some()
             {
                 return Verdict::Undecided;
             }

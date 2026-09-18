@@ -51,6 +51,12 @@ node_modules/
 # Third-party documentation and specifications — copyrighted publications, so local
 # copies are not redistributed here. `concepts/REFERENCES.md` indexes every one with its
 # retrieval URL and `scripts/fetch-reference.sh` rebuilds the folder from scratch.
+#
+# It lives at `concepts/reference/` and is therefore already covered by `/concepts/`
+# above: it is the corpus those notes are checked against, and keeping it beside them
+# means one ignored tree rather than two, and one answer to "where does the evidence
+# live". The old root-level path stays listed so a stale copy — or a re-run of a script
+# from before the move — can never be committed by accident.
 /reference/
 
 # Litter from the protocol suite: the fixture agent writes down what it was told,
