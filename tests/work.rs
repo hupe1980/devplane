@@ -1391,10 +1391,15 @@ async fn a_projects_own_rules_decide_its_agents() {
         serde_json::from_slice(&out.stdout).expect("the gate answers with JSON")
     };
 
-    assert_eq!(
+    // **The project's own prohibition answers; nothing approves.** Devplane
+    // used to say `allow` here on the vendor's behalf, which was a claim that
+    // Claude Code would have approved it too — a claim that had to be kept true
+    // against every vendor release. What is left is the half that costs nothing
+    // to hold: a prohibition fires, and everything else reaches the person.
+    assert_ne!(
         ask("echo hello")["hookSpecificOutput"]["decision"]["behavior"],
         "allow",
-        "the project's own allow rule must answer"
+        "Devplane approved a call on the vendor's behalf"
     );
     assert_eq!(
         ask("rm -rf node_modules")["hookSpecificOutput"]["decision"]["behavior"],

@@ -238,7 +238,6 @@ pub fn cmd_explain(
     }
 
     let (colour, headline) = match &verdict {
-        crate::core::Verdict::Allow { .. } => (render::GREEN, "allow"),
         crate::core::Verdict::Deny { .. } => (render::RED, "deny"),
         crate::core::Verdict::Ask { .. } => (YELLOW, "ask"),
         crate::core::Verdict::Undecided => (DIM, "undecided"),
@@ -312,7 +311,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     let calls = store.observed_tool_calls(Some(&scope), limit).await?;
 
     let cache = crate::core::PolicyCache::for_projects_only();
-    let mut counts = [0usize; 4]; // allow, ask, deny, undecided
+    let mut counts = [0usize; 3]; // ask, deny, reached you
     // Commands that reached a person, grouped by the rule that would answer
     // them. `BTreeMap` so two runs of this print the same thing.
     let mut open: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -320,13 +319,12 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     for c in &calls {
         let verdict = cache.evaluate(&c.cwd, &c.tool, &c.input);
         let slot = match verdict {
-            crate::core::Verdict::Allow { .. } => 0,
-            crate::core::Verdict::Ask { .. } => 1,
-            crate::core::Verdict::Deny { .. } => 2,
-            crate::core::Verdict::Undecided => 3,
+            crate::core::Verdict::Ask { .. } => 0,
+            crate::core::Verdict::Deny { .. } => 1,
+            crate::core::Verdict::Undecided => 2,
         };
         counts[slot] += 1;
-        if slot != 3 {
+        if slot != 2 {
             continue;
         }
         let Some(text) = crate::core::policy::rule_content(&c.tool, &c.input) else {
@@ -372,8 +370,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "dir": scope.display().to_string(),
                 "calls": total,
-                "allow": counts[0], "ask": counts[1],
-                "deny": counts[2], "undecided": counts[3],
+                "ask": counts[0], "deny": counts[1], "undecided": counts[2],
                 "suggestions": advice.iter().map(|(n, tool, rule)| serde_json::json!({
                     "calls": n, "tool": tool, "rule": format!("{tool}({rule})"),
                 })).collect::<Vec<_>>(),
@@ -398,10 +395,9 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     let pct = |n: usize| (n as f64 * 100.0 / total as f64).round() as u64;
     println!("{total} tool calls in {named} replayed against the rules as they are now\n");
     for (n, label, colour) in [
-        (counts[0], "allow", render::GREEN),
-        (counts[1], "ask", YELLOW),
-        (counts[2], "deny", render::RED),
-        (counts[3], "reached you", DIM),
+        (counts[0], "ask", YELLOW),
+        (counts[1], "deny", render::RED),
+        (counts[2], "reached you", DIM),
     ] {
         if n > 0 {
             println!("  {:>6}  {:>3}%  {}", n, pct(n), paint(colour, label));
@@ -442,7 +438,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
             &format!(
                 "{shown} of the {} calls that reached you would stop asking · \
                  paste into [policy] auto_allow, then devplane check",
-                counts[3]
+                counts[2]
             )
         )
     );

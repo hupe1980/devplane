@@ -211,8 +211,16 @@ async fn a_permission_no_rule_covers_is_left_to_claude_and_shown_to_the_human() 
     );
 }
 
+/// **A prohibition answers; nothing approves.**
+///
+/// This test used to assert that an `auto_allow` rule made Devplane answer
+/// `allow` on the vendor's behalf. That verdict is gone: saying yes was a claim
+/// that Claude Code would also have said yes, and keeping that claim true meant
+/// mirroring the vendor's semantics for ever. What remains is the half that
+/// costs nothing — a project's prohibition still fires, and everything else
+/// reaches the person.
 #[tokio::test]
-async fn a_matching_rule_answers_without_bothering_anyone() {
+async fn a_prohibition_answers_and_nothing_is_approved() {
     let (addr, token, c) = boot(Policy::default()).await;
     let home = gate_home("matching");
     let rules = r#"
@@ -221,13 +229,18 @@ auto_allow = ["Bash(pnpm test *)"]
 never_auto = ["Bash(git push *)"]
 "#;
 
-    let allow = gate(
+    let permitted = gate(
         &home,
         rules,
         r#"{"hook_event_name":"PermissionRequest","session_id":"s3","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"pnpm test -- --run"}}"#,
     );
-    assert_eq!(allow["hookSpecificOutput"]["decision"]["behavior"], "allow");
+    // No approval, whatever the project wrote: the vendor's own permission
+    // system decides that, using the vendor's own configuration.
+    assert_ne!(
+        permitted["hookSpecificOutput"]["decision"]["behavior"],
+        "allow"
+    );
 
     let deny = gate(
         &home,
@@ -284,8 +297,8 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
     // about 26 ms.
     let home = gate_home("latency");
     let body = r#"{"hook_event_name":"PermissionRequest","session_id":"s4","cwd":"/tmp/repo",
-        "tool_name":"Bash","tool_input":{"command":"ls -la"}}"#;
-    let rules = "[policy]\nauto_allow = [\"Bash(ls *)\"]\n";
+        "tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#;
+    let rules = "[policy]\nnever_auto = [\"Bash(rm *)\"]\n";
 
     // Warm the page cache so the measurement is the gate, not the first read of
     // a 40 MB debug binary off a cold disk.
@@ -296,7 +309,9 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
         let t = std::time::Instant::now();
         let reply = gate(&home, rules, body);
         worst = worst.max(t.elapsed());
-        assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        // The latency that matters is a *prohibition's*: that is the only
+        // answer Devplane gives, and it is the one that must not be felt.
+        assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "deny");
     }
     assert!(
         worst < std::time::Duration::from_millis(250),

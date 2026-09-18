@@ -791,9 +791,13 @@ fn a_wildcard_rule_never_approves_a_call_this_matcher_cannot_read() {
             "Bash",
             &serde_json::json!({ "command": call }),
         );
+        // **This property is now free.** It used to need a guard: a wildcard
+        // allow rule could approve a call whose text this matcher could not
+        // read, and one spelling of that — `cat $'\x2e\x65nv'` — was widening
+        // #32. There is no approval left to give, so the class cannot recur.
         assert!(
-            !matches!(v, Verdict::Allow { .. }),
-            "a wildcard rule approved a call it cannot read: {call} -> {v:?}"
+            matches!(v, Verdict::Undecided),
+            "something other than 'a person decides' came back for {call} -> {v:?}"
         );
     }
 
@@ -806,7 +810,7 @@ fn a_wildcard_rule_never_approves_a_call_this_matcher_cannot_read() {
             &serde_json::json!({ "command": call }),
         );
         assert!(
-            matches!(v, Verdict::Allow { .. }),
+            matches!(v, Verdict::Undecided),
             "an ordinary call stopped being approvable: {call} -> {v:?}"
         );
     }
@@ -834,9 +838,12 @@ fn a_projects_own_prohibition_cannot_be_defeated_by_its_own_allow_rule() {
             "Bash",
             &serde_json::json!({ "command": spelling }),
         );
+        // Widening #32 was a project's own prohibition defeated by its own
+        // allow rule. With no allow verdict the prohibition is the only thing
+        // that can fire, so the defeat has no mechanism.
         assert!(
-            !matches!(v, Verdict::Allow { .. }),
-            "`{spelling}` was auto-approved past a never_auto rule -> {v:?}"
+            !matches!(v, Verdict::Ask { .. }),
+            "`{spelling}` was deferred rather than prohibited -> {v:?}"
         );
     }
 }

@@ -1,10 +1,19 @@
 # Devplane
 
-**The local-first control plane for AI coding agents.** One binary that **watches** every Claude Code
-session already running on your machine — terminal, VS Code, desktop — tells you which ones need you,
-and **drives** any agent that speaks the
+**Where work that outlives a session lives.** One binary, one page, every project on your machine —
+what landed, what is red, what a reviewer is waiting on, and which finished work can *prove* it is
+done.
+
+A session ends; the work does not. When a check goes red two hours after the agent stopped there is
+no session left to show it, and that is the gap this fills. Devplane's unit is a **Work**: the
+branch, the project's own checks, the pull request, the cost. It **watches** the sessions already
+running on your machine — terminal, VS Code, desktop — and **drives** any agent that speaks the
 [Agent Client Protocol](https://agentclientprotocol.com): Claude Code, Codex, Copilot, OpenCode and
-Gemini out of the box. One permission gate governs Claude Code and GitHub Copilot alike.
+Gemini out of the box.
+
+**Devplane never approves a tool call.** Your agent's own permission system does that, in its own
+settings, where it is authoritative. Devplane can *prohibit* and *defer*, because being stricter than
+your agent is free — and it shows you the request and who needs to answer it.
 
 **[Documentation → hupe1980.github.io/devplane](https://hupe1980.github.io/devplane)**
 
@@ -43,8 +52,7 @@ link.
 > **Status: early, but the whole loop runs** — watching, driving, verified work, exportable done
 > certificates, declared pipelines,
 > resumable sessions, the decision log, and an inbox that measures whether it is worth reading.
-> Built against Claude Code 2.1.273 on a machine with 23 live sessions; the permission harness last
-> ran in full against 2.1.273.
+> Built against Claude Code 2.1.273 on a machine with 23 live sessions.
 
 ## 🤔 Why
 
@@ -134,9 +142,12 @@ on_fail = "feedback"        # feedback | escalate | ignore
 max_feedback_rounds = 2
 
 [policy]                    # this repository's rules, not the machine's
-auto_allow = ["Read", "Bash(pnpm test *)"]
-always_ask = ["Bash(git push *)"]
-never_auto = ["Bash(rm -rf *)", "Read(.env)"]
+always_ask = ["Bash(git push *)"]   # Devplane defers these to you
+never_auto = ["Bash(rm -rf *)", "Read(.env)"]   # and refuses these outright
+# There is no allow list here. Approving a call would mean claiming your agent
+# would have approved it too — a claim about somebody else's code that goes
+# stale every release. Put grants in your agent's own settings, where they are
+# enforced by the thing that owns them.
 
 [pipelines.feature]         # agents checking agents
 steps = [
@@ -151,12 +162,14 @@ otherwise surface several minutes and one model call later: a `back_to` naming a
 exist, a gate nobody declared, an `include` that leaves the repository, a review loop with no check
 behind it, and a permission rule that cannot match anything.
 
-It also reports the two kinds of rule that are *legal* and wrong: one that **provably does nothing**,
-because a prohibition above it already answers every call it speaks for, and one that **grants more
-than it looks like** — `Bash(python:*)` reads as a narrow permission for one interpreter and approves
-`python -c '…'`, which is any code at all. Claude Code reads that rule the same way, so Devplane
-reports it and does not refuse it; the narrowing is yours to write. In a scan of 3,171 public agent
-setups, 3.1 % carried a grant of exactly that shape.
+**And it lints the grants you wrote for your agent, which is where grants belong.** A rule that
+**grants more than it looks like** — `Bash(python:*)` reads as a narrow permission for one
+interpreter and approves `python -c '…'`, which is any code at all — is reported rather than
+refused, because it is your agent that will honour it and yours to narrow. In a scan of 3,171 public
+agent setups, **3.1 %** carried a grant of exactly that shape.
+
+Reading a rule to tell you what it does costs nothing and cannot go stale. *Enforcing* one would
+mean mirroring your agent's semantics for ever, which this project tried and stopped doing.
 
 [Verified done →](https://hupe1980.github.io/devplane/docs/verified-done/) ·
 [Configuration →](https://hupe1980.github.io/devplane/docs/configuration/)

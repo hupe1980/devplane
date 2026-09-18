@@ -223,8 +223,11 @@ impl PolicyCache {
             return Verdict::Undecided;
         }
         for (p, ctx) in &sets {
-            if let Verdict::Allow { rule } = p.evaluate(ctx, tool, input) {
-                return Verdict::Allow { rule };
+            // Nothing here can answer yes any more, so a hit is a prohibition
+            // or a deferral, and both are worth returning early.
+            match p.evaluate(ctx, tool, input) {
+                Verdict::Undecided => {}
+                decided => return decided,
             }
         }
         Verdict::Undecided
@@ -522,7 +525,7 @@ mod tests {
         let cache = PolicyCache::for_projects_only();
         assert!(matches!(
             cache.evaluate(&dir, "Bash", &json!({"command": "pnpm test -- --run"})),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         assert!(matches!(
             cache.evaluate(&dir, "Bash", &json!({"command": "rm -rf node_modules"})),
@@ -541,7 +544,7 @@ mod tests {
         let cmd = json!({"command": "pnpm test -- --run"});
         assert!(matches!(
             cache.evaluate(&a, "Bash", &cmd),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         assert_eq!(
             cache.evaluate(&b, "Bash", &cmd),
@@ -679,7 +682,7 @@ mod tests {
         // And the allow still does its job for everything else.
         assert!(matches!(
             cache.evaluate(&dir, "Bash", &json!({"command": "git status"})),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -723,7 +726,7 @@ mod tests {
         cache.clear();
         assert!(matches!(
             cache.evaluate(&dir, "Bash", &json!({"command": "ls -la"})),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -745,12 +748,12 @@ mod tests {
         .unwrap();
         cache.clear();
         // Nothing was ever loaded for this root after clearing, so the safe
-        // answer is the empty policy — and crucially never a silent allow.
-        assert_ne!(
+        // answer is the empty policy. Devplane has no way to say yes at all
+        // now, so what this holds is that a cleared cache does not resurrect a
+        // stale prohibition either.
+        assert_eq!(
             cache.evaluate(&dir, "Bash", &json!({"command": "rm -rf x"})),
-            Verdict::Allow {
-                rule: String::new()
-            }
+            Verdict::Undecided
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -760,7 +763,7 @@ mod tests {
         let cache = PolicyCache::new(Policy::new(&["Read".into()], &[]), PathBuf::from("/"), None);
         assert!(matches!(
             cache.evaluate(Path::new("/"), "Read", &json!({})),
-            Verdict::Allow { .. }
+            Verdict::Undecided
         ));
     }
 
