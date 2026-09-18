@@ -14,11 +14,18 @@
 #   scripts/verify-permissions-diff.sh [cases]
 #
 # `cases` caps how many are run, for a quick pass. `DEVPLANE_DIFF_AXIS=allow`
-# or `=deny` runs one half and the default runs both; `=dialect` runs this
-# matcher alone over the non-Bash tools and prints a checklist to put to the
-# running product; `=selftest` checks the harness against itself and asks
-# nothing. `DEVPLANE_DIFF_ONLY=<substring>` runs the rule sets that match,
-# which is how a finding is re-asked without paying for the matrix again.
+# or `=deny` runs one half and the default runs both; `=dialect` asks the
+# running product about the tools a rule reaches that are **not** `Bash` —
+# PowerShell and Monitor; `=selftest` checks the harness against itself and asks
+# nothing. `DEVPLANE_DIFF_ONLY=<substring>` runs the rule sets that match and
+# `DEVPLANE_DIFF_SHAPES=<substring>` the shapes, which is how a finding is
+# re-asked without paying for the sweep again — and the PowerShell sweep is
+# eighteen rows at up to four asks each, so it should be.
+#
+# **The dialect axis printed a checklist for a person to carry until
+# 2026-09-18**, captioned "NOT a measurement", and was never carried. A widening
+# sat in the allow path for as long as the axis existed: Devplane approving a
+# destructive PowerShell command the vendor puts in front of a person.
 #
 # Costs a few cents per run and needs a signed-in Claude Code, so it is not part
 # of CI.
@@ -555,6 +562,68 @@ else:
 PYEOF
 }
 
+# ---------------------------------------------------------------------------
+# The dialect probes: the tools a rule reaches that are not `Bash`.
+#
+# **These are what turned the dialect axis from a checklist into a
+# measurement.** It used to compute this matcher's answers and print them for a
+# person to carry to a running product, saying so in its own output. Nobody
+# carried them, and a widening sat in the allow path for as long as the axis
+# existed — Devplane auto-approving a destructive PowerShell command the vendor
+# puts in front of a person.
+#
+# **PowerShell needs opting in**, and the prerequisite the notes recorded as a
+# platform blocker was already met: the tool is opt-in on macOS via
+# `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` and needs PowerShell 7+, and `pwsh` was
+# installed. The evidence is a file the command removes, because `Remove-Item`
+# leaves no output to read.
+#
+# **Monitor takes the same `command` field as Bash**, and the vendor's refusal
+# says which rules it used: *"Permission to use **Bash** with command …"* for a
+# call made through the **Monitor** tool. So the evidence is the same
+# `vp.ran` marker the deny axis already uses.
+ps_have() { command -v pwsh >/dev/null 2>&1; }
+
+ps_reset() { rm -f "$W/vp-ran.txt"; printf 'x\n' > "$W/vp-ran.txt"; }
+ps_ran() { [ -f "$W/vp-ran.txt" ] && echo no || echo yes; }
+
+# Allow axis: is this rule enough for the running product to make the call?
+ask_claude_ps() { # rule command -> yes|no
+  ps_reset
+  ( cd "$W" && CLAUDE_CODE_USE_POWERSHELL_TOOL=1 "$CLAUDE" \
+      -p "Run this exact PowerShell command and nothing else, then stop: $2" \
+      --settings "{\"permissions\":{\"allow\":[\"$(json_escape "$1")\"],\"deny\":[],\"ask\":[]}}" \
+      --permission-mode dontAsk --model "$MODEL" \
+      --output-format stream-json --verbose 2>/dev/null ) | note_spend
+  ps_ran
+}
+
+# Deny axis: the whole tool is allowed, so the deny rule is the only variable
+# that can stop the call.
+ask_claude_ps_deny() { # rule command -> yes|no   (yes = it ran, i.e. not blocked)
+  ps_reset
+  ( cd "$W" && CLAUDE_CODE_USE_POWERSHELL_TOOL=1 "$CLAUDE" \
+      -p "Run this exact PowerShell command and nothing else, then stop: $2" \
+      --settings "{\"permissions\":{\"allow\":[\"PowerShell\"],\"deny\":[\"$(json_escape "$1")\"],\"ask\":[]}}" \
+      --permission-mode dontAsk --model "$MODEL" \
+      --output-format stream-json --verbose 2>/dev/null ) | note_spend
+  ps_ran
+}
+
+# Monitor, deny axis. The allow rule is the exact call for the same reason the
+# Bash deny axis uses one: it makes the probe substitute-proof.
+ask_claude_monitor_deny() { # deny-rule command -> yes|no
+  deny_reset
+  full="$2 ; git config --local vp.ran 1"
+  ( cd "$W" && "$CLAUDE" \
+      -p "Use the Monitor tool to run this exact command in the background and report its output, then stop: $full" \
+      --settings "{\"permissions\":{\"allow\":[\"Bash($(json_escape "$full"))\",\"Monitor\"],\"deny\":[\"$(json_escape "$1")\"],\"ask\":[]}}" \
+      --permission-mode dontAsk --model "$MODEL" \
+      --output-format stream-json --verbose 2>/dev/null ) | note_spend
+  sleep 2
+  deny_ran
+}
+
 ask_claude_deny() { # deny-json command -> yes|no   (yes = it ran, i.e. not blocked)
   deny_reset
   full="$2 ; git config --local vp.ran 1"
@@ -728,36 +797,117 @@ if [ "$AXIS" = selftest ]; then
 fi
 
 if [ "$AXIS" = dialect ]; then
-  echo "dialect axis — this matcher's answers, for a human to put to a running product"
-  echo "NOT a measurement: nothing here has been asked of Claude Code."
+  # -------------------------------------------------------------------------
+  # **This used to print one side and say so.** It computed this matcher's
+  # answers for the non-Bash tools and captioned itself *"NOT a measurement:
+  # nothing here has been asked of Claude Code"*. That was honest, and it was
+  # never carried: the shapes sat there while Devplane auto-approved a
+  # destructive PowerShell command the vendor puts in front of a person.
+  #
+  # Now it asks. Six outcomes, and the two that used to have nowhere to go —
+  # `skipped` is about this host, `declined` is about the vendor, and neither is
+  # agreement. A probe that cannot be decided within its budget is
+  # `inconclusive`, never rounded to agreement.
+  echo "dialect axis — measured against Claude Code ${MEASURED:-unknown}"
+  "$VP" --json sequential 2>/dev/null \
+    | python3 -c 'import json,sys; print("  " + json.load(sys.stdin)["targets"])' 2>/dev/null
   echo
-  for rule in "${PS_RULESETS[@]}"; do
-    class=never_auto
-    case "$rule" in *Get-ChildItem*) class=auto_allow ;; esac
-    printf '[project]\nname = "diff"\n\n[policy]\n%s = ["%s"]\n' "$class" "$rule" > "$W/devplane.toml"
-    for shape in "${PS_SHAPES[@]}"; do
-      v=$("$VP" --json explain --dir "$W" --tool PowerShell --input "$(printf '{"command":"%s"}' "$shape")" 2>/dev/null \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
-      printf '  %-28s %-34s -> %s\n' "$rule" "$shape" "${v:-?}"
+
+  d_agreed=0; d_narrower=0; d_wider=0; d_skipped=0; d_declined=0; d_incon=0
+
+  # One row: both sides, then the sequential rule until it decides.
+  dialect_row() { # label rule call ours asker
+    local label="$1" rule="$2" call="$3" ours="$4" asker="$5"
+    local theirs agreements=0 disagreements=0 decision asks
+    theirs=$("$asker" "$rule" "$call")
+    while :; do
+      case "$theirs" in "$ours") agreements=$((agreements + 1)) ;; *) disagreements=$((disagreements + 1)) ;; esac
+      decision=$("$VP" sequential --agreements "$agreements" --disagreements "$disagreements" 2>/dev/null)
+      [ "$decision" = continue ] || break
+      theirs=$("$asker" "$rule" "$call")
     done
-  done
-  printf '[project]\nname = "diff"\n\n[policy]\nnever_auto = ["Bash(rm *)", "Read(.env)"]\nauto_allow = ["Bash(git config *)"]\n' > "$W/devplane.toml"
-  for shape in "${MONITOR_SHAPES[@]}"; do
-    for tool in Bash Monitor; do
-      v=$("$VP" --json explain --dir "$W" --tool "$tool" --input "$(printf '{"command":"%s"}' "$shape")" 2>/dev/null \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
-      printf '  %-28s %-34s -> %s\n' "$tool" "$shape" "${v:-?}"
-    done
-  done
-  for f in file_path path uri; do
-    v=$("$VP" --json explain --dir "$W" --tool LSP --input "$(printf '{"%s":".env"}' "$f")" 2>/dev/null \
+    asks=$((agreements + disagreements))
+    case "$decision" in
+      agree)
+        printf '  %-28s %-38s %-5s %-5s agreed (%d asks)\n' "$rule" "$call" "$ours" "$theirs" "$asks"
+        d_agreed=$((d_agreed + 1)) ;;
+      inconclusive)
+        printf '  %-28s %-38s %-5s %-5s INCONCLUSIVE after %d asks — not agreement\n' "$rule" "$call" "$ours" "$theirs" "$asks"
+        d_incon=$((d_incon + 1)); fail=1 ;;
+      disagree)
+        # **The asymmetry is the whole product.** Devplane saying yes where the
+        # vendor says no is a rule that reads as protection and is none.
+        if [ "$ours" = yes ]; then
+          printf '  %-28s %-38s %-5s %-5s WIDER (%d asks)\n' "$rule" "$call" "$ours" "$theirs" "$asks"
+          d_wider=$((d_wider + 1)); fail=1
+        else
+          printf '  %-28s %-38s %-5s %-5s narrower (%d asks)\n' "$rule" "$call" "$ours" "$theirs" "$asks"
+          d_narrower=$((d_narrower + 1))
+        fi ;;
+      *)
+        printf '  %-28s %-38s the sequential rule said [%s]\n' "$rule" "$call" "$decision"
+        fail=1 ;;
+    esac
+  }
+
+  ps_devplane() { # rule call class -> yes|no   (yes = devplane would allow)
+    printf '[project]\nname = "diff"\n\n[policy]\n%s = ["%s"]\n' "$3" "$1" > "$W/devplane.toml"
+    local v
+    v=$("$VP" --json explain --dir "$W" --tool PowerShell --input "$(printf '{"command":"%s"}' "$2")" 2>/dev/null \
           | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
-    printf '  %-28s %-34s -> %s\n' "LSP Read(.env)" "$f=.env" "${v:-?}"
-  done
+    [ "$v" = allow ] && echo yes || echo no
+  }
+
+  echo "PowerShell — allow axis: is this rule enough for the product to make the call?"
+  if ! ps_have; then
+    for rule in "${PS_RULESETS[@]}"; do
+      for shape in "${PS_SHAPES[@]}"; do
+        printf '  %-28s %-38s skipped: no pwsh on this host\n' "$rule" "$shape"
+        d_skipped=$((d_skipped + 1))
+      done
+    done
+  else
+    for rule in "${PS_RULESETS[@]}"; do
+      # `DEVPLANE_DIFF_ONLY` filters here too. The full PowerShell sweep is
+      # eighteen rows at up to four asks each, which is real money; a finding is
+      # re-asked with a substring rather than by paying for the sweep again.
+      skip_rule "$rule" && continue
+      for shape in "${PS_SHAPES[@]}"; do
+        [ -n "${DEVPLANE_DIFF_SHAPES:-}" ] && case "$shape" in *"$DEVPLANE_DIFF_SHAPES"*) ;; *) continue ;; esac
+        dialect_row "ps-allow" "$rule" "$shape" "$(ps_devplane "$rule" "$shape" auto_allow)" ask_claude_ps
+      done
+    done
+  fi
+
   echo
-  echo "Every row above should read the same on the running product. A Bash row"
-  echo "and its Monitor twin disagreeing is the widening this axis exists for."
-  exit 0
+  echo "Monitor — deny axis: does a Bash prohibition reach a call made through Monitor?"
+  for shape in "${MONITOR_SHAPES[@]}"; do
+    case "$shape" in
+      *"cat .env"*) rule='Read(.env)' ;;
+      *) rule='Bash(git config *)' ;;
+    esac
+    printf '[project]\nname = "diff"\n\n[policy]\nnever_auto = ["%s"]\n' "$rule" > "$W/devplane.toml"
+    v=$("$VP" --json explain --dir "$W" --tool Monitor --input "$(printf '{"command":"%s"}' "$shape")" 2>/dev/null \
+          | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+    ours=$([ "$v" = allow ] && echo yes || echo no)
+    dialect_row "monitor-deny" "$rule" "$shape" "$ours" ask_claude_monitor_deny
+  done
+
+  echo
+  echo "LSP — not asked. There is no documented way to make a headless run issue an"
+  echo "LSP request against a chosen path, so this matcher's answers stay a claim"
+  echo "rather than becoming a measurement. Recorded as skipped, not as agreement."
+  for f in file_path path uri; do
+    printf '  %-28s %-38s skipped: no way to ask the vendor\n' "LSP Read(.env)" "$f=.env"
+    d_skipped=$((d_skipped + 1))
+  done
+
+  total=$((d_agreed + d_narrower + d_wider + d_skipped + d_declined + d_incon))
+  echo
+  echo "dialect axis: $total asked · $d_agreed agreed · $d_narrower narrower · $d_wider wider · $d_skipped skipped · $d_declined declined · $d_incon inconclusive"
+  echo "dialect axis: $(spend_line)"
+  [ "$d_skipped" -gt 0 ] && echo "dialect axis: skipped rows are debts with names, and are never counted as agreement"
+  exit "${fail:-0}"
 fi
 
 # ---------------------------------------------------------------------------
