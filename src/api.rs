@@ -620,6 +620,18 @@ async fn otel_metrics(State(state): State<Shared>, body: axum::body::Bytes) -> i
 #[derive(Serialize)]
 struct BoardResponse {
     summary: crate::core::BoardSummary,
+    /// **Which projects this board is actually about.**
+    ///
+    /// The list's promise is *across everything*. When a project cannot be
+    /// read — its forge poll failed, its configuration will not parse — its
+    /// rows are simply absent, and an empty list that silently covers four
+    /// projects out of six reads as good news. That is the worst way for this
+    /// page to be wrong, because it is wrong in the reassuring direction.
+    ///
+    /// Derived from signals that already exist rather than from a new notion of
+    /// health: a stale forge poll and a broken configuration are the two ways a
+    /// project goes quiet, and both were already tracked per project.
+    coverage: Coverage,
     /// The working set by default; everything when `?all=true`.
     runs: Vec<RunView>,
     projects: Vec<crate::core::Project>,
@@ -769,7 +781,30 @@ async fn board(
             ),
             running: running.to_string(),
         });
+    // A project is unreadable when something it owns cannot be read, not when it
+    // is merely quiet: a project with no forge configured is not a failure, and
+    // `stale` is `None` for it rather than an error.
+    let broken = state.policy.broken();
+    let unreadable: Vec<Unreadable> = w
+        .projects()
+        .filter_map(|p| {
+            let forge_why = forge.get(&p.id).and_then(|c| c.stale.clone());
+            let config_why = broken
+                .iter()
+                .find(|(root, _)| *root == p.root)
+                .map(|(_, why)| format!("its configuration will not parse: {why}"));
+            forge_why.or(config_why).map(|why| Unreadable {
+                name: p.name.clone(),
+                why,
+            })
+        })
+        .collect();
+
     Json(BoardResponse {
+        coverage: Coverage {
+            projects: w.projects().count(),
+            unreadable,
+        },
         summary,
         runs,
         gate_behind,
@@ -822,6 +857,26 @@ async fn inbox(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
         })
         .collect();
     Json(rows).into_response()
+}
+
+/// What the board could and could not see.
+#[derive(Serialize)]
+struct Coverage {
+    /// How many projects the board was assembled from.
+    projects: usize,
+    /// The ones it could not read, **named**. A count alone sends somebody
+    /// hunting; the name does not.
+    ///
+    /// Empty is the ordinary case, and an empty list is how the page knows not
+    /// to warn — a page that always warns is a page nobody reads.
+    unreadable: Vec<Unreadable>,
+}
+
+/// A project the board could not read, and why.
+#[derive(Serialize)]
+struct Unreadable {
+    name: String,
+    why: String,
 }
 
 /// One row of the cross-project issue or pull-request list.

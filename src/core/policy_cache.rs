@@ -347,19 +347,31 @@ impl PolicyCache {
         project_root: Option<&Path>,
     ) -> Result<crate::core::offer::RuleOffer, crate::core::offer::NoOffer> {
         forget_resolved();
+        // **Where a grant goes now that Devplane does not evaluate one.**
+        //
+        // This named `[policy] auto_allow` in Devplane's own file until
+        // 2026-09-18. That key is no longer read: approving a call would mean
+        // claiming the vendor would have approved it too, and Devplane stopped
+        // making that claim. A suggestion pointing at a dead key is worse than
+        // no suggestion — somebody pastes it, nothing changes, and the next
+        // identical call interrupts them again.
+        //
+        // So the rule goes where it is enforced: the agent's own settings.
+        // Devplane composes the narrowest text that covers the call and hands
+        // it over; it still writes nothing, for the reason it never did.
         let (source, dest) = match project_root {
             Some(root) => (
                 root.to_path_buf(),
                 crate::core::offer::Destination {
-                    file: root.join("devplane.toml").display().to_string(),
-                    section: "[policy] auto_allow".into(),
+                    file: root.join(".claude/settings.json").display().to_string(),
+                    section: "permissions.allow".into(),
                 },
             ),
             None => (
                 self.global_root.clone(),
                 crate::core::offer::Destination {
-                    file: self.global_root.join("policy.toml").display().to_string(),
-                    section: "[policy] auto_allow".into(),
+                    file: "~/.claude/settings.json".to_string(),
+                    section: "permissions.allow".into(),
                 },
             ),
         };

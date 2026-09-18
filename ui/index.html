@@ -142,7 +142,22 @@
      phone is the one field that has to survive the narrow case. */
   .item .meta { display: flex; flex-wrap: wrap; gap: .1rem .6rem; font-size: .82rem;
                 color: var(--faint); margin-top: .15rem; }
-  .item .meta .proj { font-weight: 600; }
+  /* `.where`, not `.proj`: `.proj` is already the board's project *heading* —
+     uppercase, letter-spaced and with a 0.9rem top margin — and inheriting that
+     pushed the name onto its own line with a gap above it. Found by looking at
+     a screenshot; no test could see it. */
+  .item .meta .where { font-weight: 600; color: var(--dim); }
+  /* How old the list is. Quiet until it is not: past the threshold the colour
+     and the glyph both change, because a reader who has stopped noticing the
+     line is exactly the reader it is for. */
+  .freshwrap { font-weight: 400; font-size: .8rem; margin-left: .5rem; }
+  .fresh { color: var(--faint); }
+  .fresh.stale, .fresh.none { color: var(--wait); font-weight: 600; }
+  /* Which projects the list is not about. Above the rows, because a reader who
+     has started down them has already decided the list is complete. */
+  .cover { border-left: 3px solid var(--wait); background: var(--bg);
+           padding: .5rem .7rem; margin-bottom: .6rem; font-size: .88rem; }
+  .cover ul { margin: .3rem 0 0; padding-left: 1.1rem; }
   .opts { margin: .35rem 0 0; padding-left: 1.1rem; color: var(--dim); }
   .opts.picks { padding-left: 0; display: flex; gap: .4rem; flex-wrap: wrap; }
   .opts.picks button { display: inline-flex; align-items: baseline; gap: .45rem; }
@@ -539,7 +554,8 @@
 
 <main>
   <section id="needs">
-    <h2 id="needshead">Needs you</h2>
+    <h2 id="needshead">Needs you <span id="fresh" class="freshwrap"></span></h2>
+    <div id="cover"></div>
     <div id="inbox" role="list" aria-labelledby="needshead"></div>
   </section>
   <section id="worksec" data-surface="false">
@@ -728,7 +744,13 @@ const waited = (since) => {
 // `connected` is tri-state on purpose: `undefined` not asked, `null` asked and
 // unknown, a boolean answered. An empty board must not claim "nothing is
 // connected" on the strength of a request that failed.
-let state = { board: null, inbox: [], work: [], sel: 0, showAll: false, connected: undefined };
+// `checkedAt` is when the list was last *confirmed*, not when it was last
+// rendered. A dropped stream leaves the page showing its last good answer,
+// which is the right thing to show and the wrong thing to present as now:
+// somebody reading "nothing needs you" from data collected before lunch is the
+// failure this field exists to prevent.
+let state = { board: null, inbox: [], work: [], sel: 0, showAll: false, connected: undefined,
+              checkedAt: null };
 // The open transcript: which run, what it has said, and whether to show the
 // agent's reasoning (usually not — a reader skips it far more often than reads).
 let talk = { run: null, messages: [], thinking: false, es: null };
@@ -778,6 +800,80 @@ function emptyBoard(b) {
   return `<div class="empty"><b>Nothing is running right now.</b><div>${rest}</div></div>`;
 }
 
+// **How old what you are looking at is.**
+//
+// Elapsed, never a clock time: "checked 11:04" asks a reader to do arithmetic
+// against a clock they may not be looking at, and "checked 3m ago" does not.
+//
+// Past the threshold it stops being a footnote, because the thing it prevents —
+// acting on a stale reassurance — happens before anybody reads a footnote. The
+// refresh interval is well under the threshold, so the page never announces
+// staleness it is about to fix by itself.
+const STALE_AFTER_MS = 90_000;
+function freshness() {
+  if (!state.checkedAt) {
+    // Never loaded is not an age of nought.
+    return `<span class="fresh none">not loaded yet</span>`;
+  }
+  const secs = Math.max(0, Math.round((Date.now() - state.checkedAt) / 1000));
+  const old = Date.now() - state.checkedAt > STALE_AFTER_MS;
+  return old
+    ? `<span class="fresh stale">⚠ last checked ${esc(ago(secs))} ago — this may be out of date</span>`
+    : `<span class="fresh">checked ${esc(ago(secs))} ago</span>`;
+}
+
+// **Which projects this list is not about.**
+//
+// Independent of whether the list is empty: a project that could not be read
+// contributes no rows either way, so a busy list can be just as incomplete as
+// an empty one. Rendered above the list rather than inside it, because it is a
+// property of the list and not a row somebody can act on.
+function coverageNote(b) {
+  const missed = b?.coverage?.unreadable || [];
+  if (!missed.length) return "";
+  return `<div class="cover">
+    <b>${esc(missed.length)} of ${esc(b.coverage.projects)} project${b.coverage.projects === 1 ? "" : "s"} could not be read.</b>
+    This list is narrower than it looks.
+    <ul>${missed.map((m) => `<li><b>${esc(m.name)}</b> — ${esc(m.why)}</li>`).join("")}</ul>
+  </div>`;
+}
+
+// **Three silences, and they are three different mornings.**
+//
+// *Nothing needs you* is the tool working. *The daemon cannot be reached* means
+// what is on screen is not current. *Some projects could not be read* means the
+// list is narrower than its promise — and that one used to render as the first,
+// which is the reassuring direction to be wrong in and therefore the worst.
+function emptyWaiting(b) {
+  if (state.checkedAt && Date.now() - state.checkedAt > STALE_AFTER_MS) {
+    return `<div class="empty">
+      <b>Devplane has not answered recently.</b>
+      <div>What is shown is the last thing it said, not what is true now.</div>
+    </div>`;
+  }
+  if ((b?.coverage?.unreadable || []).length) {
+    return `<div class="empty">
+      <b>Nothing needs you in the projects that could be read.</b>
+      <div>The ones above could not be, so this is not the whole answer.</div>
+    </div>`;
+  }
+  return `<div class="empty"><b>Nothing needs you.</b></div>`;
+}
+
+// **The text has to be valid where it is going.**
+//
+// This always emitted TOML — `auto_allow = ["…"]` — because the rule used to go
+// into Devplane's own `devplane.toml`. It goes into the agent's settings now,
+// which is JSON, and a suggestion that is invalid at its destination is worse
+// than none: somebody pastes it, the file stops parsing, and the thing they were
+// trying to make quieter breaks instead.
+//
+// Found by reading a screenshot after the destination changed. Nothing failed.
+const pasteable = (o) =>
+  (o?.section || "").startsWith("permissions")
+    ? `"permissions": { "allow": [${JSON.stringify(o.rule)}] }`
+    : `auto_allow = [${JSON.stringify(o.rule)}]`;
+
 // The rule to paste so this is never asked again — **and nothing writes it.**
 //
 // The rules are committed files reviewed like code, and an agent on this
@@ -795,7 +891,7 @@ function renderOffer(i) {
       ? `covers ${esc(o.covers)}${o.more ? "+" : ""} calls like it`
       : "this call only";
     return `<div class="offer">
-      <code class="rule">auto_allow = ["${esc(o.rule)}"]</code>
+      <code class="rule">${esc(pasteable(o))}</code>
       <button data-act="copyrule" data-rule="${esc(o.rule)}">copy</button>
       <span class="dim">${scope} · paste into <span class="path">${esc(o.file)}</span> ${esc(o.section)} — nothing here writes it</span>
     </div>`;
@@ -867,7 +963,7 @@ function render() {
         <div class="card item ${esc(i.level)}" role="listitem" data-sel="${n}" data-run="${esc(i.run_id || "")}" tabindex="0">
           <div class="t">${esc(i.title)}</div>
           <div class="meta">
-            ${i.project_name ? `<span class="proj">${esc(i.project_name)}</span>` : ""}
+            ${i.project_name ? `<span class="where">${esc(i.project_name)}</span>` : ""}
             ${i.since ? `<span class="waited">${esc(waited(i.since))}</span>` : ""}
           </div>
           ${i.detail ? `<div class="d">${esc(i.detail)}</div>` : ""}
@@ -904,7 +1000,12 @@ function render() {
             <button class="why" data-why="${n}" title="why is this here (?)">why</button>
           </div>
         </div>`).join("")
-    : `<div class="empty">Nothing needs you.</div>`;
+    : emptyWaiting(b);
+  // Coverage and freshness sit above the list: both are facts about the list
+  // rather than rows in it, and a reader who has started down the rows has
+  // already decided the list is complete.
+  $("cover").innerHTML = coverageNote(b);
+  $("fresh").innerHTML = freshness();
   // "Nothing needs you" is reassuring above a board with sessions on it and
   // noise above one with nothing on it at all, where it is a second heading
   // over blank space before the sentence that actually explains the screen.
@@ -1196,6 +1297,7 @@ async function refresh() {
       api("/api/projects"),
     ]);
     projects = projs;
+    state.checkedAt = Date.now();
     state.board = board;
     state.inbox = inbox;
     state.work = work;
@@ -1271,7 +1373,7 @@ async function act(kind, run, req, opt) {
     // on screen as selectable `<code>`, which is what makes this work on a
     // browser that withholds the clipboard — over a private network, say.
     const rule = el.dataset.rule || "";
-    const line = `auto_allow = ["${rule}"]`;
+    const line = pasteable({ rule, section: o?.section });
     navigator.clipboard?.writeText(line);
     $("livetext").textContent = navigator.clipboard
       ? "copied: " + line

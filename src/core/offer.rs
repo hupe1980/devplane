@@ -287,7 +287,7 @@ mod tests {
     fn dest() -> Destination {
         Destination {
             file: "/repo/devplane.toml".into(),
-            section: "[policy] auto_allow".into(),
+            section: "permissions.allow".into(),
         }
     }
 

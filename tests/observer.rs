@@ -1537,14 +1537,18 @@ async fn a_repeated_permission_is_offered_the_rule_that_answers_its_family() {
         "three observed calls plus the one being asked about: {offer}"
     );
 
-    // **Where it goes, and that nothing put it there.** `/tmp/repo` is inside no
-    // registered project, so the machine-wide file is the honest answer — and
-    // naming a `devplane.toml` that does not exist would be worse than naming
-    // nothing.
+    // **Where it goes, and that nothing put it there.**
+    //
+    // It used to name Devplane's own `[policy] auto_allow`. That key is no
+    // longer read — Devplane does not approve tool calls — so an offer pointing
+    // at it would be worse than no offer: somebody pastes it, nothing changes,
+    // and the next identical call interrupts them again. A grant goes where it
+    // is enforced, which is the agent's own settings. `/tmp/repo` is inside no
+    // registered project, so the user-scope file is the honest answer.
     let file = offer["file"].as_str().unwrap();
-    assert!(file.ends_with("policy.toml"), "{file}");
+    assert!(file.ends_with("settings.json"), "{file}");
     assert!(!file.contains("devplane.toml"), "{file}");
-    assert_eq!(offer["section"], "[policy] auto_allow");
+    assert_eq!(offer["section"], "permissions.allow");
 }
 
 /// One interruption is not evidence about the shape of the ones like it.
