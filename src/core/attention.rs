@@ -1563,3 +1563,73 @@ mod tests {
         assert_eq!(item.work_id.as_ref(), Some(&w.id));
     }
 }
+
+#[cfg(test)]
+mod one_row_per_thing {
+    use super::*;
+
+    /// **One underlying thing produces one row — and no mechanism enforces it,
+    /// because measuring first showed none was needed.**
+    ///
+    /// The worry was that a permission and the work it belongs to could both
+    /// raise a row about one decision, and that a list which double-counts
+    /// teaches people to distrust its count. Checking rather than building
+    /// found the structure already prevents it:
+    ///
+    /// - A row's identity is its subject and its kind — `{run}:{kind}` for a
+    ///   session, `{work}:{kind}` for a piece of work — so two namespaces that
+    ///   cannot collide, and one kind per subject inside each.
+    /// - No work-shaped kind means *a permission is waiting*. `Permission` is
+    ///   raised against a run and nothing else describes the same decision.
+    ///
+    /// So this is the guard on that remaining true, rather than a
+    /// de-duplication layer that would have to guess which row to keep.
+    #[test]
+    fn no_work_kind_describes_a_permission() {
+        // The kinds a piece of work raises, all of which outlive its session.
+        let work_shaped = [
+            AttentionKind::GateFailed,
+            AttentionKind::HumanStep,
+            AttentionKind::ReviewExhausted,
+            AttentionKind::PipelineBroken,
+            AttentionKind::Conflict,
+            AttentionKind::PrReady,
+            AttentionKind::CiRed,
+            AttentionKind::ChangesRequested,
+            AttentionKind::ReviewRequested,
+        ];
+        for k in work_shaped {
+            assert_ne!(
+                k.as_str(),
+                AttentionKind::Permission.as_str(),
+                "a work-shaped kind now describes a permission, so one decision \
+                 can raise two rows"
+            );
+        }
+    }
+
+    /// **A session's row and a piece of work's row cannot be confused**, because
+    /// the ids they are built from carry their kind.
+    ///
+    /// A row's id is `{subject}:{kind}`, and the subject is a run id or a work
+    /// id. Those are minted with distinct prefixes — `w-` for work, and a
+    /// provider tag such as `acp-` for a driven run — so the two namespaces are
+    /// disjoint by construction rather than by coincidence.
+    ///
+    /// The first draft of this test asserted the two ids were *equal* for the
+    /// same stem and called that acceptable, which proved nothing: it is only
+    /// true when somebody hands both types the same string, which nothing does.
+    #[test]
+    fn work_ids_and_run_ids_are_minted_into_different_namespaces() {
+        let src = concat!(include_str!("work.rs"), include_str!("../driven.rs"),);
+        assert!(
+            src.contains(r#"WorkId::new(format!("w-{}""#),
+            "work ids stopped carrying a prefix, so a work row's id could \
+             collide with a session row's"
+        );
+        assert!(
+            src.contains(r#"RunId::new(format!("acp-{}""#),
+            "driven run ids stopped carrying a prefix"
+        );
+    }
+}
