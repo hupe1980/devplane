@@ -81,6 +81,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/issues", post(list_issues))
         .route("/api/forge", get(forge))
         .route("/api/decisions", get(decisions))
+        .route("/api/decisions/pane", get(decisions_pane))
+        .route("/api/gate/pane", get(gate_pane))
         .route("/api/explain", get(explain))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
@@ -2119,6 +2121,15 @@ struct AuditQuery {
     about: Option<String>,
     #[serde(default = "default_limit")]
     limit: i64,
+    /// The heading the pane carries, when it has one. Read from the item the
+    /// reader is looking at — so it is somebody else's text, and is escaped on
+    /// the way back out like everything else.
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    sub: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
 }
 
 /// What Devplane decided, newest first.
@@ -2136,6 +2147,86 @@ async fn decisions(
         )
             .into_response(),
     }
+}
+
+/// The reason pane, rendered.
+///
+/// **The first route that serves markup rather than JSON**, and the shape the
+/// rest of the move takes. The page asks a question and gets an answer it can
+/// insert; it does not receive a list and a set of instructions for turning one
+/// into the other.
+///
+/// What that buys is not bytes. It is that `reason`, `actor` and `action` —
+/// a rule somebody wrote, possibly a model, and a command an agent composed —
+/// are escaped by a type on the way out, rather than by a discipline held at
+/// every interpolation site in a script.
+async fn decisions_pane(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<AuditQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let head = q.title.as_deref().map(|t| {
+        (
+            t,
+            q.sub.as_deref().unwrap_or(""),
+            q.detail.as_deref().filter(|d| !d.is_empty()),
+        )
+    });
+    match state.store.decisions(q.about.as_deref(), q.limit).await {
+        Ok(d) => {
+            let rows: Vec<crate::render::DecisionRow> = d
+                .iter()
+                .map(|x| crate::render::DecisionRow {
+                    // The pane shows a time, not a timestamp — narrowed here so
+                    // the page does not slice a string it did not produce.
+                    at: x.at.to_string().chars().skip(11).take(5).collect(),
+                    actor: x.actor.as_str().to_string(),
+                    action: x.action.clone(),
+                    outcome: x.outcome.clone(),
+                    reason: x.reason.clone(),
+                })
+                .collect();
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                crate::render::reason_pane(head, &rows).as_str().to_string(),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// The gate surface, rendered.
+///
+/// The product's one unoccupied claim, reachable without knowing a command
+/// exists. It renders what `devplane gate` prints, from the same constants.
+async fn gate_pane(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let running = {
+        let w = state.world.lock().await;
+        w.runs()
+            .filter_map(|r| r.claude_version.as_deref())
+            .max()
+            .map(str::to_string)
+    };
+    let cadence =
+        crate::core::policy::cadence(running.as_deref(), Some(&crate::conformance::today()));
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        crate::render::gate_pane(
+            running.as_deref(),
+            &cadence,
+            crate::conformance::MEASURES_ONLY_WHAT_WAS_ANNOUNCED,
+        )
+        .as_str()
+        .to_string(),
+    )
+        .into_response()
 }
 
 /// Asks the daemon to stop.

@@ -12,6 +12,12 @@ answers a different question.
 
 ![The board: sessions grouped by project, with what each one is doing, its context use and its cost](/board.png)
 
+Either theme, from one set of values measured independently — the light one is
+not the dark one inverted, and every colour in both was computed against the
+surface it sits on rather than chosen.
+
+![The same board in the light theme, seconds apart from the one above](/board-light.png)
+
 ## The four channels
 
 | Channel | Answers | Needs `connect`? |

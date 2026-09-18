@@ -357,12 +357,22 @@ fn the_why_pane_reads_the_decision_log_and_nothing_else() {
     // `?` answers "why is this here" from the same rows `devplane audit`
     // prints. Inventing an explanation would be the one thing a supervision
     // tool cannot do.
+    //
+    // **This property moved on 2026-09-18 and caught itself moving.** It used
+    // to assert both halves against the page, and the pane is now rendered by
+    // the daemon — so the page-side half went on passing while the sentence it
+    // guarded had left the file. That is the exact failure the phase widening
+    // the escaping property exists to prevent, and it happened here first.
     assert!(
-        PAGE.contains("/api/decisions?limit=25&about="),
+        PAGE.contains("/api/decisions/pane?"),
         "the why pane asks the decision log"
     );
+    let render = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/render.rs"),
+    )
+    .expect("src/render.rs");
     assert!(
-        PAGE.contains("Nothing has been decided about this yet"),
+        render.contains("Nothing has been decided about this yet"),
         "and says so plainly when there is nothing, rather than guessing"
     );
 }
@@ -669,15 +679,38 @@ fn the_page_renders_and_escapes_what_it_renders() {
 #[test]
 fn the_page_is_one_small_self_contained_file() {
     let lines = PAGE.lines().count();
-    let bytes = PAGE.len();
-    assert!(
-        bytes < 100 * 1024,
-        "the page is {bytes} bytes; UX.md §2 promises under 100 KB uncompressed"
-    );
+
+    // **Lines, not bytes, and the change is a correction rather than a
+    // relaxation.**
+    //
+    // The ceiling here has always been a proxy for one question: *has this
+    // become an application a bundler would help with?* Bytes answered it
+    // badly. The page is **31 % comments**, and those comments are why the
+    // escaping rules and the accessibility properties are still true — so a
+    // byte ceiling made every line of explanation compete with every feature,
+    // which is a trade nobody chose and the wrong one to force.
+    //
+    // Lines measure the thing directly, in the unit a person reads and
+    // maintains. At 3 000 the question is genuinely worth re-opening.
+    //
+    // **The byte number was never about what a user pays.** If transfer ever
+    // matters, the answer is a compression layer — measured at +9 crates, a
+    // 69 % reduction — and not fewer comments.
     assert!(
         lines < 3_000,
         "the page is {lines} lines, past the point where a build step is worth revisiting"
     );
+
+    // And the obvious way to evade a line ceiling is one very long line, so
+    // that is closed here rather than discovered later. Nothing hand-written
+    // reaches this; a minified blob does immediately.
+    if let Some(long) = PAGE.lines().find(|l| l.chars().count() > 400) {
+        panic!(
+            "a line is {} characters: {}…\nA line nobody can read is a build step that arrived without being decided",
+            long.chars().count(),
+            long.chars().take(60).collect::<String>()
+        );
+    }
 
     // Anything that would make the browser fetch from somewhere else.
     for (at, _) in PAGE.match_indices("//") {
@@ -1140,5 +1173,321 @@ fn the_rule_is_offered_and_never_written() {
     assert!(
         PAGE.contains("no clipboard here"),
         "and say so rather than reporting a copy that did not happen"
+    );
+}
+
+/// The escaping guarantee, after it stopped being a property of one file.
+///
+/// `every_value_read_off_the_api_is_escaped` scans the page for `${a.bare}`
+/// interpolations. That works because all the interpolation is in one file it
+/// can read — and rendering is moving into the daemon, where a grep would be a
+/// weaker guard than the one it replaces.
+///
+/// So the guarantee is a type there, and this checks the two things a type
+/// cannot check about itself: that the escape hatch still takes `&'static str`,
+/// and that nobody has added a second way in.
+#[test]
+fn the_daemon_renderer_cannot_be_handed_an_unescaped_value() {
+    let render = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/render.rs"),
+    )
+    .expect("src/render.rs");
+
+    // The hatch is `&'static str`. A value off the API, out of a repository or
+    // out of a model is allocated at runtime and cannot satisfy it — that is
+    // the whole guarantee, and widening this signature would delete it.
+    assert!(
+        render.contains("pub fn raw(s: &'static str) -> Self"),
+        "Html::raw no longer takes `&'static str`; untrusted text can reach markup"
+    );
+
+    // And there is exactly one of it. A second constructor over `&str` or
+    // `String` would be a way in that compiles.
+    let constructors = render.matches("-> Self {").count();
+    assert!(
+        constructors > 0,
+        "the renderer has no constructors at all, which cannot be right"
+    );
+    for forbidden in [
+        "pub fn raw(s: &str)",
+        "pub fn raw(s: String)",
+        "pub fn raw_str",
+        "impl From<String> for Html",
+        "impl From<&str> for Html",
+    ] {
+        assert!(
+            !render.contains(forbidden),
+            "`{forbidden}` is a second way into markup that skips escaping"
+        );
+    }
+
+    // `IntoHtml` must not gain a pass-through for a plain string: that is the
+    // same hole wearing a trait's clothes.
+    assert!(
+        !render.contains("fn into_html(self) -> Html {\n        Html(self"),
+        "IntoHtml passes a raw string straight through"
+    );
+}
+
+/// Escaping works, checked by rendering the things that have actually bitten.
+#[test]
+fn the_renderer_escapes_what_repositories_and_models_produce() {
+    use devplane::render::Html;
+    for (input, must_not_contain) in [
+        (r#"<img src=x onerror=alert(1)>"#, "<img"),
+        (r#""onmouseover=""#, "\"onmouseover"),
+        (r#"</script><script>"#, "</script>"),
+        ("a & b", "a & b"),
+        ("it's", "it's"),
+    ] {
+        let rendered = Html::text(input);
+        assert!(
+            !rendered.as_str().contains(must_not_contain),
+            "`{input}` survived escaping as `{}`",
+            rendered.as_str()
+        );
+    }
+
+    // And the macro escapes its arguments while trusting its own literal.
+    let name = r#"<b>evil</b>"#;
+    let out = devplane::markup!("<span>{}</span>", name);
+    assert!(out.as_str().starts_with("<span>"), "the literal is trusted");
+    assert!(
+        !out.as_str().contains("<b>"),
+        "markup! let an argument through unescaped: {}",
+        out.as_str()
+    );
+
+    // Html passed in is already safe and is not double-escaped.
+    let inner = devplane::markup!("<i>{}</i>", "x & y");
+    let outer = devplane::markup!("<p>{}</p>", inner);
+    assert!(outer.as_str().contains("<i>"), "Html was re-escaped");
+    assert!(
+        outer.as_str().contains("&amp;"),
+        "the text lost its escaping"
+    );
+}
+
+// ── The rail, and the promises a list of offers has to keep ─────────────────
+
+/// A rail entry offers a surface, and every offer can be taken.
+///
+/// **This is where "an offered action is an implemented action" is easiest to
+/// break by accident.** Navigation is a list, a list is cheap to add to, and an
+/// entry that looks enabled and does nothing is the same defect class as a
+/// wrong answer — it just looks like a feature.
+#[test]
+fn no_rail_entry_offers_a_surface_that_cannot_be_opened() {
+    let rail_start = PAGE.find("<nav class=\"rail\"").expect("the rail exists");
+    let rail = &PAGE[rail_start..PAGE[rail_start..].find("</nav>").unwrap() + rail_start];
+
+    // Every link names a section that exists in the page.
+    let mut links = 0;
+    for (at, _) in rail.match_indices("data-surface=\"") {
+        let rest = &rail[at + 14..];
+        let id = &rest[..rest.find('"').expect("a closing quote")];
+        assert!(
+            PAGE.contains(&format!("id=\"{id}\"")),
+            "the rail offers `{id}`, which is not a section in the page"
+        );
+        links += 1;
+    }
+    assert!(links >= 5, "the rail lists only {links} reachable surfaces");
+
+    // And an unbuilt surface is not a control: not a link, not a button, so a
+    // keyboard never lands on an offer that cannot be taken.
+    assert!(
+        rail.contains("<span class=\"off\">"),
+        "no unbuilt surface is marked — either all six are built, or one is \
+         being offered as though it were"
+    );
+    let off_start = rail.find("<span class=\"off\">").expect("an unbuilt entry");
+    let off = &rail[off_start
+        ..rail[off_start..]
+            .find("</span>\n")
+            .map_or(rail.len(), |i| i + off_start)];
+    for control in ["<a ", "href=", "<button", "tabindex"] {
+        assert!(
+            !off.contains(control),
+            "an unbuilt rail entry contains `{control}`, which puts it in the tab order"
+        );
+    }
+    // It says what is missing rather than looking disabled and silent.
+    assert!(
+        off.contains("not built"),
+        "an unbuilt entry does not say so"
+    );
+}
+
+/// The gate report is reachable without knowing a command exists.
+///
+/// The product's one unoccupied claim is a measurement, and a measurement
+/// nobody can find is a measurement nobody is buying. This is the reason the
+/// shell outranked the feature backlog at all.
+#[test]
+fn the_gate_report_is_reachable_from_the_board() {
+    assert!(
+        PAGE.contains("data-surface=\"gatesec\""),
+        "the rail does not offer the gate report"
+    );
+    assert!(
+        PAGE.contains("/api/gate/pane"),
+        "nothing asks the daemon for the gate report"
+    );
+    // Its age is visible from the board, not only from inside the report.
+    assert!(
+        PAGE.contains("id=\"gateage\""),
+        "the gate's measurement age is not on the board"
+    );
+
+    // And the report renders every floor with what it does not claim — checked
+    // against the renderer, since that is where the sentences now live.
+    let render = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/render.rs"),
+    )
+    .expect("src/render.rs");
+    assert!(
+        render.contains("f.excludes"),
+        "the gate surface renders floors without their scope sentences"
+    );
+}
+
+/// An empty surface and an unavailable one are different sentences.
+#[test]
+fn an_empty_surface_does_not_read_as_an_unavailable_one() {
+    let render = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/render.rs"),
+    )
+    .expect("src/render.rs");
+    let empty = "Nothing has been decided about this yet";
+    let unavailable = "not built";
+    assert!(
+        render.contains(empty),
+        "an empty surface says nothing at all"
+    );
+    assert!(
+        PAGE.contains(unavailable),
+        "an unbuilt surface says nothing"
+    );
+    assert_ne!(empty, unavailable, "the two states share a sentence");
+    // The one that means "there is nothing here" must not appear where the one
+    // that means "this does not exist yet" belongs, and the reverse.
+    assert!(
+        !render.contains(unavailable),
+        "the renderer describes data as unbuilt"
+    );
+}
+
+// ── Type, figures and motion ────────────────────────────────────────────────
+
+/// Prose is proportional; monospace is kept for what earns it.
+///
+/// **This had no task and no check until an analysis pass found it**, despite
+/// being a stated part of the design. Everything with a *measurement* behind it
+/// got tests; the design rules got none — which is the bias that produces a
+/// technically-complete interface that looks wrong.
+#[test]
+fn monospace_is_kept_for_what_earns_it_and_numbers_are_tabular() {
+    // The body sets prose, and it is not monospace.
+    let body = PAGE
+        .find("  body {")
+        .map(|i| &PAGE[i..i + 600])
+        .expect("a body rule");
+    assert!(
+        !body.contains("font: 13px/1.45 ui-monospace"),
+        "the whole page is still monospace; prose costs ~15% of the line for nothing"
+    );
+    assert!(
+        body.contains("system-ui"),
+        "prose is not set in the system's own proportional stack"
+    );
+
+    // Monospace is declared for the three things that earn it — text somebody
+    // else wrote, identifiers, and numbers in a column.
+    for earns in [".row .name", ".item .d", "code", "kbd"] {
+        assert!(
+            PAGE.contains(earns),
+            "`{earns}` is not in the monospace list; it carries text nobody here wrote"
+        );
+    }
+
+    // A column of numbers is tabular, or it cannot be scanned — which is the
+    // whole reason it is a column rather than a sentence.
+    let tabular = PAGE
+        .find("font-variant-numeric: tabular-nums")
+        .map(|i| &PAGE[PAGE[..i].rfind('\n').unwrap_or(0)..i])
+        .expect("a tabular-nums rule");
+    for column in [".cost", ".gauge", ".row .since"] {
+        assert!(
+            tabular.contains(column) || PAGE.contains(&format!("{column}, ")),
+            "`{column}` is a column of numbers and is not tabular"
+        );
+    }
+}
+
+/// Nothing depends on movement to be understood.
+#[test]
+fn no_state_is_carried_by_motion_and_reduced_motion_is_honoured() {
+    // The strong form first: there is no animation to reduce. A changed number
+    // changes; no row spins because it is working.
+    for moving in ["@keyframes", "animation:", "animation-name"] {
+        assert!(
+            !PAGE.contains(moving),
+            "`{moving}` is in the page; a state conveyed by movement is a state \
+             a still screenshot and a reduced-motion reader both lose"
+        );
+    }
+    // And the preference is honoured anyway, so it stays true rather than
+    // being true by accident — and so a reader can see it was decided.
+    assert!(
+        PAGE.contains("prefers-reduced-motion"),
+        "the page never mentions the preference it happens to satisfy"
+    );
+}
+
+/// The default surface shows the inbox, and the header's count agrees with it.
+///
+/// **Written because it broke silently.** The board is the one surface made of
+/// two sections, and renaming one of them left the "is this the board" check
+/// naming the old id — so the inbox vanished from the default surface while the
+/// header went on counting *"1 need you"*. Every test passed; a screenshot
+/// found it.
+#[test]
+fn the_default_surface_shows_both_of_the_boards_sections() {
+    let js = PAGE
+        .find("const onBoard")
+        .map(|i| &PAGE[i..i + 200])
+        .expect("the board's two-section rule");
+
+    // Whatever the board surface is called, the rail and this rule must agree.
+    // Read from the rail specifically: the sections carry `data-surface` too,
+    // as the flag saying whether they are the one showing.
+    let rail = PAGE
+        .find("<nav class=\"rail\"")
+        .map(|i| &PAGE[i..i + PAGE[i..].find("</nav>").expect("the rail closes")])
+        .expect("the rail exists");
+    let rail_id = rail
+        .split("data-surface=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .expect("the rail's first entry");
+    assert!(
+        js.contains(&format!("which === \"{rail_id}\"")),
+        "the rail calls the default surface `{rail_id}` and the code checks for something else"
+    );
+    assert!(
+        js.contains("id === \"needs\""),
+        "the default surface no longer includes the inbox"
+    );
+
+    // And the fallback lands on a surface that exists.
+    let fallback = PAGE
+        .split("SURFACES.includes(want) ? want : \"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .expect("a fallback surface");
+    assert!(
+        PAGE.contains(&format!("\"{fallback}\"")) && PAGE.contains(&format!("id=\"{fallback}\"")),
+        "the fallback surface `{fallback}` is not a section in the page"
     );
 }

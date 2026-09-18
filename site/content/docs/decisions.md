@@ -30,6 +30,8 @@ devplane audit <run-or-work-id>
 2026-09-13T17:58:31 human   agent:tool.use   rm -rf node_modules
 ```
 
+![The audit surface: what Devplane decided, when, on whose authority, and the rule behind each verdict](/audit.png)
+
 ## The field the table exists for
 
 Each row carries the **actor** (`policy`, `human`, `daemon`), the **action** in the same vocabulary

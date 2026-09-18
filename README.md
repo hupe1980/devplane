@@ -205,6 +205,17 @@ the `- [ ]` boxes, and nothing here knows what a requirement is.
 
 ![The Devplane board: five projects, ten sessions, a permission waiting with the rule that would end it, and one session at 89% context](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/board.png)
 
+**And the surface nobody else ships.** Every watcher in this category can show
+you sessions. None of them can tell you how much to trust the thing deciding on
+your behalf — because none of them has ever measured it.
+
+![The gate report: three floors — what has been read, what has been measured, and what the full matrix proved — each with what it does not claim](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/gate.png)
+
+Three separate claims, never averaged into one. Each carries the half nobody
+else prints: **what it does not claim.** The uncomfortable line at the bottom is
+the point — a per-release measurement covers only what the vendor announced, and
+saying so is what makes the rest of it believable.
+
 Keyboard-first:
 
 | Key | What |
