@@ -7,22 +7,77 @@
   /* One file, no build step. The UI is small enough that a bundler would cost
      more than it saves, and a dashboard that cannot be opened without `npm`
      is a dashboard that rots the first time the toolchain moves. */
+  /* Every token declares its own role, beside its own value, because the check
+     in `tests/tokens.rs` reads them from here rather than from a copy. A list
+     of approved pairs kept somewhere else goes stale the first time somebody
+     adds a token and forgets its row — which is exactly how this page came to
+     promise AA contrast while `--faint` sat at 3.2:1 dark and 2.9:1 light,
+     carrying the two numbers a person scans most.
+
+       surface  a background other things sit on
+       line     a separator between things; decorative, no floor
+       edge     the boundary of a control; held to 3:1, because an input
+                whose edge you cannot see is a control you cannot find
+       text     carries words; held to 4.5:1 against every surface
+
+     `line` and `edge` were one token until the check above was first run and
+     reported it at 1.2:1. Raising the separator to 3:1 would have made every
+     row boundary shout, which is the two-visual-weights rule broken to satisfy
+     a floor that never applied to it. Two tokens, two obligations.  */
   :root {
     color-scheme: light dark;
-    --bg: #fbfbfa; --panel: #fff; --line: #e6e4e0; --ink: #1c1b19;
-    --dim: #6f6b66; --faint: #a5a09a;
-    --work: #2d6cdf; --wait: #b8860b; --fail: #c0392b; --done: #2e8b57;
-    --accent: #1c1b19;
+    --bg: #fbfbfa;      /* surface */
+    --panel: #fff;      /* surface */
+    --line: #e6e4e0;    /* line */
+    --edge: #918b83;    /* edge */
+    --ink: #1c1b19;     /* text */
+    --dim: #6f6b66;     /* text */
+    --faint: #726c64;   /* text */
+    --work: #2d6cdf;    /* text */
+    --wait: #8a7000;    /* text */
+    --fail: #c0392b;    /* text */
+    --done: #1f7a4d;    /* text */
+    --accent: #1c1b19;  /* text */
     font-synthesis: none;
   }
+  /* The system preference is the **default**, not the only say. A person who
+     works in a light editor and wants a dark board is not overridden by their
+     operating system, and a person who has expressed no preference still gets
+     the one their system implies.
+
+     `:root[data-theme="dark"]` repeats the block rather than sharing it,
+     because a media query and an attribute cannot be one selector. The check
+     in `tests/tokens.rs` reads both and fails when they drift. */
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #16161a; --panel: #1c1c21; --line: #2b2b32; --ink: #e8e6e3;
-      --dim: #9b968f; --faint: #6a655f;
-      --work: #6ea8ff; --wait: #e3b341; --fail: #f0715f; --done: #57c98a;
-      --accent: #e8e6e3;
+    :root:not([data-theme="light"]) {
+      --bg: #16161a;      /* surface */
+      --panel: #1c1c21;   /* surface */
+      --line: #2b2b32;    /* line */
+      --edge: #6b6b76;    /* edge */
+      --ink: #e8e6e3;     /* text */
+      --dim: #9b968f;     /* text */
+      --faint: #8b857c;   /* text */
+      --work: #6ea8ff;    /* text */
+      --wait: #e3b341;    /* text */
+      --fail: #f0715f;    /* text */
+      --done: #57c98a;    /* text */
+      --accent: #e8e6e3;  /* text */
     }
   }
+  :root[data-theme="dark"] {
+      --bg: #16161a;      /* surface */
+      --panel: #1c1c21;   /* surface */
+      --line: #2b2b32;    /* line */
+      --edge: #6b6b76;    /* edge */
+      --ink: #e8e6e3;     /* text */
+      --dim: #9b968f;     /* text */
+      --faint: #8b857c;   /* text */
+      --work: #6ea8ff;    /* text */
+      --wait: #e3b341;    /* text */
+      --fail: #f0715f;    /* text */
+      --done: #57c98a;    /* text */
+      --accent: #e8e6e3;  /* text */
+    }
   /* Visible to a screen reader, and to nothing else. Every glyph that carries
      state has one of these beside it, because "every state has a glyph and a
      word" is a rule this page states and has to keep. */
@@ -33,7 +88,13 @@
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
-    font: 13px/1.45 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    /* Prose is proportional; monospace is kept for the three things that earn
+       it — text somebody else wrote, identifiers, and any number in a column.
+       Monospace for a sentence costs about 15 % of the line and buys nothing.
+       The stack is the system's own, because an off-machine font request
+       breaks the board over a tunnel and breaks `curl`ing the page to debug
+       it, silently, on somebody else's network. */
+    font: 13.5px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     padding: 0 0 4rem;
   }
   header {
@@ -143,12 +204,12 @@
   .acts { margin-top: .4rem; display: flex; gap: .4rem; flex-wrap: wrap; }
   button {
     font: inherit; background: transparent; color: var(--dim);
-    border: 1px solid var(--line); border-radius: 4px; padding: .1rem .5rem; cursor: pointer;
+    border: 1px solid var(--edge); border-radius: 4px; padding: .1rem .5rem; cursor: pointer;
   }
   button:hover { color: var(--ink); border-color: var(--dim); }
   input {
     font: inherit; background: var(--panel); color: var(--ink);
-    border: 1px solid var(--line); border-radius: 4px; padding: .15rem .5rem;
+    border: 1px solid var(--edge); border-radius: 4px; padding: .15rem .5rem;
   }
   input:focus-visible { outline: 2px solid var(--work); outline-offset: 1px; }
   input::placeholder { color: var(--faint); }
@@ -158,7 +219,7 @@
   .hit { cursor: pointer; }
   .hit:hover { border-color: var(--dim); }
   kbd {
-    font: inherit; border: 1px solid var(--line); border-bottom-width: 2px;
+    font: inherit; border: 1px solid var(--edge); border-bottom-width: 2px;
     border-radius: 3px; padding: 0 .3rem; color: var(--dim);
   }
   /* The fixed widths above are what makes a column scannable on a monitor and
@@ -352,9 +413,106 @@
   .msg.agent .role { color: var(--accent); }
   .msg.thought { color: var(--faint); }
   .plan { margin: .3rem 0 0 1.4rem; padding: 0; list-style: none; color: var(--dim); }
+  /* The rail. Chrome, not a surface: it navigates and answers no question of
+     its own, which is why it is not subject to the one-question rule.
+
+     An entry for a surface that is not built is a `<span>`, not a link. A rail
+     is a list of offers and an offer that cannot act is the same defect class
+     as a wrong answer — so it is not focusable and not pressable, and it says
+     what is missing rather than looking enabled. */
+  body { display: grid; grid-template-columns: max-content 1fr; }
+  body > *:not(.rail) { grid-column: 2; }
+  .rail {
+    /* `1 / -1` names the end of the **explicit** grid, and there are no
+       explicit rows — so it resolved to row 1 alone and the rail inflated the
+       header row into a 150px empty band. `span 99` spans the implicit rows
+       that actually exist. */
+    grid-column: 1; grid-row: 1 / span 99; align-self: stretch;
+    border-right: 1px solid var(--line); background: var(--panel);
+    padding: .8rem .5rem; min-width: 9rem;
+  }
+  /* The links stay put while the board scrolls past them. The rail itself
+     stretches so the column reads as one surface rather than stopping where
+     its last entry does. */
+  .railinner { position: sticky; top: .8rem; display: flex; flex-direction: column; gap: .1rem; }
+  .rail a, .rail span {
+    display: flex; gap: .5rem; align-items: baseline;
+    padding: .25rem .5rem; border-radius: 4px; color: var(--dim);
+    text-decoration: none; font-size: 12px;
+  }
+  .rail a:hover { color: var(--ink); background: var(--bg); }
+  .rail a[aria-current="page"] { color: var(--ink); background: var(--bg); }
+  .rail .off { color: var(--faint); cursor: default; }
+  .rail .why { font-size: 10px; color: var(--faint); }
+  .rail .badge { margin-left: auto; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .rail .badge.stale { color: var(--wait); }
+  /* Below the width where a rail beside the board is worth its column, it
+     becomes a row above it. Reachable either way, which is the requirement;
+     where it sits is not. */
+  @media (max-width: 46rem) {
+    body { grid-template-columns: 1fr; }
+    body > *:not(.rail) { grid-column: 1; }
+    .rail {
+      grid-row: auto; flex-direction: row; flex-wrap: wrap;
+      border-right: 0; border-bottom: 1px solid var(--line); position: static;
+    }
+  }
+  /* The gate surface: three floors, each with what it does not claim. */
+  .floor { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; padding: .25rem 0; }
+  .floor .fl { width: 7rem; flex: none; color: var(--dim); }
+  .floor .fv { font-variant-numeric: tabular-nums; }
+  .floor .fc { color: var(--dim); }
+  .floor .fx { flex: 1 0 100%; padding-left: 7.6rem; color: var(--faint); }
+  .caveat { margin-top: .8rem; color: var(--faint); max-width: 46rem; }
+  /* Where monospace earns its place, and nowhere else.
+
+     A column of numbers gets tabular figures too, or it cannot be scanned —
+     which is the whole reason it is a column rather than a sentence. */
+  .row .name, .row .since, .cost, .gauge, .row .sum,
+  .item .d, .hit .run, .hit .text, .floor .fv, .offer .rule,
+  code, kbd, .rule, .cmd {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+  }
+  .row .since, .cost, .gauge, .floor .fv, .row .name {
+    font-variant-numeric: tabular-nums;
+  }
+  /* Nothing here depends on movement to be understood: a changed number
+     changes, no row spins because it is working, and no notice slides in.
+     This block exists so that stays true rather than being true by accident —
+     and so a reader can see it was decided. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+  /* Visibility has two owners and they used to fight: `render()` hides a
+     section with nothing in it, the rail hides the surfaces you are not on.
+     Two writers of one `hidden` flag meant the board's refresh kept un-hiding
+     the inbox on the gate surface. Now each writes its own fact and CSS
+     combines them. */
+  #needs[data-surface="false"], #boardsec[data-surface="false"],
+  #worksec[data-surface="false"], #gatesec[data-surface="false"],
+  #auditsec[data-surface="false"],
+  section[data-empty="true"] { display: none; }
   .plan .done { color: var(--done); }
   .plan .at { color: var(--work); }
 </style>
+
+<nav class="rail" aria-label="Surfaces"><div class="railinner">
+  <a href="#boardsec" data-surface="boardsec" aria-current="page">Board<span class="badge" id="railboard"></span></a>
+  <a href="#needs" data-surface="needs">Inbox<span class="badge" id="railinbox"></span></a>
+  <a href="#worksec" data-surface="worksec">Work<span class="badge" id="railwork"></span></a>
+  <a href="#gatesec" data-surface="gatesec">Gate<span class="badge" id="railgate"></span></a>
+  <a href="#auditsec" data-surface="auditsec">Audit</a>
+  <!-- Not built. A `<span>` rather than a link: not focusable, not pressable,
+       and it says what is missing. An entry that looked enabled and did
+       nothing would be the same defect as a wrong answer. -->
+  <span class="off">Digest<span class="why">not built</span></span>
+</div></nav>
 
 <header>
   <h1>Devplane</h1>
@@ -365,6 +523,7 @@
     <!-- In the health corner rather than among the counts: a fact about
          whether to trust this tool, not a number of things waiting. -->
     <span id="gateage" class="stale" hidden></span>
+    <button id="theme" type="button" aria-label="Switch between the light and dark theme">theme</button>
     <span class="dot" id="dot" aria-hidden="true"></span><span id="livetext">connecting</span>
   </div>
 </header>
@@ -378,7 +537,7 @@
     <h2 id="needshead">Needs you</h2>
     <div id="inbox" role="list" aria-labelledby="needshead"></div>
   </section>
-  <section id="worksec" hidden>
+  <section id="worksec" data-surface="false">
     <h2 id="workhead">Work</h2>
     <div id="work" role="list" aria-labelledby="workhead"></div>
   </section>
@@ -386,9 +545,23 @@
     <h2 id="hitshead">Matches</h2>
     <div id="hits"></div>
   </section>
-  <section>
+  <section id="boardsec">
     <h2 id="boardhead">Sessions</h2>
     <div id="board" role="list" aria-labelledby="boardhead"></div>
+  </section>
+
+  <!-- The surface nobody else in the field ships, and until now reachable only
+       by knowing `devplane gate` exists. Rendered by the daemon from the same
+       constants the command prints, so there is one home for each figure. -->
+  <section id="gatesec" data-surface="false" aria-labelledby="gatehead">
+    <div id="gatebody"></div>
+  </section>
+
+  <!-- What Devplane decided, and on whose authority. The same renderer as the
+       reason pane, without narrowing to one piece of work. -->
+  <section id="auditsec" data-surface="false">
+    <h2 id="audithead">Audit</h2>
+    <div id="auditbody" aria-labelledby="audithead"></div>
   </section>
 </main>
 
@@ -516,6 +689,15 @@ const api = async (path, opts = {}) => {
   if (res.status === 401) throw new Error("unauthorised — run `devplane open` again");
   if (!res.ok) throw new Error(path + " → " + res.status);
   return res.json();
+};
+
+// The same request, for a route that answers with markup rather than JSON.
+// Rendering moved into the daemon, so the page needs a way to ask for a piece
+// of page — one line, sharing the auth and the error handling above.
+const apiHtml = async (path) => {
+  const res = await fetch(path, { headers: { Authorization: "Bearer " + TOKEN } });
+  if (!res.ok) throw new Error(path + " → " + res.status);
+  return res.text();
 };
 
 const GLYPH = {
@@ -728,10 +910,10 @@ function render() {
   // "Nothing needs you" is reassuring above a board with sessions on it and
   // noise above one with nothing on it at all, where it is a second heading
   // over blank space before the sentence that actually explains the screen.
-  $("needs").hidden = state.inbox.length === 0 && b.runs.length === 0;
+  $("needs").dataset.empty = String(state.inbox.length === 0 && b.runs.length === 0);
 
   const work = state.work.filter((w) => w.phase !== "done" && w.phase !== "cancelled");
-  $("worksec").hidden = work.length === 0;
+  $("worksec").dataset.empty = String(work.length === 0);
   $("work").innerHTML = work.map((w) => {
     // The verdict comes from the daemon. The page used to re-derive it from
     // the raw exit codes, which reads a reproduction gate — where failing is
@@ -1720,28 +1902,25 @@ async function sendDispatch() {
 // The cheapest possible way to make a supervision tool explainable: the same
 // decision log `devplane audit` reads, narrowed to the row under the cursor.
 async function showWhy(item) {
+  // The pane is rendered by the daemon. The page asks a question and inserts
+  // the answer; it does not receive rows and a set of instructions for turning
+  // them into markup. `reason`, `actor` and `action` are a rule somebody wrote,
+  // possibly a model, and a command an agent composed — escaped by a type on
+  // the way out rather than by discipline at every interpolation site here.
   openOver("why");
   const about = item?.work_id || item?.run_id;
-  $("whybody").innerHTML = `<div class="empty">reading the decision log…</div>`;
-  const head = item
-    ? `<div style="margin-bottom:.6rem"><b>${esc(item.title)}</b><div style="color:var(--dim)">${esc(item.kind)} · ${esc(item.level)}${item.detail ? " · " + esc(item.detail) : ""}</div></div>`
-    : "";
-  if (!about) {
-    $("whybody").innerHTML = head + `<div class="empty">Nothing has been decided about this yet.</div>`;
-    return;
+  const q = new URLSearchParams({ limit: "25" });
+  if (about) q.set("about", about);
+  if (item) {
+    q.set("title", item.title ?? "");
+    q.set("sub", `${item.kind ?? ""} · ${item.level ?? ""}`);
+    if (item.detail) q.set("detail", item.detail);
   }
+  $("whybody").innerHTML = `<div class="empty">reading the decision log…</div>`;
   try {
-    const rows = await api(`/api/decisions?limit=25&about=${encodeURIComponent(about)}`);
-    $("whybody").innerHTML = head + (rows.length
-      // `d`, not `r`: a decision row is not a run, and one letter meaning two
-      // things is why the contract test needed an allowlist — which then
-      // silently stopped covering every field nobody remembered to add to it.
-      ? rows.map((d) => `<div class="e"><span class="t">${esc((d.at || "").slice(11, 16))}</span>
-           <span class="who">${esc(d.actor)}</span><span>${esc(d.outcome)} ${esc(d.action)}</span></div>
-           ${d.reason ? `<div class="r">↳ ${esc(d.reason)}</div>` : ""}`).join("")
-      : `<div class="empty">Nothing has been decided about this yet.</div>`);
+    $("whybody").innerHTML = await apiHtml(`/api/decisions/pane?${q}`);
   } catch (e) {
-    $("whybody").innerHTML = head + `<div class="err">${esc(e.message)}</div>`;
+    $("whybody").textContent = e.message;
   }
 }
 
@@ -1789,6 +1968,65 @@ document.addEventListener("click", (e) => {
   if (card.classList.contains("row") && card.dataset.run) return openTalk(card.dataset.run);
   render();
 });
+
+// Which surface is showing. The rail is chrome: it hides and shows sections
+// that already exist rather than fetching a page, so nothing is a route and
+// nothing costs a request.
+const SURFACES = ["boardsec", "needs", "worksec", "gatesec", "auditsec"];
+async function showSurface(which) {
+  // The board is two sections — what needs you, and everything running — so it
+  // is the one surface that shows more than one.
+  // The board is the one surface made of two sections: what needs you, and
+  // everything running. Named `boardsec` in both places — it was `"board"`
+  // here and `"boardsec"` in the rail for one commit, which silently hid the
+  // inbox on the default surface while the header still counted it.
+  const onBoard = (id) => which === "boardsec" && (id === "needs" || id === "boardsec");
+  for (const id of SURFACES) {
+    const el = $(id)?.closest("section") || $(id);
+    if (!el) continue;
+    el.dataset.surface = String(id === which || onBoard(id));
+  }
+  for (const a of document.querySelectorAll(".rail a")) {
+    if (a.dataset.surface === which) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
+  // The two surfaces the daemon renders. Asked for when opened rather than on
+  // every refresh: neither changes while somebody is looking at the board.
+  if (which === "gatesec") $("gatebody").innerHTML = await apiHtml("/api/gate/pane");
+  if (which === "auditsec") $("auditbody").innerHTML = await apiHtml("/api/decisions/pane?limit=50");
+}
+
+// The theme. The system preference is the default; a choice overrides it and
+// survives a reload. Storage can be unavailable — a private window, blocked
+// site data — and when it is, the default renders and nothing reports an
+// error: a preference nobody can save is an inconvenience, not a failure.
+function applyTheme(t) {
+  if (t) document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+}
+try { applyTheme(localStorage.getItem("devplane-theme")); } catch { /* the default renders */ }
+
+$("theme").addEventListener("click", () => {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const now = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+  const next = now === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try { localStorage.setItem("devplane-theme", next); } catch { /* it still applies for this visit */ }
+});
+
+// The rail's links are ordinary links, and the hash is what decides. That
+// makes a surface addressable — `#gatesec` opens the gate report for somebody
+// you sent the link to — and it means the rail needs no click handler at all
+// beyond what the browser already does. It is also what lets the screenshot
+// script photograph a surface without injecting a script into the page.
+function surfaceFromHash() {
+  const want = (location.hash || "").slice(1);
+  showSurface(SURFACES.includes(want) ? want : "boardsec");
+}
+// The board is the default and its two sections are marked so before any
+// refresh runs — otherwise the first paint is a page with nothing on it.
+surfaceFromHash();
+addEventListener("hashchange", surfaceFromHash);
 
 $("pq").addEventListener("input", renderPalette);
 

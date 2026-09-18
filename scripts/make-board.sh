@@ -98,10 +98,54 @@ post devplane/statusline '{"session_id":"a1b2c3d4","model":{"display_name":"Opus
   "cost":{"total_cost_usd":0.41}}'
 
 sleep 1
-"$CHROME" --headless --disable-gpu --hide-scrollbars \
-  --window-size=1240,940 --screenshot="$tmp/board.png" \
-  "http://127.0.0.1:$port/?token=$token" >/dev/null 2>&1
 
-[ -s "$tmp/board.png" ] || { echo "make-board: Chrome produced nothing" >&2; exit 1; }
-mv "$tmp/board.png" site/static/board.png
-echo "make-board: site/static/board.png rewritten ($(du -k site/static/board.png | cut -f1) KB)"
+# One picture per surface, from the same seeded daemon.
+#
+# The board is not the only thing worth showing any more. **Gate is the surface
+# nobody else in the field ships**, and a README that shows only a session list
+# is a README about the half that commoditised — four watchers do that, and one
+# of them has ten times the stars.
+#
+# Each shot drives the rail the way a person would, rather than loading a
+# different address: the rail is chrome, so there is no URL to photograph. The
+# theme is set the same way the toggle sets it, which is also a check — if the
+# attribute stopped working, the light shot would come back dark.
+# A surface is addressed by its hash, so a picture of one needs no script
+# injected into the page — the rail's links are ordinary links and the hash is
+# what decides.
+#
+# **No `--virtual-time-budget`.** The board holds an SSE stream open, so virtual
+# time never advances past it and Chrome waits for ever. That is not a
+# hypothetical: it is how this script first hung.
+shoot() { # file-name  hash  height  [light|dark]
+  local name="$1" hash="$2" height="${3:-940}" scheme="${4:-}"
+  # Headless Chrome answers `prefers-color-scheme: dark`, so the default shots
+  # are dark. `preferredColorScheme` drives the media query directly, which is
+  # the only way to photograph the other theme without injecting a script —
+  # and it means the light shot is a real test of the light tokens rather than
+  # a picture of the same page.
+  local flags=()
+  [ "$scheme" = light ] && flags+=(--blink-settings=preferredColorScheme=1)
+  [ "$scheme" = dark ] && flags+=(--blink-settings=preferredColorScheme=2)
+  "$CHROME" --headless --disable-gpu --hide-scrollbars "${flags[@]:+${flags[@]}}" \
+    --window-size="1240,$height" --screenshot="$tmp/$name.png" \
+    "http://127.0.0.1:$port/?token=$token#$hash" >/dev/null 2>&1 || true
+  [ -s "$tmp/$name.png" ] || { echo "make-board: Chrome produced nothing for $name" >&2; return 1; }
+  mv "$tmp/$name.png" "site/static/$name.png"
+  echo "make-board: site/static/$name.png ($(du -k "site/static/$name.png" | cut -f1) KB)"
+}
+
+shoot board boardsec 940
+# Straight after the dark one, so the two are the same board seconds apart and
+# a reader comparing them is comparing themes rather than fixture ages. Taken
+# last, the inbox item had aged off and the light shot showed no "needs you" —
+# which reads as a missing feature rather than as a stale screenshot.
+shoot board-light boardsec 940 light
+[ "${SHOTS:-all}" = board ] || {
+  # Gate is the surface nobody else in the field ships, and a README showing
+  # only a session list is a README about the half that commoditised.
+  shoot gate  gatesec  820
+  shoot audit auditsec 820
+  shoot inbox needs    620
+  shoot work  worksec  420
+}

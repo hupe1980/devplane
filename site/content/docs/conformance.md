@@ -13,6 +13,8 @@ believed.
 devplane gate
 ```
 
+![The gate report: three floors — read, measured and compatibility — each with what it does not claim, the release this machine is running, and when the full matrix is next owed](/gate.png)
+
 Two halves: how old the measurement is, and what the gate does and does not do.
 
 ## The measurement has a date

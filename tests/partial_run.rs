@@ -840,3 +840,68 @@ fn a_projects_own_prohibition_cannot_be_defeated_by_its_own_allow_rule() {
         );
     }
 }
+
+#[test]
+fn a_full_matrix_run_leaves_a_record_that_names_what_it_skipped() {
+    // A run that leaves nothing behind is a claim somebody has to remember.
+    // Until this existed the only trace a full run left was scrollback: whoever
+    // ran it knew what it said, and nobody else could check.
+    let dir = std::env::temp_dir().join(format!("vp-mrec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let narrowings = dir.join("n.txt");
+    std::fs::write(
+        &narrowings,
+        // The shape that broke the first attempt: hand-rolled JSON in the
+        // shell could not carry a value with quotes in it.
+        "eval \"cat .env\"|runs another command under its own name\n\
+         cat .en? > /dev/null|a glob the product compares as text\n",
+    )
+    .expect("fixture");
+    let out = dir.join("rec.json");
+
+    let st = std::process::Command::new("python3")
+        .current_dir(repo(""))
+        .arg("scripts/write-matrix-record.py")
+        .args([
+            out.to_str().unwrap(),
+            "2.1.267",
+            "both",
+            "334",
+            "16",
+            "12",
+            "3",
+            "green",
+            narrowings.to_str().unwrap(),
+        ])
+        .status()
+        .expect("python runs");
+    assert!(st.success(), "the writer failed");
+
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).expect("record")).expect("valid JSON");
+
+    assert_eq!(v["vendor_version"], "2.1.267", "the version that answered");
+    assert_eq!(v["cases"], 334);
+    // The field most easily left out, and the one that decides what the run
+    // means: a skipped shape is unmeasured, not clean.
+    assert_eq!(v["skipped"], 16);
+    assert!(
+        v["measures_only_the_shapes_it_ran"]
+            .as_str()
+            .expect("the caveat")
+            .contains("unmeasured, not clean"),
+        "the record does not say what a skip means"
+    );
+
+    // Every declared narrowing, with the reason it was declared — including the
+    // one whose quotes broke the shell version.
+    let declared = v["declared"].as_array().expect("declared narrowings");
+    assert_eq!(declared.len(), 2);
+    assert_eq!(declared[0]["shape"], r#"eval "cat .env""#);
+    assert!(
+        !declared[0]["reason"].as_str().expect("a reason").is_empty(),
+        "a narrowing without its reason is a claim without evidence"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -289,3 +289,257 @@ mod tests {
         assert_eq!(ago(200_000), "2d");
     }
 }
+
+// ── Markup, and the reason it is a type rather than a String ────────────────
+
+/// Markup that is already safe to insert into the page.
+///
+/// **This exists so that "untrusted text is data" stops being a discipline.**
+/// The page currently holds that line itself: a test scans it for `${a.bare}`
+/// interpolations and fails on any that skips `esc()`. That guard held at 149
+/// sites *by luck rather than by design* until somebody wrote it, and it works
+/// only because all the interpolation is in one file it can read.
+///
+/// Rendering moves into this module, so the guarantee has to move with it — and
+/// a grep over Rust would be a weaker guard than the one it replaces. So it is
+/// a type: the only way to get a runtime value into markup is
+/// [`Html::text`], which escapes, and the only way to bypass that is
+/// [`Html::raw`], which takes `&'static str` — a value read off the API cannot
+/// be `'static`, so untrusted data **cannot reach it**.
+///
+/// Session names, pull-request titles and branch names come from repositories
+/// and from models. Neither is a place to be optimistic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Html(String);
+
+impl Html {
+    /// A value from outside, escaped.
+    pub fn text(s: impl AsRef<str>) -> Self {
+        let s = s.as_ref();
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&#39;"),
+                _ => out.push(c),
+            }
+        }
+        Html(out)
+    }
+
+    /// Markup this module wrote itself.
+    ///
+    /// `&'static str` is the whole guarantee: a string that came off the API,
+    /// out of a repository or out of a model is allocated at runtime and cannot
+    /// satisfy it. There is no `raw(&str)` on purpose, and adding one would
+    /// delete the property this type exists for.
+    pub fn raw(s: &'static str) -> Self {
+        Html(s.to_string())
+    }
+
+    pub fn push(&mut self, other: Html) {
+        self.0.push_str(&other.0);
+    }
+
+    pub fn concat(parts: impl IntoIterator<Item = Html>) -> Self {
+        let mut out = Html::default();
+        for p in parts {
+            out.push(p);
+        }
+        out
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// What may be interpolated by [`markup!`].
+///
+/// `Html` passes through because it is already safe; everything else is
+/// escaped on the way in. There is no implementation that passes a `&str`
+/// through unescaped, which is the point.
+pub trait IntoHtml {
+    fn into_html(self) -> Html;
+}
+
+impl IntoHtml for Html {
+    fn into_html(self) -> Html {
+        self
+    }
+}
+
+macro_rules! escaped_into_html {
+    ($($t:ty),*) => { $(
+        impl IntoHtml for $t {
+            fn into_html(self) -> Html { Html::text(self.to_string()) }
+        }
+    )* };
+}
+escaped_into_html!(&str, String, u64, i64, usize, f64, u32, i32);
+
+/// Build markup from a literal template and escaped arguments.
+///
+/// The literal parts are trusted because they are written here; every `{}` is
+/// escaped unless it is already [`Html`]. It reads like `format!` and cannot be
+/// used to smuggle a value past the escaper, which `format!` can.
+#[macro_export]
+macro_rules! markup {
+    ($lit:literal $(, $arg:expr)* $(,)?) => {{
+        #[allow(unused_imports)]
+        use $crate::render::IntoHtml as _;
+        $crate::render::Html::raw_fmt(
+            format!($lit $(, $crate::render::IntoHtml::into_html($arg).as_str())*)
+        )
+    }};
+}
+
+impl Html {
+    /// Only for [`markup!`], which has already escaped every argument.
+    #[doc(hidden)]
+    pub fn raw_fmt(s: String) -> Self {
+        Html(s)
+    }
+}
+
+/// The reason pane: what was decided about one piece of work, and on whose
+/// authority.
+///
+/// **The first renderer moved out of the page**, and the one the rest of the
+/// move is measured against. It is a fair sample of the shape most of the board
+/// is: fetch some rows, render each, say something honest when there are none.
+///
+/// Rendered here rather than in the page for the reason in the type above —
+/// `reason` is a rule somebody wrote, `actor` can be a model, and `action` can
+/// be a command an agent composed. None of those is a place to be optimistic
+/// about a template literal.
+pub fn reason_pane(head: Option<(&str, &str, Option<&str>)>, rows: &[DecisionRow]) -> Html {
+    let mut out = Html::default();
+
+    if let Some((title, kind_level, detail)) = head {
+        let sub = match detail {
+            Some(d) => markup!("{} · {}", kind_level, d),
+            None => markup!("{}", kind_level),
+        };
+        out.push(markup!(
+            r#"<div style="margin-bottom:.6rem"><b>{}</b><div style="color:var(--dim)">{}</div></div>"#,
+            title,
+            sub
+        ));
+    }
+
+    if rows.is_empty() {
+        // Absence is distinguishable from zero: nothing *has been* decided is a
+        // different sentence from nothing *happened*, and this is the first.
+        out.push(Html::raw(
+            r#"<div class="empty">Nothing has been decided about this yet.</div>"#,
+        ));
+        return out;
+    }
+
+    for d in rows {
+        out.push(markup!(
+            r#"<div class="e"><span class="t">{}</span><span class="who">{}</span><span>{} {}</span></div>"#,
+            d.at.as_str(),
+            d.actor.as_str(),
+            d.outcome.as_str(),
+            d.action.as_str()
+        ));
+        if let Some(reason) = &d.reason {
+            out.push(markup!(r#"<div class="r">↳ {}</div>"#, reason.as_str()));
+        }
+    }
+    out
+}
+
+/// One row of the reason pane, as the pane needs it.
+pub struct DecisionRow {
+    /// `HH:MM`, already narrowed — the pane shows a time, not a timestamp.
+    pub at: String,
+    pub actor: String,
+    pub action: String,
+    pub outcome: String,
+    pub reason: Option<String>,
+}
+
+/// The gate surface: how much should a person trust the thing that decides?
+///
+/// **The surface nobody else in the field ships**, and until now it was
+/// reachable only by knowing that `devplane gate` exists. It renders what that
+/// command prints — the same three floors with the same scope sentences — and
+/// is a reader of them rather than a second author, so there is still one home
+/// for each figure.
+pub fn gate_pane(
+    running: Option<&str>,
+    cadence: &crate::core::policy::Cadence,
+    caveat: &'static str,
+) -> Html {
+    let mut out = Html::raw(r#"<h2 id="gatehead">Gate</h2>"#);
+
+    for f in crate::conformance::FLOORS {
+        // Each floor carries the half nobody else prints: what it does *not*
+        // claim. A floor rendered without its scope is a number wearing a
+        // bigger number's clothes.
+        out.push(markup!(
+            r#"<div class="floor"><span class="fl">{}</span><span class="fv">{}</span><span class="fc">{}</span><div class="fx">· {}</div></div>"#,
+            Html::raw(f.label),
+            Html::raw(f.release),
+            Html::raw(f.claims),
+            Html::raw(f.excludes)
+        ));
+    }
+
+    // Where this machine sits relative to the compatibility floor — in all four
+    // directions, because *behind* used to report the same nothing as *exactly
+    // on it*.
+    let position = match running {
+        Some(v) => {
+            let g = crate::core::policy::gap(v, crate::core::policy::VERIFIED_AGAINST);
+            match g.says() {
+                Some(sentence) => markup!(
+                    r#"<div class="floor"><span class="fl">running</span><span class="fv">{}</span><span class="fc stale">{}</span></div>"#,
+                    v,
+                    sentence
+                ),
+                None => markup!(
+                    r#"<div class="floor"><span class="fl">running</span><span class="fv">{}</span><span class="fc">exactly what the gate was measured against</span></div>"#,
+                    v
+                ),
+            }
+        }
+        // Absence is not zero: nothing reporting a version says nothing about
+        // the gap rather than implying there is none.
+        None => Html::raw(
+            r#"<div class="floor"><span class="fl">running</span><span class="fc">no session is reporting its version</span></div>"#,
+        ),
+    };
+    out.push(position);
+
+    let owed = cadence.overdue();
+    let side = |elapsed: Option<u64>, limit: u64, unit: &str| match elapsed {
+        Some(n) => format!("{n}/{limit} {unit}"),
+        None => format!("?/{limit} {unit}"),
+    };
+    out.push(markup!(
+        r#"<div class="floor"><span class="fl">cadence</span><span class="fc{}">full matrix due at {} or {} — {}</span></div>"#,
+        Html::raw(if owed.is_empty() { "" } else { " stale" }),
+        side(cadence.releases, cadence.releases_limit, "releases").as_str(),
+        side(cadence.days, cadence.days_limit, "days").as_str(),
+        if owed.is_empty() {
+            "not yet owed".to_string()
+        } else {
+            format!("owed on {}", owed.join(" and "))
+        }
+        .as_str()
+    ));
+
+    out.push(markup!(r#"<div class="caveat">{}</div>"#, caveat));
+    out
+}

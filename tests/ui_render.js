@@ -56,7 +56,15 @@ const document = {
 const context = {
   document,
   console,
-  location: { href: "http://127.0.0.1:1/?token=t", search: "?token=t" },
+  location: { href: "http://127.0.0.1:1/?token=t", search: "?token=t", hash: "" },
+  // The theme toggle asks the system what it prefers, and reads a stored
+  // choice. Stubbed rather than left undefined so the load path this harness
+  // exercises is the one a browser runs.
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  // The page listens for `hashchange` to switch surfaces, on the global the
+  // way a browser does.
+  addEventListener() {},
+  localStorage: { getItem: () => null, setItem() {} },
   history: { replaceState() {} },
   sessionStorage: { getItem: () => "t", setItem() {}, removeItem() {} },
   navigator: { clipboard: { writeText() {} } },

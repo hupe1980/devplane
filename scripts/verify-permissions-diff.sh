@@ -896,6 +896,30 @@ for rule in "${DENY_RULESETS[@]}"; do
   done
 done
 
+# ── The artifact ────────────────────────────────────────────────────────────
+#
+# **A run that leaves nothing behind is a claim somebody has to remember.**
+# The measurement is the product's only unoccupied claim, and until now the only
+# trace a full run left was scrollback: whoever ran it knew what it said, and
+# nobody else could check. This writes the dated record — the release asked,
+# the cases per axis, the shapes skipped rather than measured, and every
+# declared narrowing with the reason it was declared.
+#
+# Skipped is the field that matters most and is the easiest to leave out. A
+# skipped shape is **unmeasured, not clean**, and the skip set is not stable
+# between runs because the oracle is a model — so the honest form of the claim
+# is *this run measured these shapes*, never *the matrix is clean*.
+record_dir="$(dirname "$0")/measurements"
+mkdir -p "$record_dir"
+floor=$(grep -oE 'VERIFIED_AGAINST: &str = "[0-9.]+"' "$(dirname "$0")/../src/core/policy.rs" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+asked=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+narrowings=$(mktemp); trap 'rm -f "$narrowings"' EXIT
+for e in "${EXPECTED_NARROWER[@]}"; do printf '%s\n' "$e" >> "$narrowings"; done
+python3 "$(dirname "$0")/write-matrix-record.py" \
+  "$record_dir/full-${floor:-unknown}.json" "${asked:-}" "$AXIS" "$n" \
+  "${skipped:-0}" "${declared:-0}" "${retried:-0}" \
+  "$([ "$fail" = 0 ] && echo green || echo red)" "$narrowings"
+
 echo
 if [ "$fail" = 0 ]; then
   echo "verify-permissions-diff: $n cases, no undeclared disagreements (${skipped:-0} shapes unrunnable here, ${declared:-0} declared narrowings, ${retried:-0} reproduced)"
