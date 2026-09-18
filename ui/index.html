@@ -442,7 +442,12 @@
      is a list of offers and an offer that cannot act is the same defect class
      as a wrong answer — so it is not focusable and not pressable, and it says
      what is missing rather than looking enabled. */
-  body { display: grid; grid-template-columns: max-content 1fr; }
+  /* `minmax(0, 1fr)`, not `1fr`. A bare `1fr` is `minmax(auto, 1fr)`, and
+     `auto` resolves to *min-content* — so one unbreakable child, a long rule or
+     an absolute path, widens the whole column past the viewport and the page
+     scrolls sideways. Found at 390 points, where it is the difference between a
+     usable page and an unusable one; invisible at 1240. */
+  body { display: grid; grid-template-columns: max-content minmax(0, 1fr); }
   body > *:not(.rail) { grid-column: 2; }
   .rail {
     /* `1 / -1` names the end of the **explicit** grid, and there are no
@@ -472,12 +477,19 @@
      becomes a row above it. Reachable either way, which is the requirement;
      where it sits is not. */
   @media (max-width: 46rem) {
-    body { grid-template-columns: 1fr; }
+    body { grid-template-columns: minmax(0, 1fr); }
     body > *:not(.rail) { grid-column: 1; }
     .rail {
-      grid-row: auto; flex-direction: row; flex-wrap: wrap;
-      border-right: 0; border-bottom: 1px solid var(--line); position: static;
+      grid-row: auto; border-right: 0; border-bottom: 1px solid var(--line);
+      position: static; min-width: 0;
     }
+    /* **The flex container is `.railinner`, not `.rail`.** This rule set
+       `flex-direction: row` on the wrong element for as long as it existed, so
+       the rail stayed a column on a phone: five full-width rows of chrome above
+       the thing somebody opened the page to read. Found by photographing the
+       page at 390 points; at 1240 the rail is a column on purpose and nothing
+       looks wrong. */
+    .railinner { position: static; flex-direction: row; flex-wrap: wrap; gap: .1rem .4rem; }
   }
   /* The gate surface: three floors, each with what it does not claim. */
   .floor { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap; padding: .25rem 0; }

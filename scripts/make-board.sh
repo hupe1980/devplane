@@ -117,8 +117,8 @@ sleep 1
 # **No `--virtual-time-budget`.** The board holds an SSE stream open, so virtual
 # time never advances past it and Chrome waits for ever. That is not a
 # hypothetical: it is how this script first hung.
-shoot() { # file-name  hash  height  [light|dark]
-  local name="$1" hash="$2" height="${3:-940}" scheme="${4:-}"
+shoot() { # file-name  hash  height  [light|dark]  [width]
+  local name="$1" hash="$2" height="${3:-940}" scheme="${4:-}" width="${5:-1240}"
   # Headless Chrome answers `prefers-color-scheme: dark`, so the default shots
   # are dark. `preferredColorScheme` drives the media query directly, which is
   # the only way to photograph the other theme without injecting a script —
@@ -128,12 +128,17 @@ shoot() { # file-name  hash  height  [light|dark]
   [ "$scheme" = light ] && flags+=(--blink-settings=preferredColorScheme=1)
   [ "$scheme" = dark ] && flags+=(--blink-settings=preferredColorScheme=2)
   "$CHROME" --headless --disable-gpu --hide-scrollbars "${flags[@]:+${flags[@]}}" \
-    --window-size="1240,$height" --screenshot="$tmp/$name.png" \
+    --window-size="$width,$height" --screenshot="$tmp/$name.png" \
     "http://127.0.0.1:$port/?token=$token#$hash" >/dev/null 2>&1 || true
   [ -s "$tmp/$name.png" ] || { echo "make-board: Chrome produced nothing for $name" >&2; return 1; }
   mv "$tmp/$name.png" "site/static/$name.png"
   echo "make-board: site/static/$name.png ($(du -k "site/static/$name.png" | cut -f1) KB)"
 }
+
+# **A phone, because the question this page answers is asked away from a desk.**
+# 390 points is an iPhone's CSS width; anything that scrolls sideways here is
+# broken for the case the page exists for.
+shoot phone needs 900 "" 390
 
 shoot board boardsec 940
 # Straight after the dark one, so the two are the same board seconds apart and
