@@ -94,6 +94,100 @@ pub fn contains_analysis_barrier(command: &str) -> bool {
 /// escape hatch is the one Claude Code documents — *"write an exact-match rule
 /// for the full command string"* — so a rule with no wildcard in it still
 /// works, and only the prefix form is refused.
+/// Shell constructs this matcher does not model, and therefore may not approve.
+///
+/// **This is the allowlist half, and it is the important half.**
+/// [`unapprovable_by_prefix`] is a blocklist: allow unless one of the hazards
+/// somebody thought of is present. Every widening this gate has been found to
+/// have was a hazard nobody had thought of yet, which is why that list only
+/// ever grows and why the differential harness has to run forever to find the
+/// next one.
+///
+/// This asks the opposite question: **is every construct here one we claim to
+/// understand?** A command carrying anything else cannot be approved, whatever
+/// the rules say — not because that construct is known to be dangerous, but
+/// because its meaning is not known at all, and approving a call you cannot
+/// read is the definition of the widening direction.
+///
+/// It is also why this needs no oracle. *Narrower than the vendor* is the safe
+/// side of Principle II, and refusing to approve what we cannot parse is
+/// narrower by construction, on every release the vendor has ever shipped and
+/// every one it will. The harness stays for the shapes we *do* claim to read;
+/// it stops being the only thing between here and a class nobody enumerated.
+///
+/// Found by asking what the blocklist lets through: `cat $'\x2e\x65nv'` was
+/// approved under `Bash(cat *)` while `cat .env` was correctly denied by
+/// `Read(.env)` — the same file, spelled in a quoting form [`dequoted`] does
+/// not read. That is a project's own `never_auto` defeated by its own
+/// `auto_allow`, with no vendor disagreement needed to make it wrong.
+pub fn unmodelled_construct(command: &str) -> Option<String> {
+    // Ordered most-specific first, so the reason a reader gets is the useful one.
+    const UNMODELLED: &[(&str, &str)] = &[
+        (
+            "$'",
+            "ANSI-C quoting, whose escapes name characters this matcher does not decode",
+        ),
+        (
+            "$((",
+            "arithmetic expansion, whose result is computed by the shell",
+        ),
+        (
+            "$(",
+            "command substitution, whose text is produced by another command",
+        ),
+        (
+            "`",
+            "command substitution in backticks, whose text is produced by another command",
+        ),
+        (
+            "<(",
+            "process substitution, which becomes a path the shell creates",
+        ),
+        (
+            ">(",
+            "process substitution, which becomes a path the shell creates",
+        ),
+        ("${", "parameter expansion, whose value the shell supplies"),
+    ];
+    for (needle, why) in UNMODELLED {
+        if command.contains(needle) {
+            return Some(format!("it contains `{needle}` — {why}"));
+        }
+    }
+    // A bare `$NAME`: the value arrives from the environment and is unknown
+    // here. `$` followed by anything else — a literal dollar in a filename, an
+    // end-of-string — is left alone rather than guessed at.
+    let bytes: Vec<char> = command.chars().collect();
+    for (i, c) in bytes.iter().enumerate() {
+        if *c == '$'
+            && bytes
+                .get(i + 1)
+                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '_')
+        {
+            return Some(
+                "it contains a `$` variable, whose value the environment supplies".to_string(),
+            );
+        }
+    }
+    // An unbalanced quote means the rest of the line is not what it looks like,
+    // and `dequoted` will read it differently from the shell.
+    let (mut single, mut double) = (false, false);
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' && !single {
+            chars.next();
+        } else if c == '\'' && !double {
+            single = !single;
+        } else if c == '"' && !single {
+            double = !double;
+        }
+    }
+    if single || double {
+        return Some("it has an unbalanced quote, so the shell reads it differently".to_string());
+    }
+    None
+}
+
 pub fn unapprovable_by_prefix(command: &str) -> Option<String> {
     if command.chars().count() > MAX_ANALYSED {
         return Some(format!(

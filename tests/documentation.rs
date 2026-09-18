@@ -67,6 +67,17 @@ fn blocks_under(dir: &Path) -> Vec<Block> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            // `reference/` is third-party documentation somebody else wrote,
+            // fetched by `scripts/fetch-reference.sh`. It is full of `toml`
+            // blocks — MCP server stanzas, the vendor's own settings examples —
+            // and not one of them is a `devplane.toml`, so holding them to this
+            // parser asserts that other projects use our schema. It moved under
+            // `concepts/` on 2026-09-18 and this test went red the same minute,
+            // which is the check working: the corpus is evidence to grep, never
+            // an example to validate.
+            if path.file_name().and_then(|n| n.to_str()) == Some("reference") {
+                continue;
+            }
             out.extend(blocks_under(&path));
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             let text = std::fs::read_to_string(&path).unwrap_or_default();

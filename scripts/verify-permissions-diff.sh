@@ -676,6 +676,111 @@ if [ "$AXIS" = dialect ]; then
   exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# The row-scoped run: only the probes a release's own changelog rows name.
+#
+# `DEVPLANE_DIFF_PROBES=id[,id...]` runs exactly those pairs, through the same
+# oracle, the same local shell control, the same reproduce-before-report rule
+# and the same declared-narrowing list as the full matrix. Nothing about how a
+# probe is *judged* changes here; what changes is how many are asked.
+#
+# This exists because the full matrix cannot be the clock. It costs a signed-in
+# agent and real money, and the vendor shipped three releases in the day after
+# it last ran green. A run built from one release's announced rows is affordable
+# on the day that release ships — and inherits, by construction, every blind
+# spot those announcements have. The caller says so in its report; this script
+# says so here.
+PROBES_FILE="$(dirname "$0")/probes.txt"
+if [ -n "${DEVPLANE_DIFF_PROBES:-}" ]; then
+  # A scoped run and a full run are mutually exclusive, and this is an error
+  # rather than a precedence rule. "Which one wins" is a question nobody should
+  # have to answer at 2 a.m. with a green result on screen.
+  if [ "${DEVPLANE_DIFF_AXIS:-}" = both ] || [ "$CASES" != 0 ]; then
+    echo "verify-permissions-diff: DEVPLANE_DIFF_PROBES is a scoped run; it cannot also be a full one" >&2
+    exit 2
+  fi
+  [ -f "$PROBES_FILE" ] || { echo "verify-permissions-diff: $PROBES_FILE is missing" >&2; exit 2; }
+
+  scoped_fail=0; scoped_n=0
+  IFS=, read -ra WANTED <<< "$DEVPLANE_DIFF_PROBES"
+  for id in "${WANTED[@]}"; do
+    id="${id// /}"
+    [ -n "$id" ] || continue
+    line=$(grep -E "^$id[[:space:]]*\|" "$PROBES_FILE" | head -1)
+    if [ -z "$line" ]; then
+      echo "PROBE $id error (no such probe in $PROBES_FILE)"
+      scoped_fail=1; continue
+    fi
+    axis=$(printf '%s' "$line" | awk -F'|' '{gsub(/ /,"",$2); print $2}')
+    rule=$(printf '%s' "$line" | awk -F'|' '{sub(/^ +/,"",$3); sub(/ +$/,"",$3); print $3}')
+    # The call is everything after the third `|`, so it may contain pipes.
+    call=$(printf '%s' "$line" | cut -d'|' -f4- | sed 's/^ *//; s/ *$//')
+
+    # A scoped run's two sides are handed the *same* `$rule` string, so the
+    # parity the selftest exists to check is structural here rather than
+    # asserted. What a scoped run can get wrong instead is drifting from the
+    # tables the full matrix runs — a probes.txt entry nobody exercises — so
+    # that is what is checked.
+    if ! printf '%s\n' "${SHAPES[@]}" "${WRITE_SHAPES[@]}" "${DENY_SHAPES[@]}" | grep -Fxq -- "$call"; then
+      echo "PROBE $id error (its call is in no shape table: $call)"
+      scoped_fail=1; continue
+    fi
+
+    # `DEVPLANE_DIFF_CHECK=1` validates the registry against the shape tables
+    # and stops. It is what a dry run uses, and what a test uses: the question
+    # "is every declared probe still runnable" must be answerable without a
+    # signed-in agent, or it gets asked only when somebody is already spending.
+    if [ -n "${DEVPLANE_DIFF_CHECK:-}" ]; then
+      echo "PROBE $id ok ($axis)"
+      scoped_n=$((scoped_n+1))
+      continue
+    fi
+
+    scoped_n=$((scoped_n+1))
+    case "$axis" in
+      allow)
+        if ! runnable "$call"; then
+          echo "PROBE $id skipped (this machine cannot run it; not a verdict)"
+          continue
+        fi
+        theirs=$(ask_claude "$rule" "$call"); ours=$(ask_devplane "$rule" "$call")
+        ;;
+      deny)
+        if ! deny_program_present "$call"; then
+          echo "PROBE $id skipped (that program is not installed here; not a verdict)"
+          continue
+        fi
+        if ! deny_model_will_run "$call"; then
+          echo "PROBE $id skipped (the model does not reliably run it unprohibited; not a verdict)"
+          continue
+        fi
+        theirs=$(ask_claude_deny "[\"$rule\"]" "$call"); ours=$(ask_devplane_deny "$rule" "$call")
+        ;;
+      *)
+        echo "PROBE $id error (axis is neither allow nor deny: $axis)"
+        scoped_fail=1; continue
+        ;;
+    esac
+
+    if [ "$theirs" = "$ours" ]; then
+      echo "PROBE $id agreed"
+    elif reason=$(narrowing_reason "$call"); then
+      echo "PROBE $id declared ($reason)"
+    else
+      echo "PROBE $id disagreed (claude=$theirs devplane=$ours) rule=[$rule] call=[$call]"
+      scoped_fail=1
+    fi
+  done
+
+  if [ -n "${DEVPLANE_DIFF_CHECK:-}" ]; then
+    echo "verify-permissions-diff: $scoped_n probe(s) resolve to a runnable shape; nothing was asked"
+    exit $scoped_fail
+  fi
+  echo "verify-permissions-diff: scoped run, $scoped_n probe(s) asked of the running product"
+  echo "verify-permissions-diff: this measured only what those rows announced; it says nothing about the rest of the matcher"
+  exit $scoped_fail
+fi
+
 if [ "$AXIS" != deny ]; then
 echo "allow axis — ${#RULESETS[@]} rule sets × $((${#SHAPES[@]} + ${#WRITE_SHAPES[@]})) shapes"
 echo

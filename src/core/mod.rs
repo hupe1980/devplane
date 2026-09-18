@@ -41,6 +41,7 @@ pub mod diff;
 pub mod event;
 pub mod forge;
 pub mod ids;
+pub mod measured;
 pub mod offer;
 pub mod policy;
 pub mod policy_cache;

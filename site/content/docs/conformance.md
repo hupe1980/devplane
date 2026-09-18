@@ -24,23 +24,39 @@ No other gate in this category does that — and no other gate has to admit when
 ```console
 $ devplane gate
 measurement
-  measured  Claude Code 2.1.273 (the last release the full differential run was green against)
-            1 release behind a session here (2.1.274)
-  rows      changelog rows cleared through 2.1.274 (not a compatibility claim)
+  read          2.1.274 — every rule row the vendor announced up to here has a written disposition
+                · does not claim any of it was checked against the running product
+  measured      2.1.240 — every rule row up to here produced a probe the running vendor agreed with
+                · measured only what the vendor announced; says nothing about the rest of the matcher
+  compatibility 2.1.273 — the full differential matrix ran green on both axes
+                · does not claim the shapes it runs are complete, nor that skipped shapes are clean
+  running       2.1.276 — 3 releases past the compatibility floor
+  cadence       full matrix due at 3/10 releases or 1/28 days — not yet owed
 ```
 
-Two numbers, because they mean different things.
+**Three numbers, because they mean three different things**, and the second line under each is the
+half nobody else prints: what it does *not* claim.
 
-**`measured`** is the last release the full differential matrix ran green against. It costs a
-signed-in agent and real money, so it moves rarely. This is the number the claim rests on.
+**`read`** is the last release whose rule-relevant changelog entries have each been accounted for —
+covered by a test, or declined with a reason. It costs one `curl` and a person reading, so it moves
+often, and it is a statement about the ledger rather than about the matcher. `just owed` fails when
+the vendor has shipped past it; `just advance` moves it, and refuses on a red ledger.
 
-**`rows`** is the last release whose rule-relevant changelog entries have each been accounted for —
-covered by a test, or declined with a reason. It is cheap and moves often, and it is a statement about
-the ledger rather than about the matcher. `just owed` fails when the vendor has shipped past it;
-`just advance` moves it, and refuses on a red ledger.
+**`measured`** is the last release whose announced rows each produced a probe the running product
+agreed with. It costs the probes of one release rather than the whole matrix, so it can move the day
+a release ships. It measured only what the vendor announced — the most recent widening this project
+found came from a shape no changelog row asked for, so this floor inherits every blind spot those
+notes have, and says so.
 
-The gap between them is the window a silent divergence lives in. Two of the gate's known defects were
-found inside a two-release gap.
+**`compatibility`** is the last release the full differential matrix ran green against. It costs a
+signed-in agent and real money, so it moves rarely. This is the number the central claim rests on.
+
+**`cadence`** is two bounds and never one. The release count tracks drift the cheap run cannot see;
+the day count stops a quiet month from letting the expensive clock stop altogether. A single "days
+until due" would hide which of the two is the reason.
+
+The gaps between them are the windows a silent divergence lives in. Two of the gate's known defects
+were found inside a two-release gap.
 
 **A green run is a claim about the shapes it ran.** The last one put 126 allow cases and 208 deny
 cases to Claude Code 2.1.273 and found one real widening, now fixed. Twelve deny shapes were

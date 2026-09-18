@@ -66,15 +66,15 @@ jobs:
       - name: Dependency ledger
         run: bash scripts/deps-count.sh
 
-      # `reference/`, not `specs/` — that directory is the project's own Spec Kit
-      # features now, and it is committed, so `-d specs` would be true on every
-      # checkout and this job would fail rather than skip.
+      # `concepts/reference/`, not `specs/` — that directory is the project's own
+      # Spec Kit features now, and it is committed, so `-d specs` would be true on
+      # every checkout and this job would fail rather than skip.
       - name: Claims that need the fetched reference docs
         run: |
-          if [ -d reference ]; then
+          if [ -d concepts/reference ]; then
             bash scripts/verify-claims.sh
           else
-            echo "reference/ is gitignored and absent; nothing to verify here."
+            echo "concepts/reference/ is gitignored and absent; nothing to verify here."
           fi
 
       # The ledger is committed and the changelog is not, so this runs only
@@ -82,8 +82,8 @@ jobs:
       # is the job that says the world changed under us.
       - name: Every rule row in the changelog is accounted for
         run: |
-          if [ -f reference/claude-code/CHANGELOG.md ]; then
+          if [ -f concepts/reference/claude-code/CHANGELOG.md ]; then
             bash scripts/changelog-rows.sh
           else
-            echo "reference/ is gitignored and absent; nothing to account for here."
+            echo "concepts/reference/ is gitignored and absent; nothing to account for here."
           fi

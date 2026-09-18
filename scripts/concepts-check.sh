@@ -52,7 +52,11 @@ leaked=$(cd .. && grep -rInoE '\b(D|R)[0-9]+\b' $published 2>/dev/null \
 #
 # `reference/` is also what a *user's* specification directory is called — Spec Kit
 # puts them there — so a documentation example naming `reference/reset.md` is not a
-# reference to this repository's gitignored `reference/` at all. The distinguishing
+# reference to this repository's own corpus at all. That corpus now lives at
+# `concepts/reference/` and is covered by the `concepts/` half of this pattern; the
+# bare `reference/` half is kept because the thing it catches is prose — "see
+# reference/ for the protocol" in a doc comment — which names nothing a reader of
+# the published tree can open, before the move or after it. The distinguishing
 # feature is code: an example lives in a fenced block or a backticked span, and
 # a reference to our own notes is bare prose. Matches inside backticks are
 # therefore exempt, which keeps the thing this guard is for — "see reference/ for
@@ -228,7 +232,13 @@ EOF
 # deleted stayed "known" for as long as its own prose still mentioned it
 # elsewhere in the file — which is what happened the first time an item was
 # retired, and the check was green for it.
-for a in $(grep -rhoE '`#[a-z][a-z-]+`' *.md | sort -u); do
+#
+# A CSS hex colour is also a backticked `#` followed by letters — `#ffffff` and
+# `#fff` match this pattern exactly — and DESIGN.md is full of them. They are
+# excluded by shape rather than by filename, because the exclusion has to keep
+# working when the tokens move to another file: a three- or six-character run of
+# hex digits is never an anchor, and an anchor is never only hex digits.
+for a in $(grep -rhoE '`#[a-z][a-z-]+`' *.md | grep -vE '^`#([0-9a-f]{3}|[0-9a-f]{6})`$' | sort -u); do
   grep -qE "^### $a " ROADMAP.md || { echo "unknown roadmap anchor: $a"; fail=1; }
 done
 # And the other direction: a roadmap heading with no anchor cannot be cited

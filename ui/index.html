@@ -1481,7 +1481,10 @@ function renderSetup() {
     out += val("", c.settings_path || "", "dim");
     out += val("telemetry", c.telemetry_is_ours ? "to devplane" : c.telemetry_endpoint || "not exported", "dim");
   }
-  out += val("gate", `rules checked against Claude Code ${d.gate?.verified_against} · rows cleared through ${d.gate?.rows_cleared_through}`, "dim");
+  // Three floors, three claims, never averaged. The order is cheapest claim
+  // first, so the expensive one is not mistaken for the cheap one that happens
+  // to carry a bigger number.
+  out += val("gate", `rows read through ${d.gate?.rows_cleared_through} · announced rows probed through ${d.gate?.rows_measured_through} · full matrix green against ${d.gate?.verified_against}`, "dim");
   out += val("agents", (d.agents || []).map((a) => a.name || a.id || a).join(", ") || "none", "dim");
 
   // The machine-wide rules. Every repository inherits them, and a project can

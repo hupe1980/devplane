@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Downloads the third-party specs and docs referenced by CONCEPT.md into reference/ (gitignored).
+# Downloads the third-party specs and docs referenced by CONCEPT.md into concepts/reference/ (gitignored).
 # Usage: scripts/fetch-reference.sh
 set -u
 cd "$(dirname "$0")/.."
-mkdir -p reference/claude-code reference/claude-agent-sdk reference/copilot reference/codex reference/opencode reference/symphony reference/sdd reference/mcp reference/jsonrpc reference/acp reference/standards
+mkdir -p concepts/reference/claude-code concepts/reference/claude-agent-sdk concepts/reference/copilot concepts/reference/codex concepts/reference/opencode concepts/reference/symphony concepts/reference/sdd concepts/reference/mcp concepts/reference/jsonrpc concepts/reference/acp concepts/reference/standards
 UA='devplane-specs-fetch'
 # The test is "did we get the document or an error page", and size was a bad proxy for it:
 # a `-gt 500` floor deleted 83 of the 130 generated Codex schema files, because a generated
@@ -29,86 +29,86 @@ for p in hooks hooks-guide headless cli-reference worktrees sessions agent-view 
          ultrareview code-review advisor feature-availability context-window \
          channels-reference plugins-reference errors github-actions gitlab-ci-cd \
          sandbox-environments analytics artifacts; do
-  fetch "https://code.claude.com/docs/en/$p.md" "reference/claude-code/$p.md"
+  fetch "https://code.claude.com/docs/en/$p.md" "concepts/reference/claude-code/$p.md"
 done
-fetch https://code.claude.com/docs/llms.txt reference/claude-code/llms.txt
+fetch https://code.claude.com/docs/llms.txt concepts/reference/claude-code/llms.txt
 # The vendor publishes a dated weekly digest of what changed. Re-verification reads these
 # rather than diffing a 300-page index by hand: a surface that landed since the last pass
 # is a row in one of them.
-fetch https://code.claude.com/docs/en/whats-new/index.md reference/claude-code/whats-new.md
+fetch https://code.claude.com/docs/en/whats-new/index.md concepts/reference/claude-code/whats-new.md
 for w in 37 36 35 34 33 32 31 30 29 28 27 26; do
-  fetch "https://code.claude.com/docs/en/whats-new/2026-w$w.md" "reference/claude-code/whats-new-2026-w$w.md"
+  fetch "https://code.claude.com/docs/en/whats-new/2026-w$w.md" "concepts/reference/claude-code/whats-new-2026-w$w.md"
 done
 # A week with no digest is normal and is not an absence of change: the digest stopped at week
 # 34 while the product reached 2.1.270, so thirty releases — including a sixth permission-rule
 # widening — exist only in the CHANGELOG. The digest tells you what the vendor thought was
 # notable; the changelog is the enumerated table.
-fetch https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md reference/claude-code/CHANGELOG.md
+fetch https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md concepts/reference/claude-code/CHANGELOG.md
 # Claude Agent SDK docs
 for p in overview permissions user-input streaming-output structured-outputs sessions mcp hooks typescript python cost-tracking \
          session-storage observability todo-tracking subagents; do
-  fetch "https://code.claude.com/docs/en/agent-sdk/$p.md" "reference/claude-agent-sdk/$p.md"
+  fetch "https://code.claude.com/docs/en/agent-sdk/$p.md" "concepts/reference/claude-agent-sdk/$p.md"
 done
-fetch https://raw.githubusercontent.com/Roasbeef/claude-agent-sdk-go/main/docs/cli-protocol.md reference/claude-agent-sdk/community-cli-wire-protocol.md
+fetch https://raw.githubusercontent.com/Roasbeef/claude-agent-sdk-go/main/docs/cli-protocol.md concepts/reference/claude-agent-sdk/community-cli-wire-protocol.md
 # GitHub Copilot: the second provider that documents all three channels.
 # GitHub publishes its docs as markdown in github/docs, so these are the source files
 # rather than a rendered page.
 CPD=https://raw.githubusercontent.com/github/docs/main/content/copilot
-fetch "$CPD/reference/hooks-reference.md"                              reference/copilot/hooks-reference.md
-fetch "$CPD/reference/copilot-cli-reference/acp-server.md"             reference/copilot/acp-server.md
-fetch "$CPD/reference/copilot-cli-reference/cli-command-reference.md"  reference/copilot/cli-command-reference.md
-fetch "$CPD/reference/copilot-cli-reference/cli-config-dir-reference.md" reference/copilot/cli-config-dir-reference.md
-fetch "$CPD/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md"     reference/copilot/allowing-tools.md
-fetch "$CPD/how-tos/copilot-sdk/observability/opentelemetry.md"        reference/copilot/sdk-opentelemetry.md
+fetch "$CPD/reference/hooks-reference.md"                              concepts/reference/copilot/hooks-reference.md
+fetch "$CPD/reference/copilot-cli-reference/acp-server.md"             concepts/reference/copilot/acp-server.md
+fetch "$CPD/reference/copilot-cli-reference/cli-command-reference.md"  concepts/reference/copilot/cli-command-reference.md
+fetch "$CPD/reference/copilot-cli-reference/cli-config-dir-reference.md" concepts/reference/copilot/cli-config-dir-reference.md
+fetch "$CPD/how-tos/copilot-cli/use-copilot-cli/allowing-tools.md"     concepts/reference/copilot/allowing-tools.md
+fetch "$CPD/how-tos/copilot-sdk/observability/opentelemetry.md"        concepts/reference/copilot/sdk-opentelemetry.md
 # OpenAI Symphony (orchestration spec, Apache-2.0)
-fetch https://raw.githubusercontent.com/openai/symphony/main/SPEC.md reference/symphony/SPEC.md
-fetch https://raw.githubusercontent.com/openai/symphony/main/README.md reference/symphony/README.md
+fetch https://raw.githubusercontent.com/openai/symphony/main/SPEC.md concepts/reference/symphony/SPEC.md
+fetch https://raw.githubusercontent.com/openai/symphony/main/README.md concepts/reference/symphony/README.md
 # Spec-driven development frameworks
-fetch https://raw.githubusercontent.com/Fission-AI/OpenSpec/main/README.md reference/sdd/openspec-README.md
-fetch https://raw.githubusercontent.com/github/spec-kit/main/README.md reference/sdd/spec-kit-README.md
-fetch https://raw.githubusercontent.com/github/spec-kit/main/spec-driven.md reference/sdd/spec-kit-spec-driven.md
-fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/analyze.md reference/sdd/spec-kit-analyze.md
-fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/converge.md reference/sdd/spec-kit-converge.md
+fetch https://raw.githubusercontent.com/Fission-AI/OpenSpec/main/README.md concepts/reference/sdd/openspec-README.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/README.md concepts/reference/sdd/spec-kit-README.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/spec-driven.md concepts/reference/sdd/spec-kit-spec-driven.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/analyze.md concepts/reference/sdd/spec-kit-analyze.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/converge.md concepts/reference/sdd/spec-kit-converge.md
 # The two templates that carry the shape a work item names: what a specification
 # document holds, and how its task list is written. `--spec` reads the second.
-fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/spec-template.md reference/sdd/spec-kit-spec-template.md
-fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/tasks-template.md reference/sdd/spec-kit-tasks-template.md
-fetch https://agents.md/ reference/standards/agents-md.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/spec-template.md concepts/reference/sdd/spec-kit-spec-template.md
+fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/tasks-template.md concepts/reference/sdd/spec-kit-tasks-template.md
+fetch https://agents.md/ concepts/reference/standards/agents-md.md
 # Codex app-server (JSON-RPC)
-fetch https://raw.githubusercontent.com/openai/codex/main/codex-rs/app-server/README.md reference/codex/app-server-README.md
+fetch https://raw.githubusercontent.com/openai/codex/main/codex-rs/app-server/README.md concepts/reference/codex/app-server-README.md
 # Codex app-server protocol: generated JSON Schema + TypeScript types (listed via GitHub API)
-mkdir -p reference/codex/schema
+mkdir -p concepts/reference/codex/schema
 for sub in json typescript; do
   curl -s -A "$UA" "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol/schema/$sub" \
     | python3 -c 'import sys,json; [print(x["download_url"]) for x in json.load(sys.stdin) if x["type"]=="file"]' \
-    | while read -r u; do [ -n "$u" ] && fetch "$u" "reference/codex/schema/$(basename "$u")"; done
+    | while read -r u; do [ -n "$u" ] && fetch "$u" "concepts/reference/codex/schema/$(basename "$u")"; done
 done
 # OpenCode server (HTTP + SSE)
-fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/server.mdx reference/opencode/server.mdx
-fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/sdk.mdx reference/opencode/sdk.mdx
-fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/sdk/openapi.json reference/opencode/openapi.json
+fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/server.mdx concepts/reference/opencode/server.mdx
+fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/sdk.mdx concepts/reference/opencode/sdk.mdx
+fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/sdk/openapi.json concepts/reference/opencode/openapi.json
 # Model Context Protocol (the gate server speaks it) + JSON-RPC 2.0 (daemon API, Codex app-server)
 MCP_REV=2026-07-28
 for p in basic/index server/tools basic/transports client/elicitation; do
-  fetch "https://modelcontextprotocol.io/specification/$MCP_REV/$p.md" "reference/mcp/$(echo "$p" | tr '/' '-' | sed 's/-index$//').md"
+  fetch "https://modelcontextprotocol.io/specification/$MCP_REV/$p.md" "concepts/reference/mcp/$(echo "$p" | tr '/' '-' | sed 's/-index$//').md"
 done
-fetch "https://modelcontextprotocol.io/specification/$MCP_REV.md" "reference/mcp/spec-$MCP_REV.md"
-fetch https://modelcontextprotocol.io/llms.txt reference/mcp/llms.txt
-fetch "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/schema/$MCP_REV/schema.json" "reference/mcp/schema-$MCP_REV.json"
-rm -f reference/mcp/spec-2025-06-18.md reference/mcp/schema-2025-06-18.json
-fetch https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/main/README.md reference/mcp/rmcp-README.md
-fetch https://www.jsonrpc.org/specification reference/jsonrpc/jsonrpc-2.0.html
+fetch "https://modelcontextprotocol.io/specification/$MCP_REV.md" "concepts/reference/mcp/spec-$MCP_REV.md"
+fetch https://modelcontextprotocol.io/llms.txt concepts/reference/mcp/llms.txt
+fetch "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/main/schema/$MCP_REV/schema.json" "concepts/reference/mcp/schema-$MCP_REV.json"
+rm -f concepts/reference/mcp/spec-2025-06-18.md concepts/reference/mcp/schema-2025-06-18.json
+fetch https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/main/README.md concepts/reference/mcp/rmcp-README.md
+fetch https://www.jsonrpc.org/specification concepts/reference/jsonrpc/jsonrpc-2.0.html
 # Agent Client Protocol: protocol pages (v1/v2), Rust SDK page, registry docs + JSON, READMEs
 for p in v2/overview v2/initialization v2/session-setup v2/session-list v2/prompt-lifecycle v2/tool-calls v2/agent-plan v2/elicitation v2/cancellation v2/extensibility v1/overview v1/file-system v1/terminals v1/session-modes; do
-  fetch "https://agentclientprotocol.com/protocol/$p.md" "reference/acp/$(echo "$p" | tr '/' '-').md"
+  fetch "https://agentclientprotocol.com/protocol/$p.md" "concepts/reference/acp/$(echo "$p" | tr '/' '-').md"
 done
-fetch https://agentclientprotocol.com/libraries/rust.md reference/acp/libraries-rust.md
-fetch https://agentclientprotocol.com/get-started/registry.md reference/acp/registry.md
-fetch https://agentclientprotocol.com/llms.txt reference/acp/llms.txt
-fetch https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json reference/acp/registry.json
-fetch https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/README.md reference/acp/agent-client-protocol-README.md
-fetch https://raw.githubusercontent.com/agentclientprotocol/claude-agent-acp/main/README.md reference/acp/claude-agent-acp-README.md
-fetch https://raw.githubusercontent.com/agentclientprotocol/registry/main/README.md reference/acp/registry-README.md
+fetch https://agentclientprotocol.com/libraries/rust.md concepts/reference/acp/libraries-rust.md
+fetch https://agentclientprotocol.com/get-started/registry.md concepts/reference/acp/registry.md
+fetch https://agentclientprotocol.com/llms.txt concepts/reference/acp/llms.txt
+fetch https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json concepts/reference/acp/registry.json
+fetch https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/README.md concepts/reference/acp/agent-client-protocol-README.md
+fetch https://raw.githubusercontent.com/agentclientprotocol/claude-agent-acp/main/README.md concepts/reference/acp/claude-agent-acp-README.md
+fetch https://raw.githubusercontent.com/agentclientprotocol/registry/main/README.md concepts/reference/acp/registry-README.md
 # claude-view (closest existing observer)
-fetch https://raw.githubusercontent.com/tombelieber/claude-view/main/README.md reference/claude-view-README.md
-date -u +'fetched: %Y-%m-%dT%H:%MZ' > reference/FETCHED.txt
+fetch https://raw.githubusercontent.com/tombelieber/claude-view/main/README.md concepts/reference/claude-view-README.md
+date -u +'fetched: %Y-%m-%dT%H:%MZ' > concepts/reference/FETCHED.txt

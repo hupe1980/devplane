@@ -4,24 +4,38 @@ floor: 2.1.240
 # decides, and what was done about it. `scripts/changelog-rows.sh` fails until
 # every one has a line here.
 #
-#   case     — a test or a harness shape covers it; it names what.
-#   declined — it cannot change a verdict here; it says why.
+#   probe    — it names a probe in `scripts/probes.txt` by id: a call the
+#              running vendor is asked about, so a disagreement is findable.
+#              Clears the read floor AND the measured floor.
+#   case     — a test over *our own matcher* covers it; it names which. That
+#              proves Devplane behaves as we read the row and says nothing about
+#              the vendor, so it clears the read floor and **owes** the measured
+#              one.
+#   declined — it cannot change a verdict here; it says why. Clears both, because
+#              "this cannot matter" needs no vendor to check.
 #
 # A declined row is a decision. An unread row is a gap wearing a decision's
 # clothes, and eight widenings came out of the gap this file closes.
+#
+# **`case` and `probe` were one word until 2026-09-18**, and splitting them is
+# what `policy::ROWS_MEASURED_THROUGH` is made of. The audit that split them
+# read all twenty-one `case` rows: **ten named something the vendor had actually
+# been asked, eleven did not** — and several of the eleven claimed in prose to
+# have been "measured", with nothing able to re-establish it and no date. That
+# ratio is the honest starting state, not a backlog.
 
 2.1.269 | case | Fixed a deny or ask permission rule starting with `!` applying beyond the settings source that wrote it; such a rule now applies only within its own source, and a bare `!` negation is ignored
         ^ `!` scoping — `a_bang_rule_is_scoped_to_its_own_source`
 2.1.269 | declined | Fixed `permission_denials` in `--output-format stream-json` results omitting Read, Edit and Write calls blocked by a path-scoped deny rule
         ^ `permission_denials` is a field of the vendor's own stream-json output; Devplane never reads it
-2.1.269 | case | Fixed `Edit()` deny rules and the write-path check not applying to the file a Bash `tee` command writes; a `Bash(tee:*)` allow rule no longer covers destinations outside the working directories
-        ^ `tee` writes — `a_read_deny_reaches_a_write_by_a_command_on_the_list_and_no_further`
+2.1.269 | probe | Fixed `Edit()` deny rules and the write-path check not applying to the file a Bash `tee` command writes; a `Bash(tee:*)` allow rule no longer covers destinations outside the working directories
+        ^ probe:tee-write-target — `tee` writes — `a_read_deny_reaches_a_write_by_a_command_on_the_list_and_no_further`
 2.1.269 | declined | [VSCode] Added a Permission rules dialog that lists permission rules and adds or removes them in user, project, and local settings; startup-option, session-only, and managed rules stay read-only
         ^ a VS Code dialog for editing settings.json; no rule semantics
 2.1.268 | case | Fixed deny and ask permission rules on symlinked directories (`/etc`, `/tmp`, `/var` on macOS; `/bin` on Linux) not applying when a path was given by its real location, and Bash commands ignoring deny rules written on a symlinked path spelling
         ^ symlinked directories from both ends — `a_deny_rule_reaches_a_file_named_by_its_real_location`
-2.1.268 | case | Fixed a case where a Read or Edit deny rule did not apply when an `env -C`, `eval` or similar command the permission checker cannot analyze was on the same line
-        ^ `env -C`/`eval` barriers — ANALYSIS_BARRIERS + the harness's declared list
+2.1.268 | probe | Fixed a case where a Read or Edit deny rule did not apply when an `env -C`, `eval` or similar command the permission checker cannot analyze was on the same line
+        ^ probe:analysis-barrier-eval — `env -C`/`eval` barriers — ANALYSIS_BARRIERS + the harness's declared list
 2.1.268 | case | Changed plain `WebFetch` deny and ask rules to no longer apply to Artifact tool reads and updates; use an `Artifact` rule (or `WebFetch(domain:claude.ai)`) to block or gate them
         ^ a plain `WebFetch` deny must not reach `Artifact`; measured undecided, `shape_of` maps them separately
 2.1.268 | declined | [VSCode] Added Left and Right arrow keys to change where an always-allow permission rule is saved, for keyboard and screen reader users
@@ -38,8 +52,8 @@ floor: 2.1.240
         ^ parentheses in a path rule — `an_edit_rule_with_parentheses_in_its_path_matches_as_spelled`
 2.1.260 | declined | Fixed one file permission rule with an uncompilable pattern (e.g. an unclosed `[`) making every file edit fail with `Invalid regular expression`; such a deny rule now guards the literal path it spells
         ^ this matcher compiles no regex, so no pattern can make every edit fail; an unclosed `[` guards the literal path, measured
-2.1.260 | case | Fixed Bash permission checks auto-approving zsh commands that hide a command substitution in a REPORTTIME, REPORTMEMORY or DIRSTACKSIZE assignment; these now prompt for approval
-        ^ assignments hiding a substitution — `an_assignment_cannot_smuggle_a_command_past_the_read_only_shortcut`
+2.1.260 | probe | Fixed Bash permission checks auto-approving zsh commands that hide a command substitution in a REPORTTIME, REPORTMEMORY or DIRSTACKSIZE assignment; these now prompt for approval
+        ^ probe:assign-hides-substitution — assignments hiding a substitution — `an_assignment_cannot_smuggle_a_command_past_the_read_only_shortcut`
 2.1.260 | declined | Fixed managed `skillOverrides` entries keyed on a bundled skill's alias (e.g. `checkup` for `/doctor`) not applying, and `Skill(name)` deny rules not covering a nested skill listed as `<dir>:name`
         ^ `Skill(...)` rules and managed `skillOverrides` are the vendor's skill resolution; Devplane matches `Skill` as a bare tool name only
 2.1.260 | declined | Glob/Grep: Fixed the search path being probed on disk before the permission check; a missing path is now reported after permission is decided, as Read does
@@ -52,8 +66,8 @@ floor: 2.1.240
         ^ text after the closing parenthesis is refused — `Rule::parse` returns None and `check` reports it
 2.1.259 | declined | Added `--permission-prompts none` for unattended headless hosts: anything that would prompt is denied automatically while the active permission mode (including auto mode) keeps deciding
         ^ a CLI flag for the vendor's headless hosts; Devplane's own gate is unaffected
-2.1.259 | case | Fixed Bash `Read()` deny rules not covering files given as option values (`--ignore-revs-file=.env`, `-f.env`, `@file`), `git diff`/`git grep` file operands, or `cd DIR && cat FILE` compounds; `grep -r`/`cp -r` over a directory holding a denied file now asks
-        ^ option values, git operands, compounds and recursion — four tests plus DENY_SHAPES
+2.1.259 | probe | Fixed Bash `Read()` deny rules not covering files given as option values (`--ignore-revs-file=.env`, `-f.env`, `@file`), `git diff`/`git grep` file operands, or `cd DIR && cat FILE` compounds; `grep -r`/`cp -r` over a directory holding a denied file now asks
+        ^ probe:read-deny-option-value — option values, git operands, compounds and recursion — four tests plus DENY_SHAPES
 2.1.257 | declined | Added a Containment Escape rule to auto mode so cloud metadata-credential fetches, egress evasion, and cross-tenant reach are no longer auto-approved unless your environment marks them expected
         ^ an auto-mode classifier rule; Devplane's rules resolve before the classifier and it writes none
 2.1.257 | declined | Fixed sessions dispatched from an agent view opened with `←` always starting in the original session's permission mode, overriding the target directory's `defaultMode` and the agent's `permissionMode`
@@ -70,8 +84,8 @@ floor: 2.1.240
         ^ the Workflow tool reading its own script path; not a rule shape
 2.1.251 | declined | Fixed Grep and Glob not applying `Read(...)` deny rules to files reached through a symlinked search path
         ^ Grep/Glob resolving a symlinked search path inside the vendor's tools; Devplane sees the tool call, not its traversal
-2.1.251 | case | Fixed Bash permission checks auto-approving commands that assign an arithmetic expression to an integer shell variable (e.g. `OPTIND=1/0`, `RANDOM=2+2`); these now prompt for approval
-        ^ arithmetic assignments — same test as row 15; `RANDOM=2+2` and `SECONDS=1/0` measured undecided
+2.1.251 | probe | Fixed Bash permission checks auto-approving commands that assign an arithmetic expression to an integer shell variable (e.g. `OPTIND=1/0`, `RANDOM=2+2`); these now prompt for approval
+        ^ probe:evaluated-assignment — arithmetic assignments — same test as row 15; `RANDOM=2+2` and `SECONDS=1/0` measured undecided
 2.1.251 | declined | Changed Claude in Chrome so browser actions always go through Claude Code's permission checks, including in sessions with telemetry disabled, which previously used the Chrome extension's own prompts
         ^ Claude in Chrome routing through the vendor's checks; a browser surface Devplane does not observe
 2.1.248 | declined | Fixed the trust dialog's list of repo permission rules showing a garbled character when a long rule was cut off in the middle of an emoji
@@ -92,20 +106,25 @@ floor: 2.1.240
         ^ substitutions inside a command do not widen a pattern match — `a_deny_rule_reaches_into_substitutions_and_bodies`
 2.1.243 | declined | [VSCode] Fixed sessions started before feature flags were first fetched (for example right after install) opening in the default permission mode instead of auto mode or your configured default mode
         ^ which mode a VS Code session opens in before feature flags load
-2.1.271 | case | Fixed Bash permission checks missing the file that `fmt`, `column` and similar commands read when it follows an option the checker doesn't recognize
-        ^ `fmt` was absent from the reader table entirely — `fmt .env` walked past `Read(.env)`. Nineteenth widening; `a_reader_named_by_the_vendor_is_in_the_table`
-2.1.271 | case | Fixed Bash permission checks skipping files a wildcard expands to when the wildcard sits in a command's pattern or option value (for example `grep -v dir/* file`)
-        ^ no operand carrying a glob was ever matched against a path deny — `cat *.env` walked past `Read(.env)`. Twentieth widening, and the one that also produced a wrong *reason*; `a_glob_operand_is_matched_against_a_path_deny`, `an_allowed_call_names_the_rule_that_allowed_it`
+2.1.271 | probe | Fixed Bash permission checks missing the file that `fmt`, `column` and similar commands read when it follows an option the checker doesn't recognize
+        ^ probe:reader-fmt-path-deny — `fmt` was absent from the reader table entirely — `fmt .env` walked past `Read(.env)`. Nineteenth widening; `a_reader_named_by_the_vendor_is_in_the_table`
+2.1.271 | probe | Fixed Bash permission checks skipping files a wildcard expands to when the wildcard sits in a command's pattern or option value (for example `grep -v dir/* file`)
+        ^ probe:glob-operand-path-deny — no operand carrying a glob was ever matched against a path deny — `cat *.env` walked past `Read(.env)`. Twentieth widening, and the one that also produced a wrong *reason*; `a_glob_operand_is_matched_against_a_path_deny`, `an_allowed_call_names_the_rule_that_allowed_it`
 2.1.271 | declined | Fixed Bash permission checks so that shell variable declaration flags cannot misrepresent the command being run
         ^ probed on this matcher across `declare`/`local`/`typeset`/`export`/`readonly` with a substitution in the value: every form either denies on the substitution or reaches a person. The error here is a narrowing, which is the reported direction
 2.1.271 | declined | Changed auto mode so that a skill's or slash command's inline `!` shell commands follow default-mode permission rules instead of the classifier; a command no rule decides runs as a reviewed tool call
         ^ auto mode's own precedence, upstream of the hook Devplane answers; a `[policy]` rule decides the same way whichever path reached it
-2.1.273 | case | Fixed Bash commands the permission checker cannot fully analyze skipping the prompt under `permissions.blockReadsOutsideWorkingDirectories`, and a subshell hiding a dangerous `rm` in bypass mode
-        ^ the subshell half is the half this gate can be wrong about, and it is covered: probed across `(rm -rf x)`, `bash -c '(rm -rf x)'`, `$(rm -rf x)` and an `if` body, every form is decomposed so a `Bash(rm *)` deny reaches the hidden command — `a_compound_command_splits_the_way_the_documentation_says`. `blockReadsOutsideWorkingDirectories` and bypass mode are a vendor setting and a vendor mode this gate does not read, and both sit upstream of the rule table
-2.1.273 | case | Reverted a 2.1.268 change that checked Read and Edit deny rules on Bash lines the permission checker can't analyze (`eval`, `env -C`); commands like `time -p make build` prompt again instead of being denied
-        ^ no change here, and the row is why: all five `ANALYSIS_BARRIERS` shapes have been declared narrowings in `EXPECTED_NARROWER` since the deny axis measured at 2.1.270 that the product never honoured the 2.1.268 claim. The vendor's documentation now agrees with that measurement — `a_barrier_command_is_looked_through`. `time` is neither a barrier nor a reader, so `time -p make build` names no path here either and a prefix allow answers it on both sides
+2.1.273 | probe | Fixed Bash commands the permission checker cannot fully analyze skipping the prompt under `permissions.blockReadsOutsideWorkingDirectories`, and a subshell hiding a dangerous `rm` in bypass mode
+        ^ probe:subshell-unanalysable — the subshell half is the half this gate can be wrong about, and it is covered: probed across `(rm -rf x)`, `bash -c '(rm -rf x)'`, `$(rm -rf x)` and an `if` body, every form is decomposed so a `Bash(rm *)` deny reaches the hidden command — `a_compound_command_splits_the_way_the_documentation_says`. `blockReadsOutsideWorkingDirectories` and bypass mode are a vendor setting and a vendor mode this gate does not read, and both sit upstream of the rule table
+2.1.273 | probe | Reverted a 2.1.268 change that checked Read and Edit deny rules on Bash lines the permission checker can't analyze (`eval`, `env -C`); commands like `time -p make build` prompt again instead of being denied
+        ^ probe:glob-operand-bare-star — no change here, and the row is why: all five `ANALYSIS_BARRIERS` shapes have been declared narrowings in `EXPECTED_NARROWER` since the deny axis measured at 2.1.270 that the product never honoured the 2.1.268 claim. The vendor's documentation now agrees with that measurement — `a_barrier_command_is_looked_through`. `time` is neither a barrier nor a reader, so `time -p make build` names no path here either and a prefix allow answers it on both sides
 2.1.273 | declined | Windows: Improved the network-path permission check for UNC paths when a mapped network drive was added with `--add-dir`
         ^ the working-directory list is a documented approximation: `within()` knows the directory the session reported and not what `--add-dir` extended it with, and being wrong there costs a prompt Claude Code would not have shown, which is the reported direction
 
-2.1.274 | case | Fixed Bash permission checks for commands that loop over or assign certain special shell variables; these commands now ask for permission
-        ^ the assign half was already covered by `inert_assignment` + EVALUATED_VARS; the *loop* half was not — `for` and `in` are control words, so `for OPTIND in 1 2` never reached the check that catches `OPTIND=1/0`. Thirty-first widening, measured against 2.1.273 three times before fixing; `a_loop_over_an_evaluated_variable_is_not_approved_by_a_prefix_rule`
+2.1.274 | probe | Fixed Bash permission checks for commands that loop over or assign certain special shell variables; these commands now ask for permission
+        ^ probe:loop-assigns-evaluated-var — the assign half was already covered by `inert_assignment` + EVALUATED_VARS; the *loop* half was not — `for` and `in` are control words, so `for OPTIND in 1 2` never reached the check that catches `OPTIND=1/0`. Thirty-first widening, measured against 2.1.273 three times before fixing; `a_loop_over_an_evaluated_variable_is_not_approved_by_a_prefix_rule`
+
+2.1.275 | case | Fixed `/update-config` writing `Write(path)` permission rules, which file permission checks don't match, instead of `Edit(path)` rules
+        ^ the semantics this reaffirms are already mirrored: a path rule on `Write`, `NotebookEdit`, `MultiEdit` or `Glob` is accepted and never consulted, and `Rule::problems` warns with "Write it as `Edit(…)`" — pinned by `("Write(src/**)", Class::Deny, "never consulted")`. The fix itself is to the vendor's own `/update-config` command, which Devplane neither runs nor reads. No probe: the vendor has never been asked whether it really ignores such a rule, so this owes the measured floor
+2.1.275 | declined | [VSCode] Fixed rewound and forked conversations not keeping the permission mode you had picked for the original conversation
+        ^ session UI state in one editor: which mode a forked conversation inherits. No rule is matched differently, and Devplane never reads the vendor's permission mode to reach its own verdict
