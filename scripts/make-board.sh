@@ -144,7 +144,6 @@ shoot board-light boardsec 940 light
 [ "${SHOTS:-all}" = board ] || {
   # Gate is the surface nobody else in the field ships, and a README showing
   # only a session list is a README about the half that commoditised.
-  shoot gate  gatesec  820
   shoot audit auditsec 820
   shoot inbox needs    620
   shoot work  worksec  420

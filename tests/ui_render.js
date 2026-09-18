@@ -144,6 +144,8 @@ const item = {
   },
   no_offer: null,
   since: "2026-09-15T00:00:00Z",
+  // The project name comes from a repository, so it is somebody else's bytes.
+  project_name: NASTY,
 };
 const work = {
   id: "w1",
@@ -307,5 +309,29 @@ if (!el("ghbody").innerHTML.includes("gh: not logged in")) {
 
 // A state glyph reads as a word too.
 if (!board.includes('class="sr">working<')) fail("the board's state glyph has no word beside it");
+
+// ── The waiting row says where it came from and how long ───────────────────
+//
+// Both are what make the list readable without opening a row, and the project
+// name is repository-provided text, so it is in the escaping sweep above too.
+if (!inbox.includes("proj")) fail("a waiting row does not name its project");
+if (!inbox.includes("waiting ")) fail("a waiting row does not say how long it has waited");
+
+// A row whose project the world no longer has renders without it rather than
+// rendering a raw id at a person.
+context.__ui.setState({
+  board: board_, inbox: [{ ...item, project_name: null }], work: [work], sel: 0, showAll: false,
+});
+context.__ui.render();
+const anon = el("inbox").innerHTML;
+if (!anon.includes("card item")) fail("a row with no project name vanished");
+if (anon.includes("p1")) fail("a row with no project name fell back to showing the raw id");
+
+// An unparseable timestamp yields no age rather than `NaN`.
+context.__ui.setState({
+  board: board_, inbox: [{ ...item, since: "not a date" }], work: [work], sel: 0, showAll: false,
+});
+context.__ui.render();
+if (el("inbox").innerHTML.includes("NaN")) fail("an unreadable timestamp rendered as NaN");
 
 console.log("ui_render: ok");

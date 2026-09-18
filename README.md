@@ -252,16 +252,17 @@ recorded against this commit, not that the work is correct.
 
 ![The Devplane board: five projects, ten sessions, a permission waiting with the rule that would end it, and one session at 89% context](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/board.png)
 
-**And the surface nobody else ships.** Every watcher in this category can show
-you sessions. None of them can tell you how much to trust the thing deciding on
-your behalf — because none of them has ever measured it.
+**And it opens on the surface nobody else has.** Every watcher in this category can show you
+sessions — Claude Code now ships that itself, and does it better. None of them can show you the work
+that *outlived* the session: the branch whose check went red two hours after the agent stopped, the
+reviewer who has been waiting since yesterday, the pipeline held at a step somebody has to release.
 
-![The gate report: three floors — what has been read, what has been measured, and what the full matrix proved — each with what it does not claim](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/gate.png)
+![What needs you: one list across every project, each row naming its project and how long it has waited](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/inbox.png)
 
-Three separate claims, never averaged into one. Each carries the half nobody
-else prints: **what it does not claim.** The uncomfortable line at the bottom is
-the point — a per-release measurement covers only what the vendor announced, and
-saying so is what makes the rest of it believable.
+One list, every project, ordered by what is waiting rather than by which repository it belongs to. A
+project with six idle sessions and nothing to decide ranks below a project with none running and a
+red check from last night — not because anything is weighted, but because idle sessions raise nothing
+to answer.
 
 Keyboard-first:
 

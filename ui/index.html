@@ -136,6 +136,13 @@
      newlines throws away the half that locates the problem. */
   .acts .why { color: var(--faint); }
   .item .d { color: var(--dim); margin-top: .2rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+  /* Where a row came from and how long it has waited. Secondary to the title:
+     the title says what it is, these say whether it is yours and whether it has
+     been ignored. Wraps rather than truncates — a project name cut in half on a
+     phone is the one field that has to survive the narrow case. */
+  .item .meta { display: flex; flex-wrap: wrap; gap: .1rem .6rem; font-size: .82rem;
+                color: var(--faint); margin-top: .15rem; }
+  .item .meta .proj { font-weight: 600; }
   .opts { margin: .35rem 0 0; padding-left: 1.1rem; color: var(--dim); }
   .opts.picks { padding-left: 0; display: flex; gap: .4rem; flex-wrap: wrap; }
   .opts.picks button { display: inline-flex; align-items: baseline; gap: .45rem; }
@@ -503,8 +510,8 @@
 </style>
 
 <nav class="rail" aria-label="Surfaces"><div class="railinner">
-  <a href="#boardsec" data-surface="boardsec" aria-current="page">Board<span class="badge" id="railboard"></span></a>
-  <a href="#needs" data-surface="needs">Inbox<span class="badge" id="railinbox"></span></a>
+  <a href="#needs" data-surface="needs" aria-current="page">Needs you<span class="badge" id="railinbox"></span></a>
+  <a href="#boardsec" data-surface="boardsec">Sessions<span class="badge" id="railboard"></span></a>
   <a href="#worksec" data-surface="worksec">Work<span class="badge" id="railwork"></span></a>
   <a href="#auditsec" data-surface="auditsec">Audit</a>
   <!-- Not built. A `<span>` rather than a link: not focusable, not pressable,
@@ -704,6 +711,20 @@ const ago = (s) =>
   s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m"
   : s < 86400 ? Math.floor(s / 3600) + "h" : Math.floor(s / 86400) + "d";
 
+// How long a row has been waiting, from the timestamp it started at.
+//
+// **Elapsed, never a clock time.** "waiting since 11:04" asks a reader to do
+// arithmetic against a clock they may not be looking at; "waiting 3m" does not.
+// The list is ordered by this, so hiding it makes the order look arbitrary.
+//
+// A timestamp the browser cannot parse yields nothing rather than `NaN`: a row
+// with no age is better than a row claiming to have waited `NaNm`.
+const waited = (since) => {
+  const t = Date.parse(since);
+  if (!Number.isFinite(t)) return "";
+  return "waiting " + ago(Math.max(0, Math.round((Date.now() - t) / 1000)));
+};
+
 // `connected` is tri-state on purpose: `undefined` not asked, `null` asked and
 // unknown, a boolean answered. An empty board must not claim "nothing is
 // connected" on the strength of a request that failed.
@@ -845,6 +866,10 @@ function render() {
     ? state.inbox.map((i, n) => `
         <div class="card item ${esc(i.level)}" role="listitem" data-sel="${n}" data-run="${esc(i.run_id || "")}" tabindex="0">
           <div class="t">${esc(i.title)}</div>
+          <div class="meta">
+            ${i.project_name ? `<span class="proj">${esc(i.project_name)}</span>` : ""}
+            ${i.since ? `<span class="waited">${esc(waited(i.since))}</span>` : ""}
+          </div>
           ${i.detail ? `<div class="d">${esc(i.detail)}</div>` : ""}
           ${i.kind === "config_broken"
             // The one item whose whole answer is a file. `,` is where the file
@@ -2009,10 +2034,16 @@ $("theme").addEventListener("click", () => {
 // script photograph a surface without injecting a script into the page.
 function surfaceFromHash() {
   const want = (location.hash || "").slice(1);
-  showSurface(SURFACES.includes(want) ? want : "boardsec");
+  showSurface(SURFACES.includes(want) ? want : "needs");
 }
-// The board is the default and its two sections are marked so before any
+// **The waiting list is the default**, and its section is marked so before any
 // refresh runs — otherwise the first paint is a page with nothing on it.
+//
+// It used to be the session list. Anthropic ships that surface as `claude
+// agents`, maintained by the people who own the session format, and theirs is
+// better; what only this product has — work that outlived the session that made
+// it — was one click away. A default is a small change and it is most of what
+// this page is for.
 surfaceFromHash();
 addEventListener("hashchange", surfaceFromHash);
 

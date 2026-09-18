@@ -782,9 +782,46 @@ async fn board(
     .into_response()
 }
 
+/// One waiting row, with the name of the project it came from.
+///
+/// **The item carries a project *id*, and a person cannot read an id.** The
+/// name is attached here rather than looked up in the page, for the reason the
+/// forge list already works this way: a page that resolves ids against a second
+/// list renders a raw id the first time the two disagree, and they disagree
+/// exactly when a project has just been removed — which is when somebody is
+/// most likely to be reading the row.
+#[derive(Serialize)]
+struct WaitingRow {
+    #[serde(flatten)]
+    item: crate::core::AttentionItem,
+    /// `None` when the item belongs to no project, or to one the world no
+    /// longer has. Absent rather than an empty string: *no project* and *a
+    /// project whose name we could not find* are both true silences, and
+    /// neither is the name.
+    project_name: Option<String>,
+}
+
 async fn inbox(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
-    Json(state.current_inbox().await).into_response()
+    let names: std::collections::BTreeMap<_, _> = {
+        let w = state.world.lock().await;
+        w.projects()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect()
+    };
+    let rows: Vec<WaitingRow> = state
+        .current_inbox()
+        .await
+        .into_iter()
+        .map(|item| WaitingRow {
+            project_name: item
+                .project_id
+                .as_ref()
+                .and_then(|id| names.get(id).cloned()),
+            item,
+        })
+        .collect();
+    Json(rows).into_response()
 }
 
 /// One row of the cross-project issue or pull-request list.
