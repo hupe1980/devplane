@@ -52,7 +52,7 @@ string_id!(
 );
 string_id!(
     RunId,
-    "A Vibeplane run. For observed sessions this mirrors the `SessionId`: a \
+    "A Devplane run. For observed sessions this mirrors the `SessionId`: a \
      session we did not start has no other identity we can correlate on."
 );
 string_id!(AttentionId, "One item in the inbox.");

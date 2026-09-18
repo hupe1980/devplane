@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Does Claude Code decide the way Vibeplane decides?
+# Does Claude Code decide the way Devplane decides?
 #
 # `scripts/verify-claims.sh` pins every rule of the permission syntax to a line
 # in the vendored specification. This script asks the *running product* instead,
@@ -35,17 +35,17 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-CLAUDE="${VIBEPLANE_CLAUDE_BIN:-$(command -v claude || true)}"
+CLAUDE="${DEVPLANE_CLAUDE_BIN:-$(command -v claude || true)}"
 if [ -z "$CLAUDE" ]; then
   for d in "$HOME/.claude/local/claude" \
            "$HOME"/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude; do
     [ -x "$d" ] && CLAUDE="$d"
   done
 fi
-[ -x "${CLAUDE:-}" ] || { echo "no claude binary found; set VIBEPLANE_CLAUDE_BIN"; exit 2; }
+[ -x "${CLAUDE:-}" ] || { echo "no claude binary found; set DEVPLANE_CLAUDE_BIN"; exit 2; }
 "$CLAUDE" auth status >/dev/null 2>&1 || { echo "claude is not signed in; nothing to ask"; exit 2; }
 
-MODEL="${VIBEPLANE_PROBE_MODEL:-claude-haiku-4-5-20251001}"
+MODEL="${DEVPLANE_PROBE_MODEL:-claude-haiku-4-5-20251001}"
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 fail=0; n=0
@@ -130,7 +130,7 @@ writeprobe no  "paths: the same pattern FLOATS as a deny, to any depth" \
 #
 # Claude Code checks a redirection's target against the `Edit` rules "as if
 # Claude wrote or read that file directly", and applies `Read`/`Edit` deny
-# rules to the operands of the file commands it recognises. Vibeplane matched a
+# rules to the operands of the file commands it recognises. Devplane matched a
 # `Bash` rule against the command *text* only, so `Read(.env)` did not stop
 # `cat .env` and `Edit(.env)` did not stop `echo x > .env` — two prohibitions
 # that read as protection and were none.

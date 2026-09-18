@@ -1,4 +1,4 @@
-//! Vibeplane — the local-first control plane for AI coding agents.
+//! Devplane — the local-first control plane for AI coding agents.
 //!
 //! One crate. [`core`] is the half that may not reach the outside world — the
 //! types, the reducer, the attention engine, the permission policy — and
@@ -20,7 +20,7 @@ pub mod cli;
 /// The CLI's view of the daemon.
 pub mod client;
 pub mod config;
-/// Where Vibeplane keeps its own state, and how a client finds the daemon.
+/// Where Devplane keeps its own state, and how a client finds the daemon.
 pub mod conformance;
 /// Types and the pure logic over them. Reaches nothing outside the process.
 pub mod core;
@@ -28,7 +28,7 @@ pub mod core;
 pub mod daemon;
 /// Starting the daemon in the background.
 pub mod daemonise;
-/// Runs Vibeplane owns, over the Agent Client Protocol.
+/// Runs Devplane owns, over the Agent Client Protocol.
 pub mod driven;
 /// Raising the window that owns a session.
 pub mod focus;

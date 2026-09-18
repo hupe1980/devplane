@@ -46,7 +46,7 @@ pub async fn cmd_audit(about: Option<&str>, limit: i64, json: bool) -> Result<()
     let empty = vec![];
     let rows = v.as_array().unwrap_or(&empty);
     if rows.is_empty() {
-        println!("{}", paint(DIM, "Vibeplane has not decided anything yet."));
+        println!("{}", paint(DIM, "Devplane has not decided anything yet."));
         return Ok(());
     }
     for d in rows {
@@ -91,11 +91,11 @@ pub async fn cmd_agents(json: bool) -> Result<()> {
         "\n{}\n{}",
         paint(
             DIM,
-            "Add one by name in ~/.vibeplane/agents.toml:  [agents.kimi] command = \"...\""
+            "Add one by name in ~/.devplane/agents.toml:  [agents.kimi] command = \"...\""
         ),
         paint(
             DIM,
-            "Or point at a command: vibeplane dispatch --agent '/opt/my-agent --acp' ..."
+            "Or point at a command: devplane dispatch --agent '/opt/my-agent --acp' ..."
         )
     );
     Ok(())
@@ -168,7 +168,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
 
     // Which world this machine is in, before anything about channels — because
     // on four of the six providers the vendor's whole supervision layer is off
-    // and Vibeplane is the only gate here, and a person needs telling that
+    // and Devplane is the only gate here, and a person needs telling that
     // before they are told a hook is installed.
     println!("\n{}", paint(BOLD, "provider"));
     println!(
@@ -186,7 +186,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
     if !provider.has_vendor_supervision() {
         println!(
             "  {}",
-            paint(BOLD, "Vibeplane is the only gate on this machine.")
+            paint(BOLD, "Devplane is the only gate on this machine.")
         );
         println!(
             "  {} {}",
@@ -267,7 +267,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
     println!("  settings  {}", state.settings_path.display());
     if state.hooks_installed.is_empty() {
         println!(
-            "  hooks     {} — run `vibeplane connect claude`",
+            "  hooks     {} — run `devplane connect claude`",
             paint(render::RED, "not installed")
         );
     } else {
@@ -279,7 +279,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
     }
     match (&probe.command, probe.answered) {
         (None, _) => println!(
-            "  gate      {} — run `vibeplane connect claude`",
+            "  gate      {} — run `devplane connect claude`",
             paint(render::RED, "not installed")
         ),
         (Some(_), true) => println!(
@@ -317,7 +317,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
     }
     if state.gate_is_stale {
         println!(
-            "  gate      {} — run `vibeplane connect claude`",
+            "  gate      {} — run `devplane connect claude`",
             paint(render::RED, "out of date")
         );
         println!(
@@ -477,7 +477,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             );
         }
 
-        // The other gate. Vibeplane's own prohibitions reach auto mode, and in
+        // The other gate. Devplane's own prohibitions reach auto mode, and in
         // that mode the thing deciding is a classifier configured somewhere
         // else entirely — so a person supervising twenty agents should be able
         // to see both from one place. Read, never written.
@@ -532,7 +532,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             )
         );
 
-        // A project whose `vibeplane.toml` will not load keeps the rules that
+        // A project whose `devplane.toml` will not load keeps the rules that
         // were already cached — and after a restart there are none to keep, so
         // its `never_auto` list is silently gone. That has to be visible
         // somewhere, and this is where somebody looks when something is wrong.
@@ -550,7 +550,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                 "  {}",
                 paint(
                     DIM,
-                    "its permission rules are not in force — run `vibeplane check` there"
+                    "its permission rules are not in force — run `devplane check` there"
                 )
             );
         }
@@ -599,7 +599,7 @@ pub async fn cmd_connect(what: ConnectTarget, statusline: bool, json: bool) -> R
     let token = config::load_or_create_token()?;
     let path = crate::observe::connect::settings_path()?;
     let mut settings = crate::observe::connect::read_settings(&path)?;
-    let exe = std::env::current_exe().context("finding the vibeplane binary")?;
+    let exe = std::env::current_exe().context("finding the devplane binary")?;
     let mut report = crate::observe::connect::connect(&mut settings, c.base_url(), &token, &exe);
     if statusline {
         report.notes.push(crate::observe::connect::wrap_status_line(
@@ -639,17 +639,17 @@ pub async fn cmd_connect(what: ConnectTarget, statusline: bool, json: bool) -> R
     println!(
         "\n{}\n  Existing sessions pick the hooks up on their next turn.\n  New sessions are seen immediately. Try {}.",
         paint(BOLD, "Done."),
-        paint(BOLD, "vibeplane ls")
+        paint(BOLD, "devplane ls")
     );
     Ok(())
 }
 
-/// `vibeplane connect copilot`.
+/// `devplane connect copilot`.
 ///
 /// **One file, and one thing it deliberately does not do.**
 ///
 /// Copilot loads every `*.json` in `~/.copilot/hooks/`, so the whole
-/// installation is a single file Vibeplane owns — written, read back and
+/// installation is a single file Devplane owns — written, read back and
 /// removed without touching a line the user wrote. That is a better mechanism
 /// than Claude Code's, where hooks live inside the user's own `settings.json`
 /// and disconnecting means picking our entries back out of it.
@@ -659,12 +659,12 @@ pub async fn cmd_connect(what: ConnectTarget, statusline: bool, json: bool) -> R
 /// `OTEL_EXPORTER_OTLP_ENDPOINT`) or from *managed* settings, which belong to an
 /// organisation rather than to this tool. Editing somebody's shell profile is
 /// not a thing a supervisor should do quietly, and writing a managed policy is
-/// the same refusal that keeps Vibeplane out of the auto-mode classifier's
+/// the same refusal that keeps Devplane out of the auto-mode classifier's
 /// configuration. So the two lines are printed and the person runs them.
 async fn connect_copilot(json: bool) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
     let token = config::load_or_create_token()?;
-    let exe = std::env::current_exe().context("finding the vibeplane binary")?;
+    let exe = std::env::current_exe().context("finding the devplane binary")?;
     let dir = crate::observe::copilot::hooks_dir()
         .context("no home directory, so no ~/.copilot to write to")?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -677,7 +677,7 @@ async fn connect_copilot(json: bool) -> Result<()> {
         ("COPILOT_OTEL_ENABLED", "true".to_string()),
         (
             "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("{}/vibeplane/otel", c.base_url()),
+            format!("{}/devplane/otel", c.base_url()),
         ),
     ];
     if json {
@@ -714,7 +714,7 @@ async fn connect_copilot(json: bool) -> Result<()> {
   {}",
         paint(
             DIM,
-            "Vibeplane does not edit shell profiles, and its managed-settings equivalent \
+            "Devplane does not edit shell profiles, and its managed-settings equivalent \
              belongs to your organisation rather than to this tool."
         )
     );
@@ -772,7 +772,7 @@ pub async fn cmd_disconnect(what: ConnectTarget, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `vibeplane rewind` — the files the vendor's checkpoint will not restore.
+/// `devplane rewind` — the files the vendor's checkpoint will not restore.
 ///
 /// A query over rows that already exist, and deliberately not a feature: no
 /// snapshots, no storage, no second copy of anybody's files. Claude Code
@@ -824,7 +824,7 @@ pub async fn cmd_rewind(run: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `vibeplane gate` — what the gate is, and how much of it is measured.
+/// `devplane gate` — what the gate is, and how much of it is measured.
 ///
 /// Separate from `doctor` because it answers a different question. `doctor`
 /// asks whether the channels are alive; this asks whether the verdicts are

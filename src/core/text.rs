@@ -78,7 +78,7 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
 /// Splits YAML frontmatter from a markdown body.
 ///
 /// Claude Code Skills are `---`-delimited frontmatter followed by the
-/// instructions. Vibeplane uses the *body* as a prompt, which is portable —
+/// instructions. Devplane uses the *body* as a prompt, which is portable —
 /// markdown is markdown, and an agent that is not Claude reads it perfectly
 /// well. What does not travel is the frontmatter's meaning: `allowed-tools`,
 /// `context: fork` and `model` are directives the Claude harness honours when
@@ -115,7 +115,7 @@ pub fn split_frontmatter(src: &str) -> (Option<&str>, &str) {
 mod tests {
     #[test]
     fn a_skill_contributes_its_body_and_not_its_frontmatter() {
-        // Claude Code's own prompt-template format. Vibeplane takes the body,
+        // Claude Code's own prompt-template format. Devplane takes the body,
         // which is portable markdown any agent can follow; the frontmatter is
         // a set of directives only the Claude harness applies, and inlining it
         // as prose would read as instructions to the model.

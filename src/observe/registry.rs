@@ -13,7 +13,7 @@
 //!   otherwise only arrives with OpenTelemetry.
 //! * `ide/<pid>.lock` maps a workspace folder to the **editor window** that has
 //!   it open. That is what turns "this session needs you" into "here is the
-//!   window", which is the only useful action for a session Vibeplane cannot
+//!   window", which is the only useful action for a session Devplane cannot
 //!   type into.
 
 use serde::Deserialize;

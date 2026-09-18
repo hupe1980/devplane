@@ -9,7 +9,7 @@
 # shapes this project thought to generate, which is a guess about what an agent
 # writes. What actually found eight widenings in one sitting was a person
 # reading thirty changelog rows and typing the forms they name into
-# `vibeplane explain` — and a person reading is a habit with a base rate, not a
+# `devplane explain` — and a person reading is a habit with a base rate, not a
 # guarantee.
 #
 # So this makes the reading mechanical in the only half a machine can do: it
@@ -32,13 +32,13 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-CHANGELOG="specs/claude-code/CHANGELOG.md"
+CHANGELOG="reference/claude-code/CHANGELOG.md"
 LEDGER="scripts/changelog-ledger.txt"
 MODE="${1:-check}"
 CHANGELOG_URL="https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md"
 
 # `--fetch` re-downloads the one file this script reads. It is separate from
-# `fetch-specs.sh`, which re-downloads all 130 and needs a minute.
+# `fetch-reference.sh`, which re-downloads all 130 and needs a minute.
 #
 # This exists because the script was green and wrong. It reported "41 rule rows,
 # all accounted for" while measuring a corpus pinned two releases behind the
@@ -52,7 +52,7 @@ if [ "$MODE" = "--fetch" ]; then
 fi
 
 [ -f "$CHANGELOG" ] || {
-  echo "changelog-rows: $CHANGELOG is missing — run scripts/fetch-specs.sh"
+  echo "changelog-rows: $CHANGELOG is missing — run scripts/fetch-reference.sh"
   exit 2
 }
 [ -f "$LEDGER" ] || { echo "changelog-rows: $LEDGER is missing"; exit 2; }

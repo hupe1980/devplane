@@ -35,12 +35,25 @@ node_modules/
 # to a document the reader cannot open.
 /concepts/
 
+# This project's own feature specifications, and the Spec Kit machinery that
+# produces them: the requirements, plans, research and task lists behind each
+# feature, plus `.specify/memory/constitution.md` and the `/speckit.*` skills.
+# Same rule as `concepts/` — the published tree may not cite a path the reader
+# does not have, and `scripts/concepts-check.sh` fails on one that does.
+#
+# Note this is *this repository's* `specs/`. Devplane's `--spec` flag points at
+# **a user's** specification directory, which is a product feature and is
+# documented as one.
+/specs/
+/.specify/
+/.claude/
+
 # Third-party documentation and specifications — copyrighted publications, so local
 # copies are not redistributed here. `concepts/REFERENCES.md` indexes every one with its
-# retrieval URL and `scripts/fetch-specs.sh` rebuilds the folder from scratch.
-/specs/
+# retrieval URL and `scripts/fetch-reference.sh` rebuilds the folder from scratch.
+/reference/
 
 # Litter from the protocol suite: the fixture agent writes down what it was told,
 # in the directory the client named — which for a test that dispatches into the
 # repository itself is the repository itself.
-.vibeplane/
+.devplane/

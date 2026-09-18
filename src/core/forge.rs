@@ -153,7 +153,7 @@ fn since(updated_at: Option<&str>, fallback: Timestamp) -> Timestamp {
 
 /// The inbox items one project's forge produces.
 ///
-/// `own_prs` are the pull requests Vibeplane itself opened for this project.
+/// `own_prs` are the pull requests Devplane itself opened for this project.
 /// Their Work already raises `ci_red`, `changes_requested` and `pr_ready`, so
 /// they are skipped here rather than reported twice under two ids.
 ///
@@ -205,7 +205,8 @@ pub fn items_for_forge(
             url: Some(url.to_string()),
             launch,
             work_id: None,
-            suggested_rule: None,
+            offer: None,
+            no_offer: None,
             since: since_at,
         })
     };
@@ -372,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pull_request_vibeplane_opened_is_not_reported_twice() {
+    fn a_pull_request_devplane_opened_is_not_reported_twice() {
         // Its Work already raises `ci_red`; a second row under a second id
         // would be the same fact asking twice.
         let own = BTreeSet::from([142u64]);

@@ -1,10 +1,10 @@
 //! The other gate, read back.
 //!
 //! In **auto mode** Claude Code routes tool calls through a classifier instead
-//! of prompting, and the classifier has its own configuration that Vibeplane
+//! of prompting, and the classifier has its own configuration that Devplane
 //! neither writes nor controls. That matters here more than it looks: auto mode
 //! is the mode people choose precisely when they are *not* watching, and
-//! closing the hole on Vibeplane's own side (prohibitions ride `PreToolUse`,
+//! closing the hole on Devplane's own side (prohibitions ride `PreToolUse`,
 //! which fires in every mode) only fixed half of it. The other half is that a
 //! person supervising twenty agents has no way to see what the classifier will
 //! stop.

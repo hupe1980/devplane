@@ -12,8 +12,8 @@ labels: bug
 **Steps**
 
 ```sh
-vibeplane doctor        # paste the output — it names the channels and the gate's state
-vibeplane --version
+devplane doctor        # paste the output — it names the channels and the gate's state
+devplane --version
 ```
 
 **Environment:** OS, terminal or editor, which agents are connected.

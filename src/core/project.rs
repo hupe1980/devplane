@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 /// A registered repository.
 ///
-/// Registration is deliberate: a project must be trusted before Vibeplane will
+/// Registration is deliberate: a project must be trusted before Devplane will
 /// ever spawn an agent in it, because a headless Claude run executes the
 /// repository's own hooks and MCP servers with no dialog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
 /// Two conventions, because there are two ways a worktree gets made and a
 /// human does not think of them as different things:
 ///
-/// * Claude Code's — and Vibeplane's — `<repo>/.claude/worktrees/<name>`, which
+/// * Claude Code's — and Devplane's — `<repo>/.claude/worktrees/<name>`, which
 ///   is a pure string question;
 /// * anything `git worktree add` produced, which can be anywhere on the disk.
 ///   Its `.git` is a *file* reading `gitdir: <repo>/.git/worktrees/<name>`, so
@@ -100,7 +100,7 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
 ///   answer is needed on the synchronous hook a session is blocked on.
 ///
 /// Getting the second one wrong is not cosmetic. The repository's
-/// `vibeplane.toml` is found from this, so a worktree that resolves to itself
+/// `devplane.toml` is found from this, so a worktree that resolves to itself
 /// is a worktree where the project's `never_auto` rules and its gates silently
 /// do not apply.
 pub fn main_checkout_for(path: &Path) -> Option<PathBuf> {
@@ -146,7 +146,7 @@ fn linked_worktree_owner(start: &Path) -> Option<PathBuf> {
     Some(common.parent()?.to_path_buf())
 }
 
-/// The directory whose `vibeplane.toml` governs a path: the repository that
+/// The directory whose `devplane.toml` governs a path: the repository that
 /// owns it, or the checkout itself when it owns nothing.
 ///
 /// One function, because five call sites spelling out the same `or_else` chain
@@ -154,13 +154,13 @@ fn linked_worktree_owner(start: &Path) -> Option<PathBuf> {
 ///
 /// **The last clause is a fallback and not a third convention.** A directory
 /// with no git above it used to have no rules at all, however plainly a
-/// `vibeplane.toml` was sitting in it — so `vibeplane check` read the file and
-/// printed its rules while `vibeplane explain`, in the same directory, answered
+/// `devplane.toml` was sitting in it — so `devplane check` read the file and
+/// printed its rules while `devplane explain`, in the same directory, answered
 /// `undecided` and never mentioned it. Two commands disagreeing about one file
 /// is worse than either answer.
 ///
 /// Inside a repository the root still wins, even if a nested directory carries
-/// its own `vibeplane.toml`: making the *nearest* file win would silently move
+/// its own `devplane.toml`: making the *nearest* file win would silently move
 /// authority for every existing checkout, in a direction nobody could predict
 /// from the outside. This only reaches a path that has no repository above it.
 pub fn governing_root(path: &Path) -> Option<PathBuf> {
@@ -169,7 +169,7 @@ pub fn governing_root(path: &Path) -> Option<PathBuf> {
         .or_else(|| find_config_root(path))
 }
 
-/// The nearest ancestor holding a `vibeplane.toml`, for a path with no
+/// The nearest ancestor holding a `devplane.toml`, for a path with no
 /// repository above it.
 fn find_config_root(start: &Path) -> Option<PathBuf> {
     let mut cur = Some(start);
@@ -236,7 +236,7 @@ mod tests {
         // and its output can be anywhere on the disk — there is no string in
         // the path to recognise. Before this, such a checkout resolved to
         // itself: its own project row on the board, its own trust decision, and
-        // a `vibeplane.toml` at the real root whose `never_auto` rules and
+        // a `devplane.toml` at the real root whose `never_auto` rules and
         // gates silently did not apply to work happening inside it.
         let (main, feature) = linked_worktree("owner");
         assert_eq!(main_checkout_for(&feature).as_deref(), Some(main.as_path()));

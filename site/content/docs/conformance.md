@@ -10,7 +10,7 @@ The gate decides. This page is how much that is worth, and it is written to be c
 believed.
 
 ```sh
-vibeplane gate
+devplane gate
 ```
 
 Two halves: how old the measurement is, and what the gate does and does not do.
@@ -22,14 +22,14 @@ the running product can be asked the same question, call by call, and a disagree
 No other gate in this category does that — and no other gate has to admit when the check is stale.
 
 ```console
-$ vibeplane gate
+$ devplane gate
 measurement
   measured  Claude Code 2.1.273 (the last release the full differential run was green against)
-  rows      changelog rows cleared through 2.1.273 (not a compatibility claim)
+            1 release behind a session here (2.1.274)
+  rows      changelog rows cleared through 2.1.274 (not a compatibility claim)
 ```
 
-Two numbers, because they mean different things — and today they are the same number, which is the
-state this page exists to make visible when it stops being true.
+Two numbers, because they mean different things.
 
 **`measured`** is the last release the full differential matrix ran green against. It costs a
 signed-in agent and real money, so it moves rarely. This is the number the claim rests on.
@@ -48,7 +48,7 @@ cases to Claude Code 2.1.273 and found one real widening, now fixed. Twelve deny
 the probe does not reliably run them even with nothing forbidden. A skipped shape is unmeasured, not
 clean.
 
-Only the [status-line shim](/vibeplane/docs/observe/#the-status-line) reports a version per session,
+Only the [status-line shim](/devplane/docs/observe/#the-status-line) reports a version per session,
 so with none installed the command says nothing is reporting — rather than implying there is no gap.
 
 ## The card, and its failures
@@ -74,7 +74,7 @@ missing on it is a marketing document.**
 ## What this does not claim
 
 - **It is not a sandbox.** A file a program opens itself is named by no rule, here or in Claude Code.
-  The gate is a policy layer; the vendor's sandbox is the boundary, and [security](/vibeplane/docs/security/)
+  The gate is a policy layer; the vendor's sandbox is the boundary, and [security](/devplane/docs/security/)
   says where that line falls.
 - **It is not proven.** The gate has been found wrong in the widening direction, silently, more than
   two dozen times. Five mechanisms look for that — the differential harness on both axes, a changelog

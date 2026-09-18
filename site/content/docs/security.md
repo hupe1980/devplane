@@ -6,7 +6,7 @@ weight = 24
 group = "reference"
 +++
 
-Vibeplane is privileged software. It approves tool calls, runs commands your repository committed,
+Devplane is privileged software. It approves tool calls, runs commands your repository committed,
 and pushes branches. This page is the trust model, stated plainly, including what it does **not**
 defend against.
 
@@ -16,13 +16,13 @@ No account, no cloud relay, no service to run, and no telemetry of our own — n
 no crash reporting.
 
 The daemon's only network egress is: GitHub through the `gh` CLI (opt-in, per repository), and the
-agent processes themselves, which talk to their own providers exactly as they do without Vibeplane.
+agent processes themselves, which talk to their own providers exactly as they do without Devplane.
 
 ## Loopback is not an access control
 
 Every listener binds `127.0.0.1`. That is necessary and not sufficient: **any process running as you
-can reach the port.** What actually separates Vibeplane from everything else on the machine is the
-bearer token in `~/.vibeplane/token`, mode `0600`, required on every request.
+can reach the port.** What actually separates Devplane from everything else on the machine is the
+bearer token in `~/.devplane/token`, mode `0600`, required on every request.
 
 Two deliberate exceptions:
 
@@ -31,16 +31,16 @@ Two deliberate exceptions:
   to every other collector you configure. They accept **observations only, never commands**.
 
 The board is served unauthenticated because it is a static page containing no data; it cannot fetch
-any without the token your browser holds. `vibeplane open` hands that token over once in the URL and
+any without the token your browser holds. `devplane open` hands that token over once in the URL and
 the page strips it from the address bar, so it does not end up in a screenshot or a bookmark.
 
 ## The trust gate
 
 ```sh
-vibeplane trust .
+devplane trust .
 ```
 
-`vibeplane work start` and `vibeplane dispatch` both refuse an untrusted repository, and both go
+`devplane work start` and `devplane dispatch` both refuse an untrusted repository, and both go
 through the same check — a check one caller can skip is not a check.
 
 The reason is specific: a headless agent runs **that repository's own hooks and MCP servers** with no
@@ -71,25 +71,25 @@ the prompt.
 service unreachable” path, and the build fails if anything in the pure half grows one. Given the
 call, the answer is always a verdict.
 
-**And the gate does not need the daemon.** It is a `command` hook — the `vibeplane` binary, reading
+**And the gate does not need the daemon.** It is a `command` hook — the `devplane` binary, reading
 the call on stdin and answering on stdout in about 26 ms — so a daemon that is stopped, crashed or
 not yet started costs you the *record* of a decision, never the decision. A decision taken with no
-daemon listening is appended to `~/.vibeplane/pending-decisions.jsonl` and written into the log at
+daemon listening is appended to `~/.devplane/pending-decisions.jsonl` and written into the log at
 the next start, marked as filed late.
 
 **No hook can enforce its own presence**, and that is the vendor's design: a timed-out hook does not
 block, and the reference says plainly *"don't count on a stalled hook to act as a gate."* So
-detection is the defence. `vibeplane doctor` **runs** the installed gate with a probe call rather
+detection is the defence. `devplane doctor` **runs** the installed gate with a probe call rather
 than checking a line exists in a settings file, and the daemon does the same on a timer and raises a
 critical `gate_down` item when it stops answering.
 
-A **`vibeplane.toml` that will not parse** is the same failure one repository wide: the last good
+A **`devplane.toml` that will not parse** is the same failure one repository wide: the last good
 rules are kept, and a daemon restarted against a broken file has none to keep, so that repository's
 `never_auto` list is simply gone. That raises a critical `config_broken` item naming the file and the
 parser's reason.
 
 **Nothing writes the rules back.** There is no API route and no button that edits `[policy]`, in a
-repository or in `~/.vibeplane/policy.toml`. An agent here runs as you and can read the bearer token,
+repository or in `~/.devplane/policy.toml`. An agent here runs as you and can read the bearer token,
 so a write path would be a widening path; the board's <kbd>,</kbd> panel reads every file and offers
 nothing to save.
 
@@ -100,7 +100,7 @@ nothing to save.
 The harder half is **silence**. A deny rule that matches nothing reads as protection and provides
 none, and nothing errors. So the rule syntax implements the published specification row by row, and
 the spellings that cannot work — a path rule on `Write`, an `mcp__` rule with brackets, a bare
-wildcard in `auto_allow` — are **refused** by `vibeplane check` rather than carried. And because
+wildcard in `auto_allow` — are **refused** by `devplane check` rather than carried. And because
 reading a specification is not the same as agreeing with the product, `scripts/verify-permissions-diff.sh`
 **generates** calls and fails on any disagreement with a running Claude Code.
 
@@ -108,7 +108,7 @@ It asks on two axes: an `auto_allow` list answering *did Claude Code run it?*, a
 list answering *did Claude Code refuse?*. The oracle is a model, so a disagreement is re-asked once
 and reported only if it reproduces.
 
-A third axis, `VIBEPLANE_DIFF_AXIS=dialect`, covers the tools that are not shells — `PowerShell`,
+A third axis, `DEVPLANE_DIFF_AXIS=dialect`, covers the tools that are not shells — `PowerShell`,
 `Monitor`, `LSP` — which cannot use that oracle, since two run no command and the third needs a
 Windows host. It runs **this matcher alone** and prints a checklist to put to a running product, and
 says in its own output that it is not a measurement.
@@ -130,8 +130,8 @@ test for what it means for two wildcards to meet, a fuzzer asserting it never pa
 agent can type, and a counter holding it to one parse per command however many rules ask.
 See [Permissions](/docs/permissions/).
 
-A malformed `vibeplane.toml` keeps the rules it had. Because a process starting fresh has none to
-keep, both `vibeplane doctor` and `vibeplane explain` name the project whose rules are not in force
+A malformed `devplane.toml` keeps the rules it had. Because a process starting fresh has none to
+keep, both `devplane doctor` and `devplane explain` name the project whose rules are not in force
 rather than answering as though it simply had no rules.
 
 ### On GitHub Copilot the same rules ride a different hook
@@ -142,9 +142,9 @@ default permission flow — so the gate there runs as a `command` hook, which fa
 Two consequences, both deliberate:
 
 - **If the daemon is not running, the hook says nothing and exits zero.** A fail-closed hook that
-  errored would deny every tool call on your machine while Vibeplane is stopped.
+  errored would deny every tool call on your machine while Devplane is stopped.
 - **A hook timeout is fail-open on every Copilot event**, administrator policy hooks included. A slow
-  Vibeplane there is not one that blocks the session; it is one that was not consulted.
+  Devplane there is not one that blocks the session; it is one that was not consulted.
 
 ## The policy cannot be made slow by its subject
 
@@ -155,7 +155,7 @@ service against the synchronous hook a session is blocked on. Measured under 50 
 
 ## Gates and setup commands are project-authored
 
-They come from the committed `vibeplane.toml`, never from an agent. They run as **children of the
+They come from the committed `devplane.toml`, never from an agent. They run as **children of the
 daemon**, never through the agent — letting the thing being checked choose the check is the one
 mistake this layer exists to avoid.
 
@@ -190,7 +190,7 @@ symlinks.
 
 ## Telemetry stays local and redacted
 
-The receiver binds loopback only. Vibeplane never sets `OTEL_LOG_USER_PROMPTS`,
+The receiver binds loopback only. Devplane never sets `OTEL_LOG_USER_PROMPTS`,
 `OTEL_LOG_ASSISTANT_RESPONSES` or `OTEL_LOG_TOOL_CONTENT`, so prompt and response text stays
 redacted. Account and email attributes are dropped at ingest.
 
@@ -201,11 +201,11 @@ a collector is already configured, `connect` refuses to override it.
 
 What a *driven* agent says is written to the same SQLite file as everything else, on your machine,
 behind the same `0600` token, and pruned on the same retention sweep. It is kept by default because
-such a run has no other window — and because the protocol streams the text to Vibeplane either way,
+such a run has no other window — and because the protocol streams the text to Devplane either way,
 so discarding it was never a privacy measure.
 
 It is still a repository's decision: `[transcripts] keep = false` writes nothing down, including the
-prompts Vibeplane itself sent. Sessions Vibeplane merely watches are unaffected, because the
+prompts Devplane itself sent. Sessions Devplane merely watches are unaffected, because the
 documented channels carry no prose at all.
 
 ## Agent supply chain
@@ -213,7 +213,7 @@ documented channels carry no prose at all.
 The five built-in agents are pinned to exact versions, and so is every `npx` package. Nothing
 auto-updates.
 
-Agents beyond those four are launch commands **you** write in `~/.vibeplane/agents.toml`. Vibeplane
+Agents beyond those four are launch commands **you** write in `~/.devplane/agents.toml`. Devplane
 runs what is in that file and pins nothing on your behalf — a smaller trust surface than fetching a
 registry, but the pin is in your hands.
 
@@ -223,13 +223,13 @@ The decision log is **not tamper-evident**. Hash-chaining defends against an adv
 access to the same machine as the agents themselves, which is not a threat model this product has —
 and claiming it would be worse than not having it.
 
-Vibeplane does **not** sandbox agents. The vendors' own sandboxes and worktree isolation are what is
+Devplane does **not** sandbox agents. The vendors' own sandboxes and worktree isolation are what is
 used. And nothing here governs what an agent does: no software can make an external agent's `rm -rf`
 at-most-once from outside the process that runs it.
 
 ## Reporting something
 
-Open an issue on [the repository](https://github.com/hupe1980/vibeplane). For anything you would
+Open an issue on [the repository](https://github.com/hupe1980/devplane). For anything you would
 rather not post publicly, use GitHub's private vulnerability reporting there.
 
 No external security review has happened. This page is a threat model, not an audit.

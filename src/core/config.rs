@@ -1,11 +1,11 @@
-//! `vibeplane.toml` — the project's own definition of done.
+//! `devplane.toml` — the project's own definition of done.
 //!
 //! It lives in the repository and is committed, which is the whole point: the
 //! commands that decide whether work is finished are the project's, reviewed
 //! like anything else, and never something an agent wrote for itself.
 //!
 //! Every field has a default, so a repository with no file at all still works:
-//! the gates are empty, no rule auto-decides anything, and Vibeplane behaves
+//! the gates are empty, no rule auto-decides anything, and Devplane behaves
 //! exactly as it does today. Configuration buys automation, it is not the price
 //! of entry.
 
@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-/// The file Vibeplane looks for at a repository root.
-pub const CONFIG_FILE: &str = "vibeplane.toml";
+/// The file Devplane looks for at a repository root.
+pub const CONFIG_FILE: &str = "devplane.toml";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -39,7 +39,7 @@ pub struct Project {
     pub name: Option<String>,
     /// What worktrees branch from. Discovered from the repository when unset.
     pub base_branch: Option<String>,
-    /// The agent `vibeplane work start` uses when none is named.
+    /// The agent `devplane work start` uses when none is named.
     pub default_agent: Option<String>,
 }
 
@@ -235,7 +235,7 @@ pub struct RoleStep {
     /// why `findings` requires a gate: see [`ProjectConfig::validate`].
     #[serde(default)]
     pub agent: Option<String>,
-    /// A prompt template in `.vibeplane/prompts/<name>.md`, or the text itself
+    /// A prompt template in `.devplane/prompts/<name>.md`, or the text itself
     /// when no such file exists.
     pub prompt: String,
     /// A gate that must pass before the pipeline moves on: `check`, or a name
@@ -272,7 +272,7 @@ pub struct Findings {
     /// grades what it finds and then hands the decision back, so a step whose
     /// prompt is one of those needs a line saying which grades stop the work.
     ///
-    /// **The words are the project's, never Vibeplane's.** `CRITICAL` and
+    /// **The words are the project's, never Devplane's.** `CRITICAL` and
     /// `HIGH` are Spec Kit's vocabulary; another tool grades differently and a
     /// third will rename its levels next month. Holding a table of somebody
     /// else's nouns is the mistake this project refuses everywhere else, so the
@@ -289,7 +289,7 @@ fn one() -> u32 {
     1
 }
 fn findings_file() -> String {
-    ".vibeplane/findings.md".into()
+    ".devplane/findings.md".into()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,7 +307,7 @@ pub enum OnFail {
 /// Whether to keep what driven agents say in this repository.
 ///
 /// On by default, and the reasoning is worth stating because the project is
-/// otherwise careful about what it stores. A run Vibeplane drives has no window
+/// otherwise careful about what it stores. A run Devplane drives has no window
 /// of its own: without its transcript the board can say a tool ran and not one
 /// word about why, which makes `dispatch` a black box. The text is already in
 /// the process — the protocol streams it to us — so discarding it was never a
@@ -318,7 +318,7 @@ pub enum OnFail {
 /// the worktree it works in. Off means nothing is written down and the
 /// transcript views say so; it does not stop the agent reading anything.
 ///
-/// Sessions Vibeplane merely *watches* are unaffected either way: the
+/// Sessions Devplane merely *watches* are unaffected either way: the
 /// documented channels carry no prose, which is why `focus` is the honest
 /// action for them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -342,8 +342,8 @@ impl Default for Transcripts {
 ///
 /// **A ceiling only bites when the agent reports what it spent.** ACP makes the
 /// cost field optional, so an agent that never sends one is never stopped by
-/// this, and Vibeplane says so rather than implying a guard it does not have:
-/// `vibeplane check` warns when a budget is set, and `vibeplane work show`
+/// this, and Devplane says so rather than implying a guard it does not have:
+/// `devplane check` warns when a budget is set, and `devplane work show`
 /// prints the cost so far or "not reported".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -360,7 +360,7 @@ pub struct Budget {
     /// the agent reports what it spent, which is optional twice over: the
     /// protocol marks the cost field optional, and the OpenTelemetry GenAI
     /// conventions have no notion of money at all. Turns are counted here, from
-    /// events Vibeplane saw itself, so they bind every agent.
+    /// events Devplane saw itself, so they bind every agent.
     pub max_turns: Option<u32>,
     /// How long one piece of work may run, in the same duration spelling the
     /// rest of the file uses (`45m`, `2h`).
@@ -410,7 +410,7 @@ impl Budget {
 #[serde(default, deny_unknown_fields)]
 pub struct GitHub {
     /// Open a pull request when the gates pass. Off by default: pushing a
-    /// branch is the first thing Vibeplane does that other people can see.
+    /// branch is the first thing Devplane does that other people can see.
     pub pull_request: bool,
     /// Open it as a draft. A pull request that looks finished summons
     /// reviewers, and work a machine just finished has not been read by anyone.
@@ -487,7 +487,7 @@ pub struct PolicySection {
     pub stall_timeout: Option<Duration>,
 }
 
-/// The machine-wide rules, from `~/.vibeplane/policy.toml`.
+/// The machine-wide rules, from `~/.devplane/policy.toml`.
 ///
 /// The same `[policy]` shape a project writes, so a rule can be moved between
 /// the two files by cutting and pasting it — and read by the same TOML parser,
@@ -572,7 +572,7 @@ impl ProjectConfig {
     /// — a `back_to` naming a step that does not exist. And it can be *dangerous
     /// in a way only the domain knows*, which is what most of this is.
     ///
-    /// Checked when work starts and by `vibeplane check`, so the answer arrives
+    /// Checked when work starts and by `devplane check`, so the answer arrives
     /// before an agent has been paid to discover it.
     pub fn validate(&self) -> Vec<Problem> {
         let mut out = Vec::new();
@@ -766,7 +766,7 @@ impl ProjectConfig {
     /// This file read back: what it will actually do, and everything in it that
     /// cannot do what it says.
     ///
-    /// One derivation, for the same reason the inbox has one: `vibeplane check`
+    /// One derivation, for the same reason the inbox has one: `devplane check`
     /// and the board answering "what is configured here" from two different
     /// projections is how a terminal and a browser end up disagreeing about a
     /// repository's own rules.
@@ -1013,7 +1013,7 @@ steps = [
         assert_eq!(f.max, 2);
         // Defaulted rather than required: a pipeline should be writable in
         // three lines, and the path only matters when someone wants it moved.
-        assert_eq!(f.file, ".vibeplane/findings.md");
+        assert_eq!(f.file, ".devplane/findings.md");
 
         // A step with `human` is a person, never mistaken for a role.
         assert!(matches!(&p.steps[2], Step::Human(h) if h.human == "merge"));
@@ -1346,7 +1346,7 @@ max_parallel_runs = 2
 [github]
 pull_request = true
 draft = true
-ready_label = "vibeplane:ready"
+ready_label = "devplane:ready"
 "#,
         )
         .unwrap();
@@ -1368,7 +1368,7 @@ ready_label = "vibeplane:ready"
 
     #[test]
     fn github_is_off_until_it_is_asked_for() {
-        // Pushing a branch is the first thing Vibeplane does that other people
+        // Pushing a branch is the first thing Devplane does that other people
         // can see, so it is never a default.
         let c = ProjectConfig::default();
         assert!(!c.github.pull_request);

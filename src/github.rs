@@ -540,14 +540,14 @@ mod tests {
               "title": "Login fails after midnight",
               "body": "Steps:\n1. wait\n2. log in",
               "url": "https://github.com/acme/app/issues/7",
-              "labels": [{"name": "bug"}, {"name": "vibeplane:ready"}]
+              "labels": [{"name": "bug"}, {"name": "devplane:ready"}]
             }]"#,
         )
         .unwrap();
         assert_eq!(issues[0].number, 7);
-        assert!(issues[0].has_label("vibeplane:ready"));
+        assert!(issues[0].has_label("devplane:ready"));
         assert!(
-            issues[0].has_label("VIBEPLANE:READY"),
+            issues[0].has_label("DEVPLANE:READY"),
             "labels are not case law"
         );
         assert!(!issues[0].has_label("wontfix"));

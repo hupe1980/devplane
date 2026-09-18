@@ -1,7 +1,7 @@
 //! Which world this machine is in.
 //!
 //! Claude Code's own availability matrix splits cleanly, in a way that decides
-//! what Vibeplane is *for* on a given laptop:
+//! what Devplane is *for* on a given laptop:
 //!
 //! > Everything Claude Code ships to **run** an agent works on every provider.
 //! > Everything it ships to **supervise, schedule, review and audit** one needs
@@ -11,8 +11,8 @@
 //! file are on the first list. Remote Control, Routines, ultrareview, Code
 //! Review, Channels, Desktop and the analytics dashboard are on the second. So
 //! on Bedrock, Google Cloud's Agent Platform, Microsoft Foundry or behind a
-//! gateway, Vibeplane's substrate is intact and the vendor's supervision layer
-//! is gone — and the honest sentence there is *"Vibeplane is the only gate on
+//! gateway, Devplane's substrate is intact and the vendor's supervision layer
+//! is gone — and the honest sentence there is *"Devplane is the only gate on
 //! this machine"*.
 //!
 //! Pure: it reads an environment somebody else captured, so the daemon, the CLI
@@ -81,7 +81,7 @@ impl Provider {
     }
 
     /// What still works, which is the half that matters here: it is exactly
-    /// Vibeplane's substrate.
+    /// Devplane's substrate.
     pub fn intact(&self) -> &'static [&'static str] {
         &[
             "hooks",
@@ -110,7 +110,7 @@ impl Provider {
 ///
 /// The order is the vendor's own credential precedence, with one addition it
 /// puts outside the list: a signed-in gateway session outranks every provider
-/// variable. Vibeplane cannot see that session, so the variable it *can* see —
+/// variable. Devplane cannot see that session, so the variable it *can* see —
 /// `ANTHROPIC_BASE_URL` — is read last and only decides when nothing else did.
 pub fn detect(get: impl Fn(&str) -> Option<String>) -> Provider {
     let set = |k: &str| {
@@ -220,9 +220,9 @@ mod tests {
     }
 
     #[test]
-    fn every_provider_that_loses_supervision_keeps_vibeplanes_substrate() {
+    fn every_provider_that_loses_supervision_keeps_devplanes_substrate() {
         // The whole point of the split: what is gone is the vendor's
-        // supervision layer, and what is left is exactly what Vibeplane runs on
+        // supervision layer, and what is left is exactly what Devplane runs on
         //.
         for p in [
             Provider::Bedrock,

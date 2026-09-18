@@ -25,7 +25,7 @@ pub struct Health<'a> {
     /// Why the installed gate did not refuse a call its own rule denies, when
     /// the daemon last asked it. `None` when it answered.
     pub gate_down: Option<&'a str>,
-    /// Repository roots whose `vibeplane.toml` will not parse, with the
+    /// Repository roots whose `devplane.toml` will not parse, with the
     /// parser's reason.
     pub broken_configs: &'a [(PathBuf, String)],
 }
@@ -154,7 +154,7 @@ impl World {
     /// the agent stopped — so they are merged rather than kept in a second list
     /// the human has to remember to look at.
     ///
-    /// `drivable` is the set of runs Vibeplane still holds a session for. It is
+    /// `drivable` is the set of runs Devplane still holds a session for. It is
     /// passed in because this module cannot see them, and because after a
     /// restart the rows come back looking alive while the processes are gone —
     /// so an offer to prompt an agent must never be decided from run state.
@@ -201,7 +201,7 @@ impl World {
         let from_work = works.iter().flat_map(|w| {
             let can_drive = w.current_run().is_some_and(|r| drivable.contains(r));
             // Resumable is a different question from drivable, and only this
-            // module can answer it: the agent named a session, and Vibeplane no
+            // module can answer it: the agent named a session, and Devplane no
             // longer holds one. Both halves matter — offering to resume a run
             // that is already running would start a second agent on one
             // worktree.
@@ -841,6 +841,7 @@ mod tests {
                     message: Some("Bash".into()),
                     request_id: None,
                     options: vec![],
+                    call: None,
                 },
             ),
         ];
@@ -1055,7 +1056,7 @@ mod tests {
         let detail = item.detail.as_deref().unwrap_or_default();
         assert!(detail.contains("line 12"), "{detail}");
         assert!(
-            detail.contains("vibeplane check /repos/payments-api"),
+            detail.contains("devplane check /repos/payments-api"),
             "{detail}"
         );
         // Nothing to click: rewriting somebody's committed rules from an inbox

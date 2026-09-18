@@ -1,14 +1,14 @@
 //! Connecting and disconnecting Claude Code.
 //!
-//! The only part of Vibeplane that writes to a file the user owns, so the one
+//! The only part of Devplane that writes to a file the user owns, so the one
 //! that has to be most careful. Five rules:
 //!
 //! 1. **Merge, never replace.** Hooks the user already configured keep working,
-//!    and Vibeplane's entries are appended alongside them.
+//!    and Devplane's entries are appended alongside them.
 //! 2. **Remove exactly what was added.** Every entry carries a recognisable
 //!    loopback URL, so disconnecting is subtraction rather than a guess.
 //! 3. **Never take over a setting that is already doing a job.** If telemetry
-//!    is already exported somewhere, Vibeplane does not redirect it; it reports
+//!    is already exported somewhere, Devplane does not redirect it; it reports
 //!    that the channel belongs to someone else.
 //! 4. **Never install a hook that replaces behaviour.** `WorktreeCreate`
 //!    replaces Claude Code's own `git worktree` logic when configured, so an
@@ -23,11 +23,11 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-/// The marker in every URL Vibeplane writes. Disconnect removes entries whose
+/// The marker in every URL Devplane writes. Disconnect removes entries whose
 /// URL contains it and nothing else.
-pub const URL_MARKER: &str = "/vibeplane/";
+pub const URL_MARKER: &str = "/devplane/";
 
-/// The environment variables Vibeplane sets for telemetry.
+/// The environment variables Devplane sets for telemetry.
 const OTEL_VARS: &[&str] = &[
     "CLAUDE_CODE_ENABLE_TELEMETRY",
     "OTEL_LOGS_EXPORTER",
@@ -40,7 +40,7 @@ const OTEL_VARS: &[&str] = &[
     "OTEL_METRICS_INCLUDE_REPOSITORY",
 ];
 
-/// The hook events Vibeplane subscribes to.
+/// The hook events Devplane subscribes to.
 ///
 /// **Two are synchronous, and they answer different questions.**
 ///
@@ -63,7 +63,7 @@ const HOOKS: &[(&str, Option<&str>, bool)] = &[
     ("PostToolUse", None, true),
     ("PostToolUseFailure", None, true),
     // The permission Claude Code's own auto mode refused, which is a decision
-    // about this session that Vibeplane would otherwise never see: the run
+    // about this session that Devplane would otherwise never see: the run
     // stays "working" while the agent is being stopped from doing things. The
     // receiver has always known how to read it; nothing subscribed to it.
     ("PermissionDenied", None, true),
@@ -75,11 +75,11 @@ const HOOKS: &[(&str, Option<&str>, bool)] = &[
     ("Elicitation", None, true),
     // The other half of it, and the reason an answered question stops being
     // asked. It fires when a person answers the elicitation — in their own
-    // terminal, where Vibeplane has no other way to learn the dialog closed.
+    // terminal, where Devplane has no other way to learn the dialog closed.
     // Without it the inbox went on showing a decision that had been made,
     // which is what teaches somebody to skim the list.
     ("ElicitationResult", None, true),
-    // Somebody edited the settings Vibeplane writes its hooks into, or a
+    // Somebody edited the settings Devplane writes its hooks into, or a
     // managed policy arrived that blocks loopback. Every other symptom of that
     // is a channel going quiet, which is indistinguishable from a quiet
     // machine.
@@ -127,9 +127,9 @@ pub struct ConnectReport {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TelemetryStatus {
-    /// Vibeplane owns the export.
+    /// Devplane owns the export.
     Configured,
-    /// Someone else configured an exporter; Vibeplane left it alone.
+    /// Someone else configured an exporter; Devplane left it alone.
     External,
     /// Removed by disconnect.
     Removed,
@@ -169,22 +169,22 @@ pub fn write_settings(path: &Path, settings: &Map<String, Value>) -> Result<()> 
         std::fs::create_dir_all(parent).ok();
     }
     if path.exists() {
-        let backup = path.with_extension("json.vibeplane-backup");
+        let backup = path.with_extension("json.devplane-backup");
         std::fs::copy(path, &backup)
             .with_context(|| format!("backing up {} first", path.display()))?;
     }
     let body = serde_json::to_string_pretty(settings)? + "\n";
     // Write to a temporary file and rename, so an interrupted write cannot
     // leave the user with half a settings file and no Claude Code.
-    let tmp = path.with_extension("json.vibeplane-tmp");
+    let tmp = path.with_extension("json.devplane-tmp");
     std::fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
 
-/// Adds Vibeplane's hooks and telemetry configuration.
+/// Adds Devplane's hooks and telemetry configuration.
 ///
-/// `exe` is the absolute path of the `vibeplane` binary, used for the one hook
+/// `exe` is the absolute path of the `devplane` binary, used for the one hook
 /// that cannot be delivered over HTTP.
 pub fn connect(
     settings: &mut Map<String, Value>,
@@ -319,7 +319,7 @@ pub fn connect(
         }
         env.insert(
             "OTEL_EXPORTER_OTLP_ENDPOINT".into(),
-            json!(format!("{base_url}/vibeplane/otel")),
+            json!(format!("{base_url}/devplane/otel")),
         );
         report.telemetry = TelemetryStatus::Configured;
     }
@@ -438,7 +438,7 @@ pub fn disconnect(settings: &mut Map<String, Value>) -> ConnectReport {
     report
 }
 
-/// Whether a hook entry is one Vibeplane wrote.
+/// Whether a hook entry is one Devplane wrote.
 ///
 /// HTTP entries are recognised by the marker in their URL; the one command
 /// entry by the shim it runs. Anything else in the file belongs to the user and
@@ -476,7 +476,7 @@ fn is_shim_command(cmd: &str) -> bool {
                 let head = head.trim().trim_matches('\'').trim_matches('"');
                 let is_ours = std::path::Path::new(head)
                     .file_name()
-                    .map(|f| f == "vibeplane" || f == "vibeplane.exe")
+                    .map(|f| f == "devplane" || f == "devplane.exe")
                     .unwrap_or(false);
                 // `statusline --then ...` has a tail; `hook` must not, or a
                 // script called `hook-something` would match.
@@ -523,7 +523,7 @@ fn hook_entry(
 ) -> Value {
     let mut hook = json!({
         "type": "http",
-        "url": format!("{base_url}/vibeplane/{path}"),
+        "url": format!("{base_url}/devplane/{path}"),
         "headers": { "Authorization": format!("Bearer {token}") },
     });
     if is_async {
@@ -656,7 +656,7 @@ pub fn probe_gate(settings: &Map<String, Value>) -> GateProbe {
         "session_id": crate::observe::hook::PROBE_SESSION,
         "cwd": probe.display().to_string(),
         "tool_name": "Bash",
-        "tool_input": { "command": "cat .vibeplane-probe" },
+        "tool_input": { "command": "cat .devplane-probe" },
     })
     .to_string();
 
@@ -694,11 +694,11 @@ pub fn probe_gate(settings: &Map<String, Value>) -> GateProbe {
 
 /// A throwaway project whose only rule is the one the probe exercises.
 fn probe_dir() -> std::io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("vibeplane-probe-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("devplane-probe-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     std::fs::write(
         dir.join(crate::core::config::CONFIG_FILE),
-        "[project]\nname = \"vibeplane-probe\"\n\n[policy]\nnever_auto = [\"Read(.vibeplane-probe)\"]\n",
+        "[project]\nname = \"devplane-probe\"\n\n[policy]\nnever_auto = [\"Read(.devplane-probe)\"]\n",
     )?;
     Ok(dir)
 }
@@ -809,13 +809,13 @@ mod tests {
             &mut s,
             "http://127.0.0.1:47831",
             "tok",
-            Path::new("/usr/local/bin/vibeplane"),
+            Path::new("/usr/local/bin/devplane"),
         );
         s
     }
 
     fn connect_test(s: &mut Map<String, Value>, url: &str, token: &str) -> ConnectReport {
-        connect(s, url, token, Path::new("/usr/local/bin/vibeplane"))
+        connect(s, url, token, Path::new("/usr/local/bin/devplane"))
     }
 
     #[test]
@@ -888,7 +888,7 @@ mod tests {
         // and nothing says so.
         let mut old: Map<String, Value> = serde_json::from_str(
             r#"{"hooks": {"PreToolUse": [{"hooks": [{"type":"http",
-                 "url":"http://127.0.0.1:47831/vibeplane/hook","async":true}]}]}}"#,
+                 "url":"http://127.0.0.1:47831/devplane/hook","async":true}]}]}}"#,
         )
         .unwrap();
         let state = inspect(&old, std::path::Path::new("/tmp/settings.json"));
@@ -903,9 +903,9 @@ mod tests {
         // whenever the daemon is.
         let http_gate: Map<String, Value> = serde_json::from_str(
             r#"{"hooks": {"PreToolUse": [{"hooks": [{"type":"http",
-                 "url":"http://127.0.0.1:47831/vibeplane/policy","timeout":5}]}]},
+                 "url":"http://127.0.0.1:47831/devplane/policy","timeout":5}]}]},
                 "PermissionRequest": [{"hooks": [{"type":"http",
-                 "url":"http://127.0.0.1:47831/vibeplane/policy","timeout":5}]}]}"#,
+                 "url":"http://127.0.0.1:47831/devplane/policy","timeout":5}]}]}"#,
         )
         .unwrap();
         assert!(
@@ -1074,9 +1074,9 @@ mod tests {
             r#"{"statusLine": {"type": "command", "command": "~/bin/my-line.sh --fancy"}}"#,
         )
         .unwrap();
-        wrap_status_line(&mut s, Path::new("/usr/local/bin/vibeplane"));
+        wrap_status_line(&mut s, Path::new("/usr/local/bin/devplane"));
         let cmd = s["statusLine"]["command"].as_str().unwrap();
-        assert!(cmd.starts_with("/usr/local/bin/vibeplane statusline --then "));
+        assert!(cmd.starts_with("/usr/local/bin/devplane statusline --then "));
         assert!(cmd.contains("my-line.sh --fancy"));
 
         // And disconnecting gives it back exactly.
@@ -1090,9 +1090,9 @@ mod tests {
     #[test]
     fn wrapping_twice_is_not_nesting() {
         let mut s = Map::new();
-        wrap_status_line(&mut s, Path::new("/usr/local/bin/vibeplane"));
+        wrap_status_line(&mut s, Path::new("/usr/local/bin/devplane"));
         let once = s["statusLine"]["command"].as_str().unwrap().to_string();
-        wrap_status_line(&mut s, Path::new("/usr/local/bin/vibeplane"));
+        wrap_status_line(&mut s, Path::new("/usr/local/bin/devplane"));
         assert_eq!(s["statusLine"]["command"].as_str().unwrap(), once);
     }
 
@@ -1130,8 +1130,8 @@ mod tests {
         let back = read_settings(&p).unwrap();
         assert_eq!(back["model"], json!("opus"), "unrelated settings survive");
         assert!(back.contains_key("hooks"));
-        assert!(p.with_extension("json.vibeplane-backup").exists());
-        assert!(!p.with_extension("json.vibeplane-tmp").exists());
+        assert!(p.with_extension("json.devplane-backup").exists());
+        assert!(!p.with_extension("json.devplane-tmp").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

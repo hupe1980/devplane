@@ -1,6 +1,6 @@
 //! The documentation and the parser have to agree.
 //!
-//! `vibeplane.toml` is read with `deny_unknown_fields`, so a single
+//! `devplane.toml` is read with `deny_unknown_fields`, so a single
 //! designed-but-unbuilt key in a reference produces a file that does not load
 //! *at all* — and that takes the repository's permission rules down with it. It
 //! has happened twice: five sections that did not exist, and later an `on =`
@@ -10,7 +10,7 @@
 //! A configuration reference that cannot be pasted is worse than none, so every
 //! example in the README and on the documentation site is checked the way a
 //! public API is: it must parse, it must mean something, and it must be a
-//! configuration `vibeplane check` would accept.
+//! configuration `devplane check` would accept.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +19,7 @@ struct Block {
     /// Where it came from, for a failure message somebody can act on.
     source: String,
     /// The file the block is an example *of*, from its own leading comment —
-    /// which is there for the reader anyway. Empty means `vibeplane.toml`,
+    /// which is there for the reader anyway. Empty means `devplane.toml`,
     /// because that is what most of this documentation is about.
     names: String,
     body: String,
@@ -107,7 +107,7 @@ fn check(blocks: Vec<Block>) -> usize {
             std::fs::create_dir_all(&home).unwrap();
             std::fs::write(home.join("agents.toml"), &b.body).unwrap();
 
-            let added = vibeplane::acp::user_agents(&home);
+            let added = devplane::acp::user_agents(&home);
             assert!(
                 !added.is_empty(),
                 "{}: this `agents.toml` example adds no agent at all:\n{}",
@@ -124,10 +124,10 @@ fn check(blocks: Vec<Block>) -> usize {
             continue;
         }
 
-        let parsed = toml::from_str::<vibeplane::core::ProjectConfig>(&b.body);
+        let parsed = toml::from_str::<devplane::core::ProjectConfig>(&b.body);
         assert!(
             parsed.is_ok(),
-            "{}: does not parse as vibeplane.toml:\n{}\n{}",
+            "{}: does not parse as devplane.toml:\n{}\n{}",
             b.source,
             parsed.unwrap_err(),
             b.body
@@ -138,7 +138,7 @@ fn check(blocks: Vec<Block>) -> usize {
         // the line above and teach nobody.
         assert_ne!(
             config,
-            vibeplane::core::ProjectConfig::default(),
+            devplane::core::ProjectConfig::default(),
             "{}: parses to nothing at all:\n{}",
             b.source,
             b.body
@@ -146,7 +146,7 @@ fn check(blocks: Vec<Block>) -> usize {
 
         // And it must be a configuration the product would accept. Showing one
         // it refuses is worse than showing none: the reader follows the example
-        // and then `vibeplane check` tells them they are wrong.
+        // and then `devplane check` tells them they are wrong.
         let fatal: Vec<String> = config
             .validate()
             .into_iter()
@@ -155,7 +155,7 @@ fn check(blocks: Vec<Block>) -> usize {
             .collect();
         assert!(
             fatal.is_empty(),
-            "{}: shows a configuration `vibeplane check` refuses: {fatal:?}\n{}",
+            "{}: shows a configuration `devplane check` refuses: {fatal:?}\n{}",
             b.source,
             b.body
         );
@@ -171,7 +171,7 @@ fn every_example_in_the_readme_is_one_that_works() {
     // document that ships to crates.io.
     const README: &str = include_str!("../README.md");
     let configs = check(blocks_in("README.md", README));
-    assert!(configs >= 1, "the README shows no vibeplane.toml at all");
+    assert!(configs >= 1, "the README shows no devplane.toml at all");
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn every_example_on_the_documentation_site_is_one_that_works() {
     let configs = check(blocks_under(&dir));
     assert!(
         configs >= 8,
-        "only {configs} vibeplane.toml examples found on the site; \
+        "only {configs} devplane.toml examples found on the site; \
          the reference pages are the ones that have to be right"
     );
 }
@@ -228,7 +228,7 @@ fn every_key_a_project_can_set_is_in_the_reference() {
     // and two new keys slipped straight through it.
     //
     // A struct that derives `Deserialize` is one a person can write; one that
-    // only derives `Serialize` is something Vibeplane reports back, like a
+    // only derives `Serialize` is something Devplane reports back, like a
     // `Problem`. That distinction is the whole filter, and it maintains itself.
     let src =
         std::fs::read_to_string(repo_root().join("src/core/config.rs")).expect("the config module");
@@ -344,7 +344,7 @@ fn the_release_workflow_builds_every_target_the_manifest_declares() {
 /// The page is the only place a person learns which rule shapes are dead, and
 /// it contradicted itself for a release: one section documented `!` exceptions
 /// as honoured and scoped to their file — which is what the code does — while
-/// the "rules that cannot work" table three screens down said Vibeplane did not
+/// the "rules that cannot work" table three screens down said Devplane did not
 /// implement them and told the reader to keep such a rule in `settings.json`.
 /// Both sentences were written from the code, at different times, and nothing
 /// read either one afterwards.
@@ -355,7 +355,7 @@ fn the_release_workflow_builds_every_target_the_manifest_declares() {
 /// or the page is teaching a spelling the gate will refuse.
 #[test]
 fn the_refused_rules_table_on_the_site_is_the_one_the_gate_refuses() {
-    use vibeplane::core::policy::{Class, Rule};
+    use devplane::core::policy::{Class, Rule};
 
     let page = std::fs::read_to_string(repo_root().join("site/content/docs/permissions.md"))
         .expect("the permissions page");
@@ -435,7 +435,7 @@ fn the_refused_rules_table_on_the_site_is_the_one_the_gate_refuses() {
 /// full, and this test is what makes the rest follow.
 #[test]
 fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
-    let baseline = vibeplane::core::policy::VERIFIED_AGAINST;
+    let baseline = devplane::core::policy::VERIFIED_AGAINST;
     let root = repo_root();
     // The phrasings the published tree actually uses, each followed by the
     // version. A page that invents a ninth phrasing is invisible here, which is
@@ -546,7 +546,7 @@ fn the_agent_facing_index_names_every_command() {
         }
         // `hook` and `statusline` are typed by a hook, never by a person, and
         // the index says so rather than pretending they are user commands.
-        if !llms.contains(&format!("`vibeplane {kebab}")) {
+        if !llms.contains(&format!("`devplane {kebab}")) {
             missing.push(kebab);
         }
     }

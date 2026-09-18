@@ -1,7 +1,7 @@
 //! What a repository's agent configuration grants, read before anybody trusts
 //! it.
 //!
-//! `vibeplane trust` tells the daemon that headless agents may start in a
+//! `devplane trust` tells the daemon that headless agents may start in a
 //! directory, and a headless agent runs that repository's **own** hooks and MCP
 //! servers with no dialog of its own. The command said exactly that and then
 //! printed the word `trusted`, which is a consent dialog rather than a gate.
@@ -61,6 +61,15 @@ impl Kind {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Setup {
     pub findings: Vec<Finding>,
+    /// Skills the repository ships, whether or not any of them is a finding.
+    ///
+    /// **Counted separately because "nothing to flag" is not "nothing here".**
+    /// A skill is reported only when it pre-approves a tool, which is the right
+    /// bar for a *finding* — and it left `trust` saying a repository "declares
+    /// no skills" about one shipping ten of them. A person deciding whether to
+    /// trust a repository wants to know what will load into their agent, not
+    /// only which part of it alarmed a scanner.
+    pub skills: usize,
     /// Files that exist and could not be parsed. Reported rather than skipped:
     /// a `settings.json` this cannot read is one whose hooks are invisible
     /// here and entirely visible to the agent, which is the worst combination
@@ -92,10 +101,10 @@ pub fn scan(root: &Path) -> Setup {
     out
 }
 
-/// Allow rules in this repository's own `vibeplane.toml` that grant an
+/// Allow rules in this repository's own `devplane.toml` that grant an
 /// arbitrary program.
 ///
-/// The same finding `vibeplane check` prints, surfaced here because it belongs
+/// The same finding `devplane check` prints, surfaced here because it belongs
 /// to the same question: trusting a directory means adopting the `[policy]`
 /// block that arrived with somebody else's code, and an accumulated
 /// `auto_allow` is the record of an agent escalating after transient failures.
@@ -114,7 +123,7 @@ fn policy(root: &Path, out: &mut Setup) {
             kind: Kind::Policy,
             subject: wide.rule,
             // The `why` and not the suggestion: this surface is somebody
-            // deciding about a repository, not editing its rules. `vibeplane
+            // deciding about a repository, not editing its rules. `devplane
             // check` is where the narrower rule to write belongs.
             detail: wide.why,
         });
@@ -136,6 +145,7 @@ fn skills(root: &Path, out: &mut Setup) {
     // Directory order is filesystem order, which differs between machines and
     // would make this output unstable for no reason.
     paths.sort();
+    out.skills = paths.len();
     for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -357,6 +367,47 @@ mod tests {
         // machine already, which trusting this directory did not change.
         assert_eq!(unpinned_package("/usr/local/bin/my-server", &[]), None);
         assert_eq!(unpinned_package("node", &["server.js"]), None);
+    }
+
+    /// A repository that ships skills is not a repository that ships nothing.
+    ///
+    /// **Found by pointing `trust` at this repository** after installing Spec
+    /// Kit, which drops ten skills into `.claude/skills/`. None of them
+    /// pre-approves a tool, so none is a finding — and the command said the
+    /// repository *"declares no hooks, MCP servers or skills"*. The scan was
+    /// right and the sentence was false, which is the worse of the two failures
+    /// for a gate whose entire job is telling a person what will load into
+    /// their agent before they consent to it.
+    #[test]
+    fn skills_that_pre_approve_nothing_are_still_counted() {
+        let root = std::env::temp_dir().join(format!("vp-setup-{}", uuid::Uuid::new_v4().simple()));
+        let skills = root.join(".claude/skills");
+        for name in ["speckit-plan", "speckit-tasks"] {
+            std::fs::create_dir_all(skills.join(name)).unwrap();
+            std::fs::write(
+                skills.join(name).join("SKILL.md"),
+                "---\nname: \"{name}\"\ndescription: \"does a thing\"\n---\n\nbody",
+            )
+            .unwrap();
+        }
+        let setup = scan(&root);
+        assert!(
+            setup.findings.is_empty(),
+            "nothing here pre-approves a tool, so nothing is a finding"
+        );
+        assert_eq!(
+            setup.skills, 2,
+            "but two skills will load, and trust says so"
+        );
+
+        // And a repository with none says none, so the count is a fact rather
+        // than a number that is always printed.
+        let bare = std::env::temp_dir().join(format!("vp-setup-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(scan(&bare).skills, 0);
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&bare).ok();
     }
 
     #[test]

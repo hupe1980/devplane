@@ -1,4 +1,4 @@
-//! Where Vibeplane keeps its own state, and how a client finds the daemon.
+//! Where Devplane keeps its own state, and how a client finds the daemon.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -8,17 +8,17 @@ use std::path::PathBuf;
 /// than in the ephemeral range, so it is recognisable in `lsof`.
 pub const DEFAULT_PORT: u16 = 47831;
 
-/// `~/.vibeplane`, or `$VIBEPLANE_HOME`.
+/// `~/.devplane`, or `$DEVPLANE_HOME`.
 pub fn home() -> Result<PathBuf> {
-    if let Some(h) = std::env::var_os("VIBEPLANE_HOME") {
+    if let Some(h) = std::env::var_os("DEVPLANE_HOME") {
         return Ok(PathBuf::from(h));
     }
     let base = dirs::home_dir().context("cannot determine the home directory")?;
-    Ok(base.join(".vibeplane"))
+    Ok(base.join(".devplane"))
 }
 
 pub fn db_path() -> Result<PathBuf> {
-    Ok(home()?.join("vibeplane.db"))
+    Ok(home()?.join("devplane.db"))
 }
 
 pub fn token_path() -> Result<PathBuf> {
@@ -72,7 +72,7 @@ pub fn clear_daemon_info() -> Result<()> {
 ///
 /// The token gates the loopback API. Loopback alone is not an access control:
 /// any process on the machine can reach it, so the token file's permissions are
-/// what actually separate Vibeplane from everything else running as the user.
+/// what actually separate Devplane from everything else running as the user.
 pub fn load_or_create_token() -> Result<String> {
     let p = token_path()?;
     if let Ok(t) = std::fs::read_to_string(&p) {
@@ -174,7 +174,7 @@ fn trim_spool(path: &std::path::Path) {
     }
     let dropped = lines.len() - SPOOL_MAX_LINES;
     let marker = serde_json::json!({
-        "session": "vibeplane",
+        "session": "devplane",
         "verdict": "note",
         "rule": null,
         "subject": format!("{dropped} spooled decisions were dropped: no daemon had started in a very long time"),

@@ -1,4 +1,4 @@
-//! Vibeplane's types and the pure logic over them.
+//! Devplane's types and the pure logic over them.
 //!
 //! One rule defines this module: **nothing here may reach the outside world.**
 //! No `async fn`, no `.await`, no `tokio`, no `sqlx`, no `reqwest`, no `axum`.
@@ -25,8 +25,8 @@
 //! * [`reduce`](crate::core::reduce) — the state machine, replay-tested.
 //! * [`world`](crate::core::world) — the in-memory state and the derived inbox.
 //! * [`policy`](crate::core::policy), [`policy_cache`](crate::core::policy_cache) — permission rules, per project.
-//! * [`config`](crate::core::config) — `vibeplane.toml`, and what it means for it to be wrong.
-//! * [`decision`](crate::core::decision) — what Vibeplane decided, and on whose authority.
+//! * [`config`](crate::core::config) — `devplane.toml`, and what it means for it to be wrong.
+//! * [`decision`](crate::core::decision) — what Devplane decided, and on whose authority.
 //! * [`deeplink`](crate::core::deeplink) — links that open a coding agent.
 //! * [`text`](crate::core::text) — cutting strings a human reads and an agent wrote.
 //! * [`transcript`](crate::core::transcript) — what a driven agent said.
@@ -37,9 +37,11 @@ pub mod command;
 pub mod config;
 pub mod decision;
 pub mod deeplink;
+pub mod diff;
 pub mod event;
 pub mod forge;
 pub mod ids;
+pub mod offer;
 pub mod policy;
 pub mod policy_cache;
 pub mod project;

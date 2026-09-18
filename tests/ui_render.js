@@ -125,7 +125,16 @@ const item = {
   url: null,
   launch: null,
   work_id: null,
-  suggested_rule: null,
+  // Every field of the offer is somebody else's bytes: the rule is composed
+  // from an agent's command and the path is a repository's.
+  offer: {
+    rule: NASTY,
+    basis: "family",
+    covers: 6,
+    file: NASTY,
+    section: "[policy] auto_allow",
+  },
+  no_offer: null,
   since: "2026-09-15T00:00:00Z",
 };
 const work = {

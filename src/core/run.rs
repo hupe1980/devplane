@@ -7,15 +7,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// How much control Vibeplane has over a run.
+/// How much control Devplane has over a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
     /// Started elsewhere — a terminal, the VS Code extension, the desktop app.
-    /// Vibeplane can show and focus it and decide permissions by policy, but
+    /// Devplane can show and focus it and decide permissions by policy, but
     /// cannot type into it.
     Observed,
-    /// An ACP session Vibeplane owns. Full control.
+    /// An ACP session Devplane owns. Full control.
     Driven,
     /// Delegated to a provider daemon (`claude --bg`).
     Background,
@@ -118,6 +118,18 @@ pub struct ToolCall {
     pub tool: String,
     pub at: Timestamp,
     pub ok: Option<bool>,
+    /// What the tool was asked to do, kept only while the call is in flight.
+    ///
+    /// **`BlockedOn::input` claimed to carry this and never did**: every
+    /// construction site in the reducer wrote `None`, so the one consumer — the
+    /// rule offered on a permission item — was dead for every session the
+    /// product watches rather than drives. A field nothing fills is worse than
+    /// a missing one, because the code above it reads as working.
+    ///
+    /// Dropped the moment the call finishes, so this is one input per in-flight
+    /// call rather than a log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
 }
 
 /// A tool call that was refused, and by what.
@@ -240,10 +252,10 @@ pub struct Run {
     pub project_id: Option<ProjectId>,
     /// The agent that is running: `claude`, or an ACP registry id.
     pub agent: String,
-    /// The command line that started it, for a run Vibeplane drives.
+    /// The command line that started it, for a run Devplane drives.
     ///
     /// Recorded because the id alone is not always enough to start the agent
-    /// again: `vibeplane dispatch --agent /path/to/my-agent` resolves to the id
+    /// again: `devplane dispatch --agent /path/to/my-agent` resolves to the id
     /// `custom`, which names nothing in the registry. Without the command, such
     /// a run could be observed and never resumed.
     #[serde(default)]
@@ -269,7 +281,7 @@ pub struct Run {
     pub name: Option<String>,
     /// The id the *agent* knows this conversation by, for a driven run.
     ///
-    /// Distinct from `id`, which is Vibeplane's, and from `session_id`, which
+    /// Distinct from `id`, which is Devplane's, and from `session_id`, which
     /// for an observed session is the provider's. This is the one an agent will
     /// accept on `session/resume`, so it is what makes a run survive a restart
     /// of the daemon rather than only a row about it.
@@ -345,7 +357,7 @@ pub struct Run {
 pub struct BlockedOn {
     pub waiting_for: WaitingFor,
     pub message: Option<String>,
-    /// Set when this can be answered from Vibeplane.
+    /// Set when this can be answered from Devplane.
     #[serde(default)]
     pub request_id: Option<String>,
     pub tool: Option<String>,

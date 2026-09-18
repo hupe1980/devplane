@@ -72,9 +72,9 @@ pub enum AttentionKind {
     /// finished, the project disagreed, the failures went back to it as many
     /// times as the project allows, and it is now somebody's turn.
     GateFailed,
-    /// A check on a pull request Vibeplane opened is red.
+    /// A check on a pull request Devplane opened is red.
     CiRed,
-    /// A reviewer asked for changes on a pull request Vibeplane opened.
+    /// A reviewer asked for changes on a pull request Devplane opened.
     ChangesRequested,
     /// A pull request is green and waiting for a person.
     PrReady,
@@ -86,7 +86,7 @@ pub enum AttentionKind {
     /// from an inbox row.
     IssueAssigned,
     /// A review was requested from the person on a pull request they did not
-    /// open through Vibeplane.
+    /// open through Devplane.
     ReviewRequested,
     /// Another piece of work in this repository is editing the same files.
     ///
@@ -126,17 +126,17 @@ pub enum AttentionKind {
     /// is being enforced.
     ///
     /// The only kind that is about the machine rather than about a run, and the
-    /// only one raised by Vibeplane about *itself*. It exists because no hook
+    /// only one raised by Devplane about *itself*. It exists because no hook
     /// can enforce its own presence: a hook that times out does not block, and
     /// one whose binary has moved is a non-blocking error the agent walks past.
     /// Detection is the whole defence, and detection nobody performs is none —
-    /// `vibeplane doctor` only helps the person who runs it.
+    /// `devplane doctor` only helps the person who runs it.
     ///
     /// Critical, which no other kind is by default except a lost run. Everything
     /// else in this list is one piece of work going wrong; this is every
     /// prohibition on the machine being inert while the board says all is well.
     GateDown,
-    /// **A repository's `vibeplane.toml` will not parse**, so the rules it
+    /// **A repository's `devplane.toml` will not parse**, so the rules it
     /// commits are not in force.
     ///
     /// The second kind about the machine rather than about a run, and it is
@@ -238,7 +238,7 @@ pub enum Action {
     /// case where a choice can be sent back, and listed before `Allow`/`Deny`:
     /// when an agent has named the answers it accepts, those are the answers.
     Choose,
-    /// Grant the outstanding request. Offered only when Vibeplane can actually
+    /// Grant the outstanding request. Offered only when Devplane can actually
     /// answer it — a driven run — never for a session it merely watches.
     Allow,
     /// Refuse it.
@@ -382,18 +382,21 @@ pub struct AttentionItem {
     /// pipeline, and the run that was doing the last step may already be gone.
     #[serde(default)]
     pub work_id: Option<crate::core::ids::WorkId>,
-    /// The rule that would have answered this call, on a permission item.
+    /// The rule to paste so this is never asked again, on a permission item.
     ///
-    /// **The exact call, never a pattern.** One interruption is evidence that
-    /// this command needed a decision and no evidence at all about the shape of
-    /// the ones like it, and a control plane that answers "you were asked about
-    /// `pnpm test --run`" with "grant every `pnpm test`" is guessing on
-    /// somebody's behalf about the thing it exists to be careful about.
-    /// `vibeplane explain --replay` is where a *pattern* comes from, because
-    /// there the evidence is a count: the inbox answers **this one**, the
-    /// replay answers **this kind**.
+    /// **A pattern only where there is a count behind it.** One interruption is
+    /// evidence that this command needed a decision and no evidence at all
+    /// about the shape of the ones like it, so the offer is the exact call
+    /// until this machine has seen enough of its family to say otherwise — and
+    /// `covers` is how it says so. The evidence is the store's, so this is
+    /// filled by the daemon rather than here: `build` is pure and the count is
+    /// a query.
     #[serde(default)]
-    pub suggested_rule: Option<String>,
+    pub offer: Option<crate::core::offer::RuleOffer>,
+    /// Why there is none, on a permission item that has no offer. A blank where
+    /// an offer belongs reads as broken.
+    #[serde(default)]
+    pub no_offer: Option<crate::core::offer::NoOfferView>,
     pub since: Timestamp,
 }
 
@@ -476,7 +479,7 @@ pub struct AttentionConfig {
     /// How many refused tool calls in one run before somebody is told.
     ///
     /// A guess, like every other number here, and the same answer applies: it
-    /// is reported by `vibeplane attention` per kind, so the first evidence
+    /// is reported by `devplane attention` per kind, so the first evidence
     /// that it is wrong is a `dismissed` column nobody can argue with.
     pub refusals: u64,
 }
@@ -492,22 +495,6 @@ impl Default for AttentionConfig {
             refusals: 5,
         }
     }
-}
-
-/// The rule that would have answered the call this run is blocked on.
-///
-/// The **exact** call, never a pattern — see `AttentionItem::suggested_rule`.
-/// `None` when the call cannot be pinned to one rule: a compound command, an
-/// exec wrapper no prefix rule may approve, a tool whose rules take no
-/// specifier. Offering a rule that would not work is worse than offering none,
-/// because the person pastes it, is asked again, and stops believing the
-/// suggestion.
-fn rule_that_would_answer(run: &Run) -> Option<String> {
-    let b = run.blocked_on.as_ref()?;
-    let tool = b.tool.as_deref()?;
-    let content = crate::core::policy::rule_content(tool, b.input.as_ref()?)?;
-    let spec = crate::core::command::suggest_rule_for(tool, &[content])?;
-    Some(format!("{tool}({spec})"))
 }
 
 /// The one item that is about the machine rather than about a run.
@@ -529,8 +516,8 @@ pub fn gate_down_item(why: &str) -> AttentionItem {
         title: "The permission gate is installed and not answering".into(),
         detail: Some(format!(
             "No rule in any project is being enforced right now.\n{why}\n\n\
-             Run `vibeplane doctor` for the command it tried, then \
-             `vibeplane connect claude` to reinstall it."
+             Run `devplane doctor` for the command it tried, then \
+             `devplane connect claude` to reinstall it."
         )),
         options: Vec::new(),
         actions: Vec::new(),
@@ -538,12 +525,13 @@ pub fn gate_down_item(why: &str) -> AttentionItem {
         url: None,
         launch: None,
         work_id: None,
-        suggested_rule: None,
+        offer: None,
+        no_offer: None,
         since: jiff::Timestamp::now(),
     }
 }
 
-/// A repository whose `vibeplane.toml` will not parse, and the parser's reason.
+/// A repository whose `devplane.toml` will not parse, and the parser's reason.
 ///
 /// No action, for the same reason [`gate_down_item`] offers none: the fix is a
 /// text editor and a person who can read TOML, and a button that rewrote
@@ -560,14 +548,14 @@ pub fn config_broken_item(root: &Path, why: &str) -> AttentionItem {
         run_id: None,
         project_id: None,
         title: format!(
-            "{}/vibeplane.toml will not load",
+            "{}/devplane.toml will not load",
             root.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| where_.clone())
         ),
         detail: Some(format!(
             "The rules this repository commits are not in force.\n{why}\n\n\
-             Run `vibeplane check {where_}` for the line, and the gates and \
+             Run `devplane check {where_}` for the line, and the gates and \
              prohibitions come back as soon as the file parses."
         )),
         options: Vec::new(),
@@ -576,7 +564,8 @@ pub fn config_broken_item(root: &Path, why: &str) -> AttentionItem {
         url: None,
         launch: None,
         work_id: None,
-        suggested_rule: None,
+        offer: None,
+        no_offer: None,
         since: jiff::Timestamp::now(),
     }
 }
@@ -603,10 +592,6 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
         if run.snoozed.hides(&kind) {
             return;
         }
-        // Computed before the literal, which moves `kind`.
-        let suggested_rule = (kind == AttentionKind::Permission)
-            .then(|| rule_that_would_answer(run))
-            .flatten();
         out.push(AttentionItem {
             id: AttentionItem::make_id(&run.id, &kind),
             level: kind.default_level(),
@@ -624,8 +609,12 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
             launch: None,
             // A run item is about a session, not a piece of work.
             work_id: None,
-            // Only a permission item has a rule that would have answered it.
-            suggested_rule,
+            // **Filled by the daemon, not here.** The rule to paste is a
+            // function of what this machine has observed, and observing is a
+            // query — so this builder, which may not reach a disk, leaves both
+            // fields empty and `offer::compose` fills them.
+            offer: None,
+            no_offer: None,
             since,
         });
     };
@@ -639,7 +628,7 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
             } else {
                 format!("Permission: {tool}")
             };
-            // Answerable only when Vibeplane owns the session. Offering
+            // Answerable only when Devplane owns the session. Offering
             // "allow" for a run it cannot reach would be a button that lies.
             let answerable = b.and_then(|b| b.request_id.as_ref()).is_some();
             let options = b.map(|b| b.options.clone()).unwrap_or_default();
@@ -682,7 +671,7 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
             AttentionKind::Question,
             format!("Waiting: {what}"),
             Some(
-                "Claude Code is waiting on a person for something Vibeplane \
+                "Claude Code is waiting on a person for something Devplane \
                  does not model. Its own window has the dialog."
                     .into(),
             ),
@@ -816,7 +805,7 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
 /// the agent stopped is the clearest example of why Work is the durable unit
 /// and the session is not.
 ///
-/// `can_drive` says whether Vibeplane still holds a session it could prompt —
+/// `can_drive` says whether Devplane still holds a session it could prompt —
 /// not whether a run row looks alive. Only the first is a reason to offer
 /// anything that talks to an agent.
 pub fn items_for_work(
@@ -889,7 +878,8 @@ pub fn items_for_work_in(
             request_id: None,
             work_id: Some(work.id.clone()),
             // A work item is not about a tool call, so no rule answers it.
-            suggested_rule: None,
+            offer: None,
+            no_offer: None,
             since: work.updated_at,
         })
     };
@@ -946,7 +936,7 @@ pub fn items_for_work_in(
                 format!("{}: {}", bound, work.title),
                 Some(
                     "This reached one of the bounds `[budget]` sets. Raise it in \
-                     vibeplane.toml if the work is worth more, or pick it up yourself."
+                     devplane.toml if the work is worth more, or pick it up yourself."
                         .into(),
                 ),
                 vec![Action::Open, Action::Snooze],
@@ -1017,7 +1007,7 @@ pub fn items_for_work_in(
                 Some(format!(
                     "{detail}\n\nThis is a problem with the pipeline rather than with \
                      the code, so there is nothing to hand back to an agent. \
-                     `vibeplane check` reads the file the same way this did."
+                     `devplane check` reads the file the same way this did."
                 )),
                 vec![Action::Open, Action::Snooze],
             ));
@@ -1109,11 +1099,11 @@ pub fn items_for_work_in(
 }
 
 /// What a blocked run offers: the answers the agent will actually take where
-/// Vibeplane can send one, and otherwise the honest ways to reach the session.
+/// Devplane can send one, and otherwise the honest ways to reach the session.
 ///
 /// `Focus` raises the editor window that owns a directory and `Attach` hands
 /// the terminal to `claude --resume`. Neither means anything for a run
-/// Vibeplane started over the protocol: it has no window, and its session id
+/// Devplane started over the protocol: it has no window, and its session id
 /// belongs to an agent that may not be Claude Code at all. Offering them there
 /// was a button that lies, which is the one failure a control plane cannot
 /// afford.
@@ -1389,62 +1379,9 @@ mod tests {
     }
 
     #[test]
-    fn a_permission_item_names_the_rule_that_would_have_answered_it() {
-        use serde_json::json;
-        let ask = |tool: &str, input: serde_json::Value| {
-            let mut r = run(RunMode::Observed);
-            r.state = RunState::Waiting(WaitingFor::Permission);
-            r.blocked_on = Some(BlockedOn {
-                waiting_for: WaitingFor::Permission,
-                message: None,
-                request_id: Some("req-1".into()),
-                tool: Some(tool.into()),
-                input: Some(input),
-                options: vec![],
-                since: Timestamp::now(),
-            });
-            items(&r)[0].suggested_rule.clone()
-        };
-
-        // The **exact** call, never a pattern. One interruption says this
-        // command needed a decision and says nothing about the shape of the
-        // ones like it; `explain --replay` is where a pattern comes from,
-        // because there the evidence is a count.
-        assert_eq!(
-            ask("Bash", json!({"command": "pnpm test --run"})),
-            Some("Bash(pnpm test --run)".into())
-        );
-        // A path rule is still written about a directory, because that is the
-        // vocabulary `Read` rules use.
-        assert_eq!(
-            ask("Read", json!({"file_path": "src/main.rs"})),
-            Some("Read(src/**)".into())
-        );
-        assert_eq!(
-            ask("WebFetch", json!({"url": "https://docs.rs/x"})),
-            Some("WebFetch(docs.rs)".into())
-        );
-
-        // Nothing is offered where the rule would not work, because a
-        // suggestion that gets pasted and then asked about again is worse than
-        // no suggestion.
-        assert_eq!(
-            ask("Bash", json!({"command": "pnpm test && rm -rf /"})),
-            None
-        );
-        assert_eq!(ask("Bash", json!({"command": "watch pnpm test"})), None);
-
-        // And no other kind carries one: the rest are not about a tool call.
-        let mut idle = run(RunMode::Observed);
-        idle.state = RunState::Waiting(WaitingFor::Question);
-        idle.blocked_on = Some(blocked(WaitingFor::Question, vec![]));
-        assert!(items(&idle)[0].suggested_rule.is_none());
-    }
-
-    #[test]
     fn a_driven_run_is_never_offered_a_window_to_raise() {
         // `Focus` raises the editor window that owns a directory and `Attach`
-        // runs `claude --resume`. A run Vibeplane started over the protocol has
+        // runs `claude --resume`. A run Devplane started over the protocol has
         // no window, and its session id may not belong to Claude Code at all —
         // so both were buttons that could not do what they said.
         let mut r = run(RunMode::Driven);
@@ -1495,7 +1432,7 @@ mod tests {
         // The bug this pins: a question carrying four labelled options was
         // offered as `allow`/`deny`. The API could already answer it by option
         // id and two documents promised `1`–`9` would pick one — so the one
-        // question Vibeplane could genuinely answer was reduced to a yes/no
+        // question Devplane could genuinely answer was reduced to a yes/no
         // nobody asked, and the options rode along as decoration.
         let mut r = run(RunMode::Driven);
         r.state = RunState::Waiting(WaitingFor::Question);
@@ -1530,7 +1467,7 @@ mod tests {
     fn a_permission_keeps_the_one_key_shorthand_beside_its_options() {
         // A permission is a grant or a refusal however many ways the agent
         // spells it, so `allow`/`deny` stay — unlike a question, where a binary
-        // would be Vibeplane inventing an answer.
+        // would be Devplane inventing an answer.
         let mut r = run(RunMode::Driven);
         r.state = RunState::Waiting(WaitingFor::Permission);
         r.blocked_on = Some(blocked(

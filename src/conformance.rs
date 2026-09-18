@@ -1,6 +1,6 @@
 //! What this gate is, and how much of it is measured.
 //!
-//! `vibeplane doctor` answers *is it working*. This answers a different
+//! `devplane doctor` answers *is it working*. This answers a different
 //! question, and one nothing else in the product answered: **how much should I
 //! trust the thing that decides?**
 //!

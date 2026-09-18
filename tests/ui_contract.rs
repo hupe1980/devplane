@@ -51,7 +51,7 @@ async fn serve_one_run() -> (std::net::SocketAddr, reqwest::Client) {
         std::process::id(),
         uuid::Uuid::new_v4().simple()
     ));
-    let state = vibeplane::daemon::AppState::new(
+    let state = devplane::daemon::AppState::new(
         db.clone(),
         "tok".into(),
         Default::default(),
@@ -63,18 +63,18 @@ async fn serve_one_run() -> (std::net::SocketAddr, reqwest::Client) {
     // One run in every interesting state: blocked, costed, in a worktree.
     state
         .ingest(
-            vibeplane::core::ids::RunId::new("s1"),
-            vibeplane::core::event::Source::Hook,
-            vibeplane::core::event::Event::QuestionAsked {
+            devplane::core::ids::RunId::new("s1"),
+            devplane::core::event::Source::Hook,
+            devplane::core::event::Event::QuestionAsked {
                 question: "Keep it?".into(),
                 options: vec!["yes".into()],
             },
             Some("/tmp/repo".into()),
-            vibeplane::core::run::RunMode::Observed,
+            devplane::core::run::RunMode::Observed,
         )
         .await;
 
-    let app = vibeplane::api::router(state);
+    let app = devplane::api::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.ok() });
@@ -163,7 +163,7 @@ fn the_page_carries_no_credential_and_no_remote_dependency() {
 fn every_button_the_inbox_renders_is_one_the_item_offered() {
     // `attention.rs` is careful about which actions an item gets: `attach` is
     // withheld from a driven run because there is no terminal to attach to,
-    // `allow` from a session Vibeplane only watches because it cannot answer
+    // `allow` from a session Devplane only watches because it cannot answer
     // for it. All of that is wasted if the page renders the button anyway —
     // and for `attach` and `snooze` it did, unconditionally.
     //
@@ -254,7 +254,7 @@ fn every_element_the_script_reaches_for_exists_in_the_page() {
 #[test]
 fn the_board_can_search_what_the_cli_can() {
     // The daemon has had the index all along — `/api/search` is what
-    // `vibeplane search` uses — and the board was the one surface that could
+    // `devplane search` uses — and the board was the one surface that could
     // not answer "where did I see that command".
     assert!(
         PAGE.contains("/api/search?q="),
@@ -279,7 +279,7 @@ fn the_answers_an_agent_offered_are_answerable() {
     // protocol ids, the API accepted `option_id`, two documents promised
     // `1`-`9` picks one — and the page rendered them as an unclickable list
     // while offering `allow`/`deny`. Every layer had its half and none of them
-    // connected, so the one question Vibeplane could truly answer became a
+    // connected, so the one question Devplane could truly answer became a
     // yes/no nobody had asked.
     assert!(
         PAGE.contains(r#"data-act="choose""#),
@@ -293,7 +293,7 @@ fn the_answers_an_agent_offered_are_answerable() {
         PAGE.contains("option_id: opt"),
         "the choice goes to the API as option_id"
     );
-    // An option with no id belongs to a provider dialog Vibeplane cannot
+    // An option with no id belongs to a provider dialog Devplane cannot
     // answer. Readable, never dressed up as a button.
     assert!(
         PAGE.contains("opt-dead"),
@@ -354,7 +354,7 @@ fn dispatch_refuses_a_project_nobody_trusted() {
 
 #[test]
 fn the_why_pane_reads_the_decision_log_and_nothing_else() {
-    // `?` answers "why is this here" from the same rows `vibeplane audit`
+    // `?` answers "why is this here" from the same rows `devplane audit`
     // prints. Inventing an explanation would be the one thing a supervision
     // tool cannot do.
     assert!(
@@ -386,9 +386,9 @@ fn the_board_loads_the_projects_a_person_can_dispatch_to() {
 fn the_work_card_reads_only_fields_the_api_serves() {
     // The row itself is a flattened `Work`, so its own field names are the
     // domain's and a rename breaks here.
-    let work = vibeplane::core::Work::new(
-        vibeplane::core::ProjectId::from_path(std::path::Path::new("/tmp/x")),
-        vibeplane::core::WorkKind::Quick,
+    let work = devplane::core::Work::new(
+        devplane::core::ProjectId::from_path(std::path::Path::new("/tmp/x")),
+        devplane::core::WorkKind::Quick,
         "t".into(),
         "p".into(),
     );
@@ -396,7 +396,16 @@ fn the_work_card_reads_only_fields_the_api_serves() {
 
     // What `WorkView` adds on top, listed explicitly so that removing one is a
     // deliberate two-line change rather than something that stops being checked.
-    const VIEW_ONLY: &[&str] = &["gate", "can_retry", "stopped_summary", "claim"];
+    const VIEW_ONLY: &[&str] = &[
+        "gate",
+        "can_retry",
+        "stopped_summary",
+        "claim",
+        // Why there is no claim, where there could have been one: a repository
+        // that keeps no transcripts and an agent that said nothing are two
+        // facts, and the page renders a different sentence for each.
+        "claim_absent",
+    ];
 
     let mut missing = Vec::new();
     for field in fields_read_by_page("w") {
@@ -413,7 +422,7 @@ fn the_work_card_reads_only_fields_the_api_serves() {
 /// The board's script has to *parse*.
 ///
 /// It shipped not parsing. Two `const hit` in one block scope is a
-/// `SyntaxError`, which takes the whole `<script>` with it — so `vibeplane
+/// `SyntaxError`, which takes the whole `<script>` with it — so `devplane
 /// open` served a page that rendered its chrome, said "connecting", and never
 /// fetched anything. Every other test here reads the page as *text*: they
 /// check that the fields the page names match the ones the API serves, which
@@ -436,7 +445,7 @@ fn the_board_script_parses() {
         script.len()
     );
 
-    let dir = std::env::temp_dir().join("vibeplane-ui-contract");
+    let dir = std::env::temp_dir().join("devplane-ui-contract");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let js = dir.join("board.js");
     std::fs::write(&js, script).expect("write the extracted script");
@@ -875,7 +884,7 @@ fn the_empty_board_has_two_sentences_and_only_one_is_a_thing_to_do() {
         .expect("the page has an empty-state function");
     // The one that is a thing to do names the command that does it.
     assert!(
-        body.contains("vibeplane connect claude"),
+        body.contains("devplane connect claude"),
         "the not-connected state has to name the command that fixes it"
     );
     // The reassuring one does not, and is reached when the answer is unknown:
@@ -973,5 +982,163 @@ fn every_global_command_has_something_to_click() {
     assert!(
         PAGE.contains(r#"card.classList.contains("row") && card.dataset.run"#),
         "a session row has to open what it is saying, the way enter does"
+    );
+}
+
+/// The work view shows what the gate measured, and says what it does not show.
+///
+/// T004, T009 and the last row of the SC-004 walk. Two properties, and the
+/// second is the one that matters: command output is the compiler's bytes and
+/// the agent's, so it is escaped like everything else the page prints — and
+/// every way the evidence can be missing is a sentence rather than a blank
+/// region, because an empty space where evidence belongs reads as broken.
+#[test]
+fn the_work_view_shows_the_gate_evidence_and_names_what_is_missing() {
+    let body = PAGE
+        .split("function renderWork(")
+        .nth(1)
+        .and_then(|r| r.split("\n}\n").next())
+        .expect("the page renders a work view");
+
+    // Every value from the gate is escaped. `command` and `output_tail` are the
+    // two that carry somebody else's text.
+    // The prefix, not the whole call: `esc(c.output_tail || "")` escapes the
+    // value exactly as `esc(c.output_tail)` does, and a test that insists on one
+    // spelling fails on code that is right — which it did, first time out.
+    for field in ["c.command", "c.output_tail", "g.summary", "g.name"] {
+        assert!(
+            body.contains(&format!("esc({field}")),
+            "`{field}` reaches the page unescaped"
+        );
+    }
+
+    // Three ways a gate can say nothing, three sentences. A gate that never
+    // ran, a gate that ran and recorded no commands, and a reproduction gate
+    // whose red *is* its green — the last row of the spec's edge-case walk.
+    assert!(
+        body.contains("No gate has run against this work yet"),
+        "a work nothing has checked must not read as a work that passed"
+    );
+    assert!(
+        body.contains("recorded no commands, which is not the same as passing"),
+        "an empty command list must not read as a pass"
+    );
+    assert!(
+        body.contains("failing is the point"),
+        "a reproduction gate has to explain its own verdict"
+    );
+
+    // The change is fetched and inserted, not computed here: a client-side diff
+    // renderer is the change that would force a bundler onto this page.
+    assert!(
+        body.contains("loadChange(w.id)"),
+        "the view has to ask for the change"
+    );
+    assert!(
+        PAGE.contains("box().innerHTML = changes.html"),
+        "and insert what the daemon rendered rather than building it"
+    );
+
+    // The release control is offered only where it can keep its promise.
+    assert!(
+        body.contains(r#"w.phase === "human""#) && body.contains(r#"data-act="approve""#),
+        "a button that cannot do what it says is the one thing this must not show"
+    );
+}
+
+/// The two ways an agent's account can be missing read differently.
+///
+/// T025. `[transcripts] keep = false` means **nothing was recorded**; a kept
+/// transcript with no closing message means **the agent said nothing**. Both
+/// arrived as an absent `claim` until the API was made to say which, and a
+/// surface that renders them identically tells a reviewer something false about
+/// a repository that simply never writes transcripts down.
+#[test]
+fn the_two_ways_a_claim_can_be_absent_do_not_render_the_same() {
+    let body = PAGE
+        .split("function renderWork(")
+        .nth(1)
+        .and_then(|r| r.split("\n}\n").next())
+        .expect("the page renders a work view");
+
+    assert!(
+        body.contains(r#"w.claim_absent === "transcripts_off""#),
+        "the page has to ask which absence this is"
+    );
+    // Two sentences, and neither is the other.
+    assert!(body.contains("Nothing was recorded"), "{body}");
+    assert!(body.contains("ended without a closing message"));
+    // And the claim itself is the agent's words, marked as such and judged by
+    // nothing — no verdict, no score, no comparison against the evidence.
+    assert!(body.contains("the agent's account: "));
+    // Comments stripped first: the paragraph above this code *explains* why the
+    // product does not judge, and the word "untruthful" in that explanation is
+    // not a judgement reaching the page. Scanning the prose for the vocabulary
+    // it is arguing against fails on code that is right, which it did.
+    let rendered: String = body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for judged in ["accurate", "matches", "contradicts", "truthful"] {
+        assert!(
+            !rendered.contains(judged),
+            "the product does not grade the claim; it puts both on screen"
+        );
+    }
+}
+
+/// The rule to paste, and the one thing this surface must never grow.
+///
+/// T008 and T024. Two properties. The first is that an absent offer is a
+/// *sentence* — a blank where a rule belongs reads as a surface that failed
+/// rather than one with nothing to say. The second is the whole reason the
+/// feature hands over text instead of writing it: an agent on this machine runs
+/// as the same user and can read the token this page uses, so a control that
+/// edited `[policy]` would be a widening path reachable by the party the rules
+/// govern.
+#[test]
+fn the_rule_is_offered_and_never_written() {
+    let body = PAGE
+        .split("function renderOffer(")
+        .nth(1)
+        .and_then(|r| r.split("\n}\n").next())
+        .expect("the page renders an offer");
+
+    // Both halves of the offer, and the absence as words.
+    for want in ["i.offer", "o.covers", "o.file", "i.no_offer.sentence"] {
+        assert!(body.contains(want), "the offer is missing `{want}`");
+    }
+    assert!(
+        body.contains("esc(i.no_offer.sentence)"),
+        "the reason is a sentence the daemon wrote, escaped like everything else"
+    );
+
+    // **Nothing writes a rule.** Every POST the page makes, checked against a
+    // list — a new one that touched a policy file would have to be added here
+    // deliberately, which is the point.
+    let writes: Vec<&str> = PAGE
+        .match_indices("/api/")
+        .filter_map(|(at, _)| PAGE[at..].split(['`', '"', '\'', '$']).next())
+        .filter(|r| r.contains("polic") || r.contains("rule") || r.contains("auto_allow"))
+        .collect();
+    assert!(
+        writes.is_empty(),
+        "the board must not reach a policy route: {writes:?}"
+    );
+    assert!(
+        !PAGE.contains(r#"data-act="writerule""#) && !PAGE.contains("auto_allow\", {"),
+        "no control writes a permission rule"
+    );
+
+    // The rule stays on the screen. A toast is not a fallback for a line
+    // somebody types into a file on another machine.
+    assert!(
+        PAGE.contains("user-select: all"),
+        "the rule has to be selectable where there is no clipboard"
+    );
+    assert!(
+        PAGE.contains("no clipboard here"),
+        "and say so rather than reporting a copy that did not happen"
     );
 }

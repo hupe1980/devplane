@@ -2,13 +2,13 @@
 //!
 //! Claude's own daemon supervises background sessions: it restarts them,
 //! stops them when idle and owns their worktrees. For those runs its roster is
-//! authoritative, so Vibeplane polls it rather than inferring state from hooks
+//! authoritative, so Devplane polls it rather than inferring state from hooks
 //! that may have been missed while the daemon was down.
 //!
 //! It is also, and more importantly, the **discovery** channel. The command
 //! lists every live session on the machine, interactive ones included, with its
 //! pid, working directory, session id and name. That is what makes the board
-//! useful the moment Vibeplane is installed: sessions appear before a single
+//! useful the moment Devplane is installed: sessions appear before a single
 //! hook has fired, and a session that never does anything still shows up.
 //!
 //! And it is the reconciliation source at startup: a run the database believes

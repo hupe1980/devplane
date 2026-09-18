@@ -1,6 +1,6 @@
 # Contributing
 
-Vibeplane is early and one person maintains it. The most useful contribution is a precise report,
+Devplane is early and one person maintains it. The most useful contribution is a precise report,
 and the second most useful is a test.
 
 ## Reports that matter most
@@ -15,9 +15,20 @@ and the second most useful is a test.
 
 ```sh
 just check          # fmt, clippy, build, test — what CI runs
-just verify         # plus the claim ledger and the dependency count; needs `just specs` once
+just verify         # plus the claim ledger and the dependency count; needs `just reference` once
 just perms 20       # a quick differential pass against a real `claude`, if you have one
 ```
+
+## Where a change is planned
+
+A feature is specified before it is built, with
+[GitHub Spec Kit](https://github.com/github/spec-kit) — requirements with stable ids, a plan checked
+against a written constitution, then a task list. Those working files are not published — they are
+the maintainer's, and a reader would have neither the folder nor the identifiers it cites.
+
+**What reaches you instead is the result.** Every behaviour the specification asked for is a test
+that names it, and `just verify` runs all of them. If you want to know what a feature must do, the
+tests are the answer that cannot go stale.
 
 Every behaviour change to the permission layer needs a test that asserts **both** the verdict and
 the rule that produced it; a right answer with a wrong reason is a bug here. A dependency bump is a
@@ -33,7 +44,7 @@ all — that last one needs `node`, and skips without it.
 Things that will not be merged, so nobody spends a weekend on them: a model deciding a permission
 or a gate result; a cloud relay or account; a second rule language; parsing transcript JSONL on the
 critical path; a React or WASM rewrite of the board. The public docs explain the reasoning:
-<https://hupe1980.github.io/vibeplane/docs/decisions/>.
+<https://hupe1980.github.io/devplane/docs/decisions/>.
 
 ## Licence
 

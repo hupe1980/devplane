@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The claim ledger of concepts/QUALITY.md §2: every load-bearing integration claim in the
-# concept notes is pinned to a file in specs/ and this script greps for it. Run
-# scripts/fetch-specs.sh first. Exit 1 if any claim is missing from its source.
+# concept notes is pinned to a file in reference/ and this script greps for it. Run
+# scripts/fetch-reference.sh first. Exit 1 if any claim is missing from its source.
 set -u
-cd "$(dirname "$0")/../specs" || { echo "no specs/ (run scripts/fetch-specs.sh)"; exit 1; }
+cd "$(dirname "$0")/../reference" || { echo "no reference/ (run scripts/fetch-reference.sh)"; exit 1; }
 fail=0; n=0
 chk() { n=$((n+1)); if grep -q -i -E "$3" $2 2>/dev/null; then printf 'OK   %s\n' "$1"; else printf 'MISS %s  (%s ~ /%s/)\n' "$1" "$2" "$3"; fail=1; fi; }
 # ── GitHub Copilot: the second provider that documents all three channels ─────
@@ -130,7 +130,7 @@ chk "permissions: Stop Task is TaskStop"           claude-code/permissions.md 'c
 # used to catch a typo in a prohibition. It only ever warns, but a list that has
 # rotted warns about tools that exist — so the reference has to still contain
 # every name in it.
-# Paths are relative to specs/, because that is where this script runs.
+# Paths are relative to reference/, because that is where this script runs.
 if [ -f claude-code/tools-reference.md ] && [ -f ../src/core/policy.rs ]; then
   missing=""
   for t in $(sed -n '/^const KNOWN_TOOLS/,/^];/p' ../src/core/policy.rs \
@@ -196,7 +196,7 @@ chk "opencode openapi: /session"                    opencode/openapi.json '"/ses
 # than its documentation — this is the claim that was wrong, so it is the one pinned hardest.
 sdk=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'agent-client-protocol-schema-*' 2>/dev/null | sort | tail -1)
 # The provider surfaces added through 2026 that these notes now rest on. Each row was
-# absent from the ledger while its page sat unread in specs/ — the gap R19 is about, and
+# absent from the ledger while its page sat unread in reference/ — the gap R19 is about, and
 # the reason the unit of verification is the row rather than the page.
 chk "hooks: the prompt handler type exists"         claude-code/hooks.md '"type": "prompt"'
 chk "hooks: the agent handler type exists"          claude-code/hooks.md '"type": "agent"'
@@ -240,7 +240,7 @@ if [ -n "$sdk" ]; then
   sdkchk "sdk: SetSessionModeRequest is v1"         src/v1/agent.rs 'pub struct SetSessionModeRequest'
   sdkchk "sdk: CreateElicitationRequest is v1"      src/v1/elicitation.rs 'pub struct CreateElicitationRequest'
   sdkchk "sdk: resume is an agent capability"       src/v1/agent.rs 'pub resume: Option<SessionResumeCapabilities>'
-  # Vibeplane sends `session/resume` with no history replay and relies on that:
+  # Devplane sends `session/resume` with no history replay and relies on that:
   # it kept the transcript itself, so a replay would write every line down twice.
   # `replayFrom` is a v2 field, and this is what says so.
   sdkchk "sdk: v1 resume carries no replayFrom"     src/v1/agent.rs 'pub struct ResumeSessionRequest'
@@ -258,7 +258,7 @@ fi
 # ── Counts, computed from the corpus rather than grepped from prose ──────────────
 # The whole ledger above asks "does the source say this", which cannot catch a number
 # these notes invented about somebody else's system. Four places said the ACP registry
-# held 51 agents while specs/acp/registry.json said 41, and nothing failed, because a
+# held 51 agents while reference/acp/registry.json said 41, and nothing failed, because a
 # count is not a sentence to grep for. A number about external data is now DERIVED here
 # and the notes are checked against it.
 countchk() { # label  actual  file-glob-in-concepts  regex-with-one-capture
@@ -291,7 +291,7 @@ chk "ps: matching ignores case"                   claude-code/permissions.md 'Ma
 chk "ps: compound commands split like Bash"       claude-code/permissions.md 'A rule must match every subcommand'
 chk "ps: rules use the Bash rule shape"           claude-code/permissions.md 'PowerShell permission rules use the same shape as Bash rules'
 # ── Why an interpreter grant is overbroad *there* as well as here (D200) ──────
-# `vibeplane check` tells people `Bash(python:*)` approves `python -c '…'` and
+# `devplane check` tells people `Bash(python:*)` approves `python -c '…'` and
 # that Claude Code reads it the same way. That second half is a claim about
 # somebody else's product, published in our own README, so it is pinned to the
 # sentence it follows from rather than left as a reading.

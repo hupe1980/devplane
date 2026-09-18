@@ -115,14 +115,14 @@ struct Entry {
     /// right behaviour — a typo must not read as permission — but it is only
     /// half an answer, because after a restart there are no previous rules to
     /// keep and the project's `never_auto` list is silently gone. So the fact
-    /// is recorded and `vibeplane doctor` says it out loud.
+    /// is recorded and `devplane doctor` says it out loud.
     error: Option<String>,
 }
 
 /// Policies by repository, plus the global fallback.
 #[derive(Debug)]
 pub struct PolicyCache {
-    /// Applies everywhere, from `~/.vibeplane/policy.toml`.
+    /// Applies everywhere, from `~/.devplane/policy.toml`.
     global: Policy,
     /// Where that file lives. A rule spelled `Read(/secrets/**)` anchors at the
     /// file it was written in, so the machine-wide set and a project's set
@@ -139,7 +139,7 @@ pub struct PolicyCache {
 
 impl PolicyCache {
     /// `global_root` is the directory the machine-wide rules were read from —
-    /// `~/.vibeplane` — and `home` the user's home directory.
+    /// `~/.devplane` — and `home` the user's home directory.
     pub fn new(global: Policy, global_root: PathBuf, home: Option<PathBuf>) -> Self {
         Self {
             global,
@@ -152,10 +152,10 @@ impl PolicyCache {
     /// A cache with nothing but a project's own rules. **Tests only**, where
     /// there is no home directory to read and none should be invented.
     ///
-    /// Not for a command a person runs: `vibeplane explain` used this and so
+    /// Not for a command a person runs: `devplane explain` used this and so
     /// answered without the machine-wide rules, which meant the surface built
     /// to say *what would the gate decide* could say `allow` for a call
-    /// `~/.vibeplane/policy.toml` denies. [`Self::from_disk`] is what a command
+    /// `~/.devplane/policy.toml` denies. [`Self::from_disk`] is what a command
     /// uses.
     pub fn for_projects_only() -> Self {
         Self::new(Policy::default(), PathBuf::from("/"), None)
@@ -164,7 +164,7 @@ impl PolicyCache {
     /// The rules this machine actually enforces: the machine-wide file plus
     /// whatever each project adds.
     ///
-    /// **One evaluator for every surface.** The daemon, `vibeplane explain` and
+    /// **One evaluator for every surface.** The daemon, `devplane explain` and
     /// the `command` hook all build the gate this way, so a verdict cannot
     /// depend on which of the three was asked. It used to: two of them read the
     /// machine-wide file and one did not.
@@ -318,6 +318,55 @@ impl PolicyCache {
     /// *daemon's* working directory, letting whichever repository it was started
     /// in answer for a session somewhere else. There is no honest project answer
     /// without a directory, so the machine-wide rules decide alone.
+    /// The rule to paste so this call is never asked about again.
+    ///
+    /// **The context is built the way a verdict's is**, and that is the point
+    /// rather than a detail. `core::offer` refuses any rule that does not
+    /// decide the call, and a replay anchored somewhere the real evaluation is
+    /// not would be checking a different question — a rule spelled
+    /// `Read(/secrets/**)` means one directory in a project file and another in
+    /// the machine-wide one.
+    ///
+    /// So the anchor follows the **destination**: a call inside a registered
+    /// project is answered by that project's `devplane.toml`, anchored at its
+    /// root, and everything else by `~/.devplane/policy.toml`, anchored at the
+    /// directory that file lives in.
+    ///
+    /// `others` are the calls that would **also** interrupt. Filtering them is
+    /// the caller's, because it needs the event log and this side may not have
+    /// one.
+    pub fn offer_for(
+        &self,
+        dir: &Path,
+        tool: &str,
+        input: &serde_json::Value,
+        others: &[crate::core::offer::Interrupting],
+        project_root: Option<&Path>,
+    ) -> Result<crate::core::offer::RuleOffer, crate::core::offer::NoOffer> {
+        forget_resolved();
+        let (source, dest) = match project_root {
+            Some(root) => (
+                root.to_path_buf(),
+                crate::core::offer::Destination {
+                    file: root.join("devplane.toml").display().to_string(),
+                    section: "[policy] auto_allow".into(),
+                },
+            ),
+            None => (
+                self.global_root.clone(),
+                crate::core::offer::Destination {
+                    file: self.global_root.join("policy.toml").display().to_string(),
+                    section: "[policy] auto_allow".into(),
+                },
+            ),
+        };
+        let ctx = Context::at(dir)
+            .with_source(&source)
+            .with_home(self.home.as_deref())
+            .with_realpath(realpath);
+        crate::core::offer::compose(tool, input, &ctx, others, &dest)
+    }
+
     pub fn evaluate_global_only(&self, tool: &str, input: &serde_json::Value) -> Verdict {
         forget_resolved();
         let ctx = Context::at(&self.global_root)
@@ -393,7 +442,7 @@ impl PolicyCache {
         Some(rules)
     }
 
-    /// Projects whose `vibeplane.toml` would not load, with the reason.
+    /// Projects whose `devplane.toml` would not load, with the reason.
     ///
     /// Reported rather than only logged. The previous rules are kept, which is
     /// the safe half; the unsafe half is that a daemon restarted against a
@@ -465,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_projects_own_rules_decide_its_agents() {
-        // The thing that was broken: `[policy]` in vibeplane.toml did nothing.
+        // The thing that was broken: `[policy]` in devplane.toml did nothing.
         let dir = repo(
             "own",
             "[policy]\nauto_allow = [\"Bash(pnpm test *)\"]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
@@ -547,7 +596,7 @@ mod tests {
     #[test]
     fn an_agent_cannot_widen_its_own_rules_from_the_branch_it_is_working_on() {
         // The whole point of the split. An agent works in a worktree and may
-        // edit every file in it, `vibeplane.toml` included — so the rules are
+        // edit every file in it, `devplane.toml` included — so the rules are
         // read from the checkout that *owns* the worktree, which is the copy on
         // the trunk that a person reviewed. If they were read from the worktree,
         // "delete the deny rule, then do the thing" would be a two-step escape

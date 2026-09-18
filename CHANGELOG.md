@@ -14,34 +14,76 @@ a path grant like `Edit(out.txt)` no longer speaks for whatever command fills
 that file. If a rule of yours relied on that, the call now asks. No
 configuration breaks.
 
+**Two suggestion defects were shipped and are fixed.** A `WebFetch` rule was
+suggested as `WebFetch(docs.rs)`, missing the `domain:` the vendor's syntax
+requires — so pasting it granted nothing. And the suggestion itself never
+appeared for a session Devplane *watches* rather than drives, because the field
+it was read from was set to `None` at every site that built it. Both were found
+by making the product check its own suggestion before showing it.
+
 ### Added
 
-- **The gate's measurement is current for the first time.** The full
-  differential matrix ran green against Claude Code **2.1.273** — 126 allow
-  cases and 208 deny cases — so `vibeplane gate` no longer reports a gap between
-  the release the rules were measured against and the one the vendor ships.
-  Twelve deny shapes were **skipped rather than measured**, and the command says
-  so: a skipped shape is unmeasured, not clean.
+- **A permission says how to stop being asked it again, and nothing writes the
+  rule.** An item now carries the narrowest rule covering the calls this machine
+  has actually seen in that family, how many it covers, and the file to paste it
+  into — on the board as well as in the terminal. A pattern is offered only past
+  three distinct calls; below that it is the exact call, because one
+  interruption says nothing about the shape of the ones like it. The rule is
+  **replayed against the call before you are shown it**, so one that would not
+  have decided it is refused rather than handed over, and where no rule is
+  possible the item says which reason it is. There is no route that edits
+  `[policy]` and there will not be: an agent here runs as you and can read the
+  daemon's token, so a write path to the rules would be reachable by the thing
+  they govern.
+- **The project specifies its own features before building them**, with
+  [GitHub Spec Kit](https://github.com/github/spec-kit) — requirements with
+  stable ids, a plan checked against a written constitution, then a task list.
+  Those working files are not published, like the architecture notes; what
+  reaches this repository is a test per behaviour the specification asked for.
+- **`devplane trust` counts the skills a repository ships**, not only the ones
+  that pre-approve a tool. It reported *"declares no hooks, MCP servers or
+  skills"* about a repository shipping ten of them — the scan was right and the
+  sentence was false, which is the worse of the two for a gate whose job is
+  telling you what will load into your agent before you consent.
+- **The gate's measurement caught up with the vendor.** The full differential
+  matrix ran green against Claude Code **2.1.273** — 126 allow cases and 208 deny
+  cases. Twelve deny shapes were **skipped rather than measured**, and the
+  command says so: a skipped shape is unmeasured, not clean. The vendor shipped
+  2.1.274 the same day and its one rule row cost a widening, which is the gap
+  this clock exists to report rather than a reason not to report it.
+- **A work view: what changed, what the checks said, and the release control
+  beside both.** Approving work you cannot see is not approval. `tab` and
+  `enter`, or a click, on a work row opens what its branch changed — against the **merge
+  base**, so commits that landed on `main` since the worktree was made are not
+  reported as this work's doing — with every gate command, its exit code, and
+  the failing lines the agent was handed. A reproduction gate reads as passing
+  when its commands failed, and says why; a gate that recorded no commands is
+  distinguishable from one that passed. Uncommitted *and untracked* files count:
+  a reviewer approves the checkout as it stands, and a file the agent created
+  would otherwise have been invisible. A change too large reports what is
+  withheld and the command that shows the rest, rather than a silent subset. The
+  release control is offered only where the work is actually held at a declared
+  human step.
 - **<kbd>,</kbd> on the board: what is configured, everywhere.** The machine —
   hooks installed, the settings file, how stale the measurement is — and every
-  registered repository's `vibeplane.toml` read back: gates, pipelines, rules in
+  registered repository's `devplane.toml` read back: gates, pipelines, rules in
   evaluation order, and the three findings nobody gets by reading the file (a
   rule that covers nothing, one that grants more than it reads as granting, a
   path denied for reading that is still writable). The same read-back
-  `vibeplane check --json` prints. **It reads and never writes**: an agent here
+  `devplane check --json` prints. **It reads and never writes**: an agent here
   runs as you, so a route that edited `[policy]` would be a widening path.
-- **A `vibeplane.toml` that will not parse is now a critical inbox item.** The
+- **A `devplane.toml` that will not parse is now a critical inbox item.** The
   last good rules are kept, and a daemon restarted against a broken file has
   none to keep — so that repository's `never_auto` list was simply gone and
   nothing on any screen said so. The item names the file and the parser's reason.
 - **The agent's account, beside what the gate measured.** When a gate goes red,
-  the board and `vibeplane work show` print what the agent last said, under the
+  the board and `devplane work show` print what the agent last said, under the
   verdict and judging neither — a report references about one action in eleven
   and drifts toward its plan as the run leaves it, so it is worth very little
   alone and is the whole point next to an exit code that contradicts it. Shown
   **only** beside a failed gate; absent when no transcript was kept, which is
   *nothing was recorded* rather than *the agent said nothing*.
-- **`vibeplane gate`** — how much the gate is worth, which `doctor` does not
+- **`devplane gate`** — how much the gate is worth, which `doctor` does not
   answer. The release the rules were last measured against, how far the vendor
   has moved since, and the gate scored against the EBL-Core execution-boundary
   profile (arXiv:2609.11596) rather than a list written here. **The card shows
@@ -51,13 +93,13 @@ configuration breaks.
   changelog and exits non-zero when it has shipped past the release whose
   rule-relevant rows are accounted for; a cron line is the whole mechanism.
   `just advance` moves that floor and **refuses on a red ledger**.
-- **`vibeplane mcp`** serves a read-only surface to your agents over stdio:
+- **`devplane mcp`** serves a read-only surface to your agents over stdio:
   `inbox`, `work`, `explain`, `audit`. The useful one daily is `explain` — an
   agent can find out *before* running a command that a rule refuses it. It is
   read-only because it **implements no mutating tool**, not because anything is
   annotated. Every payload is framed as a report carrying other people's text,
-  and an `explain` asked this way is recorded in `vibeplane audit`.
-- **`vibeplane work start --spec specs/001-password-reset`** names the
+  and an `explain` asked this way is recorded in `devplane audit`.
+- **`devplane work start --spec specs/001-password-reset`** names the
   specification a piece of work answers — a file, or the folder your spec tool
   wrote, which is what Spec Kit, Kiro and OpenSpec all actually produce. Every
   gate stamps a fingerprint over every document under it, so *checked against
@@ -74,6 +116,21 @@ configuration breaks.
 
 ### Fixed
 
+- **The spec task count included the specification's own quality checklist.**
+  Pointed at a real Spec Kit feature, the reader counted **47**
+  tasks where the task list had 31 — Spec Kit writes a `checklists/` folder
+  whose boxes validate the *spec*, not the feature. Where a `tasks.md` exists it
+  is now the task list and the other documents are not; where there is none,
+  every box still counts, because a one-file specification reporting zero is a
+  worse answer than the one being fixed. A **ticked** box is also no longer read
+  as an open question: the checklist line *"No [NEEDS CLARIFICATION] markers
+  remain"* was being counted as one.
+- **A loop over a special shell variable was auto-approved.** `OPTIND=1/0 ls`
+  already asked — an expression assigned to a variable the shell evaluates is
+  arithmetic, not a string — but `for OPTIND in 1 2; do ls; done` did not,
+  because `for` and `in` are control words stripped before that check runs. The
+  `=` going out of sight was enough to walk past it. Claude Code 2.1.273 was
+  asked three times: it runs the ordinary loop and refuses this one.
 - **A path grant approved anything that wrote to that path.** With
   `auto_allow = ["Edit(out.txt)"]` and nothing else, every command redirecting
   into `out.txt` was auto-approved — `cat /etc/passwd > out.txt`,
@@ -90,6 +147,13 @@ configuration breaks.
   over blank space is not an answer: *nothing is running* is the tool working,
   *nothing is connected* is a thing to do. It now says which, names the command
   when there is one, and makes the quiet-session count the way to see them.
+- **A cancelled turn is now tested, not just described.** The client sends
+  `session/cancel`, waits five seconds for the agent to end the turn with
+  `stop_reason: cancelled`, and tears the connection down if it does not — and
+  every fixture turn finished in microseconds, so only the *timeout* branch was
+  ever reachable. The test fixture can now be interrupted, and the new
+  conformance case fails in 5.8 seconds against an agent that ignores the
+  cancel and passes in 0.8 against one that answers it.
 - **The deny axis weighed "it ran" and "it did not run" as if they were the
   same kind of answer.** Its evidence is *did the command run* and its oracle is
   a language model, so a `yes` is a fact and a `no` has two causes that look
@@ -103,7 +167,7 @@ configuration breaks.
   not installed already was.
 - **The differential permission harness was asking its two sides different
   questions.** The extra grant a write-shape probe needs reached the vendor's
-  settings and not the `vibeplane.toml`, so those rows compared a rule set
+  settings and not the `devplane.toml`, so those rows compared a rule set
   against a different rule set and reported the difference as a finding. One
   list behind both spellings now, and a `selftest` axis that refuses to run the
   matrix when they diverge — it needs no model and no signed-in vendor, so it is
@@ -121,9 +185,21 @@ configuration breaks.
   inbox item carries `why`. A shortcut nobody can discover is a feature only its
   author has.
 - **The quickstart's keyboard table was broken**, so its last three rows
-  rendered as prose with pipes in it.
+  rendered as prose with pipes in it. The same defect was in the test fixture's
+  own header.
+- **The docs sidebar had no space between the search box and the first group.**
+  `:first-of-type` zeroed the heading's top margin, which is right for a heading
+  that starts a column and wrong once a search box sits above it.
+
+### Changed
+
+- **The fetched third-party corpus moved from `specs/` to `reference/`**, and
+  `scripts/fetch-specs.sh` with it. Spec Kit hard-codes `specs/` for the
+  project's own feature specifications, and one directory cannot be both a
+  gitignored build artefact and committed source of truth. `just specs` is now
+  `just reference`.
 - **A pipeline step's gate verdict now carries the specification stamp** that
-  the work loop and `vibeplane work verify` already recorded. Two paths of three
+  the work loop and `devplane work verify` already recorded. Two paths of three
   read as evidence of absence on the third.
 - **The documentation said a spec tool's CLI made *drift* a gate.** It does not:
   `openspec validate` checks specifications against each other and reads no
@@ -142,7 +218,7 @@ repository actually loads, which rules grant more than they look like, how old
 the gate's own measurement is, and which files a shell command wrote past
 Claude Code's checkpoint.
 
-**Upgrading.** `vibeplane trust` now asks, so a script that calls it needs
+**Upgrading.** `devplane trust` now asks, so a script that calls it needs
 `--yes`; without it, a non-interactive stdin is an error rather than a silent
 yes. Your rules are unchanged but may prompt where they did not — that is the
 point of **Fixed**. The decision log gains a column and keeps its rows.
@@ -179,31 +255,31 @@ point of **Fixed**. The decision log gains a column and keeps its rows.
 
 ### Added
 
-- **`vibeplane rewind <run>`** names the files a shell command wrote that
+- **`devplane rewind <run>`** names the files a shell command wrote that
   Claude Code's `/rewind` will not restore — its checkpoint tracks only what its
   own editing tools touched. A read over the decision log; no snapshots and no
   copies of your files. It says *named for writing* rather than *changed*,
   because the gate sees a call before it runs, and it leaves out refused calls
   and paths nothing can pin to one file.
-- **`vibeplane doctor` says how old the gate's measurement is.** Two numbers:
+- **`devplane doctor` says how old the gate's measurement is.** Two numbers:
   `measured`, the last release the full differential run was green against, and
   `rows`, the last release whose rule-relevant changelog entries are all
   accounted for — the second is not a compatibility claim and says so. When no
   session reports a version it says that rather than implying no gap. The board
   shows it too, and only when there is one.
-- **`vibeplane trust` lists what it is about to trust** before it asks: every
+- **`devplane trust` lists what it is about to trust** before it asks: every
   `command` hook and its event, every MCP server with the unpinned ones named,
   every skill whose front matter pre-approves the shell, and every `[policy]`
   rule that grants more than it looks like. `--dry-run` prints it and trusts
   nothing; `--yes` skips the prompt. It reports and refuses nothing, and a
   repository that declares none of this says so in one line.
-- **`vibeplane check` reports a rule that grants more than it looks like.**
+- **`devplane check` reports a rule that grants more than it looks like.**
   `Bash(python:*)` reads as a permission for one interpreter and approves
   `python -c '…'`. Claude Code reads it the same way, so this is reported and
   **not** refused. Two shapes only — the interpreter alone, and the code flag
   with a wildcard after it — so `Bash(python -m pytest *)` stays quiet. In
   `--json` as `overbroad`.
-- **`vibeplane check` reports rules that provably do nothing**: an `auto_allow`
+- **`devplane check` reports rules that provably do nothing**: an `auto_allow`
   a `never_auto` already covers, and a rule an earlier one in the same list
   covers. Answered by pattern containment, so `Read(.env)` is reported as
   covered by `Read(*.env)`. Silent on anything it cannot prove. In `--json` as
@@ -212,7 +288,7 @@ point of **Fixed**. The decision log gains a column and keeps its rows.
 
 ### Changed
 
-- **`vibeplane diagnostics` is now `vibeplane doctor`**, which is what the
+- **`devplane diagnostics` is now `devplane doctor`**, which is what the
   documentation has always called it. Both spellings still work.
 - **The board reads as a table again.** Costs and context percentages sat behind
   a cell with no width, so one session on `cli` rather than `claude-vscode`
@@ -233,7 +309,7 @@ point of **Fixed**. The decision log gains a column and keeps its rows.
 ## 0.3.0 — 2026-09-15
 
 The permission gate runs as a `command` hook instead of reaching the daemon, and
-several rules decide differently. **Run `vibeplane connect claude` after
+several rules decide differently. **Run `devplane connect claude` after
 upgrading**: the old hook entries are installed and do not decide.
 
 ### Added
@@ -242,7 +318,7 @@ upgrading**: the old hook entries are installed and do not decide.
   open issues and pull requests through `gh`, a few seconds after it starts and
   every five minutes after. Project headings carry `· 4 issues · 2 PRs (1 needs
   you)`; `g` or the counts themselves open both lists on the board, and
-  `vibeplane issues` and `vibeplane prs` print them. **Nothing is written to
+  `devplane issues` and `devplane prs` print them. **Nothing is written to
   GitHub** — every action is a link.
 - **What GitHub is waiting on you for is in the inbox**: an issue assigned to
   you, a review requested from you, and your own pull request that is red,
@@ -257,24 +333,24 @@ upgrading**: the old hook entries are installed and do not decide.
 - **A client restarts a daemon older than itself.** `/healthz` names the
   daemon's version; every command compares it to its own and restarts a stale
   one instead of hitting routes it does not have. Two releases of
-  `vibeplane audit` and `vibeplane attention` answered 404 on machines that had
+  `devplane audit` and `devplane attention` answered 404 on machines that had
   upgraded without restarting.
-- **`vibeplane doctor` runs the gate** with a probe call and reports whether it
+- **`devplane doctor` runs the gate** with a probe call and reports whether it
   answered and how fast, instead of checking that a settings line exists. The
   probe is recorded nowhere.
-- `vibeplane doctor` reports how many decisions are waiting in the spool.
+- `devplane doctor` reports how many decisions are waiting in the spool.
 - **A `gate_down` inbox item**, critical, raised when the daemon's periodic
   probe finds the installed gate not answering. No hook can enforce its own
   presence, so a broken one is otherwise indistinguishable from a quiet machine.
-- `vibeplane explain` says why nothing answered: no rules here, rules that will
-  not load, or rules that loaded and did not match. A `vibeplane.toml` that
+- `devplane explain` says why nothing answered: no rules here, rules that will
+  not load, or rules that loaded and did not match. A `devplane.toml` that
   fails to parse is reported with its error.
 - **The board is usable with a screen reader.** Every state glyph has a word
   beside it, the inbox, board and work sections are lists, every overlay is a
   dialog that gives focus back to whatever opened it, and there is one live
   region — polite, and silent unless its sentence changes. Each rule has a
   test.
-- **`VIBEPLANE_UI` serves the board from a file on disk** instead of the copy
+- **`DEVPLANE_UI` serves the board from a file on disk** instead of the copy
   compiled into the binary, so working on the page is edit-and-reload rather
   than rebuild-and-restart. `just ui` is that with the path filled in. The
   board is also served `Cache-Control: no-store`, so a reload gets the page
@@ -282,14 +358,14 @@ upgrading**: the old hook entries are installed and do not decide.
 - **The status line reads the rest of its payload.** The session's model, its
   Claude Code version, the context window's size, every rate-limit window with
   its reset time — including the gateway spend limit — the session cost and the
-  lines it changed. `vibeplane show` prints them; the shim is still optional.
-- **`vibeplane doctor` gains a `gate` section**: the Claude Code release the
+  lines it changed. `devplane show` prints them; the shim is still optional.
+- **`devplane doctor` gains a `gate` section**: the Claude Code release the
   matcher was tested against, and any session observed running a newer one.
 - **`findings.only`** on a pipeline step: words that make a finding worth
   returning the work for. A findings file with no matching line is *nothing
   found*. For reporters that grade what they find, such as a spec-driven
   tool's analyser.
-- `VIBEPLANE_DIFF_AXIS=dialect` runs the `PowerShell`, `Monitor` and `LSP`
+- `DEVPLANE_DIFF_AXIS=dialect` runs the `PowerShell`, `Monitor` and `LSP`
   shapes against this matcher and prints a checklist to put to a running Claude
   Code. It is not a measurement and says so in its output.
 
@@ -297,10 +373,10 @@ upgrading**: the old hook entries are installed and do not decide.
 
 - **The gate decides in its own process and no longer needs the daemon.** An
   unreachable HTTP hook is a non-blocking error Claude Code walks past, so
-  every rule was inert whenever the daemon was stopped. `vibeplane doctor`
+  every rule was inert whenever the daemon was stopped. `devplane doctor`
   reports an HTTP gate as out of date.
 - **A decision taken with no daemon is spooled** to
-  `~/.vibeplane/pending-decisions.jsonl` and filed at the next start. Capped at
+  `~/.devplane/pending-decisions.jsonl` and filed at the next start. Capped at
   20 000 rows, oldest dropped. Observations are not spooled.
 - **A glob in a command's operands reaches a path deny.** `Read(.env)` now
   stops `cat .en?`, `cat .env*`, `head -c3 .en?` and `cat .en[v]`. A wildcard
@@ -310,17 +386,17 @@ upgrading**: the old hook entries are installed and do not decide.
 - **An allow rule must cover at least one part of a command.** A rule matching
   nothing no longer approves a command made entirely of read-only parts, and no
   verdict names a rule that did not fire.
-- **`vibeplane explain` reads `~/.vibeplane/policy.toml`** as well as the
+- **`devplane explain` reads `~/.devplane/policy.toml`** as well as the
   project's rules, so it answers for the gate rather than for half of it.
-- **`vibeplane.toml` is found without git.** A directory with no repository
+- **`devplane.toml` is found without git.** A directory with no repository
   above it is governed by the file sitting in it. Inside a repository the root
   still wins.
-- **`vibeplane work issues` is gone; `vibeplane issues --ready` replaces it.**
+- **`devplane work issues` is gone; `devplane issues --ready` replaces it.**
   `--label` and `--cwd` imply `--ready`.
 - **GitHub Copilot's `powershell` tool is reported as `PowerShell`**, not
   `Bash`, so its commands are matched as PowerShell rather than parsed by a
   POSIX shell parser.
-- `vibeplane check` labels an exception `except` rather than by the list it
+- `devplane check` labels an exception `except` rather than by the list it
   subtracts from.
 - A rule is suggested for every command tool, not only `Bash`.
 
@@ -378,7 +454,7 @@ upgrading**: the old hook entries are installed and do not decide.
 - **The gate's own probe could reach the board.** The hook declines to report
   the probe call `doctor` and the daemon's timer make, but the daemon did not
   decline to *file* one — so a probe spooled by an earlier build arrived at
-  the next start as a `vibeplane-probe-<pid>` project, a working session and
+  the next start as a `devplane-probe-<pid>` project, a working session and
   two audit rows. Both receivers now drop the probe session, and a start
   forgets any rows an earlier build left.
 - **Every value the board prints is escaped.** Session names, branch names,
@@ -396,10 +472,10 @@ upgrading**: the old hook entries are installed and do not decide.
   long turn on a machine that had not run `connect` was a stall. A stall is
   now raised only for a session that reports.
 - Two sessions of one project with the same short name printed the same
-  label twice on `vibeplane ls`; a repeated label now falls back to the id.
+  label twice on `devplane ls`; a repeated label now falls back to the id.
 - The protocol conformance tests wrote their fixture's session files into the
   repository they ran from — 847 of them — instead of a scratch directory.
-- **`vibeplane inbox` failed to decode any item without a session** — a piece of
+- **`devplane inbox` failed to decode any item without a session** — a piece of
   work whose runs have ended, which is the ordinary case for a pull request
   going red later. The command printed a decoding error instead of the inbox.
 - **`max_runtime` never fired.** The elapsed time was computed through a string
@@ -410,8 +486,8 @@ upgrading**: the old hook entries are installed and do not decide.
 
 ### Removed
 
-- The `/vibeplane/policy` and `/vibeplane/copilot/gate` endpoints. The process
-  that enforces a verdict records it through `/vibeplane/decided`.
+- The `/devplane/policy` and `/devplane/copilot/gate` endpoints. The process
+  that enforces a verdict records it through `/devplane/decided`.
 
 ## 0.2.0 — 2026-09-15
 
@@ -421,16 +497,16 @@ existing `never_auto` rule cover less than it did.
 
 ### Added
 
-- `vibeplane explain --replay` — replays every tool call already observed against
+- `devplane explain --replay` — replays every tool call already observed against
   the current rules, and names the rule that would answer the ones that reached
   you. Offline; `--dir` scopes it to one project.
-- `vibeplane doctor` names the model provider, and on Bedrock, Google Cloud's
+- `devplane doctor` names the model provider, and on Bedrock, Google Cloud's
   Agent Platform, Microsoft Foundry, a Console key or a gateway says which of
   Claude Code's own supervision surfaces are unavailable there.
-- Permission items in `vibeplane inbox` name the rule that would have answered
+- Permission items in `devplane inbox` name the rule that would have answered
   them.
 - A pipeline `review` step falls back to the repository's `REVIEW.md`.
-- `vibeplane check` notes when a `Read(path)` deny has no `Edit(path)` beside it.
+- `devplane check` notes when a `Read(path)` deny has no `Edit(path)` beside it.
 - `just rows` checks every rule-relevant row of Claude Code's changelog against
   a committed ledger; `just perms-allow` and `just perms-deny` run one half of
   the differential harness.
@@ -455,12 +531,12 @@ existing `never_auto` rule cover less than it did.
 - No allow rule approves a command behind `env`, `eval`, `sudo`, `doas` or
   `exec`. Deny rules see through them, which is stricter than Claude Code and
   deliberate.
-- `vibeplane ls` says why the cost and context columns are blank when nothing is
+- `devplane ls` says why the cost and context columns are blank when nothing is
   connected.
 
 ### Fixed
 
-- **`vibeplane open` served a board that never loaded.** Two `const hit` in one
+- **`devplane open` served a board that never loaded.** Two `const hit` in one
   block scope is a `SyntaxError`, so the whole script failed to parse: the page
   rendered its chrome, said "connecting", and fetched nothing. The board's
   script is now parsed by the test suite.

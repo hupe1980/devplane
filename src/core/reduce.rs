@@ -84,6 +84,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                 tool: tool.clone(),
                 at: env.at,
                 ok: None,
+                input: Some(input.clone()),
             });
             if run.recent_tools.len() > RECENT_TOOLS {
                 run.recent_tools.remove(0);
@@ -100,6 +101,10 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                 .find(|c| c.tool == *tool && c.ok.is_none())
             {
                 last.ok = Some(*ok);
+                // The input is kept only while the call is in flight: it is
+                // there so a *blocked* run can say what it is blocked on, and
+                // `RECENT_TOOLS` of them would be a log nobody asked for.
+                last.input = None;
             }
             if !ok {
                 run.totals.errors += 1;
@@ -118,7 +123,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             // A refusal is counted, because a refused agent does not stop. It
             // tries something else, and then something else again, and the
             // only outward sign of a rule that is too tight is a run that
-            // costs more and finishes worse. `deny` is Vibeplane's own verdict
+            // costs more and finishes worse. `deny` is Devplane's own verdict
             // and Claude Code's auto-mode denial; `reject_once`/`reject_always`
             // are the protocol's spellings when a person refuses.
             if decision.starts_with("deny") || decision.starts_with("reject") {
@@ -143,7 +148,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         }
 
         // Not a property of the run; recorded so `doctor` can say the settings
-        // Vibeplane depends on were edited, and when.
+        // Devplane depends on were edited, and when.
         Event::ConfigChanged { .. } => {}
 
         // An observed session's own task list. A driven run gets its plan over
@@ -165,6 +170,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             message,
             request_id,
             options,
+            call,
         } => {
             // `idle_prompt` means the turn ended and nobody has typed since. It
             // is not a question, so it must not outrank one: a run already
@@ -180,8 +186,19 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                     waiting_for: waiting_for.clone(),
                     message: message.clone(),
                     request_id: request_id.clone(),
-                    tool: last_pending_tool(run),
-                    input: None,
+                    // **The event first, the run's in-flight call second.**
+                    // `BlockedOn::input` was `None` at every site, which made
+                    // it a field the type documented and nothing ever set —
+                    // and the one consumer, the rule offered on a permission
+                    // item, silently did nothing for every watched session.
+                    tool: call
+                        .as_ref()
+                        .map(|c| c.tool.clone())
+                        .or_else(|| last_pending_tool(run).map(|c| c.tool.clone())),
+                    input: call
+                        .as_ref()
+                        .map(|c| c.input.clone())
+                        .or_else(|| last_pending_tool(run).and_then(|c| c.input.clone())),
                     options: options.clone(),
                     since: env.at,
                 });
@@ -450,12 +467,8 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
 /// The tool a pending permission most likely refers to: the newest tool call
 /// that has not reported a result. A permission prompt arrives between the
 /// `PreToolUse` hook and the tool running, so the pending call is the subject.
-fn last_pending_tool(run: &Run) -> Option<String> {
-    run.recent_tools
-        .iter()
-        .rev()
-        .find(|c| c.ok.is_none())
-        .map(|c| c.tool.clone())
+fn last_pending_tool(run: &Run) -> Option<&ToolCall> {
+    run.recent_tools.iter().rev().find(|c| c.ok.is_none())
 }
 
 /// A one-line description of what a tool call is doing, for the board.
@@ -668,6 +681,7 @@ mod tests {
                 message: Some("Bash wants to run".into()),
                 request_id: None,
                 options: vec![],
+                call: None,
             }),
         );
         apply(
@@ -677,6 +691,7 @@ mod tests {
                 message: None,
                 request_id: None,
                 options: vec![],
+                call: None,
             }),
         );
         assert_eq!(r.state, RunState::Waiting(WaitingFor::Permission));
@@ -692,6 +707,7 @@ mod tests {
                 message: None,
                 request_id: None,
                 options: vec![],
+                call: None,
             }),
         );
         apply(&mut r, &ev(Event::PromptSubmitted { chars: 12 }));
@@ -778,7 +794,7 @@ mod tests {
 
     #[test]
     fn an_interactive_row_populates_the_board_before_any_hook() {
-        // This is what makes `vibeplane ls` useful the moment it is installed:
+        // This is what makes `devplane ls` useful the moment it is installed:
         // the roster lists every live session, not only background ones.
         let mut r = run();
         apply(&mut r, &ev(roster("interactive", Some("busy"))));
@@ -821,6 +837,7 @@ mod tests {
                 message: Some("rm -rf node_modules".into()),
                 request_id: Some("req-1".into()),
                 options: vec![],
+                call: None,
             }),
         );
         assert!(r.state.needs_human());

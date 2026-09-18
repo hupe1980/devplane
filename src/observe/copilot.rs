@@ -7,21 +7,21 @@
 //!
 //! *Only a `command` hook fails closed.* An HTTP `preToolUse` hook falls
 //! through to the default permission flow on any error, so a prohibition sent
-//! that way evaporates under load. The deciding events ride `vibeplane hook`;
+//! that way evaporates under load. The deciding events ride `devplane hook`;
 //! the informational ones stay on HTTP, where a process per tool call would
 //! cost something for nothing. (Loopback HTTP is available with
 //! `COPILOT_HOOK_ALLOW_LOCALHOST=1`, so the reason is the failure mode rather
 //! than the transport.)
 //!
 //! *A hook timeout is fail-open on every event*, administrator policy hooks
-//! included. A slow Vibeplane here is not one that blocks the session; it is
+//! included. A slow Devplane here is not one that blocks the session; it is
 //! one that was not consulted.
 //!
 //! *The tool vocabulary is Copilot's own* — `bash`, `view`, `create` — mapped
 //! below to the names the policy already speaks. That mapping is the only
 //! translation in this module and deliberately the only one: rules are never
 //! rewritten into Copilot's `--allow-tool` vocabulary, because a rule written
-//! into somebody else's configuration cannot be read back by `vibeplane audit`.
+//! into somebody else's configuration cannot be read back by `devplane audit`.
 
 use crate::core::event::Event;
 use serde::{Deserialize, Serialize};
@@ -111,7 +111,7 @@ impl HookPayload {
     }
 }
 
-/// What one Copilot hook payload means, in Vibeplane's own event model.
+/// What one Copilot hook payload means, in Devplane's own event model.
 ///
 /// Smaller than the Claude mapping because Copilot publishes fewer events that
 /// say anything new: no `PostCompact`, no model switch, no elicitation pair, no
@@ -233,9 +233,9 @@ pub fn hooks_dir() -> Option<std::path::PathBuf> {
 }
 
 /// The one file `connect copilot` writes, and `disconnect copilot` deletes.
-pub const HOOKS_FILE: &str = "vibeplane.json";
+pub const HOOKS_FILE: &str = "devplane.json";
 
-/// The hook registration: one file, entirely Vibeplane's.
+/// The hook registration: one file, entirely Devplane's.
 ///
 /// Copilot loads every `*.json` in `~/.copilot/hooks/`, so the whole
 /// installation can be written and removed without touching a line the user
@@ -269,7 +269,7 @@ pub fn hooks_file(base_url: &str, token: &str, exe: &std::path::Path) -> Value {
             event.into(),
             json!([{
                 "type": "http",
-                "url": format!("{base_url}/vibeplane/copilot/hook?event={event}"),
+                "url": format!("{base_url}/devplane/copilot/hook?event={event}"),
                 "headers": { "Authorization": format!("Bearer {token}") },
                 "timeoutSec": 5,
             }]),

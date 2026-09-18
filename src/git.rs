@@ -2,12 +2,12 @@
 //!
 //! Mutations go through the `git` command rather than a library, deliberately.
 //! Claude Code creates its worktrees with `git worktree`, the user creates
-//! theirs by hand with `git worktree`, and Vibeplane creating them a third way
+//! theirs by hand with `git worktree`, and Devplane creating them a third way
 //! would produce checkouts that behave subtly differently from both. Parity
 //! with what everyone else does is worth more here than a few milliseconds.
 //!
 //! The location follows Claude Code's convention — `.claude/worktrees/<name>` —
-//! so a worktree Vibeplane made and one Claude made are indistinguishable, and
+//! so a worktree Devplane made and one Claude made are indistinguishable, and
 //! Claude's own cleanup sweep understands both.
 
 use anyhow::{Context, Result, bail};
@@ -268,6 +268,82 @@ pub async fn remove_worktree(root: &Path, dir: &Path, force: bool) -> Result<()>
 /// Every repository-relative path this checkout has touched since it diverged
 /// from `base` — committed on the branch, staged, or still dirty.
 ///
+/// What a work's branch changed, relative to what it branched from.
+///
+/// **Three-dot, for `touched_files`' reason.** `<base>...HEAD` diffs against the
+/// merge base, so a `base` that has moved on since the worktree was made does
+/// not report everybody else's commits as this branch's work. Two dots would
+/// make every review show the whole of `main`.
+///
+/// Uncommitted work is included on purpose: a reviewer approving a held step is
+/// approving the checkout as it stands, and an agent that has not committed yet
+/// has still changed the file. That is the same reason `touched_files` adds
+/// `git status`, arrived at from the review side rather than the overlap side.
+///
+/// The rendering is somebody else's job — this returns the text and the command
+/// that produced it, and `core::diff` is pure so it can be tested without a
+/// repository.
+pub async fn change_set(dir: &Path, base: &str) -> crate::core::diff::ChangeSet {
+    let range = format!("{base}...HEAD");
+    // `--find-renames` so a moved file reads as moved rather than as one whole
+    // file deleted and another added, which is the single biggest source of
+    // noise in a review.
+    let args = ["diff", "--find-renames", "--no-color", &range];
+    let committed = git(dir, &args).await.unwrap_or_default();
+    // And what is not committed yet, against the working tree.
+    let working = git(dir, &["diff", "--find-renames", "--no-color", "HEAD"])
+        .await
+        .unwrap_or_default();
+    // **And the files git has never seen.** `git diff` reports tracked changes
+    // only, so a file the agent *created* is invisible to both diffs above —
+    // which is the worst possible omission for a view whose whole purpose is
+    // that approving work you cannot see is not approval. Caught by the test
+    // for this route, on the first run.
+    //
+    // `--no-index` rather than `git add -N`: intent-to-add would mutate the
+    // index of somebody's checkout to render a page, and a read must not write.
+    let mut untracked = String::new();
+    if let Ok(list) = git(dir, &["ls-files", "--others", "--exclude-standard"]).await {
+        for path in list.lines().filter(|l| !l.is_empty()).take(MAX_UNTRACKED) {
+            // `--no-index` exits 1 whenever the files differ, which for a new
+            // file is always, so the status is not an error here.
+            let out = tokio::process::Command::new("git")
+                .args(["diff", "--no-color", "--no-index", "--", "/dev/null", path])
+                .current_dir(dir)
+                .kill_on_drop(true)
+                .output()
+                .await;
+            if let Ok(o) = out {
+                untracked.push_str(&String::from_utf8_lossy(&o.stdout));
+            }
+        }
+    }
+
+    let text = format!("{committed}{working}{untracked}");
+    let mut set = crate::core::diff::parse(base, &text, &format!("git diff {range}"));
+    // A binary file has no lines to show, so its size is the only thing the
+    // view can say about it. `git diff` does not print one — it says the files
+    // differ and stops — and the parser is pure, so the stat happens here. A
+    // deleted binary has nothing left to measure and keeps saying just
+    // *binary*, which is true.
+    for f in &mut set.files {
+        if let crate::core::diff::Body::Binary { bytes } = &mut f.body {
+            *bytes = tokio::fs::metadata(dir.join(&f.path))
+                .await
+                .ok()
+                .map(|m| m.len());
+        }
+    }
+    set
+}
+
+/// How many never-seen files are diffed individually.
+///
+/// One process each, so this is a bound on work rather than on output. Past it
+/// the change set is truncated and says so, which is the same answer the file
+/// bound gives.
+const MAX_UNTRACKED: usize = 40;
+
 /// Used to answer a question no single piece of work can answer about itself:
 /// whether somebody else is editing the same file right now.
 ///
@@ -305,7 +381,7 @@ pub async fn touched_files(dir: &Path, base: &str) -> Vec<String> {
 /// already in the worktree.
 ///
 /// Paths that leave the repository are refused, **by spelling and by symlink**.
-/// `vibeplane.toml` is committed, so it arrives with somebody else's code, and
+/// `devplane.toml` is committed, so it arrives with somebody else's code, and
 /// `include = ["../../.ssh/id_rsa"]` would otherwise copy a private key into a
 /// directory an agent is about to read. A symlink is not a spelling, and git
 /// tracks symlinks, so both ends are resolved rather than read:
@@ -529,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn a_symlinked_include_cannot_smuggle_a_file_out_of_the_repository() {
         // The lexical check in `within` is about the *spelling* of a path, and
-        // a symlink is not a spelling. `vibeplane.toml` arrives with somebody
+        // a symlink is not a spelling. `devplane.toml` arrives with somebody
         // else's code and git tracks symlinks, so a repository can ship
         // `config/local.env -> /home/you/.ssh/id_rsa` and name it in
         // `[workspace] include`. Following it would copy a private key into the
@@ -587,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_include_cannot_reach_outside_the_repository() {
-        // `vibeplane.toml` is committed, so it arrives with somebody else's
+        // `devplane.toml` is committed, so it arrives with somebody else's
         // code. A path that escapes the root would copy a private key into a
         // directory an agent is about to read.
         let root = scratch_repo("escape").await;

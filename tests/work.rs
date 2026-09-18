@@ -1,15 +1,15 @@
 //! The verified-done loop, against a real repository.
 //!
 //! This is the product's central claim, so the test does the real thing: a git
-//! repository with a committed `vibeplane.toml`, a gate command that genuinely
+//! repository with a committed `devplane.toml`, a gate command that genuinely
 //! fails, a worktree, and an agent that claims success without earning it.
 
 mod common;
 
+use devplane::core::Policy;
+use devplane::daemon::{AppState, Shared};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use vibeplane::core::Policy;
-use vibeplane::daemon::{AppState, Shared};
 
 /// A repository whose gate fails until `fixed.txt` exists.
 fn scratch_repo(tag: &str, on_fail: &str, rounds: u32) -> PathBuf {
@@ -30,7 +30,7 @@ fn scratch_repo(tag: &str, on_fail: &str, rounds: u32) -> PathBuf {
     git(&["config", "user.email", "t@example.com"]);
     git(&["config", "user.name", "Test"]);
     std::fs::write(
-        dir.join("vibeplane.toml"),
+        dir.join("devplane.toml"),
         format!(
             r#"
 [gates]
@@ -55,7 +55,7 @@ max_feedback_rounds = {rounds}
     dir.canonicalize().unwrap()
 }
 
-/// A repository whose `vibeplane.toml` declares a pipeline.
+/// A repository whose `devplane.toml` declares a pipeline.
 fn pipeline_repo(tag: &str, pipeline: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "vp-pipe-{tag}-{}-{}",
@@ -73,7 +73,7 @@ fn pipeline_repo(tag: &str, pipeline: &str) -> PathBuf {
     git(&["init", "-q", "-b", "main"]);
     git(&["config", "user.email", "t@example.com"]);
     git(&["config", "user.name", "Test"]);
-    std::fs::write(dir.join("vibeplane.toml"), pipeline).unwrap();
+    std::fs::write(dir.join("devplane.toml"), pipeline).unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-qm", "init"]);
     dir.canonicalize().unwrap()
@@ -127,7 +127,7 @@ async fn boot() -> (std::net::SocketAddr, reqwest::Client, Daemon) {
     )
     .await
     .unwrap();
-    let app = vibeplane::api::router(state.clone());
+    let app = devplane::api::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.ok() });
@@ -243,7 +243,7 @@ async fn an_untrusted_project_will_not_host_an_agent() {
     .await;
     let err = res["error"].as_str().unwrap_or_default();
     assert!(err.contains("not trusted"), "got {err:?}");
-    assert!(err.contains("vibeplane trust"), "and says how to fix it");
+    assert!(err.contains("devplane trust"), "and says how to fix it");
 
     // Nothing was created on the way to refusing.
     assert!(!repo.join(".claude/worktrees").exists());
@@ -299,6 +299,28 @@ async fn a_claim_of_done_that_fails_the_gates_does_not_become_done() {
             .iter()
             .any(|f| f.as_str().unwrap_or("").contains("auth::login")),
         "the failure the human sees is the one the runner printed"
+    );
+
+    // T006 — and the *current* verdict carries its own evidence, so a reviewer
+    // does not have to reach into the history and work out which element is the
+    // last one. `passed` lives on this object for the same reason: the board
+    // once re-derived it from exit codes and read a reproduction gate backwards.
+    let gate = &settled["gate"];
+    let commands = gate["commands"]
+        .as_array()
+        .expect("the verdict carries the commands it was reached from");
+    assert!(!commands.is_empty());
+    assert!(
+        commands
+            .iter()
+            .any(|c| c["exit_code"].as_i64().is_some_and(|code| code != 0)),
+        "a failed gate names the command that failed: {gate}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|c| !c["output_tail"].as_str().unwrap_or("").is_empty()),
+        "and what it printed — the text the agent was handed, not a summary"
     );
 
     std::fs::remove_dir_all(&repo).ok();
@@ -359,7 +381,7 @@ async fn a_project_with_no_gates_asks_a_human_rather_than_claiming_success() {
     // the definition of done that governs it is the one in the commit. That is
     // the right behaviour — a project's checks should not change because
     // somebody has an unsaved edit in another window.
-    std::fs::write(repo.join("vibeplane.toml"), "[project]\nname = \"x\"\n").unwrap();
+    std::fs::write(repo.join("devplane.toml"), "[project]\nname = \"x\"\n").unwrap();
     for args in [vec!["add", "-A"], vec!["commit", "-qm", "drop the gates"]] {
         std::process::Command::new("git")
             .args(&args)
@@ -398,7 +420,7 @@ async fn a_broken_config_stops_the_work_rather_than_being_ignored() {
     let repo = scratch_repo("badconfig", "feedback", 1);
     // The main checkout's copy is what `work start` reads, before any worktree
     // exists — so this one does not need committing.
-    std::fs::write(repo.join("vibeplane.toml"), "[gates]\nchekc = [\"true\"]\n").unwrap();
+    std::fs::write(repo.join("devplane.toml"), "[gates]\nchekc = [\"true\"]\n").unwrap();
     let (addr, c, _state) = boot().await;
     trust(&c, &addr, &repo).await;
 
@@ -413,7 +435,7 @@ async fn a_broken_config_stops_the_work_rather_than_being_ignored() {
         res["error"]
             .as_str()
             .unwrap_or("")
-            .contains("vibeplane.toml"),
+            .contains("devplane.toml"),
         "the error names the file: {res}"
     );
     std::fs::remove_dir_all(&repo).ok();
@@ -793,8 +815,8 @@ steps = [
 #[tokio::test]
 async fn a_driven_run_keeps_the_conversation_it_is_the_only_window_for() {
     // A session somebody started in a terminal already has a window showing its
-    // transcript, and Vibeplane's honest action for it is `focus`. A run
-    // Vibeplane *drives* has no other window: without this, `dispatch` can say
+    // transcript, and Devplane's honest action for it is `focus`. A run
+    // Devplane *drives* has no other window: without this, `dispatch` can say
     // that a tool ran and not one word about why.
     let Some(agent) = echo_agent() else { return };
     let repo = scratch_repo("said", "escalate", 0);
@@ -833,7 +855,7 @@ async fn a_driven_run_keeps_the_conversation_it_is_the_only_window_for() {
     }
 
     // It starts with the ask. A transcript that begins with the answer is half
-    // a conversation, and the prompt is the one thing Vibeplane always knows.
+    // a conversation, and the prompt is the one thing Devplane always knows.
     assert_eq!(said[0]["role"], "user", "{said:?}");
     assert!(said[0]["text"].as_str().unwrap().contains("use a tool"));
 
@@ -1028,14 +1050,14 @@ async fn snoozing_work_actually_quietens_it() {
     let (addr, c, state) = boot().await;
     trust(&c, &addr, &repo).await;
 
-    let mut work = vibeplane::core::Work::new(
-        vibeplane::core::ProjectId::from_path(&repo),
-        vibeplane::core::WorkKind::Bug,
+    let mut work = devplane::core::Work::new(
+        devplane::core::ProjectId::from_path(&repo),
+        devplane::core::WorkKind::Bug,
         "flaky login test".into(),
         "fix it".into(),
     );
-    work.phase = vibeplane::core::Phase::Review;
-    work.pull_request = Some(vibeplane::core::work::PullRequestRef {
+    work.phase = devplane::core::Phase::Review;
+    work.pull_request = Some(devplane::core::work::PullRequestRef {
         number: 7,
         url: "https://github.com/acme/app/pull/7".into(),
         status: "failing".into(),
@@ -1107,14 +1129,14 @@ async fn a_red_pull_request_reaches_the_inbox_after_the_agent_is_gone() {
     trust(&c, &addr, &repo).await;
 
     // A finished piece of work with a pull request, and no live session at all.
-    let mut work = vibeplane::core::Work::new(
-        vibeplane::core::ProjectId::from_path(&repo),
-        vibeplane::core::WorkKind::Bug,
+    let mut work = devplane::core::Work::new(
+        devplane::core::ProjectId::from_path(&repo),
+        devplane::core::WorkKind::Bug,
         "fix the flaky login test".into(),
         "fix it".into(),
     );
-    work.phase = vibeplane::core::Phase::Review;
-    work.pull_request = Some(vibeplane::core::work::PullRequestRef {
+    work.phase = devplane::core::Phase::Review;
+    work.pull_request = Some(devplane::core::work::PullRequestRef {
         number: 142,
         url: "https://github.com/acme/app/pull/142".into(),
         status: "failing".into(),
@@ -1167,13 +1189,13 @@ async fn an_approved_and_green_pull_request_asks_for_nothing() {
     // decisions. An inbox that lists finished work stops being read.
     let repo = scratch_repo("prquiet", "escalate", 0);
     let (addr, c, state) = boot().await;
-    let mut work = vibeplane::core::Work::new(
-        vibeplane::core::ProjectId::from_path(&repo),
-        vibeplane::core::WorkKind::Quick,
+    let mut work = devplane::core::Work::new(
+        devplane::core::ProjectId::from_path(&repo),
+        devplane::core::WorkKind::Quick,
         "done and dusted".into(),
         "x".into(),
     );
-    work.pull_request = Some(vibeplane::core::work::PullRequestRef {
+    work.pull_request = Some(devplane::core::work::PullRequestRef {
         number: 9,
         url: "u".into(),
         status: "ready_to_merge".into(),
@@ -1199,7 +1221,7 @@ async fn an_approved_and_green_pull_request_asks_for_nothing() {
 
 #[tokio::test]
 async fn a_projects_own_rules_decide_its_agents() {
-    // `[policy]` in vibeplane.toml was parsed and then ignored, which is worse
+    // `[policy]` in devplane.toml was parsed and then ignored, which is worse
     // than not offering it: a rule someone wrote did nothing at all.
     //
     // Driven through the binary rather than an HTTP handler, because that is
@@ -1207,7 +1229,7 @@ async fn a_projects_own_rules_decide_its_agents() {
     // daemon cannot switch every prohibition off without saying so.
     let repo = scratch_repo("policy", "escalate", 0);
     std::fs::write(
-        repo.join("vibeplane.toml"),
+        repo.join("devplane.toml"),
         "[policy]\nauto_allow = [\"Bash(echo *)\"]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
     )
     .unwrap();
@@ -1227,9 +1249,9 @@ async fn a_projects_own_rules_decide_its_agents() {
             "tool_input": { "command": command }
         })
         .to_string();
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_vibeplane"))
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
             .arg("hook")
-            .env("VIBEPLANE_HOME", &home)
+            .env("DEVPLANE_HOME", &home)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -1268,7 +1290,7 @@ async fn a_projects_parallelism_limit_is_enforced() {
     let Some(agent) = echo_agent() else { return };
     let repo = scratch_repo("parallel", "escalate", 0);
     std::fs::write(
-        repo.join("vibeplane.toml"),
+        repo.join("devplane.toml"),
         "[policy]\nmax_parallel_runs = 1\n",
     )
     .unwrap();
@@ -1308,14 +1330,14 @@ async fn work_stranded_by_a_restart_says_so() {
     let repo = scratch_repo("stranded", "escalate", 0);
     let (addr, c, state) = boot().await;
 
-    let mut work = vibeplane::core::Work::new(
-        vibeplane::core::ProjectId::from_path(&repo),
-        vibeplane::core::WorkKind::Quick,
+    let mut work = devplane::core::Work::new(
+        devplane::core::ProjectId::from_path(&repo),
+        devplane::core::WorkKind::Quick,
         "half-finished".into(),
         "x".into(),
     );
-    work.phase = vibeplane::core::Phase::Implement;
-    work.runs.push(vibeplane::core::RunId::new("gone"));
+    work.phase = devplane::core::Phase::Implement;
+    work.runs.push(devplane::core::RunId::new("gone"));
     state.works.lock().await.insert(work.id.clone(), work);
 
     let inbox: Value = c
@@ -1369,7 +1391,7 @@ async fn a_restart_does_not_lose_the_conversation_the_work_was_having() {
         )
         .await
         .unwrap();
-        let app = vibeplane::api::router(state.clone());
+        let app = devplane::api::router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.ok() });
@@ -1387,7 +1409,7 @@ async fn a_restart_does_not_lose_the_conversation_the_work_was_having() {
             }),
         )
         .await;
-        let run_id = vibeplane::core::RunId::new(run["run_id"].as_str().unwrap());
+        let run_id = devplane::core::RunId::new(run["run_id"].as_str().unwrap());
 
         // Wait for the handshake: the agent's own session id is what resume
         // needs, and it only exists once the agent has answered.
@@ -1407,13 +1429,13 @@ async fn a_restart_does_not_lose_the_conversation_the_work_was_having() {
         }
         let agent_session = named.expect("the agent named its session, and we recorded it");
 
-        let mut work = vibeplane::core::Work::new(
-            vibeplane::core::ProjectId::from_path(&repo),
-            vibeplane::core::WorkKind::Quick,
+        let mut work = devplane::core::Work::new(
+            devplane::core::ProjectId::from_path(&repo),
+            devplane::core::WorkKind::Quick,
             "half-finished".into(),
             "x".into(),
         );
-        work.phase = vibeplane::core::Phase::Implement;
+        work.phase = devplane::core::Phase::Implement;
         work.runs.push(run_id.clone());
         let id = work.id.clone();
         state.store.save_work(&work).await.unwrap();
@@ -1427,7 +1449,7 @@ async fn a_restart_does_not_lose_the_conversation_the_work_was_having() {
             .run(&run_id)
             .expect("the run exists")
             .clone();
-        snapshot.state = vibeplane::core::RunState::Working;
+        snapshot.state = devplane::core::RunState::Working;
         state.shutdown().await;
         state.store.save_run(&snapshot).await.unwrap();
         server.abort();
@@ -1443,7 +1465,7 @@ async fn a_restart_does_not_lose_the_conversation_the_work_was_having() {
     )
     .await
     .unwrap();
-    let app = vibeplane::api::router(state.clone());
+    let app = devplane::api::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.ok() });
@@ -1573,7 +1595,7 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
         )
         .await
         .unwrap();
-        let app = vibeplane::api::router(state.clone());
+        let app = devplane::api::router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.ok() });
@@ -1589,16 +1611,16 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
             serde_json::json!({ "agent": agent, "cwd": repo.to_string_lossy() }),
         )
         .await;
-        let run_id = vibeplane::core::RunId::new(run["run_id"].as_str().unwrap());
+        let run_id = devplane::core::RunId::new(run["run_id"].as_str().unwrap());
 
         // Work that is mid-flight in it.
-        let mut work = vibeplane::core::Work::new(
-            vibeplane::core::ProjectId::from_path(&repo),
-            vibeplane::core::WorkKind::Quick,
+        let mut work = devplane::core::Work::new(
+            devplane::core::ProjectId::from_path(&repo),
+            devplane::core::WorkKind::Quick,
             "half-finished".into(),
             "x".into(),
         );
-        work.phase = vibeplane::core::Phase::Implement;
+        work.phase = devplane::core::Phase::Implement;
         work.runs.push(run_id.clone());
         let id = work.id.clone();
         state.store.save_work(&work).await.unwrap();
@@ -1615,7 +1637,7 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
             .run(&run_id)
             .expect("the run exists")
             .clone();
-        snapshot.state = vibeplane::core::RunState::Working;
+        snapshot.state = devplane::core::RunState::Working;
         state.shutdown().await;
         state.store.save_run(&snapshot).await.unwrap();
         server.abort();
@@ -1631,7 +1653,7 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
     )
     .await
     .unwrap();
-    let app = vibeplane::api::router(state.clone());
+    let app = devplane::api::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.ok() });
@@ -1762,6 +1784,34 @@ steps = [
     )
     .await;
     assert_eq!(released["released"], "merge", "{released}");
+
+    // T021 — and the release is **recorded as a person's decision**. The work
+    // view offers this button, so the audit trail has to say who released it:
+    // `devplane audit` answers *what was decided and on whose authority*, and a
+    // human step released with no row would be the one decision missing from it.
+    let log: Value = c
+        .get(format!("http://{addr}/api/decisions"))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = log.as_array().cloned().unwrap_or_default();
+    let row = rows
+        .iter()
+        .find(|d| d["action"] == "work:advance")
+        .unwrap_or_else(|| panic!("no release in the decision log: {log}"));
+    assert_eq!(
+        row["actor"], "human",
+        "a person released it, and the log says so"
+    );
+    assert_eq!(row["work_id"], held["id"]);
+    assert!(
+        row["reason"].as_str().unwrap_or("").contains("released"),
+        "\"done\" is not an answer; \"released the `feature` pipeline\" is: {row}"
+    );
 
     let done = await_phase(&c, &addr, &["review", "failed"]).await;
     assert_eq!(done["phase"], "review");
@@ -1928,7 +1978,7 @@ steps = [
     // so the fixture writes down what it was told, and that is what proves the
     // reviewer's words reached the agent that has to act on them.
     let worktree = PathBuf::from(settled["worktree"].as_str().unwrap());
-    let heard = std::fs::read_to_string(worktree.join(".vibeplane/heard.log")).unwrap_or_default();
+    let heard = std::fs::read_to_string(worktree.join(".devplane/heard.log")).unwrap_or_default();
     let turns: Vec<&str> = heard
         .split("\n---\n")
         .filter(|t| !t.trim().is_empty())
@@ -1947,19 +1997,19 @@ steps = [
     std::fs::remove_dir_all(&repo).ok();
 }
 
-/// A standing grant is the one decision whose consequences Vibeplane never
+/// A standing grant is the one decision whose consequences Devplane never
 /// sees, so it has to be the one the log is clearest about.
 ///
 /// "Allow always" lives inside the *agent's* session: every later call it
-/// covers is approved there, and no request for those ever reaches Vibeplane.
-/// Recorded as a plain "allow" it would leave `vibeplane audit` answering
+/// covers is approved there, and no request for those ever reaches Devplane.
+/// Recorded as a plain "allow" it would leave `devplane audit` answering
 /// "why did that command run without anybody being asked?" with silence —
 /// which is the question the decision log exists for
 /// ([arXiv:2606.22504](https://arxiv.org/abs/2606.22504) calls this lingering
 /// authority, and recommends exactly this: make the scope visible).
 #[test]
 fn a_standing_grant_is_recorded_as_one() {
-    use vibeplane::core::{Actor, Decision};
+    use devplane::core::{Actor, Decision};
 
     let once = Decision::new(Actor::Human, "agent:tool.use", "Bash: pnpm test", "allow");
     let always = Decision::new(
@@ -1983,9 +2033,9 @@ fn a_standing_grant_is_recorded_as_one() {
 /// `undecided` used to be one sentence covering three different situations, and
 /// only one of them is a fact about the call.
 ///
-/// The dangerous one is a `vibeplane.toml` that will not parse: there are then
+/// The dangerous one is a `devplane.toml` that will not parse: there are then
 /// **no** rules in force, and reporting that as "no rule answers this one" is a
-/// typo in a deny rule reading as permission. `vibeplane check` had always
+/// typo in a deny rule reading as permission. `devplane check` had always
 /// printed the parse error; `explain` is the surface somebody uses *while
 /// editing the file*, so it is the one most likely to meet a broken one.
 #[test]
@@ -2000,11 +2050,11 @@ fn explain_says_why_nothing_answered() {
     std::fs::create_dir_all(&home).unwrap();
 
     let explain = |dir: &std::path::Path| -> Value {
-        let out = std::process::Command::new(env!("CARGO_BIN_EXE_vibeplane"))
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
             .args(["--json", "explain", "--dir"])
             .arg(dir)
             .arg("cat .env")
-            .env("VIBEPLANE_HOME", &home)
+            .env("DEVPLANE_HOME", &home)
             .output()
             .expect("explain runs");
         serde_json::from_slice(&out.stdout).expect("explain answers with JSON")
@@ -2018,7 +2068,7 @@ fn explain_says_why_nothing_answered() {
     // 2. A file that will not parse: the rules are NOT in force, and the
     //    difference is the whole point.
     std::fs::write(
-        dir.join("vibeplane.toml"),
+        dir.join("devplane.toml"),
         "[project]\nname=\"x\"\n[polcy]\nnever_auto=[\"Read(.env)\"]\n",
     )
     .unwrap();
@@ -2028,14 +2078,14 @@ fn explain_says_why_nothing_answered() {
     assert_eq!(r["rules"]["in_force"], false);
     assert!(
         r["rules"]["error"].as_str().unwrap().contains("polcy"),
-        "it has to name what is wrong, like `vibeplane check` does"
+        "it has to name what is wrong, like `devplane check` does"
     );
 
     // 3. Rules that load. Found without a git repository above them, which they
     //    were not: `check` read this file happily while `explain`, in the same
     //    directory, answered as though it did not exist.
     std::fs::write(
-        dir.join("vibeplane.toml"),
+        dir.join("devplane.toml"),
         "[project]\nname=\"x\"\n[policy]\nnever_auto=[\"Read(.env)\"]\n",
     )
     .unwrap();
@@ -2046,4 +2096,94 @@ fn explain_says_why_nothing_answered() {
     assert_eq!(r["rules"]["in_force"], true);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The change set, and the four answers it has to keep apart.
+///
+/// T018. A reviewer approving work is entitled to know which of these they are
+/// reading: *here is the change*, *the branch changed nothing*, *the checkout is
+/// gone*, and *there is more than this*. Rendering any two of them the same way
+/// is the failure the spec's SC-004 is about.
+#[tokio::test]
+async fn the_change_set_tells_its_four_answers_apart() {
+    let Some(agent) = echo_agent() else { return };
+    let repo = scratch_repo("changes", "escalate", 0);
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+
+    let started = post(
+        &c,
+        &addr,
+        "/api/work",
+        serde_json::json!({
+            "cwd": repo.to_string_lossy(),
+            "title": "show me the change",
+            "agent": agent,
+        }),
+    )
+    .await;
+    let id = started["work_id"].as_str().unwrap().to_string();
+    let worktree = PathBuf::from(started["work"]["worktree"].as_str().unwrap());
+    await_phase(&c, &addr, &["failed", "review"]).await;
+
+    let get = |path: String| {
+        let c = c.clone();
+        async move {
+            let r = c
+                .get(format!("http://{addr}{path}"))
+                .bearer_auth("tok")
+                .send()
+                .await
+                .unwrap();
+            let status = r.status();
+            (status, r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+
+    // 2. A branch that changed nothing is a *finding*, and the rendered form
+    //    says so in words rather than showing a blank.
+    let (status, body) = get(format!("/api/work/{id}/changes")).await;
+    assert_eq!(status, 200, "{body}");
+    if body["changes"]["files"].as_array().unwrap().is_empty() {
+        assert!(
+            body["html"].as_str().unwrap().contains("verified nothing"),
+            "an empty change set is a sentence, not a blank: {body}"
+        );
+    }
+
+    // 1. A real change is read back, with the file that carries it.
+    std::fs::write(worktree.join("reviewed.txt"), "one\ntwo\n").unwrap();
+    let (status, body) = get(format!("/api/work/{id}/changes")).await;
+    assert_eq!(status, 200);
+    let files = body["changes"]["files"].as_array().unwrap();
+    assert!(
+        files.iter().any(|f| f["path"] == "reviewed.txt"),
+        "uncommitted work counts — a reviewer approves the checkout as it stands: {body}"
+    );
+    assert!(body["html"].as_str().unwrap().contains("reviewed.txt"));
+
+    // A binary file has no lines to show, so its size is the only thing the
+    // view can say about it — and `git diff` never prints one, so this is the
+    // stat in `git::change_set` rather than anything the parser could know.
+    std::fs::write(worktree.join("logo.bin"), [0u8, 1, 2, 255, 0, b'x']).unwrap();
+    let (_, body) = get(format!("/api/work/{id}/changes")).await;
+    assert!(
+        body["html"].as_str().unwrap().contains("binary, 6 bytes"),
+        "a binary file is named with its size, not rendered as broken text: {body}"
+    );
+
+    // 3. The checkout being gone is not the same as nothing having changed.
+    std::fs::remove_dir_all(&worktree).ok();
+    let (status, body) = get(format!("/api/work/{id}/changes")).await;
+    assert_eq!(status, 404, "a missing checkout is its own answer: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("checkout"),
+        "{body}"
+    );
+
+    // 4. And a work nobody has heard of is a different 404 again.
+    let (status, _) = get("/api/work/w-nope/changes".to_string()).await;
+    assert_eq!(status, 404);
+
+    std::fs::remove_dir_all(&repo).ok();
 }

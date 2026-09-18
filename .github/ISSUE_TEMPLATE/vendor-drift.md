@@ -1,5 +1,5 @@
 ---
-name: A vendor changed something Vibeplane rides on
+name: A vendor changed something Devplane rides on
 about: A hook, roster field, telemetry attribute or ACP detail that moved in a vendor release
 title: "drift: <vendor> <version> — <what moved>"
 labels: vendor-drift
@@ -9,7 +9,7 @@ labels: vendor-drift
 
 **The changelog row or doc sentence** that describes the change (a link and the quoted text):
 
-**What Vibeplane does now** and what it should do:
+**What Devplane does now** and what it should do:
 
-**How you noticed** — `vibeplane doctor` output, an inbox item that stopped appearing, a permission
-that started prompting again, a session missing from `vibeplane ls`:
+**How you noticed** — `devplane doctor` output, an inbox item that stopped appearing, a permission
+that started prompting again, a session missing from `devplane ls`:

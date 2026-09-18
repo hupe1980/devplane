@@ -45,7 +45,7 @@ pub struct AppState {
     /// **Nothing else can report this.** A gate that has stopped deciding looks
     /// exactly like a quiet machine from the event log: no hook arrives either
     /// way. So the daemon runs the installed command on a slow timer and keeps
-    /// the answer here, and the inbox raises it — because `vibeplane doctor`
+    /// the answer here, and the inbox raises it — because `devplane doctor`
     /// only ever helps the person who thinks to run it.
     pub gate_down: Mutex<Option<String>>,
     /// What GitHub says about every registered project, from the last poll.
@@ -63,7 +63,7 @@ pub struct AppState {
     /// The two are separate frames so a subscriber never has to inspect a
     /// payload to find out which it was handed.
     pub tx: broadcast::Sender<crate::core::Frame>,
-    /// Raised by `POST /api/shutdown`, so `vibeplane stop` can ask rather than
+    /// Raised by `POST /api/shutdown`, so `devplane stop` can ask rather than
     /// signal. A request carries the bearer token and reaches the same graceful
     /// path as ctrl-c; a signal needs a pid, and a pid read from a file is a
     /// pid the operating system may have given to somebody else.
@@ -103,7 +103,7 @@ pub struct ForgeState {
 impl ForgeState {
     /// The inbox items the forge produces, across every project.
     ///
-    /// `works` is what Vibeplane opened itself: those pull requests already
+    /// `works` is what Devplane opened itself: those pull requests already
     /// raise items through their Work, and are skipped here rather than
     /// reported twice.
     pub fn items(&self, works: &[crate::core::Work]) -> Vec<crate::core::AttentionItem> {
@@ -253,8 +253,8 @@ impl AppState {
     ///
     /// Every observed session is Claude Code, because hooks and the roster are
     /// Claude Code's; a driven one is whatever was dispatched. This used to
-    /// hard-code `claude` for all of them, so a Codex or OpenCode run Vibeplane
-    /// had started itself said "claude" on the board and in `vibeplane show` —
+    /// hard-code `claude` for all of them, so a Codex or OpenCode run Devplane
+    /// had started itself said "claude" on the board and in `devplane show` —
     /// wrong about the one thing the row exists to identify.
     pub async fn ingest_as(
         &self,
@@ -331,7 +331,7 @@ impl AppState {
     /// work phase, a snooze, a gate verdict.
     ///
     /// A real event with its own name, not a `StatusSample` of all-`None`
-    /// pretending to be one: `vibeplane watch` prints what comes off this
+    /// pretending to be one: `devplane watch` prints what comes off this
     /// stream, and a reader should not have to know that an empty status sample
     /// secretly means "look again".
     pub fn notify_changed(&self) {
@@ -345,7 +345,7 @@ impl AppState {
     /// Appends a decision to the log and wakes the subscribers.
     ///
     /// Deliberately infallible from the caller's point of view: nothing that
-    /// Vibeplane does should fail because the audit trail could not be written.
+    /// Devplane does should fail because the audit trail could not be written.
     /// It is logged loudly instead, because an audit trail that is quietly not
     /// being written is worse than none at all.
     pub async fn record(&self, decision: crate::core::Decision) {
@@ -355,7 +355,7 @@ impl AppState {
         }
     }
 
-    /// The runs Vibeplane still holds a session for.
+    /// The runs Devplane still holds a session for.
     ///
     /// What "can this be driven" actually means. A run row restored from the
     /// store after a restart looks alive and has no process behind it, so the
@@ -376,17 +376,119 @@ impl AppState {
         // is the set where a missing `never_auto` is actually costing something.
         let broken_configs = self.policy.broken();
         let forge = self.forge.lock().await.items(&works);
-        let w = self.world.lock().await;
-        w.inbox_with_health(
-            &works,
-            &drivable,
-            &|dir| self.policy.stall_seconds(dir),
-            &crate::core::world::Health {
-                gate_down: gate_down.as_deref(),
-                broken_configs: &broken_configs,
-            },
-            forge,
-        )
+        let mut items = {
+            let w = self.world.lock().await;
+            w.inbox_with_health(
+                &works,
+                &drivable,
+                &|dir| self.policy.stall_seconds(dir),
+                &crate::core::world::Health {
+                    gate_down: gate_down.as_deref(),
+                    broken_configs: &broken_configs,
+                },
+                forge,
+            )
+        };
+        self.fill_offers(&mut items).await;
+        items
+    }
+
+    /// The rule to paste, on every permission item that can have one.
+    ///
+    /// **Here rather than in the item builder**, because the interesting half
+    /// of the answer is *how many calls like this one would interrupt me* and
+    /// that is a query. `core::attention` may not have one.
+    ///
+    /// Bounded twice over: nothing happens unless a permission item is open,
+    /// and the query is scoped to that call's own repository in SQL rather
+    /// than filtered afterwards.
+    async fn fill_offers(&self, items: &mut [crate::core::AttentionItem]) {
+        use crate::core::{AttentionKind, Verdict, policy};
+        /// How far back the evidence reaches. A bound on work per poll, and the
+        /// same order of magnitude `explain --replay` reads.
+        const LOOK_BACK: i64 = 500;
+
+        let wanted: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.kind == AttentionKind::Permission)
+            .map(|(n, _)| n)
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        // The call each one is blocked on, read off the world once.
+        let asked: Vec<(usize, PathBuf, String, serde_json::Value)> = {
+            let w = self.world.lock().await;
+            wanted
+                .into_iter()
+                .filter_map(|n| {
+                    let run = w.run(items[n].run_id.as_ref()?)?;
+                    let b = run.blocked_on.as_ref()?;
+                    Some((n, run.cwd.clone(), b.tool.clone()?, b.input.clone()?))
+                })
+                .collect()
+        };
+
+        for (n, cwd, tool, input) in asked {
+            let root = crate::core::project::governing_root(&cwd);
+            let scope = root.clone().unwrap_or_else(|| cwd.clone());
+            // **Family first, verdict second, and the order is the whole cost.**
+            // Reversing these evaluates every observed call through the policy
+            // to throw almost all of them away: measured at 152µs for a poll
+            // with no permission item against 61ms with one, over a log of 400
+            // calls — a cost growing with the event log rather than with the
+            // number of items, which is what SC-007 calls the defect. Narrowing
+            // by family is string comparison; evaluating is not.
+            let family = crate::core::command::rule_family(
+                &tool,
+                &policy::rule_content(&tool, &input).unwrap_or_default(),
+            );
+            // Calls that would interrupt, not calls that happened: a family an
+            // existing rule already answers is not work this rule would do, and
+            // counting it would credit a new grant with an old one's coverage.
+            let others: Vec<crate::core::offer::Interrupting> = self
+                .store
+                .observed_tool_calls(Some(&scope), LOOK_BACK)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| c.tool.eq_ignore_ascii_case(&tool))
+                .filter_map(|c| {
+                    let content = policy::rule_content(&c.tool, &c.input)?;
+                    (crate::core::command::rule_family(&c.tool, &content) == family)
+                        .then_some((c, content))
+                })
+                // Distinct first: a command run twenty times is one grant and
+                // twenty evaluations, and only the first is worth paying for.
+                .fold(Vec::new(), |mut seen, pair| {
+                    if seen.len() < crate::core::offer::MAX_KIN
+                        && !seen.iter().any(|(_, c): &(_, String)| *c == pair.1)
+                    {
+                        seen.push(pair);
+                    }
+                    seen
+                })
+                .into_iter()
+                .filter(|(c, _)| {
+                    matches!(
+                        self.policy.evaluate(&c.cwd, &c.tool, &c.input),
+                        Verdict::Undecided
+                    )
+                })
+                .map(|(c, content)| crate::core::offer::Interrupting {
+                    content,
+                    tool: c.tool,
+                })
+                .collect();
+            match self
+                .policy
+                .offer_for(&cwd, &tool, &input, &others, root.as_deref())
+            {
+                Ok(offer) => items[n].offer = Some(offer),
+                Err(why) => items[n].no_offer = Some(why.into()),
+            }
+        }
     }
 
     pub async fn drivable_runs(&self) -> std::collections::BTreeSet<RunId> {
@@ -418,7 +520,7 @@ impl AppState {
         w.set_context_window(run, window);
     }
 
-    /// Stops every agent Vibeplane started, and waits for their processes.
+    /// Stops every agent Devplane started, and waits for their processes.
     ///
     /// Without this the daemon exits, its tasks are never dropped, the ACP
     /// connections are never torn down, and every agent it started is
@@ -460,9 +562,9 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
         started_at: jiff::Timestamp::now().to_string(),
     })?;
 
-    tracing::info!(%bound, "vibeplane daemon listening");
+    tracing::info!(%bound, "devplane daemon listening");
 
-    let notifications = std::env::var("VIBEPLANE_NOTIFY").as_deref() != Ok("0");
+    let notifications = std::env::var("DEVPLANE_NOTIFY").as_deref() != Ok("0");
     let poller = tokio::spawn(crate::poller::run(state.clone()));
     let sweeper = tokio::spawn(crate::poller::stall_sweeper(state.clone(), notifications));
     let retention = tokio::spawn(crate::poller::retention(state.clone(), 30, 7));
@@ -504,9 +606,9 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
 ///
 /// When the default port is taken, the daemon takes another one rather than
 /// refusing to start. By the time this is reached the caller has already
-/// established that no daemon of *this* `VIBEPLANE_HOME` is running, so
+/// established that no daemon of *this* `DEVPLANE_HOME` is running, so
 /// whatever holds the port belongs to somebody else — which is exactly the
-/// case `VIBEPLANE_HOME=/tmp/vp vibeplane ls` is for. Clients read the port out
+/// case `DEVPLANE_HOME=/tmp/vp devplane ls` is for. Clients read the port out
 /// of `daemon.json`, so they follow.
 ///
 /// A port asked for explicitly is never silently swapped: somebody who names a

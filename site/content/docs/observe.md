@@ -1,12 +1,12 @@
 +++
 title = "Watching sessions"
-description = "How Vibeplane sees sessions it did not start: the roster, hooks, OpenTelemetry and the optional status line."
+description = "How Devplane sees sessions it did not start: the roster, hooks, OpenTelemetry and the optional status line."
 weight = 10
 [extra]
 group = "guide"
 +++
 
-Vibeplane's first job is to know what is happening without changing how you work. It watches
+Devplane's first job is to know what is happening without changing how you work. It watches
 sessions it did not start, on documented interfaces only, through four channels — each of which
 answers a different question.
 
@@ -37,19 +37,19 @@ sessions in every repository on the machine.
 ## Every blocked state reaches the inbox
 
 `claude agents --json` reports `waitingFor` only while a session is waiting, so every value means a
-person is being waited on. Vibeplane raises an item for all five documented ones, and for any value
+person is being waited on. Devplane raises an item for all five documented ones, and for any value
 Claude Code adds later — titled in its own words rather than dropped for being unfamiliar.
 
-Discovery is free. `vibeplane ls` is useful the moment it is installed, because the roster lists
+Discovery is free. `devplane ls` is useful the moment it is installed, because the roster lists
 **every live session on the machine** — interactive ones included, not only the background sessions
 the Agent View shows.
 
 ## Connecting
 
 ```sh
-vibeplane connect claude
-vibeplane doctor            # is anything actually arriving?
-vibeplane disconnect claude
+devplane connect claude
+devplane doctor            # is anything actually arriving?
+devplane disconnect claude
 ```
 
 `connect` writes to `~/.claude/settings.json` — your **user** settings, so every project is covered —
@@ -58,7 +58,7 @@ after taking a backup, and adds only two things.
 **Hook entries**, merged alongside hooks you already have. Observation goes over HTTP to
 `http://127.0.0.1:47831` with a bearer token; the two events that **decide** do not.
 
-- **The two deciding hooks run the `vibeplane` binary**, not a URL. `PermissionRequest` and
+- **The two deciding hooks run the `devplane` binary**, not a URL. `PermissionRequest` and
   `PreToolUse` are `command` hooks: Claude Code pipes the call in on stdin and reads the verdict from
   stdout, and no daemon is involved. That is deliberate. Claude Code treats a failure to reach an
   HTTP hook as a non-blocking error and lets the call through, so a gate delivered over HTTP is one
@@ -80,7 +80,7 @@ after taking a backup, and adds only two things.
   in microseconds and never wait for a person.
 
 **OpenTelemetry variables** pointing at the same loopback port, merged per variable and shown before
-they are written. If you already export telemetry somewhere, Vibeplane leaves it alone and says so.
+they are written. If you already export telemetry somewhere, Devplane leaves it alone and says so.
 
 > [!IMPORTANT]
 > The flags that would put your prompts or the agent's responses into telemetry —
@@ -96,7 +96,7 @@ The telemetry endpoint reads both shapes agents send:
 | | Claude Code | Agents on the GenAI semantic conventions |
 |---|---|---|
 | Signal | log records named `claude_code.*` | **traces** — `invoke_agent` with `chat` and `execute_tool` spans beneath it |
-| Endpoint | `/vibeplane/otel/v1/logs` | `/vibeplane/otel/v1/traces` |
+| Endpoint | `/devplane/otel/v1/logs` | `/devplane/otel/v1/traces` |
 | Wire protocol | `http/json` | `http/json` |
 | Carries cost | yes — `cost_usd` is Claude Code's own extension | **no.** Those conventions have no notion of money |
 
@@ -107,8 +107,8 @@ and `work show` says so rather than printing `$0.00`.
 
 ## GitHub Copilot
 
-`vibeplane connect copilot` writes **one file**, `~/.copilot/hooks/vibeplane.json`, and
-`vibeplane disconnect copilot` deletes it. Nothing of yours is merged into or picked back out of —
+`devplane connect copilot` writes **one file**, `~/.copilot/hooks/devplane.json`, and
+`devplane disconnect copilot` deletes it. Nothing of yours is merged into or picked back out of —
 Copilot loads every `*.json` in that directory, which is a cleaner mechanism than editing a settings
 file you own.
 
@@ -120,33 +120,33 @@ Three things differ from Claude Code, and each is Copilot's rather than a prefer
   HTTP, where a process per tool call would cost something for nothing.
 - **If the daemon is not running, the hook says nothing and exits zero.** A `command` hook is
   fail-*closed* on an error, so erroring would deny every tool call on your machine the moment
-  Vibeplane is stopped. An observer that is absent must not become one that breaks your agent.
+  Devplane is stopped. An observer that is absent must not become one that breaks your agent.
 - **Telemetry is not installed for you.** Copilot reads it from the environment, and its settings
   equivalent is a managed (organisation) key. `connect` prints the two lines instead:
 
 ```sh
 export COPILOT_OTEL_ENABLED=true
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:47831/vibeplane/otel
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:47831/devplane/otel
 ```
 
 > [!NOTE]
-> **There is no session roster for Copilot.** `claude agents --json` is what makes `vibeplane ls`
+> **There is no session roster for Copilot.** `claude agents --json` is what makes `devplane ls`
 > work before anything is configured; Copilot publishes no equivalent, so the sequence here is
 > connect first, then see. A Copilot session appears once it does something.
 >
 > These channels are implemented and **not yet verified against a live Copilot account** — the same
-> state `vibeplane agents` reports for it.
+> state `devplane agents` reports for it.
 
-Your `vibeplane.toml` rules govern it unchanged. Copilot's own tool names are mapped to the ones the
+Your `devplane.toml` rules govern it unchanged. Copilot's own tool names are mapped to the ones the
 rules use — `view` is `Read`, `create` is `Write`, `bash` is `Bash` — so `never_auto = ["Read(.env)"]`
-stops a Copilot `view` of `.env` and names itself in `vibeplane audit`.
+stops a Copilot `view` of `.env` and names itself in `devplane audit`.
 
 ## What `connect` will not do
 
 Two refusals worth knowing about, because both protect something that is easy to break by accident.
 
 **It never creates `allowedHttpHookUrls`.** Defining that key restricts *every* HTTP hook on your
-machine to the patterns it lists. Vibeplane appends `http://127.0.0.1:*` when the key already
+machine to the patterns it lists. Devplane appends `http://127.0.0.1:*` when the key already
 exists, and leaves it absent otherwise. `doctor` reports when a managed allowlist is blocking
 loopback, because the symptom is otherwise indistinguishable from “Claude Code is quiet”.
 
@@ -160,7 +160,7 @@ status line and the roster instead.
 Optional, and off by default, because it wraps a command you configured yourself:
 
 ```sh
-vibeplane connect claude --statusline
+devplane connect claude --statusline
 ```
 
 The shim runs your original status-line command with the same input, so what you see is unchanged,
@@ -174,10 +174,10 @@ Several of its facts arrive through **no other channel** — no telemetry to ena
 | **The model** | Otherwise this needs OpenTelemetry, or a `SessionStart` hook the reference says Claude Code *"doesn't always include"*. |
 | **The context window's size** | 200 000, or 1 000 000 on an extended-context model — stated, rather than inferred from which model is in play. |
 | **Cost, and the lines it changed** | Cost without telemetry, and the only report of what a session changed rather than how long it took. |
-| **The Claude Code release this session runs** | The permission gate's behaviour is differentially tested against one release. A session ahead of it is governed by rules nobody has checked against it — `vibeplane doctor` says which, and `vibeplane show` marks it. |
+| **The Claude Code release this session runs** | The permission gate's behaviour is differentially tested against one release. A session ahead of it is governed by rules nobody has checked against it — `devplane doctor` says which, and `devplane show` marks it. |
 
 ```console
-$ vibeplane show 7c
+$ devplane show 7c
   model      claude-opus-5
   cost       $2.5000 over 41 requests
   changed    +156 −23 lines
@@ -200,7 +200,7 @@ doing something nor asking for something is counted rather than shown:
 
 ```console
 8 projects · 23 sessions · 5 working · 2 need you · 4 idle · $4.18
-12 quiet (nothing heard for hours) — vibeplane ls --all
+12 quiet (nothing heard for hours) — devplane ls --all
 ```
 
 Two things are never counted away, however old they are: a session that is **working**, and a
@@ -229,12 +229,12 @@ saas  ·  4 issues · 2 PRs (1 needs you)
 What counts as *needs you*: an issue assigned to you; a review requested from you (directly or
 through a team); your own pull request that is red, has changes requested, or is approved and
 waiting for a merge. Each of those is an inbox item too, at normal level, snoozable per project.
-Pull requests Vibeplane opened itself are not counted twice — their Work already raises
+Pull requests Devplane opened itself are not counted twice — their Work already raises
 `ci_red`, `changes_requested` and `pr_ready`.
 
 This is observation only. Nothing on the board, in the inbox or on the command line writes to
 GitHub; every action is a link to the thing. A project whose directory has no GitHub remote is
-asked once and then skipped, and a `gh` that is not logged in is reported by `vibeplane doctor`
+asked once and then skipped, and a `gh` that is not logged in is reported by `devplane doctor`
 rather than retried on every poll.
 
 ## What `doctor` will tell you that nothing else does
@@ -245,7 +245,7 @@ Three failures are invisible on the board, because in each one the symptom is an
 | Reported as | What it means |
 |---|---|
 | `channels` | which observation channels are arriving, how fast, and the worst latency seen. A channel that stopped is silence, and silence is what a quiet machine looks like too |
-| `unreadable configuration` | a repository whose `vibeplane.toml` will not load. The rules it had stay cached — but a restarted daemon has none to cache, so that project's `never_auto` list is simply not in force |
+| `unreadable configuration` | a repository whose `devplane.toml` will not load. The rules it had stay cached — but a restarted daemon has none to cache, so that project's `never_auto` list is simply not in force |
 | `unreadable rows` | stored runs or work this build can no longer decode. The schema changes here without migrations on purpose, so a changed shape makes rows vanish from the board. A **work** row is the one to read first: it names a branch and a worktree, so losing it orphans a checkout nobody is left to tell you about. Observations rebuild from the providers, so deleting the database costs you nothing *except the decision log*, which is in the same file and is the one thing that cannot be re-derived from anything |
 
 ## Who wins when channels disagree
@@ -263,6 +263,6 @@ inbox. So:
 A session **you** started has no transcript here, and that is not a gap waiting to be filled. Hooks
 carry lifecycle and tool inputs; telemetry redacts prompts and responses; the transcript files are
 documented as internal, which is the one dependency this project refuses. The conversation is
-already on your screen in the window that owns it, and `vibeplane focus <run>` raises it.
+already on your screen in the window that owns it, and `devplane focus <run>` raises it.
 
-A run Vibeplane **drives** is the opposite case in every respect — see [Driving agents](/docs/agents/).
+A run Devplane **drives** is the opposite case in every respect — see [Driving agents](/docs/agents/).

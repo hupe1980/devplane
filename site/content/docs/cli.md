@@ -1,6 +1,6 @@
 +++
 title = "CLI reference"
-description = "Every Vibeplane command. All of them take --json, and all of them start the daemon if it is not already running."
+description = "Every Devplane command. All of them take --json, and all of them start the daemon if it is not already running."
 weight = 20
 [extra]
 group = "reference"
@@ -9,25 +9,25 @@ group = "reference"
 Two things are true of every command below: it takes `--json`, and it starts the daemon if one is
 not already running. There is nothing to launch first.
 
-Installing puts one binary on your `PATH`, named `vibeplane`. If you type it often enough to
+Installing puts one binary on your `PATH`, named `devplane`. If you type it often enough to
 want it shorter, alias it yourself — there is no second binary to install:
 
 ```sh
-alias vp=vibeplane
+alias vp=devplane
 ```
 
 ### Naming a run
 
-Anywhere a command takes `<run>`, you can give it **whatever the board printed** — Vibeplane
+Anywhere a command takes `<run>`, you can give it **whatever the board printed** — Devplane
 resolves it the way `git` resolves a short commit: the full id, any unambiguous prefix of it, or the
 session's name.
 
 ```console
-$ vibeplane ls
+$ devplane ls
 core-lib
   ● a1         vscode     88%   $0.41   2s  Bash: cargo test --workspace
 
-$ vibeplane show a1        # the label on the row is enough
+$ devplane show a1        # the label on the row is enough
 ```
 
 If what you typed matches more than one session it says so and lists them, rather than picking one —
@@ -39,31 +39,31 @@ Work ids resolve by prefix the same way.
 
 ## Asking
 
-### `vibeplane connect copilot`
+### `devplane connect copilot`
 
 ```sh
-vibeplane connect copilot      # writes ~/.copilot/hooks/vibeplane.json
-vibeplane disconnect copilot   # deletes it
+devplane connect copilot      # writes ~/.copilot/hooks/devplane.json
+devplane disconnect copilot   # deletes it
 ```
 
 One file, and two lines printed for you to export — Copilot reads telemetry from the environment.
 See [Observing sessions](/docs/observe/#github-copilot).
 
-### `vibeplane explain`
+### `devplane explain`
 
 What the gate would decide about one call, and which rule says so. Offline: no daemon, no agent, no
 bill — which is what you want while you are still writing the rule.
 
 ```console
-$ vibeplane explain 'pnpm test --run'
+$ devplane explain 'pnpm test --run'
 allow      Bash
         by Bash(pnpm test *)
 
-$ vibeplane explain 'pnpm test && rm -rf /'
+$ devplane explain 'pnpm test && rm -rf /'
 deny       Bash
         by Bash(rm -rf *)
 
-$ vibeplane explain 'echo x | tee /etc/hosts'
+$ devplane explain 'echo x | tee /etc/hosts'
 undecided  Bash
         no rule answers this one, so the provider's own dialog decides and it reaches your inbox
 ```
@@ -74,21 +74,21 @@ are invisible from reading a rule list, and they are where a permission layer is
 
 | Flag | What |
 |---|---|
-| `--tool <name>` | the tool, default `Bash`. `Read`, `Edit` and `WebFetch` take their specifier directly: `vibeplane explain --tool Read .env` |
+| `--tool <name>` | the tool, default `Bash`. `Read`, `Edit` and `WebFetch` take their specifier directly: `devplane explain --tool Read .env` |
 | `--input '<json>'` | the whole tool input, for a call a specifier cannot express: `--tool Agent --input '{"isolation":"worktree"}'` |
 | `--dir <path>` | the directory the agent would be working in, which decides whose rules apply. Default `.` |
 | `--replay` | ask the same question of every call already observed, and name the rule that would answer the ones that reached you |
 | `--limit <n>` | how many of the most recent calls `--replay` reads. Default 5000 |
 | `--json` | the verdict, the rule, and what a `PreToolUse` hook would answer — which is a different question, and the one that holds in auto mode |
 
-### `vibeplane explain --replay`
+### `devplane explain --replay`
 
 Which rule to write next, from the calls this machine has already made. It replays every observed
 tool call against the rules **as they are now**, and groups the ones that reached you by the rule
 that would have answered them.
 
 ```console
-$ vibeplane explain --replay
+$ devplane explain --replay
 1284 tool calls in saas replayed against the rules as they are now
 
      912   71%  allow
@@ -102,7 +102,7 @@ one rule each, most interruptions first
     41×  Read(src/**)
     12×  WebFetch(docs.rs)
 
-315 of the 358 calls that reached you would stop asking · paste into [policy] auto_allow, then vibeplane check
+315 of the 358 calls that reached you would stop asking · paste into [policy] auto_allow, then devplane check
 ```
 
 Each suggestion is in the vocabulary that tool's rules use: a command prefix with the `*` after the
@@ -117,10 +117,10 @@ subcommand, a directory glob for a path rule, a domain for `WebFetch`.
 
 ## Looking
 
-### `vibeplane ls`
+### `devplane ls`
 
 The working set — sessions in play, and anything asking for you. Alias: `ps`. This is also what
-plain `vibeplane` does.
+plain `devplane` does.
 
 | Flag | What |
 |---|---|
@@ -128,26 +128,37 @@ plain `vibeplane` does.
 | `--project <name>`, `-p` | one project; matches any part of the name, so `mat` finds `matter-kit` |
 | `--needs-you` | only what is waiting on a human |
 
-### `vibeplane inbox`
+### `devplane inbox`
 
 What needs a human, most urgent first. Derived from state rather than stored, so it is correct after
 a restart. Ranked by level, then age, oldest first.
 
-A permission item also names **the rule that would have answered it**:
+A permission item also names **the rule to paste so it is never asked again**, and where it goes:
 
 ```console
  ! Permission: Bash [permission]
-     pnpm test --run
-     1. Yes
-     2. No
-     never asked again: auto_allow = ["Bash(pnpm test --run)"]
+     cargo test --lib policy
+     never asked again: auto_allow = ["Bash(cargo test *)"]
+     covers 6 calls like it · paste into /Users/me/work/saas/devplane.toml [policy] auto_allow
 ```
 
-That is the **exact call**, never a pattern: one interruption says nothing about the shape of the
-calls like it. [`vibeplane explain --replay`](#vibeplane-explain-replay) is where a pattern comes
-from, where the evidence is a count. Nothing is written for you either way.
+**A pattern only where there is a count behind it.** One interruption says this command needed a
+decision and says nothing about the shape of the calls like it, so the offer is the exact call until
+this machine has seen three distinct ones in the same family — the same threshold
+[`devplane explain --replay`](#devplane-explain-replay) uses, and `covers` is how it shows its
+working. Past fifty it stops counting and says `50+`.
 
-Two items are about the machine rather than about any run, and they are the only things Vibeplane
+The rule offered is the **narrowest** that covers what it was composed from, never the permission the
+agent asked for, and it is replayed against the call before you are shown it: a rule that would not
+have decided it is refused rather than handed over. Where none can be, the item says which reason it
+is — several commands in one call, a construct no prefix rule may approve, a tool whose rules take no
+pattern.
+
+**Nothing is written for you.** No command and no route edits `[policy]`, and there will not be one:
+an agent on this machine runs as you and can read the daemon's token, so a write path to the rules
+would be reachable by the thing the rules govern. The handover is a paste.
+
+Two items are about the machine rather than about any run, and they are the only things Devplane
 raises about **itself**:
 
 ```console
@@ -155,7 +166,7 @@ raises about **itself**:
      No rule in any project is being enforced right now.
      it will not start: No such file or directory
 
- ! payments-api/vibeplane.toml will not load [config_broken]
+ ! payments-api/devplane.toml will not load [config_broken]
      The rules this repository commits are not in force.
      TOML parse error at line 12, column 3
 ```
@@ -164,16 +175,16 @@ A broken gate and a quiet machine look identical from the outside: no hook arriv
 the daemon runs the installed gate on a timer. A file that will not parse is the same failure one
 repository wide — the last good rules are kept, and a daemon restarted against it has none to keep.
 
-Both are critical and neither offers an action: the fixes are `vibeplane connect claude` and a text
+Both are critical and neither offers an action: the fixes are `devplane connect claude` and a text
 editor, and this is not a product that rewrites your settings or your rules from a list.
 
-### `vibeplane issues` · `vibeplane prs`
+### `devplane issues` · `devplane prs`
 
 Every open issue, and every open pull request, across **every registered project** — read through
 your own `gh`, grouped by project, with what needs you first:
 
 ```console
-$ vibeplane prs
+$ devplane prs
 as hupe1980 · what needs you first
 
 saas
@@ -197,13 +208,13 @@ raises a desktop notification.
 
 The daemon reads GitHub a few seconds after it starts and every five minutes after that. A project it
 could not read keeps its last good numbers and is marked `· stale`. A project with no GitHub remote
-is ruled out and asked again an hour later. `vibeplane doctor` says whose `gh` this is, when it last
+is ruled out and asked again an hour later. `devplane doctor` says whose `gh` this is, when it last
 read, and which projects were ruled out and why.
 
-**Nothing here writes to GitHub** — every action is a link, and `vibeplane work start --issue <n>` is
+**Nothing here writes to GitHub** — every action is a link, and `devplane work start --issue <n>` is
 how an issue becomes work.
 
-`vibeplane issues --ready` asks a different question of one repository: which of its issues are
+`devplane issues --ready` asks a different question of one repository: which of its issues are
 *offered* as work — the ones carrying `[github].ready_label` — which is the list
 `work start --issue` picks from. It reads that repository live rather than serving the poller's
 cached counts.
@@ -216,12 +227,12 @@ cached counts.
 
 A project whose directory has no GitHub remote is asked once and then left alone.
 
-### `vibeplane show <run>`
+### `devplane show <run>`
 
 One run in detail: state, agent, model, surface, cost, tool calls, what it is blocked on, the agent's
 own plan, recent tools, and — for a driven run — the last few things it said.
 
-### `vibeplane tail <run>`
+### `devplane tail <run>`
 
 Follow what a driven agent is saying, like `tail -f`.
 
@@ -230,11 +241,11 @@ Follow what a driven agent is saying, like `tail -f`.
 | `--thinking` | include its reasoning, where it streams any |
 | `--history <n>` | how much of the conversation to print first (default 40) |
 
-Only for runs Vibeplane drives. A session you started in a terminal or an editor is already showing
-you its own transcript — `vibeplane focus` raises that window, and `tail` says so rather than
+Only for runs Devplane drives. A session you started in a terminal or an editor is already showing
+you its own transcript — `devplane focus` raises that window, and `tail` says so rather than
 printing nothing for ever.
 
-### `vibeplane search <query>`
+### `devplane search <query>`
 
 Full-text search over tool commands, questions and errors across every session. What you type is a
 phrase, not a query language.
@@ -242,7 +253,7 @@ phrase, not a query language.
 The board has the same search — press <kbd>/</kbd>, or click the box in the header. A match names the
 session it came from and opens it.
 
-### `vibeplane work start --spec <path>`
+### `devplane work start --spec <path>`
 
 The specification this work answers, relative to the repository — a file, or the folder your spec
 tool wrote. Every gate stamps a fingerprint over every Markdown document under it and counts its
@@ -253,19 +264,19 @@ frameworks in this category agree on none of them. The outline is the headings, 
 boxes, and the `[gates]` commands you declare are what actually check the work.
 
 A path outside the repository, or a folder with no Markdown in it, is an error at the point you can
-still fix the typo. See [pipelines](/vibeplane/docs/pipelines/) for what the stamp buys you.
+still fix the typo. See [pipelines](/devplane/docs/pipelines/) for what the stamp buys you.
 
-### `vibeplane rewind <run>`
+### `devplane rewind <run>`
 
 Which of a session's files Claude Code's own checkpoint will **not** bring back.
 
 Claude Code snapshots the files its own editing tools touch before each turn, and `/rewind` restores
 them. Its documentation is explicit about the limit: *"files modified by bash commands are not
-tracked."* That is the one class Vibeplane has a complete record of — every tool call the gate saw,
+tracked."* That is the one class Devplane has a complete record of — every tool call the gate saw,
 with the files the command named.
 
 ```console
-$ vibeplane rewind s-4f2a
+$ devplane rewind s-4f2a
 outside Claude Code's checkpoint for this session
   build/report.json
   notes.md
@@ -280,22 +291,22 @@ before the tool runs, so claiming the file changed would be an answer this evide
 A refused call is not listed, and a path nothing can pin to one file — a glob, a `~`, a variable — is
 left out rather than printed as though it named a file.
 
-### `vibeplane audit [id]`
+### `devplane audit [id]`
 
-What Vibeplane decided, and on whose authority. Narrow to a run or a piece of work by id. See
+What Devplane decided, and on whose authority. Narrow to a run or a piece of work by id. See
 [the decision log](/docs/decisions/).
 
 | Flag | What |
 |---|---|
 | `--limit <n>` | how many rows (default 50) |
 
-### `vibeplane attention`
+### `devplane attention`
 
-Whether the inbox is worth reading, per kind. Every item Vibeplane raises is recorded, and every
+Whether the inbox is worth reading, per kind. Every item Devplane raises is recorded, and every
 resolution says what became of it.
 
 ```console
-$ vibeplane attention
+$ devplane attention
 kind               raised   acted  dismissed  elsewhere   open   acted
 permission             41      36          0          4      1     90%
 gate_failed             9       8          1          0      0     89%
@@ -318,17 +329,17 @@ a threshold to change.
 |---|---|
 | `--days <n>` | how far back to look (default 7) |
 
-### `vibeplane watch`
+### `devplane watch`
 
 Follow events as they arrive. Two kinds of frame, told apart on the wire: state changes, and
 fragments of what a driven agent is saying.
 
-### `vibeplane open`
+### `devplane open`
 
 Open the board in a browser. The token is handed over once in the URL and stripped from the address
 bar, so it cannot end up in a screenshot or a bookmark.
 
-### `vibeplane gate`
+### `devplane gate`
 
 What the permission gate is, and how much of it is measured — the release the rules were last checked
 against, how far the vendor has moved since, and the gate scored against a published
@@ -336,15 +347,15 @@ execution-boundary profile. `doctor` asks whether the channels are alive; this a
 verdicts are worth anything.
 
 The card shows what is **missing** as well as what is met: a conformance report with no failures in it
-is a marketing document. [The full page →](/vibeplane/docs/conformance/)
+is a marketing document. [The full page →](/devplane/docs/conformance/)
 
-### `vibeplane doctor`
+### `devplane doctor`
 
-Aliased as `vibeplane diagnostics`.
+Aliased as `devplane diagnostics`.
 
 Whether the tool itself is telling you the truth: hook latency, when telemetry was last seen, the
 roster, each channel's last error **with the date it happened**, and any project whose
-`vibeplane.toml` will not parse — whose permission rules are therefore not in force.
+`devplane.toml` will not parse — whose permission rules are therefore not in force.
 
 **It also says how old the gate's measurement is.** The rules are Claude Code's own syntax, so the
 running product can be asked the same question — and that check is only true on the day it runs.
@@ -379,7 +390,7 @@ or, when something is wrong with it:
 
 ```console
   gate      INSTALLED AND NOT ANSWERING — every prohibition on this machine is inert
-            /usr/local/bin/vibeplane hook
+            /usr/local/bin/devplane hook
             it will not start: No such file or directory
             a hook that does not answer never blocks — the provider carries on
 ```
@@ -398,7 +409,7 @@ workflows and skills all still work:
 ```console
 provider
   Amazon Bedrock  (CLAUDE_CODE_USE_BEDROCK is set)
-  Vibeplane is the only gate on this machine.
+  Devplane is the only gate on this machine.
   off here   Remote Control · Routines (/schedule) · ultrareview · Code Review · Channels · …
   partial    auto mode — fewer models, and sessions start in Manual
   still on   hooks · OpenTelemetry metrics · workflows · skills and commands · sandboxing · …
@@ -408,7 +419,7 @@ On a claude.ai sign-in it is one line. It names the variable that decided, and a
 empty reads as unset.
 
 It also reads back **Claude Code's own auto-mode classifier**, because in that mode the thing
-actually deciding is configured somewhere Vibeplane does not write:
+actually deciding is configured somewhere Devplane does not write:
 
 ```console
 auto mode (Claude Code's own classifier)
@@ -416,24 +427,24 @@ auto mode (Claude Code's own classifier)
   your deny and ask rules resolve before it; it cannot override them
 ```
 
-Vibeplane reads this and never writes it. If nothing is configured it says so: an unconfigured
+Devplane reads this and never writes it. If nothing is configured it says so: an unconfigured
 classifier trusts only the working repository and its remotes, which is the usual cause of denials
 people blame on the agent. `/auto-mode-setup` in Claude Code drafts the entries.
 
 ## Acting
 
-### `vibeplane focus <run>`
+### `devplane focus <run>`
 
 Raise the editor window that owns a run's directory. When no window has it open, says so and prints
 the resume command rather than claiming success.
 
-### `vibeplane attach <run>`
+### `devplane attach <run>`
 
 Hand the terminal to the real agent, resuming its session — `claude --resume <id>`, or
 `claude attach <id>` for a background session, whose daemon has its own way in. Replaces this process
 rather than nesting one inside it.
 
-### `vibeplane dispatch <prompt…>`
+### `devplane dispatch <prompt…>`
 
 Start an agent and give it something to do.
 
@@ -442,11 +453,11 @@ Start an agent and give it something to do.
 | `--agent <id>` | `claude`, `codex`, `opencode`, `gemini`, anything in `agents.toml`, or a command line |
 | `--cwd <path>` | where it runs (default: here) |
 
-### `vibeplane say <run> <prompt…>`
+### `devplane say <run> <prompt…>`
 
-Send another prompt to a run Vibeplane drives.
+Send another prompt to a run Devplane drives.
 
-### `vibeplane decide <run> --request <id>`
+### `devplane decide <run> --request <id>`
 
 Answer a permission request from a driven run.
 
@@ -458,7 +469,7 @@ Answer a permission request from a driven run.
 Option ids belong to the agent — one calls it `allow`, another `proceed_once` — so `--decision` is
 resolved against the options it actually offered rather than a guessed string.
 
-### `vibeplane snooze <id>`
+### `devplane snooze <id>`
 
 Hide a run's — or a piece of work's — inbox items for a while. Takes either id; the inbox prints
 whichever one an item is about.
@@ -475,7 +486,7 @@ pull request that goes red hours later has no run left to quieten.
 
 ## Work
 
-### `vibeplane work start <title…>`
+### `devplane work start <title…>`
 
 Make an isolated checkout, prepare it, put an agent in it, and run the project's gates when the agent
 says it is finished.
@@ -488,28 +499,28 @@ says it is finished.
 | `--no-worktree` | work in the repository itself rather than an isolated checkout |
 | `--issue <n>` | start from a GitHub issue; its body arrives marked as an untrusted report |
 
-### `vibeplane work list`
+### `devplane work list`
 
 Where everything is. Alias: `ls`.
 
-### `vibeplane work show <id>`
+### `devplane work show <id>`
 
 Phase, pipeline stepper, runs, cost, and what each check actually said.
 
-### `vibeplane work verify <id>`
+### `devplane work verify <id>`
 
 Run the project's gates now. A read: it never changes a phase a person asked for.
 
-### `vibeplane work approve <id>`
+### `devplane work approve <id>`
 
 Release a pipeline waiting at a declared human step.
 
-### `vibeplane work retry <id>`
+### `devplane work retry <id>`
 
 Hand the failures back to the agent once more, past the project's bound. Offered only while the
 session that wrote the code still exists; recorded as a human decision, and counted.
 
-### `vibeplane work resume <id>`
+### `devplane work resume <id>`
 
 Pick work back up after the daemon that was running it stopped, **against the same agent-side
 conversation**.
@@ -521,14 +532,14 @@ rediscover what the first one already knew, and would look at the half-finished 
 without the context that produced it.
 
 It is offered in the inbox on the `interrupted` item, and only when it can actually work: the run
-recorded the id its agent answers `session/resume` on, and Vibeplane is not already holding a session
+recorded the id its agent answers `session/resume` on, and Devplane is not already holding a session
 for it. Where the agent cannot resume — it does not advertise the capability, or it has forgotten the
 session — this says so instead of silently starting again.
 
 Deliberately not automatic on startup. Resuming spends money and runs an agent in a repository, and
 doing either because a machine rebooted is a decision nobody made.
 
-### `vibeplane work finish <id>`
+### `devplane work finish <id>`
 
 | Flag | What |
 |---|---|
@@ -539,14 +550,14 @@ Without `--force`, removal refuses to destroy uncommitted or unpushed work.
 
 ## Setup and health
 
-### `vibeplane trust [path]`
+### `devplane trust [path]`
 
-Allow Vibeplane to start agents in a repository. Required once per repository, because a headless
+Allow Devplane to start agents in a repository. Required once per repository, because a headless
 agent runs that repository's own hooks and MCP servers without asking — and it prints what those are
 before it asks you.
 
 ```console
-$ vibeplane trust .
+$ devplane trust .
   starting an agent here loads this repository's own:
 
   hook    ./scripts/guard.sh
@@ -577,26 +588,26 @@ A repository that declares none of this says so in one line and asks nothing fur
 
 Without `--yes`, a non-interactive stdin is an error rather than a silent yes.
 
-### `vibeplane check [path]`
+### `devplane check [path]`
 
-Read the repository's `vibeplane.toml` and say what it will do — and refuse what cannot work. Offline
+Read the repository's `devplane.toml` and say what it will do — and refuse what cannot work. Offline
 and daemon-free, so it runs in CI. Exits non-zero on an error.
 
 It also names the three things a person cannot get by reading the file: a rule that covers nothing, a
 rule that grants more than it reads as granting, and a path denied for reading that is still
 writable. `--json` returns the same read-back the board shows under `,`.
 
-### `vibeplane agents`
+### `devplane agents`
 
-The agents Vibeplane can drive.
+The agents Devplane can drive.
 
-### `vibeplane mcp`
+### `devplane mcp`
 
-Serve Vibeplane's read-only surface to an agent over MCP, on stdio. Register it with your agent as a
+Serve Devplane's read-only surface to an agent over MCP, on stdio. Register it with your agent as a
 command MCP server:
 
 ```json
-{ "mcpServers": { "vibeplane": { "command": "vibeplane", "args": ["mcp"] } } }
+{ "mcpServers": { "devplane": { "command": "devplane", "args": ["mcp"] } } }
 ```
 
 Four questions, and nothing that acts:
@@ -606,7 +617,7 @@ Four questions, and nothing that acts:
 | `inbox` | What needs a human right now, across every project. Worth asking before your agent asks *you* something you have already been asked. |
 | `work` | A piece of work: phase, gate verdicts, the specification it answers. |
 | `explain` | What the gate would decide about a call, and which rule decides it — **before** running it, so a refusal costs nothing. |
-| `audit` | What Vibeplane decided and on whose authority. |
+| `audit` | What Devplane decided and on whose authority. |
 
 **It is read-only because it implements no mutating tool** — not because anything is labelled.
 `readOnlyHint` is metadata a client may act on and constrains no server, so it is not what this
@@ -614,11 +625,11 @@ rests on. Anything that acts still goes through a person.
 
 Two things worth knowing. Every payload is framed as **a report containing other people's text** —
 commands an agent wrote, build output, issue bodies — because this surface is a conduit. And an
-`explain` asked here is **recorded** in `vibeplane audit`: a read-only interrogation is also a way to
+`explain` asked here is **recorded** in `devplane audit`: a read-only interrogation is also a way to
 probe for a command the rules happen to allow. The CLI's `explain` stays offline and unrecorded — a
 person at a terminal is not the party the rules govern.
 
-### `vibeplane connect claude` · `disconnect claude`
+### `devplane connect claude` · `disconnect claude`
 
 Install or remove hooks and telemetry, in your user settings, with a backup.
 
@@ -626,7 +637,7 @@ Install or remove hooks and telemetry, in your user settings, with a backup.
 |---|---|
 | `--statusline` | also wrap your status line — the only source of subscription rate limits |
 
-### `vibeplane serve`
+### `devplane serve`
 
 Run the daemon in the foreground. Every other command starts it in the background as needed.
 
@@ -635,9 +646,9 @@ Run the daemon in the foreground. Every other command starts it in the backgroun
 | `--port <n>` | default `47831`; `0` asks the OS for any free port |
 
 When the default port is taken by something else, the daemon takes another one and clients follow via
-`~/.vibeplane/daemon.json`. A port you asked for explicitly is never silently swapped.
+`~/.devplane/daemon.json`. A port you asked for explicitly is never silently swapped.
 
-### `vibeplane stop`
+### `devplane stop`
 
 Ask the daemon to stop — over its own API, with the bearer token, reaching the same graceful path as
 ctrl-C. **The agents it started are stopped first**, and waited for. It does not signal a pid: a

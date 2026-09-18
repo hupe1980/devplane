@@ -10,12 +10,12 @@ Two questions have to be answerable months later, in front of a repository you h
 
 > Why did that command run without anybody being asked? Why is there a pull request on this branch?
 
-Neither is answerable from an event log, because an event log records what happened **to** Vibeplane.
-These are facts about what Vibeplane **did**, or allowed.
+Neither is answerable from an event log, because an event log records what happened **to** Devplane.
+These are facts about what Devplane **did**, or allowed.
 
 ```sh
-vibeplane audit
-vibeplane audit <run-or-work-id>
+devplane audit
+devplane audit <run-or-work-id>
 ```
 
 ```console
@@ -44,8 +44,8 @@ Both live in one SQLite file, and the asymmetry is the point rather than an acci
 
 | | Nature | Retention | Rebuildable from |
 |---|---|---|---|
-| Runs, events, telemetry, transcripts | things that happened **to** Vibeplane | pruned on a timer, with the search index | the providers |
-| Decisions | what Vibeplane **did**, or allowed | appended, never pruned | nothing |
+| Runs, events, telemetry, transcripts | things that happened **to** Devplane | pruned on a timer, with the search index | the providers |
+| Decisions | what Devplane **did**, or allowed | appended, never pruned | nothing |
 
 An observation can be re-derived from the provider. A decision cannot be re-derived from anything —
 so pruning it would leave a pull request nobody can account for.
@@ -55,26 +55,26 @@ handler, the gate runner, and the git and GitHub mutations.
 
 ## An undecided request is not a decision
 
-When no rule matches, Vibeplane replies with *no decision* and Claude Code shows its own dialog. The
-human answering that dialog is not something Vibeplane saw, so nothing is written. Recording it
+When no rule matches, Devplane replies with *no decision* and Claude Code shows its own dialog. The
+human answering that dialog is not something Devplane saw, so nothing is written. Recording it
 would be recording a guess.
 
 ## A standing grant says so
 
 "Allow always" lives inside **the agent's** session: every later call it covers is approved there,
-and no request for those reaches Vibeplane. It is the one decision whose consequences this log cannot
+and no request for those reaches Devplane. It is the one decision whose consequences this log cannot
 show you, so two rules apply.
 
-- **The policy never chooses one.** When a rule auto-approves a call, Vibeplane picks `allow_once`.
+- **The policy never chooses one.** When a rule auto-approves a call, Devplane picks `allow_once`.
   The rule your project wrote *is* the standing grant; a second one inside the agent would put
   authority somewhere you cannot read back.
 - **When you choose one, the log names it** — outcome `allow_always`, not `allow`.
 
 ```console
-$ vibeplane audit
+$ devplane audit
 2026-09-14T11:02:07 human   agent:tool.use   Bash: pnpm build
                      ↳ allow_always — a standing choice made by a person: the agent
-                       applies it to later matching calls itself, and Vibeplane sees
+                       applies it to later matching calls itself, and Devplane sees
                        no request for those
 ```
 
@@ -89,9 +89,9 @@ worse than not having it.
 
 ## The boundary of the claim
 
-> **Vibeplane's own actions are accounted for; the agents' actions are supervised.**
+> **Devplane's own actions are accounted for; the agents' actions are supervised.**
 
-Nothing here governs what Claude Code, Codex or OpenCode do. Their tool calls are theirs. Vibeplane
+Nothing here governs what Claude Code, Codex or OpenCode do. Their tool calls are theirs. Devplane
 sees a permission request for a run it drives, or a hook for a session it merely watches, and
 answers — and *that answer* is a decision with a rule behind it.
 
@@ -100,7 +100,7 @@ that runs it.
 
 ## Repeating an action is safe
 
-Everything Vibeplane does to the world is idempotent, free to repeat, or checked against the remote
+Everything Devplane does to the world is idempotent, free to repeat, or checked against the remote
 first: a gate is a read, pushing a branch twice is one branch, and `gh pr create` reads the branch's
 pull request back because it needs the number. A pipeline step resumes rather than repeats, because
 the cursor is a column on the work row.

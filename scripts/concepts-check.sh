@@ -13,7 +13,7 @@ for f in *.md; do
     [ -f "$t" ] || { echo "$f: broken link -> $t"; exit 9; }
   done || fail=1
   # header
-  [ "$f" = README.md ] || grep -q '^> Part of the Vibeplane architecture notes' "$f" || { echo "$f: missing header block"; fail=1; }
+  [ "$f" = README.md ] || grep -q '^> Part of the Devplane architecture notes' "$f" || { echo "$f: missing header block"; fail=1; }
   # unfinished-work markers outside the roadmap
   [ "$f" = ROADMAP.md ] || ! grep -q -E '^\s*- \[ \]|\bTODO\b|\bTBD\b' "$f" || { echo "$f: records unfinished work (belongs in ROADMAP.md)"; fail=1; }
 done
@@ -29,7 +29,7 @@ for id in $cited; do echo "$defined" | grep -qx "$id" || { echo "cited but undef
 cited=$(grep -oh '\bR[0-9]\+\b' *.md | sort -u); defined=$(grep -o '^| R[0-9]\+ ' RISKS.md | tr -d '| ' | sort -u)
 for id in $cited; do echo "$defined" | grep -qx "$id" || { echo "cited but undefined: $id"; fail=1; }; done
 # Nothing a reader of the published product sees may point at these notes.
-# `concepts/` and `specs/` are gitignored, so a decision id or a "see the
+# `concepts/` and `reference/` are gitignored, so a decision id or a "see the
 # architecture notes" in a doc comment renders on docs.rs — and on the site — as
 # a reference to a document the reader cannot open.
 #
@@ -47,19 +47,19 @@ leaked=$(cd .. && grep -rInoE '\b(D|R)[0-9]+\b' $published 2>/dev/null \
 # The same rule, spelled out rather than numbered: a path into a gitignored
 # directory, or a phrase that sends the reader to a document they do not have.
 # `tests/documentation.rs` is the one file that may name the notes: it reads
-# them to check every `vibeplane.toml` example parses, and skips when they are
+# them to check every `devplane.toml` example parses, and skips when they are
 # absent — which is the whole reason a clean checkout stays green.
 #
-# `specs/` is also what a *user's* specification directory is called — Spec Kit
-# puts them there — so a documentation example naming `specs/reset.md` is not a
-# reference to this repository's gitignored `specs/` at all. The distinguishing
+# `reference/` is also what a *user's* specification directory is called — Spec Kit
+# puts them there — so a documentation example naming `reference/reset.md` is not a
+# reference to this repository's gitignored `reference/` at all. The distinguishing
 # feature is code: an example lives in a fenced block or a backticked span, and
 # a reference to our own notes is bare prose. Matches inside backticks are
-# therefore exempt, which keeps the thing this guard is for — "see specs/ for
+# therefore exempt, which keeps the thing this guard is for — "see reference/ for
 # the protocol" in a doc comment — and stops it failing an example.
 bt=$(printf '\140')
 fence="$bt$bt$bt"
-notes='concepts/|specs/|architecture notes|these notes|design notes'
+notes='concepts/|reference/|architecture notes|these notes|design notes'
 examples_excluded=$(cd .. && grep -rInoE "$notes" \
   $published 2>/dev/null | grep -vE '/target/|site/public/|^tests/documentation\.rs:' \
   | while IFS= read -r hit; do
@@ -71,7 +71,7 @@ examples_excluded=$(cd .. && grep -rInoE "$notes" \
       [ "${text#*$bt}" != "$text" ] && continue
       # Or a string literal, which is what an example path is in Rust. The
       # quoted runs are removed and the line re-tested: if nothing matches any
-      # more it was only ever inside a string, and `// see specs/ for the
+      # more it was only ever inside a string, and `// see reference/ for the
       # protocol` — the thing this guard is for — still has nothing quoting it.
       stripped=$(printf '%s' "$text" | sed 's/"[^"]*"//g')
       printf '%s' "$stripped" | grep -qE "$notes" || continue
@@ -87,7 +87,41 @@ if [ -n "$leaked" ]; then
   fail=1
 fi
 
-# Every `vibeplane.toml` example has to be one the parser accepts. `deny_unknown_fields`
+# The same rule for this project's own specifications, and it needs a different
+# mechanism. `specs/NNN-name/` is also where a **user's** specifications live —
+# it is what `--spec` points at and it is documented as a product feature — so
+# the path alone says nothing about whose it is, and the backtick heuristic above
+# exempts exactly the citations worth catching (`Specified in
+# `specs/001-work-view-diff`` reads as an example and is not one).
+#
+# So this asks the only question with an exact answer: do any of *this
+# checkout's* feature directories appear by name in the published tree? A clean
+# clone has no `specs/` and nothing to check, which is correct rather than
+# lenient — there is nothing there to point at.
+if [ -d ../specs ]; then
+  for feature in ../specs/*/; do
+    [ -d "$feature" ] || continue
+    name=$(basename "$feature")
+    hits=$(cd .. && grep -rIn --fixed-strings "$name" $published 2>/dev/null \
+      | grep -vE '/target/|site/public/')
+    if [ -n "$hits" ]; then
+      echo "published tree names a gitignored specification ($name):"
+      echo "$hits" | sed 's/^/  /'
+      fail=1
+    fi
+  done
+fi
+# And the machinery beside them. Unlike a feature name this string is fixed, so
+# it is checked whether or not the directory is here.
+specify_hits=$(cd .. && grep -rIn --fixed-strings '.specify/' $published 2>/dev/null \
+  | grep -vE '/target/|site/public/')
+if [ -n "$specify_hits" ]; then
+  echo "published tree points into .specify/ (gitignored):"
+  echo "$specify_hits" | sed 's/^/  /'
+  fail=1
+fi
+
+# Every `devplane.toml` example has to be one the parser accepts. `deny_unknown_fields`
 # means a single designed-but-unbuilt key fails the whole file — and takes that repository's
 # permission rules down with it — so a reference that cannot be pasted is worse than none.
 # It has happened twice: five sections that did not exist, and an `on =` key for standing
@@ -95,7 +129,7 @@ fi
 # notes when they are absent, which is why it is worth running from here as well.
 if command -v cargo >/dev/null 2>&1; then
   ( cd .. && cargo test --quiet --test documentation ) >/dev/null 2>&1 \
-    || { echo "a vibeplane.toml example does not parse (cargo test --test documentation)"; fail=1; }
+    || { echo "a devplane.toml example does not parse (cargo test --test documentation)"; fail=1; }
 fi
 
 # The storage decision carries numbers, so the numbers are recomputed rather than
@@ -170,8 +204,14 @@ EOF
 # PROVIDERS.md sent a reader to "§3 item 5" three times for review-comment
 # handling, and two files to "§4 item 1" for work that has never been in §4. A
 # number is a position; positions move and nothing notices.
+#
+# **It must match a heading, not merely the file.** The first form of this check
+# looked for the anchor anywhere in ROADMAP.md, so an item that was finished and
+# deleted stayed "known" for as long as its own prose still mentioned it
+# elsewhere in the file — which is what happened the first time an item was
+# retired, and the check was green for it.
 for a in $(grep -rhoE '`#[a-z][a-z-]+`' *.md | sort -u); do
-  grep -qF "$a" ROADMAP.md || { echo "unknown roadmap anchor: $a"; fail=1; }
+  grep -qE "^### $a " ROADMAP.md || { echo "unknown roadmap anchor: $a"; fail=1; }
 done
 # And the other direction: a roadmap heading with no anchor cannot be cited
 # safely. Items used to be numbered (`**7 · Title**`) and are now headings that
@@ -255,7 +295,7 @@ fi
 # ...and against the code, which is the authority for both floors.
 #
 # Agreeing with itself is not enough for these two. They are the only figures
-# here a *user* is shown — `vibeplane doctor` prints them, and the product's
+# here a *user* is shown — `devplane doctor` prints them, and the product's
 # central claim is how old they are — so the constant the binary reads is the
 # fact and these notes are a copy of it, exactly as the released version is a
 # copy of `Cargo.toml`. They could drift silently until this existed.
@@ -292,7 +332,7 @@ done
 # current release" (nothing was the authority for that at all).
 #
 # Three requests close them. They are skipped without a word when the network is
-# unavailable, so a clean offline checkout stays green; `VIBEPLANE_NO_NET=1`
+# unavailable, so a clean offline checkout stays green; `DEVPLANE_NO_NET=1`
 # skips them on purpose.
 #
 # The third was added after the first two had already been written *from a
@@ -306,7 +346,7 @@ done
 # REFERENCES.md and a star-count refresher. A guard that is slow or flaky is a
 # guard people start skipping, and a skipped guard is how the internal figures
 # rotted before any of this existed. Those stay a person's job once per pass.
-if [ -z "${VIBEPLANE_NO_NET:-}" ] && command -v curl >/dev/null 2>&1; then
+if [ -z "${DEVPLANE_NO_NET:-}" ] && command -v curl >/dev/null 2>&1; then
   get() { curl -fsS --max-time 8 "$1" 2>/dev/null; }
 
   # 1. The release these notes call released, against what the forge serves.
@@ -318,7 +358,7 @@ if [ -z "${VIBEPLANE_NO_NET:-}" ] && command -v curl >/dev/null 2>&1; then
   #    that compared it would fail every release preparation.
   if [ -n "${claimed_release:-}" ]; then
     latest=$(curl -fsS -o /dev/null -w '%{redirect_url}' --max-time 8 \
-      https://github.com/hupe1980/vibeplane/releases/latest 2>/dev/null | sed 's|.*/tag/||')
+      https://github.com/hupe1980/devplane/releases/latest 2>/dev/null | sed 's|.*/tag/||')
     if [ -n "$latest" ] && [ "$latest" != "v$claimed_release" ]; then
       echo "these notes call $claimed_release released; the forge serves $latest"
       fail=1

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Locates the `claude` executable, most explicit source first.
 pub fn claude_binary() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("VIBEPLANE_CLAUDE_BIN") {
+    if let Some(p) = std::env::var_os("DEVPLANE_CLAUDE_BIN") {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Some(p);
@@ -74,9 +74,9 @@ mod tests {
     fn an_explicit_override_wins_when_it_exists() {
         // The override must still point at something: a stale variable should
         // fall through to discovery rather than disabling the poller.
-        unsafe { std::env::set_var("VIBEPLANE_CLAUDE_BIN", "/definitely/not/here") };
+        unsafe { std::env::set_var("DEVPLANE_CLAUDE_BIN", "/definitely/not/here") };
         let found = claude_binary();
-        unsafe { std::env::remove_var("VIBEPLANE_CLAUDE_BIN") };
+        unsafe { std::env::remove_var("DEVPLANE_CLAUDE_BIN") };
         assert!(found != Some(PathBuf::from("/definitely/not/here")));
     }
 

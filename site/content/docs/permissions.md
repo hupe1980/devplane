@@ -6,12 +6,12 @@ weight = 22
 group = "reference"
 +++
 
-One rule set answers three callers: the synchronous permission hook for sessions Vibeplane only
+One rule set answers three callers: the synchronous permission hook for sessions Devplane only
 watches, the protocol's permission request for runs it drives, and its own effects in the
 [decision log](/docs/decisions/).
 
 ```toml
-# vibeplane.toml
+# devplane.toml
 [policy]
 auto_allow = [
   "Read",
@@ -29,17 +29,17 @@ always_ask = [
 ]
 ```
 
-A machine-wide set with the same shape lives in `~/.vibeplane/policy.toml`.
+A machine-wide set with the same shape lives in `~/.devplane/policy.toml`.
 
 ## The syntax is Claude Code's
 
-A rule moves between `settings.json` and `vibeplane.toml` by cutting and pasting it. Every row below
+A rule moves between `settings.json` and `devplane.toml` by cutting and pasting it. Every row below
 is pinned by a test against the published specification, and the rules that decide most calls are
 additionally checked against a **running Claude Code** (last full run: 2.1.273) — that a deny matching one subcommand
 blocks the whole line, that an allow does not approve a compound command it only half-covers, that an
 ask outranks the allow beside it, and that a single-segment directory pattern anchors as an allow
 while the same pattern floats to any depth as a deny — and that an `Edit` deny covers the target of a
-shell redirection, so `echo ok > secret.txt` does not write. Vibeplane agrees with the live product
+shell redirection, so `echo ok > secret.txt` does not write. Devplane agrees with the live product
 on all fourteen probes.
 
 ### Tools
@@ -96,11 +96,11 @@ Two subtleties worth knowing:
 > [!WARNING]
 > Put the `*` after the subcommand. In `Bash(git * main)` the wildcard stands in for the subcommand,
 > so the rule allows every git subcommand — including `-c`, which makes git run a program the agent
-> names. `vibeplane check` warns about it.
+> names. `devplane check` warns about it.
 
 #### Compound commands
 
-A `Bash` rule is **not** matched against the whole command line. Like Claude Code, Vibeplane is aware
+A `Bash` rule is **not** matched against the whole command line. Like Claude Code, Devplane is aware
 of shell operators — `&&`, `||`, `;`, `|`, `|&`, `&` and newlines — and matches each subcommand
 separately. The two sides are deliberately not symmetric:
 
@@ -132,7 +132,7 @@ cannot answer for them either:
 | `find` with `-exec`, `-execdir`, `-delete`, `-ok`, `-okdir` | runs a program, or removes files |
 | anything over 10 000 characters | past what the command analysis reads, so neither side has understood it |
 
-`Bash(watch *)` therefore approves nothing, and `vibeplane check` says so rather than letting it read
+`Bash(watch *)` therefore approves nothing, and `devplane check` says so rather than letting it read
 as protection. The escape hatch is Claude Code's own: **an exact rule still works**, so
 `Bash(watch -n5 make build)` — no wildcard — speaks for exactly that call.
 
@@ -142,7 +142,7 @@ are exactly the commands somebody writes a prohibition for.
 > [!WARNING]
 > A `Bash` rule matches the text the agent writes, and it is **not a security boundary around the
 > program**. `Bash(rm *)` stops `rm -rf build/`; it does not stop `/bin/rm -rf build/` or
-> `bash -c 'rm -rf build/'`. That is Claude Code's behaviour and Vibeplane mirrors it rather than
+> `bash -c 'rm -rf build/'`. That is Claude Code's behaviour and Devplane mirrors it rather than
 > inventing a stricter rule that would refuse calls your own settings allow. Environment runners like
 > `npx`, `docker exec` and `devbox run` are not wrappers either: `Bash(devbox run *)` covers whatever
 > follows `run`, including `devbox run rm -rf .`. For a boundary that does not depend on command
@@ -161,7 +161,7 @@ Four anchors, and confusing them is the most common mistake:
 |---|---|---|
 | `//path` | the filesystem root | `Read(//tmp/**)` |
 | `~/path` | your home directory | `Read(~/.ssh/**)` |
-| `/path` | **the file the rule is written in** | `Edit(/src/**)` in a `vibeplane.toml` means *that repository's* `src` |
+| `/path` | **the file the rule is written in** | `Edit(/src/**)` in a `devplane.toml` means *that repository's* `src` |
 | `path`, `./path` | the directory the agent is working in | `Read(*.env)` |
 
 A **bare filename matches at any depth**, so `Read(.env)` and `Read(**/.env)` are the same rule.
@@ -191,7 +191,7 @@ So to protect a file from a shell, write both halves:
 never_auto = ["Read(.env)", "Edit(.env)"]
 ```
 
-`vibeplane check` prints a note when only one is there.
+`devplane check` prints a note when only one is there.
 
 ### Path rules reach shell commands too
 
@@ -290,10 +290,10 @@ never_auto = ["Bash(git *)", "!Bash(git status *)"]
 A bare `!` is ignored. In `auto_allow` it is refused, because an allow list is already the list of
 exceptions.
 
-### One rule shape Vibeplane declines
+### One rule shape Devplane declines
 
 `Cd(<path>)` rules govern the `/cd` slash command — a person moving the session, not a tool call —
-so nothing ever reaches Vibeplane's gate to match one. `vibeplane check` says so rather than letting
+so nothing ever reaches Devplane's gate to match one. `devplane check` says so rather than letting
 the rule look like protection. Keep it in `settings.json`, where Claude Code evaluates it.
 
 ### Hosts and parameters
@@ -327,7 +327,7 @@ call. So a deny rule cannot carry allowlist exceptions, and `always_ask` is how 
 a broad `auto_allow`:
 
 ```toml
-# vibeplane.toml — fragment
+# devplane.toml — fragment
 [policy]
 auto_allow = ["Bash(git *)"]
 always_ask = ["Bash(git push *)"]
@@ -351,14 +351,14 @@ written in another.
 `Bash(pnpm test *)` is safe in the repository whose tests that runs and meaningless in the one beside
 it. The policy is resolved from the **directory the agent is working in**, with a worktree inheriting
 the rules of the checkout that owns it — both kinds: the `.claude/worktrees/<name>` layout Claude
-Code and Vibeplane use, and anything `git worktree add` put elsewhere on the disk.
+Code and Devplane use, and anything `git worktree add` put elsewhere on the disk.
 
 ### The rules come from the checkout, the gates come from the branch
 
 This asymmetry is deliberate, and it is the reason an agent cannot widen its own permissions.
 
 An agent works on a branch, in a worktree, and it can edit any file there — including
-`vibeplane.toml`. So the **permission rules** are read from the checkout that *owns* the worktree,
+`devplane.toml`. So the **permission rules** are read from the checkout that *owns* the worktree,
 which is the copy on your trunk that you reviewed. A rule the agent adds to its own branch changes
 nothing about what it is allowed to do.
 
@@ -368,14 +368,14 @@ weakens still has to produce a green result that a person then looks at, and eve
 the decision log.
 
 Each rule set is evaluated against the directory it was **written in**, which is what a single
-leading slash anchors to. The same `Read(/secrets/**)` means one thing in a `vibeplane.toml` and
-another in `~/.vibeplane/policy.toml`; use `//` or `~/` for a machine-wide rule that should apply
+leading slash anchors to. The same `Read(/secrets/**)` means one thing in a `devplane.toml` and
+another in `~/.devplane/policy.toml`; use `//` or `~/` for a machine-wide rule that should apply
 inside every project.
 
 ## Rules that cannot work are refused
 
 Claude Code lists the spellings it skips in its own startup dialog, and for a good reason: the
-failure is silent, and on `never_auto` silence reads as permission. `vibeplane check` and
+failure is silent, and on `never_auto` silence reads as permission. `devplane check` and
 `work start` report the same ones **before an agent starts**.
 
 | Refused | Why |
@@ -396,7 +396,7 @@ And one **warning**, because the list behind it is a snapshot of somebody else's
 | `Bahs(rm *)`, `Stop Task` in `never_auto` or `always_ask` | the tool name is not one Claude Code documents, so the rule matches nothing. A prohibition with a typo in it is a dead prohibition. The name shown in the transcript is not always the one rules use — `Stop Task` is written `TaskStop` |
 
 Verified against Claude Code 2.1.273: `claude doctor` reports the three refusals above that are
-parse errors. The rest are spellings its own documentation describes as skipped, which `vibeplane
+parse errors. The rest are spellings its own documentation describes as skipped, which `devplane
 check` reports before an agent starts rather than after one has been paid for.
 
 ### How the list stays honest
@@ -415,8 +415,8 @@ than transcribed:
   ships most days.
 - Every fix carries a test.
 
-`vibeplane gate` prints the age of that measurement and scores the gate against a published
-execution-boundary profile, failures included — [conformance](/vibeplane/docs/conformance/).
+`devplane gate` prints the age of that measurement and scores the gate against a published
+execution-boundary profile, failures included — [conformance](/devplane/docs/conformance/).
 
 Both mistakes cost something, which is why the list is neither transcribed nor guessed at: a command
 that belongs here and is missing leaves a prohibition that reads as protection and is none, and one
@@ -425,12 +425,12 @@ running Claude Code; `xxd`, `zcat`, `join`, `less`, `more` and `truncate` are **
 and so are not here.
 
 **The release it was measured against is a number you can check.** A session running a newer Claude
-Code is governed by rules nobody has checked against it. `vibeplane doctor` prints the baseline and
+Code is governed by rules nobody has checked against it. `devplane doctor` prints the baseline and
 names any such session — only for sessions running the
 [status-line shim](/docs/observe/#the-status-line), the one channel reporting a version per session:
 
 ```console
-$ vibeplane doctor
+$ devplane doctor
 gate
   verified against Claude Code 2.1.273
   1 session(s) are running a newer Claude Code than the gate was measured against
@@ -438,15 +438,15 @@ gate
   rules are still enforced; nobody has checked that they agree
 ```
 
-## The one place Vibeplane is stricter than Claude Code, on purpose
+## The one place Devplane is stricter than Claude Code, on purpose
 
-The rules here are Claude Code's, so a rule you move between `settings.json` and `vibeplane.toml`
+The rules here are Claude Code's, so a rule you move between `settings.json` and `devplane.toml`
 decides the same way in both. There is one deliberate exception:
 
 > **Exactly as strict as Claude Code, except for commands that exist to defeat text matching.**
 
 `eval`, `env`, `sudo`, `doas` and `exec` take a command and run it under another name. Claude Code
-treats what they are handed as opaque text; Vibeplane looks through it, so
+treats what they are handed as opaque text; Devplane looks through it, so
 `never_auto = ["Read(.env)"]` also stops `eval "cat .env"`. No allow rule approves a command behind
 one of them — not a prefix rule, and not an exact rule naming the whole line.
 
@@ -461,7 +461,7 @@ nothing was going to ask. A `never_auto` or `always_ask` rule *does* still apply
 to put one of them back in front of a person.
 
 ```sh
-vibeplane check
+devplane check
 ```
 
 also prints the rules back, allow and deny, because a rule that parses, is legal and still covers
@@ -469,11 +469,11 @@ nothing anybody expected is only visible by reading it.
 
 ## Rules that do nothing
 
-`vibeplane check` reports a rule that provably cannot matter, which is a different
+`devplane check` reports a rule that provably cannot matter, which is a different
 thing from a rule that is malformed:
 
 ```console
-$ vibeplane check
+$ devplane check
   policy    3 deny, 0 ask, 2 allow
             deny   Read(*.env)
             deny   Bash(rm *)
@@ -506,7 +506,7 @@ The mirror of the check above. In a scan of 3,171 public agent setups, **3.1 % p
 execution through a grant that reads as scoped** — `Bash(python:*)` being the canonical shape.
 
 ```console
-$ vibeplane check
+$ devplane check
   policy    0 deny, 0 ask, 2 allow
             allow  Bash(python:*)
             allow  Bash(npm test *)
@@ -527,8 +527,8 @@ narrow enough is a question about the script.
 
 Rules the gate already refuses to honour are not repeated: `Bash(watch *)` and `Bash(env *)` approve
 nothing whatever they say ([the veto](#the-syntax-is-claude-code-s)), and `Bash(xargs *)` grants
-nothing extra because the wrapper is stripped first. `vibeplane trust` prints the same finding for a
-repository's own `vibeplane.toml`.
+nothing extra because the wrapper is stripped first. `devplane trust` prints the same finding for a
+repository's own `devplane.toml`.
 
 ## Globs in a command
 
@@ -536,7 +536,7 @@ The shell expands a wildcard before the program sees it, so a **deny** rule asks
 carrying one: *could this expand onto something I protect?*
 
 ```console
-$ vibeplane explain 'cat .en?'      # never_auto = ["Read(.env)"]
+$ devplane explain 'cat .en?'      # never_auto = ["Read(.env)"]
 deny  Bash
         by Read(.env)
 ```
@@ -547,7 +547,7 @@ deny  Bash
 an operand that are both patterns do not have to look alike to name the same file:
 
 ```console
-$ vibeplane explain 'cat conf*'    # never_auto = ["Read(*.env)"]
+$ devplane explain 'cat conf*'    # never_auto = ["Read(*.env)"]
 deny  Bash
         by Read(*.env)
 ```
@@ -569,7 +569,7 @@ matched against the command as written **and** against the command with its quot
 neither spelling gets past a prohibition:
 
 ```console
-$ vibeplane explain "r''m -rf /tmp/x"    # never_auto = ["Bash(rm *)"]
+$ devplane explain "r''m -rf /tmp/x"    # never_auto = ["Bash(rm *)"]
 deny  Bash
         by Bash(rm *)
 ```
@@ -593,7 +593,7 @@ Reaching a bound is reported rather than ignored. A deny rule treats the part no
 it could be anything, so a protected file cannot be hidden behind a long enough command line:
 
 ```console
-$ vibeplane explain 'cat f1 f2 … f600 .env'   # never_auto = ["Read(.env)"]
+$ devplane explain 'cat f1 f2 … f600 .env'   # never_auto = ["Read(.env)"]
 deny  Bash
         by Read(.env)
 ```
@@ -606,7 +606,7 @@ enough.
 
 Claude Code's **auto mode** reviews actions with a classifier instead of asking you, so routine calls
 run without a prompt. A `PermissionRequest` hook fires only when Claude Code is about to *ask* —
-which in auto mode is never. So Vibeplane installs two synchronous hooks:
+which in auto mode is never. So Devplane installs two synchronous hooks:
 
 | Hook | Fires | Carries |
 |---|---|---|
@@ -637,27 +637,27 @@ and ten thousand checks are not ten thousand file reads.
 
 ## When the file is broken
 
-A malformed `vibeplane.toml` **keeps the rules it had**. A typo in a deny rule must never read as
+A malformed `devplane.toml` **keeps the rules it had**. A typo in a deny rule must never read as
 “no rules”.
 
 That is only half an answer, because a process starting fresh against a broken file has no previous
-rules to keep — so `vibeplane doctor` names the project and says its rules are not in force, rather
+rules to keep — so `devplane doctor` names the project and says its rules are not in force, rather
 than leaving it to a log line.
 
-`vibeplane explain` says it too, and it is the one that matters while you are editing:
+`devplane explain` says it too, and it is the one that matters while you are editing:
 
 ```console
-$ vibeplane explain 'cat .env'
+$ devplane explain 'cat .env'
 undecided  Bash
         this project's rules are NOT in force — the file below will not load
 
-vibeplane.toml is not valid: TOML parse error at line 3, column 2
+devplane.toml is not valid: TOML parse error at line 3, column 2
   |
 3 | [polcy]
   |  ^^^^^
 unknown field `polcy`, expected one of `project`, `workspace`, `gates`, `policy`, …
 
-every rule in this file is off until it parses — vibeplane check
+every rule in this file is off until it parses — devplane check
 ```
 
 Three situations end in `undecided` and only one of them is a fact about the call — no rules here,
@@ -688,13 +688,13 @@ climbing, nothing in the inbox.
 Refusals are counted. Five in one live run raises a `refused` item naming the rule that stopped it:
 
 ```console
-$ vibeplane inbox
+$ devplane inbox
 refused   core-lib   7 calls refused in this run
           The last one was `Bash`, refused by `Bash(git *)`. Check that the rule means
           what you meant.
 ```
 
-It never interrupts — `normal` level — and `vibeplane attention` reports what became of every one, so
+It never interrupts — `normal` level — and `devplane attention` reports what became of every one, so
 a threshold that is wrong shows up in the `dismissed` column.
 
 ## Every verdict is recorded

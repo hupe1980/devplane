@@ -36,7 +36,7 @@ pub async fn run(state: Shared) {
 
 /// Reads the roster once, before the API is reachable.
 ///
-/// Without this the first `vibeplane ls` after a cold start shows an empty
+/// Without this the first `devplane ls` after a cold start shows an empty
 /// board while twenty sessions are running, and the first thing the product
 /// ever says about itself is wrong.
 pub async fn initial_poll(state: &Shared) {
@@ -188,7 +188,7 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
     }
 }
 
-/// Refreshes the pull requests Vibeplane opened.
+/// Refreshes the pull requests Devplane opened.
 ///
 /// Checks finish minutes or hours after the agent stopped, which is the clearest
 /// illustration of why Work is the durable unit: the session that wrote the code
@@ -486,7 +486,7 @@ pub async fn reconcile_at_startup(state: &Shared) {
             match run.pid {
                 Some(pid) => process_alive(pid),
                 // An interactive session reports no pid, and neither does a run
-                // Vibeplane drove: the process is behind an ACP connection that
+                // Devplane drove: the process is behind an ACP connection that
                 // did not survive the restart. Its own hooks correct the record
                 // the moment it does anything, and calling it lost on a hunch
                 // would fill the inbox with ghosts every time the daemon
@@ -509,7 +509,7 @@ pub async fn reconcile_at_startup(state: &Shared) {
 ///
 /// **A broken gate and a quiet machine are the same thing in the event log** —
 /// no hook arrives either way — so this is the only mechanism that can tell
-/// them apart without a person. `vibeplane doctor` asks the same question and
+/// them apart without a person. `devplane doctor` asks the same question and
 /// only helps whoever runs it; this puts the answer in the inbox.
 ///
 /// Slow on purpose. The probe spawns a process, and a gate that broke four

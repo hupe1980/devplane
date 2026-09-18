@@ -16,7 +16,7 @@
 //!   prohibition read as protection and was none;
 //! * `auto_allow = ["Bash(pnpm test *)"]` **auto-approved** `pnpm test && rm
 //!   -rf /`, which is the example Claude Code's own documentation uses to
-//!   explain why it splits. Vibeplane answers the permission prompt, so that
+//!   explain why it splits. Devplane answers the permission prompt, so that
 //!   was a destructive command approved without anybody being asked.
 //!
 //! Everything here is a pure function of the command text, because it runs on
@@ -89,7 +89,7 @@ pub fn contains_analysis_barrier(command: &str) -> bool {
 ///
 /// These are the forms Claude Code puts in front of a person whatever an allow
 /// rule says, and the reason they need naming here is the direction the mistake
-/// runs in: Vibeplane is the thing answering the prompt, so a rule that is
+/// runs in: Devplane is the thing answering the prompt, so a rule that is
 /// broader here than there is a call approved without anybody being asked. The
 /// escape hatch is the one Claude Code documents — *"write an exact-match rule
 /// for the full command string"* — so a rule with no wildcard in it still
@@ -124,6 +124,26 @@ pub fn unapprovable_by_prefix(command: &str) -> Option<String> {
             && let Some(p) = words.find(|w| FIND_EXEC_PREDICATES.contains(w))
         {
             return Some(format!("`find {p}` runs a program or deletes files"));
+        }
+        // **A loop assigns its variable, once per iteration.** `OPTIND=1/0` is
+        // arithmetic rather than a string, and `for OPTIND in 1 2` performs the
+        // same assignment with the `=` out of sight — so the check that catches
+        // the first has to catch the second, or the loop is the way around it.
+        //
+        // Measured against Claude Code 2.1.273, three times: it runs
+        // `for i in 1; do …; done` and refuses `for OPTIND in 1 2; do …; done`
+        // under the same allow rule. The 2.1.274 changelog then named the class
+        // — *"commands that loop over or assign certain special shell
+        // variables… now ask for permission"* — which is the row that sent
+        // somebody looking.
+        // `for` and `in` are control words and are stripped before this, so the
+        // loop *variable* arrives here as the part's first word — `for OPTIND
+        // in 1 2` reaches this as `OPTIND in 1 2`. The `in` is what tells a
+        // loop header apart from a bare command that happens to share the name.
+        if EVALUATED_VARS.contains(&program) && words.next() == Some("in") {
+            return Some(format!(
+                "`for {program}` assigns a variable the shell evaluates, once per iteration"
+            ));
         }
     }
     None
@@ -164,7 +184,7 @@ const RUNS_GIVEN_CODE: &[(&str, &str)] = &[
 /// Whether `program` runs code handed to it on the command line, and the flag
 /// that does it — for the sentence a report prints.
 ///
-/// See [`RUNS_GIVEN_CODE`]: this drives `vibeplane check` and the trust scan,
+/// See [`RUNS_GIVEN_CODE`]: this drives `devplane check` and the trust scan,
 /// and nothing that decides a call.
 pub fn runs_given_code(program: &str) -> Option<&'static str> {
     RUNS_GIVEN_CODE
@@ -225,7 +245,7 @@ const NO_OPS: &[&str] = &["true", "false", ":"];
 /// **It is deliberately not a veto on allow rules.** Those cases describe what
 /// happens in Manual mode when *no rule matches*; an allow rule the user wrote
 /// still approves the call, there and here. Treating them as a veto would make
-/// Vibeplane refuse calls the user's own settings allow — the mistake this
+/// Devplane refuse calls the user's own settings allow — the mistake this
 /// module has made six times in the other direction and must not now make in
 /// this one. What this is for is the *warning*: telling somebody that
 /// `Bash(find *)` "approves nothing" is false the moment their `find` carries a
@@ -907,19 +927,20 @@ mod tests {
         assert_eq!(v("Read", &[".env", ".env"]), Some(".env".into()));
         // Two directories share no rule worth guessing at.
         assert_eq!(v("Read", &["src/a.rs", "docs/b.md"]), None);
-        // A WebFetch rule takes a domain, never a URL.
+        // A WebFetch rule takes a domain, never a URL — and the `domain:`
+        // prefix is part of the specifier, not prose about it.
         assert_eq!(
             v(
                 "WebFetch",
                 &["https://docs.rs/x", "https://docs.rs/y/z?q=1"]
             ),
-            Some("docs.rs".into())
+            Some("domain:docs.rs".into())
         );
         assert_eq!(v("WebFetch", &["https://a.com/x", "https://b.com/y"]), None);
         // Port and credentials are not part of the host.
         assert_eq!(
             v("WebFetch", &["https://u:p@Docs.RS:8443/x"]),
-            Some("docs.rs".into())
+            Some("domain:docs.rs".into())
         );
         // Anything else is matched whole, so several distinct values are not
         // one rule.
@@ -988,6 +1009,48 @@ mod tests {
         // A subcommand that names no files reaches nothing but its options.
         assert!(paths("git status").is_empty());
         assert!(paths("git diff").is_empty());
+    }
+
+    /// A loop assigns its variable, and the `=` being out of sight changes
+    /// nothing about that.
+    ///
+    /// **Widening thirty-one, and the mechanisms found it in the order they were
+    /// built to.** `changelog-rows.sh` refused to pass with 2.1.274's row
+    /// unaccounted — *"commands that loop over or assign certain special shell
+    /// variables… now ask for permission"* — and the running product settled it:
+    /// asked three times under one allow rule, Claude Code 2.1.273 runs
+    /// `for i in 1; do …; done` and refuses `for OPTIND in 1 2; do …; done`.
+    /// This matcher approved both, because `for` and `in` are control words that
+    /// are stripped before the check that catches `OPTIND=1/0` ever runs.
+    #[test]
+    fn a_loop_over_an_evaluated_variable_is_not_approved_by_a_prefix_rule() {
+        for looped in [
+            "for OPTIND in 1 2; do ls; done",
+            "for RANDOM in 1; do ls; done",
+            "for SECONDS in 1; do ls; done",
+        ] {
+            assert!(
+                unapprovable_by_prefix(looped).is_some(),
+                "{looped} assigns a variable the shell evaluates"
+            );
+        }
+        // And an ordinary loop is still an ordinary loop. Refusing every `for`
+        // would be the other failure: the running product runs this one, and a
+        // matcher stricter than it here costs a prompt on a shape agents write
+        // constantly.
+        for ordinary in [
+            "for i in 1 2; do ls; done",
+            "for FOO in 1; do ls; done",
+            "for f in *.txt; do cat \"$f\"; done",
+        ] {
+            assert!(
+                unapprovable_by_prefix(ordinary).is_none(),
+                "{ordinary} is an ordinary loop"
+            );
+        }
+        // The name alone is not the trigger — a command that merely *is* one of
+        // these words is not a loop header, and `in` is what tells them apart.
+        assert!(unapprovable_by_prefix("OPTIND=1 ls").is_none());
     }
 
     #[test]
@@ -2280,9 +2343,15 @@ pub fn suggest_rule_for(tool: &str, calls: &[String]) -> Option<String> {
     // Every tool whose rules carry a command pattern, not just `Bash`:
     // `PowerShell` and `Monitor` are command tools too, and offering somebody
     // the literal command line as their rule is offering a rule that covers
-    // the call they just saw and nothing else. The suggestion is validated by
-    // deterministic replay before it is shown, so a prefix that turns out not
-    // to reproduce the verdict is never offered.
+    // the call they just saw and nothing else.
+    //
+    // **This composes; it does not check.** It once said the result was
+    // "validated by deterministic replay before it is shown", and nothing
+    // replayed anything — the only protection here is the *static* refusal in
+    // [`suggest_rule`], which drops a command no prefix rule may approve before
+    // a rule is composed at all. Whether the composed rule actually decides the
+    // call is a different question and is [`crate::core::offer`]'s, which
+    // parses the text and matches it before anybody is handed it.
     if crate::core::policy::is_command_tool(tool) {
         return suggest_rule(calls);
     }
@@ -2302,11 +2371,17 @@ pub fn suggest_rule_for(tool: &str, calls: &[String]) -> Option<String> {
         );
     }
     if tool.eq_ignore_ascii_case("WebFetch") {
+        // **`domain:` is not decoration.** It is the vendor's documented
+        // specifier for this tool, and `WebFetch(docs.rs)` without it is not a
+        // domain grant — it is read as something else and answers nothing.
+        // This returned the bare host until `core::offer` started replaying
+        // suggestions against the call they were composed from, and the first
+        // run refused it.
         let host = web_host(calls.first()?)?;
         return calls
             .iter()
             .all(|c| web_host(c).as_deref() == Some(host.as_str()))
-            .then_some(host);
+            .then(|| format!("domain:{host}"));
     }
     // Everything else is matched on its whole specifier, so one distinct value
     // is a rule and several are not.

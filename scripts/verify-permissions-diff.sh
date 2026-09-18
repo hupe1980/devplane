@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Differential testing: does Vibeplane's matcher agree with the running Claude
+# Differential testing: does Devplane's matcher agree with the running Claude
 # Code on calls nobody wrote down?
 #
 # The other three checks cannot close this hole. `verify-claims.sh` asks whether
@@ -13,11 +13,11 @@
 #
 #   scripts/verify-permissions-diff.sh [cases]
 #
-# `cases` caps how many are run, for a quick pass. `VIBEPLANE_DIFF_AXIS=allow`
+# `cases` caps how many are run, for a quick pass. `DEVPLANE_DIFF_AXIS=allow`
 # or `=deny` runs one half and the default runs both; `=dialect` runs this
 # matcher alone over the non-Bash tools and prints a checklist to put to the
 # running product; `=selftest` checks the harness against itself and asks
-# nothing. `VIBEPLANE_DIFF_ONLY=<substring>` runs the rule sets that match,
+# nothing. `DEVPLANE_DIFF_ONLY=<substring>` runs the rule sets that match,
 # which is how a finding is re-asked without paying for the matrix again.
 #
 # Costs a few cents per run and needs a signed-in Claude Code, so it is not part
@@ -36,7 +36,7 @@
 #
 # **The oracle is `--permission-mode dontAsk`**: a call runs if and only if a
 # rule covers it, with nobody to prompt. So `claude ran it` must mean
-# `vibeplane says allow`, and all three of Vibeplane's non-allow verdicts end
+# `devplane says allow`, and all three of Devplane's non-allow verdicts end
 # with a person deciding, which is the same outcome.
 #
 # **`WRITE_SHAPES` are the exception**: they exist to test file *targets*, so
@@ -96,11 +96,11 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 CASES="${1:-0}"            # 0 = the full built-in matrix
-AXIS="${VIBEPLANE_DIFF_AXIS:-both}"   # allow | deny | both | dialect | selftest
+AXIS="${DEVPLANE_DIFF_AXIS:-both}"   # allow | deny | both | dialect | selftest
 # One rule set, by substring. The full matrix costs hours and a finding has to
 # be re-asked several times before it is believed, so re-running the one rule it
 # came from is the difference between a minute and an afternoon.
-ONLY="${VIBEPLANE_DIFF_ONLY:-}"
+ONLY="${DEVPLANE_DIFF_ONLY:-}"
 
 # A rule the caller asked to skip.
 skip_rule() { [ -n "$ONLY" ] && case "$1" in *"$ONLY"*) return 1 ;; *) return 0 ;; esac; return 1; }
@@ -109,7 +109,7 @@ skip_rule() { [ -n "$ONLY" ] && case "$1" in *"$ONLY"*) return 1 ;; *) return 0 
 # requiring a signed-in Claude Code for a check that only compares two strings
 # would take `just verify` off every machine that does not have one.
 if [ "$AXIS" != selftest ]; then
-  CLAUDE="${VIBEPLANE_CLAUDE_BIN:-$(command -v claude || true)}"
+  CLAUDE="${DEVPLANE_CLAUDE_BIN:-$(command -v claude || true)}"
   if [ -z "$CLAUDE" ]; then
     # The editor keeps every version it has ever installed side by side, so the
     # choice is which one to measure against — and it must be the newest, because
@@ -126,7 +126,7 @@ if [ "$AXIS" != selftest ]; then
     [ -n "$newest" ] && CLAUDE="$newest"
     [ -x "$HOME/.claude/local/claude" ] && [ -z "$newest" ] && CLAUDE="$HOME/.claude/local/claude"
   fi
-  [ -x "${CLAUDE:-}" ] || { echo "no claude binary found; set VIBEPLANE_CLAUDE_BIN"; exit 2; }
+  [ -x "${CLAUDE:-}" ] || { echo "no claude binary found; set DEVPLANE_CLAUDE_BIN"; exit 2; }
   "$CLAUDE" auth status >/dev/null 2>&1 || { echo "claude is not signed in; nothing to ask"; exit 2; }
   # The release this run measures against. Printed, because a clean run is a claim
   # about a *version* and a number with no version beside it is not a measurement.
@@ -135,10 +135,10 @@ if [ "$AXIS" != selftest ]; then
   echo
 fi
 
-VP="${VIBEPLANE_BIN:-target/debug/vibeplane}"
+VP="${DEVPLANE_BIN:-target/debug/devplane}"
 [ -x "$VP" ] || cargo build -q || exit 2
 
-MODEL="${VIBEPLANE_PROBE_MODEL:-claude-haiku-4-5-20251001}"
+MODEL="${DEVPLANE_PROBE_MODEL:-claude-haiku-4-5-20251001}"
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 git -C "$W" init -q
@@ -189,6 +189,10 @@ SHAPES=(
   "true; $P"
   "($P)"
   "for i in 1; do $P; done"
+  # A loop assigns its variable once per iteration, which is the `OPTIND=1/0`
+  # hazard with the `=` out of sight. The product refuses this and runs the
+  # control above it (2.1.274, measured at 2.1.273).
+  "for OPTIND in 1 2; do $P; done"
   "if true; then $P; fi"
   "sh -c \"$P\""
   "$P > /dev/null"
@@ -359,7 +363,7 @@ DENY_SHAPES=(
 # none of it has been asked of the running product.
 #
 # It cannot be: `Monitor` and `LSP` are not shells, and PowerShell needs a
-# Windows host or `pwsh`. So `VIBEPLANE_DIFF_AXIS=dialect` runs this side alone
+# Windows host or `pwsh`. So `DEVPLANE_DIFF_AXIS=dialect` runs this side alone
 # and prints a checklist to put to a running product on a machine that has the
 # tool. It is not a measurement, and says so in its own output.
 PS_RULESETS=(
@@ -402,10 +406,10 @@ deny_program_present() { # shape -> 0 when runnable here
 
 # Narrowings this project chose, each with the reason it was chosen. A row here
 # is reported as a declared divergence rather than as a finding — but only ever
-# a *narrowing*: a WIDER row is a call Vibeplane would auto-approve and the
+# a *narrowing*: a WIDER row is a call Devplane would auto-approve and the
 # product would not, and nothing may excuse one.
 #
-# **One rule behind every row**: Vibeplane is exactly as strict as Claude Code,
+# **One rule behind every row**: Devplane is exactly as strict as Claude Code,
 # except where matching it would make a prohibition trivially avoidable. The
 # cost is always a prompt, never a refusal. Three measured classes, and a shape
 # belongs here only when it is an instance of one of them:
@@ -524,13 +528,13 @@ deny_model_will_run() { # shape -> 0 when it is a usable probe
   [ "$(claude_deny_ran_within 3 '[]' "$1")" = yes ]
 }
 
-ask_vibeplane_deny() { # deny-rule command -> yes|no
+ask_devplane_deny() { # deny-rule command -> yes|no
   full="$2 ; git config --local vp.ran 1"
   {
     printf '[project]\nname = "diff"\n\n[policy]\n'
     printf 'never_auto = ["%s"]\n' "$1"
     printf 'auto_allow = ["Bash(%s)"]\n' "$(printf '%s' "$full" | sed 's/"/\\"/g')"
-  } > "$W/vibeplane.toml"
+  } > "$W/devplane.toml"
   v=$("$VP" --json explain --dir "$W" "$full" 2>/dev/null \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
   # Anything but a clean allow ends with a person, which is the same outcome as
@@ -559,7 +563,7 @@ reset() {
 # The extra grant a write shape needs, and nothing else gets.
 #
 # **Both sides get it, and that took a run to notice.** It was written into the
-# Claude settings blob and not into the `vibeplane.toml`, so every write-shape
+# Claude settings blob and not into the `devplane.toml`, so every write-shape
 # row asked the two sides *different questions* — Claude with `Edit(ran.txt)`,
 # this matcher without — and the first real run reported the artefact as a
 # narrowing. A differential harness whose two probes do not carry the same rules
@@ -599,9 +603,9 @@ ask_claude() { # ruleset command -> yes|no
   ran "$2"
 }
 
-ask_vibeplane() { # ruleset command -> yes|no
+ask_devplane() { # ruleset command -> yes|no
   printf '[project]\nname = "diff"\n\n[policy]\nauto_allow = ["%s"%s]\n' \
-    "$1" "$(extra_allow_toml "$2")" > "$W/vibeplane.toml"
+    "$1" "$(extra_allow_toml "$2")" > "$W/devplane.toml"
   v=$("$VP" --json explain --dir "$W" "$2" 2>/dev/null \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
   [ "$v" = allow ] && echo yes || echo no
@@ -610,7 +614,7 @@ ask_vibeplane() { # ruleset command -> yes|no
 # ---------------------------------------------------------------------------
 # The harness measuring itself.
 #
-# `VIBEPLANE_DIFF_AXIS=selftest` asks the one question that has no oracle: **are
+# `DEVPLANE_DIFF_AXIS=selftest` asks the one question that has no oracle: **are
 # the two probes being handed the same rules?** A differential harness whose
 # sides carry different rule sets is not measuring a disagreement, it is
 # manufacturing one, and its output reads exactly like a finding — which is how
@@ -625,7 +629,7 @@ selftest() {
     # One is JSON and one is TOML, so they are compared with the spacing
     # removed rather than as strings.
     if [ "$(printf '%s' "$theirs" | tr -d ' ')" != "$(printf '%s' "$mine" | tr -d ' ')" ]; then
-      printf 'SELFTEST  the two probes disagree about %s: claude=[%s] vibeplane=[%s]\n' \
+      printf 'SELFTEST  the two probes disagree about %s: claude=[%s] devplane=[%s]\n' \
         "$shape" "$theirs" "$mine"
       bad=1
     fi
@@ -646,14 +650,14 @@ if [ "$AXIS" = dialect ]; then
   for rule in "${PS_RULESETS[@]}"; do
     class=never_auto
     case "$rule" in *Get-ChildItem*) class=auto_allow ;; esac
-    printf '[project]\nname = "diff"\n\n[policy]\n%s = ["%s"]\n' "$class" "$rule" > "$W/vibeplane.toml"
+    printf '[project]\nname = "diff"\n\n[policy]\n%s = ["%s"]\n' "$class" "$rule" > "$W/devplane.toml"
     for shape in "${PS_SHAPES[@]}"; do
       v=$("$VP" --json explain --dir "$W" --tool PowerShell --input "$(printf '{"command":"%s"}' "$shape")" 2>/dev/null \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
       printf '  %-28s %-34s -> %s\n' "$rule" "$shape" "${v:-?}"
     done
   done
-  printf '[project]\nname = "diff"\n\n[policy]\nnever_auto = ["Bash(rm *)", "Read(.env)"]\nauto_allow = ["Bash(git config *)"]\n' > "$W/vibeplane.toml"
+  printf '[project]\nname = "diff"\n\n[policy]\nnever_auto = ["Bash(rm *)", "Read(.env)"]\nauto_allow = ["Bash(git config *)"]\n' > "$W/devplane.toml"
   for shape in "${MONITOR_SHAPES[@]}"; do
     for tool in Bash Monitor; do
       v=$("$VP" --json explain --dir "$W" --tool "$tool" --input "$(printf '{"command":"%s"}' "$shape")" 2>/dev/null \
@@ -694,7 +698,7 @@ for rule in "${RULESETS[@]}"; do
     [ "$CASES" != 0 ] && [ "$n" -ge "$CASES" ] && break 2
     n=$((n+1))
     theirs=$(ask_claude "$rule" "$shape")
-    ours=$(ask_vibeplane "$rule" "$shape")
+    ours=$(ask_devplane "$rule" "$shape")
     if [ "$theirs" != "$ours" ]; then
       theirs=$(ask_claude "$rule" "$shape")
       retried=$((${retried:-0}+1))
@@ -702,9 +706,9 @@ for rule in "${RULESETS[@]}"; do
     if [ "$theirs" = "$ours" ]; then
       printf '  ok   %-22s %s\n' "$rule" "$shape"
     else
-      printf 'DIFF   %-22s %s   (claude ran=%s, vibeplane allow=%s)\n' \
+      printf 'DIFF   %-22s %s   (claude ran=%s, devplane allow=%s)\n' \
         "$rule" "$shape" "$theirs" "$ours"
-      # A widening is the one that matters: Vibeplane answering the prompt with
+      # A widening is the one that matters: Devplane answering the prompt with
       # `allow` for a call Claude Code would not have run without a person.
       if [ "$ours" = yes ]; then
         disagreements="$disagreements\n  WIDER  $rule  ::  $shape"
@@ -747,7 +751,7 @@ for rule in "${DENY_RULESETS[@]}"; do
     [ "$CASES" != 0 ] && [ "$n" -ge "$CASES" ] && break 2
     n=$((n+1))
     theirs=$(ask_claude_deny "[\"$rule\"]" "$shape")
-    ours=$(ask_vibeplane_deny "$rule" "$shape")
+    ours=$(ask_devplane_deny "$rule" "$shape")
     # A model answered the first one. Ask again before believing it.
     if [ "$theirs" != "$ours" ]; then
       # Four more chances for the evidence to appear, so a reported absence has
@@ -767,10 +771,10 @@ for rule in "${DENY_RULESETS[@]}"; do
       printf '  ok   %-18s %s\n' "$rule" "$shape"
     else
       # Same asymmetry as the allow axis, arrived at from the other side:
-      # Vibeplane saying `allow` where Claude Code refused is a deny rule that
+      # Devplane saying `allow` where Claude Code refused is a deny rule that
       # reads as protection and is none.
       if [ "$ours" = yes ]; then
-        printf 'DIFF   %-18s %s   (claude ran=%s, vibeplane allow=%s)\n' \
+        printf 'DIFF   %-18s %s   (claude ran=%s, devplane allow=%s)\n' \
           "$rule" "$shape" "$theirs" "$ours"
         disagreements="$disagreements\n  WIDER  $rule  ::  $shape"
         fail=1
@@ -778,7 +782,7 @@ for rule in "${DENY_RULESETS[@]}"; do
         printf ' decl  %-18s %-34s %s\n' "$rule" "$shape" "($(narrowing_reason "$shape"))"
         declared=$((${declared:-0}+1))
       else
-        printf 'DIFF   %-18s %s   (claude ran=%s, vibeplane allow=%s)\n' \
+        printf 'DIFF   %-18s %s   (claude ran=%s, devplane allow=%s)\n' \
           "$rule" "$shape" "$theirs" "$ours"
         disagreements="$disagreements\n  narrower  $rule  ::  $shape"
         fail=1
@@ -794,7 +798,7 @@ else
   # shellcheck disable=SC2059
   printf "verify-permissions-diff: $n cases (${skipped:-0} shapes unrunnable here), disagreements:$disagreements\n"
   echo
-  echo "A WIDER row is a call Vibeplane would auto-approve and Claude Code puts"
+  echo "A WIDER row is a call Devplane would auto-approve and Claude Code puts"
   echo "in front of a person. That is the failure this layer exists to prevent."
 fi
 exit $fail

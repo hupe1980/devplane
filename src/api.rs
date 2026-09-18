@@ -2,8 +2,8 @@
 //!
 //! One server, on loopback, for both. The browser shell needs HTTP anyway, and
 //! a second transport for the CLI would mean two protocols to keep in step for
-//! no gain. Everything under `/api` and `/vibeplane` requires the bearer token
-//! from `~/.vibeplane/token`.
+//! no gain. Everything under `/api` and `/devplane` requires the bearer token
+//! from `~/.devplane/token`.
 
 use crate::core::event::Source;
 use crate::core::ids::RunId;
@@ -24,27 +24,27 @@ use std::time::Instant;
 
 pub fn router(state: Shared) -> Router {
     Router::new()
-        // Receivers. The paths carry the `/vibeplane/` marker that `connect`
+        // Receivers. The paths carry the `/devplane/` marker that `connect`
         // uses to recognise its own entries when disconnecting.
-        .route("/vibeplane/hook", post(hook))
+        .route("/devplane/hook", post(hook))
         // Where the `command` hook files what it has **already decided**.
         // This endpoint does not decide: the process that enforced a verdict is
         // the authority for what was enforced, and a second evaluation here
         // could disagree with it — writing down a rule other than the one that
         // fired is the same failure as naming no rule at all.
-        .route("/vibeplane/decided", post(decided))
-        .route("/vibeplane/statusline", post(statusline))
-        .route("/vibeplane/otel/v1/logs", post(otel_logs))
-        .route("/vibeplane/otel/v1/metrics", post(otel_metrics))
+        .route("/devplane/decided", post(decided))
+        .route("/devplane/statusline", post(statusline))
+        .route("/devplane/otel/v1/logs", post(otel_logs))
+        .route("/devplane/otel/v1/metrics", post(otel_metrics))
         // The second dialect. Claude Code exports log records; agents that
         // follow the GenAI semantic conventions — GitHub Copilot, Codex —
         // export traces, on the same transport and the same `http/json` wire
         // protocol. One receiver, two readers, one event model.
-        .route("/vibeplane/otel/v1/traces", post(otel_traces))
+        .route("/devplane/otel/v1/traces", post(otel_traces))
         // GitHub Copilot's channels. Its deciding hook is a `command` one
         // — an HTTP `preToolUse` hook there fails open — so the gate arrives
         // through the shim rather than from the agent directly.
-        .route("/vibeplane/copilot/hook", post(copilot_hook))
+        .route("/devplane/copilot/hook", post(copilot_hook))
         // Telemetry arrives in batches and axum's default body limit is 2 MB,
         // which a busy session can exceed. A rejected batch is not an error
         // anybody sees: the exporter drops it, the receiver is never called,
@@ -73,6 +73,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/work/{id}/approve", post(approve_work))
         .route("/api/work/{id}/retry", post(retry_work))
         .route("/api/work/{id}/snooze", post(snooze_work))
+        .route("/api/work/{id}/changes", get(work_changes))
         .route("/api/work/{id}/resume", post(resume_work))
         .route("/api/projects", get(projects))
         .route("/api/projects/trust", post(trust_project))
@@ -123,7 +124,7 @@ async fn resolved_run(state: &Shared, id: String) -> Result<RunId, Refusal> {
 }
 
 /// The same, for work. Work ids are long enough that nobody types one in full,
-/// and `vibeplane work ls` prints them clipped.
+/// and `devplane work ls` prints them clipped.
 async fn resolved_work(state: &Shared, id: String) -> Result<crate::core::WorkId, Refusal> {
     let works = state.works.lock().await;
     if works.contains_key(&crate::core::WorkId::new(id.clone())) {
@@ -170,7 +171,7 @@ macro_rules! run_id {
 ///
 /// Loopback is not an access control: every process running as this user can
 /// reach the port. The token, in a file only the user can read, is what
-/// actually separates Vibeplane from everything else on the machine.
+/// actually separates Devplane from everything else on the machine.
 ///
 /// A `token` query parameter is accepted as well, because `EventSource` cannot
 /// send a header and the browser shell needs the live stream. The page drops it
@@ -213,16 +214,16 @@ macro_rules! guard {
 /// The board.
 ///
 /// Embedded, so the binary is the whole product and the page works on a laptop
-/// with no network. `VIBEPLANE_UI` points at the file on disk instead, which is
+/// with no network. `DEVPLANE_UI` points at the file on disk instead, which is
 /// the difference between a one-second edit-reload loop and a rebuild plus a
 /// daemon restart for every line of CSS. Development only: it reads a file the
 /// user named, so it is opt-in by an environment variable rather than a
 /// setting, and it falls back to the embedded copy rather than failing.
 async fn index() -> impl IntoResponse {
     const EMBEDDED: &str = include_str!("../ui/index.html");
-    let body = match std::env::var_os("VIBEPLANE_UI") {
+    let body = match std::env::var_os("DEVPLANE_UI") {
         Some(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            tracing::warn!(path = ?path, error = %e, "VIBEPLANE_UI is set and unreadable; serving the embedded page");
+            tracing::warn!(path = ?path, error = %e, "DEVPLANE_UI is set and unreadable; serving the embedded page");
             EMBEDDED.to_string()
         }),
         None => EMBEDDED.to_string(),
@@ -284,7 +285,7 @@ async fn focus_run(
 /// daemon's cached rules can be seconds behind the file the hook just read, so
 /// the log could name a rule that did not fire.
 ///
-/// The same envelope is what `~/.vibeplane/pending-decisions.jsonl` holds, so
+/// The same envelope is what `~/.devplane/pending-decisions.jsonl` holds, so
 /// a decision taken with no daemon and one taken with a daemon are written down
 /// by the same code.
 async fn decided(
@@ -311,7 +312,7 @@ pub async fn record_decided(state: &Shared, env: crate::core::DecidedEnvelope) {
     // The gate is run against a probe call by `doctor` and by the daemon's own
     // timer, and the hook already declines to report those. Declined *here*
     // too, because an older hook binary — or a spool written by one — can
-    // still deliver it, and it arrived once: a `vibeplane-probe-<pid>` project
+    // still deliver it, and it arrived once: a `devplane-probe-<pid>` project
     // with a working session on the board and two rows in the audit log.
     if env.session == crate::observe::hook::PROBE_SESSION {
         return;
@@ -374,9 +375,22 @@ pub async fn record_decided(state: &Shared, env: crate::core::DecidedEnvelope) {
             waiting_for: crate::core::event::WaitingFor::Permission,
             message: Some(env.subject.clone()),
             // An observed session's prompt belongs to Claude Code's own dialog;
-            // Vibeplane can show it, not answer it.
+            // Devplane can show it, not answer it.
             request_id: None,
             options: Vec::new(),
+            // **The gate knows the call and the tool hook may never have
+            // fired.** Claude Code resolves permission before invoking the
+            // tool, so recovering this from an in-flight `ToolStarted` finds
+            // nothing — which is what made the rule offered on a permission
+            // item dead code for every watched session.
+            call: env
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("tool_input"))
+                .map(|input| crate::core::event::ToolCallRef {
+                    tool: env.tool.clone(),
+                    input: input.clone(),
+                }),
         }),
         _ => {}
     }
@@ -787,7 +801,7 @@ struct ForgeRow<T: Serialize> {
 /// `gh` this is, why the last poll failed, when it ran. Splitting them costs
 /// the board a second round trip and lets one page show issues read at 10:42
 /// beside pull requests read at 10:47 under a single `fetched_at`.
-/// `vibeplane issues` and `vibeplane prs` each read the half they print.
+/// `devplane issues` and `devplane prs` each read the half they print.
 ///
 /// Ordered by what needs the person, then by project, then newest first —
 /// the order somebody with eight repositories actually wants.
@@ -969,7 +983,7 @@ async fn run_events(
 
 /// What the gate would decide about one call, and which rule decides it.
 ///
-/// The same evaluation `vibeplane explain` does, with one difference that is
+/// The same evaluation `devplane explain` does, with one difference that is
 /// the whole reason this endpoint exists: **it leaves a row.** A read-only
 /// interrogation is also a way to probe for a command the rules happen to
 /// allow, and a gate that answers questions should be able to say it was asked.
@@ -1086,9 +1100,9 @@ async fn run_rewind_gap(
 
 /// What a driven agent said, oldest first.
 ///
-/// Empty for a session Vibeplane only watches, and that is not a gap to fill
+/// Empty for a session Devplane only watches, and that is not a gap to fill
 /// later: hooks carry lifecycle and tool inputs, OpenTelemetry redacts prompts
-/// and responses and Vibeplane never sets the flag that would change it, and
+/// and responses and Devplane never sets the flag that would change it, and
 /// the transcript files are documented as internal. For those runs the honest
 /// action is `focus` — the text is already on screen in the window that owns it.
 async fn run_messages(
@@ -1375,6 +1389,21 @@ struct WorkView<'a> {
     /// recorded* rather than *the agent said nothing*.
     #[serde(skip_serializing_if = "Option::is_none")]
     claim: Option<String>,
+    /// Why there is no claim, where there could have been one.
+    ///
+    /// **Two absences that are not the same fact.** A repository with
+    /// `[transcripts] keep = false` recorded nothing, and a run that kept its
+    /// transcript and ended without a closing message said nothing — and until
+    /// this field existed both arrived as a missing `claim`, so any surface
+    /// showing them had to render them identically. A reviewer reading *the
+    /// agent said nothing* about a repository that simply never writes
+    /// transcripts down has been told something false.
+    ///
+    /// `transcripts_off` or `nothing_said`, and present only where the claim was
+    /// worth showing in the first place — a passing gate has no absence to
+    /// explain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claim_absent: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -1391,6 +1420,20 @@ struct GateView {
     /// this tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     spec: Option<crate::core::work::SpecStamp>,
+    /// Every command the gate ran, with what it returned and what it printed.
+    ///
+    /// **Not new on the wire — new *here*.** The whole history is already
+    /// served under the flattened `gates` array, so a consumer could reach into
+    /// it and take the last element. This object exists so that nobody has to:
+    /// `passed` lives here because the board once re-derived it from exit codes
+    /// and read a reproduction gate exactly backwards, and the evidence for a
+    /// verdict belongs beside the verdict for the same reason.
+    ///
+    /// The output is the same text that was handed back to the agent rather
+    /// than a second description of it, and `output_tail` is bounded at capture
+    /// time — which is what makes serving it affordable when a failing suite
+    /// produces megabytes.
+    commands: Vec<crate::core::work::CommandResult>,
 }
 
 impl<'a> WorkView<'a> {
@@ -1403,9 +1446,11 @@ impl<'a> WorkView<'a> {
                 attempt: g.attempt,
                 expect_fail: g.expect_fail,
                 spec: g.spec.clone(),
+                commands: g.commands.clone(),
             }),
             can_retry,
             claim: None,
+            claim_absent: None,
             stopped_summary: work
                 .stopped
                 .as_ref()
@@ -1441,6 +1486,19 @@ async fn list_work(State(state): State<Shared>, headers: HeaderMap) -> impl Into
     // place it is worth reading, and which keeps this to zero queries on the
     // ordinary board. A report alone references about one action in eleven; a
     // report beside an exit code that contradicts it is the thing worth showing.
+    // Where a project keeps transcripts at all. Read once per project rather
+    // than once per work, and only for the works that could carry a claim.
+    let roots: std::collections::BTreeMap<_, _> = {
+        let world = state.world.lock().await;
+        all.iter()
+            .filter(|w| w.claim_is_worth_showing())
+            .filter_map(|w| {
+                world
+                    .project(&w.project_id)
+                    .map(|p| (w.project_id.clone(), p.root.clone()))
+            })
+            .collect()
+    };
     for (view, w) in views.iter_mut().zip(all.iter()) {
         if !w.claim_is_worth_showing() {
             continue;
@@ -1453,6 +1511,21 @@ async fn list_work(State(state): State<Shared>, headers: HeaderMap) -> impl Into
                 .ok()
                 .flatten()
                 .map(|t| crate::core::text::clip(t.trim(), 400));
+        }
+        if view.claim.is_none() {
+            // Which absence this is. A repository that keeps no transcripts
+            // recorded nothing; one that keeps them and has no closing message
+            // has an agent that said nothing. The two read differently and a
+            // surface that cannot tell them apart will say the wrong one.
+            let keeps = roots
+                .get(&w.project_id)
+                .and_then(|root| crate::core::ProjectConfig::load(root).ok())
+                .map(|c| c.transcripts.keep)
+                .unwrap_or(true);
+            view.claim_absent = Some(match keeps {
+                true => "nothing_said",
+                false => "transcripts_off",
+            });
         }
     }
     Json(views).into_response()
@@ -1596,6 +1669,65 @@ async fn resume_work(
 /// Its own endpoint rather than the run's, because the items Work produces
 /// outlive the sessions that produced them: a pull request that went red hours
 /// after the agent stopped has no run left to snooze.
+/// What a work's branch changed.
+///
+/// **A route of its own rather than a field on `/api/work`.** That list is
+/// polled every few seconds by every open board, and a change set is expensive
+/// to produce and large to send; putting it there would pay the cost for every
+/// work on every poll to serve a view open for one of them. Same reasoning as
+/// `/api/runs/{id}/messages`.
+///
+/// Computed on demand and never stored: git already holds it, and a second copy
+/// is a second thing to keep true.
+async fn work_changes(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = work_id!(state, id);
+    let work = state.works.lock().await.get(&id).cloned();
+    let Some(work) = work else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such work"})),
+        )
+            .into_response();
+    };
+    // **The checkout being gone is not the same as nothing having changed**, and
+    // a reviewer told the second when the first is true has been misled about
+    // the thing they are approving.
+    let Some(dir) = work.worktree.clone().filter(|d| d.is_dir()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "this work has no checkout on disk"})),
+        )
+            .into_response();
+    };
+    // **Resolved the way `work start` resolved it**, config first and then
+    // discovery — not defaulted to `HEAD`. `HEAD...HEAD` is an empty diff, so a
+    // fallback that looks harmless would render *this branch changed nothing*
+    // about a branch full of work, which is the one wrong answer this view
+    // cannot give.
+    let root = {
+        let w = state.world.lock().await;
+        w.project(&work.project_id).map(|p| p.root.clone())
+    };
+    let base = match &root {
+        Some(root) => match crate::core::ProjectConfig::load(root)
+            .ok()
+            .and_then(|c| c.project.base_branch)
+        {
+            Some(b) => b,
+            None => crate::git::base_branch(root).await,
+        },
+        None => crate::git::base_branch(&dir).await,
+    };
+    let set = crate::git::change_set(&dir, &base).await;
+    let html = crate::core::diff::render(&set);
+    Json(json!({ "changes": set, "html": html })).into_response()
+}
+
 async fn snooze_work(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -1788,7 +1920,7 @@ async fn list_issues(
 ///
 /// The launcher's whole reason to exist is that it does not make you retype the
 /// thing you do every Tuesday, so a project arrives with its prompts, the
-/// pipelines its `vibeplane.toml` declares, and whether an agent may start in
+/// pipelines its `devplane.toml` declares, and whether an agent may start in
 /// it at all. Every project is listed, including ones with no session running —
 /// the board shows what *is* happening, and this answers what *could*.
 async fn projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
@@ -1989,7 +2121,7 @@ struct AuditQuery {
     limit: i64,
 }
 
-/// What Vibeplane decided, newest first.
+/// What Devplane decided, newest first.
 async fn decisions(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -2008,8 +2140,8 @@ async fn decisions(
 
 /// Asks the daemon to stop.
 ///
-/// What `vibeplane stop` calls. A request rather than a signal to the pid in
-/// `~/.vibeplane/daemon.json`, because a stale record names a pid the operating
+/// What `devplane stop` calls. A request rather than a signal to the pid in
+/// `~/.devplane/daemon.json`, because a stale record names a pid the operating
 /// system may since have given to somebody else. A request needs no such
 /// guard: it carries the bearer token, it
 /// reaches the same graceful path as ctrl-c, and it behaves identically on a
@@ -2029,7 +2161,7 @@ async fn shutdown(State(state): State<Shared>, headers: HeaderMap) -> impl IntoR
 /// repository.
 ///
 /// The product had no answer to *what is set up here* outside a terminal:
-/// `vibeplane check` reads one repository at a time, `doctor` reads the
+/// `devplane check` reads one repository at a time, `doctor` reads the
 /// machine, and a person with eight projects had to visit eight of them to find
 /// the one whose rules stopped loading. This is that answer in one request.
 ///
@@ -2122,7 +2254,7 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
             "started_at": state.started_at.to_string(),
             "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
             "home": home.as_ref().map(|h| h.display().to_string()),
-            "database": home.as_ref().map(|h| h.join("vibeplane.db").display().to_string()),
+            "database": home.as_ref().map(|h| h.join("devplane.db").display().to_string()),
         },
         "provider": {
             "name": provider.as_str(),
@@ -2146,7 +2278,7 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
 async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let channels = state.store.channel_health().await.unwrap_or_default();
-    // A `vibeplane.toml` that will not load keeps whatever rules were already
+    // A `devplane.toml` that will not load keeps whatever rules were already
     // cached, which is the safe half of the answer. The unsafe half is that a
     // daemon restarted against a broken file has nothing cached, so that
     // repository's `never_auto` list is simply gone — and nothing said so.
@@ -2225,7 +2357,7 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
         "stall_seconds": w.attention.stall_seconds,
         "unreadable_configs": broken,
         "unreadable_rows": unreadable_rows,
-        // The *other* gate. Vibeplane's prohibitions reach auto mode, and in
+        // The *other* gate. Devplane's prohibitions reach auto mode, and in
         // that mode the thing actually deciding is a classifier configured
         // somewhere else. Read back, never written.
         "auto_mode": match auto_mode {
@@ -2242,7 +2374,7 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
     .into_response()
 }
 
-/// Live events, as server-sent events. The browser shell and `vibeplane watch`
+/// Live events, as server-sent events. The browser shell and `devplane watch`
 /// use the same stream.
 ///
 /// A subscriber that falls behind is skipped forward rather than disconnected:

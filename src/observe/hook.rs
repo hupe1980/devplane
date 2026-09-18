@@ -1,6 +1,6 @@
 //! Claude Code hooks — the lifecycle channel.
 //!
-//! The only documented way to learn about a session Vibeplane did not start,
+//! The only documented way to learn about a session Devplane did not start,
 //! and it covers every surface: a terminal, the VS Code extension, the desktop
 //! app, a headless run.
 //!
@@ -167,7 +167,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
         }),
 
         // The instant blocked signal, and the only hook whose reply matters.
-        // It is delivered to `/vibeplane/policy` instead, which answers it; a
+        // It is delivered to `/devplane/policy` instead, which answers it; a
         // copy arriving here has nothing to record.
         "PermissionRequest" => HookOutcome::none(),
 
@@ -184,10 +184,11 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
             Some("permission_prompt") => HookOutcome::just(Event::Blocked {
                 waiting_for: WaitingFor::Permission,
                 message: p.message.clone(),
-                // An observed session's dialog is Claude Code's own: Vibeplane
+                // An observed session's dialog is Claude Code's own: Devplane
                 // can show that it is there, never answer it.
                 request_id: None,
                 options: Vec::new(),
+                call: None,
             }),
             Some("elicitation_dialog") | Some("elicitation_url_dialog") => {
                 HookOutcome::just(Event::Blocked {
@@ -195,6 +196,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
                     message: p.message.clone(),
                     request_id: None,
                     options: Vec::new(),
+                    call: None,
                 })
             }
             Some("idle_prompt") => HookOutcome::just(Event::Blocked {
@@ -202,6 +204,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
                 message: None,
                 request_id: None,
                 options: Vec::new(),
+                call: None,
             }),
             _ => HookOutcome::none(),
         },
@@ -246,7 +249,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
         // After, not before. The gauge is a level, and it only drops once the
         // window has actually been rewritten.
         "PostCompact" => HookOutcome::just(Event::Compacted),
-        // Kept readable because a settings file written by an older Vibeplane
+        // Kept readable because a settings file written by an older Devplane
         // still has it, and an event an observer does not understand is an
         // event it drops silently.
         "PreCompact" => HookOutcome::none(),
@@ -266,10 +269,11 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
                 .message
                 .clone()
                 .or_else(|| p.mcp_server_name.clone().map(|s| format!("{s} is asking"))),
-            // The dialog belongs to Claude Code. Vibeplane can say it is there
+            // The dialog belongs to Claude Code. Devplane can say it is there
             // and raise the window that has it; it cannot answer it.
             request_id: None,
             options: Vec::new(),
+            call: None,
         }),
 
         // A question has been answered, wherever it was answered. Without this
@@ -279,7 +283,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
             action: p.action.clone().unwrap_or_else(|| "accept".into()),
         }),
 
-        // Somebody edited the settings Vibeplane writes its own hooks into.
+        // Somebody edited the settings Devplane writes its own hooks into.
         // `policy_settings` is the interesting one: managed policy can block
         // loopback hooks, and the only other symptom is silence.
         "ConfigChange" => HookOutcome::just(Event::ConfigChanged {
@@ -287,7 +291,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
             path: p.file_path.clone(),
         }),
 
-        // The agent's own task list, for a session Vibeplane only watches.
+        // The agent's own task list, for a session Devplane only watches.
         "TaskCreated" | "TaskCompleted" => match (&p.task_id, &p.task_subject) {
             (Some(id), Some(subject)) => HookOutcome::just(Event::TaskChanged {
                 id: id.clone(),
@@ -366,7 +370,7 @@ fn parse_ask_user_question(input: Option<&Value>) -> (String, Vec<Choice>) {
 ///
 /// An empty response means "no decision": Claude Code shows its own dialog, and
 /// the human answers where they already are. That is the right answer for a
-/// session Vibeplane only observes, and it is why the hook can be answered in a
+/// session Devplane only observes, and it is why the hook can be answered in a
 /// millisecond without waiting for anybody.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PermissionResponse {
@@ -476,15 +480,15 @@ impl PreToolUseResponse {
 // Deciding, in whichever process is holding the payload
 // ---------------------------------------------------------------------------
 
-/// The session id `vibeplane doctor` uses when it runs the gate to see whether
+/// The session id `devplane doctor` uses when it runs the gate to see whether
 /// it answers.
 ///
 /// The gate is a real gate however it was started, so the probe gets a real
 /// verdict — and a real verdict used to get a real row in the decision log.
-/// **A diagnostic must not write history.** Running `vibeplane doctor` three
+/// **A diagnostic must not write history.** Running `devplane doctor` three
 /// times left three refusals of a command nobody ran, in the one table that is
 /// never pruned and exists to answer "why did that happen".
-pub const PROBE_SESSION: &str = "vibeplane-doctor";
+pub const PROBE_SESSION: &str = "devplane-doctor";
 
 /// What a tool call is called in the decision log: the tool, and as much of its
 /// specifier as fits.
@@ -508,7 +512,7 @@ pub fn permission_reply(verdict: &crate::core::Verdict) -> PermissionResponse {
     match verdict {
         Verdict::Allow { .. } => PermissionResponse::allow(),
         Verdict::Deny { rule } => {
-            PermissionResponse::deny(format!("denied by Vibeplane policy rule {rule}"))
+            PermissionResponse::deny(format!("denied by Devplane policy rule {rule}"))
         }
         // A project said a person decides this one. The reply is the same as
         // `Undecided` — Claude Code prompts exactly as it would have — but the
@@ -527,7 +531,7 @@ pub fn pre_tool_use_reply(verdict: &crate::core::Verdict) -> PreToolUseResponse 
     use crate::core::Verdict;
     match verdict {
         Verdict::Deny { rule } => {
-            PreToolUseResponse::deny(format!("denied by Vibeplane policy rule {rule}"))
+            PreToolUseResponse::deny(format!("denied by Devplane policy rule {rule}"))
         }
         Verdict::Ask { rule } => {
             PreToolUseResponse::ask(format!("{rule} asks that a person decides this"))
@@ -616,7 +620,7 @@ mod tests {
 
     #[test]
     fn a_settings_change_is_recorded_with_its_source() {
-        // Vibeplane writes its own hooks into one of these files. Somebody
+        // Devplane writes its own hooks into one of these files. Somebody
         // removing them, or a managed policy arriving that blocks loopback,
         // otherwise shows up only as a channel that stopped speaking.
         match to_events(&payload(json!({
@@ -774,7 +778,7 @@ mod tests {
 
     #[test]
     fn a_permission_request_is_answered_elsewhere_and_recorded_there() {
-        // It goes to `/vibeplane/policy`, which is the endpoint that replies.
+        // It goes to `/devplane/policy`, which is the endpoint that replies.
         // Recording it here too would double every blocked signal.
         let out = to_events(&payload(json!({
             "hook_event_name": "PermissionRequest",

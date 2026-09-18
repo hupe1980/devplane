@@ -2,11 +2,11 @@
 //!
 //! One rule set answers three callers with one audit format: the synchronous
 //! `PermissionRequest` hook for observed sessions, `session/request_permission`
-//! for driven runs, and Vibeplane's own effects.
+//! for driven runs, and Devplane's own effects.
 //!
 //! The rule syntax is Claude Code's, implemented against its published
 //! specification — the four specifier shapes, the four path anchors, the MCP
-//! prefixes and the allow/deny asymmetries. <https://hupe1980.github.io/vibeplane/docs/permissions/>
+//! prefixes and the allow/deny asymmetries. <https://hupe1980.github.io/devplane/docs/permissions/>
 //! is the reference; the tests below are a case per row of it.
 //!
 //! Three properties matter more than expressiveness:
@@ -106,7 +106,7 @@ pub struct Context<'a> {
     /// The user's home. `Read(~/.ssh/**)` is relative to this.
     pub home: Option<&'a Path>,
     /// Where this rule set was written down: the repository root for a
-    /// `vibeplane.toml`, `~/.vibeplane` for the machine-wide file. A single
+    /// `devplane.toml`, `~/.devplane` for the machine-wide file. A single
     /// leading slash anchors here, which is what makes `Edit(/src/**)` in a
     /// project file mean *that project's* `src`.
     pub source: &'a Path,
@@ -182,7 +182,7 @@ impl fmt::Debug for Context<'_> {
 /// bypassable by a compound command, so it is refused and `Bash(rm *)` is the
 /// spelling that works.
 /// The name of a tool's primary content field, for a caller building a call
-/// rather than matching one — `vibeplane explain` turns `pnpm test` into
+/// rather than matching one — `devplane explain` turns `pnpm test` into
 /// `{"command": "pnpm test"}` with it.
 pub fn rule_content_field(tool: &str) -> Option<&'static str> {
     content_field(tool)
@@ -521,7 +521,7 @@ pub const VERIFIED_AGAINST: &str = "2.1.273";
 /// So this one says something narrower and true: **nothing the vendor
 /// announced has gone unlooked-at.** That is a statement about the ledger, not
 /// about the matcher, and `doctor` labels it as such.
-pub const ROWS_CLEARED_THROUGH: &str = "2.1.273";
+pub const ROWS_CLEARED_THROUGH: &str = "2.1.274";
 
 /// How many releases `observed` is ahead of `baseline`, when that is countable.
 ///
@@ -1119,13 +1119,13 @@ impl Rule {
             // means "never replace it" — but **not** `NotebookEdit`, which the
             // specification excludes by name, and which is why a path no tool
             // may change needs an `Edit` deny of its own. Reaching it anyway
-            // would make Vibeplane refuse a call the user's own settings allow.
+            // would make Devplane refuse a call the user's own settings allow.
             return reads_files(tool)
                 || (self.class.is_restrictive() && edits_files(tool) && tool != "NotebookEdit");
         }
         // A path rule on any other tool is one Claude Code accepts and never
         // consults; `problems` reports it, and honouring it here would make
-        // Vibeplane stricter than the thing it is mirroring.
+        // Devplane stricter than the thing it is mirroring.
         false
     }
 
@@ -1290,7 +1290,7 @@ impl Rule {
         // `Cd` is a real rule shape and the one this gate can never answer for:
         // it governs the `/cd` slash command, which is a person moving the
         // session rather than an agent calling a tool, so no hook ever carries
-        // one to Vibeplane. Its path syntax is different too — anchored to the
+        // one to Devplane. Its path syntax is different too — anchored to the
         // whole directory path rather than gitignore-shaped — so honouring it
         // here would mean implementing a second path language for calls that
         // never arrive. Declined, with the reason, rather than left to look
@@ -1300,7 +1300,7 @@ impl Rule {
                 true,
                 format!(
                     "`{raw}` is a `Cd` rule. Those govern the `/cd` slash command — a person \
-                     moving the session, not a tool call — so nothing reaches Vibeplane's gate \
+                     moving the session, not a tool call — so nothing reaches Devplane's gate \
                      to match it. Keep it in `settings.json`, where Claude Code evaluates it"
                 ),
             ));
@@ -1617,8 +1617,8 @@ enum Anchor {
     Root,
     /// `~/path` — the user's home.
     Home,
-    /// `/path` — where the rule set was written down. In a `vibeplane.toml`
-    /// that is the repository; in `~/.vibeplane/policy.toml` it is that
+    /// `/path` — where the rule set was written down. In a `devplane.toml`
+    /// that is the repository; in `~/.devplane/policy.toml` it is that
     /// directory, which is the trap the documentation calls out.
     Source,
     /// `path` or `./path` — the directory the agent is working in.
@@ -1923,7 +1923,7 @@ pub fn uncovered_targets(
 
 /// Whether `file`, resolved against `dir`, stays inside it.
 ///
-/// The approximation Vibeplane can honestly make of Claude Code's *working
+/// The approximation Devplane can honestly make of Claude Code's *working
 /// directories*: it knows the one the session reported and not the list
 /// `--add-dir` may have extended it with. Being wrong here costs a prompt that
 /// Claude Code would not have shown, which is the safe direction.
@@ -1972,7 +1972,7 @@ fn normalise(p: &Path) -> PathBuf {
 /// below, and for the same reason. The recursive reading of `**` (recurse once
 /// per possible split) is exponential in the number of globstars, and both
 /// halves of this matcher run attacker-influenced input on the synchronous hook
-/// a session is blocked on: the pattern comes from a committed `vibeplane.toml`
+/// a session is blocked on: the pattern comes from a committed `devplane.toml`
 /// and the path from a tool call an agent chose.
 ///
 /// Greedy-with-one-anchor is correct because every non-`**` segment consumes
@@ -2122,7 +2122,7 @@ fn segments_cover(general: &[String], special: &[String]) -> bool {
 /// under-reports: it stays quiet about a rule it cannot prove redundant and
 /// never calls one redundant that is not. Silence costs a reader nothing; a
 /// wrong claim would invite them to delete a rule that was doing something.
-/// It runs in `vibeplane check`, never on the hook.
+/// It runs in `devplane check`, never on the hook.
 fn glob_covers(general: &str, special: &str) -> bool {
     let g: Vec<char> = general.chars().collect();
     let s: Vec<char> = special.chars().collect();
@@ -2184,7 +2184,7 @@ fn glob_covers(general: &str, special: &str) -> bool {
     let mut seen = std::collections::HashSet::from([start]);
     let mut queue = vec![start];
     // A subset construction is exponential in the worst case, and the patterns
-    // come from a `vibeplane.toml` — which, for a contributor's branch, is a
+    // come from a `devplane.toml` — which, for a contributor's branch, is a
     // file somebody else wrote. No pattern anybody writes approaches this, and
     // past it the answer is the conservative one: the analysis stays quiet
     // rather than taking an unbounded amount of time to say something optional.
@@ -2432,8 +2432,8 @@ fn first_match<'r>(
 /// surface can compose its own sentence.
 ///
 /// Three parts rather than one string because two surfaces want different
-/// amounts of it: `vibeplane check` is where somebody is editing rules and
-/// wants the suggestion, and `vibeplane trust` is where somebody is deciding
+/// amounts of it: `devplane check` is where somebody is editing rules and
+/// wants the suggestion, and `devplane trust` is where somebody is deciding
 /// about a whole repository and wants the fact. A single pre-formatted line
 /// meant the second one took the first one apart again with `split`, which is
 /// the shape that breaks the moment the wording changes.
@@ -2597,7 +2597,7 @@ impl Policy {
     /// and answers with an SMT solver. Here the language is two wildcards over
     /// path segments, so it is answered exactly, with no solver and no
     /// dependency — and **conservatively**: anything undecidable is silent.
-    /// Nothing here changes a verdict; it is advice `vibeplane check` prints.
+    /// Nothing here changes a verdict; it is advice `devplane check` prints.
     pub fn redundancies(&self) -> Vec<String> {
         let mut out = Vec::new();
         for allow in &self.allow {
@@ -2729,7 +2729,7 @@ impl Policy {
     /// is a suggestion about a gap between the rule and what people expect,
     /// and `Read(.env)` is the most common rule anybody writes — so raising it
     /// as a warning would fire on the canonical example and teach people to
-    /// ignore warnings. `vibeplane check` prints it once, as advice.
+    /// ignore warnings. `devplane check` prints it once, as advice.
     pub fn half_protected_paths(&self) -> Vec<String> {
         fn spelled(r: &Rule) -> Option<&str> {
             match &r.spec {
@@ -3427,7 +3427,7 @@ mod tests {
         );
     }
 
-    /// The two findings `vibeplane check` prints, and the cases it stays quiet
+    /// The two findings `devplane check` prints, and the cases it stays quiet
     /// about.
     #[test]
     fn the_analysis_reports_dead_rules_and_nothing_it_cannot_prove() {
@@ -3491,7 +3491,7 @@ mod tests {
     /// Containment stays bounded on patterns chosen to be hard.
     ///
     /// A subset construction is exponential in the worst case and the patterns
-    /// come from a committed `vibeplane.toml`, which on a contributor's branch
+    /// come from a committed `devplane.toml`, which on a contributor's branch
     /// is a file somebody else wrote. The bound is a state cap with a
     /// conservative answer past it — the analysis is optional, so declining to
     /// finish is always available and taking unbounded time never is.
@@ -3884,7 +3884,7 @@ mod tests {
         // Claude Code reads a leading `!` on a deny or ask rule as an
         // exception scoped to the settings source that wrote it. This used to
         // be refused outright, which was safe in the wrong direction: it made
-        // Vibeplane decline a rule set the user's own `settings.json` accepts.
+        // Devplane decline a rule set the user's own `settings.json` accepts.
         let p = Policy::new(&[], &["Bash(git *)".into(), "!Bash(git status *)".into()]);
         assert!(matches!(
             p.evaluate(&ctx(), "Bash", &bash("git push origin main")),
@@ -4213,7 +4213,7 @@ mod tests {
     fn a_write_through_tee_is_checked_like_a_redirect() {
         // Claude Code checks the file a `tee` writes against `Edit` rules and
         // the working directories, exactly as it checks `> file` (2.1.269).
-        // Vibeplane recognised four file commands, all readers, because the
+        // Devplane recognised four file commands, all readers, because the
         // reference lists them after the words "such as".
         let deny = Policy::new(&[], &["Edit(.env)".into()]);
         for cmd in ["echo pwned > .env", "echo pwned | tee .env"] {
@@ -4793,7 +4793,7 @@ mod tests {
     fn the_root_anchor_reaches_the_whole_filesystem() {
         // Documented: `Read(//**/.env)` blocks any `.env` anywhere, which is
         // the rule to write in the machine-wide file — a single leading slash
-        // there would anchor at `~/.vibeplane`.
+        // there would anchor at `~/.devplane`.
         let p = Policy::new(&[], &["Read(//**/.env)".into()]);
         for path in ["/etc/.env", "/home/dev/anything/deep/.env"] {
             assert!(
@@ -5227,7 +5227,7 @@ mod tests {
         // *parse* errors, so a deny rule naming a tool that does not exist is
         // accepted by the settings file and matches nothing — the dead
         // prohibition this whole layer exists to prevent. Claude Code catches
-        // it with a startup warning; `vibeplane check` catches it before an
+        // it with a startup warning; `devplane check` catches it before an
         // agent starts.
         let said = |raw: &str, class| {
             Rule::parse(raw, class)
@@ -5277,7 +5277,7 @@ mod tests {
     // The forms no prefix rule may approve, and the matcher that must not stall
     // -----------------------------------------------------------------------
 
-    /// A deny rule's *pattern* comes from a committed `vibeplane.toml` and its
+    /// A deny rule's *pattern* comes from a committed `devplane.toml` and its
     /// *subject* is a path an agent chose, and the pair is evaluated on the
     /// synchronous hook a session blocks on. The recursive reading of
     /// `segments_match` took 3.5 s on this input against a five-second hook
@@ -5328,7 +5328,7 @@ mod tests {
     }
 
     /// Claude Code: *"Exec wrappers such as `watch`, `setsid`, `ionice`, and
-    /// `flock` can't be auto-approved by a prefix rule."* Vibeplane is the thing
+    /// `flock` can't be auto-approved by a prefix rule."* Devplane is the thing
     /// answering the prompt, so being broader here than there is a destructive
     /// command approved with nobody asked.
     #[test]

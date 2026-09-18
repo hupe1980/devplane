@@ -6,7 +6,7 @@
     <p class="eyebrow">Local-first · One binary · MIT OR Apache-2.0</p>
     <h1>See every coding agent on your machine.<br><span class="accent">Know which one needs you.</span></h1>
     <p class="lede">
-      Vibeplane is a control plane for AI coding agents. It watches every Claude&nbsp;Code session
+      Devplane is a control plane for AI coding agents. It watches every Claude&nbsp;Code session
       already running — terminal, VS&nbsp;Code, desktop, background — drives any agent that speaks
       the <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a>, and turns
       <em>“the agent says it’s done”</em> into <em>“your project’s checks agree”</em>.
@@ -18,19 +18,19 @@
     </div>
 
     <div class="install-line">
-      <code>curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh</code>
-      <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh" aria-label="Copy the install command">Copy</button>
+      <code>curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh</code>
+      <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh" aria-label="Copy the install command">Copy</button>
     </div>
     <p class="muted small">
       macOS (Apple Silicon), Linux and Windows. <a href="{{ get_url(path='/docs/install/') }}">Other install paths</a>.
     </p>
 
     {# A real capture, not a mock. #}
-    <figure class="terminal" aria-label="Example output of the vibeplane ls command">
+    <figure class="terminal" aria-label="Example output of the devplane ls command">
       <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
-<pre><code><span class="t-dim">$</span> vibeplane ls
+<pre><code><span class="t-dim">$</span> devplane ls
 <span class="t-bold">8 projects</span> · 23 sessions · 5 working · <span class="t-warn">2</span> need you · 4 idle <span class="t-dim">· $4.18</span>
-<span class="t-dim">12 quiet (nothing heard for hours) — vibeplane ls --all</span>
+<span class="t-dim">12 quiet (nothing heard for hours) — devplane ls --all</span>
 
 <span class="t-bold">saas</span>  <span class="t-dim">·  4 issues · 2 PRs (1 needs you)</span>
   <span class="t-warn">◆</span> 7c         <span class="t-dim">vscode</span>     62%   $1.04   3m  Keep the legacy /v1/login route?
@@ -62,14 +62,14 @@
           for your project.
         </p>
         <p>
-          Vibeplane sits above all of them, on documented interfaces only, and stays out of the way.
+          Devplane sits above all of them, on documented interfaces only, and stays out of the way.
           It does not replace your editor, your tracker or your agent. It is the layer that spans them.
         </p>
       </div>
       <div>
         <p class="muted">
           <strong>It works before you configure anything.</strong> Sessions are discovered from
-          Claude Code’s own roster, so <code>vibeplane ls</code> is useful on first run with nothing
+          Claude Code’s own roster, so <code>devplane ls</code> is useful on first run with nothing
           installed. Connecting is what adds live state: cost, context usage, blocking, and the
           permission gate.
         </p>
@@ -164,7 +164,7 @@
   <div class="principles">
     <div><h3>Local-first</h3><p>No account, no cloud relay, no service to run. Loopback only, and a token in a file only you can read. Nothing leaves the machine.</p></div>
     <div><h3>Documented interfaces only</h3><p>Hooks, OpenTelemetry, the session roster, the Agent Client Protocol. No transcript scraping, no undocumented wire protocols.</p></div>
-    <div><h3>Observe before own</h3><p>A session Vibeplane did not start is first-class. Ownership is additive, never a prerequisite.</p></div>
+    <div><h3>Observe before own</h3><p>A session Devplane did not start is first-class. Ownership is additive, never a prerequisite.</p></div>
     <div><h3>Work outlives sessions</h3><p>Sessions crash and get handed to an editor. A pull request goes red hours later. Only work carries gates, evidence and history.</p></div>
     <div><h3>The model is never the authority</h3><p>If the answer is a function of trusted inputs, it is a function. Attention, gates and policy never call a model.</p></div>
     <div><h3>An offered action is an implemented action</h3><p>A button that cannot do what it says is the one failure a control plane cannot afford, because the whole product is a claim about what is true.</p></div>
@@ -176,8 +176,8 @@
     <h2>Try it on the machine you already have</h2>
     <p class="lede">One binary. It finds your sessions on the first run.</p>
     <div class="install-line big">
-      <code>curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh &amp;&amp; vibeplane ls</code>
-      <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh && vibeplane ls" aria-label="Copy the install command">Copy</button>
+      <code>curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh &amp;&amp; devplane ls</code>
+      <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh && devplane ls" aria-label="Copy the install command">Copy</button>
     </div>
     <p class="cta-row">
       <a class="btn primary" href="{{ get_url(path='/docs/quickstart/') }}">Quickstart</a>

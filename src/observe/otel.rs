@@ -26,7 +26,7 @@
 //!
 //! Prompt and response text never appear here. Claude Code redacts them unless
 //! `OTEL_LOG_USER_PROMPTS` is set, and Copilot unless
-//! `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is set. Vibeplane sets
+//! `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is set. Devplane sets
 //! neither.
 
 use crate::core::event::{ApiUsage, Event};
@@ -605,13 +605,13 @@ mod tests {
             "body": {"stringValue": "claude_code.api_request"},
             "attributes": [
                 attr("session.id", json!({"stringValue": "s1"})),
-                attr("vcs.repository.url.full", json!({"stringValue": "https://github.com/hupe1980/vibeplane"}))
+                attr("vcs.repository.url.full", json!({"stringValue": "https://github.com/hupe1980/devplane"}))
             ]
         }]}]}]});
         let recs = parse_logs(&serde_json::to_vec(&body).unwrap()).unwrap();
         assert_eq!(
             recs[0].repo_url.as_deref(),
-            Some("https://github.com/hupe1980/vibeplane")
+            Some("https://github.com/hupe1980/devplane")
         );
     }
 

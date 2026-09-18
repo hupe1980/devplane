@@ -438,12 +438,12 @@ pub struct PullRequestRef {
 /// implement step that already cost money.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pipeline {
-    /// The name of the pipeline in `vibeplane.toml`.
+    /// The name of the pipeline in `devplane.toml`.
     pub name: String,
     /// Which step is running or about to, counting from zero.
     pub step: usize,
     /// The role of each step, in order. Copied from the config when the work
-    /// starts so that editing `vibeplane.toml` mid-flight cannot renumber a
+    /// starts so that editing `devplane.toml` mid-flight cannot renumber a
     /// chain that is already running.
     pub roles: Vec<String>,
     /// How many times each step has been entered. Bounds the review loop.

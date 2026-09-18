@@ -6,25 +6,25 @@ weight = 11
 group = "guide"
 +++
 
-A session Vibeplane **watches** is one it can show you and raise the window for. A session it
+A session Devplane **watches** is one it can show you and raise the window for. A session it
 **drives** is one it can answer.
 
 ```sh
-vibeplane agents                                   # what can be driven
-vibeplane dispatch "add rate limiting to /login"   # starts Claude Code here
-vibeplane dispatch --agent codex --cwd ../core-lib "review the auth change"
-vibeplane say <run> "use the existing middleware"  # another turn
-vibeplane decide <run> --request <id> --decision allow
+devplane agents                                   # what can be driven
+devplane dispatch "add rate limiting to /login"   # starts Claude Code here
+devplane dispatch --agent codex --cwd ../core-lib "review the auth change"
+devplane say <run> "use the existing middleware"  # another turn
+devplane decide <run> --request <id> --decision allow
 ```
 
 A driven run is a run like any other: same board, same project grouping, same inbox. The difference
-is that its permission requests can be *answered* from Vibeplane rather than only looked at — and
+is that its permission requests can be *answered* from Devplane rather than only looked at — and
 the same `[policy]` rules that auto-decide a hook decide these first.
 
 ## Trust comes first
 
 ```sh
-vibeplane trust .
+devplane trust .
 ```
 
 Required before any agent starts in a repository, because a headless agent runs *that repository's*
@@ -45,14 +45,14 @@ Five are built in, each pinned to an exact version:
 
 ### If an agent needs signing in
 
-Most agents authenticate in their own terminal, and Vibeplane does not try to do it for them — a
+Most agents authenticate in their own terminal, and Devplane does not try to do it for them — a
 login is device codes, browser redirects and a keychain, all of which already work there.
 
 What it does instead is repeat what the agent said. Agents advertise their sign-in methods during
 the handshake, so when starting a session fails you get that back rather than a protocol error:
 
 ```console
-$ vibeplane dispatch "add rate limiting" --agent copilot
+$ devplane dispatch "add rate limiting" --agent copilot
 could not start a session: Invalid request.
 This agent may need signing in first. It offers:
   • Log in with Copilot CLI — Run `copilot login` in the terminal
@@ -63,17 +63,17 @@ This agent may need signing in first. It offers:
 A driven run's conversation survives a daemon restart, and the protocol offers **two** ways to carry
 it — advertised separately by each agent:
 
-| Method | What it does | Vibeplane |
+| Method | What it does | Devplane |
 |---|---|---|
 | `session/resume` | continues without replaying history | preferred where offered |
 | `session/load` | continues *and* replays the conversation | the fallback, with the replay suppressed |
 
-The replay is suppressed because Vibeplane already wrote that conversation down — a driven run has no
+The replay is suppressed because Devplane already wrote that conversation down — a driven run has no
 window of its own, so its transcript is kept as the agent speaks, and taking the replay too would
 duplicate every sentence. A plan, a usage total or a tool call replayed alongside it *is* kept: those
 are state rather than speech.
 
-An agent that offers neither is told so. Vibeplane will not open a fresh conversation and call it a
+An agent that offers neither is told so. Devplane will not open a fresh conversation and call it a
 resume.
 
 > [!NOTE]
@@ -82,7 +82,7 @@ resume.
 
 > [!NOTE]
 > **Driving an agent and watching one are different things.** Every agent here can be *started* by
-> Vibeplane. A session **you** started, in your own terminal, is only visible where its vendor
+> Devplane. A session **you** started, in your own terminal, is only visible where its vendor
 > publishes a channel for it — hooks, telemetry, a roster. That means Claude Code, and GitHub Copilot
 > once connected. The [observe](/docs/observe/) page says which channels each one has.
 
@@ -92,10 +92,10 @@ proves nothing, and `npx` will happily fetch a new major version overnight other
 ## Adding an agent
 
 The argument for speaking a standard is that a new agent costs no code. So anything else that speaks
-the protocol is four lines in `~/.vibeplane/agents.toml`:
+the protocol is four lines in `~/.devplane/agents.toml`:
 
 ```toml
-# ~/.vibeplane/agents.toml
+# ~/.devplane/agents.toml
 [agents.kimi]
 name    = "Kimi"
 command = "npx -y @moonshot/kimi-acp@1.2.0"
@@ -108,7 +108,7 @@ and says so in the log.
 Or point straight at a command:
 
 ```sh
-vibeplane dispatch --agent '/opt/my-agent --acp' "..."
+devplane dispatch --agent '/opt/my-agent --acp' "..."
 ```
 
 A bare word that is not a known id stays an error rather than becoming a launch attempt, so a typo
@@ -116,14 +116,14 @@ reports “unknown agent” instead of “no such binary”.
 
 ## What a driven run says
 
-A driven run has no window of its own, so Vibeplane is the only place its conversation can appear —
+A driven run has no window of its own, so Devplane is the only place its conversation can appear —
 and without it `dispatch` is a black box that can tell you a tool ran and not one word about why.
 The protocol streams the answer, the reasoning and the agent's own plan to the client:
 
 ```sh
-vibeplane tail <run>              # follow it live
-vibeplane tail <run> --thinking   # including its reasoning
-vibeplane show <run>              # the last few lines, with everything else
+devplane tail <run>              # follow it live
+devplane tail <run> --thinking   # including its reasoning
+devplane show <run>              # the last few lines, with everything else
 ```
 
 Chunks are joined into fragments rather than stored one row per syllable, and they live in their own
@@ -140,7 +140,7 @@ keep = false     # default is true; it reads either way
 ## Cost and context
 
 The protocol reports a **running total** for cost and a **level** for the context window, not
-per-request figures. Vibeplane keeps what it has already counted and records the delta, and treats
+per-request figures. Devplane keeps what it has already counted and records the delta, and treats
 the window level as a level — without the first a driven run shows `$0.00` for ever, and without the
 second the token count becomes the sum of every level ever reported.
 
@@ -148,7 +148,7 @@ The window size is the agent's own figure, which is better than any table of mod
 
 > [!WARNING]
 > The protocol makes the cost field **optional**. An agent that never reports one can never be
-> stopped by a `[budget]` ceiling, so `vibeplane work show` prints “not reported by this agent”
+> stopped by a `[budget]` ceiling, so `devplane work show` prints “not reported by this agent”
 > rather than `$0.00` and letting you assume you are covered.
 
 ## A driven session outlives the daemon, if the agent lets it
@@ -157,12 +157,12 @@ Restarting the daemon ends every agent *process* it was driving — a protocol c
 survive the thing holding it. The branch and worktree are untouched, and work that was mid-flight
 appears in the inbox as `interrupted` rather than sitting on the board looking busy.
 
-What is new is that the **conversation** can be picked back up. When a driven run starts, Vibeplane
+What is new is that the **conversation** can be picked back up. When a driven run starts, Devplane
 records the id the agent knows the session by; after a restart, the `interrupted` item offers
 **resume**, which reconnects to that same session rather than opening a new one:
 
 ```sh
-vibeplane work resume <id>
+devplane work resume <id>
 ```
 
 That matters more than it sounds. A fresh session in the same worktree would pay again to work out
@@ -170,7 +170,7 @@ what the last one already knew, and would read half-finished code without the co
 it. Resuming continues the turn the restart interrupted.
 
 It is offered only when it will actually work — the agent advertises `session/resume`, the run
-recorded a session id, and Vibeplane is not already holding a session for it. An agent that cannot
+recorded a session id, and Devplane is not already holding a session for it. An agent that cannot
 resume, or has forgotten the session, gets an honest refusal rather than a silent restart wearing a
 resume's name. It is never automatic: resuming spends money and runs an agent in a repository, and
 neither should happen because a machine rebooted.
@@ -182,13 +182,13 @@ neither should happen because a machine rebooted.
 
 ## Handing over
 
-Vibeplane is not a terminal. When a session needs more than a decision, the right answer is the real
+Devplane is not a terminal. When a session needs more than a decision, the right answer is the real
 thing, in the right place:
 
 ```sh
-vibeplane attach <run>    # replaces this process with `claude --resume <id>`
-vibeplane focus <run>     # raises the editor window that owns its directory
+devplane attach <run>    # replaces this process with `claude --resume <id>`
+devplane focus <run>     # raises the editor window that owns its directory
 ```
 
 `attach` uses `exec` rather than holding a pseudo-terminal open, so ctrl-C, resize and the alternate
-screen behave exactly as they do without Vibeplane in the way.
+screen behave exactly as they do without Devplane in the way.

@@ -28,7 +28,7 @@ pub fn roles(p: &crate::core::config::Pipeline) -> Vec<String> {
 
 /// The step a cursor points at, found by role rather than by index.
 ///
-/// By role, because `vibeplane.toml` can be edited while a chain is running and
+/// By role, because `devplane.toml` can be edited while a chain is running and
 /// renumbering a pipeline mid-flight would send the work to a step it never
 /// agreed to. The roles copied onto the Work are what it is running; if one has
 /// since been deleted, that is an error rather than a guess.
@@ -38,7 +38,7 @@ fn step_at<'a>(config: &'a crate::core::config::Pipeline, role: &str) -> Option<
 
 /// Finds the text behind a step's `prompt`, in the order a project means it.
 ///
-/// 1. `.vibeplane/prompts/<name>.md` — the portable form, committed on the
+/// 1. `.devplane/prompts/<name>.md` — the portable form, committed on the
 ///    branch like the gates. First because a project that wrote one for this
 ///    chain meant it for this chain, whichever agent runs the step.
 /// 2. `.claude/skills/<name>/SKILL.md`, project then personal — Claude Code's
@@ -58,7 +58,7 @@ fn step_at<'a>(config: &'a crate::core::config::Pipeline, role: &str) -> Option<
 /// directives the Claude harness applies when *it* loads the skill by name.
 /// Inlining the body takes the instructions and none of that.
 fn template(dir: &Path, name: &str, reviewing: bool) -> Option<String> {
-    let portable = dir.join(".vibeplane/prompts").join(format!("{name}.md"));
+    let portable = dir.join(".devplane/prompts").join(format!("{name}.md"));
     if let Ok(text) = std::fs::read_to_string(&portable) {
         return Some(text);
     }
@@ -303,7 +303,7 @@ async fn advance(state: &Shared, id: &WorkId) -> Result<()> {
     let config = ProjectConfig::load(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
     let declared = config
         .pipeline_for(&name)
-        .with_context(|| format!("`{name}` is no longer declared in vibeplane.toml"))?
+        .with_context(|| format!("`{name}` is no longer declared in devplane.toml"))?
         .clone();
     let Some(Step::Role(step)) = step_at(&declared, &role).cloned() else {
         bail!("`{role}` is no longer a step of `{name}`");
@@ -472,7 +472,7 @@ pub async fn approve(state: &Shared, id: &WorkId) -> Result<String> {
     };
     let declared = config
         .pipeline_for(&name)
-        .with_context(|| format!("`{name}` is no longer declared in vibeplane.toml"))?
+        .with_context(|| format!("`{name}` is no longer declared in devplane.toml"))?
         .clone();
 
     state
@@ -562,7 +562,7 @@ mod tests {
         Findings {
             back_to: "implement".into(),
             max: 1,
-            file: ".vibeplane/findings.md".into(),
+            file: ".devplane/findings.md".into(),
             only: Vec::new(),
         }
     }
@@ -582,9 +582,9 @@ mod tests {
         );
         assert!(bare.starts_with("review this change"));
 
-        std::fs::create_dir_all(d.join(".vibeplane/prompts")).unwrap();
+        std::fs::create_dir_all(d.join(".devplane/prompts")).unwrap();
         std::fs::write(
-            d.join(".vibeplane/prompts/review.md"),
+            d.join(".devplane/prompts/review.md"),
             "Review {title}. The ask was: {task}",
         )
         .unwrap();
@@ -627,8 +627,8 @@ mod tests {
         assert!(!implementing.contains("Flag unwrap()"), "{implementing}");
 
         // And anything the project wrote for this chain still wins over it.
-        std::fs::create_dir_all(d.join(".vibeplane/prompts")).unwrap();
-        std::fs::write(d.join(".vibeplane/prompts/review.md"), "Ours: {title}").unwrap();
+        std::fs::create_dir_all(d.join(".devplane/prompts")).unwrap();
+        std::fs::write(d.join(".devplane/prompts/review.md"), "Ours: {title}").unwrap();
         let ours = compose(
             &d,
             &step("review", Some(sends_back())),
@@ -663,8 +663,8 @@ mod tests {
 
         // And where a project wrote the portable form for this chain, that is
         // what it meant — whichever agent runs the step.
-        std::fs::create_dir_all(d.join(".vibeplane/prompts")).unwrap();
-        std::fs::write(d.join(".vibeplane/prompts/review.md"), "Portable: {title}").unwrap();
+        std::fs::create_dir_all(d.join(".devplane/prompts")).unwrap();
+        std::fs::write(d.join(".devplane/prompts/review.md"), "Portable: {title}").unwrap();
         let overridden = compose(&d, &step("review", None), "rate limiting", "add it", None);
         assert_eq!(overridden, "Portable: rate limiting");
         std::fs::remove_dir_all(&d).ok();
@@ -676,8 +676,8 @@ mod tests {
         // silently, and the loop would spend its whole budget re-reviewing the
         // same code.
         let d = dir("drop");
-        std::fs::create_dir_all(d.join(".vibeplane/prompts")).unwrap();
-        std::fs::write(d.join(".vibeplane/prompts/fix.md"), "Fix {title}.").unwrap();
+        std::fs::create_dir_all(d.join(".devplane/prompts")).unwrap();
+        std::fs::write(d.join(".devplane/prompts/fix.md"), "Fix {title}.").unwrap();
         let text = compose(
             &d,
             &step("fix", None),
@@ -702,7 +702,7 @@ mod tests {
             "task",
             None,
         );
-        assert!(text.contains(".vibeplane/findings.md"));
+        assert!(text.contains(".devplane/findings.md"));
         assert!(
             text.contains("do not create that file"),
             "and told that finding nothing is an acceptable answer"
@@ -715,16 +715,16 @@ mod tests {
         // Left behind, the same file would send the work back a second time for
         // something that was already fixed.
         let d = dir("take");
-        std::fs::create_dir_all(d.join(".vibeplane")).unwrap();
-        let path = d.join(".vibeplane/findings.md");
+        std::fs::create_dir_all(d.join(".devplane")).unwrap();
+        let path = d.join(".devplane/findings.md");
         std::fs::write(&path, "  the error path is untested\n").unwrap();
 
         assert_eq!(
-            take_findings(&d, ".vibeplane/findings.md", &[]).as_deref(),
+            take_findings(&d, ".devplane/findings.md", &[]).as_deref(),
             Some("the error path is untested")
         );
         assert!(!path.exists());
-        assert_eq!(take_findings(&d, ".vibeplane/findings.md", &[]), None);
+        assert_eq!(take_findings(&d, ".devplane/findings.md", &[]), None);
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -735,8 +735,8 @@ mod tests {
         // levels are Spec Kit's here and would be something else for another
         // tool, which is why nothing in the binary knows them.
         let d = dir("only");
-        std::fs::create_dir_all(d.join(".vibeplane")).unwrap();
-        let path = d.join(".vibeplane/findings.md");
+        std::fs::create_dir_all(d.join(".devplane")).unwrap();
+        let path = d.join(".devplane/findings.md");
         let report = "\
 - CRITICAL: FR-003 has no acceptance criteria
 - LOW: terminology drift between spec.md and plan.md
@@ -745,7 +745,7 @@ mod tests {
         let only = ["CRITICAL".to_string(), "HIGH".to_string()];
 
         std::fs::write(&path, report).unwrap();
-        let kept = take_findings(&d, ".vibeplane/findings.md", &only).expect("two lines matched");
+        let kept = take_findings(&d, ".devplane/findings.md", &only).expect("two lines matched");
         assert!(kept.contains("FR-003"));
         // Case-insensitive: a grade is a word, not a shout.
         assert!(kept.contains("maps to no task"));
@@ -758,12 +758,12 @@ mod tests {
         // found*: the step passes, exactly as an empty file does. Without this
         // the loop spends its whole budget on style notes.
         std::fs::write(&path, "- LOW: a heading is inconsistent\n").unwrap();
-        assert_eq!(take_findings(&d, ".vibeplane/findings.md", &only), None);
+        assert_eq!(take_findings(&d, ".devplane/findings.md", &only), None);
 
         // And with no `only`, every finding still counts — which is what a
         // reviewer writing prose produces, and the default.
         std::fs::write(&path, "- LOW: a heading is inconsistent\n").unwrap();
-        assert!(take_findings(&d, ".vibeplane/findings.md", &[]).is_some());
+        assert!(take_findings(&d, ".devplane/findings.md", &[]).is_some());
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -772,9 +772,9 @@ mod tests {
         // A reviewer that creates the file and writes nothing has said it is
         // happy, not that it has an unspeakable complaint.
         let d = dir("blank");
-        std::fs::create_dir_all(d.join(".vibeplane")).unwrap();
-        std::fs::write(d.join(".vibeplane/findings.md"), "\n  \n").unwrap();
-        assert_eq!(take_findings(&d, ".vibeplane/findings.md", &[]), None);
+        std::fs::create_dir_all(d.join(".devplane")).unwrap();
+        std::fs::write(d.join(".devplane/findings.md"), "\n  \n").unwrap();
+        assert_eq!(take_findings(&d, ".devplane/findings.md", &[]), None);
         std::fs::remove_dir_all(&d).ok();
     }
 }

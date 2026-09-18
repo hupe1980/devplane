@@ -1,4 +1,4 @@
-/* Vibeplane docs — the only script on the site.
+/* Devplane docs — the only script on the site.
  *
  * Four jobs: the theme toggle, the documentation search, copy buttons on code
  * blocks, and the mobile menu. Everything else is HTML the server already sent,

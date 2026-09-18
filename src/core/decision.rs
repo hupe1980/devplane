@@ -1,4 +1,4 @@
-//! The decision log: what Vibeplane decided, and on whose authority.
+//! The decision log: what Devplane decided, and on whose authority.
 //!
 //! Two questions have to be answerable months later, and neither is answerable
 //! from the event log. *Why did this command run without anybody being asked?*
@@ -6,8 +6,8 @@
 //! is there a pull request on this branch?* — because these checks passed, and
 //! they are named too.
 //!
-//! Observations are things that happened to Vibeplane. A decision is something
-//! Vibeplane *did*, or allowed, and the difference matters: an observation can
+//! Observations are things that happened to Devplane. A decision is something
+//! Devplane *did*, or allowed, and the difference matters: an observation can
 //! be re-derived from the provider, a decision cannot be re-derived from
 //! anything. It is appended, never edited, and pruning the event log leaves it
 //! alone.
@@ -25,11 +25,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Actor {
-    /// A rule in a `vibeplane.toml` or the machine-wide policy.
+    /// A rule in a `devplane.toml` or the machine-wide policy.
     Policy,
     /// A person, through the inbox, the board or the CLI.
     Human,
-    /// Vibeplane itself, following a rule the project wrote down — a gate
+    /// Devplane itself, following a rule the project wrote down — a gate
     /// verdict, a pipeline advancing, a pull request opening.
     Daemon,
 }
@@ -130,7 +130,7 @@ impl Decision {
         self
     }
 
-    /// One line, the way `vibeplane audit` prints it.
+    /// One line, the way `devplane audit` prints it.
     pub fn line(&self) -> String {
         let reason = match &self.reason {
             Some(r) => format!(" — {r}"),
@@ -178,8 +178,8 @@ mod tests {
 
 /// What the `command` hook hands back after it has enforced a verdict.
 ///
-/// One shape for two journeys. Posted to `/vibeplane/decided` when a daemon is
-/// listening, and appended to `~/.vibeplane/pending-decisions.jsonl` when one
+/// One shape for two journeys. Posted to `/devplane/decided` when a daemon is
+/// listening, and appended to `~/.devplane/pending-decisions.jsonl` when one
 /// is not — so a decision taken while the daemon was down is written down by
 /// exactly the code that writes down every other decision, rather than by a
 /// second path nobody exercises.

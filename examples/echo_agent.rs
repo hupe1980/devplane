@@ -1,6 +1,6 @@
 //! A fake ACP agent, for testing the client.
 //!
-//! Vibeplane's job is to drive other people's agents, and every interesting bug
+//! Devplane's job is to drive other people's agents, and every interesting bug
 //! lives at that seam. Testing it against a real agent would mean a network, a
 //! subscription and a bill on every `cargo test`, so the suite drives this one
 //! instead: it speaks the protocol, streams text, calls a tool, and asks for
@@ -15,26 +15,52 @@
 //! | `fail`          | ends the turn with a refusal              |
 //! | `criticise`     | writes the findings file it was asked to  |
 //! | `expensive`     | reports a cumulative cost of $100         |
+//! | `slow`          | works until cancelled, then stops properly |
+//! | anything else   | streams the prompt back and ends the turn |
 //!
-//! Every prompt it hears is also appended to `.vibeplane/heard.log` in the
+//! Every prompt it hears is also appended to `.devplane/heard.log` in the
 //! session's working directory, so a test can assert what an agent was told —
 //! which the event log cannot answer, because prompt text is never stored.
-//! | anything else   | streams the prompt back and ends the turn |
 //!
 //! An ACP agent owns stdout for JSON-RPC, so anything diagnostic goes to stderr.
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, ContentBlock, ContentChunk, Cost, InitializeRequest, InitializeResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest, PromptResponse,
-    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate, StopReason,
-    TextContent, ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields, UsageUpdate,
+    AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, InitializeRequest,
+    InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
+    PromptResponse, RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse,
+    SessionCapabilities, SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+    StopReason, TextContent, ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+    UsageUpdate,
 };
 use agent_client_protocol::{Agent, Client, Result, Stdio};
 
 /// The working directory the client gave this session.
 static CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Sessions the client has asked to stop.
+///
+/// **`session/cancel` is a notification, not JSON-RPC cancellation**, so the
+/// library's `Responder::cancellation` never fires for it and an agent has to
+/// track it itself — which is the whole reason this fixture models it. The
+/// client sends the notification, waits a grace period for the turn to end with
+/// `stop_reason: cancelled`, and tears the connection down if it does not. Until
+/// this existed nothing exercised the acknowledging half: every fixture turn
+/// finished instantly, so the client's cancel path could only ever be measured
+/// by its timeout.
+static CANCELLED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn cancel(session: String) {
+    CANCELLED.lock().expect("cancelled").push(session);
+}
+
+fn is_cancelled(session: &str) -> bool {
+    CANCELLED
+        .lock()
+        .expect("cancelled")
+        .iter()
+        .any(|s| s == session)
+}
 
 /// Where this fixture remembers a session, and how many turns it has heard.
 ///
@@ -46,7 +72,7 @@ static CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new
 /// continues its own count, a fresh one says `turn 1`.
 fn session_file(session: &str) -> Option<std::path::PathBuf> {
     let root = CWD.lock().expect("cwd").clone()?;
-    Some(root.join(".vibeplane").join(format!("session-{session}")))
+    Some(root.join(".devplane").join(format!("session-{session}")))
 }
 
 fn turns_for(session: &str) -> u32 {
@@ -105,13 +131,13 @@ async fn main() -> Result<()> {
                 // a client that checks only for `resume` refuses to continue a
                 // conversation that agent is willing to continue.
                 //
-                // `VIBEPLANE_ECHO_NO_RESUME=1` makes this fixture that agent,
+                // `DEVPLANE_ECHO_NO_RESUME=1` makes this fixture that agent,
                 // so the fallback is exercised rather than described.
-                let load_only = std::env::var_os("VIBEPLANE_ECHO_NO_RESUME").is_some();
-                // `VIBEPLANE_ECHO_NEEDS_AUTH=1` makes the fixture an agent that
+                let load_only = std::env::var_os("DEVPLANE_ECHO_NO_RESUME").is_some();
+                // `DEVPLANE_ECHO_NEEDS_AUTH=1` makes the fixture an agent that
                 // has to be signed into, so the client's handling of that can
                 // be tested without one that really does.
-                let auth = if std::env::var_os("VIBEPLANE_ECHO_NEEDS_AUTH").is_some() {
+                let auth = if std::env::var_os("DEVPLANE_ECHO_NEEDS_AUTH").is_some() {
                     vec![agent_client_protocol::schema::v1::AuthMethod::Agent(
                         agent_client_protocol::schema::v1::AuthMethodAgent::new(
                             agent_client_protocol::schema::v1::AuthMethodId::new("echo-login"),
@@ -146,16 +172,16 @@ async fn main() -> Result<()> {
                 // none of its business. Remembering it here is what makes the
                 // fixture behave like a real agent.
                 *CWD.lock().expect("cwd") = Some(req.cwd.clone());
-                // A *new* id every time, so a test can tell a resumed session
-                // from one that was quietly started again. With a fixed id the
-                // two are indistinguishable, and a test that cannot tell them
-                // apart cannot check the thing resume exists for.
-                if std::env::var_os("VIBEPLANE_ECHO_NEEDS_AUTH").is_some() {
+                if std::env::var_os("DEVPLANE_ECHO_NEEDS_AUTH").is_some() {
                     return responder.respond_with_error(
                         agent_client_protocol::Error::invalid_request()
                             .data("authentication required"),
                     );
                 }
+                // A *new* id every time, so a test can tell a resumed session
+                // from one that was quietly started again. With a fixed id the
+                // two are indistinguishable, and a test that cannot tell them
+                // apart cannot check the thing resume exists for.
                 let id = mint_session();
                 open_session(&id);
                 responder.respond(NewSessionResponse::new(SessionId::new(id)))
@@ -200,6 +226,15 @@ async fn main() -> Result<()> {
             },
             agent_client_protocol::on_receive_request!(),
         )
+        .on_receive_notification(
+            async move |note: CancelNotification, _cx| {
+                // Fire-and-forget by design: the client is not waiting on a
+                // reply here, it is waiting for the *turn* to end properly.
+                cancel(note.session_id.to_string());
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
         .on_receive_request(
             async move |req: PromptRequest, responder, connection| {
                 // The work runs off the handler. An ACP handler that awaits a
@@ -218,7 +253,7 @@ async fn main() -> Result<()> {
 /// The path a pipeline told this agent to write its findings to.
 ///
 /// The instruction is `write what you found to \`<path>\``, appended by
-/// Vibeplane rather than by the project's template, so the fixture can take it
+/// Devplane rather than by the project's template, so the fixture can take it
 /// literally.
 fn findings_path(text: &str) -> Option<String> {
     let rest = text.split_once("write what you found to `")?.1;
@@ -226,129 +261,182 @@ fn findings_path(text: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
+/// Answers one `session/prompt`, whatever happens while producing the answer.
+///
+/// **Every path through this function replies to the client**, and that is the
+/// whole reason it is split in two. The protocol library is explicit that
+/// dropping a responder for an individual request *"does not automatically send
+/// a reply"*, so an early exit leaves the client waiting for a `PromptResponse`
+/// that never comes — the same deadlock the handler above spawns a task to
+/// avoid, arrived at from the other side.
+///
+/// The trap is that an early exit does not have to look like one. The turn body
+/// sends six notifications and awaits a permission round trip, and **every `?`
+/// among them is a `return`**: a failed `send_notification` is harmless because
+/// nobody is left to wait, but the permission request can fail while the client
+/// is very much alive. So the body hands back a `StopReason` or an error, and
+/// the reply happens here, once.
 async fn serve_prompt(
     req: PromptRequest,
     responder: agent_client_protocol::Responder<PromptResponse>,
     connection: agent_client_protocol::ConnectionTo<Client>,
 ) -> Result<()> {
-    {
-        let text = req
-            .prompt
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text(t) => Some(t.text.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let say = |t: String| {
-            SessionNotification::new(
-                req.session_id.clone(),
-                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                    TextContent::new(t),
-                ))),
-            )
-        };
-
-        // The turn number is what proves a resume continued the conversation
-        // rather than starting a new one: a fresh session says `turn 1`.
-        let turn = turns_for(&req.session_id.to_string());
-        connection.send_notification(say(format!("echo: {text} [turn {turn}]")))?;
-
-        // Vibeplane never stores prompt text — telemetry is redacted and stays
-        // that way — so a test cannot ask the event log what an agent was told.
-        // This fixture writes it down instead, in the session's own directory,
-        // which is the only way to prove that what one step found reaches the
-        // step that has to act on it.
-        if let Some(root) = CWD.lock().expect("cwd").clone() {
-            let log = root.join(".vibeplane/heard.log");
-            if let Some(parent) = log.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            let mut prior = std::fs::read_to_string(&log).unwrap_or_default();
-            prior.push_str(&text);
-            prior.push_str("\n---\n");
-            std::fs::write(&log, prior).ok();
-        }
-
-        // ACP reports usage as a running total for the session, and the cost
-        // field is optional — an agent that never sends one can never be
-        // stopped by a budget, which is exactly why the fixture sends one.
-        if text.contains("expensive") {
-            connection.send_notification(SessionNotification::new(
-                req.session_id.clone(),
-                SessionUpdate::UsageUpdate(
-                    UsageUpdate::new(180_000, 200_000).cost(Cost::new(100.0, "USD".to_string())),
-                ),
-            ))?;
-        }
-
-        if text.contains("tool") {
-            connection.send_notification(SessionNotification::new(
-                req.session_id.clone(),
-                SessionUpdate::ToolCall(ToolCall::new(
-                    ToolCallId::new("t1"),
-                    "cargo test --workspace".to_string(),
-                )),
-            ))?;
-        }
-
-        // A reviewing step in a pipeline is told, in its prompt, where to
-        // write what it found. Playing that role honestly — reading the path
-        // out of the instruction rather than having it hard-coded — is what
-        // makes the fixture a test of the mechanism and not of itself.
-        if text.contains("criticise")
-            && let Some(path) = findings_path(&text)
-        {
-            // Only ever under the directory the client named. A default of
-            // "wherever this process happens to be" wrote test litter into the
-            // source tree, which is exactly the bug a real agent would have.
-            let Some(root) = CWD.lock().expect("cwd").clone() else {
-                return Ok(());
-            };
-            let file = root.join(&path);
-            if let Some(parent) = file.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            std::fs::write(&file, "the error path is not covered by a test\n").ok();
-            connection.send_notification(say(format!("wrote findings to {}", file.display())))?;
-        }
-
-        if text.contains("permission") {
-            // The client must answer this before the turn can end,
-            // which is exactly the blocking path worth testing.
-            let answer = connection
-                .send_request(RequestPermissionRequest::new(
-                    req.session_id.clone(),
-                    ToolCallUpdate::new(
-                        ToolCallId::new("t2"),
-                        ToolCallUpdateFields::new().title("rm -rf node_modules"),
-                    ),
-                    vec![
-                        PermissionOption::new(
-                            PermissionOptionId::new("allow"),
-                            "Allow once".to_string(),
-                            PermissionOptionKind::AllowOnce,
-                        ),
-                        PermissionOption::new(
-                            PermissionOptionId::new("deny"),
-                            "Deny".to_string(),
-                            PermissionOptionKind::RejectOnce,
-                        ),
-                    ],
-                ))
-                .block_task()
-                .await?;
-            connection
-                .send_notification(say(format!("permission outcome: {:?}", answer.outcome)))?;
-        }
-
-        let stop = if text.contains("fail") {
-            StopReason::Refusal
-        } else {
-            StopReason::EndTurn
-        };
-        responder.respond(PromptResponse::new(stop))
+    match take_turn(&req, &connection).await {
+        Ok(stop) => responder.respond(PromptResponse::new(stop)),
+        Err(e) => responder.respond_with_error(e),
     }
+}
+
+/// The turn itself: notifications, an optional permission round trip, and how
+/// it ended. Free to use `?`, because its caller always replies.
+async fn take_turn(
+    req: &PromptRequest,
+    connection: &agent_client_protocol::ConnectionTo<Client>,
+) -> Result<StopReason> {
+    let text = req
+        .prompt
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let say = |t: String| {
+        SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(t),
+            ))),
+        )
+    };
+
+    // The turn number is what proves a resume continued the conversation
+    // rather than starting a new one: a fresh session says `turn 1`.
+    let turn = turns_for(&req.session_id.to_string());
+    connection.send_notification(say(format!("echo: {text} [turn {turn}]")))?;
+
+    // Devplane never stores prompt text — telemetry is redacted and stays
+    // that way — so a test cannot ask the event log what an agent was told.
+    // This fixture writes it down instead, in the session's own directory,
+    // which is the only way to prove that what one step found reaches the
+    // step that has to act on it.
+    if let Some(root) = CWD.lock().expect("cwd").clone() {
+        let log = root.join(".devplane/heard.log");
+        if let Some(parent) = log.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        // Appended rather than read-modify-written: two sessions sharing
+        // one working directory would otherwise each write back a copy of
+        // what they read, and the later write would drop the other's turn.
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+        {
+            write!(f, "{text}\n---\n").ok();
+        }
+    }
+
+    // ACP reports usage as a running total for the session, and the cost
+    // field is optional — an agent that never sends one can never be
+    // stopped by a budget, which is exactly why the fixture sends one.
+    if text.contains("expensive") {
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::UsageUpdate(
+                UsageUpdate::new(180_000, 200_000).cost(Cost::new(100.0, "USD".to_string())),
+            ),
+        ))?;
+    }
+
+    if text.contains("tool") {
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ToolCall(ToolCall::new(
+                ToolCallId::new("t1"),
+                "cargo test --workspace".to_string(),
+            )),
+        ))?;
+    }
+
+    // A reviewing step in a pipeline is told, in its prompt, where to write what
+    // it found. Playing that role honestly — reading the path out of the
+    // instruction rather than having it hard-coded — is what makes the fixture a
+    // test of the mechanism and not of itself.
+    //
+    // Only ever under the directory the client named. A default of "wherever
+    // this process happens to be" wrote test litter into the source tree, which
+    // is exactly the bug a real agent would have.
+    if text.contains("criticise")
+        && let Some(path) = findings_path(&text)
+        && let Some(root) = CWD.lock().expect("cwd").clone()
+    {
+        let file = root.join(&path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&file, "the error path is not covered by a test\n").ok();
+        connection.send_notification(say(format!("wrote findings to {}", file.display())))?;
+    }
+
+    // A turn long enough to be interrupted. Everything else here finishes in
+    // microseconds, which makes the client's cancel handshake unobservable: the
+    // turn is always over before the notification arrives.
+    if text.contains("slow") {
+        let id = req.session_id.to_string();
+        // Comfortably longer than the client's cancel grace period, which is
+        // five seconds: if this ceiling were the shorter of the two, the turn
+        // would end on its own while the client was still waiting and the test
+        // would pass without the cancel ever being acknowledged. Bounded all
+        // the same, so a fixture nobody cancels cannot hang a suite.
+        const CEILING: usize = 30 * 100;
+        for _ in 0..CEILING {
+            if is_cancelled(&id) {
+                // The protocol's half of the bargain. A turn that just stops
+                // leaves the client waiting out its grace period and then
+                // tearing the connection down — which is what "the agent did
+                // not acknowledge the cancel" means on the other side.
+                return Ok(StopReason::Cancelled);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    if text.contains("permission") {
+        // The client must answer this before the turn can end, which is exactly
+        // the blocking path worth testing — and the one `?` here that can fail
+        // with the client still listening.
+        let answer = connection
+            .send_request(RequestPermissionRequest::new(
+                req.session_id.clone(),
+                ToolCallUpdate::new(
+                    ToolCallId::new("t2"),
+                    ToolCallUpdateFields::new().title("rm -rf node_modules"),
+                ),
+                vec![
+                    PermissionOption::new(
+                        PermissionOptionId::new("allow"),
+                        "Allow once".to_string(),
+                        PermissionOptionKind::AllowOnce,
+                    ),
+                    PermissionOption::new(
+                        PermissionOptionId::new("deny"),
+                        "Deny".to_string(),
+                        PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            ))
+            .block_task()
+            .await?;
+        connection.send_notification(say(format!("permission outcome: {:?}", answer.outcome)))?;
+    }
+
+    Ok(if text.contains("fail") {
+        StopReason::Refusal
+    } else {
+        StopReason::EndTurn
+    })
 }

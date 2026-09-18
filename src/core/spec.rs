@@ -15,7 +15,9 @@
 //! - the structure is **headings**;
 //! - the unit is a **folder**, not a file;
 //! - progress is a **task list** in a `tasks.md`, written with `- [ ]` and
-//!   `- [x]` (verified against Spec Kit's and OpenSpec's own templates).
+//!   `- [x]` (verified against Spec Kit's and OpenSpec's own templates), and
+//!   **only** that file: a `checklists/` folder validating the specification's
+//!   own quality is not progress on the feature.
 //!
 //! So that is what is read. The outline is the headings. The progress is the
 //! boxes. Nothing here knows what a requirement is.
@@ -102,11 +104,33 @@ impl Spec {
         }
     }
 
-    /// Checked boxes, and how many there are.
+    /// Checked boxes, and how many there are — **from `tasks.md` only**.
+    ///
+    /// The figure sits beside a gate verdict answering *how much of this work
+    /// is done*, so it may only count boxes that mean that. It counted every
+    /// box under the path until this project pointed the reader at its own
+    /// first specification and got **47** where the task list has 31: Spec Kit
+    /// writes a `checklists/` folder whose boxes validate the *specification's*
+    /// quality, and those are not progress on the feature.
+    ///
+    /// `tasks.md` is not a guess at a methodology — it is the one filename all
+    /// three documented layouts share, and Spec Kit's and OpenSpec's are pinned
+    /// in the claim ledger. Where a specification has none, every box counts:
+    /// narrowing unconditionally made a one-file specification report no
+    /// progress at all, which is a worse answer than the one it was fixing.
     pub fn tasks(&self) -> (u32, u32) {
-        self.docs.iter().fold((0, 0), |(d, t), doc| {
-            (d + doc.done, t + doc.done + doc.open)
-        })
+        // Where there is a `tasks.md`, it is the task list and the other
+        // documents are not. Where there is none — a one-file specification, or
+        // a layout nobody here has seen — every box counts, because there is
+        // nothing to tell them apart and reporting zero is a worse answer than
+        // the one that was being fixed.
+        let named = self.docs.iter().any(|d| is_task_list(&d.path));
+        self.docs
+            .iter()
+            .filter(|d| !named || is_task_list(&d.path))
+            .fold((0, 0), |(d, t), doc| {
+                (d + doc.done, t + doc.done + doc.open)
+            })
     }
 
     pub fn questions(&self) -> usize {
@@ -154,6 +178,18 @@ fn collect(root: &Path, dir: &Path, markers: &[String], depth: usize, out: &mut 
             out.push(d);
         }
     }
+}
+
+/// Whether a document is the one that carries a feature's task list.
+///
+/// Matched on the file name so a nested layout still works — OpenSpec's
+/// `changes/<id>/tasks.md` and Spec Kit's `specs/NNN-name/tasks.md` are both
+/// this — and case-insensitively, because a filename's case is the
+/// filesystem's business rather than the specification's.
+fn is_task_list(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("tasks.md"))
 }
 
 fn is_markdown(p: &Path) -> bool {
@@ -211,9 +247,16 @@ impl Doc {
             // CLARIFICATION]` is Spec Kit's spelling and the next tool will
             // have another. Case-insensitive and per line, exactly as a
             // reviewer's findings are matched.
-            if markers
-                .iter()
-                .any(|m| line.to_lowercase().contains(&m.to_lowercase()))
+            // A **ticked** box is a finished check, not an open question, and
+            // saying so is the difference between a true count and a plausible
+            // one. Spec Kit's own quality checklist carries the line "No
+            // [NEEDS CLARIFICATION] markers remain" — asserting the absence of
+            // the very thing the marker names — and counting it reported one
+            // unanswered question about a specification that had none.
+            if task_box(t) != Some(true)
+                && markers
+                    .iter()
+                    .any(|m| line.to_lowercase().contains(&m.to_lowercase()))
             {
                 questions.push(line.trim().to_string());
             }
@@ -333,8 +376,9 @@ mod tests {
         );
         assert_eq!(
             spec.tasks(),
-            (2, 4),
-            "the fenced example is a template's illustration, not a task"
+            (2, 3),
+            "the fenced example is a template's illustration, and the box in \
+             contracts/ is not the task list: where a tasks.md exists, it is"
         );
         assert_eq!(spec.questions(), 1);
         assert!(
@@ -390,5 +434,86 @@ mod tests {
         assert_eq!(spec.docs.len(), 1);
         assert_eq!(spec.tasks(), (1, 2));
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod dogfood {
+    use super::*;
+
+    /// The reader, pointed at whatever real specifications this checkout has.
+    ///
+    /// The one test in the suite that reads something on disk rather than a
+    /// fixture. `specs/` is not published — it is the maintainer's working
+    /// material — so this is **allowed to find nothing** and does nothing when
+    /// it does. That is not a weakened test: it
+    /// is the only honest shape for one whose subject is a folder a clean
+    /// checkout has no reason to contain.
+    ///
+    /// Where a feature *is* there, the reader is checked against a count taken
+    /// a different way — `tasks.md` read directly, by name — because the defect
+    /// this caught was the reader counting boxes from `checklists/` as progress
+    /// and returning 47 for a list of 31. Two computations that agree is
+    /// evidence; a computation compared with itself is not.
+    #[test]
+    fn a_real_specification_reads_and_its_progress_is_the_task_list() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Ok(entries) = std::fs::read_dir(root.join("specs")) else {
+            return;
+        };
+        let mut looked_at = 0;
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() || !dir.join("tasks.md").is_file() {
+                continue;
+            }
+            looked_at += 1;
+            let feature = format!("specs/{}", entry.file_name().to_string_lossy());
+            let markers = vec!["NEEDS CLARIFICATION".to_string()];
+            let spec = Spec::read(root, &feature, &markers);
+
+            let names: Vec<&str> = spec.docs.iter().map(|d| d.path.as_str()).collect();
+            for want in ["spec.md", "plan.md", "tasks.md"] {
+                assert!(
+                    names.iter().any(|n| n.ends_with(want)),
+                    "{feature}: {want} is part of the feature and the reader missed it: {names:?}"
+                );
+            }
+
+            // Counted the other way: one named file, every checkbox in it, and
+            // nothing else in the tree. Fenced blocks are excluded here as the
+            // reader excludes them, which is the one thing the two share.
+            let text = std::fs::read_to_string(dir.join("tasks.md")).expect("tasks.md reads");
+            let mut fenced = false;
+            let (mut done, mut total) = (0u32, 0u32);
+            for line in text.lines() {
+                if line.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                    continue;
+                }
+                if fenced {
+                    continue;
+                }
+                match task_box(line) {
+                    Some(true) => {
+                        done += 1;
+                        total += 1;
+                    }
+                    Some(false) => total += 1,
+                    None => {}
+                }
+            }
+            assert!(total > 0, "{feature}: a task list with no tasks in it");
+            assert_eq!(
+                spec.tasks(),
+                (done, total),
+                "{feature}: the reader disagrees with its own task list —                  `checklists/` is not progress on the feature"
+            );
+        }
+        // Nothing to say when there is nothing there, and saying it out loud so
+        // a silent pass is not mistaken for a real one.
+        if looked_at == 0 {
+            eprintln!("no specifications in this checkout — nothing read");
+        }
     }
 }

@@ -1,19 +1,19 @@
 +++
 title = "Configuration"
-description = "The complete vibeplane.toml reference. Every key is read by the code; an unknown key is a parse error rather than a silent default."
+description = "The complete devplane.toml reference. Every key is read by the code; an unknown key is a parse error rather than a silent default."
 weight = 21
 [extra]
 group = "reference"
 +++
 
-`vibeplane.toml` lives at the repository root and is **committed**. That is the point: the commands
+`devplane.toml` lives at the repository root and is **committed**. That is the point: the commands
 that decide whether work is finished are the project's, reviewed like anything else, and never
 something an agent wrote for itself.
 
-A repository with no `vibeplane.toml` still works — the gates are empty, no rule auto-decides
+A repository with no `devplane.toml` still works — the gates are empty, no rule auto-decides
 anything, and nothing changes.
 
-**Vibeplane reads this file and never writes it.** `vibeplane check` prints it back in a terminal;
+**Devplane reads this file and never writes it.** `devplane check` prints it back in a terminal;
 <kbd>,</kbd> on the board does the same for every registered repository at once, including the one
 whose file stopped parsing. There is no settings form on purpose: an agent here runs as you, so a
 write path to `[policy]` would be the widening path the gate exists to close.
@@ -69,7 +69,7 @@ open_questions = ["NEEDS CLARIFICATION", "TBD"]
 [github]                  # off by default: a push is visible
 pull_request = true
 draft        = true
-ready_label  = "vibeplane:ready"
+ready_label  = "devplane:ready"
 
 [pipelines.feature]
 steps = [
@@ -82,9 +82,9 @@ steps = [
 ```
 
 ```sh
-vibeplane check          # what will this file actually do?
-vibeplane check ../lib   # somewhere else
-vibeplane check --json   # exits non-zero on an error; for CI
+devplane check          # what will this file actually do?
+devplane check ../lib   # somewhere else
+devplane check --json   # exits non-zero on an error; for CI
 ```
 
 `check` is offline and daemon-free, so it runs in a repository nothing is connected to yet.
@@ -192,12 +192,12 @@ semantic conventions** — the dialect GitHub Copilot and Codex emit — have no
 anywhere in them, so a run observed that way reports tokens, models and durations and no dollars.
 That is not an agent declining to answer; it is a schema with nowhere to put the answer.
 
-`max_turns` and `max_runtime` exist because of that. A turn is an API request Vibeplane saw itself,
+`max_turns` and `max_runtime` exist because of that. A turn is an API request Devplane saw itself,
 and elapsed time is arithmetic on the work's own timestamp, so neither depends on an agent's
 cooperation and both bind every agent on every provider. They are checked before the money bound.
 
 > [!WARNING]
-> If a `_usd` ceiling is the only bound you set, `vibeplane check` warns — and `vibeplane work show`
+> If a `_usd` ceiling is the only bound you set, `devplane check` warns — and `devplane work show`
 > says whether your agent reports a cost at all, rather than printing `$0.00` and letting you assume
 > you are covered. A guard that may not fire has to say so.
 
@@ -209,10 +209,10 @@ cooperation and both bind every agent on every provider. They are checked before
 
 On by default, because such a run has no window of its own and the board would otherwise be able to
 say that a tool ran and not one word about why — and because the protocol streams the text to
-Vibeplane regardless, so discarding it was never a privacy measure.
+Devplane regardless, so discarding it was never a privacy measure.
 
-Off writes nothing, including the prompts Vibeplane itself sent, and does not stop the agent reading
-anything. Sessions Vibeplane merely watches are unaffected either way.
+Off writes nothing, including the prompts Devplane itself sent, and does not stop the agent reading
+anything. Sessions Devplane merely watches are unaffected either way.
 
 ## `[spec]`
 
@@ -221,7 +221,7 @@ anything. Sessions Vibeplane merely watches are unaffected either way.
 | `open_questions` | list of strings | empty | words that mark a question the specification has not answered |
 
 Counted per gate for the specification a piece of work names with
-[`--spec`](/vibeplane/docs/pipelines/#spec-driven-development), alongside its `- [ ]` task list, and
+[`--spec`](/devplane/docs/pipelines/#spec-driven-development), alongside its `- [ ]` task list, and
 shown on the board beside the verdict.
 
 The words are yours. `NEEDS CLARIFICATION` is Spec Kit's spelling, `TBD` is everybody's, and the
@@ -237,9 +237,9 @@ progress is the boxes, because those are the only things the frameworks in this 
 |---|---|---|---|
 | `pull_request` | bool | `false` | open one when the gates pass |
 | `draft` | bool | `true` | open it as a draft |
-| `ready_label` | string | none | which issues `vibeplane issues --ready` offers |
+| `ready_label` | string | none | which issues `devplane issues --ready` offers |
 
-Off by default because pushing a branch is the first thing Vibeplane does that other people can see.
+Off by default because pushing a branch is the first thing Devplane does that other people can see.
 
 ## `[pipelines.<kind>]`
 
@@ -267,13 +267,13 @@ steps = [
 |---|---|
 | `role` | what the step is for, and the name `back_to` refers to |
 | `agent` | an agent id, or `any` for the project's default |
-| `prompt` | a template in `.vibeplane/prompts/<name>.md`, or the text itself |
+| `prompt` | a template in `.devplane/prompts/<name>.md`, or the text itself |
 | `gate` | `check`, or a name from `[gates.named]` |
 | `findings.back_to` | an **earlier** role, which must declare a `gate` |
 | `findings.max` | how many times work may go back |
-| `findings.file` | where the reviewer writes them (default `.vibeplane/findings.md`) |
+| `findings.file` | where the reviewer writes them (default `.devplane/findings.md`) |
 | `findings.only` | words that make a finding worth returning the work for; empty (the default) means every finding counts |
-| `human` | suspends the chain until `vibeplane work approve` |
+| `human` | suspends the chain until `devplane work approve` |
 
 A step is one or the other: setting both `role` and `human` is an error, and so is giving a human
 step a `prompt`.
@@ -282,19 +282,19 @@ See [Pipelines](/docs/pipelines/).
 
 ## Machine-wide files
 
-`~/.vibeplane/policy.toml` takes the same `[policy]` shape, so a rule moves between the two by
+`~/.devplane/policy.toml` takes the same `[policy]` shape, so a rule moves between the two by
 cutting and pasting it.
 
-`~/.vibeplane/agents.toml` adds agents by name — see [Driving agents](/docs/agents/).
+`~/.devplane/agents.toml` adds agents by name — see [Driving agents](/docs/agents/).
 
 ## Environment
 
 | Variable | What |
 |---|---|
-| `VIBEPLANE_HOME` | where the database, token and daemon record live (default `~/.vibeplane`) |
-| `VIBEPLANE_PORT` | the port `serve` asks for (default `47831`) |
-| `VIBEPLANE_CLAUDE_BIN` | the `claude` binary, when it is not where Vibeplane looks |
-| `VIBEPLANE_NOTIFY` | `0` turns desktop notifications off |
-| `VIBEPLANE_LOG` | tracing filter, e.g. `vibeplane=debug` |
-| `VIBEPLANE_UI` | serve the board from this file instead of the copy compiled into the binary — for working on the page |
+| `DEVPLANE_HOME` | where the database, token and daemon record live (default `~/.devplane`) |
+| `DEVPLANE_PORT` | the port `serve` asks for (default `47831`) |
+| `DEVPLANE_CLAUDE_BIN` | the `claude` binary, when it is not where Devplane looks |
+| `DEVPLANE_NOTIFY` | `0` turns desktop notifications off |
+| `DEVPLANE_LOG` | tracing filter, e.g. `devplane=debug` |
+| `DEVPLANE_UI` | serve the board from this file instead of the copy compiled into the binary — for working on the page |
 | `CLAUDE_CONFIG_DIR` | which Claude Code config `connect` writes to |

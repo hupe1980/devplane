@@ -1,18 +1,18 @@
 +++
 title = "Install"
-description = "Install Vibeplane, and check it found the agent binaries on your machine."
+description = "Install Devplane, and check it found the agent binaries on your machine."
 weight = 1
 [extra]
 group = "start"
 +++
 
-Vibeplane is a single static binary. It contains the daemon, the CLI, the hook shims and the web
+Devplane is a single static binary. It contains the daemon, the CLI, the hook shims and the web
 board — there is no service to run and nothing to configure before it is useful.
 
 ## The path that is meant for you
 
 ```sh
-curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh
+curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 ```
 
 Fetches a prebuilt binary for macOS (Apple Silicon), Linux and Windows. No Rust toolchain.
@@ -33,7 +33,7 @@ there.
 ## From source
 
 ```sh
-cargo install vibeplane
+cargo install devplane
 ```
 
 Requires Rust 1.90 or later, and builds from source — a few minutes the first time. This is the
@@ -42,19 +42,19 @@ path for contributors and for platforms the release matrix does not cover, not t
 ## Check it works
 
 ```sh
-vibeplane ls
+devplane ls
 ```
 
 If Claude Code sessions are running, you will see them immediately — discovery needs no
-configuration at all. If nothing appears, Vibeplane will tell you which of the two reasons it is.
+configuration at all. If nothing appears, Devplane will tell you which of the two reasons it is.
 
 ## Finding the `claude` binary
 
 Session discovery runs `claude agents --json`, and `claude` is routinely **not** on your `PATH`: the
-VS&nbsp;Code extension ships its own copy and installs nothing globally. Vibeplane looks in four
+VS&nbsp;Code extension ships its own copy and installs nothing globally. Devplane looks in four
 places, in order:
 
-1. `$VIBEPLANE_CLAUDE_BIN`
+1. `$DEVPLANE_CLAUDE_BIN`
 2. `PATH`
 3. `~/.claude/local/claude`
 4. the newest `anthropic.claude-code-*` extension in VS&nbsp;Code, VS&nbsp;Code Insiders or Cursor
@@ -62,30 +62,30 @@ places, in order:
 If yours lives somewhere else:
 
 ```sh
-export VIBEPLANE_CLAUDE_BIN=/path/to/claude
+export DEVPLANE_CLAUDE_BIN=/path/to/claude
 ```
 
 > [!NOTE]
-> Vibeplane runs perfectly well with no Claude Code at all — it drives any agent that speaks the
+> Devplane runs perfectly well with no Claude Code at all — it drives any agent that speaks the
 > Agent Client Protocol. The binary is only needed for *watching* Claude Code sessions and for
-> `vibeplane attach`.
+> `devplane attach`.
 
 ## Where it keeps things
 
-Everything lives in one directory, `~/.vibeplane`:
+Everything lives in one directory, `~/.devplane`:
 
 | File | What |
 |---|---|
-| `vibeplane.db` | SQLite: events, runs, work, transcripts, the decision log |
+| `devplane.db` | SQLite: events, runs, work, transcripts, the decision log |
 | `token` | the bearer token for the local API, mode `0600` |
 | `daemon.json` | the running daemon's pid and the port it actually bound |
 | `policy.toml` | optional machine-wide permission rules |
 | `agents.toml` | optional extra agents, by name |
 
-`VIBEPLANE_HOME` moves all of it, which is how you run a throwaway instance beside your real one:
+`DEVPLANE_HOME` moves all of it, which is how you run a throwaway instance beside your real one:
 
 ```sh
-VIBEPLANE_HOME=/tmp/vp vibeplane ls
+DEVPLANE_HOME=/tmp/vp devplane ls
 ```
 
 A second instance takes another port rather than refusing to start, so it never interferes with the
@@ -94,15 +94,15 @@ daemon you are actually using.
 ## Uninstall
 
 ```sh
-vibeplane disconnect claude    # removes the hooks and telemetry it installed
-vibeplane disconnect copilot   # deletes the one file it wrote
-vibeplane stop                 # stops the daemon, and the agents it started
-rm -rf ~/.vibeplane
+devplane disconnect claude    # removes the hooks and telemetry it installed
+devplane disconnect copilot   # deletes the one file it wrote
+devplane stop                 # stops the daemon, and the agents it started
+rm -rf ~/.devplane
 ```
 
-Then remove the binary the way you installed it — `cargo uninstall vibeplane`, or deleting it from
+Then remove the binary the way you installed it — `cargo uninstall devplane`, or deleting it from
 `~/.local/bin`.
 
 `disconnect claude` removes exactly the entries `connect` added, leaving the hooks you configured
-yourself alone. `disconnect copilot` deletes `~/.copilot/hooks/vibeplane.json`, which is the whole
+yourself alone. `disconnect copilot` deletes `~/.copilot/hooks/devplane.json`, which is the whole
 of what it wrote — any OpenTelemetry variables you exported are yours to remove.

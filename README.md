@@ -1,4 +1,4 @@
-# Vibeplane
+# Devplane
 
 **The local-first control plane for AI coding agents.** One binary that **watches** every Claude Code
 session already running on your machine — terminal, VS Code, desktop — tells you which ones need you,
@@ -6,12 +6,12 @@ and **drives** any agent that speaks the
 [Agent Client Protocol](https://agentclientprotocol.com): Claude Code, Codex, Copilot, OpenCode and
 Gemini out of the box. One permission gate governs Claude Code and GitHub Copilot alike.
 
-**[Documentation → hupe1980.github.io/vibeplane](https://hupe1980.github.io/vibeplane)**
+**[Documentation → hupe1980.github.io/devplane](https://hupe1980.github.io/devplane)**
 
 ```console
-$ vibeplane ls
+$ devplane ls
 8 projects · 23 sessions · 5 working · 2 need you · 4 idle · $4.18
-12 quiet (nothing heard for hours) — vibeplane ls --all
+12 quiet (nothing heard for hours) — devplane ls --all
 
 saas  ·  4 issues · 2 PRs (1 needs you)
   ◆ 7c         vscode     62%   $1.04   3m  Keep the legacy /v1/login route?
@@ -33,9 +33,9 @@ is still today's business and counted afterwards. A quiet session that starts as
 joins the working set immediately. The numbers add up — every session is in exactly one of them.
 
 **GitHub is on the same board.** Half of what is waiting on you is not a session — it is the issues
-and pull requests on your repositories. Vibeplane reads them through your own `gh` for every
+and pull requests on your repositories. Devplane reads them through your own `gh` for every
 registered project: the heading carries the counts, `g` on the board opens every issue and pull
-request across every project, `vibeplane issues` and `vibeplane prs` print the same two lists, and an
+request across every project, `devplane issues` and `devplane prs` print the same two lists, and an
 issue assigned to you or a review requested from you is an inbox item. A draft of your own is not —
 you already said it is unfinished. Nothing is ever written to GitHub from a list; every action is a
 link.
@@ -52,61 +52,61 @@ Five VS Code windows, five agents, and no way to know which one is stuck. Claude
 Code started; neither spans your terminal, your editor and the desktop app at once, and none of them
 knows what *done* means for your project.
 
-Vibeplane watches all of them, on documented interfaces, and stays out of the way.
+Devplane watches all of them, on documented interfaces, and stays out of the way.
 
 ## 📦 Install
 
 ```sh
 # a prebuilt binary: macOS (Apple Silicon), Linux, Windows
-curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh
+curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 
 # from source, needs Rust 1.90+
-cargo install vibeplane
+cargo install devplane
 ```
 
 On macOS use the installer rather than the releases page: the binaries are not notarised, and macOS
 quarantines a file based on what downloaded it — a browser sets that flag and `curl` does not.
 
-[Install guide →](https://hupe1980.github.io/vibeplane/docs/install/)
+[Install guide →](https://hupe1980.github.io/devplane/docs/install/)
 
 ## 🔁 The loop, in one screen
 
 ```sh
-vibeplane ls                 # the working set — works immediately, no setup
-vibeplane connect claude     # add live state: hooks + telemetry, into your user settings
-vibeplane connect copilot    # the same for GitHub Copilot: one file, and two lines to export
-vibeplane inbox              # only what needs a human, most urgent first
-vibeplane issues             # every open issue across your projects, what needs you first
-vibeplane prs                # every open pull request, the same way
-vibeplane open               # the board in a browser, updating live
+devplane ls                 # the working set — works immediately, no setup
+devplane connect claude     # add live state: hooks + telemetry, into your user settings
+devplane connect copilot    # the same for GitHub Copilot: one file, and two lines to export
+devplane inbox              # only what needs a human, most urgent first
+devplane issues             # every open issue across your projects, what needs you first
+devplane prs                # every open pull request, the same way
+devplane open               # the board in a browser, updating live
 
-vibeplane trust .            # shows the hooks, MCP servers and skills you are about to allow
-vibeplane work start "fix the flaky login test" --kind bug
-vibeplane work show <id>     # where it got to, what it cost, what the checks said
-vibeplane rewind <run>       # files a shell command wrote past Claude Code's checkpoint
-vibeplane audit              # what Vibeplane decided, and on whose authority
-vibeplane attention          # whether the inbox is worth reading, per kind
-vibeplane explain --replay   # which rule to write so it stops asking
+devplane trust .            # shows the hooks, MCP servers and skills you are about to allow
+devplane work start "fix the flaky login test" --kind bug
+devplane work show <id>     # where it got to, what it cost, what the checks said
+devplane rewind <run>       # files a shell command wrote past Claude Code's checkpoint
+devplane audit              # what Devplane decided, and on whose authority
+devplane attention          # whether the inbox is worth reading, per kind
+devplane explain --replay   # which rule to write so it stops asking
 ```
 
-`vibeplane ls` works before you connect anything: sessions are discovered from Claude Code's own
+`devplane ls` works before you connect anything: sessions are discovered from Claude Code's own
 roster. Connecting is what adds cost, context usage, blocking and the permission gate.
 
-**One gate, two vendors.** The same `vibeplane.toml` rules govern Claude Code and GitHub Copilot,
-evaluated in Vibeplane's own process and never translated into either vendor's configuration — so
+**One gate, two vendors.** The same `devplane.toml` rules govern Claude Code and GitHub Copilot,
+evaluated in Devplane's own process and never translated into either vendor's configuration — so
 `never_auto = ["Read(.env)"]` stops Claude's `Read` and Copilot's `view`, and both name the rule in
-`vibeplane audit`. Copilot has no session roster, so there it is connect-first-then-see.
+`devplane audit`. Copilot has no session roster, so there it is connect-first-then-see.
 
 Every command starts the daemon if it is not already running, and every command takes `--json`.
 
-[Quickstart →](https://hupe1980.github.io/vibeplane/docs/quickstart/) ·
-[CLI reference →](https://hupe1980.github.io/vibeplane/docs/cli/)
+[Quickstart →](https://hupe1980.github.io/devplane/docs/quickstart/) ·
+[CLI reference →](https://hupe1980.github.io/devplane/docs/cli/)
 
 ## ✅ Verified done
 
 `work start` makes an isolated checkout at `.claude/worktrees/<slug>` on its own branch, runs your
 setup command, copies the files you name, and puts an agent in it. **When the agent says it is
-finished, Vibeplane runs your checks.** Green means a human should look; red means the failures go
+finished, Devplane runs your checks.** Green means a human should look; red means the failures go
 back to that same session, bounded, and then you are asked — in the inbox, with the same failing
 lines the agent was handed.
 
@@ -118,15 +118,15 @@ An agent that claims success without earning it reaches `failed`, never `review`
 
 **Two pieces of work editing the same files is an inbox item, not a merge conflict.** Isolated
 checkouts are exactly as isolated as they sound, which is what lets two branches be locally correct
-and jointly impossible. Vibeplane compares what each in-flight worktree has touched when work reaches
+and jointly impossible. Devplane compares what each in-flight worktree has touched when work reaches
 review, and names the files and the other work.
 
-**A daemon restart does not lose the conversation.** `vibeplane work resume <id>` reconnects to the
+**A daemon restart does not lose the conversation.** `devplane work resume <id>` reconnects to the
 agent's own session rather than paying again to rediscover what it already knew — over
 `session/resume`, or `session/load` for agents that offer only that.
 
 ```toml
-# vibeplane.toml — committed, so the definition of done is the project's, not the agent's.
+# devplane.toml — committed, so the definition of done is the project's, not the agent's.
 [gates]
 check   = ["pnpm typecheck", "pnpm test -- --run"]
 on_fail = "feedback"        # feedback | escalate | ignore
@@ -145,7 +145,7 @@ steps = [
 ]
 ```
 
-`vibeplane check` reads that file and tells you what it will do — and refuses the mistakes that
+`devplane check` reads that file and tells you what it will do — and refuses the mistakes that
 otherwise surface several minutes and one model call later: a `back_to` naming a step that does not
 exist, a gate nobody declared, an `include` that leaves the repository, a review loop with no check
 behind it, and a permission rule that cannot match anything.
@@ -153,12 +153,12 @@ behind it, and a permission rule that cannot match anything.
 It also reports the two kinds of rule that are *legal* and wrong: one that **provably does nothing**,
 because a prohibition above it already answers every call it speaks for, and one that **grants more
 than it looks like** — `Bash(python:*)` reads as a narrow permission for one interpreter and approves
-`python -c '…'`, which is any code at all. Claude Code reads that rule the same way, so Vibeplane
+`python -c '…'`, which is any code at all. Claude Code reads that rule the same way, so Devplane
 reports it and does not refuse it; the narrowing is yours to write. In a scan of 3,171 public agent
 setups, 3.1 % carried a grant of exactly that shape.
 
-[Verified done →](https://hupe1980.github.io/vibeplane/docs/verified-done/) ·
-[Configuration →](https://hupe1980.github.io/vibeplane/docs/configuration/)
+[Verified done →](https://hupe1980.github.io/devplane/docs/verified-done/) ·
+[Configuration →](https://hupe1980.github.io/devplane/docs/configuration/)
 
 ## 📐 Spec-driven, with no format to adopt
 
@@ -180,7 +180,7 @@ reaches `review`.
 And a work item can name what it answers — a file, or the folder your tool wrote:
 
 ```sh
-vibeplane work start "password reset" --kind feature --spec specs/001-password-reset
+devplane work start "password reset" --kind feature --spec specs/001-password-reset
 ```
 
 Every gate stamps a fingerprint over every document under it, so *checked against
@@ -197,23 +197,25 @@ so *gates green* beside *eleven boxes still open* is a sentence neither the exit
 can produce alone. No methodology is learned: the outline is the Markdown headings, the progress is
 the `- [ ]` boxes, and nothing here knows what a requirement is.
 
-[Pipelines →](https://hupe1980.github.io/vibeplane/docs/pipelines/)
+[Pipelines →](https://hupe1980.github.io/devplane/docs/pipelines/)
 
 ## 🖥️ The board
 
-`vibeplane open` serves one page from the daemon on loopback.
+`devplane open` serves one page from the daemon on loopback.
 
-![The Vibeplane board: four projects, six sessions, one permission waiting and one session at 89% context](https://raw.githubusercontent.com/hupe1980/vibeplane/main/site/static/board.png)
+![The Devplane board: four projects, six sessions, one permission waiting and one session at 89% context](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/board.png)
 
 Keyboard-first:
 
 | Key | What |
 |---|---|
 | `j` `k` · `enter` | move · open what a session is saying |
+| `tab` · `enter` on a work row | what it changed — diff, gate commands, the agent's account |
 | `1`–`9` | pick one of the answers the agent offered |
 | `y` `n` · `r` | allow · deny · reply |
+| — | a permission also carries the rule that stops it being asked again, and the file to paste it into |
 | `?` | why is this here — the decision log for that row |
-| `,` | what is configured — this machine, and every repository's `vibeplane.toml` read back |
+| `,` | what is configured — this machine, and every repository's `devplane.toml` read back |
 | `g` | every open issue and pull request, across every project |
 | `⌘N` | dispatch: prompt, project, kind, and this project's own prompts |
 | `⌘K` | jump to any project, session or piece of work by name |
@@ -228,10 +230,10 @@ with the prompt already typed. It sends nothing: Claude Code fills the box and s
 
 ## 📊 Is the inbox worth reading?
 
-A control plane is a filter, so Vibeplane measures its own:
+A control plane is a filter, so Devplane measures its own:
 
 ```console
-$ vibeplane attention
+$ devplane attention
 kind               raised   acted  dismissed  elsewhere   open   acted
 permission             41      36          0          4      1     90%
 gate_failed             9       8          1          0      0     89%
@@ -246,7 +248,7 @@ stalled                12       0          2         10      0      0%
 And the other half — **which rule to write so it stops**:
 
 ```console
-$ vibeplane explain --replay
+$ devplane explain --replay
 1284 tool calls in saas replayed against the rules as they are now
 
      912   71%  allow
@@ -273,7 +275,7 @@ stopping it.
 
 ## 🔐 Permissions are Claude Code's, in full
 
-A rule moves between `settings.json` and `vibeplane.toml` by cutting and pasting it — all three
+A rule moves between `settings.json` and `devplane.toml` by cutting and pasting it — all three
 lists, the `:*` form, gitignore paths with all four anchors, MCP server prefixes, and the
 allow/deny asymmetries. `Edit(…)` covers every built-in tool that writes files and `Read(…)` every
 one that reads them — `Read`, `Grep`, `Glob` and `LSP` — so two rules cover nine tools.
@@ -316,7 +318,7 @@ line. `never_auto = ["Bash(rm -rf *)"]` stops `ls && rm -rf /`, and `auto_allow 
 And some commands **no pattern rule may approve**, because Claude Code asks about them whatever the
 rules say: an exec wrapper (`watch`, `setsid`, `ionice`, `flock`) that runs whatever follows it,
 `find` with `-exec` or `-delete`, and anything past the length its command analysis reads. A rule
-naming the exact command still works; `Bash(watch *)` does not, and `vibeplane check` says so rather
+naming the exact command still works; `Bash(watch *)` does not, and `devplane check` says so rather
 than letting it look like protection.
 
 A path rule also reaches **the files a command names**: the operands of the commands Claude Code
@@ -332,7 +334,7 @@ covers the command, not what it writes: `Bash(echo *)` does not answer for
 
 **`Read` and `Edit` are two halves and you want both.** `Read(.env)` stops `cat .env` and
 `echo x | tee .env`; it does *not* stop `echo x > .env` or `touch .env`, which are `Edit` business.
-`vibeplane check` prints a note when only one half is present.
+`devplane check` prints a note when only one half is present.
 
 **Symlinks are followed from both ends, and the two sides read the pair differently.** A deny applies
 when *either* the link or its target matches, so a repository that ships `config/key -> ~/.ssh/id_rsa`
@@ -342,12 +344,12 @@ of an approved directory stops being approved. And **the rule can be the end hol
 resolving only the accessed path leaves every such rule evadable by spelling the real location.
 
 ```console
-$ vibeplane explain 'echo x | tee /etc/hosts'
+$ devplane explain 'echo x | tee /etc/hosts'
 undecided  Bash
         no rule answers this one, so the provider's own dialog decides and it reaches your inbox
 ```
 
-`vibeplane explain` answers offline — no daemon, no agent, no bill — which is what you want while
+`devplane explain` answers offline — no daemon, no agent, no bill — which is what you want while
 you are still writing the rule. The interesting answer is the `undecided` that looks like an allow:
 a rule matched and still did not speak, because the command writes somewhere no rule covers.
 
@@ -355,7 +357,7 @@ a rule matched and still did not speak, because the command writes somewhere no 
 prompt ever appears. Denies and asks go out on a hook that fires before every tool call in every
 mode; grants stay on the one that fires only when you were going to be asked anyway.
 
-[The rule syntax →](https://hupe1980.github.io/vibeplane/docs/permissions/)
+[The rule syntax →](https://hupe1980.github.io/devplane/docs/permissions/)
 
 ## 🌍 Which world is this machine in?
 
@@ -363,19 +365,19 @@ Claude Code's own availability matrix splits cleanly: everything it ships to **r
 on every provider, and everything it ships to **supervise, schedule, review and audit** one needs a
 claude.ai sign-in. On Amazon Bedrock, Google Cloud's Agent Platform, Microsoft Foundry, a Console API
 key or a corporate gateway, the vendor's whole supervision layer is off — and hooks, OpenTelemetry,
-workflows, skills and sandboxing all still work, which is exactly Vibeplane's substrate.
+workflows, skills and sandboxing all still work, which is exactly Devplane's substrate.
 
 ```console
-$ vibeplane doctor
+$ devplane doctor
 provider
   Amazon Bedrock  (CLAUDE_CODE_USE_BEDROCK is set)
-  Vibeplane is the only gate on this machine.
+  Devplane is the only gate on this machine.
   off here   Remote Control · Routines · ultrareview · Code Review · Channels · analytics
   partial    auto mode — fewer models, and sessions start in Manual
   still on   hooks · OpenTelemetry metrics · workflows · skills · sandboxing · MCP servers
 ```
 
-[Which surfaces →](https://hupe1980.github.io/vibeplane/docs/cli/#vibeplane-doctor)
+[Which surfaces →](https://hupe1980.github.io/devplane/docs/cli/#devplane-doctor)
 
 ## ⏱ The gate says how old its own measurement is
 
@@ -384,7 +386,7 @@ question and a disagreement fails the build. That check is only true on the day 
 is printed rather than hidden:
 
 ```console
-$ vibeplane gate
+$ devplane gate
 measurement
   measured  Claude Code 2.1.273
   rows      changelog rows cleared through 2.1.273 (not a compatibility claim)
@@ -393,16 +395,16 @@ measurement
 Beside it, the gate scored against a published execution-boundary profile — **including the two
 properties it does not have**, because a conformance report with no failures in it is a marketing
 document. `just owed` fails on a cron line when the vendor ships past the floor.
-[Conformance →](https://hupe1980.github.io/vibeplane/docs/conformance/)
+[Conformance →](https://hupe1980.github.io/devplane/docs/conformance/)
 
 ## 🔍 Trust is a decision, so it shows you the evidence
 
-`vibeplane trust` is the one deliberate act here: it lets headless agents start in a directory, and a
+`devplane trust` is the one deliberate act here: it lets headless agents start in a directory, and a
 headless agent runs **that repository's own hooks and MCP servers** with no dialog of its own. So it
 prints what those are before it asks.
 
 ```console
-$ vibeplane trust .
+$ devplane trust .
   starting an agent here loads this repository's own:
 
   hook    ./scripts/guard.sh
@@ -427,18 +429,18 @@ purpose, too — it does not open the script a hook names.
 ## 🤖 Your agents can ask it things
 
 ```json
-{ "mcpServers": { "vibeplane": { "command": "vibeplane", "args": ["mcp"] } } }
+{ "mcpServers": { "devplane": { "command": "devplane", "args": ["mcp"] } } }
 ```
 
 Four questions — `inbox`, `work`, `explain`, `audit` — and nothing that acts. The useful one daily is
 `explain`: an agent finds out *before* running a command that a rule refuses it, instead of burning a
 turn. It is read-only because it **implements no mutating tool**, not because anything is labelled.
-[MCP →](https://hupe1980.github.io/vibeplane/docs/cli/#vibeplane-mcp)
+[MCP →](https://hupe1980.github.io/devplane/docs/cli/#devplane-mcp)
 
 ## ⚙️ How it works
 
 ```
-  agent sessions                           vibeplane serve (the daemon)
+  agent sessions                           devplane serve (the daemon)
   ──────────────                           ───────────────────────────
   terminal ─┐                          ┌─ hooks     → lifecycle, blocking, policy
   VS Code  ─┼─ hooks + OpenTelemetry ─►├─ OTLP      → cost, tokens, entrypoint
@@ -459,8 +461,8 @@ be re-derived from the provider, but “this command ran because rule X allowed 
 request exists because these checks passed” cannot be re-derived from anything, so they are appended
 and never pruned.
 
-[Architecture →](https://hupe1980.github.io/vibeplane/docs/architecture/) ·
-[Security →](https://hupe1980.github.io/vibeplane/docs/security/)
+[Architecture →](https://hupe1980.github.io/devplane/docs/architecture/) ·
+[Security →](https://hupe1980.github.io/devplane/docs/security/)
 
 ## 🗂️ Layout
 
@@ -468,7 +470,7 @@ One crate.
 
 | Path | What |
 |---|---|
-| `src/core/` | Types, the reducer, the attention engine, the permission policy, `vibeplane.toml`. **May not reach the outside world** — no `async fn`, no `.await`, no runtime, no database, no HTTP |
+| `src/core/` | Types, the reducer, the attention engine, the permission policy, `devplane.toml`. **May not reach the outside world** — no `async fn`, no `.await`, no runtime, no database, no HTTP |
 | `src/` | Everything that does: daemon, receivers, HTTP API, protocol client, gates, git, GitHub, SQLite, CLI, and the board (`ui/index.html`) |
 | `tests/purity.rs` | Fails the build if `src/core/` ever breaks that rule |
 | `site/` | The documentation site (Zola) |
@@ -490,7 +492,7 @@ just open                    # the board in a browser
 just site                    # the documentation site, at http://127.0.0.1:1111
 just ui                      # the board served from ui/index.html — edit, reload, no rebuild
 
-VIBEPLANE_HOME=/tmp/vp just vp ls    # an isolated instance, touching nothing of yours
+DEVPLANE_HOME=/tmp/vp just vp ls    # an isolated instance, touching nothing of yours
 ```
 
 `just rows` is the cheapest of the three permission checks and the one that runs in CI: it fails
@@ -508,15 +510,15 @@ The protocol tests drive a real agent process — `examples/echo_agent` — rath
 a vendor's, and the GitHub tests parse captured `gh` output rather than calling GitHub. That is what
 keeps them runnable on every commit: a suite that needs a subscription is a suite nobody runs.
 
-`VIBEPLANE_HOME` moves the database, token and daemon record; `CLAUDE_CONFIG_DIR` points `connect`
+`DEVPLANE_HOME` moves the database, token and daemon record; `CLAUDE_CONFIG_DIR` points `connect`
 at a throwaway Claude Code config. Together they let you exercise the whole thing without going near
 your own setup — including while your real daemon is running, because a second instance takes
 another port rather than refusing to start.
 
-`VIBEPLANE_CLAUDE_BIN` points at a `claude` binary if yours is not on `PATH` — which is common, since
+`DEVPLANE_CLAUDE_BIN` points at a `claude` binary if yours is not on `PATH` — which is common, since
 the VS Code extension ships its own copy and installs nothing.
 
-`VIBEPLANE_UI` points the daemon at `ui/index.html` on disk, so editing the board is a browser reload
+`DEVPLANE_UI` points the daemon at `ui/index.html` on disk, so editing the board is a browser reload
 rather than a rebuild and a restart — `just ui` is that with the path filled in. The copy compiled
 into the binary is what ships.
 

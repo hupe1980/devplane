@@ -32,17 +32,39 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
         for (n, o) in i.options.iter().enumerate() {
             println!("     {}. {}", n + 1, o.label);
         }
-        // The rule that would have answered this one, where one would. It is
-        // the exact call and never a pattern: being interrupted once says this
-        // command needed a decision and says nothing about the shape of the
-        // ones like it. `vibeplane explain --replay` is where a pattern comes
-        // from, because there the evidence is a count.
-        if let Some(rule) = &i.suggested_rule {
+        // The rule to paste, and where. A pattern only where this machine has
+        // seen enough of the family to have a count behind it — being
+        // interrupted once says this command needed a decision and says
+        // nothing about the shape of the ones like it.
+        //
+        // **Printed, never written.** The rules are committed files reviewed
+        // like code, and an agent here runs as the same user, so the handover
+        // is a paste and that is the whole of it.
+        if let Some(o) = &i.offer {
+            let scope = match o.basis {
+                crate::core::offer::Basis::Family => {
+                    format!(
+                        "covers {}{} calls like it",
+                        o.covers,
+                        if o.more { "+" } else { "" }
+                    )
+                }
+                crate::core::offer::Basis::Call => "this call only".to_string(),
+            };
             println!(
                 "     {} {}",
                 paint(DIM, "never asked again:"),
-                paint(render::GREEN, &format!("auto_allow = [\"{rule}\"]"))
+                paint(render::GREEN, &format!("auto_allow = [\"{}\"]", o.rule))
             );
+            println!(
+                "     {}",
+                paint(
+                    DIM,
+                    &format!("{scope} · paste into {} {}", o.file, o.section)
+                )
+            );
+        } else if let Some(no) = &i.no_offer {
+            println!("     {}", paint(DIM, &no.sentence));
         }
         // A work item has no run of its own once the agent is gone, and
         // printing `run ` followed by nothing helps nobody.
@@ -70,9 +92,9 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
         if i.actions.iter().any(|a| a == "resume")
             && let Some(w) = &i.work_id
         {
-            println!("     {}", paint(DIM, &format!("vibeplane work resume {w}")));
+            println!("     {}", paint(DIM, &format!("devplane work resume {w}")));
         }
-        // Spell out the command only when Vibeplane can actually run it. For a
+        // Spell out the command only when Devplane can actually run it. For a
         // session it merely watches there is nothing to decide from here, and
         // printing a command that would fail is worse than printing none.
         if let (Some(req), Some(run)) = (&i.request_id, &i.run_id) {
@@ -80,7 +102,7 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
                 "     {}",
                 paint(
                     DIM,
-                    &format!("vibeplane decide {run} --request {req} --decision allow")
+                    &format!("devplane decide {run} --request {req} --decision allow")
                 )
             );
         }

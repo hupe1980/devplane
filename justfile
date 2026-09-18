@@ -1,7 +1,7 @@
-# Vibeplane tasks. `just` on its own lists them.
+# Devplane tasks. `just` on its own lists them.
 #
 # `check` is exactly what .github/workflows/ci.yml runs; the rest are local,
-# because they need concepts/, specs/ or a real agent binary.
+# because they need concepts/, reference/ or a real agent binary.
 
 set shell := ["bash", "-uc"]
 
@@ -12,19 +12,19 @@ default:
 
 # The board in a browser. Starts the daemon if one is not already running.
 open: build
-    ./target/debug/vibeplane open
+    ./target/debug/devplane open
 
 # The same, serving ui/index.html from disk: edit, save, reload. No rebuild.
 ui: build
-    VIBEPLANE_UI=$PWD/ui/index.html ./target/debug/vibeplane serve
+    DEVPLANE_UI=$PWD/ui/index.html ./target/debug/devplane serve
 
 # The daemon in the foreground.
 serve: build
-    ./target/debug/vibeplane serve
+    ./target/debug/devplane serve
 
 # Any subcommand: `just vp explain 'rm -rf /'`
 vp *ARGS: build
-    ./target/debug/vibeplane {{ARGS}}
+    ./target/debug/devplane {{ARGS}}
 
 # ── The loop ─────────────────────────────────────────────────────────────────
 
@@ -62,13 +62,13 @@ test: build
 deps:
     bash scripts/deps-count.sh
 
-# Every integration claim against its file in specs/. Run `just specs` first.
+# Every integration claim against its file in reference/. Run `just reference` first.
 claims:
     bash scripts/verify-claims.sh
 
-# Re-download the third-party specs into specs/ (gitignored).
-specs:
-    bash scripts/fetch-specs.sh
+# Re-download the third-party reference docs into reference/ (gitignored).
+reference:
+    bash scripts/fetch-reference.sh
 
 # concepts/ against its own rules: links resolve, D/R ids unique.
 concepts:
@@ -90,7 +90,7 @@ rows-new:
 # A cron line on the machine with the signed-in agent is the whole mechanism —
 # no scheduler, no daemon, no service:
 #
-#   0 9 * * *  cd /path/to/vibeplane && just owed || notify "vibeplane: rows owed"
+#   0 9 * * *  cd /path/to/devplane && just owed || notify "devplane: rows owed"
 #
 # The clock: non-zero when the vendor has shipped past the cleared floor.
 owed:
@@ -110,23 +110,23 @@ perms CASES="0": build
 
 # Allow axis only: does an `auto_allow` rule approve what Claude Code runs?
 perms-allow CASES="0": build
-    VIBEPLANE_DIFF_AXIS=allow bash scripts/verify-permissions-diff.sh {{CASES}}
+    DEVPLANE_DIFF_AXIS=allow bash scripts/verify-permissions-diff.sh {{CASES}}
 
 # Deny axis only: does a `never_auto` rule stop what Claude Code refuses?
 perms-deny CASES="0": build
-    VIBEPLANE_DIFF_AXIS=deny bash scripts/verify-permissions-diff.sh {{CASES}}
+    DEVPLANE_DIFF_AXIS=deny bash scripts/verify-permissions-diff.sh {{CASES}}
 
 # One rule set, both axes, so a disagreement is re-asked cheaply: `just perms-only 'Read(.env)'`
 perms-only RULE: build
-    VIBEPLANE_DIFF_ONLY='{{RULE}}' bash scripts/verify-permissions-diff.sh
+    DEVPLANE_DIFF_ONLY='{{RULE}}' bash scripts/verify-permissions-diff.sh
 
 # PowerShell, Monitor and LSP answered by this matcher alone: a checklist, not a measurement.
 perms-dialect: build
-    VIBEPLANE_DIFF_AXIS=dialect bash scripts/verify-permissions-diff.sh
+    DEVPLANE_DIFF_AXIS=dialect bash scripts/verify-permissions-diff.sh
 
 # Are both probes handed the same rules? The one question the harness has no oracle for.
 perms-selftest:
-    VIBEPLANE_DIFF_AXIS=selftest bash scripts/verify-permissions-diff.sh
+    DEVPLANE_DIFF_AXIS=selftest bash scripts/verify-permissions-diff.sh
 
 # The written-down permission rules against a real Claude Code. Needs `claude`.
 perms-live: build

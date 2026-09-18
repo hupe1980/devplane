@@ -1,11 +1,11 @@
--- Vibeplane's observation store.
+-- Devplane's observation store.
 --
 -- This holds observations only: events we received, and the run and project
 -- rows derived from them. Everything here is rebuildable from the providers,
 -- which is why it can be deleted without losing anything that matters, and why
 -- the schema changes without a migration while the project is unreleased.
 --
--- Facts Vibeplane *causes* live here too, in `decisions`, and are the one table
+-- Facts Devplane *causes* live here too, in `decisions`, and are the one table
 -- that is append-only and never pruned: an observation can be re-derived from
 -- the provider, a decision cannot be re-derived from anything.
 
@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS events_by_kind ON events(kind, at DESC);
 
 -- Full-text search over what a human would search for: the tool commands, the
 -- questions, the summaries. Prompt and response text is deliberately absent —
--- Vibeplane never turns on the telemetry flags that would carry it.
+-- Devplane never turns on the telemetry flags that would carry it.
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
     text,
     run_id UNINDEXED,
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS works (
 CREATE INDEX IF NOT EXISTS works_by_phase ON works(phase, updated_at DESC);
 CREATE INDEX IF NOT EXISTS works_by_project ON works(project_id, updated_at DESC);
 
--- What Vibeplane decided, and on whose authority.
+-- What Devplane decided, and on whose authority.
 --
 -- Append-only, and deliberately outside the retention sweep: the event log is
 -- history you can lose, this is the answer to "why did that happen" months
@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     outcome      TEXT NOT NULL,
     reason       TEXT,
     -- The tool the call was, where there was one. Recorded rather than inferred
-    -- from `subject`, because the question `vibeplane rewind` asks -- which of
+    -- from `subject`, because the question `devplane rewind` asks -- which of
     -- these wrote a file through a *shell* -- is answerable exactly from the
     -- tool name and only guessable from the text.
     tool         TEXT,
@@ -167,7 +167,7 @@ CREATE INDEX IF NOT EXISTS messages_by_time ON messages(at);
 -- item's own actions, the sweeper when it simply went away — and never
 -- overwritten, so an explicit `acted` always beats the sweeper that follows it.
 --
--- An observation, not a decision: it records what Vibeplane *showed*, not what
+-- An observation, not a decision: it records what Devplane *showed*, not what
 -- it did. It is pruned with the event log.
 CREATE TABLE IF NOT EXISTS attention_log (
     rowid_       INTEGER PRIMARY KEY AUTOINCREMENT,

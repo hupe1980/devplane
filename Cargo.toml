@@ -1,12 +1,12 @@
 [package]
-name = "vibeplane"
+name = "devplane"
 description = "The local-first control plane for AI coding agents: see every session on your machine, gate what they may do, and make \"done\" mean your project's checks passed."
 version = "0.5.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/hupe1980/vibeplane"
-homepage = "https://hupe1980.github.io/vibeplane"
+repository = "https://github.com/hupe1980/devplane"
+homepage = "https://hupe1980.github.io/devplane"
 authors = ["hupe1980"]
 readme = "README.md"
 keywords = ["ai", "agents", "claude-code", "developer-tools", "orchestration"]
@@ -28,11 +28,11 @@ include = [
 [workspace]
 
 [lib]
-name = "vibeplane"
+name = "devplane"
 path = "src/lib.rs"
 
 [[bin]]
-name = "vibeplane"
+name = "devplane"
 path = "src/main.rs"
 
 # The fixture the protocol suite drives: a real agent process speaking real ACP,

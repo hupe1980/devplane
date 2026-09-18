@@ -12,9 +12,9 @@
 
 mod common;
 
+use devplane::acp::{AcpEvent, AgentSpec};
 use std::path::PathBuf;
 use std::time::Duration;
-use vibeplane::acp::{AcpEvent, AgentSpec};
 
 /// The repository root, which is also the crate root.
 fn repo_root() -> std::path::PathBuf {
@@ -89,7 +89,7 @@ async fn collect(
 #[tokio::test]
 async fn a_prompt_runs_a_turn_and_streams_the_answer() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
         .await
         .expect("spawning the agent");
 
@@ -117,7 +117,7 @@ async fn a_prompt_runs_a_turn_and_streams_the_answer() {
 #[tokio::test]
 async fn a_tool_call_is_reported() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -138,7 +138,7 @@ async fn a_permission_request_blocks_until_it_is_answered() {
     let _serial = common::one_agent_at_a_time();
     // This is the path the whole product turns on: the agent is stopped, the
     // human decides, and the turn continues.
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -185,7 +185,7 @@ async fn a_permission_request_blocks_until_it_is_answered() {
 #[tokio::test]
 async fn refusing_a_permission_also_lets_the_turn_finish() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -211,7 +211,7 @@ async fn refusing_a_permission_also_lets_the_turn_finish() {
 #[tokio::test]
 async fn a_refusal_is_reported_as_the_stop_reason() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -230,7 +230,7 @@ async fn several_turns_run_on_one_session() {
     let _serial = common::one_agent_at_a_time();
     // A driven run is a conversation, not a one-shot: the session has to
     // survive a completed turn and take the next prompt.
-    let (session, mut events) = vibeplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -258,9 +258,9 @@ async fn several_turns_run_on_one_session() {
 async fn an_agent_that_needs_a_login_says_how() {
     let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
-    spec.command = format!("env VIBEPLANE_ECHO_NEEDS_AUTH=1 {}", spec.command);
+    spec.command = format!("env DEVPLANE_ECHO_NEEDS_AUTH=1 {}", spec.command);
 
-    let (session, mut rx) = vibeplane::acp::spawn(&spec, std::env::temp_dir())
+    let (session, mut rx) = devplane::acp::spawn(&spec, std::env::temp_dir())
         .await
         .expect("the fixture starts");
     let events = collect(&mut rx, |e| {
@@ -300,10 +300,10 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
     let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
     // The fixture reads this and drops `resume` from what it advertises.
-    spec.command = format!("env VIBEPLANE_ECHO_NO_RESUME=1 {}", spec.command);
+    spec.command = format!("env DEVPLANE_ECHO_NO_RESUME=1 {}", spec.command);
     let cwd = std::env::temp_dir();
 
-    let (session, mut rx) = vibeplane::acp::spawn(&spec, cwd.clone())
+    let (session, mut rx) = devplane::acp::spawn(&spec, cwd.clone())
         .await
         .expect("the fixture starts");
     let ready = collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -317,7 +317,7 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
     session.stop();
 
     // Same id, a second connection: continued rather than started again.
-    let (again, mut rx2) = vibeplane::acp::resume(&spec, cwd, id.clone())
+    let (again, mut rx2) = devplane::acp::resume(&spec, cwd, id.clone())
         .await
         .expect("the fixture starts again");
     let ready2 = collect(&mut rx2, |e| {
@@ -338,7 +338,7 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
 async fn a_missing_agent_fails_loudly_rather_than_hanging() {
     let _serial = common::one_agent_at_a_time();
     let spec = AgentSpec::new("nope", "nope", "/definitely/not/an/agent --acp");
-    match vibeplane::acp::spawn(&spec, scratch()).await {
+    match devplane::acp::spawn(&spec, scratch()).await {
         Err(e) => assert!(!e.to_string().is_empty()),
         Ok((session, mut events)) => {
             // Some transports only fail once the process is reaped, so an
@@ -354,5 +354,42 @@ async fn a_missing_agent_fails_loudly_rather_than_hanging() {
             );
             let _ = session;
         }
+    }
+}
+
+/// A cancelled turn ends with the agent saying so, not with a timeout.
+///
+/// **The half of `session/cancel` nothing measured.** The client sends the
+/// notification, waits a grace period for the turn to end with
+/// `stop_reason: cancelled`, and tears the connection down if it does not — and
+/// until the fixture could be interrupted, every turn finished in microseconds,
+/// so only the *timeout* branch was ever reachable. A handshake whose success
+/// path is untested is a handshake that can rot into its failure path silently.
+#[tokio::test]
+async fn a_cancelled_turn_is_acknowledged_rather_than_timed_out() {
+    let _serial = common::one_agent_at_a_time();
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+        .await
+        .unwrap();
+    collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
+    // `slow` keeps the fixture working until it is told to stop.
+    session.prompt("please work slow").await.unwrap();
+
+    // Long enough that the turn is certainly in flight, short enough that the
+    // fixture's own six-second ceiling cannot be what ends it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    session.stop();
+
+    let turn = collect(&mut events, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
+    match turn
+        .iter()
+        .rev()
+        .find(|e| matches!(e, AcpEvent::TurnEnded { .. }))
+    {
+        Some(AcpEvent::TurnEnded { stop_reason }) => assert_eq!(
+            stop_reason, "cancelled",
+            "the agent acknowledged the cancel, so this is not a timeout"
+        ),
+        other => panic!("{other:?}"),
     }
 }

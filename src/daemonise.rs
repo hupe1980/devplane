@@ -1,15 +1,15 @@
 //! Starting the daemon in the background.
 //!
 //! The daemon has to outlive the terminal that started it: a hook that arrives
-//! while no window is open is precisely the observation Vibeplane exists to
+//! while no window is open is precisely the observation Devplane exists to
 //! catch.
 
 use anyhow::{Context, Result};
 use std::process::{Command, Stdio};
 
-/// Re-executes this binary as `vibeplane serve`, detached.
+/// Re-executes this binary as `devplane serve`, detached.
 pub fn spawn_detached() -> Result<()> {
-    let exe = std::env::current_exe().context("finding the vibeplane binary")?;
+    let exe = std::env::current_exe().context("finding the devplane binary")?;
     let log = crate::config::home()?.join("daemon.log");
     std::fs::create_dir_all(log.parent().unwrap()).ok();
     let out = std::fs::OpenOptions::new()

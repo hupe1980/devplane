@@ -1,4 +1,4 @@
-//! What an agent actually said, for the runs Vibeplane drives.
+//! What an agent actually said, for the runs Devplane drives.
 //!
 //! Only driven runs have one. A session somebody started themselves already has
 //! a window showing its transcript — `focus` raises it — and the documented
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
-    /// What Vibeplane sent: a dispatch, another turn, a gate's failures handed
+    /// What Devplane sent: a dispatch, another turn, a gate's failures handed
     /// back. Recorded because a transcript that starts with the answer is half
     /// a conversation.
     User,

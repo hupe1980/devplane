@@ -25,7 +25,7 @@ The **kind** of work chooses the pipeline, which is why `--kind` is the only thi
 decide:
 
 ```sh
-vibeplane work start "add rate limiting" --kind feature
+devplane work start "add rate limiting" --kind feature
 ```
 
 ## The cursor lives on the work item
@@ -34,7 +34,7 @@ Which step, how many times each has been entered, and what the last reviewer fou
 SQLite on the work row — not state in the process running it. A daemon that dies between *review*
 and *verify* comes back and resumes at *verify*, rather than paying for *implement* twice.
 
-The roles are **copied onto the work when it starts**, so editing `vibeplane.toml` mid-flight cannot
+The roles are **copied onto the work when it starts**, so editing `devplane.toml` mid-flight cannot
 renumber a chain that is already running and send it to a step nobody agreed to. A role that has
 since been deleted is an error rather than a guess.
 
@@ -46,15 +46,15 @@ invents findings that send real work backwards or misses them and waves a bad ch
 ```toml
 # a fragment of a reviewing step
 findings = { back_to = "implement", max = 2,
-             file = ".vibeplane/findings.md" }
+             file = ".devplane/findings.md" }
 ```
 
-The reviewing step writes `.vibeplane/findings.md` in the worktree. Vibeplane reads it, hands the
+The reviewing step writes `.devplane/findings.md` in the worktree. Devplane reads it, hands the
 contents to the step named, and deletes it so the next round starts clean. **An empty file and a
 missing one both mean “nothing found”** — a reviewer should never have to invent a complaint to fill
 a file.
 
-Vibeplane appends the instruction naming that path to a reviewing step's prompt itself, so the
+Devplane appends the instruction naming that path to a reviewing step's prompt itself, so the
 mechanism cannot be broken by a project's template forgetting it.
 
 ## Humans are steps
@@ -70,7 +70,7 @@ alarm. The agents are retired while it waits: a chain can sit at a human step fo
 a model open for all of them is memory and money for nothing.
 
 ```sh
-vibeplane work approve <id>
+devplane work approve <id>
 ```
 
 ## Choosing a reviewer
@@ -80,10 +80,10 @@ automatically an improvement — **a reviewer weaker than the implementer remove
 one below a capability floor changes nothing at all while doubling the bill. Pick for precision
 rather than for how much a model flags.[^review]
 
-Vibeplane enforces the structural half:
+Devplane enforces the structural half:
 
 > [!IMPORTANT]
-> **A step that can send work back must have a gate behind it.** `vibeplane check` and `work start`
+> **A step that can send work back must have a gate behind it.** `devplane check` and `work start`
 > refuse the configuration otherwise. With a gate, a reviewer can only *propose*; the project's
 > checks decide.
 
@@ -116,13 +116,13 @@ Exhaustion asks a person. It never loops for ever.
 
 ## Prompts
 
-`prompt = "implement"` names a template at `.vibeplane/prompts/implement.md`, committed on the
+`prompt = "implement"` names a template at `.devplane/prompts/implement.md`, committed on the
 branch like the gates. When no such file exists the string is used literally, so a one-line pipeline
 does not require creating a directory of files first.
 
 A `prompt` is looked up in one order, the same for every agent:
 
-1. `.vibeplane/prompts/<name>.md` — the portable form, committed on the branch like the gates.
+1. `.devplane/prompts/<name>.md` — the portable form, committed on the branch like the gates.
 2. `.claude/skills/<name>/SKILL.md`, project then personal — **your Claude Code Skills work as
    pipeline prompts**, so a project that already keeps its prompts there needs no second copy. Only
    the body is used; markdown is portable, so this works for a step running on Codex too.
@@ -146,7 +146,7 @@ code, so they are appended instead.
 
 ## Spec-driven development
 
-Vibeplane detects no spec-tool layout and recognises no framework's section names — unsettled
+Devplane detects no spec-tool layout and recognises no framework's section names — unsettled
 third-party conventions to track, for no capability `[gates]` and `[pipelines]` do not already have.
 It contributes the part the category leaves out: **every spec tool ships a consistency checker and
 none of them decides.** Spec Kit's `/speckit.analyze` is **"STRICTLY READ-ONLY"** and closes with a
@@ -172,14 +172,14 @@ that compares the two, which is the step below.
 wrote. One document is the exception in this category, not the shape.
 
 ```sh
-vibeplane work start "password reset" --kind feature --spec specs/001-password-reset
+devplane work start "password reset" --kind feature --spec specs/001-password-reset
 ```
 
 Every gate stamps a fingerprint over every Markdown file under that path, as they were when it ran —
 and counts the task list:
 
 ```console
-$ vibeplane work show w-3f9a
+$ devplane work show w-3f9a
   spec       specs/001-password-reset at 3f9a1c40b7e2d518 over 4 documents
              20/31 tasks   11 still open in the specification
 ```
@@ -199,6 +199,10 @@ OpenSpec in `openspec/changes/<id>/`; a requirement is `FR-001`, an EARS sentenc
 `### Requirement:` heading; the document names differ, and all of them are still moving. So nothing
 here recognises a section. What is read is what they *do* share: Markdown, a folder rather than a
 file, headings for structure, and a `tasks.md` whose progress is `- [ ]` and `- [x]`.
+
+**Where a `tasks.md` exists, it is the task list and the other documents are not** — a `checklists/`
+folder validating the specification's own quality is not progress on the feature. Where there is
+none, every box counts, because there is nothing to tell them apart.
 
 **The boxes are the point.** An agent's own account of its work references about one action in
 eleven, so *gates green* beside *20/31 tasks* is a sentence neither the exit code nor the agent can
@@ -230,19 +234,19 @@ steps = [
 ```
 
 Matching is per line and case-insensitive; a findings file with no matching line is **nothing
-found**. The words are yours — `CRITICAL` and `HIGH` are Spec Kit's vocabulary, and Vibeplane holds
+found**. The words are yours — `CRITICAL` and `HIGH` are Spec Kit's vocabulary, and Devplane holds
 no table of anyone's severity names.
 
 **The phases are a pipeline.** `specify → plan → tasks → implement` is a chain with sign-off between
 the steps, so declare it as one and use your own prompts — a Spec Kit command, a Skill, a file in
-`.vibeplane/prompts/`. What Vibeplane adds is the gate between the steps, the human step that
+`.devplane/prompts/`. What Devplane adds is the gate between the steps, the human step that
 suspends until somebody releases it, the cursor that survives a crash, and the row in
-`vibeplane audit` saying why each step proceeded.
+`devplane audit` saying why each step proceeded.
 
 ## What `check` refuses
 
 ```sh
-vibeplane check
+devplane check
 ```
 
 | Refused | Why it is not merely untidy |

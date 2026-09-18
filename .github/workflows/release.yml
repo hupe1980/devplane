@@ -117,7 +117,7 @@ jobs:
           else
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \
-              --notes "Install: \`curl -LsSf https://github.com/hupe1980/vibeplane/releases/latest/download/vibeplane-installer.sh | sh\`" \
+              --notes "Install: \`curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh\`" \
               "${files[@]}"
           fi
 

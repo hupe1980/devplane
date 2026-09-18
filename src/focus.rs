@@ -1,6 +1,6 @@
 //! Raising the window that owns a session.
 //!
-//! For a session Vibeplane did not start, this is the only honest action. The
+//! For a session Devplane did not start, this is the only honest action. The
 //! product cannot type an answer into somebody else's terminal, so it does the
 //! next best thing: it puts the human in front of the session that is asking,
 //! instead of leaving them to find which of twenty windows it was.

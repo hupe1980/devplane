@@ -36,7 +36,7 @@ pub async fn cmd_dispatch(
             cwd.display(),
             paint(
                 DIM,
-                &format!("vibeplane say {} ...", v["run_id"].as_str().unwrap_or(""))
+                &format!("devplane say {} ...", v["run_id"].as_str().unwrap_or(""))
             )
         ),
     }
@@ -50,7 +50,7 @@ pub async fn cmd_dispatch(
 /// where it matters most: **a typo in a deny rule must never read as
 /// permission**, and "no rule answers this one" is exactly how it read.
 enum Rules {
-    /// No `vibeplane.toml` governs this directory at all.
+    /// No `devplane.toml` governs this directory at all.
     None { root: PathBuf },
     /// One was found and will not load, so *nothing* is in force here.
     Broken { path: PathBuf, error: String },
@@ -113,13 +113,13 @@ impl Rules {
     fn why_nothing_answered(&self) -> &'static str {
         match self {
             Rules::None { .. } => {
-                "no vibeplane.toml governs this directory, so nothing here decides anything"
+                "no devplane.toml governs this directory, so nothing here decides anything"
             }
             Rules::Broken { .. } => {
                 "this project's rules are NOT in force — the file below will not load"
             }
             Rules::Loaded { count: 0, .. } => {
-                "this project's vibeplane.toml declares no [policy] rules"
+                "this project's devplane.toml declares no [policy] rules"
             }
             Rules::Loaded { .. } => {
                 "its rules loaded and none answers this one, so the provider's own \
@@ -158,7 +158,7 @@ impl Rules {
     }
 }
 
-/// `vibeplane explain` — what the gate would decide about one call, and why.
+/// `devplane explain` — what the gate would decide about one call, and why.
 ///
 /// Offline and daemon-free, like `check`, and for the same two reasons. A
 /// person editing `[policy]` needs to be able to ask a question of the rules
@@ -198,7 +198,7 @@ pub fn cmd_explain(
 
     // The gate this machine actually enforces, not a project-only imitation of
     // it: `explain` used `for_projects_only()` and so answered without
-    // `~/.vibeplane/policy.toml`, which let the surface built to say *what
+    // `~/.devplane/policy.toml`, which let the surface built to say *what
     // would the gate decide* answer `allow` for a call the machine denies.
     let (cache, global_error) = crate::core::PolicyCache::from_disk();
     let verdict = cache.evaluate(&dir, &tool, &input);
@@ -208,11 +208,11 @@ pub fn cmd_explain(
     // to be one sentence covering three different situations, and only one of
     // them is a fact about the call: no rules here, rules that would not load,
     // and rules that loaded and did not match. The middle one is the dangerous
-    // one — a `vibeplane.toml` with a typo in it has *no* rules in force, and
+    // one — a `devplane.toml` with a typo in it has *no* rules in force, and
     // reporting that as "no rule answers this one" is a typo in a deny rule
     // reading as permission, which is the one thing this layer may never do.
     //
-    // `vibeplane check` has always printed the parse error. This is the surface
+    // `devplane check` has always printed the parse error. This is the surface
     // somebody uses *while editing the file*, so it is the surface most likely
     // to meet a broken one.
     let rules = Rules::at(&dir);
@@ -261,7 +261,7 @@ pub fn cmd_explain(
             "{}",
             paint(
                 DIM,
-                "every rule in this file is off until it parses — vibeplane check"
+                "every rule in this file is off until it parses — devplane check"
             )
         );
     }
@@ -271,7 +271,7 @@ pub fn cmd_explain(
             paint(
                 YELLOW,
                 &format!(
-                    "{} rule(s) in this project cannot do what they say — vibeplane check",
+                    "{} rule(s) in this project cannot do what they say — devplane check",
                     problems.len()
                 )
             )
@@ -283,7 +283,7 @@ pub fn cmd_explain(
 /// Replay every tool call this machine has seen against the rules as they are
 /// now, and say which rule would stop the interruptions.
 ///
-/// The product measures its own inbox (`vibeplane attention`); this is the
+/// The product measures its own inbox (`devplane attention`); this is the
 /// other half — what to *do* about it. A permission prompt that has appeared
 /// forty times is forty interruptions a person could have answered once, and
 /// the thing standing between them and answering it once is knowing that the
@@ -388,7 +388,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
             paint(
                 DIM,
                 &format!(
-                    "no tool calls observed in {named} — `vibeplane connect claude`, then come back"
+                    "no tool calls observed in {named} — `devplane connect claude`, then come back"
                 )
             )
         );
@@ -441,7 +441,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
             DIM,
             &format!(
                 "{shown} of the {} calls that reached you would stop asking · \
-                 paste into [policy] auto_allow, then vibeplane check",
+                 paste into [policy] auto_allow, then devplane check",
                 counts[3]
             )
         )
@@ -495,7 +495,7 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
     if !file.exists() {
         println!(
             "{}\n\nNothing is verified and nothing pretends to be. \
-             Add a vibeplane.toml when you want gates.",
+             Add a devplane.toml when you want gates.",
             paint(DIM, &format!("no {}", file.display()))
         );
         return Ok(());
@@ -671,7 +671,7 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `vibeplane trust` — show what a repository's agent configuration does, then
+/// `devplane trust` — show what a repository's agent configuration does, then
 /// let a person decide.
 ///
 /// The scan is the point. `trust` has always been the one deliberate act in
@@ -708,6 +708,9 @@ pub async fn cmd_trust(path: PathBuf, yes: bool, dry_run: bool, json: bool) -> R
                     "path": root.display().to_string(),
                     "trusted": false,
                     "findings": findings,
+                    // What is there, beside what is worth flagging: a finding
+                    // list of zero does not mean the repository ships nothing.
+                    "skills": setup.skills,
                     "unreadable": setup.unreadable,
                 }))?
             );
@@ -721,6 +724,7 @@ pub async fn cmd_trust(path: PathBuf, yes: bool, dry_run: bool, json: bool) -> R
                 "trusted": v.get("error").is_none(),
                 "error": v.get("error"),
                 "findings": findings,
+                "skills": setup.skills,
                 "unreadable": setup.unreadable,
             }))?
         );
@@ -764,16 +768,16 @@ async fn trust_call(root: &Path) -> Result<serde_json::Value> {
 /// What starting an agent here will load, grouped the way a person reads it.
 fn print_setup(root: &Path, setup: &crate::core::setup::Setup) {
     if setup.is_empty() {
-        println!(
-            "  {}",
-            paint(
-                DIM,
-                &format!(
-                    "{} declares no hooks, MCP servers or skills",
-                    root.display()
-                )
-            )
-        );
+        // What is *there* and what is worth flagging are different questions,
+        // and this line used to answer the second while appearing to answer the
+        // first — it said "no skills" about a repository shipping ten that
+        // happen to pre-approve nothing.
+        let quiet = match setup.skills {
+            0 => "declares no hooks, MCP servers or skills".to_string(),
+            1 => "declares 1 skill, and no hooks, MCP servers or pre-approved tools".to_string(),
+            n => format!("declares {n} skills, and no hooks, MCP servers or pre-approved tools"),
+        };
+        println!("  {}", paint(DIM, &format!("{} {quiet}", root.display())));
         return;
     }
     println!(
@@ -842,8 +846,8 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
             let title = title.join(" ");
             if title.is_empty() && issue.is_none() {
                 anyhow::bail!(
-                    "say what the work is: vibeplane work start \"fix the flaky test\"\n\
-                     or point at an issue:  vibeplane work start --issue 7"
+                    "say what the work is: devplane work start \"fix the flaky test\"\n\
+                     or point at an issue:  devplane work start --issue 7"
                 );
             }
             let v: serde_json::Value = c
@@ -887,7 +891,7 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
                 paint(
                     DIM,
                     &format!(
-                        "vibeplane work verify {}",
+                        "devplane work verify {}",
                         v["work_id"].as_str().unwrap_or("")
                     )
                 )
@@ -971,7 +975,7 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
             if items.is_empty() {
                 println!(
                     "No work yet.\n\n  {}",
-                    paint(BOLD, "vibeplane work start \"fix the flaky login test\"")
+                    paint(BOLD, "devplane work start \"fix the flaky login test\"")
                 );
                 return Ok(());
             }
@@ -1348,7 +1352,7 @@ fn print_work(w: &serde_json::Value) {
     }
 }
 
-/// The issues one repository offers as work: `vibeplane issues --ready`.
+/// The issues one repository offers as work: `devplane issues --ready`.
 ///
 /// Its own function rather than a `work` subcommand, because a reader should
 /// not have to know which of two commands called `issues` answers which
@@ -1392,7 +1396,7 @@ pub async fn cmd_ready_issues(
     }
     println!(
         "\n  {}",
-        paint(DIM, "vibeplane work start --issue <number> --kind bug")
+        paint(DIM, "devplane work start --issue <number> --kind bug")
     );
     Ok(())
 }

@@ -138,7 +138,7 @@ fn session_label(run: &render::RunView, project: &str) -> String {
         .unwrap_or(name);
     if short.is_empty() {
         // Nothing to strip and nothing to show: fall back to the run's own id,
-        // which is what `vibeplane show` and `focus` take anyway.
+        // which is what `devplane show` and `focus` take anyway.
         return run.id.chars().take(8).collect();
     }
     clip(short, 10)
@@ -173,7 +173,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             println!(
                 "No session matches {}.\n\n{}",
                 paint(BOLD, needle.as_str()),
-                paint(DIM, "vibeplane ls --all lists every project.")
+                paint(DIM, "devplane ls --all lists every project.")
             );
             return Ok(());
         }
@@ -198,7 +198,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                     board.summary.dormant
                 )
             ),
-            paint(DIM, "vibeplane ls --all shows them.")
+            paint(DIM, "devplane ls --all shows them.")
         );
         return Ok(());
     }
@@ -213,7 +213,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                  Start one, and it appears here. For live state — what each session is \n\
                  doing, what it costs, what it is blocked on — run {}.",
                 paint(DIM, &format!("using {}", bin.display())),
-                paint(BOLD, "vibeplane connect claude")
+                paint(BOLD, "devplane connect claude")
             ),
             None => println!(
                 "{}\n\n\
@@ -222,7 +222,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                  extension.\n\n\
                  Point at it with {} if it lives somewhere else.",
                 paint(render::YELLOW, "Claude Code was not found on this machine."),
-                paint(BOLD, "VIBEPLANE_CLAUDE_BIN=/path/to/claude")
+                paint(BOLD, "DEVPLANE_CLAUDE_BIN=/path/to/claude")
             ),
         }
         return Ok(());
@@ -305,7 +305,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             paint(
                 DIM,
                 &format!(
-                    "{} quiet (nothing heard for hours) — vibeplane ls --all",
+                    "{} quiet (nothing heard for hours) — devplane ls --all",
                     s.dormant
                 )
             )
@@ -326,7 +326,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             "{}",
             paint(
                 DIM,
-                "cost and context are blank — vibeplane connect claude adds them",
+                "cost and context are blank — devplane connect claude adds them",
             )
         );
     }
@@ -464,7 +464,7 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         }
     }
 
-    // The last of the conversation, for a run that has one. `vibeplane tail`
+    // The last of the conversation, for a run that has one. `devplane tail`
     // is the live version; this is the glance.
     if v["mode"] == "driven" {
         let said: Vec<render::Message> = c
@@ -490,7 +490,7 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
                     clip(m.text.trim(), 70)
                 );
             }
-            println!("  {}", paint(DIM, &format!("vibeplane tail {run}")));
+            println!("  {}", paint(DIM, &format!("devplane tail {run}")));
         }
     }
     Ok(())
@@ -526,7 +526,7 @@ pub async fn cmd_tail(run: &str, thinking: bool, history: i64) -> Result<()> {
     let mode = detail["mode"].as_str().unwrap_or("observed");
     if mode != "driven" {
         anyhow::bail!(
-            "that is a session Vibeplane watches, not one it drives, and the documented \n             channels carry no transcript: hooks report lifecycle and tool inputs, and \n             telemetry redacts prompts and responses.\n\n             Its own window already has the conversation:\n  vibeplane focus {run}"
+            "that is a session Devplane watches, not one it drives, and the documented \n             channels carry no transcript: hooks report lifecycle and tool inputs, and \n             telemetry redacts prompts and responses.\n\n             Its own window already has the conversation:\n  devplane focus {run}"
         );
     }
 
@@ -615,7 +615,7 @@ pub async fn cmd_focus(run: &str) -> Result<()> {
 /// Hands the terminal to Claude Code, resuming the session in its own
 /// directory.
 ///
-/// This is the escape hatch the whole product is built around: Vibeplane is
+/// This is the escape hatch the whole product is built around: Devplane is
 /// not a terminal, and when a session needs more than a decision the right
 /// answer is the real thing, in the right place, with one keystroke.
 pub async fn cmd_attach(run: &str) -> Result<()> {
@@ -629,7 +629,7 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
     let mode = v["mode"].as_str().unwrap_or("observed");
 
     let bin = crate::observe::locate::claude_binary()
-        .context("no claude binary found; set VIBEPLANE_CLAUDE_BIN")?;
+        .context("no claude binary found; set DEVPLANE_CLAUDE_BIN")?;
 
     // A background session is owned by Claude's daemon, which has its own way
     // in; resuming it as a fresh conversation would fork the transcript.
@@ -651,7 +651,7 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
     {
         use std::os::unix::process::CommandExt;
         // Replace this process rather than nesting one inside it: the user
-        // wanted Claude Code, not Vibeplane holding a pipe to it.
+        // wanted Claude Code, not Devplane holding a pipe to it.
         let err = std::process::Command::new(&bin)
             .args(&args)
             .current_dir(dir)
@@ -870,7 +870,7 @@ pub async fn cmd_forge_issues(json: bool) -> Result<()> {
         "\n{}",
         paint(
             DIM,
-            "◆ assigned to you · vibeplane work start --issue <n> --cwd <project> turns one into work"
+            "◆ assigned to you · devplane work start --issue <n> --cwd <project> turns one into work"
         )
     );
     Ok(())

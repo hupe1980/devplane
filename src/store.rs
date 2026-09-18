@@ -3,7 +3,7 @@
 //! Two rules shape everything here:
 //!
 //! * **Observations only.** Events, and the run and project rows derived from
-//!   them. Anything Vibeplane causes belongs in the runtime journal instead, so
+//!   them. Anything Devplane causes belongs in the runtime journal instead, so
 //!   there is never a question about which store owns a fact.
 //! * **Rebuildable.** Losing this database costs history, not correctness: the
 //!   providers are still the source of truth for what is running.
@@ -222,7 +222,7 @@ impl Store {
     /// Full-text search across tool commands, questions and summaries.
     ///
     /// What the user typed is a phrase, not an FTS5 expression. Passing it
-    /// through raw meant `vibeplane search "a-b"` or a query containing a quote
+    /// through raw meant `devplane search "a-b"` or a query containing a quote
     /// was a syntax error the user could not have predicted and the daemon
     /// reported as a 500.
     pub async fn search(&self, query: &str, limit: i64) -> Result<Vec<(RunId, String)>> {
@@ -356,7 +356,7 @@ impl Store {
 
     /// How many stored rows this build can no longer read.
     ///
-    /// Asked by `vibeplane doctor`, because the answer is otherwise invisible:
+    /// Asked by `devplane doctor`, because the answer is otherwise invisible:
     /// the rows are simply absent from the board, which looks exactly like
     /// never having had them.
     pub async fn unreadable(&self) -> Result<Vec<(String, String)>> {
@@ -401,7 +401,7 @@ impl Store {
     /// run leaves it, so the report is worth reading **next to** a gate's exit
     /// code and worth very little on its own.
     ///
-    /// `None` when there is no transcript — a run Vibeplane only watched, or a
+    /// `None` when there is no transcript — a run Devplane only watched, or a
     /// repository with `[transcripts] keep = false`. That is *nothing was
     /// recorded*, never *the agent said nothing*, and every surface that shows
     /// this has to keep the two apart.
@@ -724,7 +724,7 @@ impl Store {
             };
             n += q.execute(&self.pool).await?.rows_affected();
         }
-        n += sqlx::query("DELETE FROM projects WHERE root LIKE '%/vibeplane-probe-%'")
+        n += sqlx::query("DELETE FROM projects WHERE root LIKE '%/devplane-probe-%'")
             .execute(&self.pool)
             .await?
             .rows_affected();
@@ -747,9 +747,9 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         // The attention log goes too, and this is where it was supposed to
-        // have been going all along: it is an observation about what Vibeplane
+        // have been going all along: it is an observation about what Devplane
         // *showed*, one row per item raised, and nothing was removing it.
-        // `vibeplane attention` only ever looks back a fixed number of days,
+        // `devplane attention` only ever looks back a fixed number of days,
         // and the table grew without bound on exactly the machines this product
         // is for — twenty agents raising items all day.
         //
@@ -820,7 +820,7 @@ fn decode_rows<T: serde::de::DeserializeOwned>(
             lost,
             kept = out.len(),
             "rows this build cannot read were left out of the board — \
-             `vibeplane doctor` lists them; deleting the database rebuilds it from the providers"
+             `devplane doctor` lists them; deleting the database rebuilds it from the providers"
         );
     }
     out
@@ -1095,7 +1095,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_query_a_person_would_type_is_not_a_syntax_error() {
-        // `vibeplane search "cargo test --workspace"` would otherwise reach FTS5 as an
+        // `devplane search "cargo test --workspace"` would otherwise reach FTS5 as an
         // expression and come back as a 500.
         let s = Store::open_in_memory().await.unwrap();
         s.append_event(&EventEnvelope::new(
@@ -1235,7 +1235,8 @@ mod tests {
             url: None,
             launch: None,
             work_id: None,
-            suggested_rule: None,
+            offer: None,
+            no_offer: None,
             since: jiff::Timestamp::now(),
         }
     }
@@ -1317,7 +1318,8 @@ mod tests {
             project_id: None,
             run_id: Some(RunId::new("r1")),
             work_id: None,
-            suggested_rule: None,
+            offer: None,
+            no_offer: None,
             since: jiff::Timestamp::now(),
             options: Vec::new(),
             actions: Vec::new(),

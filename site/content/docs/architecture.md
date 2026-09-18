@@ -10,12 +10,12 @@ group = "reference"
 
 ```
 ┌───────────────┐  ┌────────────────┐
-│ browser tab   │  │ vibeplane CLI  │
+│ browser tab   │  │ devplane CLI  │
 │ (embedded UI) │  │ (same binary)  │
 └──────┬────────┘  └──────┬─────────┘
        │  HTTP + SSE      │ HTTP + SSE
 ┌──────▼──────────────────▼───────────────────────────────────┐
-│                 vibeplane serve (the daemon)                 │
+│                 devplane serve (the daemon)                 │
 │ api      REST + SSE, bearer token, loopback only             │
 │ core     domain, reducers, attention engine, policy (pure)   │
 │ acp      protocol client; every agent that speaks it         │
@@ -29,10 +29,10 @@ group = "reference"
 ```
 
 Install is one binary with nothing else to run. The daemon is started by any client command and
-found through `~/.vibeplane/daemon.json`, which records the pid and the port it actually bound.
+found through `~/.devplane/daemon.json`, which records the pid and the port it actually bound.
 Notifications and window raising shell out to the platform, so neither needs a GUI framework.
 
-A **second instance is supported rather than an error**: `VIBEPLANE_HOME=/tmp/vp vibeplane ls` gets
+A **second instance is supported rather than an error**: `DEVPLANE_HOME=/tmp/vp devplane ls` gets
 its own database, token and daemon record, and — because the usual port is taken by the real one — its
 own port.
 
@@ -74,7 +74,7 @@ The retention sweep prunes the event log **and its search index together** — a
 what it indexes is both the larger half of the file and a search that finds things that are no longer
 there.
 
-It is one file, and `sqlite3 ~/.vibeplane/vibeplane.db` opens it — the search, the run history and
+It is one file, and `sqlite3 ~/.devplane/devplane.db` opens it — the search, the run history and
 the decision log are all queryable with a tool you already have.
 
 ## The API
@@ -87,9 +87,9 @@ a URL, and SSE is one line in a browser and needs no client library.
 |---|---|
 | **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/runs/{id}`, `/api/runs/{id}/events`, `/api/runs/{id}/messages`, `/api/runs/{id}/rewind-gap`, `/api/agents`, `/api/work`, `/api/decisions`, `/api/search`, `/api/diagnostics`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz` |
 | **Write** | `/api/dispatch`, `/api/work`, `/api/work/{id}/{verify,finish,approve,retry}`, `/api/issues`, `/api/projects/trust`, `/api/runs/{id}/{prompt,decide,stop,snooze,focus}`, `/api/shutdown` |
-| **Receivers** | `/vibeplane/hook`, `/vibeplane/policy`, `/vibeplane/statusline`, `/vibeplane/otel/v1/{logs,metrics}` |
+| **Receivers** | `/devplane/hook`, `/devplane/policy`, `/devplane/statusline`, `/devplane/otel/v1/{logs,metrics}` |
 
-Everything under `/api` and `/vibeplane` requires the token, except `/healthz` — which proves the port
+Everything under `/api` and `/devplane` requires the token, except `/healthz` — which proves the port
 is ours without revealing what is on it — and the telemetry endpoints, because the exporter cannot be
 given a per-signal credential without sending it to every other collector you configure. Those accept
 observations only, never commands.
@@ -119,11 +119,11 @@ the set the daemon still holds and never from run state.
 
 ## Shutdown
 
-Every agent Vibeplane started is a protocol connection holding a child process group. A daemon that
+Every agent Devplane started is a protocol connection holding a child process group. A daemon that
 simply exits leaves each of them re-parented to init and still spending — a model with a subscription
 attached, running, with nothing left on the machine that knows it is there.
 
-`serve` stops them and waits, bounded, before it returns. `vibeplane stop` reaches the same path.
+`serve` stops them and waits, bounded, before it returns. `devplane stop` reaches the same path.
 
 ## Technology
 
@@ -140,14 +140,14 @@ attached, running, with nothing left on the machine that knows it is there.
 The UI has no build step on purpose. A dashboard that cannot be opened without `npm install` rots the
 first time the toolchain moves, and a Rust build that depends on a JavaScript build is a Rust build
 that breaks for everyone. The two things that usually demand a bundler need none here: the daemon
-renders the diff it already computes, and `vibeplane attach` hands your terminal to `claude --resume`
+renders the diff it already computes, and `devplane attach` hands your terminal to `claude --resume`
 rather than owning one.
 
 A test holds the page under 100 KB and three thousand lines, and requires that it fetch nothing — no
 CDN, no font, no second file. A page that reaches the network breaks the board over Tailscale on a
 phone, and `curl` when you are debugging it, on someone else's network where you will not see it.
 
-`VIBEPLANE_UI=/path/to/index.html vibeplane serve` reads the page from disk instead of the binary,
+`DEVPLANE_UI=/path/to/index.html devplane serve` reads the page from disk instead of the binary,
 which makes the edit loop a browser reload.
 
 ## Performance

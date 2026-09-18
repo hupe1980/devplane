@@ -17,7 +17,7 @@ impl Client {
     /// Connects to a running daemon.
     pub fn connect() -> Result<Self> {
         let info = crate::config::read_daemon_info()?
-            .context("no daemon is running — start one with `vibeplane serve`")?;
+            .context("no daemon is running — start one with `devplane serve`")?;
         Ok(Self {
             base: info.base_url(),
             token: crate::config::load_or_create_token()?,
@@ -28,7 +28,7 @@ impl Client {
     /// Connects, starting a daemon first if none is running.
     ///
     /// Every client command does this, so the daemon is something the user
-    /// never has to think about: the first `vibeplane ls` after a reboot starts
+    /// never has to think about: the first `devplane ls` after a reboot starts
     /// the observer that should have been running all along.
     pub async fn connect_or_start() -> Result<Self> {
         if let Ok(c) = Self::connect() {
@@ -40,7 +40,7 @@ impl Client {
                 // releases. Restart it; the store and the spool survive.
                 Some(v) => {
                     eprintln!(
-                        "vibeplane: the running daemon is v{v} and this is v{}; restarting it",
+                        "devplane: the running daemon is v{v} and this is v{}; restarting it",
                         env!("CARGO_PKG_VERSION")
                     );
                     c.stop_and_wait().await;
@@ -57,7 +57,7 @@ impl Client {
                 return Ok(c);
             }
         }
-        bail!("started a daemon but it did not become ready; try `vibeplane serve` to see why")
+        bail!("started a daemon but it did not become ready; try `devplane serve` to see why")
     }
 
     /// The running daemon's version, or `None` when nothing healthy answers.

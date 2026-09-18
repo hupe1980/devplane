@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Vibeplane</title>
+<title>Devplane</title>
 <style>
   /* One file, no build step. The UI is small enough that a bundler would cost
      more than it saves, and a dashboard that cannot be opened without `npm`
@@ -242,13 +242,53 @@
   #dwill { padding: .5rem .9rem; background: var(--bg); border-top: 1px solid var(--line); color: var(--dim); }
   .dfoot { display: flex; gap: .9rem; align-items: center; padding: .5rem .9rem; border-top: 1px solid var(--line); color: var(--faint); }
   /* Setup. A reading surface, so it is laid out as a definition list: a fixed
-     label column and the value beside it, the same shape `vibeplane check`
+     label column and the value beside it, the same shape `devplane check`
      prints in a terminal. */
   /* Wider than the launchers. This one is read rather than typed into, and a
      gate command or a rule wrapping mid-pattern is harder to check than it is
      to fit. */
   #setup { width: min(56rem, 94vw); }
   #setupbody { max-height: 62vh; overflow-y: auto; padding-bottom: .6rem; }
+  /* The work view. Same reading shape as Setup — a label column and the thing
+     itself — because it answers the same kind of question. */
+  /* The rule to paste. Selectable on purpose: it is the fallback on a browser
+     that withholds the clipboard, not a decoration. */
+  .offer { margin: .35rem 0 .1rem; display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: baseline; }
+  /* `min-width: 0` because a flex item will not shrink below its longest
+     unbreakable run without it, and a rule and an absolute path are both one
+     long token — which is how a row pushes a phone screen sideways. */
+  .offer .rule { background: var(--bg); border: 1px solid var(--line); min-width: 0;
+                 border-radius: 4px; padding: .1rem .35rem; user-select: all; overflow-wrap: anywhere; }
+  .offer .path { overflow-wrap: anywhere; }
+  .offer.none { opacity: .85; }
+  #workview { width: min(56rem, 94vw); }
+  #wvbody { max-height: 62vh; overflow-y: auto; padding-bottom: .6rem; }
+  .wvhead { padding: .55rem .9rem .2rem; color: var(--faint); font-size: 11px;
+            text-transform: uppercase; letter-spacing: .08em; }
+  .cmd { display: flex; gap: .6rem; align-items: baseline; padding: .18rem .9rem; }
+  .cmd .mark { width: 1rem; flex: none; }
+  .cmd .mark.ok { color: var(--done); } .cmd .mark.bad { color: var(--fail); }
+  .cmd .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .cmd .took { color: var(--faint); }
+  /* Output is somebody else's bytes, laid out as they wrote them. */
+  .out { margin: .2rem .9rem .5rem 2.5rem; padding: .45rem .6rem; background: var(--bg);
+         border: 1px solid var(--line); border-radius: 6px; color: var(--dim);
+         white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16rem; overflow-y: auto; }
+  .out .fail { color: var(--fail); }
+  /* The change. Line classes only — the daemon supplies the structure and the
+     page supplies the colours, which is the whole of the rendering contract. */
+  .dfile { display: flex; gap: .6rem; align-items: baseline; padding: .5rem .9rem .1rem;
+           border-top: 1px solid var(--line); margin-top: .4rem; }
+  .dpath { font-weight: 600; overflow-wrap: anywhere; }
+  .dstat { color: var(--faint); margin-left: auto; white-space: nowrap; }
+  .dhunk { padding: .2rem .9rem 0; color: var(--faint); }
+  /* The newline in the rendered output is the line break — `display: block`
+     here as well gave every line a blank one after it, and it is also what
+     keeps a copied selection identical to the file. */
+  .dbody { margin: 0; padding: 0 .9rem .3rem; overflow-x: auto; line-height: 1.45; }
+  .da { color: var(--done); } .dr { color: var(--fail); } .dc { color: var(--dim); }
+  .dnote, .dnone { padding: .35rem .9rem; color: var(--dim); }
+  .dnote.err { color: var(--fail); }
   .setgrp { padding: .55rem .9rem .2rem; color: var(--faint); font-size: 11px;
             text-transform: uppercase; letter-spacing: .08em; }
   .setrow { display: flex; gap: .7rem; align-items: baseline; padding: .12rem .9rem; }
@@ -317,7 +357,7 @@
 </style>
 
 <header>
-  <h1>Vibeplane</h1>
+  <h1>Devplane</h1>
   <div class="counts" id="counts"></div>
   <input id="q" type="search" placeholder="search tool calls, questions, errors  /"
          autocomplete="off" spellcheck="false" size="34">
@@ -407,8 +447,18 @@
   <!-- Why there is nothing to edit here. One sentence, because a person who
        came looking for a settings form deserves an answer rather than a
        missing button. -->
-  <div class="setfoot">Every value here is a file. Vibeplane reads them and never writes them:
+  <div class="setfoot">Every value here is a file. Devplane reads them and never writes them:
     the rules are committed and reviewed like code, and an agent on this machine runs as you.</div>
+</div>
+
+<!-- The work view. The fourth thing allowed to cover the page, and it earns the
+     exemption the same way the others do: it is where a decision's evidence
+     lives, so nothing here asks for a decision without showing what it rests
+     on. -->
+<div id="workview" class="over" role="dialog" aria-modal="true" aria-label="What this work changed" hidden>
+  <div class="whyhead"><b id="wvtitle">Work</b><span id="wvphase" class="tag"></span>
+    <button id="wvclose" style="margin-left:auto">close</button></div>
+  <div id="wvbody"></div>
 </div>
 
 <div id="why" class="over" role="dialog" aria-modal="true" aria-label="Why this is here" hidden>
@@ -443,7 +493,7 @@
 </footer>
 
 <script>
-// The token arrives once in the URL from `vibeplane open`, is kept for the tab,
+// The token arrives once in the URL from `devplane open`, is kept for the tab,
 // and is stripped from the address bar so it does not end up in a screenshot or
 // a bookmark.
 const url = new URL(location.href);
@@ -463,7 +513,7 @@ const api = async (path, opts = {}) => {
     ...opts,
     headers: { ...(opts.headers || {}), Authorization: "Bearer " + TOKEN },
   });
-  if (res.status === 401) throw new Error("unauthorised — run `vibeplane open` again");
+  if (res.status === 401) throw new Error("unauthorised — run `devplane open` again");
   if (!res.ok) throw new Error(path + " → " + res.status);
   return res.json();
 };
@@ -514,10 +564,10 @@ function emptyBoard(b) {
   if (state.connected === false) {
     return `<div class="empty">
       <b>No agent sessions here yet.</b>
-      <div>Vibeplane watches Claude Code in your terminal, VS Code and the desktop app —
+      <div>Devplane watches Claude Code in your terminal, VS Code and the desktop app —
            start one and it appears.</div>
       <div class="then">For permissions, cost and context as well, run
-           <code>vibeplane connect claude</code>.</div>
+           <code>devplane connect claude</code>.</div>
     </div>`;
   }
   // Quiet sessions are the usual reason a working machine looks empty, and a
@@ -528,6 +578,36 @@ function emptyBoard(b) {
        <button class="linkish dormant">show them</button>.`
     : "Start an agent anywhere and it appears here.";
   return `<div class="empty"><b>Nothing is running right now.</b><div>${rest}</div></div>`;
+}
+
+// The rule to paste so this is never asked again — **and nothing writes it.**
+//
+// The rules are committed files reviewed like code, and an agent on this
+// machine runs as the same user and can read the token this page uses, so a
+// control that edited `[policy]` would be a widening path reachable by the
+// party the rules govern. What is lost is one gesture.
+//
+// The text is a `<code>` and not a toast: a rule is typed into a file that
+// may not be open yet, so it has to stay on screen and be selectable. The
+// copy button is a convenience on top of that and the page works without it.
+function renderOffer(i) {
+  if (i.offer) {
+    const o = i.offer;
+    const scope = o.basis === "family"
+      ? `covers ${esc(o.covers)}${o.more ? "+" : ""} calls like it`
+      : "this call only";
+    return `<div class="offer">
+      <code class="rule">auto_allow = ["${esc(o.rule)}"]</code>
+      <button data-act="copyrule" data-rule="${esc(o.rule)}">copy</button>
+      <span class="dim">${scope} · paste into <span class="path">${esc(o.file)}</span> ${esc(o.section)} — nothing here writes it</span>
+    </div>`;
+  }
+  // An absent offer is a sentence. A blank where a rule belongs reads as a
+  // surface that failed rather than as one with nothing to say.
+  if (i.no_offer) {
+    return `<div class="offer none"><span class="dim">${esc(i.no_offer.sentence)}</span></div>`;
+  }
+  return "";
 }
 
 function render() {
@@ -627,6 +707,7 @@ function render() {
               // something, but never dressed up as buttons.
               : `<ol class="opts">${i.options.map((o) => `<li>${esc(o.label)}</li>`).join("")}</ol>`
           ) : ""}
+          ${renderOffer(i)}
           <div class="acts">
             ${i.actions.includes("allow") ? `<button data-act="allow" data-run="${esc(i.run_id || "")}" data-req="${esc(i.request_id || "")}">allow</button>` : ""}
             ${i.actions.includes("deny") ? `<button data-act="deny" data-run="${esc(i.run_id || "")}" data-req="${esc(i.request_id || "")}">deny</button>` : ""}
@@ -726,7 +807,7 @@ function render() {
       : w.can_retry
       ? `<button data-act="retry" data-work="${esc(w.id)}" title="${esc(w.stopped_summary || w.gate?.summary || "")}">hand back again</button>`
       : "";
-    return `<div class="card row" role="listitem">
+    return `<div class="card row wv" role="listitem" data-work="${esc(w.id)}" tabindex="0">
       <span class="s ${esc(w.phase)}"><span aria-hidden="true">${GLYPH[w.phase] || "\u25CF"}</span><span class="sr">${esc(w.phase)}</span></span>
       <span class="name">${esc(w.title)}</span>
       <span class="meta">${esc(w.phase)}</span>
@@ -800,7 +881,7 @@ function render() {
 function renderTalk() {
   const run = state.board?.runs.find((r) => r.id === talk.run);
   $("talkwho").textContent = run?.name || (talk.run || "").slice(0, 8);
-  $("talkmode").textContent = run?.mode === "driven" ? "driven by vibeplane" : "";
+  $("talkmode").textContent = run?.mode === "driven" ? "driven by devplane" : "";
   $("talkthinking").textContent = talk.thinking ? "hide thinking" : "show thinking";
 
   const plan = (run?.plan || []).length
@@ -827,7 +908,7 @@ async function openTalk(run) {
   if (r && r.mode !== "driven") {
     // Saying why beats an empty panel.
     alert(
-      "Vibeplane watches this session, it does not drive it, and the documented " +
+      "Devplane watches this session, it does not drive it, and the documented " +
       "channels carry no transcript.\n\nIts own window has the conversation — press f to raise it."
     );
     return;
@@ -863,7 +944,7 @@ function closeTalk() {
 
 // Search, debounced.
 //
-// The daemon already has the index — `/api/search` is what `vibeplane search`
+// The daemon already has the index — `/api/search` is what `devplane search`
 // uses — so the board was the only surface that could not answer "where did I
 // see that command". Typing is not a reason to run a query per keystroke, and
 // the result of an older query must never overwrite a newer one, so each run
@@ -1005,8 +1086,19 @@ async function act(kind, run, req, opt) {
     const where_ = req ? `/api/work/${req}` : run ? `/api/runs/${run}` : `/api/projects/${opt}`;
     await api(`${where_}/snooze?minutes=60`, { method: "POST" }).catch((e) => alert(e.message));
     refresh();
+  } else if (kind === "copyrule") {
+    // A convenience, never the only way to get the text: the rule is already
+    // on screen as selectable `<code>`, which is what makes this work on a
+    // browser that withholds the clipboard — over a private network, say.
+    const rule = el.dataset.rule || "";
+    const line = `auto_allow = ["${rule}"]`;
+    navigator.clipboard?.writeText(line);
+    $("livetext").textContent = navigator.clipboard
+      ? "copied: " + line
+      : "no clipboard here — select the rule above";
+    setTimeout(() => (window.__live?.() ?? null), 2000);
   } else if (kind === "attach") {
-    const cmd = `vibeplane attach ${run}`;
+    const cmd = `devplane attach ${run}`;
     navigator.clipboard?.writeText(cmd);
     // Clipboard access can be refused; showing the command is the fallback that
     // always works.
@@ -1025,7 +1117,7 @@ let projects = [];
 let over = { which: null, sel: 0, hits: [], dispatch: null };
 // Every dialog allowed to cover the page, in one list: a new one added here is
 // closed by `esc` and by the veil without anybody remembering to.
-const OVERLAYS = ["palette", "dispatch", "why", "github", "setup"];
+const OVERLAYS = ["palette", "dispatch", "why", "github", "setup", "workview"];
 
 const openOver = (which) => {
   over.which = which;
@@ -1174,6 +1266,10 @@ const GO = {
 document.addEventListener("click", (e) => {
   if (!(e.target instanceof Element)) return;
   if (e.target.closest("#ghopen, .ghopen")) openGithub();
+  // A work row opens what the checks said. Not on a button inside it — the
+  // release control lives there and a stray click must not navigate away.
+  const wv = e.target.closest(".card.row.wv");
+  if (wv && !e.target.closest("button")) openWork(wv.dataset.work);
   const go = e.target.closest("[data-go]");
   if (go) GO[go.dataset.go]?.();
 });
@@ -1182,10 +1278,147 @@ $("ghtabi").addEventListener("click", () => { gh.tab = "issues"; renderGithub();
 $("ghtabp").addEventListener("click", () => { gh.tab = "prs"; renderGithub(); });
 $("ghclose").addEventListener("click", closeOver);
 
+// ── The work view: what the checks said, beside what is being approved ───────
+//
+// A decision is made while looking at its evidence, so the surface that asks a
+// person to release work is the surface that shows what the gate measured, what
+// changed, and what the agent said about it.
+// How long a command took. `ago()` counts whole seconds, which renders a 412 ms
+// check as "0s" — a number that reads as *instant* and is really *rounded away*.
+const took = (ms) => (ms < 1000 ? ms + "ms" : ago(Math.round(ms / 1000)));
+
+function openWork(id) {
+  const w = (state.work || []).find((x) => x.id === id);
+  if (!w) return;
+  openOver("workview");
+  $("wvtitle").textContent = w.title || w.id;
+  $("wvphase").textContent = w.phase || "";
+  renderWork(w);
+}
+
+function renderWork(w) {
+  const g = w.gate;
+  let out = "";
+
+  // **The verdict, and the reason it reads the way it does.** A reproduction
+  // gate is the one whose failure is the pass, and a list of red commands under
+  // the word "passed" reads as a contradiction unless it says why.
+  if (!g) {
+    out += `<div class="wvhead">Checks</div>` +
+      row("", "No gate has run against this work yet.", "dim");
+  } else {
+    out += `<div class="wvhead">${esc(g.name)}</div>`;
+    out += row("", `<span class="gate ${g.passed ? "green" : "red"}">${
+      g.passed ? "gates green" : "gates red"}</span> ${esc(g.summary)}${
+      g.attempt > 1 ? ` · attempt ${esc(g.attempt)}` : ""}`);
+    if (g.expect_fail) {
+      out += row("", "This gate is a reproduction: failing is the point, and a run that passed would have demonstrated nothing.", "dim");
+    }
+    const cmds = g.commands || [];
+    if (!cmds.length) {
+      out += row("", "The gate recorded no commands, which is not the same as passing.", "dim");
+    }
+    for (const c of cmds) {
+      // What the project expected of this command, not merely its exit code:
+      // under `expect_fail` a non-zero exit is the desired answer.
+      const met = g.expect_fail ? c.exit_code !== 0 : c.exit_code === 0;
+      out += `<div class="cmd"><span class="mark ${met ? "ok" : "bad"}" aria-hidden="true">${
+        met ? "✓" : "✗"}</span><span class="sr">${met ? "met" : "did not meet"}</span>` +
+        `<span class="what"><code>${esc(c.command)}</code></span>` +
+        `<span class="took">${c.timed_out ? "timed out" : c.exit_code == null ? "did not start"
+          : "exit " + esc(c.exit_code)}${c.duration_ms ? " · " + took(c.duration_ms) : ""}</span></div>`;
+      // The lines the agent was handed. Shown for what did not meet the
+      // expectation, because that is the case a person is deciding about.
+      if (!met) {
+        const fails = (c.failures || []).map((f) => `<span class="fail">${esc(f)}</span>`).join("\n");
+        const tail = esc(c.output_tail || "");
+        if (fails || tail) out += `<div class="out">${fails}${fails && tail ? "\n\n" : ""}${tail}</div>`;
+      }
+    }
+  }
+
+  // The specification this work answers, as it was when the gate ran. Read off
+  // the same payload the board row uses rather than recomputed: two surfaces
+  // deriving one figure is how they come to disagree.
+  const st = g && g.spec;
+  if (st) {
+    out += `<div class="wvhead">Specification</div>`;
+    out += row("", `<code>${esc(st.path)}</code>${
+      st.fingerprint ? ` <span class="dim">at ${esc(st.fingerprint)}${
+        st.files > 1 ? ` over ${esc(st.files)} documents` : ""}</span>`
+      : ` <span class="err">— not there when the gate ran</span>`}`);
+    if (st.tasks_total > 0) {
+      const left = st.tasks_total - st.tasks_done;
+      out += row("", `<b>${esc(st.tasks_done)}/${esc(st.tasks_total)} tasks</b> ${
+        left ? `<span class="find">${esc(left)} still open in the specification</span>`
+             : "every box ticked"}`, "dim");
+    }
+    if (st.open_questions > 0) {
+      out += row("", `<span class="find">${esc(st.open_questions)} unanswered question${
+        st.open_questions === 1 ? "" : "s"} in the specification</span>`, "dim");
+    }
+  }
+
+  // **What the agent said, beside what the gate measured — and judged by
+  // nothing.** No model separates a truthful trajectory report from an
+  // untruthful one better than a bag-of-words detector does, so the sentence
+  // and the exit code go on one screen and the person reads. Served only where
+  // the last gate failed, which is the one place the two are worth together.
+  if (w.claim) {
+    out += `<div class="wvhead">What the agent said</div>` +
+      `<div class="setrow"><span class="k"></span><span class="v claim">` +
+      `<span class="sr">the agent's account: </span>${esc(w.claim)}</span></div>`;
+  } else if (w.claim_absent) {
+    // Two absences, two sentences. Saying "the agent said nothing" about a
+    // repository that never writes transcripts down would be false.
+    out += `<div class="wvhead">What the agent said</div>` +
+      row("", w.claim_absent === "transcripts_off"
+        ? "Nothing was recorded — this repository has <code>[transcripts] keep = false</code>, so there is no account to show rather than an empty one."
+        : "The agent ended without a closing message. Its transcript was kept; there was nothing in it to quote.", "dim");
+  }
+
+  // **The release control, offered only where it can do something.** A button
+  // that cannot keep its promise is the one thing a control plane must not
+  // show, so this appears for a work actually held at a declared human step and
+  // nowhere else.
+  if (w.phase === "human") {
+    out += `<div class="wvhead">Your decision</div>` +
+      `<div class="setrow"><span class="k"></span><span class="v">` +
+      `<button class="primary" data-act="approve" data-work="${esc(w.id)}">release this step</button>` +
+      ` <span class="dim">The pipeline continues from here, and the decision is recorded as yours.</span>` +
+      `</span></div>`;
+  }
+
+  // What changed. Rendered by the daemon and inserted here — the page computes
+  // no diff, which is what keeps it buildless.
+  out += `<div class="wvhead">What changed</div><div id="wvdiff">` +
+    `<div class="dnote">reading the change…</div></div>`;
+  $("wvbody").innerHTML = out;
+  loadChange(w.id);
+}
+
+// The change set, fetched once per opening rather than polled: a diff is
+// expensive to produce and does not move while somebody reads it.
+async function loadChange(id) {
+  const box = () => $("wvdiff");
+  try {
+    // `changes`, not `r`: the page's contract test reads every `r.<field>` here
+    // as a field the *board* must serve, and this is a different endpoint.
+    const changes = await api(`/api/work/${id}/changes`);
+    if (!box()) return;
+    // The daemon escaped every byte of this; see `core::diff`.
+    box().innerHTML = changes.html || `<div class="dnote">nothing to show</div>`;
+  } catch (e) {
+    if (!box()) return;
+    // A missing checkout is its own answer and must not read as "no change".
+    box().innerHTML = `<div class="dnote err">${esc(String(e && e.message ? e.message : e))}</div>`;
+  }
+}
+
 // ── ,: what is configured, on this machine and in every repository ──────────
 //
 // The product could always answer this and only in a terminal, one repository
-// at a time: `vibeplane check` per project, `vibeplane doctor` for the machine.
+// at a time: `devplane check` per project, `devplane doctor` for the machine.
 // Somebody with eight repositories had to visit eight of them to find the one
 // whose rules had stopped loading.
 //
@@ -1230,7 +1463,7 @@ function renderSetup() {
   $("setupwhere").textContent = d.machine?.home || "";
 
   let out = `<div class="setgrp">This machine</div>`;
-  out += val("vibeplane", `${d.machine?.version || "?"} · pid ${d.machine?.pid} · up ${ago(d.machine?.uptime_seconds || 0)}`);
+  out += val("devplane", `${d.machine?.version || "?"} · pid ${d.machine?.pid} · up ${ago(d.machine?.uptime_seconds || 0)}`);
   out += val("database", d.machine?.database || "—", "dim");
 
   // What the vendor's own settings file says. The distinction that matters is
@@ -1238,15 +1471,15 @@ function renderSetup() {
   // working everywhere else.
   const c = d.connect;
   if (!c || !(c.hooks_installed || []).length) {
-    out += row("claude code", `nothing installed — <code>vibeplane connect claude</code>`, "dim");
+    out += row("claude code", `nothing installed — <code>devplane connect claude</code>`, "dim");
   } else {
     out += val("claude code", c.hooks_installed.join(", ") + " installed");
     if (c.gate_is_stale)
-      out += row("", `<span class="find bad">stale</span> installed before the gate became two hooks — prohibitions do not reach auto mode. <code>vibeplane connect claude</code>`);
+      out += row("", `<span class="find bad">stale</span> installed before the gate became two hooks — prohibitions do not reach auto mode. <code>devplane connect claude</code>`);
     if (c.allowlist_blocks_us)
       out += row("", `<span class="find bad">blocked</span> <code>allowedHttpHookUrls</code> does not cover loopback, so every hook here is inert`);
     out += val("", c.settings_path || "", "dim");
-    out += val("telemetry", c.telemetry_is_ours ? "to vibeplane" : c.telemetry_endpoint || "not exported", "dim");
+    out += val("telemetry", c.telemetry_is_ours ? "to devplane" : c.telemetry_endpoint || "not exported", "dim");
   }
   out += val("gate", `rules checked against Claude Code ${d.gate?.verified_against} · rows cleared through ${d.gate?.rows_cleared_through}`, "dim");
   out += val("agents", (d.agents || []).map((a) => a.name || a.id || a).join(", ") || "none", "dim");
@@ -1255,7 +1488,7 @@ function renderSetup() {
   // never widen them, so they are shown before any project.
   const mp = d.machine_policy;
   if (mp?.error) out += row("your rules", `<span class="find bad">will not load</span> ${esc(mp.error)}`);
-  else if (mp && !mp.exists) out += val("your rules", "no ~/.vibeplane/policy.toml — nothing decides on your behalf", "dim");
+  else if (mp && !mp.exists) out += val("your rules", "no ~/.devplane/policy.toml — nothing decides on your behalf", "dim");
   else if (mp) {
     out += val("your rules", counts(mp));
     out += rules(mp);
@@ -1299,7 +1532,7 @@ function problems(list) {
 function project(p) {
   let out = `<div class="setproj"><b>${esc(p.name || p.id)}</b>
     <span class="tag${p.trusted ? "" : " no"}">${p.trusted ? "trusted" : "not trusted"}</span>
-    <span class="tag">${p.config?.exists ? "vibeplane.toml" : "no vibeplane.toml"}</span></div>`;
+    <span class="tag">${p.config?.exists ? "devplane.toml" : "no devplane.toml"}</span></div>`;
   out += val("", p.root || "", "dim");
   // A repository whose rules will not parse is the one row in this panel that
   // is about something being wrong right now: the prohibitions it commits are
@@ -1308,7 +1541,7 @@ function project(p) {
     return out +
       row("rules", `<span class="find bad">will not load</span> — nothing in it is enforced`) +
       row("", esc(p.error), "dim pre") +
-      row("", `<code>vibeplane check ${esc(p.root)}</code>`, "dim");
+      row("", `<code>devplane check ${esc(p.root)}</code>`, "dim");
   const d = p.describes;
   if (!d) return out;
 
@@ -1450,7 +1683,7 @@ function renderDispatch() {
 
   // What will happen, before it happens.
   const why = !p ? "No project to start in."
-    : !p.trusted ? `<b>${esc(p.name)} is not trusted.</b> An agent runs that repository's own hooks and MCP servers, so the decision has to be one somebody made deliberately — <code>vibeplane trust ${esc(p.root)}</code>.`
+    : !p.trusted ? `<b>${esc(p.name)} is not trusted.</b> An agent runs that repository's own hooks and MCP servers, so the decision has to be one somebody made deliberately — <code>devplane trust ${esc(p.root)}</code>.`
     : `Creates <b>${esc(d.kind)}</b> work in <b>${esc(p.name)}</b>${d.worktree ? ", in an isolated checkout on its own branch" : ", in the checkout itself"}. The project's gates run when the agent stops.`;
   $("dwill").innerHTML = why;
   $("dgo").disabled = !p || !p.trusted;
@@ -1482,7 +1715,7 @@ async function sendDispatch() {
 // ── ?: why is this here ──────────────────────────────────────────────────────
 //
 // The cheapest possible way to make a supervision tool explainable: the same
-// decision log `vibeplane audit` reads, narrowed to the row under the cursor.
+// decision log `devplane audit` reads, narrowed to the row under the cursor.
 async function showWhy(item) {
   openOver("why");
   const about = item?.work_id || item?.run_id;
@@ -1611,6 +1844,13 @@ document.addEventListener("keydown", (e) => {
   }
   // Anything typed into a field is text, not a command.
   if (e.target instanceof HTMLInputElement) return;
+  // A work row is focusable, so it must answer the key that opens everything
+  // else. Without this the view was reachable by mouse only.
+  const focused = e.target instanceof Element && e.target.closest(".card.row.wv");
+  if (focused && (e.key === "Enter" || e.key === " ")) {
+    openWork(focused.dataset.work);
+    return e.preventDefault();
+  }
   const cards = [...document.querySelectorAll("[data-sel]")];
   const cur = cards[state.sel];
   const run = cur?.dataset.run;

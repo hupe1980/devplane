@@ -16,7 +16,7 @@ pub const BLUE: &str = "\x1b[34m";
 pub const MAGENTA: &str = "\x1b[35m";
 
 /// Whether to emit escape codes at all. Honours `NO_COLOR`, and turns itself
-/// off when stdout is not a terminal so that `vibeplane ls > file` is readable.
+/// off when stdout is not a terminal so that `devplane ls > file` is readable.
 pub fn colour() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
@@ -112,7 +112,7 @@ pub struct InboxItem {
     /// machine.
     ///
     /// **This was `String`, and the API has always sent `null` here**, so
-    /// `vibeplane inbox` failed to decode the whole response the moment one
+    /// `devplane inbox` failed to decode the whole response the moment one
     /// such item existed — which `AttentionItem` calls "the ordinary case, not
     /// an edge one". The renderer below already had a branch for a missing run;
     /// the type stopped it ever being reached.
@@ -133,9 +133,12 @@ pub struct InboxItem {
     /// Set when the item is about a piece of work rather than a session.
     #[serde(default)]
     pub work_id: Option<String>,
-    /// The rule that would have answered this call, on a permission item.
+    /// The rule to paste so this is never asked again, on a permission item.
     #[serde(default)]
-    pub suggested_rule: Option<String>,
+    pub offer: Option<crate::core::offer::RuleOffer>,
+    /// Why there is none. A blank where an offer belongs reads as broken.
+    #[serde(default)]
+    pub no_offer: Option<crate::core::offer::NoOfferView>,
 }
 
 /// One fragment of a driven run's conversation, as the API serves it.

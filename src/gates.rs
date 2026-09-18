@@ -501,7 +501,7 @@ mod tests {
             ("test auth::login ... FAILED", true),
             ("FAIL src/auth.test.ts", true),
             ("thread 'x' panicked at src/lib.rs:4", true),
-            ("   Compiling vibeplane v0.1.0", false),
+            ("   Compiling devplane v0.1.0", false),
             ("warning: unused variable", false),
         ];
         for (line, expected) in cases {

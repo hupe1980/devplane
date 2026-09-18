@@ -59,9 +59,9 @@ fn title_for(item: &AttentionItem) -> String {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| p.to_string());
-            format!("Vibeplane · {name}")
+            format!("Devplane · {name}")
         }
-        None => "Vibeplane".to_string(),
+        None => "Devplane".to_string(),
     }
 }
 
@@ -98,7 +98,7 @@ fn applescript_escape(s: &str) -> String {
 #[cfg(target_os = "linux")]
 fn platform_send(title: &str, body: &str) -> std::io::Result<()> {
     Command::new("notify-send")
-        .args(["--app-name=Vibeplane", title, body])
+        .args(["--app-name=Devplane", title, body])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -112,7 +112,7 @@ fn platform_send(title: &str, body: &str) -> std::io::Result<()> {
          $t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(1); \
          $t.GetElementsByTagName('text')[0].AppendChild($t.CreateTextNode('{}')) > $null; \
          $t.GetElementsByTagName('text')[1].AppendChild($t.CreateTextNode('{}')) > $null; \
-         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Vibeplane').Show($t)",
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Devplane').Show($t)",
         title.replace('\'', "''"),
         body.replace('\'', "''")
     );
@@ -150,7 +150,8 @@ mod tests {
             url: None,
             launch: None,
             work_id: None,
-            suggested_rule: None,
+            offer: None,
+            no_offer: None,
             since: jiff::Timestamp::now(),
         }
     }

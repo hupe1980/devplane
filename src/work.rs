@@ -33,7 +33,7 @@ pub(crate) async fn persist(state: &Shared, work: &Work) {
             "could not save this work: the board is ahead of the store, and a restart will lose it"
         );
         // Surfaced rather than only logged, because a log line in a daemon is
-        // not somewhere anybody looks. `vibeplane doctor` reads this.
+        // not somewhere anybody looks. `devplane doctor` reads this.
         state
             .store
             .record_channel("store", 0, Some(&e.to_string()))
@@ -119,7 +119,7 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<WorkId> {
         .collect();
     if !fatal.is_empty() {
         bail!(
-            "{}/vibeplane.toml cannot do what it says:\n  {}",
+            "{}/devplane.toml cannot do what it says:\n  {}",
             root.display(),
             fatal.join("\n  ")
         );
@@ -277,7 +277,7 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
                 state,
                 &work_id,
                 Stopped::Broken {
-                    detail: format!("this project's vibeplane.toml cannot be read: {e}"),
+                    detail: format!("this project's devplane.toml cannot be read: {e}"),
                 },
             )
             .await;
@@ -443,7 +443,7 @@ pub(crate) async fn open_pull_request(state: &Shared, id: &WorkId, config: &Proj
     }
 
     // The branch has to exist on the remote before a pull request can point at
-    // it. This is the first thing Vibeplane does that other people can see,
+    // it. This is the first thing Devplane does that other people can see,
     // which is why `[github].pull_request` is off until asked for.
     if let Err(e) = push_branch(&dir, &branch).await {
         tracing::warn!(error = %e, "could not push the branch");
@@ -515,7 +515,7 @@ pub(crate) async fn open_pull_request(state: &Shared, id: &WorkId, config: &Proj
 ///
 /// Separate from [`charge`] because the figure is worth having whether or not a
 /// ceiling exists: work in a project with no gates never reached `charge` at
-/// all, so `vibeplane work show` printed "not reported by this agent" for a run
+/// all, so `devplane work show` printed "not reported by this agent" for a run
 /// that had reported perfectly well.
 pub(crate) async fn tally(state: &Shared, id: &WorkId) -> (f64, WorkKind, String) {
     let (spent, _, _, kind, title) = tally_all(state, id).await;
@@ -527,7 +527,7 @@ pub(crate) async fn tally(state: &Shared, id: &WorkId) -> (f64, WorkKind, String
 /// Money is the one a project usually writes down and the only one that can be
 /// missing: the protocol makes the agent's cost field optional, and the GenAI
 /// telemetry conventions have no notion of money at all. Turns and elapsed time
-/// are counted from what Vibeplane saw itself, so they bind every agent on
+/// are counted from what Devplane saw itself, so they bind every agent on
 /// every provider — which is the whole reason they exist.
 pub(crate) async fn tally_all(
     state: &Shared,
@@ -611,7 +611,7 @@ async fn pr_body(state: &Shared, id: &WorkId) -> String {
             ));
         }
     }
-    body.push_str("\n---\n_Opened by Vibeplane after the project's own checks passed._\n");
+    body.push_str("\n---\n_Opened by Devplane after the project's own checks passed._\n");
     body
 }
 
@@ -630,7 +630,7 @@ pub(crate) async fn charge(state: &Shared, id: &WorkId, config: &ProjectConfig) 
 
     // Three bounds, checked in the order of how confident each is that it saw
     // what it is bounding. Turns and elapsed time are counted from events
-    // Vibeplane recorded itself; money is what an agent chose to report, and
+    // Devplane recorded itself; money is what an agent chose to report, and
     // both the protocol and the GenAI telemetry conventions make that optional.
     let ceiling = config.budget.for_kind(kind.as_str());
     let over: Option<String> = if config.budget.max_turns.is_some_and(|m| turns > m) {
@@ -655,7 +655,7 @@ pub(crate) async fn charge(state: &Shared, id: &WorkId, config: &ProjectConfig) 
         };
         // Cleared when a raised ceiling now covers what was spent. Without
         // this the flag was permanent, and so was the refusal behind it: the
-        // inbox item said "raise the ceiling in vibeplane.toml if it is worth
+        // inbox item said "raise the ceiling in devplane.toml if it is worth
         // more", the person did, and `work retry` went on refusing for a
         // ceiling that no longer existed. A remedy a product names has to work.
         w.stopped = over
@@ -991,7 +991,7 @@ pub async fn retry(state: &Shared, id: &WorkId) -> Result<()> {
     let feedback = match &stopped {
         Stopped::Broken { detail } => bail!(
             "that work stopped because the chain could not continue ({detail}), which is \
-             a problem with the pipeline rather than the code. `vibeplane check` reads \
+             a problem with the pipeline rather than the code. `devplane check` reads \
              the file the same way this did."
         ),
         Stopped::OverBudget { spent_usd, bound } => {
@@ -1016,7 +1016,7 @@ pub async fn retry(state: &Shared, id: &WorkId) -> Result<()> {
             if still_over {
                 bail!(
                     "that work stopped: {bound}. The bound `[budget]` sets \
-                     for its kind. Raise it in vibeplane.toml if it is worth more."
+                     for its kind. Raise it in devplane.toml if it is worth more."
                 );
             }
             // The ceiling was raised. What the agent needs handed back is
@@ -1047,7 +1047,7 @@ pub async fn retry(state: &Shared, id: &WorkId) -> Result<()> {
     if !crate::driven::is_live(state, &run).await {
         bail!(
             "the agent that wrote this code is gone, and a fresh one would have to \
-             learn it all again. Pick it up yourself with `vibeplane attach {run}`, \
+             learn it all again. Pick it up yourself with `devplane attach {run}`, \
              or start new work."
         );
     }

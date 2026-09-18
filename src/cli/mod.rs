@@ -26,12 +26,12 @@ use work::{cmd_check, cmd_dispatch, cmd_trust, cmd_work};
 
 #[derive(Parser)]
 #[command(
-    name = "vibeplane",
+    name = "devplane",
     version,
     about = "The control plane for AI coding agents",
-    long_about = "Vibeplane watches every Claude Code session on this machine — in a terminal, \
+    long_about = "Devplane watches every Claude Code session on this machine — in a terminal, \
                   in VS Code, in the desktop app — and tells you which ones need you.\n\n\
-                  Start with `vibeplane connect claude`, then `vibeplane ls`."
+                  Start with `devplane connect claude`, then `devplane ls`."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -46,7 +46,7 @@ pub struct Cli {
 pub enum Command {
     /// Run the daemon in the foreground.
     Serve {
-        #[arg(long, env = "VIBEPLANE_PORT", default_value_t = config::DEFAULT_PORT)]
+        #[arg(long, env = "DEVPLANE_PORT", default_value_t = config::DEFAULT_PORT)]
         port: u16,
     },
     /// Show what is happening: sessions in play, and anything asking for you.
@@ -70,7 +70,7 @@ pub enum Command {
     ///
     /// `--ready` narrows it to one repository's issues that are *offered as
     /// work* — the ones carrying `[github].ready_label` — which is the list
-    /// `vibeplane work start --issue` picks from.
+    /// `devplane work start --issue` picks from.
     Issues {
         /// Only the issues this repository offers as work.
         #[arg(long)]
@@ -88,9 +88,9 @@ pub enum Command {
     Show { run: String },
     /// Follow what a driven agent is saying, like `tail -f`.
     ///
-    /// Only for runs Vibeplane drives: they have no window of their own, which
+    /// Only for runs Devplane drives: they have no window of their own, which
     /// is why this exists. A session you started in a terminal or an editor is
-    /// already showing you its own transcript — use `vibeplane focus` to raise
+    /// already showing you its own transcript — use `devplane focus` to raise
     /// the window that has it.
     Tail {
         run: String,
@@ -114,10 +114,10 @@ pub enum Command {
     /// before the tool runs, so claiming the second would be a confident answer
     /// this evidence does not support.
     Rewind {
-        /// The run, or a unique prefix of it, as `vibeplane ls` prints it.
+        /// The run, or a unique prefix of it, as `devplane ls` prints it.
         run: String,
     },
-    /// Show what Vibeplane decided, and on whose authority.
+    /// Show what Devplane decided, and on whose authority.
     ///
     /// Answers the two questions the event log cannot: why a command ran
     /// without anybody being asked, and why there is a pull request on a branch.
@@ -153,7 +153,7 @@ pub enum Command {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
-    /// Send another prompt to a run Vibeplane drives.
+    /// Send another prompt to a run Devplane drives.
     Say { run: String, prompt: Vec<String> },
     /// Answer a permission request from a driven run.
     Decide {
@@ -168,9 +168,9 @@ pub enum Command {
         #[arg(long)]
         request: String,
     },
-    /// List the agents Vibeplane can drive.
+    /// List the agents Devplane can drive.
     Agents,
-    /// Read this repository's vibeplane.toml and say what it will do.
+    /// Read this repository's devplane.toml and say what it will do.
     ///
     /// Answers the three questions a committed config raises: does it parse,
     /// does everything it names exist, and is anything in it unsafe.
@@ -184,10 +184,10 @@ pub enum Command {
     /// without starting a daemon or an agent, so a rule can be tested before it
     /// is committed.
     ///
-    ///   vibeplane explain 'pnpm test && rm -rf /'
-    ///   vibeplane explain --tool Read .env
-    ///   vibeplane explain --tool Agent --input '{"isolation":"worktree"}'
-    ///   vibeplane explain --replay
+    ///   devplane explain 'pnpm test && rm -rf /'
+    ///   devplane explain --tool Read .env
+    ///   devplane explain --tool Agent --input '{"isolation":"worktree"}'
+    ///   devplane explain --replay
     ///
     /// `--replay` asks the same question of every call already observed and
     /// names the rule that would stop the interruptions.
@@ -213,7 +213,7 @@ pub enum Command {
         #[arg(long, default_value_t = 5000)]
         limit: i64,
     },
-    /// Allow Vibeplane to start agents in a repository.
+    /// Allow Devplane to start agents in a repository.
     ///
     /// A headless agent runs that repository's own hooks and MCP servers
     /// without asking, so this is a deliberate act rather than a default — and
@@ -241,7 +241,7 @@ pub enum Command {
     },
     /// Hide a run's or a piece of work's inbox items for a while.
     Snooze {
-        /// A run id, or a work id from `vibeplane inbox`.
+        /// A run id, or a work id from `devplane inbox`.
         id: String,
         /// Minutes to stay quiet. `0` un-snoozes.
         #[arg(long, default_value_t = 60)]
@@ -271,7 +271,7 @@ pub enum Command {
     /// every time.
     #[command(visible_alias = "diagnostics")]
     Doctor,
-    /// Install Vibeplane's hooks into a provider.
+    /// Install Devplane's hooks into a provider.
     Connect {
         #[command(subcommand)]
         what: ConnectTarget,
@@ -288,7 +288,7 @@ pub enum Command {
     },
     /// Stop the running daemon.
     Stop,
-    /// Serve Vibeplane's read-only surface to an agent over MCP, on stdio.
+    /// Serve Devplane's read-only surface to an agent over MCP, on stdio.
     ///
     /// Four questions — `inbox`, `work`, `explain`, `audit` — and nothing that
     /// acts. The surface is read-only because it implements no mutating tool,
@@ -296,7 +296,7 @@ pub enum Command {
     /// may ignore.
     ///
     /// Register it with your agent as a `command` MCP server running
-    /// `vibeplane mcp`.
+    /// `devplane mcp`.
     Mcp,
     /// Read a hook payload on stdin and forward it to the daemon.
     ///
@@ -484,8 +484,8 @@ pub async fn run(cli: Cli) -> Result<()> {
 async fn cmd_serve(port: u16) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("VIBEPLANE_LOG")
-                .unwrap_or_else(|_| "vibeplane=info,warn".into()),
+            tracing_subscriber::EnvFilter::try_from_env("DEVPLANE_LOG")
+                .unwrap_or_else(|_| "devplane=info,warn".into()),
         )
         .init();
 
@@ -494,7 +494,7 @@ async fn cmd_serve(port: u16) -> Result<()> {
         && info.pid != std::process::id()
     {
         anyhow::bail!(
-            "a daemon is already running (pid {}, port {}). Stop it with `vibeplane stop`.",
+            "a daemon is already running (pid {}, port {}). Stop it with `devplane stop`.",
             info.pid,
             info.port
         );
@@ -511,7 +511,7 @@ async fn cmd_serve(port: u16) -> Result<()> {
     daemon::serve(state, port).await
 }
 
-/// The machine-wide rules, from `~/.vibeplane/policy.toml`.
+/// The machine-wide rules, from `~/.devplane/policy.toml`.
 ///
 /// Empty by default: no rule matches, so every permission prompt reaches the
 /// human exactly as it does today. A policy that guessed on the user's behalf
@@ -521,7 +521,7 @@ async fn cmd_serve(port: u16) -> Result<()> {
 ///
 /// The hook decides in its own process, so a stopped daemon costs the *record*
 /// and not the enforcement. This is the other half of that trade: without it,
-/// `vibeplane audit` would be missing exactly the refusals that happened when
+/// `devplane audit` would be missing exactly the refusals that happened when
 /// nobody was watching, and would not say so.
 async fn drain_decision_spool(state: &std::sync::Arc<daemon::AppState>) {
     let pending = config::drain_spool();
@@ -579,7 +579,7 @@ async fn fetch_run(c: &client::Client, run: &str) -> Result<serde_json::Value> {
     c.get(&format!("/api/runs/{run}")).await.map_err(|_| {
         anyhow::anyhow!(
             "no run `{run}` on the board.\n\n  {}",
-            paint(DIM, "vibeplane ls --all lists every session, ids included.")
+            paint(DIM, "devplane ls --all lists every session, ids included.")
         )
     })
 }
@@ -731,9 +731,7 @@ async fn decide_copilot(body: &str) -> Result<()> {
         None => cache.restrictive_global_only(&tool, &input),
     };
     let reply = match &verdict {
-        Verdict::Deny { rule } => {
-            GateReply::deny(format!("denied by Vibeplane policy rule {rule}"))
-        }
+        Verdict::Deny { rule } => GateReply::deny(format!("denied by Devplane policy rule {rule}")),
         Verdict::Ask { rule } => GateReply::ask(format!("{rule} asks that a person decides this")),
         _ => GateReply::undecided(),
     };
@@ -771,7 +769,7 @@ async fn report(
     subject: String,
     blocked: bool,
 ) {
-    // `vibeplane doctor` runs this gate to check that it answers. The verdict
+    // `devplane doctor` runs this gate to check that it answers. The verdict
     // is real and the call is not, so it is reported nowhere: a diagnostic that
     // writes to the append-only log makes the log worse every time somebody
     // checks the tool is working.
@@ -818,7 +816,7 @@ async fn post_decided(env: &crate::core::DecidedEnvelope) -> bool {
         return false;
     };
     reqwest::Client::new()
-        .post(format!("{}/vibeplane/decided", info.base_url()))
+        .post(format!("{}/devplane/decided", info.base_url()))
         .bearer_auth(token)
         .header("content-type", "application/json")
         .body(body)
@@ -842,7 +840,7 @@ async fn cmd_statusline(then: Option<String>) -> Result<()> {
         // Best effort and short: the status line runs on every update, and a
         // slow shim is a slow prompt.
         let _ = reqwest::Client::new()
-            .post(format!("{}/vibeplane/statusline", info.base_url()))
+            .post(format!("{}/devplane/statusline", info.base_url()))
             .bearer_auth(token)
             .header("content-type", "application/json")
             .body(body.clone())

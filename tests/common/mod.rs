@@ -25,7 +25,7 @@
 pub struct AgentSerial(std::fs::File);
 
 pub fn one_agent_at_a_time() -> AgentSerial {
-    let path = std::env::temp_dir().join("vibeplane-test-agents.lock");
+    let path = std::env::temp_dir().join("devplane-test-agents.lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)

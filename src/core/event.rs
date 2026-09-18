@@ -1,11 +1,11 @@
 //! The event model.
 //!
-//! Everything Vibeplane learns about a session arrives as an [`Event`] wrapped
+//! Everything Devplane learns about a session arrives as an [`Event`] wrapped
 //! in an [`EventEnvelope`]. Events are append-only observations: they are never
 //! edited, and run state is a pure reduction over them
 //! ([`crate::core::reduce`]).
 //!
-//! Events are *observations*, not effects. Anything Vibeplane causes itself
+//! Events are *observations*, not effects. Anything Devplane causes itself
 //! belongs in the runtime journal instead.
 
 use crate::core::ids::{ProjectId, RunId};
@@ -26,7 +26,7 @@ pub enum Source {
     AgentsJson,
     /// The status-line shim.
     StatusLine,
-    /// Vibeplane itself (reconciliation, timers).
+    /// Devplane itself (reconciliation, timers).
     Daemon,
 }
 
@@ -101,7 +101,7 @@ impl ApiUsage {
 /// One answer a blocked run will accept.
 ///
 /// The label is what a human reads; the `id` is what the protocol requires back
-/// and is the whole reason this is not a list of strings. Vibeplane used to
+/// and is the whole reason this is not a list of strings. Devplane used to
 /// carry only labels and then send the literal `"allow"` as the choice, which
 /// works against a fixture that happens to name its option that and against no
 /// real agent at all — ACP option ids are the agent's to choose.
@@ -210,7 +210,7 @@ pub enum Event {
     /// A driven agent finished its handshake and named its own session.
     ///
     /// Recorded because it is the *only* thing that can continue this
-    /// conversation later. A run id is Vibeplane's; the id an agent will accept
+    /// conversation later. A run id is Devplane's; the id an agent will accept
     /// on `session/resume` is the agent's, it arrives after the handshake, and
     /// without it a daemon restart can only start a new conversation and pay to
     /// rediscover everything the last one knew.
@@ -218,7 +218,7 @@ pub enum Event {
         agent_session: String,
     },
     /// The human submitted a prompt. The text itself is not stored: telemetry
-    /// is redacted by default and Vibeplane never turns that off.
+    /// is redacted by default and Devplane never turns that off.
     PromptSubmitted {
         chars: usize,
     },
@@ -252,7 +252,7 @@ pub enum Event {
     },
     /// A configuration file Claude Code reads has changed.
     ///
-    /// Worth an event because Vibeplane *writes* one of them: the hooks the
+    /// Worth an event because Devplane *writes* one of them: the hooks the
     /// observer depends on live in `~/.claude/settings.json`, and the only
     /// other symptom of losing them is a channel going quiet.
     ConfigChanged {
@@ -264,7 +264,7 @@ pub enum Event {
     /// One entry of an observed session's own task list changed.
     ///
     /// The equivalent of the plan the protocol streams for a driven run: what
-    /// the agent is trying to do, for a session Vibeplane only watches.
+    /// the agent is trying to do, for a session Devplane only watches.
     TaskChanged {
         id: String,
         subject: String,
@@ -283,9 +283,18 @@ pub enum Event {
         /// The answers the agent will accept, with the ids it expects back.
         #[serde(default)]
         options: Vec<Choice>,
+        /// The call being waited on, where the source knows it.
+        ///
+        /// **The permission hook knows it and the tool hook may never have
+        /// fired.** Claude Code resolves permission *before* invoking the tool,
+        /// so a run blocked on a permission often has no in-flight
+        /// `ToolStarted` to read it off — which is why this travels on the
+        /// event rather than being recovered from the run.
+        #[serde(default)]
+        call: Option<ToolCallRef>,
     },
     /// The agent asked a question with options. Observed sessions cannot be
-    /// answered from Vibeplane, only focused.
+    /// answered from Devplane, only focused.
     QuestionAsked {
         question: String,
         options: Vec<Choice>,
@@ -339,7 +348,7 @@ pub enum Event {
     /// A row of `claude agents --json`.
     ///
     /// The roster lists **every** live session, interactive ones included — it
-    /// is how the board is populated the moment Vibeplane is installed, before
+    /// is how the board is populated the moment Devplane is installed, before
     /// a single hook has fired. What it means depends on the row:
     ///
     /// * a background row carries `state`, and the provider's daemon owns that
@@ -381,6 +390,13 @@ pub enum Event {
     /// verdict, a snooze. Carries nothing: it exists so a subscriber knows to
     /// ask again, and it is not applied to any run.
     Refresh,
+}
+
+/// A tool call named on an event that is not itself a tool call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCallRef {
+    pub tool: String,
+    pub input: serde_json::Value,
 }
 
 impl Event {

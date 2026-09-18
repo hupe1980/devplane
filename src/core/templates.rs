@@ -14,11 +14,11 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Where a template came from, which is also how much of it Vibeplane can use.
+/// Where a template came from, which is also how much of it Devplane can use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
-    /// `.vibeplane/prompts/<name>.md` — the portable form. Used whole.
+    /// `.devplane/prompts/<name>.md` — the portable form. Used whole.
     Portable,
     /// `.claude/skills/<name>/SKILL.md` in the repository.
     ProjectSkill,
@@ -63,7 +63,7 @@ pub fn list(dir: &Path) -> Vec<Template> {
         }
     };
 
-    for (name, path) in entries(&dir.join(".vibeplane/prompts"), false) {
+    for (name, path) in entries(&dir.join(".devplane/prompts"), false) {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         add(Template {
             description: first_line(&text),
@@ -167,9 +167,9 @@ mod tests {
     #[test]
     fn a_project_offers_its_prompts_and_its_skills() {
         let d = scratch("both");
-        std::fs::create_dir_all(d.join(".vibeplane/prompts")).unwrap();
+        std::fs::create_dir_all(d.join(".devplane/prompts")).unwrap();
         std::fs::write(
-            d.join(".vibeplane/prompts/implement.md"),
+            d.join(".devplane/prompts/implement.md"),
             "# Implement\n\nDo the thing.",
         )
         .unwrap();
@@ -205,8 +205,8 @@ mod tests {
         // choice that does not exist — the picker would show two rows and one
         // of them would be a lie about what happens when you press enter.
         let d = scratch("shadow");
-        std::fs::create_dir_all(d.join(".vibeplane/prompts")).unwrap();
-        std::fs::write(d.join(".vibeplane/prompts/review.md"), "Portable review.").unwrap();
+        std::fs::create_dir_all(d.join(".devplane/prompts")).unwrap();
+        std::fs::write(d.join(".devplane/prompts/review.md"), "Portable review.").unwrap();
         std::fs::create_dir_all(d.join(".claude/skills/review")).unwrap();
         std::fs::write(
             d.join(".claude/skills/review/SKILL.md"),

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// How to launch one agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSpec {
-    /// The id used on the board and in `vibeplane dispatch --agent`.
+    /// The id used on the board and in `devplane dispatch --agent`.
     pub id: String,
     pub name: String,
     /// The command line, as the registry publishes it.
@@ -34,7 +34,7 @@ impl AgentSpec {
     }
 }
 
-/// The agents Vibeplane knows about out of the box.
+/// The agents Devplane knows about out of the box.
 ///
 /// Pinned to exact versions on purpose. An agent that silently upgrades under a
 /// conformance suite is an agent whose suite proves nothing, and `npx` will

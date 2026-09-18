@@ -1,6 +1,6 @@
-//! Runs Vibeplane owns, over the Agent Client Protocol.
+//! Runs Devplane owns, over the Agent Client Protocol.
 //!
-//! An observed session is something Vibeplane watches; a driven one is
+//! An observed session is something Devplane watches; a driven one is
 //! something it can answer. The difference on the board is one word, which is
 //! the point — the same run, the same inbox, the same project grouping,
 //! whether the session was started here or in somebody's terminal.
@@ -128,7 +128,7 @@ async fn start(
 ///
 /// Deliberately not automatic on startup. Resuming spends money and runs an
 /// agent in a repository, and doing either because a machine rebooted is a
-/// decision nobody made — so the inbox offers it and a person (or `vibeplane
+/// decision nobody made — so the inbox offers it and a person (or `devplane
 /// work resume`) takes it.
 pub async fn resume(state: &Shared, run: &RunId) -> Result<RunId> {
     let (agent_id, agent_command, agent_session, cwd, live) = {
@@ -143,7 +143,7 @@ pub async fn resume(state: &Shared, run: &RunId) -> Result<RunId> {
         )
     };
     if live != RunMode::Driven {
-        bail!("that is a session Vibeplane watches, not one it drives");
+        bail!("that is a session Devplane watches, not one it drives");
     }
     if state.sessions.lock().await.contains_key(run) {
         bail!("that run already has an agent; there is nothing to resume");
@@ -306,7 +306,7 @@ pub async fn require_trust(state: &Shared, cwd: &Path) -> Result<()> {
     }
     anyhow::bail!(
         "{} is not trusted yet. Starting an agent there runs that repository's own hooks \
-         and MCP servers without asking. Run `vibeplane trust {}` if you meant to.",
+         and MCP servers without asking. Run `devplane trust {}` if you meant to.",
         root.display(),
         root.display()
     )
@@ -368,7 +368,7 @@ async fn require_capacity(
     if live >= limit {
         anyhow::bail!(
             "{} already has {live} piece(s) of work with an agent in them and allows \
-             {limit}. Finish one, or raise max_parallel_runs in vibeplane.toml.",
+             {limit}. Finish one, or raise max_parallel_runs in devplane.toml.",
             root.display()
         );
     }
@@ -383,7 +383,7 @@ pub async fn prompt(state: &Shared, run: &RunId, text: String) -> Result<()> {
         .await
         .get(run)
         .cloned()
-        .context("that run is not one Vibeplane drives")?;
+        .context("that run is not one Devplane drives")?;
     state
         .ingest(
             run.clone(),
@@ -458,7 +458,7 @@ impl Decision {
 ///
 /// This matters more than it looks. A standing grant lives inside the *agent's*
 /// session: every later call it covers is approved without a request ever
-/// reaching Vibeplane again. Recording it as a plain "allow" would make the
+/// reaching Devplane again. Recording it as a plain "allow" would make the
 /// decision log answer "why did that command run without anybody being asked?"
 /// with silence — which is the one question this product exists to answer. So
 /// the outcome says which it was, and the reason says what it means.
@@ -474,7 +474,7 @@ pub async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decisio
         .await
         .get(run)
         .cloned()
-        .context("that run is not one Vibeplane drives")?;
+        .context("that run is not one Devplane drives")?;
 
     // The options the agent offered, as recorded when the request arrived.
     let offered = {
@@ -552,11 +552,11 @@ pub async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decisio
     .for_run(run);
     if is_standing {
         // The log has to say this out loud, because it is the one decision
-        // whose consequences Vibeplane will not see. Everything this grant
+        // whose consequences Devplane will not see. Everything this grant
         // covers from here on is approved inside the agent, and no later row
         // will appear to explain it.
         record = record.because(
-            "a standing choice made by a person: the agent applies it to later matching calls itself, and Vibeplane sees no request for those",
+            "a standing choice made by a person: the agent applies it to later matching calls itself, and Devplane sees no request for those",
         );
     }
     state.record(record).await;
@@ -581,7 +581,7 @@ pub async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decisio
     Ok(())
 }
 
-/// Whether Vibeplane still has a session it can prompt for this run.
+/// Whether Devplane still has a session it can prompt for this run.
 ///
 /// Asked before offering anything that needs one, because an inbox button that
 /// cannot do what it says is the one failure a control plane cannot afford.
@@ -603,7 +603,7 @@ pub async fn stop(state: &Shared, run: &RunId) -> Result<()> {
             s.stop();
             Ok(())
         }
-        None => anyhow::bail!("that run is not one Vibeplane drives"),
+        None => anyhow::bail!("that run is not one Devplane drives"),
     }
 }
 
@@ -627,7 +627,7 @@ struct Pump {
     cost: f64,
     transcript: crate::core::Coalescer,
     /// Whether this repository wants what its agents say written down. Decided
-    /// once, when the agent starts, so that editing `vibeplane.toml` mid-turn
+    /// once, when the agent starts, so that editing `devplane.toml` mid-turn
     /// cannot half-record a conversation.
     keep_transcript: bool,
 }
@@ -798,7 +798,7 @@ async fn handle(
             let title = call.title.clone();
             // The same rules that answer a hook answer this, in the same
             // vocabulary: the kind the agent declared, and the arguments it
-            // actually passed. A call Vibeplane cannot classify is one no rule
+            // actually passed. A call Devplane cannot classify is one no rule
             // can honestly be said to cover, so nothing auto-decides it and a
             // person is asked — which is the direction that is safe to be
             // wrong in.
@@ -882,6 +882,7 @@ async fn handle(
                         kind: Some(o.kind),
                     })
                     .collect(),
+                call: None,
             })
             .await;
         }

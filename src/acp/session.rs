@@ -1,4 +1,4 @@
-//! A driven session: an ACP agent Vibeplane owns.
+//! A driven session: an ACP agent Devplane owns.
 //!
 //! The protocol's client API is shaped around one connection that lives for as
 //! long as the conversation, so a driven run is an actor: a task that owns the
@@ -273,7 +273,7 @@ impl Session {
 ///
 /// The agent is spawned by the protocol crate, as the leader of its own process
 /// group, with a guard that kills that group when the connection is torn down.
-/// Vibeplane never signals an agent itself; its part is to tear the connection
+/// Devplane never signals an agent itself; its part is to tear the connection
 /// down, which [`Session::stop`] does and [`crate::daemon::AppState::shutdown`]
 /// does for all of them at once.
 ///
@@ -300,7 +300,7 @@ pub async fn spawn(
 /// **Two ways to continue a session, advertised separately.**
 /// `session/resume` continues without replaying history;
 /// `session/load` (`agentCapabilities.loadSession`) continues with it. Resume
-/// is preferred where offered — Vibeplane already holds the transcript, so a
+/// is preferred where offered — Devplane already holds the transcript, so a
 /// replay only duplicates it. GitHub Copilot offers load and not resume.
 ///
 /// An agent with neither is refused rather than downgraded to a new session:
@@ -337,7 +337,7 @@ async fn connect(
     let ev_for_perm = ev_tx.clone();
     let pending_for_perm = pending.clone();
     // `session/load` replays the conversation, as ordinary notifications
-    // arriving before the response. Vibeplane already holds that transcript, so
+    // arriving before the response. Devplane already holds that transcript, so
     // taking the replay too would write every sentence down twice — the same
     // reasoning that drops `user_message_chunk`.
     let replaying = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -346,7 +346,7 @@ async fn connect(
     tokio::spawn(async move {
         let result = agent_client_protocol::Client
             .builder()
-            .name("vibeplane")
+            .name("devplane")
             .on_receive_notification(
                 async move |notification: SessionNotification, _cx| {
                     let replaying = replaying_for_notify.load(std::sync::atomic::Ordering::Relaxed);
@@ -474,7 +474,7 @@ async fn run(
                 return Ok(());
             }
             // `resume` first where it exists: it continues without replaying,
-            // and Vibeplane already holds the transcript.
+            // and Devplane already holds the transcript.
             let sid = agent_client_protocol::schema::v1::SessionId::new(previous.clone());
             if !can_resume {
                 replaying.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -792,7 +792,7 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
                 })
                 .collect(),
         )],
-        // The user's own message, replayed when a session is resumed. Vibeplane
+        // The user's own message, replayed when a session is resumed. Devplane
         // records what it sent at the moment it sends it, so taking this too
         // would write every prompt down twice.
         SessionUpdate::UserMessageChunk(_) => Vec::new(),

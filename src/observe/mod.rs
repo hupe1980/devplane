@@ -1,6 +1,6 @@
 //! Observation channels.
 //!
-//! Everything Vibeplane learns about a session it did not start arrives through
+//! Everything Devplane learns about a session it did not start arrives through
 //! one of these, and every one of them is a documented interface:
 //!
 //! * [`hook`](crate::observe::hook) — Claude Code hooks: lifecycle, blocking, and the policy gate.

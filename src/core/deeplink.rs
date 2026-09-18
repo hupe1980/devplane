@@ -3,7 +3,7 @@
 //! Claude Code registers two URL handlers with the operating system, on macOS,
 //! Linux and Windows, and they are the only cross-platform way to put somebody
 //! in front of a session — or to start one in the right place with the right
-//! prompt. Vibeplane builds the URL and hands it over; it neither registers
+//! prompt. Devplane builds the URL and hands it over; it neither registers
 //! anything nor opens anything itself.
 //!
 //! Two properties make this safe to generate from a supervisor, and both are
@@ -11,7 +11,7 @@
 //!
 //! * **A deep link executes nothing.** It picks a directory and fills the
 //!   prompt box. Claude Code shows `Prompt from an external link` until the
-//!   person sends or clears it, and warns above 1 000 characters. Vibeplane
+//!   person sends or clears it, and warns above 1 000 characters. Devplane
 //!   never auto-sends one.
 //! * **The prompt is data.** It may quote an issue body, a failing test or a
 //!   tool call — text somebody else wrote, arriving at something that can run
