@@ -135,10 +135,19 @@ shoot() { # file-name  hash  height  [light|dark]  [width]
   echo "make-board: site/static/$name.png ($(du -k "site/static/$name.png" | cut -f1) KB)"
 }
 
-# **A phone, because the question this page answers is asked away from a desk.**
-# 390 points is an iPhone's CSS width; anything that scrolls sideways here is
-# broken for the case the page exists for.
-shoot phone needs 900 "" 390
+# **The narrow view, at 500 — which is as narrow as Chrome will go.**
+#
+# `--window-size` is clamped: asking for 390 gives a 500-point *layout* cropped
+# to a 390-wide PNG, which looks exactly like a page that scrolls sideways and
+# is not one. A whole phone-overflow "bug" was chased before a diagnostic
+# printed `vw500 sw500` and settled it — the page had never overflowed, and
+# `--headless=new` clamps the same way.
+#
+# 500 still exercises the narrow layout, because the media query turns over at
+# 46rem. What it does not prove is 390, and saying 390 when the tool gives 500
+# would be the kind of claim this project fails builds over.
+shoot narrow needs 900 "" 500
+shoot diag needs 900 "" 390
 
 shoot board boardsec 940
 # Straight after the dark one, so the two are the same board seconds apart and
