@@ -77,6 +77,34 @@ FLOOR="$(grep -m1 '^floor:' "$LEDGER" | awk '{print $2}')"
 # a wider grep here.
 RULES='deny rule|allow rule|ask rule|permission rule|permission check|auto-approv|Bash\(|Read\(|Edit\(|Write\(|--disallowedTools|--allowedTools|permission mode'
 
+# ---------------------------------------------------------------------------
+# **The second ledger: the channels, not the rules.**
+#
+# `RULES` above reads `Bash,` and not `Bash(`, which is how 2.1.271's
+# per-command `allowed_domains` on Bash, PowerShell and Monitor — a
+# permission-shaped construct — went unseen. The fix is *not* to widen `RULES`:
+# its count is quoted in the notes and load-bearing, and widening it in place
+# would change what that number means without saying so.
+#
+# **The boundary was measured before it was chosen.** Everything
+# permission-adjacent matches 220 rows; adding `sandbox` alone takes a candidate
+# from 41 to 142. An unfinished ledger is worse than none, because it looks like
+# coverage.
+#
+# So: **in scope if a row changes what a rule can say or which calls a rule
+# reaches; out if it changes how a person is asked.** `sandbox` is the arguable
+# exclusion and is excluded deliberately — it changes the environment a call
+# runs in rather than what a rule can say. That line is arguable, which is why
+# it is written here rather than left implicit in the pattern.
+CHANNELS='allowed_domains|allowedDomains|defaultMode|bypassPermissions|PreToolUse|PostToolUse|PreModelSwitch'
+
+# The channel rows, newest first, excluding anything the rule ledger already has.
+channel_rows() {
+  awk '/^## / { v = substr($0, 4); next }
+       /^- / { if (v != "") printf "%s\t%s\n", v, substr($0, 3) }' "$CHANGELOG" \
+    | grep -E "$CHANNELS" | grep -vE "$RULES"
+}
+
 # Rows since the floor, newest first, as `<version>\t<text>`.
 rows() {
   awk -v floor="## $FLOOR" '
@@ -150,6 +178,21 @@ newest=$(grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' "$CHANGELOG" | awk '{print $2
 POLICY="src/core/policy.rs"
 cleared=$(grep -oE 'pub const ROWS_CLEARED_THROUGH: &str = "[0-9.]+"' "$POLICY" \
   | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+
+# `--channels` prints the second ledger and says how big it is, so the boundary
+# stays a number somebody can argue with rather than a claim.
+if [ "$MODE" = "--channels" ]; then
+  n=$(channel_rows | wc -l | tr -d " ")
+  echo "channel ledger — rows that change what a rule can say or which calls it reaches"
+  echo "boundary: sandbox is excluded deliberately; it changes the environment a call runs in"
+  echo
+  channel_rows | while IFS="$(printf "\t")" read -r v text; do
+    printf "  %-9s %s\n" "$v" "$(printf "%s" "$text" | cut -c1-140)"
+  done
+  echo
+  echo "changelog-rows: $n channel row(s) outside the rule ledger"
+  exit 0
+fi
 
 if [ "$MODE" = "--owed" ] || [ "$MODE" = "--advance" ]; then
   if [ -z "$newest" ] || [ -z "$cleared" ]; then
