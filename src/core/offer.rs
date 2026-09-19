@@ -74,6 +74,26 @@ pub struct RuleOffer {
     pub section: String,
 }
 
+impl RuleOffer {
+    /// The line to paste, **in the destination file's own language**.
+    ///
+    /// The destination stopped being Devplane's TOML on 2026-09-18 and became
+    /// the agent's `settings.json`. The text kept its old shape for a while, so
+    /// the product was handing out a TOML line for a JSON file: pasting it
+    /// broke the very file somebody was editing to be interrupted less.
+    ///
+    /// One home, because the page and the terminal both render this and they
+    /// drifted apart exactly once already.
+    pub fn pasteable(&self) -> String {
+        let rule = serde_json::Value::String(self.rule.clone());
+        if self.section.starts_with("permissions") {
+            format!("\"permissions\": {{ \"allow\": [{rule}] }}")
+        } else {
+            format!("auto_allow = [{rule}]")
+        }
+    }
+}
+
 /// Why there is no rule.
 ///
 /// A value rather than an absence, because a blank where an offer belongs reads
@@ -514,5 +534,35 @@ mod tests {
                 o.rule
             );
         }
+    }
+
+    /// The offered line must parse as the file it names.
+    ///
+    /// The destination is `.claude/settings.json`, so the text has to be JSON.
+    /// It was TOML for a while in both surfaces, which meant the one action
+    /// this product offers a stuck person broke their settings file. The page
+    /// was fixed from a screenshot; the terminal was not, because nothing read
+    /// it. This reads it.
+    #[test]
+    fn the_line_offered_parses_as_the_file_it_is_pasted_into() {
+        let dir = Path::new("/repo");
+        let o = compose(
+            "Bash",
+            &bash("cargo test --lib diff"),
+            &ctx(dir),
+            &[],
+            &dest(),
+        )
+        .expect("an offer");
+        assert!(
+            o.section.starts_with("permissions"),
+            "the destination moved"
+        );
+        let line = o.pasteable();
+        // A fragment of an object is not a document, so it is wrapped the way
+        // somebody pasting it into `{ … }` would wrap it.
+        let doc: serde_json::Value = serde_json::from_str(&format!("{{{line}}}"))
+            .unwrap_or_else(|e| panic!("{line} is not JSON: {e}"));
+        assert_eq!(doc["permissions"]["allow"][0], serde_json::json!(o.rule));
     }
 }

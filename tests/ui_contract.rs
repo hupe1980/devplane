@@ -196,6 +196,64 @@ fn every_button_the_inbox_renders_is_one_the_item_offered() {
 }
 
 #[test]
+fn the_key_legend_names_only_keys_the_row_under_the_cursor_would_answer() {
+    // The footer used to list nine fixed shortcuts. Most did not apply to most
+    // rows — `y`/`n` answers a permission and nothing else, `f` and `a` need a
+    // session behind the row — so the legend spent the space telling people
+    // about keys that would do nothing, on every screen.
+    //
+    // It is now derived from `item.actions`, the same array the buttons and the
+    // key handler read. Two ways that could rot, and both are checked here.
+
+    // One: somebody puts the static list back.
+    assert!(
+        PAGE.contains(r#"<span class="rowkeys" id="rowkeys"></span>"#),
+        "the row-key legend is hard-coded again; it is filled by rowkeys() so it \
+         cannot describe a key the row would not answer"
+    );
+
+    // Two: an action is renamed on the daemon's side. The button for it fails
+    // the test above; the legend entry would just quietly stop appearing, which
+    // is invisible — the footer still renders, just shorter.
+    let table = PAGE
+        .split("const ROWKEY = [")
+        .nth(1)
+        .expect("the legend's action table")
+        .split("];")
+        .next()
+        .expect("the table ends");
+    let mut named = 0;
+    for (at, _) in table.match_indices("[\"") {
+        let action: String = table[at + 2..].chars().take_while(|c| *c != '"').collect();
+        assert!(
+            PAGE.contains(&format!("i.actions.includes(\"{action}\")")),
+            "the legend offers a key for `{action}`, and no button in the inbox is \
+             gated on it — so either the action was renamed or the key does nothing"
+        );
+        named += 1;
+    }
+    assert!(
+        named >= 4,
+        "only {named} legend entries were read; the table's shape changed and this \
+         test stopped checking it"
+    );
+
+    // And the whole legend goes away where there is no keyboard to press.
+    let touch = PAGE
+        .split("@media (pointer: coarse)")
+        .nth(1)
+        .expect("the touch rule")
+        .split('}')
+        .next()
+        .expect("the rule ends");
+    assert!(
+        touch.contains("footer .rowkeys") && touch.contains("display: none"),
+        "the row keys are still shown on a touch device, where none of them can \
+         be pressed"
+    );
+}
+
+#[test]
 fn work_items_can_be_snoozed_through_a_route_that_exists() {
     // The items only Work produces outlive the sessions that made them, so
     // they frequently carry no run id at all. Sending their `snooze` to

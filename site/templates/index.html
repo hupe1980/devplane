@@ -4,12 +4,13 @@
 <section class="hero">
   <div class="wrap">
     <p class="eyebrow">Local-first · One binary · MIT OR Apache-2.0</p>
-    <h1>See every coding agent on your machine.<br><span class="accent">Know which one needs you.</span></h1>
+    <h1>A session ends.<br><span class="accent">The work does not.</span></h1>
     <p class="lede">
-      Devplane is a control plane for AI coding agents. It watches every Claude&nbsp;Code session
-      already running — terminal, VS&nbsp;Code, desktop, background — drives any agent that speaks
-      the <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a>, and turns
-      <em>“the agent says it’s done”</em> into <em>“your project’s checks agree”</em>.
+      Devplane is one page for every project on your machine: what needs you, what went red after
+      the agent stopped, who is waiting on a review — and which finished work can <em>prove</em> its
+      checks passed. It watches the sessions already running, drives any agent that speaks the
+      <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a>, and never approves
+      a tool call on your agent’s behalf.
     </p>
 
     <div class="cta-row">
@@ -52,18 +53,18 @@
 
 <section class="band">
   <div class="wrap">
-    <h2>Five windows, five agents, and no idea which one is stuck</h2>
+    <h2>The check goes red two hours after the agent stopped</h2>
     <div class="two-col">
       <div>
         <p>
-          Claude Code’s own <code>claude agents</code> shows background sessions in one directory.
-          The VS&nbsp;Code Agents window shows what VS&nbsp;Code started. Neither spans your terminal,
-          your editor and the desktop app at once — and none of them knows what <em>done</em> means
-          for your project.
+          By then there is no session left to show it. Claude Code’s own <code>claude agents</code>
+          shows background sessions and does it well — but a session view can only render sessions,
+          and a branch, an open pull request and a reviewer all outlive the one that made them.
         </p>
         <p>
-          Devplane sits above all of them, on documented interfaces only, and stays out of the way.
-          It does not replace your editor, your tracker or your agent. It is the layer that spans them.
+          Devplane’s unit is a <strong>Work</strong>: the branch, the project’s own checks, the pull
+          request, the cost. It sits above every agent on documented interfaces only, and stays out
+          of the way. It does not replace your editor, your tracker or your agent.
         </p>
       </div>
       <div>
@@ -71,7 +72,7 @@
           <strong>It works before you configure anything.</strong> Sessions are discovered from
           Claude Code’s own roster, so <code>devplane ls</code> is useful on first run with nothing
           installed. Connecting is what adds live state: cost, context usage, blocking, and the
-          permission gate.
+          prohibitions you write.
         </p>
       </div>
     </div>
@@ -123,13 +124,13 @@
     </article>
 
     <article class="feature">
-      <h3>Permissions that are really yours</h3>
+      <h3>Devplane never approves</h3>
       <p>
-        Claude&nbsp;Code’s rule syntax, implemented in full and resolved per repository. Deny always
-        wins, and holds in auto mode too, where a classifier approves routine calls and no prompt
-        ever appears. A rule that cannot match anything is refused rather than carried, because a
-        deny rule that silently matches nothing reads as protection and is none. The board reads
-        every repository’s rules back in the order they are evaluated, and writes none of them.
+        It can prohibit a call and defer one to you; it cannot approve one — the type has no
+        <code>Allow</code> variant, so approving is not something this code can express. Prohibitions
+        use Claude&nbsp;Code’s own syntax, resolve per repository, and hold in auto mode where no
+        prompt ever appears. A spelling that cannot match anything is refused rather than carried,
+        because a deny rule that silently matches nothing reads as protection and is none.
       </p>
       <a class="more" href="{{ get_url(path='/docs/permissions/') }}">The rule syntax</a>
     </article>
@@ -138,8 +139,8 @@
       <h3>An answer months later</h3>
       <p>
         Every verdict a rule reaches, every gate, every push and every pull request is appended to a
-        decision log with the reason behind it. “Auto-approved” is not an answer.
-        “Auto-approved&nbsp;by <code>Bash(pnpm test *)</code>” is.
+        decision log with the reason behind it. “Refused” is not an answer.
+        “Refused&nbsp;by <code>Bash(rm -rf *)</code>” is.
       </p>
       <a class="more" href="{{ get_url(path='/docs/decisions/') }}">The decision log</a>
     </article>
@@ -150,8 +151,8 @@
   <div class="wrap">
     <h2 class="section-head">The loop</h2>
     <ol class="loop">
-      <li><strong>See</strong><span>Every session, grouped by project, on one board.</span></li>
-      <li><strong>Decide</strong><span>One ranked inbox. Permissions, questions, red checks, spent budgets.</span></li>
+      <li><strong>See</strong><span>One list: what needs you, across every project.</span></li>
+      <li><strong>Decide</strong><span>Permissions, questions, red checks, spent budgets — ranked by what is waiting.</span></li>
       <li><strong>Dispatch</strong><span>An agent in an isolated checkout, with the project’s rules.</span></li>
       <li><strong>Verify</strong><span>Your own commands decide. Failures go back, bounded.</span></li>
       <li><strong>Account</strong><span>Every decision, with the rule or the check behind it.</span></li>

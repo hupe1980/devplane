@@ -432,18 +432,17 @@ fn the_refused_rules_table_on_the_site_is_the_one_the_gate_refuses() {
     }
 }
 
-/// The release the gate was measured against has one home, and the documents
-/// that quote it agree with it.
+/// Wherever the published tree states the release the gate was measured
+/// against, it is the number the binary holds.
 ///
-/// It used to live in comments in three source files, in a shell script, and in
-/// four published pages — eight copies of a number that moves every time
-/// somebody runs the differential harness. The internal notes already hold each
-/// figure to a single authority; the *published* tree had no such rule, and a
-/// page claiming a baseline the binary does not hold is the same class of
-/// silent drift, aimed at the reader instead of the author.
+/// It used to live in comments in three source files, in a shell script and in
+/// four published pages — eight copies of one number, and nothing read any of
+/// them. The harness that moved it is gone with the approval path, so the
+/// number is frozen now; what is still worth protecting is the copying.
 ///
-/// `VERIFIED_AGAINST` is the authority. Raising it means running the harness in
-/// full, and this test is what makes the rest follow.
+/// `VERIFIED_AGAINST` is the authority. The scan is over **every** published
+/// page rather than a list of four, because the previous version of this test
+/// named its files and a fifth page could say anything it liked.
 #[test]
 fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
     let baseline = devplane::core::policy::VERIFIED_AGAINST;
@@ -464,14 +463,28 @@ fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
         "ran in full against ",
         "full run, against Claude Code ",
     ];
+    let mut pages: Vec<PathBuf> = vec![root.join("README.md")];
+    let mut stack = vec![root.join("site/content")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                pages.push(p);
+            }
+        }
+    }
     let mut found = 0;
-    for rel in [
-        "site/content/docs/permissions.md",
-        "site/content/docs/security.md",
-        "site/content/docs/observe.md",
-        "README.md",
-    ] {
-        let path = root.join(rel);
+    for path in pages {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -492,17 +505,17 @@ fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
                 assert_eq!(
                     version, baseline,
                     "{rel} says the gate was verified against {version}; the binary says \
-                     {baseline}. Raising the baseline means running \
-                     scripts/verify-permissions-diff.sh in full."
+                     {baseline}. The baseline is frozen — change the page, not the \
+                     constant."
                 );
                 found += 1;
             }
         }
     }
     assert!(
-        found >= 4,
-        "only {found} statements of the gate baseline were found in the published tree; \
-         the phrasing changed and this test stopped reading them"
+        found >= 1,
+        "no page states the gate baseline any more; either the phrasings above went \
+         stale or the number stopped being published, and this test now checks nothing"
     );
 }
 

@@ -1,8 +1,8 @@
 # Devplane
 
-> A local-first control plane for AI coding agents. One Rust binary that watches every coding-agent session on a machine, drives any agent speaking the Agent Client Protocol, arbitrates each tool call against rules committed to the repository, runs the project's own checks before anything is called done, and writes every decision to an append-only log that names the rule or check behind it. No account, no cloud relay, loopback only.
+> A local-first control plane for AI coding agents. One Rust binary that shows what needs a person across every project on a machine, watches the coding-agent sessions already running, drives any agent speaking the Agent Client Protocol, runs the project's own checks before anything is called done, and writes every decision to an append-only log that names the rule or check behind it. No account, no cloud relay, loopback only.
 
-The one property no other tool in this category has: the permission rules are written in **Claude Code's own syntax**, so the running vendor can be asked the same question and a disagreement fails the build. `devplane doctor` prints how stale that measurement is.
+The unit is a **Work** — the branch, the gates, the pull request, the cost — which outlives the session that started it. **Devplane never approves a tool call**: it can prohibit one and defer one to a person, and grants belong in the agent's own settings.
 
 ## Start here
 
@@ -29,12 +29,12 @@ Every command takes a global `--json` that prints machine-readable output instea
 - `devplane say <run>`, `devplane decide <run>`: send a prompt to, or answer a permission from, a driven run.
 - `devplane agents`: the agents Devplane can drive.
 - `devplane check [path]`: read the repository's `devplane.toml` and say what it will do. Offline, daemon-free, CI-safe.
-- `devplane explain <call>`: what the gate would decide about one call, and why. `--replay` asks it of every call already observed.
+- `devplane explain <call>`: whether the rules refuse or defer one call, and why. `--replay` asks it of every call already observed and composes the grant to paste into the agent's settings.
 - `devplane trust [path]`: allow agents to start in a repository, after printing its hooks, MCP servers, skills and overbroad rules. `--dry-run` prints and trusts nothing.
 - `devplane work start|list|show|verify|approve|retry|resume|finish`: work that outlives a session, with the project's gates between steps. `--spec <file-or-folder>` names the specification it answers; no format is learned.
 - `devplane snooze <id>`: hide a run's inbox items for a while.
 - `devplane open`, `devplane watch`: the board in a browser; events as they arrive.
-- `devplane doctor` (alias `diagnostics`): channel health, provider, gate staleness, daemon status.
+- `devplane doctor` (alias `diagnostics`): channel health, provider, daemon status, and how far a running session has moved past the release the rules were measured against.
 - `devplane connect <provider>`, `devplane disconnect <provider>`: install or remove hooks and telemetry, with a backup.
 - `devplane stop`: stop the running daemon.
 - `devplane mcp`: serve Devplane's read-only surface to an agent over MCP on stdio — `inbox`, `work`, `explain`, `audit`. No tool on it writes; anything that acts still goes through a person. Register it with your agent as a command MCP server.
@@ -43,7 +43,7 @@ Every command takes a global `--json` that prints machine-readable output instea
 ## Configuration
 
 - [Configuration reference](https://hupe1980.github.io/devplane/docs/configuration/): the full `devplane.toml` — `[gates]`, `[pipelines]`, `[policy]`, `[budget]`, `[workspace]`, `[github]`, `[transcripts]`. Devplane reads these files and never writes them; `devplane check --json` and the board's `,` panel print one back.
-- [Permissions](https://hupe1980.github.io/devplane/docs/permissions/): the rule syntax, which is Claude Code's own; `never_auto`, `always_ask`, `auto_allow`; deny wins in both directions; what a rule cannot see.
+- [Permissions](https://hupe1980.github.io/devplane/docs/permissions/): the rule syntax, which is Claude Code's own; `never_auto` and `always_ask`; deny wins in both directions; what a rule cannot see. Devplane never approves, so there is no allow list.
 - [Verified done](https://hupe1980.github.io/devplane/docs/verified-done/): gates, the done certificate, and why an agent's own report is not one.
 - [Pipelines](https://hupe1980.github.io/devplane/docs/pipelines/): declared chains of runs with gates between them, including spec-driven drift checking and `--spec`, which stamps the specification a piece of work answers and counts its task list per gate.
 

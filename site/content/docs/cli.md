@@ -83,17 +83,17 @@ are invisible from reading a rule list, and they are where a permission layer is
 
 ### `devplane explain --replay`
 
-Which rule to write next, from the calls this machine has already made. It replays every observed
-tool call against the rules **as they are now**, and groups the ones that reached you by the rule
-that would have answered them.
+Which grant to write next, from the calls this machine has already made. It replays every observed
+tool call against the rules **as they are now**, and groups the ones no rule here decides by the rule
+that would answer them — in your agent's settings, which is where a grant is enforced.
 
 ```console
 $ devplane explain --replay
 1284 tool calls in saas replayed against the rules as they are now
 
-     912   71%  allow
       14    1%  ask
-     358   28%  reached you
+      31    2%  deny
+    1239   97%  no rule here
 
 one rule each, most interruptions first
    118×  Bash(pnpm typecheck)
@@ -102,14 +102,14 @@ one rule each, most interruptions first
     41×  Read(src/**)
     12×  WebFetch(docs.rs)
 
-315 of the 358 calls that reached you would stop asking · paste into [policy] auto_allow, then devplane check
+1104 of the 1239 calls Devplane leaves to your agent · paste into permissions.allow in your agent's settings
 ```
 
 Each suggestion is in the vocabulary that tool's rules use: a command prefix with the `*` after the
 subcommand, a directory glob for a path rule, a domain for `WebFetch`.
 
 - **Offline**, like the rest of `explain`: it opens the store read-only and asks no agent anything.
-- **Nothing is written for you.** Paste what you want into `[policy] auto_allow`.
+- **Nothing is written for you.** Paste what you want into your agent's own settings.
 - A rule is offered only where one covers the set, and only after a command has interrupted you
   **three times** — which is what keeps `Bash(rm -rf node_modules)` off the list.
 
@@ -138,8 +138,8 @@ A permission item also names **the rule to paste so it is never asked again**, a
 ```console
  ! Permission: Bash [permission]
      cargo test --lib policy
-     never asked again: auto_allow = ["Bash(cargo test *)"]
-     covers 6 calls like it · paste into /Users/me/work/saas/devplane.toml [policy] auto_allow
+     never asked again: "permissions": { "allow": ["Bash(cargo test *)"] }
+     covers 6 calls like it · paste into /Users/me/work/saas/.claude/settings.json permissions.allow
 ```
 
 **A pattern only where there is a count behind it.** One interruption says this command needed a
@@ -347,19 +347,15 @@ Whether the tool itself is telling you the truth: hook latency, when telemetry w
 roster, each channel's last error **with the date it happened**, and any project whose
 `devplane.toml` will not parse — whose permission rules are therefore not in force.
 
-**It also says how old the gate's measurement is.** The rules are Claude Code's own syntax, so the
-running product can be asked the same question — and that check is only true on the day it runs.
+**It also says how far the running release has moved since the rules were checked against it.** That
+number is frozen — see [the baseline](/docs/permissions/#the-release-this-was-measured-against) — but
+the gap is still worth knowing.
 
 ```console
 gate
-  measured  Claude Code 2.1.273
-            3 releases behind a session on this machine (2.1.273)
-  rows      changelog rows cleared through 2.1.273 (not a compatibility claim)
+  verified against Claude Code 2.1.273
+            1 release behind a session on this machine (2.1.274)
 ```
-
-`measured` is the last release the full differential run was green against. `rows` is the last
-release whose rule-relevant changelog entries are all accounted for — cheaper, moves more often, and
-a statement about the ledger rather than a compatibility claim.
 
 Only the status-line shim reports a version, so with none installed `doctor` says nothing is
 reporting rather than implying there is no gap.

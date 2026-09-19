@@ -11,7 +11,7 @@ Two questions have to be answerable months later, in front of a repository you h
 > Why did that command run without anybody being asked? Why is there a pull request on this branch?
 
 Neither is answerable from an event log, because an event log records what happened **to** Devplane.
-These are facts about what Devplane **did**, or allowed.
+These are facts about what Devplane **did**, or refused.
 
 ```sh
 devplane audit
@@ -25,8 +25,8 @@ devplane audit <run-or-work-id>
                      ↳ the project's gates passed
 2026-09-13T18:04:02 daemon  gate:run         pnpm typecheck && pnpm test -- --run
                      ↳ check passed
-2026-09-13T17:58:40 policy  agent:tool.use   Bash: pnpm test -- --run
-                     ↳ Bash(pnpm test *)
+2026-09-13T17:58:40 policy  agent:tool.use   Bash: rm -rf /tmp/build
+                     ↳ refused by Bash(rm -rf *)
 2026-09-13T17:58:31 human   agent:tool.use   rm -rf node_modules
 ```
 
@@ -38,7 +38,7 @@ Each row carries the **actor** (`policy`, `human`, `daemon`), the **action** in 
 the permission rules speak (`agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`,
 `work:advance`), the **subject**, the **outcome**, and the **reason**.
 
-“Auto-approved” is not an answer. “Auto-approved by `Bash(pnpm test *)`” is.
+“Refused” is not an answer. “Refused by `Bash(rm -rf *)`” is.
 
 ## Observations are pruned; decisions are not
 
@@ -47,7 +47,7 @@ Both live in one SQLite file, and the asymmetry is the point rather than an acci
 | | Nature | Retention | Rebuildable from |
 |---|---|---|---|
 | Runs, events, telemetry, transcripts | things that happened **to** Devplane | pruned on a timer, with the search index | the providers |
-| Decisions | what Devplane **did**, or allowed | appended, never pruned | nothing |
+| Decisions | what Devplane **did**, or refused | appended, never pruned | nothing |
 
 An observation can be re-derived from the provider. A decision cannot be re-derived from anything —
 so pruning it would leave a pull request nobody can account for.
@@ -67,9 +67,8 @@ would be recording a guess.
 and no request for those reaches Devplane. It is the one decision whose consequences this log cannot
 show you, so two rules apply.
 
-- **The policy never chooses one.** When a rule auto-approves a call, Devplane picks `allow_once`.
-  The rule your project wrote *is* the standing grant; a second one inside the agent would put
-  authority somewhere you cannot read back.
+- **Devplane never chooses one**, because it never approves a call at all. Every `allow_always` in
+  this log was chosen by a person.
 - **When you choose one, the log names it** — outcome `allow_always`, not `allow`.
 
 ```console

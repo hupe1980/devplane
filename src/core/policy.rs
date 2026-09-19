@@ -4,18 +4,21 @@
 //! `PermissionRequest` hook for observed sessions, `session/request_permission`
 //! for driven runs, and Devplane's own effects.
 //!
-//! The rule syntax is Claude Code's, implemented against its published
-//! specification — the four specifier shapes, the four path anchors, the MCP
-//! prefixes and the allow/deny asymmetries. <https://hupe1980.github.io/devplane/docs/permissions/>
-//! is the reference; the tests below are a case per row of it.
+//! **Nothing here answers yes.** [`Verdict`] has no `Allow`, so the type cannot
+//! express an approval: a rule set can refuse a call or put it in front of a
+//! person, and that is the whole vocabulary. Grants belong in the agent's own
+//! settings, where the thing enforcing them lives.
 //!
-//! Three properties matter more than expressiveness:
+//! The rule syntax is Claude Code's, so a prohibition can be moved between the
+//! two files by cutting and pasting it — the four specifier shapes, the four
+//! path anchors, the MCP prefixes, and the deny-side readings.
+//! <https://hupe1980.github.io/devplane/docs/permissions/> is the reference.
+//!
+//! Two properties matter more than expressiveness:
 //!
 //! * **It cannot fail open.** Evaluation is total, synchronous and in-process.
 //!   This runs on a hook Claude Code is blocked on, so there is no branch that
 //!   waits on anything.
-//! * **`never_auto` wins**, whatever the order, so a permissive rule can never
-//!   widen a prohibition somebody wrote deliberately.
 //! * **A rule that cannot work says so.** [`Rule::problems`] reports the
 //!   spellings Claude Code skips on load, because a deny rule that silently
 //!   matches nothing reads as protection and is none.
@@ -483,27 +486,17 @@ const KNOWN_TOOLS: &[&str] = &[
     "Write",
 ];
 
-/// Whether a tool's content field is a shell command line whose file operands
-/// a path rule should reach. Bash only: PowerShell's redirection and cmdlet
-/// vocabulary is a different language, and guessing at it would be the kind of
-/// confident wrong this module exists to avoid.
-/// The Claude Code release this matcher's behaviour has been differentially
-/// tested against, end to end.
+/// The last Claude Code release this matcher was measured against.
 ///
-/// One number, one home: `doctor` reads it, and a session observed running a
-/// *newer* release is reported rather than assumed equivalent — the gap between
-/// "verified against" and "what is actually running here" is the window every
-/// silent widening has lived in.
+/// **Frozen.** The differential harness that used to raise it is gone with the
+/// approval path: nothing here answers *yes* on the vendor's behalf any more,
+/// so there is no claim about the vendor's behaviour left to keep current. What
+/// survives — deny and ask — is Devplane's own decision, and being stricter
+/// than the agent needs no agreement from it.
 ///
-/// Raised only by running `scripts/verify-permissions-diff.sh` in full against
-/// that release on both axes. It is not a "latest version we know about".
-/// The release the **full** differential matrix last ran green against.
-///
-/// This is the number the product's central claim is made of — *the rule table
-/// is differentially measured against the running vendor* — and it is a claim
-/// in the present tense, so it decays every day the vendor ships and this does
-/// not run. It moves **only on a green full run**, never by editing a constant
-/// ahead of one.
+/// It is still reported, because `doctor` says how far the running release has
+/// moved since anyone checked, and that is a fact about this number rather than
+/// a promise about the next release.
 pub const VERIFIED_AGAINST: &str = "2.1.273";
 
 /// Where a running release sits relative to a floor.
@@ -652,6 +645,10 @@ pub fn is_command_tool(tool: &str) -> bool {
     shape_of(tool) == Shape::Command
 }
 
+/// Whether a tool's content field is a shell command line whose file operands
+/// a path rule should reach. Bash only: PowerShell's redirection and cmdlet
+/// vocabulary is a different language, and guessing at it would be the kind of
+/// confident wrong this module exists to avoid.
 pub fn is_shell(tool: &str) -> bool {
     // `Monitor` runs its `command` through the same shell, so a redirection in
     // it writes the same file and a recognised file command in it reads the

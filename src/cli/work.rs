@@ -311,7 +311,13 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     let calls = store.observed_tool_calls(Some(&scope), limit).await?;
 
     let cache = crate::core::PolicyCache::for_projects_only();
-    let mut counts = [0usize; 3]; // ask, deny, reached you
+    // The third is every call no rule here decides — which is most of them, and
+    // it is *not* the same as "interrupted a person": the agent's own settings
+    // answered most of these silently. This counter said "reached you" until
+    // the approval path was deleted made the difference visible, and a count
+    // that overstates how often somebody was interrupted is an argument for
+    // writing rules that were never needed.
+    let mut counts = [0usize; 3]; // ask, deny, no rule here
     // Commands that reached a person, grouped by the rule that would answer
     // them. `BTreeMap` so two runs of this print the same thing.
     let mut open: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -397,7 +403,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     for (n, label, colour) in [
         (counts[0], "ask", YELLOW),
         (counts[1], "deny", render::RED),
-        (counts[2], "reached you", DIM),
+        (counts[2], "no rule here", DIM),
     ] {
         if n > 0 {
             println!("  {:>6}  {:>3}%  {}", n, pct(n), paint(colour, label));
@@ -405,10 +411,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     }
 
     if advice.is_empty() {
-        println!(
-            "\n{}",
-            paint(DIM, "nothing that reached you has a rule worth writing")
-        );
+        println!("\n{}", paint(DIM, "nothing here has a rule worth writing"));
         return Ok(());
     }
 
@@ -436,7 +439,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
         paint(
             DIM,
             &format!(
-                "{shown} of the {} calls that reached you would stop asking · \
+                "{shown} of the {} calls Devplane leaves to your agent · \
                  paste into permissions.allow in your agent's settings",
                 counts[2]
             )
@@ -563,7 +566,7 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
     let policy = config.policy();
     if !policy.is_empty() {
         println!(
-            "  policy    {} deny, {} ask, {} allow",
+            "  policy    {} deny, {} ask, {} inert",
             policy.deny_rules().len(),
             policy.ask_rules().len(),
             policy.allow_rules().len()
@@ -596,8 +599,28 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
                 rule
             );
         }
-        for rule in policy.allow_rules() {
-            println!("            {} {}", paint(render::GREEN, "allow "), rule);
+        // **Printed grey, and labelled for what they are.** `auto_allow`
+        // decides nothing since the approval path was deleted: `Verdict` has
+        // no `Allow`. The key still parses so an older `devplane.toml` loads,
+        // but a green `allow` badge beside a rule that answers no call is this
+        // product telling somebody a protection is in force when it is not.
+        let inert = policy.allow_rules();
+        for rule in inert {
+            println!(
+                "            {} {}",
+                paint(DIM, "inert "),
+                paint(DIM, &rule.to_string())
+            );
+        }
+        if !inert.is_empty() {
+            println!(
+                "            {}",
+                paint(
+                    DIM,
+                    "auto_allow decides nothing — Devplane never approves a call. \
+                     Put grants in your agent's own settings."
+                )
+            );
         }
         // Advice, printed once and not per rule. A `Read` deny does exactly
         // what it says; what it does not say — that a shell redirection and

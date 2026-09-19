@@ -1,6 +1,6 @@
 [package]
 name = "devplane"
-description = "The local-first control plane for AI coding agents: see every session on your machine, gate what they may do, and make \"done\" mean your project's checks passed."
+description = "The local-first control plane for AI coding agents: one page for every project on your machine — what needs you, what is red, and which finished work can prove its checks passed."
 version = "0.5.0"
 edition = "2024"
 rust-version = "1.90"

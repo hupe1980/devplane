@@ -4,6 +4,14 @@ Notable changes per release. Dates are UTC.
 
 ## Unreleased
 
+**Breaking: Devplane no longer approves a tool call.** `Verdict` has no `Allow`
+variant, so the type cannot express an approval. A call your `[policy]` rules
+used to answer *yes* for is now answered by your agent's own permission system,
+exactly as if Devplane had said nothing. `auto_allow` still parses so an older
+`devplane.toml` loads, but nothing in it decides anything; `devplane check`
+prints those rules as `inert`. Move rules you want enforced into your agent's
+settings — `devplane explain --replay` composes them for you.
+
 **Renamed from Vibeplane, and every name moves with it.** The binary, the project
 file `devplane.toml`, the machine directory `~/.devplane/`, the `DEVPLANE_*`
 environment variables and the `devplane:ready` label. Nothing is read under the
@@ -15,56 +23,68 @@ mv vibeplane.toml devplane.toml          # in each project
 devplane connect claude                  # the installed hooks name the old binary
 ```
 
-**Two suggestion defects were shipped and are fixed.** A `WebFetch` rule was
-suggested as `WebFetch(docs.rs)`, missing the `domain:` the vendor's syntax
-requires — so pasting it granted nothing. And the suggestion never appeared at
-all for a session Devplane *watches* rather than drives, because the field it was
-read from was `None` at every site that built it. Both were found by making the
-product check its own suggestion before showing it.
+### Removed
+
+- **The permission mirror, and everything built to keep it honest.** Answering
+  *yes* on the vendor's behalf was a claim about somebody else's code. Keeping it
+  true needed three compatibility floors, a differential harness and a release
+  clock, and it produced **thirty-three** occasions when the mirror was wrong in
+  the dangerous direction — at a measured **$1,756–$3,511 a month** in probe
+  spend. Deleted: `Verdict::Allow`, the harness scripts, the rule ledger, the
+  conformance dialect axis and the release cadence. What is left prohibits and
+  defers, which claims nothing about anyone and cannot decay.
+- **`devplane gate`.** The command reported how current the mirror's measurement
+  was; there is no mirror to measure. `devplane doctor` still prints the frozen
+  baseline and how far a running session has moved past it.
 
 ### Added
 
+- **The page opens on what needs you.** One list across every project, ordered
+  by what is waiting on a person rather than by project or session count — work
+  and requests together, because a red check on yesterday's branch and a
+  permission asked two minutes ago are the same question. Sessions are still
+  there, below it: Claude Code ships `claude agents` and does that better.
+  Three empty states, because they are three different facts — *nothing needs
+  you* is the tool working, *Devplane has not answered recently* means the page
+  is not current, and *some projects could not be read* means the list is
+  narrower than it looks. The last one used to render as the first.
+- **A done certificate a reviewer can check without trusting this tool.** The
+  repository, the commit, the commands, their outcomes, and how to re-run them —
+  as Markdown or JSON. It is deliberately **unsigned**: the standard for this
+  shape keeps the producer inside the trust boundary, and this does not ask to be
+  believed. It also states what a green tick would hide — the commit is on no
+  remote, the tree was dirty, it passed on the fourth attempt — inside the
+  artefact, so those survive the paste.
 - **A permission says how to stop being asked it again, and nothing writes the
-  rule.** An item now carries the narrowest rule covering the calls this machine
-  has actually seen in that family, how many it covers, and the file to paste it
-  into — on the board as well as in the terminal. A pattern is offered only past
-  three distinct calls; below that it is the exact call, because one
-  interruption says nothing about the shape of the ones like it. The rule is
-  **replayed against the call before you are shown it**, so one that would not
-  have decided it is refused rather than handed over, and where no rule is
-  possible the item says which reason it is. There is no route that edits
-  `[policy]` and there will not be: an agent here runs as you and can read the
-  daemon's token, so a write path to the rules would be reachable by the thing
-  they govern.
-- **The project specifies its own features before building them**, with
-  [GitHub Spec Kit](https://github.com/github/spec-kit) — requirements with
-  stable ids, a plan checked against a written constitution, then a task list.
-  Those working files are not published, like the architecture notes; what
-  reaches this repository is a test per behaviour the specification asked for.
+  rule.** An item carries the narrowest rule covering the calls this machine has
+  seen in that family, how many it covers, and the file to paste it into — which
+  is your agent's own `settings.json`, in that file's own JSON. A pattern is
+  offered only past three distinct calls. The rule is **replayed against the call
+  before you are shown it**, so one that would not have decided it is refused
+  rather than handed over.
+- **A work view: what changed, what the checks said, and the release control
+  beside both.** `tab` and `enter`, or a click, on a work row opens what its
+  branch changed — against the **merge base**, so commits that landed on `main`
+  since are not reported as this work's doing — with every gate command, its exit
+  code, and the failing lines the agent was handed. A reproduction gate reads as
+  passing when its commands failed, and says why; a gate that recorded no
+  commands is distinguishable from one that passed. Uncommitted *and untracked*
+  files count. A change too large reports what is withheld and the command that
+  shows the rest, rather than a silent subset.
+- **A navigable shell, and two themes that were measured rather than eyeballed.**
+  Every contrast pair is computed by a test against the surface it sits on, in
+  both themes, so a token that fails is a failing build rather than something
+  somebody notices later.
 - **`devplane trust` counts the skills a repository ships**, not only the ones
   that pre-approve a tool. It reported *"declares no hooks, MCP servers or
   skills"* about a repository shipping ten of them — the scan was right and the
   sentence was false, which is the worse of the two for a gate whose job is
   telling you what will load into your agent before you consent.
-- **The gate's measurement caught up with the vendor.** The full differential
-  matrix ran green against Claude Code **2.1.273** — 126 allow cases and 208 deny
-  cases. Twelve deny shapes were **skipped rather than measured**, and the
-  command says so: a skipped shape is unmeasured, not clean. The vendor shipped
-  2.1.274 the same day and its one rule row cost a widening, which is the gap
-  this clock exists to report rather than a reason not to report it.
-- **A work view: what changed, what the checks said, and the release control
-  beside both.** Approving work you cannot see is not approval. `tab` and
-  `enter`, or a click, on a work row opens what its branch changed — against the **merge
-  base**, so commits that landed on `main` since the worktree was made are not
-  reported as this work's doing — with every gate command, its exit code, and
-  the failing lines the agent was handed. A reproduction gate reads as passing
-  when its commands failed, and says why; a gate that recorded no commands is
-  distinguishable from one that passed. Uncommitted *and untracked* files count:
-  a reviewer approves the checkout as it stands, and a file the agent created
-  would otherwise have been invisible. A change too large reports what is
-  withheld and the command that shows the rest, rather than a silent subset. The
-  release control is offered only where the work is actually held at a declared
-  human step.
+- **The project specifies its own features before building them**, with
+  [GitHub Spec Kit](https://github.com/github/spec-kit) — requirements with
+  stable ids, a plan checked against a written constitution, then a task list.
+  Those working files are not published, like the architecture notes; what
+  reaches this repository is a test per behaviour the specification asked for.
 
 ### Changed
 
@@ -73,24 +93,46 @@ product check its own suggestion before showing it.
   project's own feature specifications, and one directory cannot be both a
   gitignored build artefact and committed source of truth. `just specs` is now
   `just reference`.
+- **The changelog ledger covers channels rather than rules.** `just channels`
+  fails the build until every row of Claude Code's changelog touching a channel
+  Devplane uses — hooks, permission modes, the settings deciding whether a hook
+  is consulted — is covered or declined with a reason. A changed *rule* shape is
+  the vendor's business now; a changed *hook contract* is still ours.
 
 ### Fixed
 
+- **Two suggestion defects were shipped.** A `WebFetch` rule was suggested as
+  `WebFetch(docs.rs)`, missing the `domain:` the vendor's syntax requires — so
+  pasting it granted nothing. And the suggestion never appeared at all for a
+  session Devplane *watches* rather than drives, because the field it was read
+  from was `None` at every site that built it.
+- **The suggested rule was TOML for a JSON file.** After the destination moved to
+  `.claude/settings.json`, the text kept its old shape, so pasting it broke the
+  file somebody was editing to be interrupted less. The page was fixed from a
+  screenshot; the terminal was not, because nothing read it. Both now render the
+  same line from one function, and a test parses it as the file it names.
+- **The key legend described keys the row would not answer.** The footer listed
+  nine fixed shortcuts on every screen; `y`/`n` only answers a permission,
+  `1`–`9` needs options the agent actually offered, `f` and `a` need a session
+  behind the row. It is now derived from the same `actions` array the row's
+  buttons and the key handler read, so it cannot describe a key that does
+  nothing — and on a **touch device it is not shown at all**, where it was six
+  rows of key caps above two items, more of a phone screen than the list the
+  page exists for. The tools beside it stay, because without a keyboard they are
+  the only route to those surfaces; they drop their key caps and become buttons
+  that look like buttons.
+- **`devplane check` showed inert rules in green.** An `auto_allow` rule decides
+  nothing, and a green `allow` badge beside it told somebody a protection was in
+  force when it was not.
+- **`explain --replay` called every undecided call an interruption.** Most were
+  answered silently by the agent's own settings, so the count argued for writing
+  rules that were never needed.
 - **The spec task count included the specification's own quality checklist.**
-  Pointed at a real Spec Kit feature, the reader counted **47**
-  tasks where the task list had 31 — Spec Kit writes a `checklists/` folder
-  whose boxes validate the *spec*, not the feature. Where a `tasks.md` exists it
-  is now the task list and the other documents are not; where there is none,
-  every box still counts, because a one-file specification reporting zero is a
-  worse answer than the one being fixed. A **ticked** box is also no longer read
-  as an open question: the checklist line *"No [NEEDS CLARIFICATION] markers
-  remain"* was being counted as one.
-- **A loop over a special shell variable was auto-approved.** `OPTIND=1/0 ls`
-  already asked — an expression assigned to a variable the shell evaluates is
-  arithmetic, not a string — but `for OPTIND in 1 2; do ls; done` did not,
-  because `for` and `in` are control words stripped before that check runs. The
-  `=` going out of sight was enough to walk past it. Claude Code 2.1.273 was
-  asked three times: it runs the ordinary loop and refuses this one.
+  Pointed at a real Spec Kit feature, the reader counted **47** tasks where the
+  task list had 31 — Spec Kit writes a `checklists/` folder whose boxes validate
+  the *spec*, not the feature. A **ticked** box is also no longer read as an open
+  question: the checklist line *"No [NEEDS CLARIFICATION] markers remain"* was
+  being counted as one.
 - **A cancelled turn is now tested, not just described.** The client sends
   `session/cancel`, waits five seconds for the agent to end the turn with
   `stop_reason: cancelled`, and tears the connection down if it does not — and

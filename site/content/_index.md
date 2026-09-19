@@ -1,5 +1,5 @@
 +++
 title = "Devplane"
-description = "See every Claude Code session on your machine — terminal, VS Code, desktop, background — on one board. Drive any Agent Client Protocol agent, and make “done” mean your project’s own checks passed. One local-first binary, no account."
+description = "One page for every project on your machine: what needs you, what went red after the agent stopped, and which finished work can prove its checks passed. Drive any Agent Client Protocol agent. One local-first binary, no account."
 template = "index.html"
 +++

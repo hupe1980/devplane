@@ -95,40 +95,21 @@ nothing to save.
 
 *The rules cannot fail open; a channel can, and the channel is a local process.*
 
-`never_auto` cannot be overridden by `auto_allow`, in either direction.
+**Devplane never approves a tool call.** `Verdict` has no `Allow` variant, so the type cannot express
+one. That removes the largest thing there was to get wrong: answering *yes* on the agent's behalf was
+a claim about somebody else's code, and it was wrong in the dangerous direction thirty-three times
+before it was deleted. What is left refuses and defers, which claims nothing about anyone.
 
 The harder half is **silence**. A deny rule that matches nothing reads as protection and provides
 none, and nothing errors. So the rule syntax implements the published specification row by row, and
-the spellings that cannot work — a path rule on `Write`, an `mcp__` rule with brackets, a bare
-wildcard in `auto_allow` — are **refused** by `devplane check` rather than carried. And because
-reading a specification is not the same as agreeing with the product, `scripts/verify-permissions-diff.sh`
-**generates** calls and fails on any disagreement with a running Claude Code.
+the spellings that cannot work — a path rule on `Write`, an `mcp__` rule with brackets — are
+**refused** by `devplane check` rather than carried.
 
-It asks on two axes: an `auto_allow` list answering *did Claude Code run it?*, and a `never_auto`
-list answering *did Claude Code refuse?*. The oracle is a model, so a disagreement is re-asked once
-and reported only if it reproduces.
-
-A third axis, `DEVPLANE_DIFF_AXIS=dialect`, covers the tools that are not shells — `PowerShell`,
-`Monitor`, `LSP` — which cannot use that oracle, since two run no command and the third needs a
-Windows host. It runs **this matcher alone** and prints a checklist to put to a running product, and
-says in its own output that it is not a measurement.
-
-Its last full run, against Claude Code 2.1.273, was clean on both: 208 deny cases and 126 allow
-cases, with no undeclared disagreement. It found a real widening on the way — a path grant approving
-whatever command wrote to the granted file — which is why a prohibition is checked against the file and not only against the command text. Note for.
-
-**Twelve deny shapes were skipped rather than measured**: one because macOS lacks the program, eleven
-because the model answering the probe does not reliably run them even with nothing forbidden. A
-skipped shape is unmeasured, not clean, and a harness result is true only of the code it ran
-against.
-
-**Agreement is not correctness.** On a shape neither side generates, this matcher and Claude Code
-can be wrong together and the run still comes back clean — which is what happened over a wildcard
-rule that never met a wildcard operand. So the matcher is also held to properties checked
-exhaustively rather than by example: a brute-force reference for its pattern matching, a soundness
-test for what it means for two wildcards to meet, a fuzzer asserting it never panics on anything an
-agent can type, and a counter holding it to one parse per command however many rules ask.
-See [Permissions](/docs/permissions/).
+And because reading a specification is not the same as agreeing with the product, the matcher is held
+to properties checked exhaustively rather than by example: a brute-force reference for its pattern
+matching, a soundness test for what it means for two wildcards to meet, a fuzzer asserting it never
+panics on anything an agent can type, and a counter holding it to one parse per command however many
+rules ask. See [Permissions](/docs/permissions/).
 
 A malformed `devplane.toml` keeps the rules it had. Because a process starting fresh has none to
 keep, both `devplane doctor` and `devplane explain` name the project whose rules are not in force

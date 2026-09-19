@@ -54,7 +54,7 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
             println!(
                 "     {} {}",
                 paint(DIM, "never asked again:"),
-                paint(render::GREEN, &format!("auto_allow = [\"{}\"]", o.rule))
+                paint(render::GREEN, &o.pasteable())
             );
             println!(
                 "     {}",

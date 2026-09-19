@@ -10,7 +10,7 @@ Devplane's first job is to know what is happening without changing how you work.
 sessions it did not start, on documented interfaces only, through four channels — each of which
 answers a different question.
 
-![The board: sessions grouped by project, with what each one is doing, its context use and its cost](/board.png)
+![The board: what needs you first, then every session grouped by project with what it is doing, its context use and its cost](/board.png)
 
 Either theme, from one set of values measured independently — the light one is
 not the dark one inverted, and every colour in both was computed against the
@@ -75,13 +75,14 @@ after taking a backup, and adds only two things.
   `mcp_tool` hooks. An HTTP entry there is written happily into the settings file and then never
   runs, which looks exactly like a session that started without telling anyone.
 - **The two deciding hooks are synchronous**, and they answer different questions.
-  `PermissionRequest` is the instant signal that a session is blocked, and it carries the full
-  verdict — it fires only when Claude Code is about to ask you, so an allow there skips a prompt
-  that was already coming.
+  `PermissionRequest` is the instant signal that a session is blocked: it fires only when Claude Code
+  is about to ask you, which is what makes the request an inbox item with the agent’s own options
+  beside it.
 - `PreToolUse` is the other, and it exists because of **auto mode**: there a classifier approves
   routine calls with no prompt, so `PermissionRequest` never fires and a prohibition answered only
-  there would not run at all. `PreToolUse` fires before every tool call in every mode. It answers
-  with a deny, an ask, or nothing — never an allow, which would skip the classifier too.
+  there would not run at all. `PreToolUse` fires before every tool call in every mode.
+- **Neither ever answers `allow`.** Devplane does not approve a tool call, so both hooks reply with a
+  deny, an ask, or nothing — and a session in auto mode keeps its classifier.
 - Everything else is `async`, so no hook can make Claude Code feel slower. The two that block answer
   in microseconds and never wait for a person.
 
@@ -188,7 +189,7 @@ $ devplane show 7c
   cost       $2.5000 over 41 requests
   changed    +156 −23 lines
   limits     5-hour 88% used, resets in 39m
-  harness    Claude Code 2.1.276 — newer than the release the gate was measured against
+  harness    Claude Code 2.1.276
 ```
 
 **Nothing depends on it.** It exists only in an interactive session that renders a status line, so

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Renders site/static/board.png from a real daemon fed real payloads.
+# Renders the site's screenshots from a real daemon fed real payloads.
 #
 # The screenshot on the README and the landing page carries the product's name
 # in its header, so a rename invalidates it and no check can read it: it said
@@ -21,16 +21,39 @@ BIN=./target/debug/devplane
 [ -x "$CHROME" ] || { echo "make-board: no Chrome at $CHROME — set CHROME=" >&2; exit 2; }
 [ -x "$BIN" ]    || { echo "make-board: build first (just build)" >&2; exit 2; }
 
-# A short, fixed base: the offer names the project's own `devplane.toml` by
+# **The page is compiled into the binary**, so an edit to `ui/index.html` is not
+# in the picture until a rebuild. Running this script directly rather than
+# through `just make-board` skips that, and the shots come back showing the old
+# page while reporting success — which cost two rounds of "the CSS does not
+# work" before anybody checked which page was being served.
+if [ ui/index.html -nt "$BIN" ]; then
+  echo "make-board: ui/index.html is newer than $BIN — run 'just make-board'" >&2
+  exit 2
+fi
+
+# A short, fixed base: the offer names the project's own settings file by
 # absolute path, and a `mktemp` path would put forty characters of
 # `/var/folders/_6/...` into the picture.
+#
+# **The path is fixed, so `mkdir` is the lock.** Two runs at once used to share
+# it, and each one's cleanup deleted the other's fixture out from under Chrome:
+# the second run reported "Chrome produced nothing" for some shots, wrote the
+# rest, and exited 0. A partial set of screenshots that claims success is worse
+# than none, because the ones it did write look fine.
 tmp=/tmp/devplane-shot
-rm -rf "$tmp"
 home="$tmp/home"
+if ! mkdir "$tmp" 2>/dev/null; then
+  echo "make-board: $tmp exists — another run has it, or one died. rm -rf it." >&2
+  exit 2
+fi
 mkdir -p "$home"
 cleanup() {
+  local status=$?
   [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null || true
   rm -rf "$tmp"
+  # The trap must not launder a failure into a success. `shoot` returns
+  # non-zero when Chrome writes nothing, and that has to reach the caller.
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -117,16 +140,26 @@ sleep 1
 # **No `--virtual-time-budget`.** The board holds an SSE stream open, so virtual
 # time never advances past it and Chrome waits for ever. That is not a
 # hypothetical: it is how this script first hung.
-shoot() { # file-name  hash  height  [light|dark]  [width]
-  local name="$1" hash="$2" height="${3:-940}" scheme="${4:-}" width="${5:-1240}"
+shoot() { # file-name  hash  height  [light|dark]  [width]  [touch]
+  local name="$1" hash="$2" height="${3:-940}" scheme="${4:-}" width="${5:-1240}" touch="${6:-}"
   # Headless Chrome answers `prefers-color-scheme: dark`, so the default shots
   # are dark. `preferredColorScheme` drives the media query directly, which is
   # the only way to photograph the other theme without injecting a script —
   # and it means the light shot is a real test of the light tokens rather than
   # a picture of the same page.
+  #
+  # **And `pointer: coarse` for the phone shot.** Headless Chrome reports a
+  # mouse, so the media query that hides the key legend on a touch device never
+  # fired and the narrow picture came back identical \u2014 the rule was written,
+  # shipped, and photographed as not working, which is R49 again in a new place.
+  # `primaryPointerType=2` is `POINTER_TYPE_COARSE`; the shot is now a test of
+  # the rule rather than a hope about it.
+  local blink=()
+  [ "$scheme" = light ] && blink+=(preferredColorScheme=1)
+  [ "$scheme" = dark ] && blink+=(preferredColorScheme=2)
+  [ -n "$touch" ] && blink+=(primaryPointerType=2 availablePointerTypes=2)
   local flags=()
-  [ "$scheme" = light ] && flags+=(--blink-settings=preferredColorScheme=1)
-  [ "$scheme" = dark ] && flags+=(--blink-settings=preferredColorScheme=2)
+  [ ${#blink[@]} -gt 0 ] && flags+=(--blink-settings="$(IFS=,; echo "${blink[*]}")")
   "$CHROME" --headless --disable-gpu --hide-scrollbars "${flags[@]:+${flags[@]}}" \
     --window-size="$width,$height" --screenshot="$tmp/$name.png" \
     "http://127.0.0.1:$port/?token=$token#$hash" >/dev/null 2>&1 || true
@@ -146,8 +179,10 @@ shoot() { # file-name  hash  height  [light|dark]  [width]
 # 500 still exercises the narrow layout, because the media query turns over at
 # 46rem. What it does not prove is 390, and saying 390 when the tool gives 500
 # would be the kind of claim this project fails builds over.
-shoot narrow needs 900 "" 500
-shoot diag needs 900 "" 390
+# No companion shot at 390. Asking for it produces a 500-point layout cropped to
+# a 390-wide PNG — a picture of Chrome's clamping rather than of the page, and
+# publishing one next to the real narrow shot is how the phantom bug started.
+shoot narrow needs 900 "" 500 touch
 
 shoot board boardsec 940
 # Straight after the dark one, so the two are the same board seconds apart and

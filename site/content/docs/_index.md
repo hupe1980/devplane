@@ -1,6 +1,6 @@
 +++
 title = "Documentation"
-description = "Install Devplane, watch every coding agent on your machine, and make “done” mean your project’s own checks passed."
+description = "Install Devplane, see what needs you across every project on your machine, and make “done” mean your project’s own checks passed."
 sort_by = "weight"
 template = "section.html"
 page_template = "page.html"

@@ -248,14 +248,7 @@ recorded against this commit, not that the work is correct.
 
 ## 🖥️ The board
 
-`devplane open` serves one page from the daemon on loopback.
-
-![The Devplane board: five projects, ten sessions, a permission waiting with the rule that would end it, and one session at 89% context](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/board.png)
-
-**And it opens on the surface nobody else has.** Every watcher in this category can show you
-sessions — Claude Code now ships that itself, and does it better. None of them can show you the work
-that *outlived* the session: the branch whose check went red two hours after the agent stopped, the
-reviewer who has been waiting since yesterday, the pipeline held at a step somebody has to release.
+`devplane open` serves one page from the daemon on loopback, and **it opens on what needs you**.
 
 ![What needs you: one list across every project, each row naming its project and how long it has waited](https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/inbox.png)
 
@@ -263,6 +256,21 @@ One list, every project, ordered by what is waiting rather than by which reposit
 project with six idle sessions and nothing to decide ranks below a project with none running and a
 red check from last night — not because anything is weighted, but because idle sessions raise nothing
 to answer.
+
+Three empty states, because they are three different facts: *nothing needs you* is the tool working,
+*Devplane has not answered recently* means what is on screen is not current, and *some projects could
+not be read* means the list is narrower than it looks.
+
+Sessions are still there, below it and behind a rail click. Every watcher in this category can show
+you those — Claude Code ships `claude agents` itself and does it better — so no effort goes into
+making them prettier than a terminal table.
+
+**It works on a phone**, over Tailscale or any private network, because *what needs me* is a question
+people ask away from their desk. One HTML file, no CDN and no web font, so nothing has to load — and
+where there is no keyboard the key legend is not shown, because it would be describing keys nobody
+can press.
+
+<img src="https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/narrow.png" alt="The same page at phone width: the rail laid out horizontally, each item wrapping, no keyboard legend, and the five tools as tappable buttons" width="330">
 
 Keyboard-first:
 
@@ -279,7 +287,8 @@ Keyboard-first:
 | `⌘K` | jump to any project, session or piece of work by name |
 
 A permission also carries the rule that stops it being asked again — the narrowest one covering the
-calls this machine has seen, and the file to paste it into. Nothing writes it for you.
+calls this machine has seen, and the file to paste it into, which is your agent's own
+`settings.json`. Nothing writes it for you.
 
 `⌘N` tells you what it will do before it does it, and refuses an untrusted repository with the
 command that fixes it. `⌘K` matches by subsequence, so `crlb` finds `core-lib`.
@@ -312,8 +321,9 @@ And the other half — **which rule to write so it stops**:
 $ devplane explain --replay
 1284 tool calls in saas replayed against the rules as they are now
 
-     912   71%  allow
-     358   28%  reached you
+      14    1%  ask
+      31    2%  deny
+    1239   97%  no rule here
 
 one rule each, most interruptions first
    118×  Bash(pnpm typecheck)
@@ -321,7 +331,7 @@ one rule each, most interruptions first
     62×  Bash(cargo test *)
     41×  Read(src/**)
 
-315 of the 358 calls that reached you would stop asking · paste into [policy] auto_allow
+1104 of the 1239 calls Devplane leaves to your agent · paste into permissions.allow in your agent's settings
 ```
 
 Offline, like the rest of `explain` — no daemon, no agent, no bill. Each suggestion is in the
@@ -334,74 +344,46 @@ tries something else — so a rule that is too tight and a rule that is working 
 board, and the difference only shows up on the bill. Five refusals in one run says which rule keeps
 stopping it.
 
-## 🔐 Permissions are Claude Code's, in full
+## 🚫 Devplane never approves
 
-A rule moves between `settings.json` and `devplane.toml` by cutting and pasting it — all three
-lists, the `:*` form, gitignore paths with all four anchors, MCP server prefixes, and the
-allow/deny asymmetries. `Edit(…)` covers every built-in tool that writes files and `Read(…)` every
-one that reads them — `Read`, `Grep`, `Glob` and `LSP` — so two rules cover nine tools.
+It can **prohibit** a call and **defer** one to you. It cannot approve one — `Verdict` has no `Allow`
+variant, so the type cannot express it.
 
-Rules are resolved **per repository**, evaluated **deny → ask → allow**, and a spelling that cannot
-match anything is **refused** rather than carried — because a deny rule that silently matches nothing
-reads as protection and is none. A `!` rule is an exception scoped to the file it is written in, as
-it is there.
+Approving would mean claiming your agent would have approved it too: a claim about somebody else's
+code that goes stale every release. Keeping it honest here meant mirroring Claude Code's rule
+semantics, three compatibility floors, a differential harness and a release clock. It produced
+**thirty-three** occasions when the mirror was wrong in the dangerous direction, at a measured
+**$1,756–$3,511 a month** in probe spend. Prohibiting and deferring claim nothing about anyone, cost
+nothing, and cannot decay.
 
-The rules are checked against a *running* Claude Code, not only against its documentation.
-`scripts/verify-permissions-diff.sh` **generates** calls, asks both sides for a verdict, and fails on
-any disagreement — in either direction, because a rule that is quietly too strict is one people
-replace with a broader rule.
+So there are two lists, and they use **Claude Code's own syntax** — a prohibition moves between
+`settings.json` and `devplane.toml` by cutting and pasting it:
 
-It asks on **two axes**: an `auto_allow` list answering *did Claude Code run it?*, and a `never_auto`
-list answering *did Claude Code refuse?*. Its last full run, against Claude Code 2.1.273, was clean
-on both — 208 deny cases and 126 allow cases, no undeclared disagreement. That run found a real
-widening, which is the point of having it: a path grant like `Edit(out.txt)` was approving whatever
-command filled the file.
+```toml
+[policy]
+never_auto = ["Bash(rm -rf *)", "Read(.env)", "mcp__*"]
+always_ask = ["Bash(git push *)"]
+```
 
-**Twelve deny shapes were skipped rather than measured** — one because macOS lacks `tac`, eleven
-because the model that answers the probe does not reliably run them even with nothing forbidden. Those
-are unmeasured, not clean.
+Rules are resolved **per repository**, from the checkout that *owns* the worktree — so a rule an
+agent adds to its own branch changes nothing about what it may do. A spelling that cannot match
+anything is **refused** rather than carried, because a deny rule that silently matches nothing reads
+as protection and is none.
 
-Four ways a rule could read as protection and not fire were found by stating what the matcher claims
-to guarantee and checking it exhaustively — a brute-force reference for the pattern matchers, a
-soundness test for what it means for two wildcards to meet, a fuzzer that asserts the evaluator never
-panics, and a counter holding it to one parse per command. Those checks survive, because a
-prohibition still has to fire; what went with the approval path is every check that compared this
-matcher against somebody else's.
-
-`scripts/changelog-rows.sh` covers the other half: it fails the build until every row of Claude
-Code's changelog that could change a verdict is written down as covered, or declined with a reason.
-
-Commands are matched the way Claude Code matches them: **per subcommand**, not against the whole
-line. `never_auto = ["Bash(rm -rf *)"]` stops `ls && rm -rf /`, and `auto_allow = ["Bash(pnpm test
-*)"]` will *not* answer for `pnpm test && rm -rf /` — that one reaches you as a question.
-
-And some commands **no pattern rule may approve**, because Claude Code asks about them whatever the
-rules say: an exec wrapper (`watch`, `setsid`, `ionice`, `flock`) that runs whatever follows it,
-`find` with `-exec` or `-delete`, and anything past the length its command analysis reads. A rule
-naming the exact command still works; `Bash(watch *)` does not, and `devplane check` says so rather
-than letting it look like protection.
-
-A path rule also reaches **the files a command names**: the operands of the commands Claude Code
-recognises — `grep`, `awk`, `sort`, `od`, `strings`, `jq`, `base64`, `git diff`, `git grep` and
-twenty more — a path hidden in an option value like `grep -f.env x`, everything under a directory a
-`grep -r` walks, the target of a redirection, and whatever `env` or `sudo` turns out to be running.
-`mv` is there because it **removes** its source; `cp` is not, because it does not.
-
-That list is measured against a running Claude Code rather than transcribed: `xxd`, `zcat`, `join`,
-`less`, `more` and `truncate` are **not** recognised by it and so are not in it. And an allow rule
-covers the command, not what it writes: `Bash(echo *)` does not answer for
-`echo x > ~/.ssh/authorized_keys`.
+Commands are matched **per subcommand**, not against the whole line, so `never_auto = ["Bash(rm
+-rf *)"]` stops `ls && rm -rf /`. A path rule also reaches **the files a command names** — the
+operands of `grep`, `awk`, `jq`, `git diff` and twenty more, a path hidden in an option value like
+`grep -f.env x`, everything under a directory a `grep -r` walks, and the target of a redirection.
+That list is measured against a running Claude Code rather than transcribed: `xxd`, `zcat`, `less`
+and `truncate` are **not** recognised by it and so are not in it.
 
 **`Read` and `Edit` are two halves and you want both.** `Read(.env)` stops `cat .env` and
 `echo x | tee .env`; it does *not* stop `echo x > .env` or `touch .env`, which are `Edit` business.
 `devplane check` prints a note when only one half is present.
 
-**Symlinks are followed from both ends, and the two sides read the pair differently.** A deny applies
-when *either* the link or its target matches, so a repository that ships `config/key -> ~/.ssh/id_rsa`
-does not walk past `Read(~/.ssh/**)`. An allow applies only when *both* match, so a link pointing out
-of an approved directory stops being approved. And **the rule can be the end holding the link**:
-`/tmp` and `/etc` are symlinks on macOS, so `Read(//tmp/**)` has to stop `cat /private/tmp/x` too —
-resolving only the accessed path leaves every such rule evadable by spelling the real location.
+**Symlinks are followed from both ends.** A prohibition applies when either the link or its target
+matches, and the rule's own path is resolved too: `/tmp` is a symlink on macOS, so `Read(//tmp/**)`
+has to stop `cat /private/tmp/x` as well.
 
 ```console
 $ devplane explain 'echo x | tee /etc/hosts'
@@ -409,13 +391,14 @@ undecided  Bash
         no rule answers this one, so the provider's own dialog decides and it reaches your inbox
 ```
 
-`devplane explain` answers offline — no daemon, no agent, no bill — which is what you want while
-you are still writing the rule. The interesting answer is the `undecided` that looks like an allow:
-a rule matched and still did not speak, because the command writes somewhere no rule covers.
+`devplane explain` answers offline — no daemon, no agent, no bill — which is what you want while you
+are still writing the rule.
 
 **Your prohibitions hold in auto mode**, where a classifier approves routine calls and no permission
-prompt ever appears. Denies and asks go out on a hook that fires before every tool call in every
-mode; grants stay on the one that fires only when you were going to be asked anyway.
+prompt ever appears: they go out on a hook that fires before every tool call in every mode.
+
+Grants belong in your agent's own settings, where its own permission system enforces them — and
+`devplane explain --replay` tells you which one to write.
 
 [The rule syntax →](https://hupe1980.github.io/devplane/docs/permissions/)
 
@@ -438,20 +421,6 @@ provider
 ```
 
 [Which surfaces →](https://hupe1980.github.io/devplane/docs/cli/#devplane-doctor)
-
-## 🚫 Devplane never approves
-
-It can **prohibit** a call and **defer** one to you. It cannot approve one.
-
-Approving would mean claiming your agent would have approved it too — a claim about somebody else's
-code that goes stale every release. Keeping that claim honest here meant mirroring Claude Code's rule
-semantics, three compatibility floors, a differential harness and a release clock; it produced
-**thirty-three** occasions when the mirror was wrong in the dangerous direction, and cost a measured
-**$1,756–$3,511 a month** in probe spend to maintain.
-
-Prohibiting and deferring claim nothing about anyone, cost nothing, and cannot decay. Grants belong
-in your agent's own settings, where its own permission system enforces them — and `devplane check`
-reads them back to tell you what they actually grant.
 
 ## 🔍 Trust is a decision, so it shows you the evidence
 
@@ -556,16 +525,11 @@ Graph card from `scripts/og-card.html`, and the board screenshot from a throwawa
 the real hook endpoints. Both carry the product's name, so both were wrong after the rename and no
 check could read either.
 
-`just rows` is the cheapest of the three permission checks and the one that runs in CI: it fails
-until every row in Claude Code's changelog that could change a verdict is dispositioned in
-`scripts/changelog-ledger.txt`. `just rows-new` prints the ones that are not, ready to paste.
-
-Two checks cost money and need a signed-in Claude Code, so they are not in CI and are run by hand
-when permissions change: `just perms-live` (fixed probes) and `just perms` (generated cases, both
-sides asked, any disagreement a failure). `just perms-allow` and `just perms-deny` run one half of the
-second, `just perms-dialect` covers the tools that are not shells, and
-`just perms 20` caps the matrix for a quick pass. What fails the build is the *test* each
-finding leaves behind, never the harness itself.
+`just channels` fails the build until every row of Claude Code's changelog that touches a channel
+Devplane actually uses — hooks, permission modes, the settings deciding whether a hook is consulted
+at all — is written down as covered or declined with a reason. The rule ledger that used to sit
+beside it is gone with the approval path: Devplane no longer mirrors anybody's permission semantics,
+so a changed rule shape is the vendor's business and a changed hook contract is still ours.
 
 The protocol tests drive a real agent process — `examples/echo_agent` — rather than
 a vendor's, and the GitHub tests parse captured `gh` output rather than calling GitHub. That is what

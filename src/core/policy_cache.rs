@@ -350,11 +350,12 @@ impl PolicyCache {
         // **Where a grant goes now that Devplane does not evaluate one.**
         //
         // This named `[policy] auto_allow` in Devplane's own file until
-        // 2026-09-18. That key is no longer read: approving a call would mean
-        // claiming the vendor would have approved it too, and Devplane stopped
-        // making that claim. A suggestion pointing at a dead key is worse than
-        // no suggestion — somebody pastes it, nothing changes, and the next
-        // identical call interrupts them again.
+        // 2026-09-18. That key still parses, but nothing in it decides a call
+        // any more: approving one would mean claiming the vendor would have
+        // approved it too, and Devplane stopped making that claim. A suggestion
+        // pointing at a key that no longer answers is worse than no suggestion
+        // — somebody pastes it, nothing changes, and the next identical call
+        // interrupts them again.
         //
         // So the rule goes where it is enforced: the agent's own settings.
         // Devplane composes the narrowest text that covers the call and hands

@@ -461,18 +461,24 @@ pub struct SpecSection {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PolicySection {
-    /// Rules that answer a permission request without asking anyone.
-    pub auto_allow: Vec<String>,
-    /// Rules that refuse one. Never overridable by `auto_allow`.
-    pub never_auto: Vec<String>,
-    /// Rules that always put the call in front of a person, whatever else
-    /// matches.
+    /// Rules that **no longer approve anything**, kept so existing project
+    /// files still parse.
     ///
-    /// Claude Code's third list, and the reason it exists here: without it, an
-    /// `ask` rule moved over from `settings.json` has nowhere to go, and a
-    /// broader `auto_allow` then approves — silently — exactly the calls
-    /// somebody wrote a rule to be asked about. The order is deny, then ask,
-    /// then allow, and specificity does not change it.
+    /// This was the allow list. Answering *yes* here meant claiming the agent
+    /// would have answered yes too, and Devplane stopped making that claim —
+    /// [`crate::core::policy::Verdict`] has no `Allow` variant to return. The
+    /// key is still read so that a `devplane.toml` written before that does not
+    /// fail to load, and `devplane check` still reports the spellings in it
+    /// that cannot work, but no call is decided by anything in this list.
+    ///
+    /// Rules meant to be *enforced* go in the agent's own settings.
+    pub auto_allow: Vec<String>,
+    /// Rules that refuse a permission request.
+    pub never_auto: Vec<String>,
+    /// Rules that always put the call in front of a person.
+    ///
+    /// Claude Code's third list, so an `ask` rule moved over from
+    /// `settings.json` has somewhere to go. Evaluated after `never_auto`.
     pub always_ask: Vec<String>,
     /// How many runs may work on this project at once.
     pub max_parallel_runs: Option<usize>,

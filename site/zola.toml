@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/devplane"
 title = "Devplane"
-description = "The local-first control plane for AI coding agents. One binary that watches the Claude Code and GitHub Copilot sessions on your machine, drives any Agent Client Protocol agent, and turns “the agent says it’s done” into “verified done”."
+description = "The local-first control plane for AI coding agents. One binary, one page for every project on your machine: what needs you, what went red after the agent stopped, and which finished work can prove its checks passed."
 default_language = "en"
 author = "hupe1980"
 
@@ -41,7 +41,7 @@ include_path = true
 include_content = true
 
 [extra]
-tagline = "The control plane for AI coding agents."
+tagline = "Where work that outlives a session lives."
 repo = "https://github.com/hupe1980/devplane"
 acp = "https://agentclientprotocol.com"
 version = "0.5.0"

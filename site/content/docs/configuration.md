@@ -10,13 +10,13 @@ group = "reference"
 that decide whether work is finished are the project's, reviewed like anything else, and never
 something an agent wrote for itself.
 
-A repository with no `devplane.toml` still works — the gates are empty, no rule auto-decides
-anything, and nothing changes.
+A repository with no `devplane.toml` still works — the gates are empty, no rule prohibits anything,
+and nothing changes.
 
 **Devplane reads this file and never writes it.** `devplane check` prints it back in a terminal;
 <kbd>,</kbd> on the board does the same for every registered repository at once, including the one
 whose file stopped parsing. There is no settings form on purpose: an agent here runs as you, so a
-write path to `[policy]` would be the widening path the gate exists to close.
+write path to `[policy]` would be reachable by the thing those rules govern.
 
 > [!IMPORTANT]
 > **This is the whole file format.** Every key below is read by the code and there are no others. An
@@ -47,10 +47,9 @@ run     = ["pnpm test -- --run tests/repro"]
 expect  = "fail"          # one that passes proved nothing
 timeout = "2m"            # optional; the project's otherwise
 
-[policy]                  # evaluated deny → ask → allow
+[policy]                  # prohibit and defer; Devplane never approves
 never_auto = ["Bash(rm -rf *)", "Read(.env)"]
 always_ask = ["Bash(git push *)"]
-auto_allow = ["Read", "Bash(pnpm test *)", "Edit(src/**)"]
 max_parallel_runs = 2     # pieces of work with an agent in them
 stall_timeout     = "12m" # how long this work may be quiet
 
@@ -153,13 +152,18 @@ See [Verified done](/docs/verified-done/) for how gates run.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `never_auto` | list of rules | empty | refused; never overridable by `auto_allow` |
-| `always_ask` | list of rules | empty | put in front of a person, whatever else matches |
-| `auto_allow` | list of rules | empty | answered without asking anyone |
+| `never_auto` | list of rules | empty | refused |
+| `always_ask` | list of rules | empty | put in front of a person |
+| `auto_allow` | list of rules | empty | **decides nothing.** Kept so an older file still parses — see below |
 | `max_parallel_runs` | integer | unlimited | pieces of work with an agent in them |
 | `stall_timeout` | duration | the machine's | how long this project's work may be quiet |
 
 The rule syntax has [a page of its own](/docs/permissions/).
+
+**`auto_allow` is inert.** It was the allow list until 2026-09-18. Devplane no longer approves a tool
+call at all, so nothing in it decides anything; `devplane check` prints those rules as `inert` rather
+than as grants. The key is still read so a `devplane.toml` written before that does not fail to load.
+Rules you want *enforced* go in your agent's own settings, where the thing enforcing them lives.
 
 `max_parallel_runs` counts **pieces of work with an agent in them**, not runs. A declared chain is
 one unit however many steps it has taken — its steps share a worktree and run one after another, so

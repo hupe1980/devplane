@@ -28,8 +28,10 @@ use work::{cmd_check, cmd_dispatch, cmd_trust, cmd_work};
     name = "devplane",
     version,
     about = "The control plane for AI coding agents",
-    long_about = "Devplane watches every Claude Code session on this machine — in a terminal, \
-                  in VS Code, in the desktop app — and tells you which ones need you.\n\n\
+    long_about = "Devplane is one page for every project on this machine: what needs you, what \
+                  went red after the agent stopped, and which finished work can prove its checks \
+                  passed. It watches the sessions already running and drives any agent that \
+                  speaks the Agent Client Protocol.\n\n\
                   Start with `devplane connect claude`, then `devplane ls`."
 )]
 pub struct Cli {

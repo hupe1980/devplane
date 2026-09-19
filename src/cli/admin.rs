@@ -202,15 +202,13 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
         );
     }
 
-    // How old the central claim is, in the only unit a person can act on.
+    // How far the running release has moved since anybody checked.
     //
-    // *The rule table is differentially measured against the running vendor*
-    // is a claim in the present tense. The vendor ships most days; the matrix
-    // runs when somebody remembers. Every other tool in this category is
-    // further behind than this one and none of them has to print a number,
-    // because none of them has ever measured — so printing it is the claim
-    // rather than a confession, and hiding it would be the vendor's own
-    // "neutral conclusion" problem in this product's voice.
+    // The number is frozen: the harness that raised it went with the approval
+    // path, because prohibition is Devplane's own decision and needs no
+    // agreement from the vendor to stay true. What is still worth printing is
+    // the gap — a session on a much newer release is governed by rules nobody
+    // has put side by side with it, and that is a fact a person can act on.
     println!("\n{}", paint(BOLD, "gate"));
     let running = diag
         .as_ref()
@@ -221,9 +219,8 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
         crate::core::policy::releases_ahead(v, crate::core::policy::VERIFIED_AGAINST)
     });
     println!(
-        "  compat    Claude Code {} {}",
-        crate::core::policy::VERIFIED_AGAINST,
-        paint(DIM, "(the full matrix ran green here)")
+        "  verified against Claude Code {}",
+        crate::core::policy::VERIFIED_AGAINST
     );
     match (&running, behind) {
         (Some(v), Some(n)) => println!(

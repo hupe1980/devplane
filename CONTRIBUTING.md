@@ -5,9 +5,9 @@ and the second most useful is a test.
 
 ## Reports that matter most
 
-1. **A permission rule that did not fire.** Use the *gate widening* issue template. Every defect of
-   this kind found so far was silent, so an exact call and an exact rule is worth more than a
-   feature request.
+1. **A prohibition that did not fire.** Use the *gate widening* issue template. Every defect of this
+   kind found so far was silent, so an exact call and an exact rule is worth more than a feature
+   request. (Devplane never *approves* a call, so there is no allow-side report to make.)
 2. **A vendor release that moved something.** Claude Code, Copilot and Codex change weekly. Use the
    *vendor drift* template and quote the changelog row.
 
@@ -16,7 +16,6 @@ and the second most useful is a test.
 ```sh
 just check          # fmt, clippy, build, test — what CI runs
 just verify         # plus the claim ledger and the dependency count; needs `just reference` once
-just perms 20       # a quick differential pass against a real `claude`, if you have one
 ```
 
 ## Where a change is planned
@@ -31,7 +30,8 @@ that names it, and `just verify` runs all of them. If you want to know what a fe
 tests are the answer that cannot go stale.
 
 Every behaviour change to the permission layer needs a test that asserts **both** the verdict and
-the rule that produced it; a right answer with a wrong reason is a bug here. A dependency bump is a
+the rule that produced it; a right answer with a wrong reason is a bug here. `Verdict` has no
+`Allow` variant and will not be given one. A dependency bump is a
 reviewed change: agents and packages are pinned on purpose.
 
 The `ui/` directory is one HTML file with no build step. Keep it that way; if a change needs a

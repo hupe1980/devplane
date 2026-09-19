@@ -284,6 +284,25 @@
   footer .tools button:hover, footer .tools button:focus-visible {
     color: var(--ink); border-color: var(--line);
   }
+  /* **No keyboard, no legend.** On a touch device the row keys describe keys
+     that cannot be pressed — on a phone that was six rows of key caps above
+     two items, more of the screen than the thing the page exists to show. The
+     tools beside them are buttons and stay, because they are the only route to
+     those surfaces without a keyboard; they just stop advertising a shortcut
+     nobody there can use.
+
+     `pointer: coarse` rather than a width: a narrow window on a laptop still
+     has a keyboard, and a tablet at 1024 points does not. */
+  @media (pointer: coarse) {
+    footer .rowkeys { display: none; }
+    footer .tools kbd { display: none; }
+    /* Stripped of its key cap the label reads as text, and here it is the only
+       way to reach these surfaces — so it has to look like the thing you tap.
+       Left-aligned with the cards above rather than pushed to a right edge that
+       no longer has a legend to sit beside. */
+    footer .tools { margin-left: 0; gap: .4rem; }
+    footer .tools button { border-color: var(--line); padding: .3rem .6rem; }
+  }
   .err { color: var(--fail); padding: 1rem; }
 
   /* The launchers. Deliberately the only things that cover the page. */
@@ -672,20 +691,12 @@
 <!-- The legend is the toolbar. Every command that is not about the row under
      the cursor is a button here carrying its own shortcut, so nothing in this
      product is reachable by keyboard alone and learning the key costs one
-     glance at the thing you just clicked. The row-scoped keys stay legend:
-     each already has a target on the row itself. -->
+     glance at the thing you just clicked.
+
+     The row-scoped keys are filled in by `rowkeys()` and are only the ones that
+     would do something to the row under the cursor. -->
 <footer>
-  <span class="rowkeys">
-    <span><kbd>j</kbd><kbd>k</kbd> move</span>
-    <span><kbd>enter</kbd> what it is saying</span>
-    <span><kbd>y</kbd><kbd>n</kbd> allow / deny</span>
-    <span><kbd>1</kbd>&ndash;<kbd>9</kbd> pick an answer</span>
-    <span><kbd>r</kbd> reply</span>
-    <span><kbd>f</kbd> focus window</span>
-    <span><kbd>a</kbd> copy attach</span>
-    <span><kbd>s</kbd> snooze 1h</span>
-    <span><kbd>?</kbd> why</span>
-  </span>
+  <span class="rowkeys" id="rowkeys"></span>
   <nav class="tools" aria-label="Everywhere">
     <button data-go="search"><kbd>/</kbd> search</button>
     <button data-go="github"><kbd>g</kbd> issues &amp; PRs</button>
@@ -914,6 +925,44 @@ function renderOffer(i) {
     return `<div class="offer none"><span class="dim">${esc(i.no_offer.sentence)}</span></div>`;
   }
   return "";
+}
+
+// **Only the keys that would do something to the row under the cursor.**
+//
+// This was nine fixed entries, and most of them did not apply to most rows:
+// `y`/`n` answers a permission and nothing else, `1`–`9` needs options the
+// agent actually offered, `f` and `a` need a session behind the row. A legend
+// listing what a key would *not* do teaches the wrong thing, and it charged the
+// space for it on every screen.
+//
+// The source is `item.actions` — the same array the row's own buttons and the
+// key handler read, so the legend cannot drift from what the keys do. Nothing
+// here interpolates server data: `actions` is tested with `includes`, and the
+// labels are literals.
+const ROWKEY = [
+  ["allow", "<kbd>y</kbd><kbd>n</kbd> allow / deny"],
+  ["reply", "<kbd>r</kbd> reply"],
+  ["focus", "<kbd>f</kbd> focus window"],
+  ["attach", "<kbd>a</kbd> copy attach"],
+  ["snooze", "<kbd>s</kbd> snooze 1h"],
+];
+function rowkeys(cards) {
+  // `data-sel` runs across the inbox and then the session rows on one counter,
+  // so an index past the inbox is a session row and has no item behind it.
+  const item = state.inbox[state.sel];
+  const cur = cards[state.sel];
+  const out = [];
+  if (cards.length > 1) out.push("<kbd>j</kbd><kbd>k</kbd> move");
+  if (cur?.dataset.run) out.push("<kbd>enter</kbd> what it is saying");
+  if (item?.actions?.includes("choose") && item.options?.length) {
+    out.push("<kbd>1</kbd>&ndash;<kbd>9</kbd> pick an answer");
+  }
+  for (const [action, label] of ROWKEY) {
+    if (item?.actions?.includes(action)) out.push(label);
+  }
+  // `?` is the decision log for this row, so it needs a row with a log.
+  if (item) out.push("<kbd>?</kbd> why");
+  return out.map((k) => `<span>${k}</span>`).join("");
 }
 
 function render() {
@@ -1150,6 +1199,7 @@ function render() {
     }).join("");
 
   const sel = document.querySelector(`[data-sel="${state.sel}"]`);
+  $("rowkeys").innerHTML = rowkeys([...document.querySelectorAll("[data-sel]")]);
   document.querySelectorAll(".sel").forEach((e) => {
     e.classList.remove("sel");
     e.removeAttribute("aria-current");

@@ -175,10 +175,10 @@ devplane audit
 ```console
 2026-09-13T18:04:11 daemon  gh:pr.create     https://github.com/acme/app/pull/142
                      ↳ gates passed; opened as a draft
-2026-09-13T17:58:40 policy  agent:tool.use   Bash: pnpm test -- --run
-                     ↳ Bash(pnpm test *)
+2026-09-13T17:58:40 policy  agent:tool.use   Bash: rm -rf /tmp/build
+                     ↳ refused by Bash(rm -rf *)
 ```
 
-Every verdict names the rule or the check behind it. “Auto-approved” is not an answer.
+Every verdict names the rule or the check behind it. “Refused” is not an answer.
 
 Every command takes `--json`, and every command starts the daemon if it is not already running.
