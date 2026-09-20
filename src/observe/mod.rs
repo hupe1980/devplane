@@ -25,5 +25,6 @@ pub mod copilot;
 pub mod hook;
 pub mod locate;
 pub mod otel;
+pub mod procs;
 pub mod registry;
 pub mod statusline;

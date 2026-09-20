@@ -15,6 +15,7 @@
 pub mod acp;
 /// The HTTP surface: receivers for the providers, an API for the clients.
 pub mod api;
+pub mod batch;
 /// The command line, one module per thing a person is trying to do.
 pub mod cli;
 /// The CLI's view of the daemon.
@@ -37,6 +38,7 @@ pub mod gates;
 pub mod git;
 /// GitHub, through the `gh` command: issues, pull requests, checks.
 pub mod github;
+pub mod library;
 /// Desktop notifications.
 pub mod mcp;
 pub mod notify;

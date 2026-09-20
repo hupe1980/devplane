@@ -76,6 +76,10 @@ pub struct Summary {
     pub open_prs: usize,
     #[serde(default)]
     pub forge_needs_you: usize,
+    /// Asks still waiting whose sessions have ended. Its own number, because
+    /// the columns above are a breakdown of sessions and this is not one.
+    #[serde(default)]
+    pub asks_waiting: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +92,17 @@ pub struct RunView {
     pub project_name: Option<String>,
     pub agent: String,
     pub mode: String,
+    /// The permission mode the session's own vendor reports, when one of the
+    /// eleven hook events that carry it has arrived. `None` is *nothing has
+    /// said yet*, which is not the same as *nobody is asked* and must not
+    /// render as though it were.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Whether a person is in the loop for an ordinary call. Three-valued:
+    /// `None` means the mode is one this build does not recognise, or none has
+    /// been reported.
+    #[serde(default)]
+    pub asks_a_person: Option<bool>,
     pub state: String,
     pub waiting_for: Option<String>,
     pub cwd: String,
@@ -127,6 +142,9 @@ pub struct InboxItem {
     /// Present when the item can be answered from here.
     #[serde(default)]
     pub request_id: Option<String>,
+    /// The durable ask this item is about, which is what an answer names.
+    #[serde(default)]
+    pub ask: Option<String>,
     /// Where `open_pr` goes.
     #[serde(default)]
     pub url: Option<String>,
@@ -158,6 +176,12 @@ pub fn state_marker(state: &str) -> String {
         "completed" => paint(GREEN, "✓"),
         "failed" => paint(RED, "✗"),
         "lost" => paint(RED, "?"),
+        // Cut off rather than finished or broken, and it needs a glyph of its
+        // own: it fell through to the anonymous dot for as long as the state
+        // existed, which is colour carrying meaning alone with the colour
+        // removed too.
+        "interrupted" => paint(DIM, "⊘"),
+        "stopped" => paint(DIM, "◌"),
         _ => paint(DIM, "·"),
     }
 }
@@ -205,12 +229,23 @@ pub fn summary_line(run: &RunView) -> &str {
         return s;
     }
     match run.state.as_str() {
+        // **Waiting on a command it started is not a person's turn.** The
+        // provider reports such a session as idle, because no tokens are being
+        // generated; the process table says otherwise. Saying "needs you" here
+        // for the forty minutes of a test suite is how a board teaches people
+        // to stop reading it.
+        "waiting" if run.waiting_for.as_deref() == Some("job") => "running a command it started",
         "waiting" => "needs you",
         "idle" => "waiting for a prompt",
         // The roster says the process is busy and nothing else has spoken.
         "working" | "starting" => "busy",
         "failed" => "failed",
         "lost" => "gone",
+        // **Not "" .** An interrupted run rendered as a dim dot with no words
+        // beside it, which is the one thing a state language may not do.
+        "interrupted" => "interrupted — the daemon stopped this",
+        "stopped" => "stopped",
+        "completed" => "done",
         _ => "",
     }
 }
@@ -252,6 +287,46 @@ pub fn duration(d: std::time::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every run state has a glyph and words, and neither is the fallback.**
+    ///
+    /// Bought by `RunState::Interrupted`, which was added to stop the daemon
+    /// writing `completed` over interrupted work — and then rendered as the
+    /// anonymous dim dot with an empty label, because both matches take `&str`
+    /// and a `&str` match cannot be exhaustive. The state existed, was correct
+    /// in the store, and was invisible on the one surface a person reads.
+    ///
+    /// [`DESIGN.md`]'s rule is that colour never carries state alone. A state
+    /// with no glyph *and* no words fails it twice.
+    #[test]
+    fn every_run_state_has_a_marker_and_a_label() {
+        use crate::core::RunState;
+        let all = [
+            RunState::Starting,
+            RunState::Working,
+            RunState::Waiting(crate::core::WaitingFor::Question),
+            RunState::Idle,
+            RunState::Completed,
+            RunState::Failed,
+            RunState::Stopped,
+            RunState::Interrupted,
+            RunState::Lost,
+        ];
+        let fallback = paint(DIM, "·");
+        for st in all {
+            let name = st.as_str();
+            assert_ne!(
+                state_marker(name),
+                fallback,
+                "{name} renders as the anonymous fallback dot"
+            );
+            let v = view(name, None);
+            assert!(
+                !summary_line(&v).is_empty(),
+                "{name} renders with no words beside it"
+            );
+        }
+    }
 
     fn view(state: &str, summary: Option<&str>) -> RunView {
         let mut r: RunView = serde_json::from_value(serde_json::json!({
@@ -417,7 +492,7 @@ impl Html {
 /// is: fetch some rows, render each, say something honest when there are none.
 ///
 /// Rendered here rather than in the page for the reason in the type above —
-/// `reason` is a rule somebody wrote, `actor` can be a model, and `action` can
+/// `reason` is a rule somebody wrote, `authority` names who decided, and `action` can
 /// be a command an agent composed. None of those is a place to be optimistic
 /// about a template literal.
 pub fn reason_pane(head: Option<(&str, &str, Option<&str>)>, rows: &[DecisionRow]) -> Html {
@@ -448,7 +523,7 @@ pub fn reason_pane(head: Option<(&str, &str, Option<&str>)>, rows: &[DecisionRow
         out.push(markup!(
             r#"<div class="e"><span class="t">{}</span><span class="who">{}</span><span>{} {}</span></div>"#,
             d.at.as_str(),
-            d.actor.as_str(),
+            d.authority.as_str(),
             d.outcome.as_str(),
             d.action.as_str()
         ));
@@ -463,7 +538,9 @@ pub fn reason_pane(head: Option<(&str, &str, Option<&str>)>, rows: &[DecisionRow
 pub struct DecisionRow {
     /// `HH:MM`, already narrowed — the pane shows a time, not a timestamp.
     pub at: String,
-    pub actor: String,
+    /// `person`, `rule`, `timer`, `nobody` or `daemon` — the column the pane
+    /// exists to show.
+    pub authority: String,
     pub action: String,
     pub outcome: String,
     pub reason: Option<String>,

@@ -122,6 +122,29 @@ impl HookOutcome {
 /// events regularly, and an observer that fails on one it has not heard of is
 /// an observer that breaks on upgrade.
 pub fn to_events(p: &HookPayload) -> HookOutcome {
+    let mut out = to_events_inner(p);
+    // **The mode rides along on whatever carried it.**
+    //
+    // Eleven of the vendor's hook events include `permission_mode` and
+    // `PreToolUse` — the one every tool call fires — is *not* among them; the
+    // reference says so in one sentence and the obvious implementation is
+    // wrong because of it. So this is read from any payload that has the field
+    // rather than from a chosen event, which is also what makes it survive the
+    // vendor moving it around.
+    //
+    // Appended after, never instead: an event that already says something
+    // about the run still says it.
+    if let Some(raw) = p.permission_mode.as_deref()
+        && !raw.is_empty()
+    {
+        out.events.push(Event::PermissionModeSeen {
+            mode: raw.to_string(),
+        });
+    }
+    out
+}
+
+fn to_events_inner(p: &HookPayload) -> HookOutcome {
     let cwd = p.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
     match p.hook_event_name.as_str() {
         "SessionStart" => HookOutcome::just(Event::SessionStarted {
@@ -146,7 +169,15 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
             // waiting for a notification about it is not.
             if tool == "AskUserQuestion" {
                 let (question, options) = parse_ask_user_question(p.tool_input.as_ref());
-                return HookOutcome::just(Event::QuestionAsked { question, options });
+                // An observed session's dialog belongs to the provider: no
+                // `request_id`, so nothing offers to answer it from here.
+                return HookOutcome::just(Event::QuestionAsked {
+                    question,
+                    options,
+                    ask: None,
+                    request_id: None,
+                    form: None,
+                });
             }
             HookOutcome::just(Event::ToolStarted {
                 tool,
@@ -187,6 +218,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
                 // An observed session's dialog is Claude Code's own: Devplane
                 // can show that it is there, never answer it.
                 request_id: None,
+                ask: None,
                 options: Vec::new(),
                 call: None,
             }),
@@ -195,6 +227,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
                     waiting_for: WaitingFor::Question,
                     message: p.message.clone(),
                     request_id: None,
+                    ask: None,
                     options: Vec::new(),
                     call: None,
                 })
@@ -203,6 +236,7 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
                 waiting_for: WaitingFor::Idle,
                 message: None,
                 request_id: None,
+                ask: None,
                 options: Vec::new(),
                 call: None,
             }),
@@ -270,8 +304,12 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
                 .clone()
                 .or_else(|| p.mcp_server_name.clone().map(|s| format!("{s} is asking"))),
             // The dialog belongs to Claude Code. Devplane can say it is there
-            // and raise the window that has it; it cannot answer it.
+            // and raise the window that has it; it cannot answer it — and with
+            // nothing to answer there is nothing to make durable, which is why
+            // this carries no ask either. A token offered for a dialog no route
+            // can reach would be a button that fails.
             request_id: None,
+            ask: None,
             options: Vec::new(),
             call: None,
         }),
@@ -546,6 +584,74 @@ pub fn pre_tool_use_reply(verdict: &crate::core::Verdict) -> PreToolUseResponse 
 
 #[cfg(test)]
 mod tests {
+
+    /// **The mode rides on whatever carried it, and `PreToolUse` does not.**
+    ///
+    /// Eleven of Claude Code's hook events include `permission_mode`. The one
+    /// that fires on every single tool call is not among them, which makes the
+    /// obvious implementation — read it where the calls are — silently produce
+    /// nothing at all. This test exists because that is a sentence in a table
+    /// in somebody else's documentation, and a sentence in a table is exactly
+    /// the kind of fact this project has been wrong about before.
+    #[test]
+    fn the_mode_is_read_from_any_payload_that_has_it_and_invented_for_none() {
+        let carrying = |event: &str, mode: &str| -> Vec<String> {
+            let body = serde_json::json!({
+                "hook_event_name": event,
+                "session_id": "s1",
+                "cwd": "/tmp/repo",
+                "permission_mode": mode,
+                "prompt": "hi",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+            });
+            let p: HookPayload = serde_json::from_value(body).unwrap();
+            to_events(&p)
+                .events
+                .iter()
+                .map(|e| e.label().to_string())
+                .collect()
+        };
+
+        // A carrier reports the mode *and* whatever else it meant.
+        let prompt = carrying("UserPromptSubmit", "auto");
+        assert!(
+            prompt.contains(&"prompt_submitted".to_string()),
+            "{prompt:?}"
+        );
+        assert!(
+            prompt.contains(&"permission_mode_seen".to_string()),
+            "{prompt:?}"
+        );
+
+        // `PermissionRequest` records nothing of its own and still reports the
+        // mode — which is the only reason the mode is visible for a session
+        // that never submits another prompt.
+        assert_eq!(
+            carrying("PermissionRequest", "default"),
+            vec!["permission_mode_seen".to_string()]
+        );
+
+        // And a payload without the field invents nothing.
+        let bare: HookPayload = serde_json::from_value(serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "cwd": "/tmp/repo",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        }))
+        .unwrap();
+        let kinds: Vec<_> = to_events(&bare)
+            .events
+            .iter()
+            .map(|e| e.label().to_string())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["tool_started".to_string()],
+            "a mode was reported for a hook that does not carry one"
+        );
+    }
     use super::*;
     use serde_json::json;
 
@@ -767,7 +873,9 @@ mod tests {
             }]}
         })));
         match &out.events[0] {
-            Event::QuestionAsked { question, options } => {
+            Event::QuestionAsked {
+                question, options, ..
+            } => {
                 assert!(question.starts_with("Keep the legacy"));
                 let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
                 assert_eq!(labels, ["Keep", "Remove"]);

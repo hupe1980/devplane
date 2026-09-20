@@ -90,41 +90,50 @@ impl Setup {
 /// will not parse *is* a finding, in `unreadable`.
 pub fn scan(root: &Path) -> Setup {
     let mut out = Setup::default();
+    // **One read per file.** Hooks and permissions are two questions about the
+    // same document, and asking them separately meant a file that would not
+    // parse was reported once per question — which is the "absence is
+    // distinguishable" rule failing into double vision instead of silence.
     for rel in [".claude/settings.json", ".claude/settings.local.json"] {
-        read_json(root, rel, &mut out, |v, findings| hooks(v, rel, findings));
+        read_json(root, rel, &mut out, |v, findings| {
+            hooks(v, rel, findings);
+            granted(v, rel, findings);
+        });
     }
     read_json(root, ".mcp.json", &mut out, |v, findings| {
         mcp_servers(v, ".mcp.json", findings)
     });
     skills(root, &mut out);
-    policy(root, &mut out);
     out
 }
 
-/// Allow rules in this repository's own `devplane.toml` that grant an
-/// arbitrary program.
+/// Allow rules in the agent's own settings that grant an arbitrary program.
 ///
-/// The same finding `devplane check` prints, surfaced here because it belongs
-/// to the same question: trusting a directory means adopting the `[policy]`
-/// block that arrived with somebody else's code, and an accumulated
-/// `auto_allow` is the record of an agent escalating after transient failures.
-/// A config that will not load is left alone — `check` is where that is
-/// reported, and saying it twice in different words helps nobody.
-fn policy(root: &Path, out: &mut Setup) {
-    if !root.join(crate::core::config::CONFIG_FILE).is_file() {
-        return;
-    }
-    let Ok(cfg) = crate::core::ProjectConfig::load(root) else {
-        return;
-    };
-    for wide in cfg.policy().overbroad() {
-        out.findings.push(Finding {
-            source: crate::core::config::CONFIG_FILE.to_string(),
+/// **This reads `.claude/settings.json`, and it used to read `devplane.toml`.**
+/// The old version analysed a key that has approved nothing since the approval
+/// path was deleted, so it warned about an over-grant that could not happen —
+/// while the file where such a rule genuinely does grant was scanned for hooks
+/// and not for permissions. Trusting a directory means adopting whatever
+/// arrived with somebody else's code, and an accumulated `permissions.allow` is
+/// the record of an agent escalating past transient failures.
+fn granted(v: &serde_json::Value, rel: &str, findings: &mut Vec<Finding>) {
+    let rules: Vec<String> = v
+        .get("permissions")
+        .and_then(|p| p.get("allow"))
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for wide in crate::core::policy::overbroad(&rules) {
+        findings.push(Finding {
+            source: rel.to_string(),
             kind: Kind::Policy,
             subject: wide.rule,
             // The `why` and not the suggestion: this surface is somebody
-            // deciding about a repository, not editing its rules. `devplane
-            // check` is where the narrower rule to write belongs.
+            // deciding about a repository, not editing its rules.
             detail: wide.why,
         });
     }

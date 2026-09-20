@@ -25,20 +25,43 @@ devplane audit <run-or-work-id>
                      ↳ the project's gates passed
 2026-09-13T18:04:02 daemon  gate:run         pnpm typecheck && pnpm test -- --run
                      ↳ check passed
-2026-09-13T17:58:40 policy  agent:tool.use   Bash: rm -rf /tmp/build
+2026-09-13T17:58:40 rule    agent:tool.use   Bash: rm -rf /tmp/build
                      ↳ refused by Bash(rm -rf *)
-2026-09-13T17:58:31 human   agent:tool.use   rm -rf node_modules
+2026-09-13T17:58:31 person  agent:tool.use   rm -rf node_modules
+2026-09-13T17:41:09 timer   agent:tool.use   Bash: pnpm publish
+                     ↳ a clock refused it after 4h — set in devplane.toml
+2026-09-13T17:22:55 nobody  agent:question   req-7c03
+                     ↳ the daemon stopped while the question was waiting
 ```
 
 ![The audit surface: what Devplane decided, when, on whose authority, and the rule behind each verdict](/audit.png)
 
 ## The field the table exists for
 
-Each row carries the **actor** (`policy`, `human`, `daemon`), the **action** in the same vocabulary
-the permission rules speak (`agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`,
+Each row carries the **authority** — *on whose authority this happened* — the **action** in the same
+vocabulary the permission rules speak (`agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`,
 `work:advance`), the **subject**, the **outcome**, and the **reason**.
 
 “Refused” is not an answer. “Refused by `Bash(rm -rf *)`” is.
+
+### The five authorities
+
+| | What it means |
+|---|---|
+| `person` | somebody was asked and answered — through the inbox, the board or the CLI |
+| `rule` | one of your `never_auto` or `always_ask` rules matched. The rule text is in the reason, and re-evaluating it must reproduce the verdict |
+| `timer` | **a clock decided**, because nobody answered before the deadline your project set in [`[questions]`](/docs/configuration/#questions). The duration and the file are in the reason — Devplane has no clock of its own |
+| `nobody` | **asked, never answered, and the moment passed** — the run ended under the question, or Devplane was killed while it was waiting. Nobody decided.<br>**Stopping Devplane cleanly does not produce this row**: the question survives, and it is still yours to answer when you start it again |
+| `daemon` | Devplane itself, carrying out something your project wrote down: a gate ran, a pipeline advanced, a pull request opened |
+
+**`classifier` is deliberately not on that list.** Devplane has no channel that attributes an
+individual call to a model's approval, so a variant for it would be one nothing could ever produce.
+Which of your sessions are running under a classifier is a different question, and
+[`devplane modes`](/docs/cli/#devplane-modes) answers it.
+
+**And there is no `unknown`.** A row whose authority cannot be established is not a row with a sixth
+kind of authority — it is a row Devplane does not write. A log that guesses is worse than one with
+gaps.
 
 ## Observations are pruned; decisions are not
 
@@ -48,12 +71,15 @@ Both live in one SQLite file, and the asymmetry is the point rather than an acci
 |---|---|---|---|
 | Runs, events, telemetry, transcripts | things that happened **to** Devplane | pruned on a timer, with the search index | the providers |
 | Decisions | what Devplane **did**, or refused | appended, never pruned | nothing |
+| Asks | what an agent put to **you**, and what became of it | kept while open, then with the decision that closed it | nothing |
 
 An observation can be re-derived from the provider. A decision cannot be re-derived from anything —
-so pruning it would leave a pull request nobody can account for.
+so pruning it would leave a pull request nobody can account for. Nor can an ask: losing one loses
+the question itself, which is why it survives a restart rather than living in memory.
 
-It is written from four places and read from one: the permission hook, the protocol permission
-handler, the gate runner, and the git and GitHub mutations.
+It is written wherever something is decided — the permission hook, the protocol's permission and
+question handlers, the deadline sweep, the gate runner, the pipeline, and the git and GitHub
+mutations — and read from one place, which is why every row looks the same whatever wrote it.
 
 ## An undecided request is not a decision
 

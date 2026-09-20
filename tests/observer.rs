@@ -213,7 +213,7 @@ async fn a_permission_no_rule_covers_is_left_to_claude_and_shown_to_the_human() 
 
 /// **A prohibition answers; nothing approves.**
 ///
-/// This test used to assert that an `auto_allow` rule made Devplane answer
+/// This test used to assert that a project allow rule made Devplane answer
 /// `allow` on the vendor's behalf. That verdict is gone: saying yes was a claim
 /// that Claude Code would also have said yes, and keeping that claim true meant
 /// mirroring the vendor's semantics for ever. What remains is the half that
@@ -225,7 +225,6 @@ async fn a_prohibition_answers_and_nothing_is_approved() {
     let home = gate_home("matching");
     let rules = r#"
 [policy]
-auto_allow = ["Bash(pnpm test *)"]
 never_auto = ["Bash(git push *)"]
 "#;
 
@@ -651,14 +650,67 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
             .any(|a| a == "allow"),
         "a driven permission is answerable, not merely visible"
     );
-    let request_id = item["request_id"].as_str().expect("something to answer");
+    // **The token, not the session.** An inbox item offers the ask's own id,
+    // which is what an answer is addressed to from any surface at any later
+    // time — including after the process holding the request has gone.
+    let ask = item["ask"]
+        .as_str()
+        .expect("an answerable item carries its ask")
+        .to_string();
 
-    c.post(format!("http://{addr}/api/runs/{run}/decide"))
+    let answered: Value = c
+        .post(format!("http://{addr}/api/asks/{ask}/answer"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "request_id": request_id, "option_id": "allow" }))
+        .json(&serde_json::json!({ "option": "allow", "from": "test" }))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    assert_eq!(answered["open"], false, "answering settles the ask");
+    assert!(
+        answered["outcome"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("you answered it"),
+        "the outcome names the person: {}",
+        answered["outcome"]
+    );
+    assert_eq!(
+        answered["delivery"], "live",
+        "a waiting agent takes the answer down the connection it asked on"
+    );
+
+    // **Answered exactly once, however many surfaces try.** Two people, two
+    // devices, one agent: the second is told who answered rather than being
+    // allowed to answer again.
+    let again: Value = c
+        .post(format!("http://{addr}/api/asks/{ask}/answer"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "option": "allow", "from": "second-surface" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let said = again["error"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("already answered") && said.contains("test"),
+        "the second answer is refused and names the first: {said}"
+    );
+
+    // And it is on the record afterwards, which is what makes *who answered
+    // this?* answerable without opening a transcript.
+    let asks = get_json(&c, &addr, "/api/asks", &token).await;
+    let settled = asks["settled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == ask.as_str())
+        .expect("the ask is on the record");
+    assert_eq!(settled["answered_from"], "test");
 
     let mut cleared = false;
     for _ in 0..50 {
@@ -776,7 +828,6 @@ async fn a_prohibition_reaches_a_session_that_is_never_going_to_prompt() {
     let home = gate_home("auto");
     let rules = r#"
 [policy]
-auto_allow = ["Bash(pnpm test *)"]
 never_auto = ["Bash(git push *)"]
 always_ask = ["Bash(gh release *)"]
 "#;
@@ -894,7 +945,6 @@ async fn a_file_rule_reaches_the_files_a_shell_command_names() {
     let home = gate_home("filerule");
     let rules = r#"
 [policy]
-auto_allow = ["Bash(cat *)", "Bash(echo *)"]
 never_auto = ["Read(.env)", "Edit(.env)"]
 "#;
     // The glob spellings are here because they were not, and `cat .en?` read
@@ -1539,11 +1589,11 @@ async fn a_repeated_permission_is_offered_the_rule_that_answers_its_family() {
 
     // **Where it goes, and that nothing put it there.**
     //
-    // It used to name Devplane's own `[policy] auto_allow`. That key is no
-    // longer read — Devplane does not approve tool calls — so an offer pointing
-    // at it would be worse than no offer: somebody pastes it, nothing changes,
-    // and the next identical call interrupts them again. A grant goes where it
-    // is enforced, which is the agent's own settings. `/tmp/repo` is inside no
+    // It used to name an allow list in Devplane's own `[policy]`. There is no
+    // such key any more — Devplane does not approve tool calls — so an offer
+    // pointing at it would be worse than none: somebody pastes it, nothing
+    // changes, and the next identical call interrupts again. A grant goes where
+    // it is enforced: the agent's own settings. `/tmp/repo` is inside no
     // registered project, so the user-scope file is the honest answer.
     let file = offer["file"].as_str().unwrap();
     assert!(file.ends_with("settings.json"), "{file}");
@@ -1685,7 +1735,7 @@ async fn sc007_the_offer_costs_one_query_per_permission_item() {
     let busy = poll(c.clone(), addr, token.clone()).await;
 
     println!(
-        "SC-007: 400 observed calls · inbox poll {quiet:?} with no permission item, \
+        "inbox latency: 400 observed calls · poll {quiet:?} with no permission item, \
          {busy:?} with one · the offer covers {covered} calls"
     );
 }
@@ -1796,4 +1846,305 @@ async fn every_way_a_rule_cannot_be_offered_reads_differently() {
         watched["no_offer"].is_object(),
         "and it still says why there is no rule"
     );
+}
+
+/// **A dead session's version is not a fact about this machine now.**
+///
+/// `doctor` reported *"726 releases behind a session on this machine"* off a run
+/// that had been finished for four days. The sentence was true in the past tense
+/// and printed in the present, about a gap that did not exist — which is the
+/// exact failure this diagnostic is supposed to catch in the permission layer,
+/// committed by the diagnostic itself.
+///
+/// **The gap itself was deleted on 2026-09-19** — it counted releases since a
+/// frozen date, for a compatibility claim this product no longer makes. The
+/// invariant it taught outlives it and is what this test now holds: a figure
+/// about *this machine right now* counts live sessions only, and the numerator
+/// and denominator move together or the ratio lies.
+#[tokio::test]
+async fn only_a_live_session_reports_the_release_this_machine_is_running() {
+    use devplane::core::event::{Event, StatusSample};
+    use devplane::core::{RunId, Source};
+
+    let db = std::env::temp_dir().join(format!(
+        "vp-ver-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
+
+    let say_version = |run: &str| {
+        let state = state.clone();
+        let run = run.to_string();
+        async move {
+            let s = StatusSample {
+                claude_version: Some("2.1.999".into()),
+                ..Default::default()
+            };
+            state
+                .ingest(
+                    RunId::new(run),
+                    Source::Hook,
+                    Event::StatusSample(s),
+                    None,
+                    devplane::core::RunMode::Observed,
+                )
+                .await;
+        }
+    };
+
+    say_version("alive").await;
+    say_version("finished").await;
+
+    let d = get_json(&c, &addr, "/api/diagnostics", &token).await;
+    assert_eq!(
+        d["gate"]["sessions_reporting_a_version"], 2,
+        "both are live so far, so both count"
+    );
+
+    // One of them ends. It is now history, and history is not a claim about
+    // what this machine is running.
+    state
+        .ingest(
+            RunId::new("finished"),
+            Source::Hook,
+            Event::SessionEnded { reason: None },
+            None,
+            devplane::core::RunMode::Observed,
+        )
+        .await;
+
+    let d = get_json(&c, &addr, "/api/diagnostics", &token).await;
+    assert_eq!(
+        d["gate"]["sessions_reporting_a_version"], 1,
+        "an ended session still counted as reporting a version"
+    );
+
+    // And the thing that used to sit beside it is gone rather than empty. The
+    // count of sessions *ahead of a baseline* measured the decay of a claim
+    // this product stopped making; a key that is always `[]` would be worse
+    // than its absence, because a reader would think it meant something.
+    assert!(
+        d["gate"].get("sessions_ahead_of_baseline").is_none(),
+        "the baseline gap was deleted with the baseline: {}",
+        d["gate"]
+    );
+    assert_eq!(
+        d["gate"]["syntax_modelled_on"], "2.1.273",
+        "the honest half survives: a release named, with nothing computed from it"
+    );
+    std::fs::remove_file(&db).ok();
+}
+
+/// **The property the feature claimed and did not have until 2026-09-20.**
+///
+/// A question held in a map on a live connection survived a person leaving for
+/// the day and did not survive the daemon restarting: the run, the agent and
+/// the question died together, the inbox said *"Nothing needs you"*, and the
+/// run read `completed`. This walks the same path across a restart.
+///
+/// Four of the five durable-execution properties are asserted here: the asking
+/// state persists outside the asking process, the wait costs nothing across the
+/// restart, resume is addressed by an opaque token, and the answer is recorded
+/// before anything is delivered. The fifth — a deadline — is `core::ask`'s, and
+/// is off unless a project asks for it.
+///
+/// **The answer reaches the agent.** The original session is gone with the
+/// daemon that held it, so the person's answer is delivered into a *resumed*
+/// one and the row says so, which is the difference between this feature
+/// working and this feature being polite about failing.
+#[tokio::test]
+async fn a_question_outlives_the_daemon_that_was_holding_it() {
+    let _serial = common::one_agent_at_a_time();
+    let Some(agent) = echo_agent_path() else {
+        eprintln!("skipping: build the fixture with `cargo build -p devplane-acp --examples`");
+        return;
+    };
+    // One database, two daemons — which is the whole test.
+    let db = std::env::temp_dir().join(format!(
+        "vp-restart-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let cwd = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let ask_id = {
+        let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
+        c.post(format!("http://{addr}/api/projects/trust"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "path": cwd }))
+            .send()
+            .await
+            .unwrap();
+        let started: Value = c
+            .post(format!("http://{addr}/api/dispatch"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "agent": agent, "cwd": cwd }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let run = started["run_id"].as_str().expect("a run id").to_string();
+        c.post(format!("http://{addr}/api/runs/{run}/prompt"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "text": "this needs permission" }))
+            .send()
+            .await
+            .unwrap();
+
+        let mut ask = String::new();
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+            if let Some(id) = inbox
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|i| i["ask"].as_str())
+            {
+                ask = id.to_string();
+                break;
+            }
+        }
+        assert!(!ask.is_empty(), "the ask reaches the inbox");
+
+        // A graceful stop, which is the case that leaves the question
+        // legitimately still answerable — as against an agent whose own turn
+        // ended, which does not.
+        state.shutdown().await;
+        ask
+    };
+
+    // A second daemon on the same store, knowing nothing but what was written
+    // down.
+    let (addr, token, c, _state) = boot_shared(Policy::default(), &db).await;
+
+    let asks = get_json(&c, &addr, "/api/asks", &token).await;
+    let open = asks["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == ask_id.as_str())
+        .expect("the ask survived the daemon that was holding it");
+    assert_eq!(open["open"], true);
+    assert_eq!(open["outcome"], "waiting for you");
+
+    // And it is in front of the person again, rather than in a table they would
+    // have to know to query.
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    assert!(
+        inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["ask"] == ask_id.as_str()),
+        "a question nobody answered is still in the inbox after a restart"
+    );
+
+    // Still answerable, and the answer still arrives: the session the agent
+    // left on disk is resumed and the person's own words are delivered into it.
+    // The one thing that must not happen is a claim of a delivery that did not
+    // occur, so the sentence has to name which of the two it was.
+    let answered: Value = c
+        .post(format!("http://{addr}/api/asks/{ask_id}/answer"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "decision": "allow", "from": "test" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(answered["open"], false, "the answer settles it");
+    assert_eq!(answered["answered_from"], "test");
+    let outcome = answered["outcome"].as_str().unwrap_or_default();
+    assert!(
+        outcome.contains("you answered it"),
+        "the person is on the record: {outcome}"
+    );
+    assert_eq!(
+        answered["delivery"], "resumed",
+        "the agent that asked was gone, so the answer went into a resumed session"
+    );
+    assert!(
+        outcome.contains("resumed session"),
+        "the surface says the turn had already ended rather than implying a reply: {outcome}"
+    );
+
+    // And nothing is offered twice: the settled ask leaves the inbox.
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    assert!(
+        !inbox
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["ask"] == ask_id.as_str()),
+        "an answered ask stops being asked"
+    );
+}
+
+/// **A question waiting from an earlier session is in the header, not only in
+/// the inbox.**
+///
+/// The durable ask exists so a question outlives the process that asked it. The
+/// summary line counts *sessions* by state, and an ask whose run has ended is
+/// not a session — so without a number of its own, a machine with a question
+/// waiting since yesterday prints `0 need you` and is telling the same lie the
+/// feature was built to stop, one layer up.
+#[tokio::test]
+async fn an_ask_that_outlived_its_session_is_counted_in_the_summary() {
+    let db = std::env::temp_dir().join(format!(
+        "vp-summary-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
+
+    // An ask nobody answered, on a run with no live session — which is what a
+    // restart leaves behind.
+    let ask = devplane::core::ask::Ask::new(
+        devplane::core::AskId::new("ask-1"),
+        devplane::core::RunId::new("run-gone"),
+        devplane::core::ask::Asked {
+            kind: devplane::core::ask::Kind::Question,
+            request_id: "req".into(),
+            message: "Keep the legacy route?".into(),
+            payload: serde_json::json!({}),
+            at: jiff::Timestamp::now(),
+            deadline: devplane::core::ask::Deadline::Never,
+        },
+    );
+    state.store.save_ask(&ask).await.unwrap();
+
+    let board = get_json(&c, &addr, "/api/board", &token).await;
+    assert_eq!(
+        board["summary"]["asks_waiting"], 1,
+        "the header counts what the inbox lists"
+    );
+
+    // And the two agree, which is the property that matters: a person reading
+    // the line and then the list must not find different numbers of things
+    // waiting on them.
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    let listed = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["ask"] == "ask-1")
+        .count();
+    assert_eq!(listed, 1, "the inbox lists it exactly once");
+
+    // Answered, it leaves both.
+    let mut answered = ask.clone();
+    answered
+        .answer(serde_json::json!({}), "test", jiff::Timestamp::now())
+        .unwrap();
+    state.store.save_ask(&answered).await.unwrap();
+    let board = get_json(&c, &addr, "/api/board", &token).await;
+    assert_eq!(board["summary"]["asks_waiting"], 0);
 }

@@ -21,26 +21,98 @@ use crate::core::ids::{ProjectId, RunId, WorkId};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-/// Who decided.
+/// **On whose authority something happened.**
+///
+/// This is the column the product is named for, and for five passes it could
+/// not say what the design required. It had three values — `policy`, `human`,
+/// `daemon` — and *daemon* was doing three unrelated jobs at once: Devplane
+/// running a gate, a clock refusing a call nobody answered, and a question
+/// dying unanswered when its run ended. The reason string told those apart and
+/// the queryable column did not, in the one table whose whole purpose is being
+/// queried by exactly that dimension.
+///
+/// # Why these five and not six
+///
+/// `classifier` is deliberately absent, and its absence is a measurement
+/// rather than an oversight. Devplane has no channel that attributes an
+/// individual call to a model's approval: across four concurrent sessions,
+/// `PreToolUse` fired forty-nine times and `PermissionRequest` fired **zero**
+/// times, so a call in an `auto` session is one nobody was asked about — which
+/// is a fact about the *session's mode*, reported by `devplane modes`, and not
+/// a fact about the call. A variant nothing can produce is a documented
+/// trigger with no code behind it.
+///
+/// `unknown` is absent for the stronger reason: a row whose authority cannot be
+/// established is not a row with another kind of authority, it is **a row
+/// Devplane must not write**. A ledger that guesses is worse than one with
+/// gaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Actor {
-    /// A rule in a `devplane.toml` or the machine-wide policy.
-    Policy,
-    /// A person, through the inbox, the board or the CLI.
-    Human,
-    /// Devplane itself, following a rule the project wrote down — a gate
-    /// verdict, a pipeline advancing, a pull request opening.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub enum Authority {
+    /// Somebody was asked and answered — through the inbox, the board or the
+    /// CLI. The only value that needs no defence.
+    Person,
+    /// A rule matched: a `devplane.toml` prohibition or the machine-wide
+    /// policy. Deterministic and re-derivable, and the rule text is in
+    /// `reason`, which is the whole reason that field is not optional in
+    /// practice.
+    Rule,
+    /// A clock decided, because nobody answered in time. **Distinct from
+    /// `Daemon` on purpose**: Devplane ran the timer, but the *decision* is
+    /// that time ran out, and a person auditing the week needs to find these
+    /// without reading prose. The duration belongs in `reason`.
+    Timer,
+    /// Asked, never answered, and the moment passed — the run ended under the
+    /// question, or the call was cancelled beneath it. **Nobody decided.**
+    ///
+    /// This is the value the whole product exists to be able to write. Devin
+    /// ships the word *skipped* for it; nothing else records it at all.
+    Nobody,
+    /// Devplane itself, mechanically, carrying out something the project wrote
+    /// down: a gate verdict, a pipeline advancing, a pull request opening.
+    ///
+    /// **Not a decision taken on the person's behalf** — it is the tool doing
+    /// the job it was configured to do, and it is separated from `Rule` and
+    /// `Timer` so that filtering for *what was decided for me* does not return
+    /// every gate this machine has ever run.
     Daemon,
 }
 
-impl Actor {
+impl Authority {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Actor::Policy => "policy",
-            Actor::Human => "human",
-            Actor::Daemon => "daemon",
+            Authority::Person => "person",
+            Authority::Rule => "rule",
+            Authority::Timer => "timer",
+            Authority::Nobody => "nobody",
+            Authority::Daemon => "daemon",
         }
+    }
+
+    /// Parses the stored spelling. Unknown text is an error rather than a
+    /// default: silently reading an unrecognised authority as `daemon` would
+    /// put the most reassuring label on the least known row, which is the
+    /// failure this enum was rebuilt to stop.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "person" => Authority::Person,
+            "rule" => Authority::Rule,
+            "timer" => Authority::Timer,
+            "nobody" => Authority::Nobody,
+            "daemon" => Authority::Daemon,
+            _ => return None,
+        })
+    }
+
+    /// Whether this row is something that was decided **instead of** the
+    /// person — the filter the seat's surfaces default to.
+    ///
+    /// `Daemon` is excluded because it is the tool doing what it was told;
+    /// `Person` is excluded because those are the ones you remember.
+    pub fn was_taken_for_you(self) -> bool {
+        matches!(self, Authority::Rule | Authority::Timer | Authority::Nobody)
     }
 }
 
@@ -50,10 +122,13 @@ impl Actor {
 /// `agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`, `work:advance`.
 /// `subject` is what it was about — the command, the gate, the branch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Decision {
     pub id: String,
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
     pub at: Timestamp,
-    pub actor: Actor,
+    pub authority: Authority,
     pub action: String,
     pub subject: String,
     /// `allow`, `deny`, `pass`, `fail`, `done`.
@@ -78,11 +153,16 @@ pub struct Decision {
 }
 
 impl Decision {
-    pub fn new(actor: Actor, action: &str, subject: impl Into<String>, outcome: &str) -> Self {
+    pub fn new(
+        authority: Authority,
+        action: &str,
+        subject: impl Into<String>,
+        outcome: &str,
+    ) -> Self {
         Self {
             id: crate::core::ids::new_event_id(),
             at: Timestamp::now(),
-            actor,
+            authority,
             action: action.to_string(),
             subject: subject.into(),
             outcome: outcome.to_string(),
@@ -138,7 +218,7 @@ impl Decision {
         };
         format!(
             "{} {} {} {}{}",
-            self.actor.as_str(),
+            self.authority.as_str(),
             self.outcome,
             self.action,
             crate::core::text::clip(&self.subject, 60),
@@ -155,7 +235,7 @@ mod tests {
     fn a_decision_says_who_decided_and_on_what_authority() {
         // "auto-approved" is not an answer to "why did this run".
         let d = Decision::new(
-            Actor::Policy,
+            Authority::Rule,
             "agent:tool.use",
             "pnpm test -- --run",
             "allow",
@@ -163,15 +243,62 @@ mod tests {
         .because("Bash(pnpm test *)")
         .for_run(&RunId::new("s1"));
         let line = d.line();
-        assert!(line.contains("policy allow agent:tool.use"));
+        assert!(line.contains("rule allow agent:tool.use"), "{line}");
         assert!(line.contains("pnpm test"));
         assert!(line.contains("Bash(pnpm test *)"));
         assert_eq!(d.run_id, Some(RunId::new("s1")));
     }
 
     #[test]
+    fn the_three_things_daemon_used_to_mean_are_now_three_values() {
+        // The defect this enum was rebuilt for. All three of these were
+        // `Actor::Daemon`, distinguishable only by reading English prose, in
+        // the one table whose entire purpose is being queried by this column.
+        let gate = Decision::new(Authority::Daemon, "gate:run", "cargo test", "pass");
+        let clock = Decision::new(Authority::Timer, "agent:tool.use", "req-1", "deny")
+            .because("nobody answered within ten minutes");
+        let lost = Decision::new(Authority::Nobody, "agent:question", "req-2", "unanswered")
+            .because("the run ended before anybody answered");
+
+        for (a, b) in [(&gate, &clock), (&gate, &lost), (&clock, &lost)] {
+            assert_ne!(
+                a.authority, b.authority,
+                "these were the same value until 2026-09-19"
+            );
+        }
+
+        // And the filter the seat's surfaces default to: what was decided
+        // *instead of* the person. A gate the project asked for is not that.
+        assert!(!Authority::Daemon.was_taken_for_you());
+        assert!(!Authority::Person.was_taken_for_you());
+        for a in [Authority::Rule, Authority::Timer, Authority::Nobody] {
+            assert!(a.was_taken_for_you(), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_authority_is_refused_rather_than_read_as_daemon() {
+        // Reading an unrecognised value as `daemon` would put the most
+        // reassuring label on the least known row. Every spelling this build
+        // writes must round-trip; anything else is `None` and the row is
+        // dropped by the reader.
+        for a in [
+            Authority::Person,
+            Authority::Rule,
+            Authority::Timer,
+            Authority::Nobody,
+            Authority::Daemon,
+        ] {
+            assert_eq!(Authority::parse(a.as_str()), Some(a), "{a:?}");
+        }
+        for unknown in ["policy", "human", "classifier", "unknown", ""] {
+            assert_eq!(Authority::parse(unknown), None, "{unknown}");
+        }
+    }
+
+    #[test]
     fn a_long_subject_is_cut_rather_than_wrapped() {
-        let d = Decision::new(Actor::Daemon, "gate:run", "x".repeat(500), "pass");
+        let d = Decision::new(Authority::Daemon, "gate:run", "x".repeat(500), "pass");
         assert!(d.line().chars().count() < 120);
     }
 }
@@ -271,7 +398,7 @@ mod rewind_tests {
     use crate::core::ids::RunId;
 
     fn call(tool: &str, subject: &str, outcome: &str) -> Decision {
-        Decision::new(Actor::Policy, "agent:tool.use", subject, outcome)
+        Decision::new(Authority::Rule, "agent:tool.use", subject, outcome)
             .by_tool(tool)
             .for_run(&RunId::new("s1"))
     }
@@ -313,7 +440,7 @@ mod rewind_tests {
     #[test]
     fn a_decision_that_is_not_a_tool_call_is_ignored() {
         let rows = vec![Decision::new(
-            Actor::Daemon,
+            Authority::Daemon,
             "gh:pr.create",
             "fix/login",
             "done",

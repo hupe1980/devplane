@@ -75,22 +75,20 @@ pub struct RuleOffer {
 }
 
 impl RuleOffer {
-    /// The line to paste, **in the destination file's own language**.
+    /// The line to paste, in the destination file's own language.
     ///
-    /// The destination stopped being Devplane's TOML on 2026-09-18 and became
-    /// the agent's `settings.json`. The text kept its old shape for a while, so
-    /// the product was handing out a TOML line for a JSON file: pasting it
-    /// broke the very file somebody was editing to be interrupted less.
+    /// There is one destination and it is JSON: the agent's `settings.json`.
+    /// It was Devplane's own TOML until 2026-09-18, and for a while the text
+    /// kept the old shape — so the product handed out a TOML line for a JSON
+    /// file, and pasting it broke the very file somebody was editing in order
+    /// to be interrupted less. The TOML branch survived that fix as an
+    /// unreachable fallback and was removed with the key it named.
     ///
     /// One home, because the page and the terminal both render this and they
     /// drifted apart exactly once already.
     pub fn pasteable(&self) -> String {
         let rule = serde_json::Value::String(self.rule.clone());
-        if self.section.starts_with("permissions") {
-            format!("\"permissions\": {{ \"allow\": [{rule}] }}")
-        } else {
-            format!("auto_allow = [{rule}]")
-        }
+        format!("\"permissions\": {{ \"allow\": [{rule}] }}")
     }
 }
 
@@ -166,8 +164,15 @@ impl From<NoOffer> for NoOfferView {
     }
 }
 
+/// The key inside the destination file that a grant goes in.
+///
+/// A constant rather than a string each caller writes, because there is one
+/// key and the last time there were two the wrong one was offered for months.
+pub const ALLOW_KEY: &str = "permissions.allow";
+
 /// Where the rule goes. Supplied by the caller, which is the half that knows
-/// whether this call was made inside a registered project.
+/// whether this call was made inside a registered project — which is what
+/// decides the *file*. The key within it is always [`ALLOW_KEY`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Destination {
     pub file: String,
@@ -203,6 +208,26 @@ pub fn compose(
     let Some(content) = policy::rule_content(tool, input) else {
         return Err(NoOffer::NoShape);
     };
+
+    // **A construct this matcher does not model gets no rule composed for it,
+    // and this is the one place that check still has a job.**
+    //
+    // `unmodelled_construct` was written for the allow path — *is every
+    // construct here one we claim to understand?* — and when the allow path was
+    // deleted with the permission mirror it became a function nothing called.
+    // The safety it bought did not become unnecessary; it moved. This is now
+    // the only surface where Devplane influences an approval: it composes a
+    // rule and a person pastes it into their **agent's** settings, where it
+    // approves calls Devplane will never see again.
+    //
+    // The failure it prevents is the one it was found by: `cat $'\x2e\x65nv'`
+    // is `cat .env` in a quoting form the matcher does not read, so a rule
+    // offered for it would be wider than the person reading the rule believes.
+    // A suggestion that widens silently is worse than no suggestion, because
+    // it arrives with this product's name on it.
+    if let Some(why) = command::unmodelled_construct(&content) {
+        return Err(NoOffer::Unapprovable { why });
+    }
 
     // Everything in this family that would also interrupt, this call included.
     // `rule_family` is what decides two calls could plausibly share a rule:
@@ -306,8 +331,8 @@ mod tests {
 
     fn dest() -> Destination {
         Destination {
-            file: "/repo/devplane.toml".into(),
-            section: "permissions.allow".into(),
+            file: "/repo/.claude/settings.json".into(),
+            section: ALLOW_KEY.into(),
         }
     }
 
@@ -564,5 +589,44 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_str(&format!("{{{line}}}"))
             .unwrap_or_else(|e| panic!("{line} is not JSON: {e}"));
         assert_eq!(doc["permissions"]["allow"][0], serde_json::json!(o.rule));
+    }
+}
+
+#[cfg(test)]
+mod unmodelled_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// **The offer path is the surviving approval surface, and it may not widen
+    /// silently.**
+    ///
+    /// `cat $'\x2e\x65nv'` is `cat .env` written in a quoting form the matcher
+    /// does not model. A rule composed for it — `Bash(cat *)` — would be pasted
+    /// into somebody's agent settings believing it covers what they read, and
+    /// approve a family the matcher cannot see the shape of. No rule is offered,
+    /// and the reason says which construct stopped it.
+    #[test]
+    fn no_rule_is_offered_for_a_construct_the_matcher_does_not_model() {
+        let ctx = Context::at(Path::new("/repo"));
+        let dest = Destination {
+            file: "/repo/.claude/settings.json".into(),
+            section: ALLOW_KEY.into(),
+        };
+        let input = serde_json::json!({ "command": "cat $'\\x2e\\x65nv'" });
+        let out = compose("Bash", &input, &ctx, &[], &dest);
+        match out {
+            Err(NoOffer::Unapprovable { why }) => {
+                assert!(why.contains("$'"), "the refusal names the construct: {why}")
+            }
+            other => panic!("a rule was offered for an unmodelled construct: {other:?}"),
+        }
+
+        // And the ordinary case still gets one, so this is a refusal and not a
+        // ban on offering rules for shell commands.
+        let plain = serde_json::json!({ "command": "cat notes.txt" });
+        assert!(
+            compose("Bash", &plain, &ctx, &[], &dest).is_ok(),
+            "a command with no unmodelled construct still gets an offer"
+        );
     }
 }

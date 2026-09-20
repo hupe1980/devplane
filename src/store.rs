@@ -18,11 +18,38 @@ use sqlx::{Row, SqlitePool};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+/// The shape of `schema.sql`, stamped into every database this build writes.
+///
+/// **Bump it whenever `schema.sql` changes in a way an older file would not
+/// satisfy** — a renamed or added column, a changed type, a dropped table. A
+/// file stamped with anything else is moved aside on open rather than migrated
+/// (`Store::retire_if_stale`), which is affordable because everything here
+/// except `decisions` is re-derivable from the event log or the provider.
+///
+/// **It is 1, and the count starts here.** It had reached 5 by recording every
+/// shape this schema passed through before anybody could have a database — and
+/// with nothing released, none of those numbers described a file that exists.
+/// A version is for telling *your* file from *another* one, not for keeping a
+/// history; the history is in the changelog.
+pub const SCHEMA_VERSION: i64 = 1;
+
+/// The statement that stamps it. Written out rather than formatted, because
+/// `PRAGMA user_version` accepts no bind parameter and a formatted string
+/// would be a dynamic SQL string for a value that is a literal in this file.
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 1";
+
 /// A handle on the observation store.
 #[derive(Debug, Clone)]
 pub struct Store {
     pool: SqlitePool,
 }
+
+/// One `agent_capabilities` row as SQLite hands it back, before it becomes a
+/// [`AgentCapabilityRecord`](crate::core::AgentCapabilityRecord).
+///
+/// Named rather than written inline because eight positional columns are a type
+/// nobody can read at the call site, and the compiler says so.
+type AgentCapabilityRow = (String, Option<String>, i64, i64, i64, i64, i64, String);
 
 impl Store {
     /// Opens the store, creating it if needed.
@@ -40,6 +67,9 @@ impl Store {
             .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
             .foreign_keys(true)
             .busy_timeout(std::time::Duration::from_secs(5));
+        // A database written by a different schema is moved aside before it is
+        // opened, never migrated and never silently reused. See [`SCHEMA_VERSION`].
+        Self::retire_if_stale(path).await?;
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
             .connect_with(opts)
@@ -48,6 +78,76 @@ impl Store {
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
+    }
+
+    /// Renames a database written by a different schema out of the way.
+    ///
+    /// **There is no migration machinery and there is not going to be.** Every
+    /// table here except `decisions` is a projection of the event log or of the
+    /// provider, so the cost of starting again is a replay rather than a loss —
+    /// and `decisions` is why the old file is *moved* rather than deleted. The
+    /// user is told where it went.
+    ///
+    /// This replaces a loop of `ALTER TABLE … ADD COLUMN` statements whose
+    /// success case was a duplicate-column error. That worked for exactly the
+    /// change it was written for and silently did nothing for the next one: a
+    /// renamed column, a changed type or a dropped table all leave a file that
+    /// opens cleanly and fails on the first write naming the new shape, at
+    /// runtime, in whichever surface happened to write first.
+    async fn retire_if_stale(path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .busy_timeout(std::time::Duration::from_secs(5));
+        let found: Option<i64> = match SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+        {
+            Ok(pool) => {
+                let v: Option<(i64,)> = sqlx::query_as("PRAGMA user_version")
+                    .fetch_optional(&pool)
+                    .await
+                    .ok()
+                    .flatten();
+                pool.close().await;
+                v.map(|(n,)| n)
+            }
+            // Unreadable is not the same as stale. A file this build cannot
+            // open at all is left exactly where it is, because moving it would
+            // be this tool destroying evidence about its own failure.
+            Err(_) => return Ok(()),
+        };
+        if found == Some(SCHEMA_VERSION) {
+            return Ok(());
+        }
+        let found = found.unwrap_or(0);
+        let aside = path.with_extension(format!("v{found}.bak"));
+        std::fs::rename(path, &aside).with_context(|| {
+            format!(
+                "moving a database written by schema v{found} aside to {}",
+                aside.display()
+            )
+        })?;
+        // Both sidecars go with it or the new database inherits a stale journal.
+        for suffix in ["-wal", "-shm"] {
+            let from = PathBuf::from(format!("{}{suffix}", path.display()));
+            if from.exists() {
+                let _ = std::fs::rename(&from, format!("{}{suffix}", aside.display()));
+            }
+        }
+        tracing::warn!(
+            schema_found = found,
+            schema_expected = SCHEMA_VERSION,
+            moved_to = %aside.display(),
+            "the database was written by a different schema and has been moved aside; \
+             observations will be rebuilt from the providers, and the decision log in the \
+             old file is the one thing that is not re-derivable"
+        );
+        Ok(())
     }
 
     /// An in-memory store, for tests.
@@ -66,17 +166,13 @@ impl Store {
         Ok(store)
     }
 
-    /// Applies the schema. There is no migration machinery on purpose: almost
-    /// everything here is a projection of the event log, and a row this build
-    /// cannot decode is dropped and counted (`unreadable rows`) rather than
-    /// migrated.
+    /// Applies the schema and stamps its version.
     ///
-    /// **`decisions` is the exception, because it cannot be rebuilt.**
-    /// `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a column
-    /// added to the file never reaches a database somebody already has and the
-    /// first write naming it fails. Additive columns for that one table are
-    /// applied explicitly below; SQLite has no `ADD COLUMN IF NOT EXISTS`, so a
-    /// duplicate-column error is the success case.
+    /// There is no migration machinery on purpose: almost everything here is a
+    /// projection of the event log, and a row this build cannot decode is
+    /// dropped and counted (`unreadable rows`) rather than migrated. A file
+    /// written by a different schema never reaches this function —
+    /// [`Self::retire_if_stale`] has already moved it aside.
     async fn migrate(&self) -> Result<()> {
         // `raw_sql` runs the whole file, comments and all, in one round trip.
         // Hand-splitting on `;` is how a schema loses the statement that a
@@ -85,11 +181,16 @@ impl Store {
             .execute(&self.pool)
             .await
             .context("applying schema")?;
-        // Columns added to `decisions` after a release. Ignored when already
-        // present, which is what makes this safe to run on every open.
-        for statement in ["ALTER TABLE decisions ADD COLUMN tool TEXT"] {
-            let _ = sqlx::raw_sql(statement).execute(&self.pool).await;
-        }
+        // Stamp the version this file was written by, so the next build can
+        // tell whether it understands it. Written after the schema applies, so
+        // a half-created file is not stamped as complete.
+        // `PRAGMA user_version` takes no bind parameters, so the statement is
+        // built from the constant — which is an integer literal in this source
+        // file and can never be user input.
+        sqlx::query(SCHEMA_VERSION_PRAGMA)
+            .execute(&self.pool)
+            .await
+            .context("stamping the schema version")?;
         Ok(())
     }
 
@@ -326,11 +427,12 @@ impl Store {
     pub async fn save_work(&self, w: &crate::core::Work) -> Result<()> {
         sqlx::query(
             "INSERT INTO works (id, project_id, kind, phase, title, worktree, branch,
-                                created_at, updated_at, payload)
-             VALUES (?,?,?,?,?,?,?,?,?,?)
+                                created_at, updated_at, batch_id, payload)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                phase=excluded.phase, title=excluded.title, worktree=excluded.worktree,
-               branch=excluded.branch, updated_at=excluded.updated_at, payload=excluded.payload",
+               branch=excluded.branch, updated_at=excluded.updated_at,
+               batch_id=excluded.batch_id, payload=excluded.payload",
         )
         .bind(w.id.as_str())
         .bind(w.project_id.as_str())
@@ -341,10 +443,222 @@ impl Store {
         .bind(w.branch.as_deref())
         .bind(w.created_at.to_string())
         .bind(w.updated_at.to_string())
+        .bind(w.batch_id.as_ref().map(|b| b.as_str()))
         .bind(serde_json::to_string(w)?)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Records a fan-out.
+    ///
+    /// Written once and never updated: a batch's own facts — the prompt, the
+    /// targets, the position, who sent it and when — are fixed the moment it is
+    /// sent. What changes afterwards belongs to its members, which are work
+    /// rows with their own lifecycle.
+    pub async fn save_batch(&self, b: &crate::core::batch::Batch) -> Result<()> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO batches
+               (id, kind, position, prompt, template, sent_at, sent_by, targets)
+             VALUES (?,?,?,?,?,?,?,?)",
+        )
+        .bind(b.id.as_str())
+        .bind(match b.kind {
+            crate::core::batch::Kind::Drafted => "drafted",
+            crate::core::batch::Kind::Dispatched => "dispatched",
+        })
+        .bind(b.position.as_str())
+        .bind(&b.prompt)
+        .bind(b.template.as_deref())
+        .bind(b.sent_at.to_string())
+        .bind(&b.sent_by)
+        .bind(serde_json::to_string(&b.targets)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── Asks ────────────────────────────────────────────────────────────
+    //
+    // The one projection here that is *not* rebuildable from the providers. An
+    // agent asks once; if the row is lost, the question is lost with it, and
+    // nothing on the machine can re-derive what somebody was asked.
+
+    /// Writes an ask, and every later state of it.
+    ///
+    /// Records what an agent said it could do, the last time it was started.
+    ///
+    /// **Overwrites on purpose.** The interesting value is the *current* one: an
+    /// agent that gains `session/list` in a release should read as having it,
+    /// not as two rows a surface has to choose between. The date says when the
+    /// answer was true.
+    pub async fn save_agent_capabilities(
+        &self,
+        c: &crate::core::AgentCapabilityRecord,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO agent_capabilities
+                 (command, agent_name, resume, load_session, list_sessions,
+                  declares_modes, needs_auth, measured_at)
+             VALUES (?,?,?,?,?,?,?,?)",
+        )
+        .bind(&c.command)
+        .bind(c.agent_name.as_deref())
+        .bind(c.resume as i64)
+        .bind(c.load_session as i64)
+        .bind(c.list_sessions as i64)
+        .bind(c.declares_modes as i64)
+        .bind(c.needs_auth as i64)
+        .bind(c.measured_at.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Notes that this agent declared a session mode.
+    ///
+    /// **A separate write because it is a separate observation.** The rest of
+    /// the record comes from `initialize`; whether an agent declares a mode is
+    /// only visible when a session is created, which is later and can fail. A
+    /// single write covering both would have to choose one moment and be wrong
+    /// about the other.
+    pub async fn note_agent_declares_modes(&self, command: &str) -> Result<()> {
+        sqlx::query("UPDATE agent_capabilities SET declares_modes = 1 WHERE command = ?")
+            .bind(command)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Everything measured so far. An agent with no row has never been started,
+    /// and the caller reports that as *not probed*.
+    pub async fn agent_capabilities(&self) -> Result<Vec<crate::core::AgentCapabilityRecord>> {
+        let rows: Vec<AgentCapabilityRow> = sqlx::query_as(
+            "SELECT command, agent_name, resume, load_session, list_sessions,
+                    declares_modes, needs_auth, measured_at
+               FROM agent_capabilities",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::core::AgentCapabilityRecord {
+                command: r.0,
+                agent_name: r.1,
+                resume: r.2 != 0,
+                load_session: r.3 != 0,
+                list_sessions: r.4 != 0,
+                declares_modes: r.5 != 0,
+                needs_auth: r.6 != 0,
+                measured_at: r.7.parse().unwrap_or_else(|_| jiff::Timestamp::now()),
+            })
+            .collect())
+    }
+
+    /// `INSERT OR REPLACE` on an opaque primary key, so the answer path is
+    /// idempotent at the storage layer too: the row is the whole state and the
+    /// pure [`Ask`](crate::core::ask::Ask) decides what may change.
+    pub async fn save_ask(&self, a: &crate::core::ask::Ask) -> Result<()> {
+        let deadline: Option<i64> = match a.deadline {
+            crate::core::ask::Deadline::Never => None,
+            crate::core::ask::Deadline::After(s) => Some(s as i64),
+        };
+        sqlx::query(
+            "INSERT OR REPLACE INTO asks
+               (id, kind, run_id, project_id, request_id, message, payload, asked_at,
+                deadline_secs, answer, answered_at, answered_from, delivery, ended, ended_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(a.id.as_str())
+        .bind(a.kind.as_str())
+        .bind(a.run.as_str())
+        .bind(a.project.as_ref().map(|p| p.as_str()))
+        .bind(&a.request_id)
+        .bind(&a.message)
+        .bind(serde_json::to_string(&a.payload)?)
+        .bind(a.asked_at.to_string())
+        .bind(deadline)
+        .bind(a.answer.as_ref().map(serde_json::to_string).transpose()?)
+        .bind(a.answered_at.map(|t| t.to_string()))
+        .bind(a.answered_from.as_deref())
+        .bind(a.delivery.as_ref().map(serde_json::to_string).transpose()?)
+        .bind(a.ended.as_ref().map(serde_json::to_string).transpose()?)
+        .bind(a.ended_at.map(|t| t.to_string()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// One ask by its token.
+    pub async fn ask(&self, id: &str) -> Result<Option<crate::core::ask::Ask>> {
+        let row = sqlx::query("SELECT * FROM asks WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.as_ref().and_then(decode_ask))
+    }
+
+    /// Every ask still waiting for a person, oldest first.
+    ///
+    /// **Oldest first and not newest**, because this is a queue of things owed
+    /// to somebody rather than a feed: the one that has been waiting longest is
+    /// the one that has been failing longest.
+    pub async fn open_asks(&self) -> Result<Vec<crate::core::ask::Ask>> {
+        let rows = sqlx::query("SELECT * FROM asks WHERE ended IS NULL ORDER BY asked_at ASC")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().filter_map(decode_ask).collect())
+    }
+
+    /// Recent asks whatever became of them, newest first — the surface that
+    /// answers *who answered that one, and when*.
+    pub async fn asks(&self, limit: i64) -> Result<Vec<crate::core::ask::Ask>> {
+        let rows = sqlx::query("SELECT * FROM asks ORDER BY asked_at DESC LIMIT ?")
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().filter_map(decode_ask).collect())
+    }
+
+    /// Every fan-out, newest first.
+    ///
+    /// A row this build cannot decode is **dropped and counted**, like every
+    /// other projection here — not migrated, and not guessed at.
+    pub async fn load_batches(&self, limit: i64) -> Result<Vec<crate::core::batch::Batch>> {
+        let rows = sqlx::query("SELECT * FROM batches ORDER BY sent_at DESC LIMIT ?")
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(crate::core::batch::Batch {
+                    id: crate::core::BatchId::new(r.get::<String, _>("id")),
+                    kind: match r.get::<String, _>("kind").as_str() {
+                        "drafted" => crate::core::batch::Kind::Drafted,
+                        "dispatched" => crate::core::batch::Kind::Dispatched,
+                        _ => return None,
+                    },
+                    position: crate::core::batch::Position::parse(
+                        r.get::<String, _>("position").as_str(),
+                    )?,
+                    prompt: r.get("prompt"),
+                    template: r.get("template"),
+                    sent_at: r.get::<String, _>("sent_at").parse().ok()?,
+                    sent_by: r.get("sent_by"),
+                    targets: serde_json::from_str(&r.get::<String, _>("targets")).ok()?,
+                })
+            })
+            .collect())
+    }
+
+    /// One fan-out by id.
+    pub async fn batch(&self, id: &str) -> Result<Option<crate::core::batch::Batch>> {
+        Ok(self
+            .load_batches(500)
+            .await?
+            .into_iter()
+            .find(|b| b.id.as_str() == id))
     }
 
     pub async fn load_works(&self) -> Result<Vec<crate::core::Work>> {
@@ -449,12 +763,12 @@ impl Store {
     pub async fn append_decision(&self, d: &crate::core::Decision) -> Result<()> {
         sqlx::query(
             "INSERT OR IGNORE INTO decisions
-               (id, at, actor, action, subject, outcome, reason, tool, project_id, run_id, work_id)
+               (id, at, authority, action, subject, outcome, reason, tool, project_id, run_id, work_id)
              VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
         .bind(d.at.to_string())
-        .bind(d.actor.as_str())
+        .bind(d.authority.as_str())
         .bind(&d.action)
         .bind(&d.subject)
         .bind(&d.outcome)
@@ -567,6 +881,92 @@ impl Store {
     }
 
     /// What the inbox did, per kind, since a point in time.
+    /// How much of what happened in the person's name reached them.
+    ///
+    /// Three counts from two tables, and the seams matter:
+    ///
+    /// * **`unattended`** is tool calls — the `PreToolUse` half. Measured on
+    ///   2026-09-19, this is everything: no session on the machine asked about
+    ///   anything in forty-nine consecutive calls.
+    /// * **`asked`** is the moments a person was actually put in the loop,
+    ///   which arrive as a `blocked` event or a rule's `permission_decided`.
+    /// * **`answered`** is what a person then did about it, from the decision
+    ///   log rather than from the absence of a follow-up event — *nobody
+    ///   answered* and *nothing was recorded* are different facts and only the
+    ///   decision log can tell them apart.
+    ///
+    /// The window is a caller's, so `7 days` and `today` are the same query.
+    pub async fn oversight(
+        &self,
+        since: jiff::Timestamp,
+    ) -> Result<crate::core::attention::Oversight> {
+        use sqlx::Row;
+        let at = since.to_string();
+        let unattended: i64 =
+            sqlx::query("SELECT COUNT(*) AS n FROM events WHERE at >= ? AND kind = 'tool_started'")
+                .bind(&at)
+                .fetch_one(&self.pool)
+                .await?
+                .get("n");
+        // **Both halves from one table, which is a correction.**
+        //
+        // `asked` was first counted from event kinds — `blocked` and
+        // `permission_decided`. On a real machine that returned nought while
+        // the attention log held sixty-nine raised permissions, and the
+        // product printed *"not one was put in front of you"* underneath a
+        // table showing sixty-nine. A driven run's permission never writes
+        // those event kinds; it raises an item directly. The attention log is
+        // where *a person was put in the loop* is actually recorded, and
+        // counting the numerator and the denominator from two different
+        // tables is how a ratio ends up contradicting the rows beneath it.
+        let asked = sqlx::query(
+            "SELECT COUNT(*) AS asked,
+                    SUM(resolution = 'acted') AS answered
+             FROM attention_log
+             WHERE raised_at >= ? AND kind IN ('permission', 'question')",
+        )
+        .bind(&at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(crate::core::attention::Oversight {
+            unattended,
+            asked: asked.try_get("asked").unwrap_or(0),
+            answered: asked.try_get("answered").unwrap_or(0),
+        })
+    }
+
+    /// Which agents raised anything in the window.
+    ///
+    /// **Because a raise count is a fact about the model, not about the
+    /// machine.** Implicit escalation thresholds differ markedly by model
+    /// family and self-estimates are miscalibrated in model-specific ways
+    /// ([arXiv:2604.08588]), so *how often did something need me* compared
+    /// across a week when the vendor mix changed is comparing two escalation
+    /// policies and calling it a trend.
+    ///
+    /// The surface says so only when it is true — when more than one agent is
+    /// behind the numbers — because a caveat printed on every run is a caveat
+    /// nobody reads.
+    ///
+    /// A row whose run has been pruned contributes nothing rather than an
+    /// `unknown` agent: the question is *did more than one vendor produce
+    /// these*, and a missing join cannot answer it either way.
+    ///
+    /// [arXiv:2604.08588]: https://arxiv.org/abs/2604.08588
+    pub async fn agents_behind_attention(&self, since: jiff::Timestamp) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT r.agent FROM attention_log a
+               JOIN runs r ON r.id = a.run_id
+              WHERE a.raised_at >= ? AND r.agent != ''
+              ORDER BY r.agent",
+        )
+        .bind(since.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        use sqlx::Row;
+        Ok(rows.iter().map(|r| r.get::<String, _>("agent")).collect())
+    }
+
     pub async fn attention_stats(
         &self,
         since: jiff::Timestamp,
@@ -623,27 +1023,34 @@ impl Store {
 
         Ok(rows
             .iter()
-            .map(|r| crate::core::Decision {
-                id: r.get("id"),
-                at: r
-                    .get::<String, _>("at")
-                    .parse()
-                    .unwrap_or_else(|_| jiff::Timestamp::now()),
-                actor: match r.get::<String, _>("actor").as_str() {
-                    "policy" => crate::core::Actor::Policy,
-                    "human" => crate::core::Actor::Human,
-                    _ => crate::core::Actor::Daemon,
-                },
-                action: r.get("action"),
-                subject: r.get("subject"),
-                outcome: r.get("outcome"),
-                reason: r.get("reason"),
-                tool: r.get("tool"),
-                project_id: r.get::<Option<String>, _>("project_id").map(ProjectId::new),
-                run_id: r.get::<Option<String>, _>("run_id").map(RunId::new),
-                work_id: r
-                    .get::<Option<String>, _>("work_id")
-                    .map(crate::core::WorkId::new),
+            .filter_map(|r| {
+                Some(crate::core::Decision {
+                    id: r.get("id"),
+                    at: r
+                        .get::<String, _>("at")
+                        .parse()
+                        .unwrap_or_else(|_| jiff::Timestamp::now()),
+                    // An unrecognised authority is **dropped**, not defaulted.
+                    // Reading it as `daemon` would put the most reassuring label
+                    // on the least known row, in the one table a person queries
+                    // by exactly this column.
+                    authority: match crate::core::Authority::parse(
+                        r.get::<String, _>("authority").as_str(),
+                    ) {
+                        Some(a) => a,
+                        None => return None,
+                    },
+                    action: r.get("action"),
+                    subject: r.get("subject"),
+                    outcome: r.get("outcome"),
+                    reason: r.get("reason"),
+                    tool: r.get("tool"),
+                    project_id: r.get::<Option<String>, _>("project_id").map(ProjectId::new),
+                    run_id: r.get::<Option<String>, _>("run_id").map(RunId::new),
+                    work_id: r
+                        .get::<Option<String>, _>("work_id")
+                        .map(crate::core::WorkId::new),
+                })
             })
             .collect())
     }
@@ -906,8 +1313,129 @@ fn searchable_text(e: &crate::core::event::Event) -> Option<String> {
     }
 }
 
+/// One `asks` row back into the pure type.
+///
+/// A row this build cannot decode is **dropped**, like every other projection
+/// here — never migrated and never guessed at. Dropping an ask loses a
+/// question, which is why every field that decides *whether it is still open*
+/// is required and only the descriptive ones are tolerant.
+fn decode_ask(r: &sqlx::sqlite::SqliteRow) -> Option<crate::core::ask::Ask> {
+    use crate::core::ask::{Ask, Deadline};
+    let deadline = match r.get::<Option<i64>, _>("deadline_secs") {
+        None => Deadline::Never,
+        Some(s) if s > 0 => Deadline::After(s as u32),
+        // A stored zero or a negative is not a deadline anybody could have
+        // written through the parser, so the row is dropped rather than read as
+        // "already expired" — which would end somebody's question on a number
+        // nothing produced.
+        Some(_) => return None,
+    };
+    Some(Ask {
+        id: crate::core::AskId::new(r.get::<String, _>("id")),
+        kind: crate::core::ask::Kind::parse(r.get::<String, _>("kind").as_str())?,
+        run: crate::core::RunId::new(r.get::<String, _>("run_id")),
+        project: r
+            .get::<Option<String>, _>("project_id")
+            .map(crate::core::ProjectId::new),
+        request_id: r.get("request_id"),
+        message: r.get("message"),
+        payload: serde_json::from_str(&r.get::<String, _>("payload")).ok()?,
+        asked_at: r.get::<String, _>("asked_at").parse().ok()?,
+        deadline,
+        answer: r
+            .get::<Option<String>, _>("answer")
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        answered_at: r
+            .get::<Option<String>, _>("answered_at")
+            .and_then(|s| s.parse().ok()),
+        answered_from: r.get("answered_from"),
+        delivery: r
+            .get::<Option<String>, _>("delivery")
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        ended: r
+            .get::<Option<String>, _>("ended")
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        ended_at: r
+            .get::<Option<String>, _>("ended_at")
+            .and_then(|s| s.parse().ok()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// **The ratio and the table under it must come from the same place.**
+    ///
+    /// `asked` was first counted from event kinds. On a real machine that
+    /// returned nought while the attention log held sixty-nine raised
+    /// permissions, and the product printed *"not one of them was put in front
+    /// of you"* directly above a table showing sixty-nine of them. A driven
+    /// run's permission never writes those event kinds — it raises an item.
+    ///
+    /// Counting a numerator and a denominator from two tables is how a summary
+    /// ends up contradicting its own rows, and a person who catches a product
+    /// contradicting itself on screen is right to stop believing the rest.
+    #[tokio::test]
+    async fn the_oversight_ratio_agrees_with_the_table_beneath_it() {
+        let s = Store::open_in_memory().await.unwrap();
+        let long_ago = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+
+        // Three moments a person was put in the loop, through the path a
+        // *driven* run uses — which writes no `blocked` event at all.
+        let mut ids = Vec::new();
+        for (n, kind) in [
+            (0, crate::core::AttentionKind::Permission),
+            (1, crate::core::AttentionKind::Permission),
+            (2, crate::core::AttentionKind::Question),
+        ] {
+            let item = crate::core::AttentionItem {
+                id: crate::core::AttentionId::from(format!("i{n}")),
+                level: kind.default_level(),
+                kind,
+                run_id: None,
+                project_id: None,
+                title: "t".into(),
+                detail: None,
+                ask: None,
+                options: Vec::new(),
+                actions: Vec::new(),
+                request_id: None,
+                form: None,
+                url: None,
+                launch: None,
+                work_id: None,
+                offer: None,
+                no_offer: None,
+                since: jiff::Timestamp::now(),
+            };
+            s.attention_raise(&item).await.unwrap();
+            ids.push(format!("i{n}"));
+        }
+        // A person answered exactly one of them.
+        s.attention_resolve(&ids[2..], crate::core::attention::Resolution::Acted)
+            .await
+            .unwrap();
+
+        let o = s.oversight(long_ago).await.unwrap();
+        let stats = s.attention_stats(long_ago).await.unwrap();
+
+        let raised: i64 = stats.values().map(|k| k.raised).sum();
+        let acted: i64 = stats.values().map(|k| k.acted).sum();
+        assert_eq!(
+            o.asked, raised,
+            "the ratio says {} were put in front of a person and the table says {raised}",
+            o.asked
+        );
+        assert_eq!(
+            o.answered, acted,
+            "the ratio says {} were answered and the table says {acted}",
+            o.answered
+        );
+        assert_eq!(o.answered, 1);
+        // And the unattended half is the tool calls, which nothing raised.
+        assert_eq!(o.unattended, 0, "nothing ran, so nothing ran unattended");
+        assert_eq!(o.total(), 3);
+    }
     use super::*;
 
     #[tokio::test]
@@ -1231,7 +1759,9 @@ mod tests {
             detail: None,
             options: vec![],
             actions: vec![],
+            ask: None,
             request_id: None,
+            form: None,
             url: None,
             launch: None,
             work_id: None,
@@ -1324,7 +1854,9 @@ mod tests {
             options: Vec::new(),
             actions: Vec::new(),
             launch: None,
+            ask: None,
             request_id: None,
+            form: None,
             url: None,
         };
         s.attention_raise(&mk("closed")).await.unwrap();
@@ -1344,73 +1876,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_decision_log_written_by_an_older_release_still_opens_and_still_writes() {
-        // `decisions` is the one table that cannot be rebuilt, and
-        // `CREATE TABLE IF NOT EXISTS` leaves an existing one alone — so a
-        // column added to `schema.sql` never reaches a database somebody
-        // already has, and the first write naming it fails. Upgrading would
-        // have cost the audit trail, which is the one thing here that is not
-        // re-derivable from anything.
-        let dir = std::env::temp_dir().join(format!("vp-upgrade-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("v.db");
+    async fn a_database_from_another_schema_is_moved_aside_rather_than_migrated() {
+        // **The hard cut, asserted.** This used to be a test that an older
+        // file kept working: the schema grew columns through `ALTER TABLE`
+        // statements whose success case was a duplicate-column error. That
+        // handles exactly the change it was written for — an added, nullable
+        // column — and silently does nothing for a renamed one, which is what
+        // `actor` → `authority` is. The old file then opens cleanly and fails
+        // on the first write, at runtime, in whichever surface wrote first.
+        //
+        // So: a file stamped with a different schema is renamed out of the way
+        // and a fresh one takes its place. Observations are re-derivable; the
+        // decision log is not, which is why the old file is **moved and not
+        // deleted**, and why this test checks that it is still on disk.
+        let dir = std::env::temp_dir().join(format!("devplane-schema-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("devplane.db");
 
-        // A store as an older release left it: the table without `tool`, and a
-        // row in it.
         {
-            let s = Store::open(&path).await.unwrap();
-            sqlx::raw_sql("DROP TABLE decisions")
-                .execute(&s.pool)
+            let opts = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
                 .await
                 .unwrap();
             sqlx::raw_sql(
-                "CREATE TABLE decisions (
+                // **Any version but this build's.** It said `1`, which was a
+                // real older shape at the time and is this build's own version
+                // now — a fixture that collides with the thing it is testing.
+                "PRAGMA user_version = 99;
+                 CREATE TABLE decisions (
                    id TEXT PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
                    action TEXT NOT NULL, subject TEXT NOT NULL, outcome TEXT NOT NULL,
-                   reason TEXT, project_id TEXT, run_id TEXT, work_id TEXT)",
+                   reason TEXT, project_id TEXT, run_id TEXT, work_id TEXT);
+                 INSERT INTO decisions (id, at, actor, action, subject, outcome)
+                 VALUES ('d1', '2026-09-15T00:00:00Z', 'policy', 'agent:tool.use', 'cat a', 'allow');",
             )
-            .execute(&s.pool)
+            .execute(&pool)
             .await
             .unwrap();
-            sqlx::raw_sql(
-                "INSERT INTO decisions (id, at, actor, action, subject, outcome)
-                 VALUES ('d1', '2026-09-15T00:00:00Z', 'policy', 'agent:tool.use', 'cat a', 'allow')",
-            )
-            .execute(&s.pool)
-            .await
-            .unwrap();
+            pool.close().await;
         }
 
-        // This release opens it, keeps the old row, and can write a new one.
         let s = Store::open(&path).await.unwrap();
+        // The new database is usable immediately, under the new column.
         s.append_decision(
             &crate::core::Decision::new(
-                crate::core::Actor::Policy,
-                "agent:tool.use",
-                "echo x > notes.md",
-                "allow",
+                crate::core::Authority::Nobody,
+                "agent:question",
+                "req-1",
+                "unanswered",
             )
-            .by_tool("Bash")
             .for_run(&RunId::new("s1")),
         )
         .await
         .unwrap();
-
         let rows = s.decisions(None, 10).await.unwrap();
-        assert_eq!(
-            rows.len(),
-            2,
-            "the older release's row survives the upgrade"
-        );
+        assert_eq!(rows.len(), 1, "the new file starts empty: {rows:?}");
+        assert_eq!(rows[0].authority, crate::core::Authority::Nobody);
+
         assert!(
-            rows.iter().any(|d| d.tool.as_deref() == Some("Bash")),
-            "and this release's column is writable: {rows:?}"
+            dir.join("devplane.v99.bak").exists(),
+            "the old file is kept — a decision log is the one thing here that \
+             cannot be re-derived, so it is moved and never deleted"
         );
-        assert!(
-            rows.iter().any(|d| d.id == "d1" && d.tool.is_none()),
-            "a row written before the column exists reads as having no tool"
-        );
+
+        // And opening again is idempotent: the file now carries this schema's
+        // version, so nothing is moved a second time and the row just written
+        // is still there.
+        let s = Store::open(&path).await.unwrap();
+        assert_eq!(s.decisions(None, 10).await.unwrap().len(), 1);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1422,7 +1960,7 @@ mod tests {
         let s = Store::open_in_memory().await.unwrap();
         s.append_decision(
             &crate::core::Decision::new(
-                crate::core::Actor::Policy,
+                crate::core::Authority::Rule,
                 "agent:tool.use",
                 "pnpm test -- --run",
                 "allow",
@@ -1433,7 +1971,7 @@ mod tests {
         .await
         .unwrap();
         s.append_decision(&crate::core::Decision::new(
-            crate::core::Actor::Daemon,
+            crate::core::Authority::Daemon,
             "gh:pr.create",
             "fix/login",
             "done",
@@ -1497,5 +2035,31 @@ mod tests {
         assert_eq!(bad.len(), 1, "and the unreadable one is named: {bad:?}");
         assert!(bad[0].0.contains("s-bad"), "{bad:?}");
         assert!(!bad[0].1.is_empty(), "with a reason somebody can act on");
+    }
+}
+
+#[cfg(test)]
+mod ask_store_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_ask_round_trips_and_open_means_unanswered() {
+        let s = Store::open_in_memory().await.unwrap();
+        let a = crate::core::ask::Ask::new(
+            crate::core::AskId::new("a1"),
+            crate::core::RunId::new("r1"),
+            crate::core::ask::Asked {
+                kind: crate::core::ask::Kind::Question,
+                request_id: "req".into(),
+                message: "Keep it?".into(),
+                payload: serde_json::json!({"x": 1}),
+                at: jiff::Timestamp::now(),
+                deadline: crate::core::ask::Deadline::After(3600),
+            },
+        );
+        s.save_ask(&a).await.unwrap();
+        let back = s.ask("a1").await.unwrap().expect("stored");
+        assert_eq!(back, a);
+        assert_eq!(s.open_asks().await.unwrap().len(), 1);
     }
 }

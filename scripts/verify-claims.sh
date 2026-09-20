@@ -29,7 +29,18 @@ chk "copilot: tool rules are kind(specifier)"         copilot/allowing-tools.md 
 chk "copilot: deny beats allow"                       copilot/allowing-tools.md 'Deny rules always take precedence'
 # ── The parity rows the CHANGELOG carries and the weekly digest does not ────────
 chk "cc: a Bash tee target is checked as a write"     claude-code/CHANGELOG.md 'the file a Bash .tee. command writes'
-chk "cc: file-command coverage is an open list"       claude-code/permissions.md 'such as .cat., .head., .tail., and .sed.'
+# The claim is that the set is *open* — "such as" — not which commands are in it.
+# Pinned to the members, this row went MISS on 2026-09-19 for the least interesting
+# possible reason: the vendor added `tee` to the list, so `and .sed.` stopped being
+# the tail of it. The vendor naming `tee` explicitly is a confirmation of D147, which
+# measured that behaviour against the running product while the page did not state it.
+chk "cc: file-command coverage is an open list"       claude-code/permissions.md 'file commands Claude Code recognizes in Bash, such as'
+chk "cc: and tee is now named among them"             claude-code/permissions.md 'such as .cat., .head., .tail., .sed., and .tee.'
+# A set of read-only Bash commands that no mode prompts for and no setting can
+# reach. It is the floor under the seat's derivation (SEAT.md §3.4): calls that
+# are never put to a person by construction rather than by a rule.
+chk "cc: a built-in read-only set skips every prompt" claude-code/permissions.md 'recognizes a built-in set of Bash commands as read-only'
+chk "cc: and that set is not configurable"            claude-code/permissions.md 'The set is not configurable'
 chk "cc: a deny rule reaches a symlink's target"      claude-code/permissions.md 'apply when either the symlink path or its target matches'
 chk "cc: an allow rule needs both to match"           claude-code/permissions.md 'apply only when both the symlink path and its target match'
 chk "cc: a rule through a symlinked dir applies too"  claude-code/permissions.md 'also applies at the directory.s real location'
@@ -37,6 +48,15 @@ chk "cc: a negation rule is scoped to its source"     claude-code/CHANGELOG.md '
 chk "cc: Cd rules are directory-anchored, not gitignore" claude-code/permissions.md 'anchored to the whole directory path rather than gitignore-style'
 chk "cc: an unparsed command always prompts"          claude-code/permissions.md 'Commands the analysis can.t parse'
 chk "cc: read-only git forms need no prompt"          claude-code/permissions.md 'read-only forms of .git.'
+# ── The question clock (2026-09-20) ────────────────────────────────────────
+# Three rows for one setting, because the argument in DIRECTION.md §1b rests on
+# all three and they live in two different pages. Nobody had pinned any of them:
+# both sentences were on disk through every pass that argued about timers, which
+# is the D98/R19 class — a row nobody read inside a page already fetched.
+chk "cc: an unanswered question can auto-continue"    claude-code/settings-reference.md 'askUserQuestionTimeout'
+chk "cc: and it is off unless somebody sets it"       claude-code/tools-reference.md 'Questions stay open until you answer them'
+chk "cc: permissions never auto-resolve on idle"      claude-code/tools-reference.md 'permission prompts, including plan approval, never auto-resolve on idle'
+chk "cc: the timer can be set by managed settings"    claude-code/settings-reference.md 'User or managed'
 # ── The surfaces the third index pass found ────────────────────────────────
 chk "ultrareview: findings are independently verified"  claude-code/ultrareview.md 'independently reproduced and verified'
 chk "ultrareview: runs in a remote cloud sandbox"       claude-code/ultrareview.md 'remote sandbox|cloud sandbox'
@@ -319,9 +339,64 @@ chk "sdd: its progress is a markdown task list"   sdd/spec-kit-tasks-template.md
 chk "sdd: openspec writes a task list too"        sdd/openspec-README.md 'tasks\.md.*implementation checklist'
 chk "sdd: openspec's unit is a change folder"     sdd/openspec-README.md 'openspec/changes/'
 chk "sdd: NEEDS CLARIFICATION is spec kit's word" sdd/spec-kit-spec-template.md '\[NEEDS CLARIFICATION'
+# ── Agent Skills: the six fields, and the one documented hard error (D272) ───
+#
+# `#library` reports only what a vendor documents as a failure, so these rows
+# are the whole evidence base for its portability finding. The error is **per
+# distribution path, not per vendor** — Claude Code accepts every field it
+# documents; leaving it is what fails — and the specification's six fields are
+# the allow-list the error message itself prints.
+chk "skills: six fields, name is required"    standards/agent-skills-spec.md '\| .name. *\| Yes'
+chk "skills: description is required too"     standards/agent-skills-spec.md '\| .description. *\| Yes'
+chk "skills: license is optional"             standards/agent-skills-spec.md '\| .license. *\| No'
+chk "skills: compatibility is optional"       standards/agent-skills-spec.md '\| .compatibility. *\| No'
+chk "skills: metadata is optional"            standards/agent-skills-spec.md '\| .metadata. *\| No'
+chk "skills: allowed-tools is experimental"   standards/agent-skills-spec.md 'allowed-tools.*Experimental'
+chk "skills: name is capped at 64 chars"      standards/agent-skills-spec.md 'Max 64 characters'
+chk "skills: description is capped at 1024"   standards/agent-skills-spec.md 'Max 1024 characters'
+# The failure Devplane reports, quoted by the vendor that documents it.
+chk "cc: an unknown field is a hard error"    claude-code/skills.md 'packaging or upload fails with a hard error'
+chk "cc: and it prints the allowed six"       claude-code/skills.md 'Unexpected key\(s\) in SKILL.md frontmatter'
+chk "cc: the error is per distribution path"  claude-code/skills.md 'Claude Code accepts every field in the table above'
+# ── Papers: the numbers these notes reason from (D269) ───────────────────────
+#
+# **Twenty-three were cited and nought were checked.** Every vendor claim above
+# has been tested since this script was written; the literature had no entry at
+# all, in a corpus whose own standing rule is that every number names its test.
+# Reading one paper in full on 2026-09-19 found a correlation quoted in the
+# opposite direction and a shipped-feature design resting on a criterion the
+# paper does not contain. These rows are the cheap half of not doing that again.
+#
+# Only load-bearing numbers are here — the ones a design decision rests on.
+# A paper with no HTML rendering is fetched as its abstract, so a body-only
+# claim about it will MISS rather than pass quietly.
+#
+# The vacuity criterion, which `#vacuity` may cite and may not restate.
+chk "vacuity: it is defined over residual risk"   papers/oversight-vacuity.txt 'Oversight is vacuous at level'
+chk "vacuity: 10 of 44 cells, at tau = 0.1"       papers/oversight-vacuity.txt '10 of 44 cells are vacuous'
+chk "vacuity: the flip thresholds are located"    papers/oversight-vacuity.txt '0\.93,0\.89,0\.84,0\.75'
+# The two findings that forbid a ranking and a mitigation.
+chk "vacuity: stated confidence is near-useless"  papers/oversight-vacuity.txt 'operationally useless'
+chk "vacuity: correlation is BETWEEN families"    papers/oversight-vacuity.txt 'inter-family latent correlation is 0\.33'
+chk "vacuity: difficulty beats lineage"           papers/oversight-vacuity.txt 'shared difficulty dominates lineage'
+# Volume is a safety parameter, not a neutral property of a list.
+chk "capacity: reviewers agreed at kappa 0.52"    papers/oversight-capacity.txt '0\.52'
+chk "capacity: 125 hand-labelled actions"         papers/oversight-capacity.txt '125'
+chk "capacity: safety is an inverted U"           papers/oversight-capacity.txt 'inverted-U'
+# Detection is not intervention, and the agent's prose is an attack surface.
+chk "sabotage: most developers did not detect it" papers/sabotage-detection.txt '94'
+chk "sabotage: flagged and accepted anyway"       papers/sabotage-detection.txt '56'
+chk "sabotage: flag-only is the rejected design"  papers/sabotage-detection.txt 'of participants prefer this level of autonomy'
+chk "sabotage: they want recommend-and-wait"      papers/sabotage-detection.txt 'prefer recommend-and-wait'
+# Why a gate exists at all: an agent's account of itself is not evidence.
+chk "self-eval: it claimed progress every cycle"  papers/self-evaluation-bias.txt 'claimed improvement every time'
+chk "self-eval: and 56% had no real delta"        papers/self-evaluation-bias.txt '56 percent had a measured delta'
 # ── AGENTS.md: the one context file every vendor reads (D179) ────────────────
 chk "agents.md: stewarded by the AAIF"            standards/agents-md.md 'Agentic AI Foundation'
-chk "agents.md: over 60k repositories"            standards/agents-md.md 'over.{0,40}60k'
+# The page is HTML-only since 2026-09 and is rendered to text by the fetcher, which
+# puts each element on its own line — so a phrase spanning two spans no longer spans
+# one grep line. Pinned to the noun rather than to the sentence.
+chk "agents.md: over 60k repositories"            standards/agents-md.md '60k open-source projects'
 chk "agents.md: it mandates no structure"         standards/agents-md.md 'the agent simply parses the text you provide'
 if [ -d .. ]; then
   acp_agents=$(python3 -c 'import json;print(len(json.load(open("acp/registry.json"))["agents"]))' 2>/dev/null || echo '?')

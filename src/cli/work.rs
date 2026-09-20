@@ -82,10 +82,10 @@ impl Rules {
             Ok(c) => {
                 let p = c.policy();
                 Rules::Loaded {
-                    count: p.allow_rules().len() + p.deny_rules().len() + p.ask_rules().len(),
+                    count: p.deny_rules().len() + p.ask_rules().len(),
                     problems: c.validate(),
                     unused: p.redundancies(),
-                    overbroad: p.overbroad(),
+                    overbroad: crate::core::policy::overbroad(&vendor_allow_rules(root.as_path())),
                     path,
                 }
             }
@@ -449,6 +449,217 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Runs this repository's own gates and reports what they exited with.
+///
+/// **The verdict half of `check`.** `devplane check` answers *what will this
+/// file do*; this answers *what did the commands in it just say*. It exists
+/// because something outside this process asks the question — a Spec Kit
+/// workflow tells an agent to run it and report the result — so the answer has
+/// to be legible to a reader that is not a person, and has to distinguish
+/// *nothing was checked* from *the checks said no*.
+///
+/// It decides on exit codes and nothing else. No specification is opened, no
+/// task list is parsed, no prose is graded.
+pub async fn cmd_gate_run(cwd: Option<PathBuf>, json: bool) -> Result<()> {
+    use crate::core::work::GateState;
+
+    let here = match cwd {
+        Some(p) => p.canonicalize().context("that path does not exist")?,
+        None => std::env::current_dir()?,
+    };
+    let root = crate::core::project::find_repo_root(&here).unwrap_or(here);
+
+    // Three outcomes before a command is run, and each is its own sentence.
+    let config = match crate::core::ProjectConfig::load(&root) {
+        Err(e) => {
+            let state = GateState::ConfigUnreadable;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "state": state.as_str(),
+                        "passed": state.passed(),
+                        "summary": state.says(),
+                        "error": e.to_string(),
+                        "commands": [],
+                    }))?
+                );
+            } else {
+                println!("{}  devplane.toml", paint(render::RED, "unreadable"));
+                println!();
+                println!("  {}", paint(DIM, &e.to_string()));
+                println!();
+                println!("{}", state.says());
+            }
+            // Not a pass, and not silently a failure of the checks either: the
+            // checks did not run.
+            std::process::exit(1);
+        }
+        Ok(c) => c,
+    };
+
+    if config.gates.check.is_empty() {
+        let state = GateState::NoGates;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "state": state.as_str(),
+                    "passed": state.passed(),
+                    "summary": state.says(),
+                    "commands": [],
+                }))?
+            );
+        } else {
+            println!("{}", paint(DIM, "no gates"));
+            println!();
+            println!("{}", state.says());
+        }
+        std::process::exit(1);
+    }
+
+    let report =
+        crate::gates::run("check", &config.gates.check, &root, config.gates.timeout, 1).await;
+    let state = match report.passed() {
+        true => GateState::Verified,
+        false => GateState::Failed,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "state": state.as_str(),
+                "passed": state.passed(),
+                // The gate's own sentence, which names what failed; the state's
+                // is the frame. Both, because a reader outside this process has
+                // neither by default.
+                "summary": report.summary(),
+                "says": state.says(),
+                "commands": report.commands,
+            }))?
+        );
+    } else {
+        for c in &report.commands {
+            let (label, colour) = match c.passed() {
+                true => ("ok", render::GREEN),
+                false => ("failed", render::RED),
+            };
+            println!(
+                "{:<10}{:<22}{}",
+                paint(colour, label),
+                c.command,
+                paint(DIM, &c.outcome.headline())
+            );
+        }
+        println!();
+        println!("{}", report.summary());
+        // **Said, because the alternative is a reader assuming otherwise.**
+        // This runs in a repository rather than against a piece of work, so
+        // there is nothing for the row to be about and no daemon in the path.
+        // A verdict that is on the record is what `devplane work verify` is
+        // for, and pointing at it is more honest than inventing a way to append
+        // to the audit log from any client holding the token.
+        println!(
+            "{}",
+            paint(
+                DIM,
+                "Not recorded: this ran in a repository rather than against a piece of work. \
+                 `devplane work verify <id>` is the one that leaves a row."
+            )
+        );
+    }
+
+    match state.passed() {
+        true => Ok(()),
+        false => std::process::exit(1),
+    }
+}
+
+/// Registers Devplane's gate as a Spec Kit extension hook.
+///
+/// **It writes the file only when there is none, and otherwise prints what to
+/// add.** That is not timidity; it is the same rule the permission-rule offer
+/// follows, and it is stronger than the alternative here. `extensions.yml` is a
+/// committed file that may carry other people's hooks, comments and key order,
+/// and the only way to add an entry without a YAML parser is to append text to
+/// a structure this tool has not understood. Round-tripping it through a parser
+/// would preserve the entries and destroy the comments.
+///
+/// So: an absent file is written in full, because there is nothing to damage. A
+/// present one is left alone and the person is handed the four lines and the
+/// key they go under — which they can read, review and commit like the code it
+/// is.
+pub fn cmd_speckit_install(event: Option<String>, dry_run: bool) -> Result<()> {
+    use crate::core::spec::{DEFAULT_HOOK_EVENT, EXTENSIONS_FILE, HOOK_COMMAND, HOOK_EVENTS};
+
+    let here = std::env::current_dir()?;
+    let root = crate::core::project::find_repo_root(&here).unwrap_or(here);
+
+    if !root.join(".specify").is_dir() {
+        anyhow::bail!("Spec Kit is not installed here — there is nothing to register with.");
+    }
+
+    let event = event.unwrap_or_else(|| DEFAULT_HOOK_EVENT.to_string());
+    if !HOOK_EVENTS.contains(&event.as_str()) {
+        anyhow::bail!(
+            "`{event}` is not a hook point Spec Kit defines. It knows:\n  {}",
+            HOOK_EVENTS.join("\n  ")
+        );
+    }
+
+    let path = root.join(EXTENSIONS_FILE);
+    let existing = std::fs::read_to_string(&path).ok();
+
+    // A file that already names the command is one somebody registered. Said as
+    // an observation rather than a certainty: this reads the text rather than
+    // the structure, which is exactly why it does not then edit it.
+    if let Some(text) = &existing
+        && text.contains(HOOK_COMMAND)
+    {
+        println!(
+            "{} already names `{HOOK_COMMAND}`. Nothing to do.",
+            EXTENSIONS_FILE
+        );
+        return Ok(());
+    }
+
+    let entry = crate::core::spec::hook_entry();
+    match existing {
+        None => {
+            println!("{EXTENSIONS_FILE} would be created, containing:\n");
+            println!("{}", crate::core::spec::extensions_file(&event));
+            if dry_run {
+                println!(
+                    "{}",
+                    paint(DIM, "Nothing written. Run without --dry-run to add it.")
+                );
+                return Ok(());
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, crate::core::spec::extensions_file(&event))?;
+            println!("{}  {EXTENSIONS_FILE}", paint(render::GREEN, "written"));
+        }
+        Some(_) => {
+            // **Never edited.** See the doc comment: a file this tool has not
+            // parsed is a file it does not rewrite.
+            println!("{EXTENSIONS_FILE} exists, so add this under `hooks.{event}:`\n");
+            println!("{entry}");
+            println!(
+                "{}",
+                paint(
+                    DIM,
+                    "Devplane does not edit a file it has not parsed. Paste it, and commit it \
+                     like the rest of the repository's configuration."
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
     let root = path.canonicalize().context("that path does not exist")?;
     let root = crate::core::project::find_repo_root(&root).unwrap_or(root);
@@ -560,16 +771,32 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
             false => "no",
         }
     );
+    // **What happens to a question nobody answers**, which is a decision this
+    // file takes on somebody's behalf and is therefore exactly what `check`
+    // exists to print. A deadline that ends a question is invisible until it
+    // fires, and by then the agent has been told no in the reader's name.
+    //
+    // A value that will not parse is a **problem**, not a default: the
+    // difference between `4h` and a typo is the difference between a bounded
+    // wait and an unbounded one, and a file that says something unreadable
+    // about somebody's questions should say so out loud here.
+    // A value that will not parse is already an error in the problem list
+    // above, so this line states the deadline and does not repeat the
+    // complaint: one fact, one place, and a reader who has just been told the
+    // file is wrong does not need telling twice in different words.
+    if let Some(d) = config.questions.deadline() {
+        println!("  questions {}", crate::core::ask::Deadline::says(d));
+    }
+
     // What the rules actually do, which is the half of "is this file right"
     // that the problem list cannot answer. A rule that parses, is legal and
     // still covers nothing anybody expected is only visible by reading it back.
     let policy = config.policy();
     if !policy.is_empty() {
         println!(
-            "  policy    {} deny, {} ask, {} inert",
+            "  policy    {} deny, {} ask",
             policy.deny_rules().len(),
-            policy.ask_rules().len(),
-            policy.allow_rules().len()
+            policy.ask_rules().len()
         );
         // Printed in the order they are evaluated, because that order is the
         // thing most likely to surprise: a matching ask beats a narrower allow.
@@ -599,44 +826,7 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
                 rule
             );
         }
-        // **Printed grey, and labelled for what they are.** `auto_allow`
-        // decides nothing since the approval path was deleted: `Verdict` has
-        // no `Allow`. The key still parses so an older `devplane.toml` loads,
-        // but a green `allow` badge beside a rule that answers no call is this
-        // product telling somebody a protection is in force when it is not.
-        let inert = policy.allow_rules();
-        for rule in inert {
-            println!(
-                "            {} {}",
-                paint(DIM, "inert "),
-                paint(DIM, &rule.to_string())
-            );
-        }
-        if !inert.is_empty() {
-            println!(
-                "            {}",
-                paint(
-                    DIM,
-                    "auto_allow decides nothing — Devplane never approves a call. \
-                     Put grants in your agent's own settings."
-                )
-            );
-        }
-        // Advice, printed once and not per rule. A `Read` deny does exactly
-        // what it says; what it does not say — that a shell redirection and
-        // `touch` are `Edit` business — is the part people get wrong, and
-        // `Read(.env)` is the most common rule anybody writes. As a per-rule
-        // warning this would fire on the canonical example and teach people to
-        // ignore warnings.
-        // A rule that provably does nothing. Unlike the note below it, this is
-        // a *finding* rather than a suggestion: it is answered by pattern
-        // containment rather than by a heuristic, and it under-reports on
-        // purpose, so anything it prints is worth a person's attention.
-        let dead = policy.redundancies();
-        if !dead.is_empty() {
-            println!();
-        }
-        for finding in &dead {
+        for finding in &policy.redundancies() {
             let mut lines = crate::core::text::wrap(finding, 66).into_iter();
             if let Some(first) = lines.next() {
                 println!("  {:<10}{}", paint(BOLD, "unused"), first);
@@ -650,7 +840,7 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         // containment, not a heuristic — and printed above the advice below
         // because it is the only line here that is about somebody getting more
         // than they asked for.
-        let wide = policy.overbroad();
+        let wide = crate::core::policy::overbroad(&vendor_allow_rules(root.as_path()));
         if !wide.is_empty() {
             println!();
         }
@@ -665,6 +855,31 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
                 paint(DIM, &format!("narrow it, e.g. {}", finding.suggestion))
             );
         }
+        // Rules in the agent's own allow list that approve nothing at all — a
+        // negation, an unanchored tool-name glob, a parameter rule. Reported
+        // for the reason `overbroad` is, and it is the other half of the same
+        // question: one is a rule that grants more than it reads as granting,
+        // this is a rule that grants nothing while reading as permission.
+        //
+        // These checks existed and could never run: they live on the allow
+        // side of `Rule::problems`, and nothing has compiled an allow list
+        // since approving was deleted.
+        let inert = crate::core::policy::allow_rules_that_grant_nothing(&vendor_allow_rules(
+            root.as_path(),
+        ));
+        if !inert.is_empty() {
+            println!();
+        }
+        for what in &inert {
+            let mut lines = crate::core::text::wrap(what, 66).into_iter();
+            if let Some(first) = lines.next() {
+                println!("  {:<10}{}", paint(BOLD, "grants no"), first);
+            }
+            for rest in lines {
+                println!("  {:<10}{}", "", rest);
+            }
+        }
+
         let half = policy.half_protected_paths();
         if !half.is_empty() {
             let add = half
@@ -1473,4 +1688,29 @@ pub async fn cmd_ready_issues(
         paint(DIM, "devplane work start --issue <number> --kind bug")
     );
     Ok(())
+}
+
+/// The rules that actually grant, which are the agent's and not this product's.
+///
+/// `devplane.toml` has no allow list: nothing here approves, so a grant written
+/// here would approve nothing and warning about it would be theatre. The file
+/// that does grant is the agent's own, and it is the one worth reading.
+fn vendor_allow_rules(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for rel in [".claude/settings.json", ".claude/settings.local.json"] {
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(a) = v
+            .get("permissions")
+            .and_then(|p| p.get("allow"))
+            .and_then(|a| a.as_array())
+        {
+            out.extend(a.iter().filter_map(|r| r.as_str().map(str::to_string)));
+        }
+    }
+    out
 }

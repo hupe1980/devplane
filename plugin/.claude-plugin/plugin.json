@@ -1,0 +1,20 @@
+{
+  "name": "devplane",
+  "description": "See every coding-agent session on this machine, answer what needs you, and prove a piece of work passed its checks. Read-only from inside Claude Code: the plugin asks the daemon questions and changes nothing.",
+  "version": "0.6.0",
+  "author": {
+    "name": "hupe1980",
+    "url": "https://github.com/hupe1980"
+  },
+  "homepage": "https://hupe1980.github.io/devplane",
+  "repository": "https://github.com/hupe1980/devplane",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "agents",
+    "observability",
+    "supervision",
+    "acp",
+    "verified-done"
+  ],
+  "mcpServers": "./mcp.json"
+}

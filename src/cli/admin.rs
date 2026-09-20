@@ -32,11 +32,23 @@ pub async fn cmd_search(query: &str, json: bool) -> Result<()> {
 /// you the kind is too loud, and `elsewhere` is ambiguous — the question was
 /// answered in a terminal, so the item was right that a person was needed and
 /// wrong about where they would be.
-pub async fn cmd_audit(about: Option<&str>, limit: i64, json: bool) -> Result<()> {
+pub async fn cmd_audit(
+    about: Option<&str>,
+    without_me: bool,
+    limit: i64,
+    json: bool,
+) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
+    let filter = match without_me {
+        true => "&without_me=true",
+        false => "",
+    };
     let path = match about {
-        Some(id) => format!("/api/decisions?limit={limit}&about={}", urlencode(id)),
-        None => format!("/api/decisions?limit={limit}"),
+        Some(id) => format!(
+            "/api/decisions?limit={limit}{filter}&about={}",
+            urlencode(id)
+        ),
+        None => format!("/api/decisions?limit={limit}{filter}"),
     };
     let v = raw(&c, &path).await?;
     if json {
@@ -46,18 +58,37 @@ pub async fn cmd_audit(about: Option<&str>, limit: i64, json: bool) -> Result<()
     let empty = vec![];
     let rows = v.as_array().unwrap_or(&empty);
     if rows.is_empty() {
-        println!("{}", paint(DIM, "Devplane has not decided anything yet."));
+        println!(
+            "{}",
+            paint(
+                DIM,
+                match without_me {
+                    // Two different facts, and a surface that prints one
+                    // sentence for both is telling somebody the wrong one half
+                    // the time.
+                    true => "Nothing was decided in your name.",
+                    false => "Devplane has not decided anything yet.",
+                }
+            )
+        );
         return Ok(());
     }
     for d in rows {
-        let actor = d["actor"].as_str().unwrap_or("");
+        let authority = d["authority"].as_str().unwrap_or("");
         println!(
             "{} {:<7} {:<16} {}",
             paint(DIM, d["at"].as_str().unwrap_or("").get(0..19).unwrap_or("")),
-            match (actor, d["outcome"].as_str().unwrap_or("")) {
-                (_, "deny") | (_, "fail") => paint(render::RED, actor),
-                ("human", _) => paint(render::BLUE, actor),
-                _ => paint(DIM, actor),
+            // `nobody` is coloured like a refusal whatever its outcome says,
+            // because it is one: the agent asked, the moment passed, and the
+            // thing that did not happen was a person deciding. It is the row
+            // this log exists to be able to show, so it does not read as dim
+            // background the way `daemon` does.
+            match (authority, d["outcome"].as_str().unwrap_or("")) {
+                ("nobody", _) => paint(render::RED, authority),
+                (_, "deny") | (_, "fail") => paint(render::RED, authority),
+                ("person", _) => paint(render::BLUE, authority),
+                ("timer", _) => paint(render::YELLOW, authority),
+                _ => paint(DIM, authority),
             },
             d["action"].as_str().unwrap_or(""),
             clip(d["subject"].as_str().unwrap_or(""), 48)
@@ -79,12 +110,68 @@ pub async fn cmd_agents(json: bool) -> Result<()> {
         return Ok(());
     }
     let empty = vec![];
+    let mut any_measured = false;
     for a in v.as_array().unwrap_or(&empty) {
         println!(
             "{:<10} {:<14} {}",
             paint(BOLD, a["id"].as_str().unwrap_or("")),
             a["name"].as_str().unwrap_or(""),
             paint(DIM, a["command"].as_str().unwrap_or(""))
+        );
+        // **What this agent was measured to support, and only where it was.**
+        // Every session capability is advertised per agent at `initialize`, so
+        // it is a runtime fact about that agent at that version. An agent
+        // Devplane has never started has no line here at all — *not probed* is
+        // a different fact from *not supported*, and printing a row of crosses
+        // about something nobody has asked would state the second while meaning
+        // the first.
+        if let Some(m) = a.get("measured").filter(|m| !m.is_null()) {
+            any_measured = true;
+            let yes = |k: &str| m.get(k).and_then(|b| b.as_bool()).unwrap_or(false);
+            let mut can: Vec<&str> = Vec::new();
+            if yes("resume") {
+                can.push("resume");
+            }
+            if yes("load_session") {
+                can.push("load");
+            }
+            if yes("list_sessions") {
+                can.push("list");
+            }
+            if yes("declares_modes") {
+                can.push("modes");
+            }
+            if yes("needs_auth") {
+                can.push("needs sign-in");
+            }
+            let when = m
+                .get("at")
+                .and_then(|t| t.as_str())
+                .map(|t| clip(t, 10))
+                .unwrap_or_default();
+            println!(
+                "           {}",
+                paint(
+                    DIM,
+                    &format!(
+                        "{} · measured {when}",
+                        if can.is_empty() {
+                            "nothing beyond the baseline".to_string()
+                        } else {
+                            can.join(" · ")
+                        }
+                    )
+                )
+            );
+        }
+    }
+    if !any_measured {
+        println!(
+            "\n{}",
+            paint(
+                DIM,
+                "No agent has been started yet, so nothing here is measured.\nWhat an agent supports is advertised when it starts, not listed in a registry."
+            )
         );
     }
     println!(
@@ -99,6 +186,79 @@ pub async fn cmd_agents(json: bool) -> Result<()> {
         )
     );
     Ok(())
+}
+
+/// The one `gate` section of `doctor`.
+///
+/// **One section, printed once, whether or not a daemon answers.** It used to
+/// be two: one built from this binary's own constant and one from the running
+/// daemon's `/api/diagnostics`, under the same heading, opening with the same
+/// sentence. Neither was wrong and the pair was unreadable.
+///
+/// The two facts it carries are different in kind and are labelled as such.
+/// `SYNTAX_MODELLED_ON` is a **compile-time** fact about the binary you are
+/// holding; `sessions_reporting_a_version` is a **runtime** fact only the daemon
+/// can know, and it is absent rather than zero when nothing is running — because
+/// *no daemon has been asked* and *no session reports a version* are two
+/// different states and rendering them identically is how a diagnostic starts
+/// lying.
+///
+/// And where the daemon was built against a different release from this CLI,
+/// that is **said**. A stale daemon is a real state — `devplane stop` is one
+/// command and nothing restarts it automatically — and it is exactly the state
+/// in which a person reading `doctor` would otherwise be told a number that is
+/// not the one enforcing anything.
+fn gate_section(diag: &Option<serde_json::Value>) {
+    println!("\n{}", paint(BOLD, "gate"));
+    let mine = crate::core::policy::SYNTAX_MODELLED_ON;
+    println!(
+        "  rule syntax modelled on Claude Code {}",
+        paint(BOLD, mine)
+    );
+
+    if let Some(theirs) = diag
+        .as_ref()
+        .and_then(|d| d["gate"]["syntax_modelled_on"].as_str())
+        && theirs != mine
+    {
+        println!(
+            "  {}",
+            paint(
+                render::YELLOW,
+                &format!(
+                    "the running daemon was built against {theirs} — it is the one deciding; \
+                     restart it with `devplane stop` to use this binary"
+                )
+            )
+        );
+    }
+
+    println!(
+        "  {}",
+        paint(
+            DIM,
+            "prohibitions are Devplane's own and need no agreement from the agent"
+        )
+    );
+
+    match diag.as_ref().map(|d| {
+        d["gate"]["sessions_reporting_a_version"]
+            .as_i64()
+            .unwrap_or(0)
+    }) {
+        None => println!("  {}", paint(DIM, "no daemon, so no session was asked")),
+        Some(0) => println!(
+            "  {}",
+            paint(
+                DIM,
+                "no session reports its version — install the status-line shim to find out"
+            )
+        ),
+        Some(n) => println!(
+            "  {}",
+            paint(DIM, &format!("{n} session(s) report a version"))
+        ),
+    }
 }
 
 /// Reads a project's configuration and reports on it.
@@ -134,7 +294,7 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                 "connect": state,
                 "gate": probe,
                 "measurement": {
-                    "verified_against": crate::core::policy::VERIFIED_AGAINST,
+                    "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
                 },
                 "spooled_decisions": spooled,
                 "diagnostics": diag,
@@ -202,52 +362,27 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
         );
     }
 
-    // How far the running release has moved since anybody checked.
+    // The release this crate's rule syntax was read against — a fact with a
+    // date, and nothing derived from it.
     //
-    // The number is frozen: the harness that raised it went with the approval
-    // path, because prohibition is Devplane's own decision and needs no
-    // agreement from the vendor to stay true. What is still worth printing is
-    // the gap — a session on a much newer release is governed by rules nobody
-    // has put side by side with it, and that is a fact a person can act on.
-    println!("\n{}", paint(BOLD, "gate"));
-    let running = diag
-        .as_ref()
-        .and_then(|d| d["gate"]["sessions_ahead_of_baseline"].as_array())
-        .and_then(|a| a.iter().filter_map(|x| x["version"].as_str()).max())
-        .map(str::to_string);
-    let behind = running.as_deref().and_then(|v| {
-        crate::core::policy::releases_ahead(v, crate::core::policy::VERIFIED_AGAINST)
-    });
-    println!(
-        "  verified against Claude Code {}",
-        crate::core::policy::VERIFIED_AGAINST
-    );
-    match (&running, behind) {
-        (Some(v), Some(n)) => println!(
-            "            {}",
-            paint(
-                render::YELLOW,
-                &format!(
-                    "{n} release{} behind a session on this machine ({v})",
-                    if n == 1 { "" } else { "s" }
-                )
-            )
-        ),
-        (Some(v), None) => println!(
-            "            {}",
-            paint(render::YELLOW, &format!("a session here runs {v}"))
-        ),
-        // The honest third case, and the one a status line makes disappear:
-        // nothing is reporting a version, so this says nothing about the gap
-        // rather than implying there is none.
-        (None, _) => println!(
-            "            {}",
-            paint(
-                DIM,
-                "no session is reporting its version — install the status-line shim to see the gap"
-            )
-        ),
-    }
+    // A warning used to live here: how many releases a running session was
+    // past that number, in yellow. It was deleted on 2026-09-19 because it
+    // measured the decay of a claim this product stopped making. The floor
+    // existed to protect *Claude Code would have approved this too*; nothing
+    // answers yes on the vendor's behalf any more, so the only thing the count
+    // still tracked was how long ago somebody wrote the number down.
+    //
+    // **This section is printed exactly once.** There were two of it until
+    // 2026-09-20 — this one from the CLI's own constant, and a second one under
+    // the same heading built from the daemon's `/api/diagnostics`, both opening
+    // with the same sentence. A person running `doctor` saw `gate` twice and
+    // had no way to tell which was which, in the command whose whole job is
+    // saying what is true. The two were not redundant, which is the part worth
+    // keeping: the daemon can be an **older binary than the CLI**, so the two
+    // constants can genuinely disagree — and that is now said out loud instead
+    // of being rendered as a repetition.
+    gate_section(&diag);
+
     println!("\n{}", paint(BOLD, "claude code"));
     println!("  settings  {}", state.settings_path.display());
     if state.hooks_installed.is_empty() {
@@ -406,62 +541,6 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             }
         }
 
-        // What the gate was measured against, and what is actually running.
-        // The count of sessions *reporting* a version is printed too: without
-        // the status-line shim there is nothing to compare, and silence must
-        // not read as "all clear".
-        let g = &d["gate"];
-        println!("\n{}", paint(BOLD, "gate"));
-        println!(
-            "  verified against Claude Code {}",
-            paint(BOLD, g["verified_against"].as_str().unwrap_or("?"))
-        );
-        let ahead = g["sessions_ahead_of_baseline"]
-            .as_array()
-            .unwrap_or(&empty)
-            .clone();
-        let reporting = g["sessions_reporting_a_version"].as_i64().unwrap_or(0);
-        if reporting == 0 {
-            println!(
-                "  {}",
-                paint(
-                    DIM,
-                    "no session reports its version — install the status-line shim to find out"
-                )
-            );
-        } else if ahead.is_empty() {
-            println!(
-                "  {}",
-                paint(
-                    DIM,
-                    &format!("{reporting} session(s) report a version; none is ahead of it")
-                )
-            );
-        } else {
-            println!(
-                "  {} {}",
-                paint(render::YELLOW, &format!("{} session(s)", ahead.len())),
-                paint(
-                    render::YELLOW,
-                    "are running a newer Claude Code than the gate was measured against"
-                )
-            );
-            for a in &ahead {
-                println!(
-                    "    {}  {}",
-                    a["run"].as_str().unwrap_or(""),
-                    paint(BOLD, a["version"].as_str().unwrap_or(""))
-                );
-            }
-            println!(
-                "  {}",
-                paint(
-                    DIM,
-                    "rules are still enforced; nobody has checked that they agree"
-                )
-            );
-        }
-
         // The other gate. Devplane's own prohibitions reach auto mode, and in
         // that mode the thing deciding is a classifier configured somewhere
         // else entirely — so a person supervising twenty agents should be able
@@ -536,6 +615,78 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                 paint(
                     DIM,
                     "its permission rules are not in force — run `devplane check` there"
+                )
+            );
+        }
+
+        // **The third of the same failure, and the worst of them.** A write
+        // the store refused is history that never arrived at all — there is no
+        // row to fail to decode and no file to fix. It is logged and dropped
+        // on purpose, because failing the hook a session is blocked on is the
+        // worse trade; what was missing was anywhere for a person to see it.
+        let u = &d["unwritten"];
+        let (ue, ud) = (
+            u["events"].as_u64().unwrap_or(0),
+            u["decisions"].as_u64().unwrap_or(0),
+        );
+        if ue > 0 || ud > 0 {
+            println!("\n{}", paint(BOLD, "unwritten"));
+            println!(
+                "  {}",
+                paint(
+                    render::RED,
+                    &format!("{ue} event(s) and {ud} decision(s) the store would not take")
+                )
+            );
+            if let Some(why) = u["last_reason"].as_str() {
+                println!("  {}", clip(why, 80));
+            }
+            println!(
+                "  {}",
+                paint(
+                    DIM,
+                    "the board looks complete and is not. Check the disk and the \
+                     permissions on the database, then restart — the gap does not \
+                     fill in afterwards."
+                )
+            );
+        }
+
+        // **The failure that costs money while nobody is looking.** An agent a
+        // previous daemon started, still running, unreachable — and the only
+        // one of these absences whose price goes up the longer it is missed.
+        let leaked = d["leaked_agents"].as_array().unwrap_or(&empty);
+        if !leaked.is_empty() {
+            println!("\n{}", paint(BOLD, "leaked agents"));
+            println!(
+                "  {}",
+                paint(
+                    render::RED,
+                    &format!(
+                        "{} agent(s) started by an earlier daemon are still running and \
+                         cannot be reached",
+                        leaked.len()
+                    )
+                )
+            );
+            for a in leaked.iter().take(10) {
+                let pid = a["pid"].as_u64().unwrap_or(0);
+                println!(
+                    "  {:<8}{}",
+                    paint(BOLD, &pid.to_string()),
+                    clip(a["command"].as_str().unwrap_or(""), 64)
+                );
+                if let Some(w) = a["worktree"].as_str() {
+                    println!("  {:<8}{}", "", paint(DIM, &format!("holding {w}")));
+                }
+                println!("  {:<8}{}", "", paint(DIM, &format!("kill -TERM -{pid}")));
+            }
+            println!(
+                "  {}",
+                paint(
+                    DIM,
+                    "Devplane does not end these for you: one may be part-way through \
+                     writing what it was last asked to do."
                 )
             );
         }

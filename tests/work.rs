@@ -640,7 +640,7 @@ async fn every_verdict_is_accountable_afterwards() {
         .find(|d| d["action"] == "gate:run")
         .expect("the gate verdict is the decision that made this work fail");
     assert_eq!(gate["outcome"], "fail");
-    assert_eq!(gate["actor"], "daemon");
+    assert_eq!(gate["authority"], "daemon");
     assert!(
         gate["subject"].as_str().unwrap().contains("check.sh"),
         "the log names the commands that decided: {gate}"
@@ -746,7 +746,7 @@ async fn a_spent_feedback_budget_actually_asks_somebody() {
         .iter()
         .find(|d| d["action"] == "work:retry")
         .expect("going past the project's bound is a decision somebody made");
-    assert_eq!(retry["actor"], "human");
+    assert_eq!(retry["authority"], "person");
     assert!(
         retry["reason"]
             .as_str()
@@ -1357,7 +1357,7 @@ async fn a_projects_own_rules_decide_its_agents() {
     let repo = scratch_repo("policy", "escalate", 0);
     std::fs::write(
         repo.join("devplane.toml"),
-        "[policy]\nauto_allow = [\"Bash(echo *)\"]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
+        "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
     )
     .unwrap();
     let home = std::env::temp_dir().join(format!(
@@ -1936,7 +1936,7 @@ steps = [
         .find(|d| d["action"] == "work:advance")
         .unwrap_or_else(|| panic!("no release in the decision log: {log}"));
     assert_eq!(
-        row["actor"], "human",
+        row["authority"], "person",
         "a person released it, and the log says so"
     );
     assert_eq!(row["work_id"], held["id"]);
@@ -2141,11 +2141,16 @@ steps = [
 /// authority, and recommends exactly this: make the scope visible).
 #[test]
 fn a_standing_grant_is_recorded_as_one() {
-    use devplane::core::{Actor, Decision};
+    use devplane::core::{Authority, Decision};
 
-    let once = Decision::new(Actor::Human, "agent:tool.use", "Bash: pnpm test", "allow");
+    let once = Decision::new(
+        Authority::Person,
+        "agent:tool.use",
+        "Bash: pnpm test",
+        "allow",
+    );
     let always = Decision::new(
-        Actor::Human,
+        Authority::Person,
         "agent:tool.use",
         "Bash: pnpm test",
         "allow_always",
@@ -2317,5 +2322,102 @@ async fn the_change_set_tells_its_four_answers_apart() {
     let (status, _) = get("/api/work/w-nope/changes".to_string()).await;
     assert_eq!(status, 404);
 
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+#[tokio::test]
+async fn a_graceful_stop_records_interrupted_and_never_completed() {
+    // **The word this product distrusts, written by this product, over work
+    // nobody finished.** Measured 2026-09-20: a driven run that was `Working`
+    // when the daemon was stopped came back from the store reading
+    // `completed`, because tearing the connection down produced an
+    // `AcpEvent::Ended` whose `SessionEnded` fell through the reducer's
+    // catch-all. `driven.rs` carries a comment saying the feature exists to
+    // prevent precisely that, three lines above the code that did it.
+    //
+    // Three properties, and the third is the one a restart depends on.
+    let Some(agent) = echo_agent() else { return };
+    let repo = scratch_repo("gracefulstop", "escalate", 0);
+    let db = std::env::temp_dir().join(format!("vp-stop-{}.db", uuid::Uuid::new_v4().simple()));
+    let _serial = common::one_agent_at_a_time();
+
+    let run_id = {
+        let state = AppState::new(
+            db.clone(),
+            "tok".into(),
+            Policy::default(),
+            db.parent().unwrap().to_path_buf(),
+        )
+        .await
+        .unwrap();
+        let app = devplane::api::router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+        let c = reqwest::Client::new();
+        trust(&c, &addr, &repo).await;
+        let run = post(
+            &c,
+            &addr,
+            "/api/dispatch",
+            serde_json::json!({ "agent": agent, "cwd": repo.to_string_lossy() }),
+        )
+        .await;
+        let run_id = devplane::core::RunId::new(run["run_id"].as_str().unwrap());
+        assert!(
+            state
+                .world
+                .lock()
+                .await
+                .run(&run_id)
+                .unwrap()
+                .state
+                .is_live(),
+            "the run is live before the stop, or this test proves nothing"
+        );
+
+        state.shutdown().await;
+
+        // 1. The ending is recorded as an interruption, not a completion.
+        assert_eq!(
+            state.world.lock().await.run(&run_id).unwrap().state,
+            devplane::core::RunState::Interrupted,
+            "a daemon stopping is not the agent finishing"
+        );
+        // 2. `shutdown()` is quiescent: it returned only once every pump had
+        //    written. Nothing may change after it, with or without a pause.
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        assert_eq!(
+            state.world.lock().await.run(&run_id).unwrap().state,
+            devplane::core::RunState::Interrupted,
+            "shutdown() returned with a write still in flight"
+        );
+        server.abort();
+        run_id
+    };
+
+    // 3. A new daemon over the same database reads the same thing. This is the
+    //    property the restart story rests on, and `completed` would be
+    //    invisible to reconciliation — it is not live, so nothing would ever
+    //    revisit it.
+    let state = AppState::new(
+        db.clone(),
+        "tok".into(),
+        Policy::default(),
+        db.parent().unwrap().to_path_buf(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state.world.lock().await.run(&run_id).unwrap().state,
+        devplane::core::RunState::Interrupted,
+        "the store must not have promoted an interruption to a completion"
+    );
+    devplane::poller::reconcile_at_startup(&state).await;
+    assert_eq!(
+        state.world.lock().await.run(&run_id).unwrap().state,
+        devplane::core::RunState::Interrupted,
+        "reconciliation must leave a known ending alone"
+    );
     std::fs::remove_dir_all(&repo).ok();
 }

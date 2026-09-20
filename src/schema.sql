@@ -104,11 +104,47 @@ CREATE TABLE IF NOT EXISTS works (
     branch       TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
+    -- The fan-out this work belongs to, when it belongs to one. A member is a
+    -- work row, not a separate entity.
+    batch_id     TEXT,
     payload      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS works_by_phase ON works(phase, updated_at DESC);
 CREATE INDEX IF NOT EXISTS works_by_project ON works(project_id, updated_at DESC);
+-- Members of a fan-out. One index, because "show me this batch" is the only
+-- question asked of it.
+CREATE INDEX IF NOT EXISTS works_by_batch ON works(batch_id) WHERE batch_id IS NOT NULL;
+
+-- A fan-out: one person's intent, sent once, to many targets.
+--
+-- `kind` is `drafted` or `dispatched` and the distinction is load-bearing. A
+-- drafted batch records the composition and never expects members; a dispatched
+-- one has one member per accepted target. Modelling a draft as "a dispatched
+-- batch whose members have not arrived" would make a draft nobody sent
+-- indistinguishable from six runs that failed to start.
+--
+-- `targets` holds **every** project chosen, including the ones the preflight
+-- refused, because a record that dropped them would answer "what did I send
+-- this to" with the subset that happened to work.
+--
+-- What is deliberately absent: whether the person went on to send a draft. The
+-- vendor's window is the vendor's, and inferring a send from a later session is
+-- manufactured attribution.
+CREATE TABLE IF NOT EXISTS batches (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL,
+    position     TEXT NOT NULL,
+    prompt       TEXT NOT NULL,
+    template     TEXT,
+    sent_at      TEXT NOT NULL,
+    sent_by      TEXT NOT NULL,
+    -- The findings, as JSON: one row per target with its refusal and the time
+    -- the preflight was computed. A snapshot, not a promise.
+    targets      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS batches_by_time ON batches(sent_at DESC);
 
 -- What Devplane decided, and on whose authority.
 --
@@ -118,7 +154,18 @@ CREATE INDEX IF NOT EXISTS works_by_project ON works(project_id, updated_at DESC
 CREATE TABLE IF NOT EXISTS decisions (
     id           TEXT PRIMARY KEY,
     at           TEXT NOT NULL,
-    actor        TEXT NOT NULL,
+    -- **On whose authority**: `person`, `rule`, `timer`, `nobody`, `daemon`.
+    --
+    -- This column was `actor` with three values until 2026-09-19, and `daemon`
+    -- carried three unrelated meanings: Devplane ran a gate, a clock refused a
+    -- call nobody answered, and a question died unanswered when its run ended.
+    -- The reason text told them apart and the queryable column did not — in the
+    -- one table whose whole purpose is being queried by this dimension.
+    --
+    -- `classifier` is absent because nothing here can attribute an individual
+    -- call to a model's approval, and `unknown` is absent because a row whose
+    -- authority cannot be established is a row that must not be written.
+    authority    TEXT NOT NULL,
     action       TEXT NOT NULL,
     subject      TEXT NOT NULL,
     outcome      TEXT NOT NULL,
@@ -185,3 +232,72 @@ CREATE TABLE IF NOT EXISTS attention_log (
 -- The open set, which the sweeper reads on every tick.
 CREATE INDEX IF NOT EXISTS attention_open ON attention_log(item_id) WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS attention_by_raised ON attention_log(raised_at DESC);
+
+-- What an agent asked a person, as a row that outlives the process that asked
+-- it.
+--
+-- **The one table here that is neither a pure observation nor a decision.** An
+-- observation can be re-derived from the provider and a decision cannot be
+-- re-derived from anything; an ask is a decision *waiting to be taken*, and
+-- losing one is losing the question itself — which is what happened before this
+-- table existed: the question lived in a map on a live connection, so a daemon
+-- restart took the run, the agent and the question together and the inbox said
+-- "Nothing needs you".
+--
+-- `id` is an **opaque token** and is what an answer is addressed to, from any
+-- surface, however long afterwards. The protocol's own `request_id` is kept
+-- beside it and is deliberately not the key: it only means anything while the
+-- connection that carried it is alive.
+--
+-- `deadline_secs` is NULL by default and NULL means **it waits**. That is what
+-- the agent's own vendor does — permission prompts "never auto-resolve on
+-- idle" — and a product whose argument is that vendors end your questions on
+-- clocks you did not set may not ship one.
+--
+-- `answer` is written **before** anything is delivered, so a crash between
+-- answered and delivered replays as answered rather than as ask-again.
+CREATE TABLE IF NOT EXISTS asks (
+    id             TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL,        -- permission | question
+    run_id         TEXT NOT NULL,
+    project_id     TEXT,
+    request_id     TEXT NOT NULL,
+    message        TEXT NOT NULL,
+    payload        TEXT NOT NULL,
+    asked_at       TEXT NOT NULL,
+    deadline_secs  INTEGER,
+    answer         TEXT,
+    answered_at    TEXT,
+    answered_from  TEXT,
+    delivery       TEXT,
+    ended          TEXT,
+    ended_at       TEXT
+);
+
+-- The open set, which the inbox and the deadline sweep both read.
+CREATE INDEX IF NOT EXISTS asks_open ON asks(asked_at) WHERE ended IS NULL;
+CREATE INDEX IF NOT EXISTS asks_by_run ON asks(run_id, asked_at DESC);
+
+-- What each agent said it could do, the last time Devplane spoke to it.
+--
+-- **A measurement, never a claim.** Support for every session capability is
+-- advertised per agent at `initialize`, so it is a runtime fact about that
+-- agent at that version — not a property of this product, and not something the
+-- schema can assert. An agent Devplane has never started has **no row here**,
+-- and that is reported as *not probed* rather than as *not supported*: the two
+-- are different facts and conflating them is how a table starts lying about a
+-- field nobody has looked at.
+--
+-- Keyed by the command rather than by a friendly name, because that is what was
+-- actually run — two registry entries can point at the same binary, and a
+-- rename must not read as a new agent.
+CREATE TABLE IF NOT EXISTS agent_capabilities (
+    command        TEXT PRIMARY KEY,
+    agent_name     TEXT,
+    resume         INTEGER NOT NULL,
+    load_session   INTEGER NOT NULL,
+    list_sessions  INTEGER NOT NULL,
+    declares_modes INTEGER NOT NULL,
+    needs_auth     INTEGER NOT NULL,
+    measured_at    TEXT NOT NULL
+);

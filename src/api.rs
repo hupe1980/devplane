@@ -64,7 +64,14 @@ pub fn router(state: Shared) -> Router {
         .route("/api/runs/{id}/focus", post(focus_run))
         .route("/api/dispatch", post(dispatch))
         .route("/api/runs/{id}/prompt", post(prompt_run))
-        .route("/api/runs/{id}/decide", post(decide_run))
+        // **One route, and it is addressed by the ask rather than by the run.**
+        // There were two — `/runs/{id}/decide` and `/runs/{id}/answer` — and a
+        // surface had to know which kind it was looking at before it could send
+        // anything, which is how the board spent a release posting a permission
+        // answer to a question and getting "no permission request is waiting".
+        // The row knows what it is; the caller says what the person chose.
+        .route("/api/asks", get(asks_index))
+        .route("/api/asks/{id}/answer", post(answer_ask))
         .route("/api/runs/{id}/stop", post(stop_run))
         .route("/api/agents", get(agents))
         .route("/api/work", get(list_work).post(start_work))
@@ -77,6 +84,16 @@ pub fn router(state: Shared) -> Router {
         .route("/api/work/{id}/certificate", get(work_certificate))
         .route("/api/work/{id}/resume", post(resume_work))
         .route("/api/projects", get(projects))
+        // Read-only, and there is no write route. Adding one is a deliberate
+        // act with an argument attached — the same argument that keeps the
+        // permission composer a paste rather than a button: an agent on this
+        // machine runs as the same user and can read the token this page uses,
+        // so a route that installs executable intent into six repositories is
+        // reachable by the party it exists to bound.
+        .route("/api/batch", get(batch_index).post(batch_record))
+        .route("/api/batch/{id}", get(batch_one))
+        .route("/api/library", get(library_index))
+        .route("/api/library/{name}", get(library_one))
         .route("/api/projects/trust", post(trust_project))
         .route("/api/projects/{id}/snooze", post(snooze_project))
         .route("/api/issues", post(list_issues))
@@ -88,6 +105,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/setup", get(setup))
         .route("/api/attention", get(attention))
+        .route("/api/modes", get(modes))
         .route("/api/shutdown", post(shutdown))
         .route("/api/stream", get(stream))
         // Open, and it names the version: a client checks it before every
@@ -215,6 +233,39 @@ macro_rules! guard {
 /// only mean the page could not render the message explaining that.
 /// The board.
 ///
+/// The built interface, embedded at compile time by `build.rs`.
+///
+/// `None` when no bundle was present at build time — a clean checkout, or a
+/// machine with no node. That is a value rather than a failure, because
+/// `cargo build` must work without the second toolchain.
+///
+/// **Nothing serves this yet, and that is the point.** The interface is
+/// switched in one change: `ui/legacy.html` is deleted in the same commit that
+/// routes this, so the two are never live together. Serving both would be a
+/// second layout the contract does not cover, kept in step by hand — which is
+/// the risk this feature refused rather than a temporary convenience.
+mod bundle {
+    include!(concat!(env!("OUT_DIR"), "/ui_bundle.rs"));
+}
+
+pub use bundle::{Asset, BUNDLE};
+
+/// What the bundle would be served as, by extension.
+///
+/// Held here rather than guessed from a crate, because the set is four entries
+/// and a wrong `Content-Type` on the one document a person reads over a tunnel
+/// is the failure this whole interface exists to avoid.
+pub fn content_type_of(path: &str) -> &'static str {
+    match path.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
 /// Embedded, so the binary is the whole product and the page works on a laptop
 /// with no network. `DEVPLANE_UI` points at the file on disk instead, which is
 /// the difference between a one-second edit-reload loop and a rebuild plus a
@@ -222,7 +273,7 @@ macro_rules! guard {
 /// user named, so it is opt-in by an environment variable rather than a
 /// setting, and it falls back to the embedded copy rather than failing.
 async fn index() -> impl IntoResponse {
-    const EMBEDDED: &str = include_str!("../ui/index.html");
+    const EMBEDDED: &str = include_str!("../ui/legacy.html");
     let body = match std::env::var_os("DEVPLANE_UI") {
         Some(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| {
             tracing::warn!(path = ?path, error = %e, "DEVPLANE_UI is set and unreadable; serving the embedded page");
@@ -324,7 +375,7 @@ pub async fn record_decided(state: &Shared, env: crate::core::DecidedEnvelope) {
 
     if let Some(rule) = env.rule.as_deref() {
         let mut d = crate::core::Decision::new(
-            crate::core::Actor::Policy,
+            crate::core::Authority::Rule,
             "agent:tool.use",
             subject,
             &env.verdict,
@@ -379,6 +430,7 @@ pub async fn record_decided(state: &Shared, env: crate::core::DecidedEnvelope) {
             // An observed session's prompt belongs to Claude Code's own dialog;
             // Devplane can show it, not answer it.
             request_id: None,
+            ask: None,
             options: Vec::new(),
             // **The gate knows the call and the tool hook may never have
             // fired.** Claude Code resolves permission before invoking the
@@ -619,6 +671,9 @@ async fn otel_metrics(State(state): State<Shared>, body: axum::body::Bytes) -> i
 
 #[derive(Serialize)]
 struct BoardResponse {
+    /// The numbers the inbox raises at, so a page cannot colour by a different
+    /// one. Published rather than duplicated.
+    thresholds: serde_json::Value,
     summary: crate::core::BoardSummary,
     /// **Which projects this board is actually about.**
     ///
@@ -638,27 +693,6 @@ struct BoardResponse {
     /// Per project id: open issues, open pull requests, and how many of them
     /// are waiting on the person. Absent for a project with no forge.
     forge: std::collections::BTreeMap<String, crate::core::ForgeCounts>,
-    /// How stale the gate's measurement is, **when it is stale at all**.
-    ///
-    /// `None` when no session reports a version, and `None` when every one that
-    /// does is at or below the release the matrix ran against. A field that is
-    /// always present would put a number on the board that is usually zero, and
-    /// a number nobody can act on is noise — which is this product's own rule
-    /// about its own inbox, applied to itself.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    gate_behind: Option<GateGap>,
-}
-
-/// The gap between the release the gate was measured against and the newest one
-/// actually running here.
-#[derive(Serialize)]
-struct GateGap {
-    measured: &'static str,
-    running: String,
-    /// `None` across a minor or major boundary, where nothing here can count
-    /// releases and a number would be a guess.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    releases: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -677,6 +711,14 @@ pub struct RunView {
     pub project_name: Option<String>,
     pub agent: String,
     pub mode: String,
+    /// The permission mode the session's own vendor reports, when one of the
+    /// eleven hook events that carry it has arrived. `None` is *nothing has
+    /// said yet* — which is not *nobody is asked*, and the two must not render
+    /// the same.
+    pub permission_mode: Option<String>,
+    /// Whether a person is in the loop for an ordinary call. Three-valued:
+    /// `None` means the mode is unrecognised or unreported.
+    pub asks_a_person: Option<bool>,
     pub state: String,
     pub waiting_for: Option<String>,
     pub cwd: String,
@@ -712,6 +754,8 @@ impl RunView {
             project_name,
             agent: run.agent.clone(),
             mode: run.mode.as_str().into(),
+            permission_mode: run.permission_mode.as_ref().map(|m| m.label().to_string()),
+            asks_a_person: run.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
             state: run.state.as_str().into(),
             waiting_for: match &run.state {
                 crate::core::RunState::Waiting(w) => Some(format!("{w:?}").to_lowercase()),
@@ -765,22 +809,33 @@ async fn board(
         summary.open_prs += c.pull_requests;
         summary.forge_needs_you += c.needs_you;
     }
-    // The newest release any session here reports, when it is ahead of the one
-    // the matrix ran against. Only the status-line shim reports a version, so
-    // absence means *nothing is telling us*, never *there is no gap*.
-    let gate_behind = w
-        .runs()
-        .filter_map(|r| r.claude_version.as_deref())
-        .filter(|v| crate::core::policy::is_ahead_of_baseline(v))
-        .max()
-        .map(|running| GateGap {
-            measured: crate::core::policy::VERIFIED_AGAINST,
-            releases: crate::core::policy::releases_ahead(
-                running,
-                crate::core::policy::VERIFIED_AGAINST,
-            ),
-            running: running.to_string(),
-        });
+    // The thresholds the inbox raises at, so a page cannot colour a gauge by a
+    // different number from the one that decides whether somebody is told. The
+    // board had `85` written into it while `context_high_percent` was
+    // configurable — so a machine that lowered it got an inbox item at 70 % and
+    // a gauge that stayed calm until 85.
+    let thresholds = {
+        let cfg = w.attention;
+        json!({
+            "context_high_percent": cfg.context_high_percent,
+            "rate_limit_percent": cfg.rate_limit_percent,
+        })
+    };
+    // Asks that outlived their runs. Counted exactly where the inbox counts
+    // them — open, and no live session — so the header and the list cannot
+    // disagree about how many things are waiting.
+    {
+        let live: std::collections::HashSet<crate::core::RunId> =
+            state.sessions.lock().await.keys().cloned().collect();
+        summary.asks_waiting = state
+            .store
+            .open_asks()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|a| !live.contains(&a.run))
+            .count();
+    }
     // A project is unreadable when something it owns cannot be read, not when it
     // is merely quiet: a project with no forge configured is not a failure, and
     // `stale` is `None` for it rather than an error.
@@ -806,8 +861,8 @@ async fn board(
             unreadable,
         },
         summary,
+        thresholds,
         runs,
-        gate_behind,
         projects: w.projects().cloned().collect(),
         forge: forge
             .into_iter()
@@ -1129,14 +1184,13 @@ async fn explain(
     // project-only imitation that would answer `allow` for a call the machine
     // denies.
     let (cache, _) = crate::core::PolicyCache::from_disk();
-    let verdict = cache.evaluate(&dir, &q.tool, &input);
-    let restrictive = cache.restrictive(&dir, &q.tool, &input);
+    let verdict = cache.restrictive(&dir, &q.tool, &input);
 
     let asked_by = q.asked_by.as_deref().unwrap_or("api");
     state
         .record(
             crate::core::Decision::new(
-                crate::core::Actor::Policy,
+                crate::core::Authority::Rule,
                 "policy:explain",
                 format!("{}: {}", q.tool, q.call),
                 verdict.as_str(),
@@ -1154,10 +1208,10 @@ async fn explain(
         "call": q.call,
         "verdict": verdict.as_str(),
         "rule": verdict.rule(),
-        // What a `PreToolUse` hook would answer, which is not the same thing:
-        // that hook may never grant, so a call this says `allow` for still
-        // reaches the vendor's own permission system.
-        "before_the_tool_runs": restrictive.as_str(),
+        // `before_the_tool_runs` was here too, and it was the same value under a
+        // second name — a leftover from when this table could also grant, with a
+        // comment explaining a difference that had stopped existing. A reader
+        // comparing the two fields was comparing a value with itself.
         "nothing_ran": true,
     }))
     .into_response()
@@ -1275,32 +1329,129 @@ async fn prompt_run(
     }
 }
 
+/// What a person chose, for either kind of ask.
+///
+/// **One body, because the ask knows what it is.** A permission is allowed or
+/// denied (or answered with an exact option the agent offered); a question is
+/// answered with an option per field or with the person's own words. A caller
+/// sends what the person did and the route validates it against the row, rather
+/// than every surface having to work out which route to post to first.
 #[derive(Deserialize)]
-struct DecideBody {
-    request_id: String,
-    /// `allow` or `deny`, resolved against the options the agent offered.
+struct AnswerBody {
+    /// `allow` or `deny`, for a permission.
     #[serde(default)]
     decision: Option<String>,
-    /// An exact option id, for a caller that read one off the inbox item.
-    /// Wins over `decision` when both are given.
+    /// An exact option the agent offered — an option id on a permission, an
+    /// option value on a question. Wins over `decision`.
     #[serde(default)]
-    option_id: Option<String>,
+    option: Option<String>,
+    /// The person's own words, where the agent offered a free-text box. Wins
+    /// over `option`, which is the adapter's own rule rather than a preference
+    /// of ours.
+    #[serde(default)]
+    custom: Option<String>,
+    /// Which question, when the agent asked several at once.
+    #[serde(default)]
+    field: Option<String>,
+    /// Which surface this came from, so *who answered this?* is answerable
+    /// afterwards without a transcript.
+    #[serde(default)]
+    from: Option<String>,
 }
 
-async fn decide_run(
+/// Every ask, open ones first and oldest first among those.
+///
+/// **A queue rather than a feed**: the one that has been waiting longest is the
+/// one that has been failing longest. Settled asks follow, newest first, because
+/// the question they answer is *what became of that one* rather than *what is
+/// owed*.
+async fn asks_index(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let open = state.store.open_asks().await.unwrap_or_default();
+    let recent = state.store.asks(50).await.unwrap_or_default();
+    let settled: Vec<_> = recent.into_iter().filter(|a| !a.is_open()).collect();
+    Json(json!({
+        "open": open.iter().map(render_ask).collect::<Vec<_>>(),
+        "settled": settled.iter().map(render_ask).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// One ask, with the sentence that says what became of it.
+///
+/// The sentence is composed in `core::ask` and never here, so two surfaces
+/// cannot word the same outcome differently.
+fn render_ask(a: &crate::core::ask::Ask) -> serde_json::Value {
+    json!({
+        "id": a.id.as_str(),
+        "kind": a.kind.as_str(),
+        "run": a.run.as_str(),
+        "project": a.project.as_ref().map(|p| p.as_str()),
+        "message": a.message,
+        "payload": a.payload,
+        "asked_at": a.asked_at.to_string(),
+        "open": a.is_open(),
+        "outcome": a.outcome(),
+        "deadline": a.deadline,
+        "deadline_says": a.deadline.says(),
+        "answered_at": a.answered_at.map(|t| t.to_string()),
+        "answered_from": a.answered_from,
+        "delivery": a.delivery,
+        // Derived here rather than in each surface: *did the person's answer
+        // reach the agent* is one question with one answer, and a board and a
+        // terminal working it out separately from the variant is how two
+        // surfaces come to disagree about whether something was delivered.
+        "delivered": a.delivery.as_ref().map(|d| d.reached_the_agent()),
+        "ended": a.ended,
+    })
+}
+
+/// Answers an ask, by its own token.
+///
+/// **There is no route that dismisses one.** Cancelling is what happens when a
+/// run ends; a person choosing to make the question go away without answering
+/// it would be the agent proceeding on nothing, which is the failure the
+/// feature exists to prevent.
+async fn answer_ask(
     State(state): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(body): Json<DecideBody>,
+    Json(body): Json<AnswerBody>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let want = crate::driven::Decision::parse(body.decision.as_deref(), body.option_id);
-    let id = run_id!(state, id);
-    match crate::driven::decide(&state, &id, &body.request_id, want).await {
-        Ok(()) => {
+    let Ok(Some(ask)) = state.store.ask(&id).await else {
+        return (StatusCode::NOT_FOUND, "no such ask").into_response();
+    };
+
+    let answer = match ask.kind {
+        crate::core::ask::Kind::Permission => crate::driven::Answer::Permission(
+            crate::driven::Decision::parse(body.decision.as_deref(), body.option.clone()),
+        ),
+        crate::core::ask::Kind::Question => {
+            let field = body.field.clone().unwrap_or_else(|| "question_0".into());
+            let chosen = match (body.custom.clone(), body.option.clone()) {
+                (Some(t), _) if !t.trim().is_empty() => crate::core::question::Chosen::Custom(t),
+                (_, Some(o)) => crate::core::question::Chosen::Option(o),
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "say what the answer is: an option the agent offered, or your own words"
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            crate::driven::Answer::Question(vec![(field, chosen)])
+        }
+    };
+
+    let from = body.from.unwrap_or_else(|| "api".to_string());
+    match crate::driven::answer_ask(&state, &id, answer, &from).await {
+        Ok(a) => {
             acted_on(
                 &state,
-                id.as_str(),
+                a.run.as_str(),
                 &[
                     crate::core::AttentionKind::Permission,
                     crate::core::AttentionKind::Question,
@@ -1308,7 +1459,7 @@ async fn decide_run(
                 crate::core::attention::Resolution::Acted,
             )
             .await;
-            Json(json!({"ok": true})).into_response()
+            Json(render_ask(&a)).into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -1337,7 +1488,43 @@ async fn stop_run(
 
 async fn agents(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
-    Json(state.agents.clone()).into_response()
+    // **What each one was measured to support, where it has been started.**
+    // Support for every session capability is advertised per agent at
+    // `initialize`, so it is a runtime fact about that agent at that version —
+    // never a property this product can assert from a table.
+    //
+    // An agent with no record is **not probed**, which is a different fact from
+    // *not supported* and is reported as one: the field is simply absent, and
+    // the surface says so rather than printing a row of crosses about something
+    // nobody has ever asked.
+    let measured = state.store.agent_capabilities().await.unwrap_or_default();
+    let by_command: std::collections::HashMap<&str, &crate::core::AgentCapabilityRecord> =
+        measured.iter().map(|c| (c.command.as_str(), c)).collect();
+    let out: Vec<serde_json::Value> = state
+        .agents
+        .iter()
+        .map(|a| {
+            let mut v = serde_json::to_value(a).unwrap_or_default();
+            if let Some(c) = by_command.get(a.command.as_str())
+                && let Some(obj) = v.as_object_mut()
+            {
+                obj.insert(
+                    "measured".into(),
+                    json!({
+                        "agent_name": c.agent_name,
+                        "resume": c.resume,
+                        "load_session": c.load_session,
+                        "list_sessions": c.list_sessions,
+                        "declares_modes": c.declares_modes,
+                        "needs_auth": c.needs_auth,
+                        "at": c.measured_at.to_string(),
+                    }),
+                );
+            }
+            v
+        })
+        .collect();
+    Json(out).into_response()
 }
 
 /// Starting a piece of work.
@@ -1363,6 +1550,12 @@ struct StartWorkBody {
     /// file, or the folder a spec tool wrote. Stamped, never interpreted.
     #[serde(default)]
     spec: Option<String>,
+    /// The fan-out this work is a member of. Set by `dispatch --to` at a
+    /// running position, and absent for an ordinary single dispatch — **a batch
+    /// of one sets it too**, so the same path serves both and the less-used one
+    /// cannot rot.
+    #[serde(default)]
+    batch_id: Option<String>,
 }
 fn default_kind() -> String {
     "quick".into()
@@ -1425,6 +1618,7 @@ async fn start_work(
         None => None,
     };
     let req = crate::work::StartRequest {
+        batch_id: body.batch_id.as_deref().map(crate::core::BatchId::new),
         project_root: root,
         kind,
         title,
@@ -2071,6 +2265,180 @@ async fn list_issues(
 /// pipelines its `devplane.toml` declares, and whether an agent may start in
 /// it at all. Every project is listed, including ones with no session running —
 /// the board shows what *is* happening, and this answers what *could*.
+/// Records a fan-out.
+///
+/// The one write route this feature has, and it writes a *record* rather than
+/// starting anything: the dispatches themselves go through the existing
+/// single-target path, per accepted target, so a call inside a batch meets
+/// exactly the permission machinery a call outside one meets.
+async fn batch_record(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(b): Json<crate::core::batch::Batch>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    if let Err(e) = state.store.save_batch(&b).await {
+        tracing::warn!(error = %e, "could not record the batch");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not record").into_response();
+    }
+    Json(json!({"id": b.id.as_str()})).into_response()
+}
+
+/// Every fan-out, newest first.
+async fn batch_index(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(batches) = state.store.load_batches(50).await else {
+        return Json(json!([])).into_response();
+    };
+    let works: Vec<crate::core::Work> = state.works.lock().await.values().cloned().collect();
+    let out: Vec<_> = batches.iter().map(|b| render_batch(b, &works)).collect();
+    Json(json!(out)).into_response()
+}
+
+/// One fan-out: its targets, its members, and **no computed verdict**.
+async fn batch_one(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(Some(b)) = state.store.batch(&id).await else {
+        return (StatusCode::NOT_FOUND, "no such batch").into_response();
+    };
+    let works: Vec<crate::core::Work> = state.works.lock().await.values().cloned().collect();
+    Json(render_batch(&b, &works)).into_response()
+}
+
+/// **One row, one outcome per member, and nothing aggregated over them.**
+///
+/// There is deliberately no `passed`, no `failed_count`, no percentage and no
+/// health field. A summary over six repositories is a number that hides which
+/// one needs somebody, and *four green, one red, one asking* is the normal case
+/// rather than a failure to average away.
+fn render_batch(b: &crate::core::batch::Batch, works: &[crate::core::Work]) -> serde_json::Value {
+    // Membership and ordering both come from `core::batch`, which is where they
+    // are tested. They were inlined here — the same filter and the same
+    // `sort_by_key`, byte for byte — while the pure functions sat in the core
+    // with no caller at all: a rule stated in two places and checked in one, so
+    // changing the tested copy would have changed nothing a person sees.
+    let members: Vec<&crate::core::Work> =
+        crate::core::batch::members_of(&b.id, works.iter().map(|w| (w, w.batch_id.as_ref())));
+
+    let state_of = crate::core::batch::state(
+        b.kind,
+        b.accepted().count(),
+        &members
+            .iter()
+            .enumerate()
+            .map(|(i, w)| crate::core::batch::Member {
+                work: i as u64,
+                terminal: w.phase.is_finished(),
+                live: !w.runs.is_empty() && !w.phase.is_finished(),
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    // Ordered the way a person reads: what needs you, then what failed.
+    let rows: Vec<(&crate::core::Work, bool, bool)> = crate::core::batch::order(
+        &members
+            .iter()
+            .map(|w| (*w, w.phase.needs_a_person(), w.phase.is_failure()))
+            .collect::<Vec<_>>(),
+    );
+
+    json!({
+        "id": b.id.as_str(),
+        "kind": match b.kind {
+            crate::core::batch::Kind::Drafted => "drafted",
+            crate::core::batch::Kind::Dispatched => "dispatched",
+        },
+        "position": b.position.as_str(),
+        "prompt": b.prompt,
+        "template": b.template,
+        "sent_at": b.sent_at.to_string(),
+        "sent_by": b.sent_by,
+        "state": state_of.as_str(),
+        "says": state_of.says(),
+        "cost_in_runs": b.cost_in_runs(),
+        "targets": b.targets,
+        "members": rows.iter().map(|(w, needs_you, failed)| json!({
+            "work": w.id.as_str(),
+            "project": w.project_id.as_str(),
+            "title": w.title,
+            "phase": w.phase.as_str(),
+            "needs_you": needs_you,
+            "failed": failed,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Every artefact, with coverage per project./// Every artefact, with coverage per project.
+async fn library_index(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(all) = crate::library::list() else {
+        return Json(json!([])).into_response();
+    };
+    let projects = library_projects(&state).await;
+    let out: Vec<_> = all
+        .iter()
+        .map(|a| {
+            let cov = crate::library::coverage(a, &projects);
+            json!({
+                "name": a.name,
+                "digest": a.digest.digest,
+                "origin": a.sidecar.as_ref().map(|s| s.origin.clone()),
+                "copies": cov.iter().map(|c| json!({
+                    "project": c.project,
+                    "drift": c.drift,
+                    "present": c.present,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Json(json!(out)).into_response()
+}
+
+/// One artefact: its drift outcomes, its provenance, its portability findings.
+async fn library_one(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let Ok(all) = crate::library::list() else {
+        return (StatusCode::NOT_FOUND, "no library").into_response();
+    };
+    let Some(a) = all.iter().find(|a| a.name == name) else {
+        return (StatusCode::NOT_FOUND, "no such artefact").into_response();
+    };
+    let projects = library_projects(&state).await;
+    let cov = crate::library::coverage(a, &projects);
+    Json(json!({
+        "name": a.name,
+        "digest": a.digest.digest,
+        "provenance": a.sidecar,
+        "copies": cov.iter().map(|c| json!({
+            "project": c.project,
+            "path": c.path.display().to_string(),
+            "drift": c.drift,
+            "present": c.present,
+            "ignored": c.ignored,
+        })).collect::<Vec<_>>(),
+        "portability": crate::library::portability_of(a),
+        "also_from_this_origin": a.sidecar.as_ref()
+            .map(|s| crate::library::from_origin(&s.origin, &all))
+            .unwrap_or_default(),
+    }))
+    .into_response()
+}
+
+async fn library_projects(state: &Shared) -> Vec<(String, std::path::PathBuf)> {
+    let w = state.world.lock().await;
+    w.projects()
+        .map(|p| (p.name.clone(), p.root.clone()))
+        .collect()
+}
+
 async fn projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let w = state.world.lock().await;
@@ -2130,6 +2498,40 @@ fn default_attention_days() -> i64 {
 /// `elsewhere` is genuinely ambiguous — the question was answered in a
 /// terminal, which means the item was right that a person was needed and wrong
 /// about where they would be.
+/// Which projects are deciding without you.
+///
+/// The first slice of the seat. Live sessions only — the question is present
+/// tense — and a session that has not reported a mode is a row rather than a
+/// gap, because eleven hook events carry the mode and the one that fires on
+/// every tool call is not among them.
+async fn modes(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let w = state.world.lock().await;
+    let projects = w.permission_modes();
+    let sessions: usize = projects.iter().map(|p| p.sessions.len()).sum();
+    // **And what can answer without any of them.** Per machine rather than per
+    // session, because that is what the setting is: the vendor reads it at
+    // session start from the user's own file or from one an administrator
+    // deployed, and no session reports which it got. Saying it here — beside
+    // *which projects are deciding without you* — is the same errand one step
+    // further out.
+    let clock = crate::observe::connect::question_clock();
+    Json(json!({
+        "projects": projects,
+        "sessions": sessions,
+        "unsupervised": projects.iter().map(|p| p.unsupervised).sum::<usize>(),
+        "unknown": projects.iter().map(|p| p.unknown).sum::<usize>(),
+        "question_clock": clock.as_ref().map(|c| json!({
+            "after": c.after,
+            "source": c.source.as_str(),
+            "file": c.file,
+            "says": c.says(),
+            "chosen_by_the_person": c.chosen_by_the_person(),
+        })),
+    }))
+    .into_response()
+}
+
 async fn attention(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -2138,11 +2540,50 @@ async fn attention(
     guard!(state, headers);
     let since =
         jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * q.days.clamp(1, 365));
+    // **The bigger question, above the per-kind one.** `kinds` answers *is the
+    // inbox worth reading*; this answers *is anything reaching you at all*.
+    // Different denominators — items raised, versus everything that happened —
+    // and the second is the one that can say the product is not working.
+    let oversight = state.store.oversight(since).await.ok();
+    // Which agents are behind the counts. Published rather than interpreted:
+    // the surface decides whether to say anything, and it says it only when
+    // more than one vendor is in the window.
+    let agents = state
+        .store
+        .agents_behind_attention(since)
+        .await
+        .unwrap_or_default();
     match state.store.attention_stats(since).await {
         Ok(by_kind) => Json(json!({
             "since": since.to_string(),
             "days": q.days,
-            "kinds": by_kind,
+            "agents": agents,
+            "oversight": oversight.map(|o| json!({
+                "unattended": o.unattended,
+                "asked": o.asked,
+                "answered": o.answered,
+                "total": o.total(),
+                // Absent rather than nought when nothing happened: *none of
+                // nothing* is a quiet week and *none of four hundred* is the
+                // finding, and one number cannot say both.
+                "reviewed": o.reviewed(),
+                "sentence": o.sentence(),
+            })),
+            // **The share comes from `KindStats::acted_share`**, which is where
+            // the rule *absent when nothing has resolved* is defined and
+            // tested. The CLI computed the same ratio itself, including that
+            // rule, from the raw counts below — a third copy of one rule in a
+            // product whose own standing rule is that a figure has one home.
+            "kinds": by_kind
+                .iter()
+                .map(|(kind, st)| {
+                    let mut v = serde_json::to_value(st).unwrap_or_default();
+                    if let Some(o) = v.as_object_mut() {
+                        o.insert("acted_share".into(), json!(st.acted_share()));
+                    }
+                    (kind.clone(), v)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>(),
         }))
         .into_response(),
         Err(e) => (
@@ -2274,6 +2715,16 @@ struct AuditQuery {
     title: Option<String>,
     #[serde(default)]
     sub: Option<String>,
+    /// Only what was decided **instead of** you.
+    ///
+    /// The seat's own filter, and the one question the log exists to answer:
+    /// a rule, a clock or nobody deciding in your name. `person` rows are the
+    /// ones you remember and `daemon` rows are the tool doing what it was told,
+    /// so both are out — which is `Authority::was_taken_for_you`, a predicate
+    /// a predicate that had been described as *the filter the seat's surfaces
+    /// default to* while no surface offered it.
+    #[serde(default)]
+    without_me: bool,
     #[serde(default)]
     detail: Option<String>,
 }
@@ -2286,7 +2737,16 @@ async fn decisions(
 ) -> impl IntoResponse {
     guard!(state, headers);
     match state.store.decisions(q.about.as_deref(), q.limit).await {
-        Ok(d) => Json(d).into_response(),
+        Ok(d) => {
+            let rows: Vec<_> = match q.without_me {
+                true => d
+                    .into_iter()
+                    .filter(|r| r.authority.was_taken_for_you())
+                    .collect(),
+                false => d,
+            };
+            Json(rows).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -2327,7 +2787,7 @@ async fn decisions_pane(
                     // The pane shows a time, not a timestamp — narrowed here so
                     // the page does not slice a string it did not produce.
                     at: x.at.to_string().chars().skip(11).take(5).collect(),
-                    actor: x.actor.as_str().to_string(),
+                    authority: x.authority.as_str().to_string(),
                     action: x.action.clone(),
                     outcome: x.outcome.clone(),
                     reason: x.reason.clone(),
@@ -2405,7 +2865,6 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
                     "exists": path.exists(),
                     "deny": policy.deny_rules().iter().map(|r| r.to_string()).collect::<Vec<_>>(),
                     "ask": policy.ask_rules().iter().map(|r| r.to_string()).collect::<Vec<_>>(),
-                    "allow": policy.allow_rules().iter().map(|r| r.to_string()).collect::<Vec<_>>(),
                     "problems": g.validate(),
                 })
             }
@@ -2473,11 +2932,12 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
             "partial": provider.partial(),
         },
         "connect": connect,
-        // Three floors, three keys, and no key that combines them. A single
-        // "compatibility" figure would hide which of the three claims a reader
-        // is relying on, which is the only thing worth knowing about them.
+        // The release this crate's rule *syntax* was read against, as a
+        // static fact. Nothing computes a distance from it: the warning that
+        // used to sit here counted releases since a frozen date, which is not
+        // a measurement of anything a reader could act on.
         "gate": {
-            "verified_against": crate::core::policy::VERIFIED_AGAINST,
+            "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
         },
         "machine_policy": machine_policy,
         "projects": projects,
@@ -2541,24 +3001,37 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
     let w = state.world.lock().await;
     // Which observed sessions run a Claude Code newer than the release this
     // gate's behaviour was tested against — the gap a silent widening lives in.
-    //
-    // Only the status-line shim reports a version, so this is what is *known*
-    // and never a claim about the whole machine. Hence the count beside it:
-    // nought ahead of nought reporting is not agreement.
-    let ahead: Vec<_> = w
+    // How many live sessions are telling us what they are running. Kept
+    // because "nothing reports a version" is a real diagnostic; the list of
+    // sessions *ahead of a baseline* that used to sit beside it is gone with
+    // the baseline.
+    let reporting = w
         .runs()
-        .filter_map(|r| r.claude_version.as_deref().map(|v| (r, v)))
-        .filter(|(_, v)| crate::core::policy::is_ahead_of_baseline(v))
-        .map(|(r, v)| json!({"run": r.id.to_string(), "version": v}))
+        .filter(|r| r.state.is_live() && r.claude_version.is_some())
+        .count();
+    let (lost_events, lost_decisions, last_loss) = state.unwritten.counts();
+    // Agents a previous daemon abandoned. Read once at startup and held, so
+    // this is a lookup rather than another trip through the process table.
+    let leaked: Vec<_> = state
+        .leaked_agents
+        .lock()
+        .await
+        .iter()
+        .map(|(pid, command, worktree)| {
+            json!({
+                "pid": pid,
+                "command": command,
+                "worktree": worktree,
+            })
+        })
         .collect();
-    let reporting = w.runs().filter(|r| r.claude_version.is_some()).count();
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "gate": {
-            "verified_against": crate::core::policy::VERIFIED_AGAINST,
+            "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
             "sessions_reporting_a_version": reporting,
-            "sessions_ahead_of_baseline": ahead,
         },
+        "leaked_agents": leaked,
         "pid": std::process::id(),
         "started_at": state.started_at.to_string(),
         "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
@@ -2568,6 +3041,17 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
         "stall_seconds": w.attention.stall_seconds,
         "unreadable_configs": broken,
         "unreadable_rows": unreadable_rows,
+        // **What the record is missing.** Every other figure on this page is a
+        // reading of the store; this is the one that says how much of the
+        // store never arrived. A write that fails is logged and dropped on
+        // purpose — losing history beats stalling the hook a session is
+        // blocked on — and until this key existed, the log line it relies on
+        // went to a daemon's stderr and nowhere a person looks.
+        "unwritten": {
+            "events": lost_events,
+            "decisions": lost_decisions,
+            "last_reason": last_loss,
+        },
         // The *other* gate. Devplane's prohibitions reach auto mode, and in
         // that mode the thing actually deciding is a classifier configured
         // somewhere else. Read back, never written.

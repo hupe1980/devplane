@@ -96,9 +96,8 @@ nothing to save.
 *The rules cannot fail open; a channel can, and the channel is a local process.*
 
 **Devplane never approves a tool call.** `Verdict` has no `Allow` variant, so the type cannot express
-one. That removes the largest thing there was to get wrong: answering *yes* on the agent's behalf was
-a claim about somebody else's code, and it was wrong in the dangerous direction thirty-three times
-before it was deleted. What is left refuses and defers, which claims nothing about anyone.
+one. Answering *yes* on your agent's behalf would be a claim about somebody else's code; refusing and
+deferring claims nothing about anyone.
 
 The harder half is **silence**. A deny rule that matches nothing reads as protection and provides
 none, and nothing errors. So the rule syntax implements the published specification row by row, and

@@ -200,37 +200,19 @@ impl PolicyCache {
         let source = repo_root_of(dir).unwrap_or_else(|| dir.to_path_buf());
         let sets = self.sets(dir, &source, project.as_ref());
 
-        match restrictive_over(&sets, tool, input) {
-            Verdict::Undecided => {}
-            decided => return decided,
-        }
-        // An allow rule covers the command, not the file it writes — and the
-        // target may be spoken for by *either* rule set, so the question is
-        // asked once across both rather than inside each. Asking each set on
-        // its own would let a target the machine-wide file allows be refused
-        // because the project's file never mentioned it.
-        // `is_shell`, never a literal `"Bash"`: `Policy::evaluate` asks the same
-        // question through that function, and the two spellings drifted apart
-        // the moment `Monitor` was added — leaving the redirect check running
-        // per rule set here and across both sets there, for the same call.
-        if crate::core::policy::is_shell(tool)
-            && crate::core::policy::uncovered_targets(input, dir, |side, file| {
-                sets.iter().any(|(p, c)| p.allows_path(side, c, file))
-                    || crate::core::policy::within(dir, file)
-            })
-            .is_some()
-        {
-            return Verdict::Undecided;
-        }
-        for (p, ctx) in &sets {
-            // Nothing here can answer yes any more, so a hit is a prohibition
-            // or a deferral, and both are worth returning early.
-            match p.evaluate(ctx, tool, input) {
-                Verdict::Undecided => {}
-                decided => return decided,
-            }
-        }
-        Verdict::Undecided
+        // **One question, asked across every rule set that governs this
+        // directory.** `restrictive_over` returns the first deny anywhere, then
+        // the first ask anywhere, then nothing.
+        //
+        // There used to be two more steps after this and both were dead. A
+        // redirect-target check returned `Undecided` — which is what falling
+        // through returns — and a loop re-asked each set the question
+        // `restrictive_over` had just asked all of them. Both existed to stop an
+        // **allow** covering a command whose write target no rule spoke for, and
+        // when approving was deleted there was nothing left for them to stop.
+        // They survived because dead code that returns the right answer is
+        // invisible.
+        restrictive_over(&sets, tool, input)
     }
 
     /// The prohibitions only, across both rule sets.
@@ -349,10 +331,10 @@ impl PolicyCache {
         forget_resolved();
         // **Where a grant goes now that Devplane does not evaluate one.**
         //
-        // This named `[policy] auto_allow` in Devplane's own file until
-        // 2026-09-18. That key still parses, but nothing in it decides a call
-        // any more: approving one would mean claiming the vendor would have
-        // approved it too, and Devplane stopped making that claim. A suggestion
+        // This named an allow list in Devplane's own file until 2026-09-18,
+        // when Devplane stopped approving anything: approving a call would
+        // mean claiming the vendor would have approved it too. The key was
+        // left inert for a while and is now gone, because a suggestion
         // pointing at a key that no longer answers is worse than no suggestion
         // — somebody pastes it, nothing changes, and the next identical call
         // interrupts them again.
@@ -365,14 +347,14 @@ impl PolicyCache {
                 root.to_path_buf(),
                 crate::core::offer::Destination {
                     file: root.join(".claude/settings.json").display().to_string(),
-                    section: "permissions.allow".into(),
+                    section: crate::core::offer::ALLOW_KEY.into(),
                 },
             ),
             None => (
                 self.global_root.clone(),
                 crate::core::offer::Destination {
                     file: "~/.claude/settings.json".to_string(),
-                    section: "permissions.allow".into(),
+                    section: crate::core::offer::ALLOW_KEY.into(),
                 },
             ),
         };
@@ -388,7 +370,7 @@ impl PolicyCache {
         let ctx = Context::at(&self.global_root)
             .with_home(self.home.as_deref())
             .with_realpath(realpath);
-        self.global.evaluate(&ctx, tool, input)
+        self.global.restrictive(&ctx, tool, input)
     }
 
     /// How long a run working in `dir` may be quiet before it has stalled.
@@ -502,7 +484,7 @@ mod tests {
     fn a_project_that_says_nothing_keeps_the_machines_timeout() {
         // `None`, not a default of its own: inheriting a threshold by accident
         // is how a run gets called stalled for doing its job.
-        let dir = repo("stall-silent", "[policy]\nauto_allow = [\"Read\"]\n");
+        let dir = repo("stall-silent", "[policy]\nnever_auto = [\"Read(.env)\"]\n");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(cache.stall_seconds(&dir), None);
     }
@@ -531,17 +513,14 @@ mod tests {
     #[test]
     fn a_projects_own_rules_decide_its_agents() {
         // The thing that was broken: `[policy]` in devplane.toml did nothing.
-        let dir = repo(
-            "own",
-            "[policy]\nauto_allow = [\"Bash(pnpm test *)\"]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
-        );
+        let dir = repo("own", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
         let cache = PolicyCache::for_projects_only();
         assert!(matches!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "pnpm test -- --run"})),
+            cache.restrictive(&dir, "Bash", &json!({"command": "pnpm test -- --run"})),
             Verdict::Undecided
         ));
         assert!(matches!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "rm -rf node_modules"})),
+            cache.restrictive(&dir, "Bash", &json!({"command": "rm -rf node_modules"})),
             Verdict::Deny { .. }
         ));
         std::fs::remove_dir_all(&dir).ok();
@@ -549,18 +528,18 @@ mod tests {
 
     #[test]
     fn one_projects_rules_do_not_govern_another() {
-        let a = repo("a", "[policy]\nauto_allow = [\"Bash(pnpm test *)\"]\n");
+        let a = repo("a", "[policy]\nnever_auto = [\"Bash(pnpm test *)\"]\n");
         let b = repo("b", "");
         let cache = PolicyCache::for_projects_only();
         // The space before `*` is significant, as it is in Claude Code's own
         // rules: `pnpm test *` covers `pnpm test -- --run` and not `pnpm testx`.
         let cmd = json!({"command": "pnpm test -- --run"});
         assert!(matches!(
-            cache.evaluate(&a, "Bash", &cmd),
-            Verdict::Undecided
+            cache.restrictive(&a, "Bash", &cmd),
+            Verdict::Deny { .. }
         ));
         assert_eq!(
-            cache.evaluate(&b, "Bash", &cmd),
+            cache.restrictive(&b, "Bash", &cmd),
             Verdict::Undecided,
             "a rule belongs to the repository it protects"
         );
@@ -570,24 +549,26 @@ mod tests {
 
     #[test]
     fn deny_wins_in_both_directions() {
-        // A project cannot allow what the machine forbids, and the machine's
-        // allow does not override a project's deny.
-        let dir = repo("deny", "[policy]\nauto_allow = [\"Bash(git push *)\"]\n");
-        let global = Policy::new(&["Bash(ls *)".into()], &["Bash(git push *)".into()]);
+        // Neither file can soften the other. A project asking to be asked does
+        // not downgrade a machine-wide refusal, and a machine that only asks
+        // does not downgrade a project's refusal.
+        //
+        // This used to be written with allow lists on both sides. Devplane has
+        // no allow list any more — it refuses and defers — so the property is
+        // now `ask` against `deny` rather than `allow` against `deny`, and it
+        // is the same property: the more restrictive of the two decides.
+        let dir = repo("deny", "[policy]\nalways_ask = [\"Bash(git push *)\"]\n");
+        let global = Policy::rules(&["Bash(git push *)".into()], &[]);
         let cache = PolicyCache::new(global, PathBuf::from("/"), None);
         assert!(matches!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "git push origin main"})),
+            cache.restrictive(&dir, "Bash", &json!({"command": "git push origin main"})),
             Verdict::Deny { .. }
         ));
 
         let dir2 = repo("deny2", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
-        let cache2 = PolicyCache::new(
-            Policy::new(&["Bash(ls *)".into()], &[]),
-            PathBuf::from("/"),
-            None,
-        );
+        let cache2 = PolicyCache::new(Policy::rules(&[], &[]), PathBuf::from("/"), None);
         assert!(matches!(
-            cache2.evaluate(&dir2, "Bash", &json!({"command": "ls -la"})),
+            cache2.restrictive(&dir2, "Bash", &json!({"command": "ls -la"})),
             Verdict::Deny { .. }
         ));
         std::fs::remove_dir_all(&dir).ok();
@@ -603,7 +584,7 @@ mod tests {
         std::fs::create_dir_all(&wt).unwrap();
         let cache = PolicyCache::for_projects_only();
         assert!(matches!(
-            cache.evaluate(&wt, "Bash", &json!({"command": "rm -rf /"})),
+            cache.restrictive(&wt, "Bash", &json!({"command": "rm -rf /"})),
             Verdict::Deny { .. }
         ));
         std::fs::remove_dir_all(&root).ok();
@@ -620,18 +601,18 @@ mod tests {
         let root = repo("escalate", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
         let wt = root.join(".claude/worktrees/feature-a");
         std::fs::create_dir_all(&wt).unwrap();
-        // The agent rewrites the rules on its branch to permit exactly what the
-        // repository forbids.
+        // The agent rewrites the rules on its branch to drop exactly the
+        // refusal the repository wrote.
         std::fs::write(
             wt.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nauto_allow = [\"Bash(rm -rf *)\"]\n",
+            "[policy]\nnever_auto = []\n",
         )
         .unwrap();
 
         let cache = PolicyCache::for_projects_only();
         assert!(
             matches!(
-                cache.evaluate(&wt, "Bash", &json!({"command": "rm -rf /"})),
+                cache.restrictive(&wt, "Bash", &json!({"command": "rm -rf /"})),
                 Verdict::Deny { .. }
             ),
             "the owning checkout's rules decide, not the branch's"
@@ -663,7 +644,7 @@ mod tests {
         let cache = PolicyCache::for_projects_only();
         assert!(
             matches!(
-                cache.evaluate(&wt, "Bash", &json!({"command": "rm -rf /"})),
+                cache.restrictive(&wt, "Bash", &json!({"command": "rm -rf /"})),
                 Verdict::Deny { .. }
             ),
             "a linked worktree inherits the repository's rules"
@@ -671,50 +652,38 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&wt).ok();
     }
-
+    /// An ask rule reaches a call in either file.
+    ///
+    /// **This used to test that an ask outranked an allow beside it**, which was
+    /// the vendor's own precedence rule mirrored here. There is no allow list
+    /// any more, so what is left of the property is the half that still exists:
+    /// a project's `always_ask` puts the call in front of a person.
     #[test]
-    fn an_ask_rule_outranks_an_allow_rule_in_either_file() {
-        // Claude Code's third list. Without it, an `ask` rule pasted over from
-        // `settings.json` had nowhere to go, and a broader `auto_allow` then
-        // approved — silently — exactly the call somebody wrote a rule to be
-        // asked about. "A matching ask rule prompts even when a more specific
-        // allow rule also matches the same call."
-        let dir = repo(
-            "ask",
-            "[policy]\nauto_allow = [\"Bash(git *)\"]\nalways_ask = [\"Bash(git push *)\"]\n",
-        );
+    fn an_ask_rule_reaches_a_call_in_either_file() {
+        let dir = repo("ask", "[policy]\nalways_ask = [\"Bash(git push *)\"]\n");
         let cache = PolicyCache::for_projects_only();
-        // The narrow allow does not win.
         assert!(
             matches!(
-                cache.evaluate(&dir, "Bash", &json!({"command": "git push --force"})),
+                cache.restrictive(&dir, "Bash", &json!({"command": "git push --force"})),
                 Verdict::Ask { .. }
             ),
-            "an ask rule has to outrank the allow beside it"
+            "an ask rule has to reach the call"
         );
-        // And the allow still does its job for everything else.
-        assert!(matches!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "git status"})),
-            Verdict::Undecided
-        ));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn a_projects_allow_cannot_answer_what_the_machine_asked_to_be_asked() {
-        // The same rule as deny: adding a permissive rule in one file must not
-        // quietly widen a decision written in another.
-        let dir = repo(
-            "askglobal",
-            "[policy]\nauto_allow = [\"Bash(git push *)\"]\n",
-        );
+    fn a_project_that_says_nothing_inherits_what_the_machine_asked_to_be_asked() {
+        // A project file that does not mention a command must not read as
+        // consent to it: the machine's `always_ask` still reaches a call made
+        // inside a project that has rules of its own about other things.
+        let dir = repo("askglobal", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
         let cache = PolicyCache::new(
-            Policy::with_ask(&[], &[], &["Bash(git push *)".into()]),
+            Policy::rules(&[], &["Bash(git push *)".into()]),
             std::path::PathBuf::from("/"),
             None,
         );
         assert!(matches!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "git push --force"})),
+            cache.restrictive(&dir, "Bash", &json!({"command": "git push --force"})),
             Verdict::Ask { .. }
         ));
         std::fs::remove_dir_all(&dir).ok();
@@ -722,24 +691,26 @@ mod tests {
 
     #[test]
     fn an_edit_takes_effect_without_a_restart() {
-        let dir = repo("edit", "[policy]\nauto_allow = []\n");
+        // The verdict has to *change*. Written with two rules that both left
+        // the call undecided, this asserted nothing about reloading at all.
+        let dir = repo("edit", "[policy]\nnever_auto = []\n");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "ls"})),
+            cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"})),
             Verdict::Undecided
         );
 
         std::fs::write(
             dir.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nauto_allow = [\"Bash(ls *)\"]\n",
+            "[policy]\nnever_auto = [\"Bash(ls *)\"]\n",
         )
         .unwrap();
         // The cache re-checks on a timer; clearing is what a settings change
         // does, and proves the reload path rather than the clock.
         cache.clear();
         assert!(matches!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "ls -la"})),
-            Verdict::Undecided
+            cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"})),
+            Verdict::Deny { .. }
         ));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -750,7 +721,7 @@ mod tests {
         let dir = repo("broken", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
         let cache = PolicyCache::for_projects_only();
         assert!(matches!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "rm -rf x"})),
+            cache.restrictive(&dir, "Bash", &json!({"command": "rm -rf x"})),
             Verdict::Deny { .. }
         ));
 
@@ -765,7 +736,7 @@ mod tests {
         // now, so what this holds is that a cleared cache does not resurrect a
         // stale prohibition either.
         assert_eq!(
-            cache.evaluate(&dir, "Bash", &json!({"command": "rm -rf x"})),
+            cache.restrictive(&dir, "Bash", &json!({"command": "rm -rf x"})),
             Verdict::Undecided
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -773,9 +744,9 @@ mod tests {
 
     #[test]
     fn a_directory_outside_any_repository_falls_back_to_the_global_rules() {
-        let cache = PolicyCache::new(Policy::new(&["Read".into()], &[]), PathBuf::from("/"), None);
+        let cache = PolicyCache::new(Policy::rules(&[], &[]), PathBuf::from("/"), None);
         assert!(matches!(
-            cache.evaluate(Path::new("/"), "Read", &json!({})),
+            cache.restrictive(Path::new("/"), "Read", &json!({})),
             Verdict::Undecided
         ));
     }
@@ -784,11 +755,11 @@ mod tests {
     fn repeated_checks_are_cheap() {
         // This runs on the hook Claude Code blocks on. Ten thousand lookups
         // must not become ten thousand file reads.
-        let dir = repo("fast", "[policy]\nauto_allow = [\"Bash(ls *)\"]\n");
+        let dir = repo("fast", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
         let cache = PolicyCache::for_projects_only();
         let started = Instant::now();
         for _ in 0..10_000 {
-            cache.evaluate(&dir, "Bash", &json!({"command": "ls -la"}));
+            cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"}));
         }
         let each = started.elapsed() / 10_000;
         assert!(
@@ -827,9 +798,9 @@ mod tests {
 
         // Warm the config cache. The memo is cleared by `evaluate` itself, so
         // the count starts cold whatever the warm-up left.
-        cache.evaluate(&dir, "Read", &call);
+        cache.restrictive(&dir, "Read", &call);
         RESOLVED.store(0, Ordering::Relaxed);
-        cache.evaluate(&dir, "Read", &call);
+        cache.restrictive(&dir, "Read", &call);
         assert_eq!(
             RESOLVED.load(Ordering::Relaxed),
             11,
@@ -850,9 +821,9 @@ mod tests {
         let file = dir.join("f.txt");
         std::fs::write(&file, "x").ok();
         let call = json!({"file_path": file.to_str().unwrap()});
-        cache.evaluate(&dir, "Read", &call);
+        cache.restrictive(&dir, "Read", &call);
         RESOLVED.store(0, Ordering::Relaxed);
-        cache.evaluate(&dir, "Read", &call);
+        cache.restrictive(&dir, "Read", &call);
         assert!(
             RESOLVED.load(Ordering::Relaxed) <= 11,
             "ten rules under one prefix must not cost more than ten questions"
@@ -863,7 +834,7 @@ mod tests {
         // wall-clock assertion here is a ceiling, not a measurement.
         let started = std::time::Instant::now();
         for _ in 0..100 {
-            cache.evaluate(&dir, "Read", &call);
+            cache.restrictive(&dir, "Read", &call);
         }
         assert!(
             started.elapsed().as_millis() < 250,

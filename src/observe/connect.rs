@@ -146,6 +146,46 @@ pub fn settings_path() -> Result<PathBuf> {
     Ok(base.join("settings.json"))
 }
 
+/// Where this platform's **managed** settings live, as the vendor documents it.
+///
+/// One path per platform and no search: these are the documented locations, and
+/// a supervision tool that guessed at a second one would report a policy nobody
+/// deployed. The Windows `ProgramData` fallback is deliberately absent — the
+/// vendor removed it, and carrying a path they deleted is how a diagnostic
+/// starts describing a machine that no longer exists.
+///
+/// **What this does not resolve**: drop-ins, a policy helper, the Windows
+/// registry chain, and an SDK host's own policy. A value delivered by any of
+/// those is invisible here, which is why the absence of a timer is reported as
+/// *nothing in the files I read* rather than as *there is none*.
+pub fn managed_settings_path() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json")
+    } else if cfg!(target_os = "windows") {
+        PathBuf::from(r"C:\Program Files\ClaudeCode\managed-settings.json")
+    } else {
+        PathBuf::from("/etc/claude-code/managed-settings.json")
+    }
+}
+
+/// What can answer a question on this machine without the person.
+///
+/// Absent where nothing sets it, and where a file exists and will not parse:
+/// the vendor says such a document has **none of its settings in effect**, so
+/// reading a value out of one would be reporting a policy that is not running.
+pub fn question_clock() -> Option<crate::core::clock::QuestionClock> {
+    let user_path = settings_path().ok()?;
+    let user = read_settings(&user_path).unwrap_or_default();
+    let managed_path = managed_settings_path();
+    let managed = read_settings(&managed_path).unwrap_or_default();
+    crate::core::clock::question_clock(
+        &user,
+        &user_path.display().to_string(),
+        &managed,
+        &managed_path.display().to_string(),
+    )
+}
+
 fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }

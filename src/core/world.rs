@@ -17,9 +17,10 @@ use std::path::{Path, PathBuf};
 /// What is wrong with the machine itself, rather than with anything running on
 /// it.
 ///
-/// Both facts have the same shape and the same reason to exist: the board looks
-/// completely normal while a prohibition somebody wrote is not being enforced,
-/// and no run-derived item can say so. Default is a healthy machine.
+/// All three facts have the same shape and the same reason to exist: the board
+/// looks completely normal while a prohibition somebody wrote is not being
+/// enforced, or while the record every other row is derived from has a hole in
+/// it — and no run-derived item can say so. Default is a healthy machine.
 #[derive(Default)]
 pub struct Health<'a> {
     /// Why the installed gate did not refuse a call its own rule denies, when
@@ -28,6 +29,59 @@ pub struct Health<'a> {
     /// Repository roots whose `devplane.toml` will not parse, with the
     /// parser's reason.
     pub broken_configs: &'a [(PathBuf, String)],
+    /// Events and decisions the store would not take, and the last reason.
+    ///
+    /// `(0, 0, _)` is the ordinary case and raises nothing. Counted rather
+    /// than flagged because the row has to distinguish one lost write from
+    /// thousands.
+    pub unwritten: (u64, u64, Option<&'a str>),
+    /// Agents a previous daemon started that are still running with nothing
+    /// attached to them, as `(pid, command, worktree)`.
+    ///
+    /// Threaded in for the same reason as the other two: it cannot be derived
+    /// from the event log. The log says a run was driven; whether the process
+    /// behind it outlived the daemon is a fact about the machine, read from the
+    /// process table once at startup (`observe::procs`).
+    pub leaked_agents: &'a [(u32, String, Option<String>)],
+}
+
+/// One project's live sessions and what is supervising them.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectModes {
+    pub project: Option<String>,
+    pub name: Option<String>,
+    /// Sessions whose mode means no person is asked about an ordinary call.
+    pub unsupervised: usize,
+    /// Sessions whose mode this build does not recognise, counted separately
+    /// because *unknown* is not *fine*.
+    pub unknown: usize,
+    /// Sessions that have not reported a mode at all — a different fact from
+    /// having reported one nobody here recognises, and the two read the same
+    /// for exactly one pass before somebody noticed sixteen idle sessions
+    /// being described as running something exotic.
+    pub unreported: usize,
+    pub sessions: Vec<SessionMode>,
+}
+
+/// One session's permission mode, as its vendor reported it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionMode {
+    pub run: String,
+    pub name: Option<String>,
+    /// The vendor's own spelling, or `None` when nothing has reported one yet.
+    pub mode: Option<String>,
+    pub label: Option<String>,
+    pub asks_a_person: Option<bool>,
+    pub seen: Option<String>,
+    /// The mode an **ACP agent** declared for itself, in its own spelling.
+    ///
+    /// A separate field from `mode` rather than a fallback for it, because the
+    /// two answer different questions. `mode` is one of a vendor's documented
+    /// modes, read from a named settings file, and `asks_a_person` is derivable
+    /// from it. This is a string the agent chose; nothing maps it onto anybody's
+    /// vocabulary, and **no `asks_a_person` can be derived from it at all**.
+    pub agent_mode: Option<String>,
+    pub agent_mode_seen: Option<String>,
 }
 
 /// Everything the daemon knows right now.
@@ -143,34 +197,15 @@ impl World {
     /// runs, and correct because there is no cached copy to go stale.
     ///
     /// Uses the machine-wide stall threshold for every run. The daemon calls
-    /// [`World::inbox_with`] with the project resolver instead.
+    /// [`World::inbox_with_health`] with the project resolver instead.
     pub fn inbox(&self) -> Vec<AttentionItem> {
-        self.inbox_with(&[], &std::collections::BTreeSet::new(), &|_| None)
-    }
-
-    /// The inbox, including anything the given Work items are asking for.
-    ///
-    /// Work produces entries no run can — a pull request going red hours after
-    /// the agent stopped — so they are merged rather than kept in a second list
-    /// the human has to remember to look at.
-    ///
-    /// `drivable` is the set of runs Devplane still holds a session for. It is
-    /// passed in because this module cannot see them, and because after a
-    /// restart the rows come back looking alive while the processes are gone —
-    /// so an offer to prompt an agent must never be decided from run state.
-    ///
-    /// `stall_for` gives the project's own quiet threshold for a directory. A
-    /// callback, because the answer comes from a file this module may not read,
-    /// and because the sweeper that emits `Stalled` must resolve it the same
-    /// way: the two disagreeing puts a stall in the inbox that the event log
-    /// says never happened.
-    pub fn inbox_with(
-        &self,
-        works: &[crate::core::Work],
-        drivable: &std::collections::BTreeSet<RunId>,
-        stall_for: &dyn Fn(&Path) -> Option<i64>,
-    ) -> Vec<AttentionItem> {
-        self.inbox_with_health(works, drivable, stall_for, &Health::default(), Vec::new())
+        self.inbox_with_health(
+            &[],
+            &std::collections::BTreeSet::new(),
+            &|_| None,
+            &Health::default(),
+            Vec::new(),
+        )
     }
 
     /// The inbox, plus the items that are about the machine rather than about
@@ -219,6 +254,17 @@ impl World {
             .broken_configs
             .iter()
             .map(|(root, why)| crate::core::attention::config_broken_item(root, why));
+        let leaked = health.leaked_agents.iter().map(|(pid, command, worktree)| {
+            crate::core::attention::agent_leaked_item(*pid, command, worktree.as_deref())
+        });
+        let (lost_events, lost_decisions, last_loss) = health.unwritten;
+        let record = (lost_events > 0 || lost_decisions > 0).then(|| {
+            crate::core::attention::record_incomplete_item(
+                lost_events,
+                lost_decisions,
+                last_loss.unwrap_or("The store gave no reason."),
+            )
+        });
         // `forge` is derived by the caller from state this module cannot see
         // — the polled GitHub facts live on the other side of the purity line
         // — and ranked here so there is one list and one order.
@@ -227,9 +273,97 @@ impl World {
                 .chain(from_work)
                 .chain(gate)
                 .chain(configs)
+                .chain(record)
+                .chain(leaked)
                 .chain(forge)
                 .collect(),
         )
+    }
+
+    /// **Which projects are deciding without you, and since when we knew.**
+    ///
+    /// The first slice of the seat, and the only one the measurement of
+    /// 2026-09-19 left standing: forty-nine consecutive tool calls across four
+    /// sessions put nothing in front of a person, so *what was decided without
+    /// you* is everything and is a transcript. *Which of my six repositories
+    /// is in `auto`* is one short list, and nothing on this machine could
+    /// answer it.
+    ///
+    /// **Live sessions only.** The question is present tense. A run that ended
+    /// yesterday in `auto` is history, and putting it here would pad the list
+    /// with rows nobody can act on.
+    ///
+    /// **A session that has not reported a mode is a row, not a gap.** Eleven
+    /// hook events carry the mode and `PreToolUse` is not one of them, so a
+    /// session that has done nothing but run tools since the daemon started
+    /// genuinely has not said. Omitting those would make a partial answer look
+    /// complete, which is the failure this whole surface exists to prevent.
+    pub fn permission_modes(&self) -> Vec<ProjectModes> {
+        let mut by_project: BTreeMap<Option<ProjectId>, Vec<&Run>> = BTreeMap::new();
+        for r in self.runs.values().filter(|r| r.state.is_live()) {
+            by_project.entry(r.project_id.clone()).or_default().push(r);
+        }
+        by_project
+            .into_iter()
+            .map(|(pid, runs)| {
+                let name = pid
+                    .as_ref()
+                    .and_then(|id| self.projects.get(id))
+                    .map(|p| p.name.clone())
+                    .or_else(|| pid.as_ref().map(|p| p.to_string()));
+                let mut modes: Vec<SessionMode> = runs
+                    .iter()
+                    .map(|r| SessionMode {
+                        run: r.id.to_string(),
+                        name: r.name.clone(),
+                        mode: r.permission_mode.as_ref().map(|m| m.as_str().to_string()),
+                        label: r.permission_mode.as_ref().map(|m| m.label().to_string()),
+                        // Three-valued on purpose: `None` is *we do not know*,
+                        // which is a different row from *nobody is asked*.
+                        asks_a_person: r.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+                        // "Seen", never "since". Nothing announces a mode
+                        // change, so this is when Devplane first heard it at
+                        // this value — at best the person's next prompt after
+                        // they switched.
+                        seen: r.permission_mode_seen.map(|t| t.to_string()),
+                        agent_mode: r.agent_mode.clone(),
+                        agent_mode_seen: r.agent_mode_seen.map(|t| t.to_string()),
+                    })
+                    .collect();
+                // Least supervised first: the row worth reading is the one
+                // nobody is watching, and a list sorted by name buries it.
+                // Least supervised first, then the ones that said something
+                // unreadable, then the quiet ones. A session nobody is
+                // watching is the row worth reading and a list sorted by name
+                // buries it.
+                modes.sort_by_key(|m| {
+                    let rank = match (m.mode.is_some(), m.asks_a_person) {
+                        (true, Some(false)) => 0,
+                        (true, None) => 1,
+                        (true, Some(true)) => 2,
+                        (false, _) => 3,
+                    };
+                    (rank, m.run.clone())
+                });
+                ProjectModes {
+                    project: pid.map(|p| p.to_string()),
+                    name,
+                    unsupervised: modes
+                        .iter()
+                        .filter(|m| m.asks_a_person == Some(false))
+                        .count(),
+                    // `mode.is_some()` is the whole distinction: a session
+                    // that said something this build cannot read, versus one
+                    // that has not said anything.
+                    unknown: modes
+                        .iter()
+                        .filter(|m| m.mode.is_some() && m.asks_a_person.is_none())
+                        .count(),
+                    unreported: modes.iter().filter(|m| m.mode.is_none()).count(),
+                    sessions: modes,
+                }
+            })
+            .collect()
     }
 
     /// Registers a project explicitly. Explicit registration is what grants
@@ -536,9 +670,13 @@ impl World {
                 RunState::Waiting(_) => s.needs_you += 1,
                 RunState::Idle => s.idle += 1,
                 RunState::Failed | RunState::Lost => s.failed += 1,
-                // A completed or stopped run that is still in play — it ended
-                // ten minutes ago — is on the board and belongs somewhere.
-                _ => s.idle += 1,
+                // **Interrupted is counted here deliberately, and not as
+                // `needs_you`.** Work cut off by a daemon bounce does want a
+                // person, but the thing that asks for one is the inbox item
+                // (`AttentionKind::Interrupted`), and a run counted in both
+                // places is one interruption charging the attention budget
+                // twice. The header line summarises; the inbox asks.
+                RunState::Completed | RunState::Stopped | RunState::Interrupted => s.idle += 1,
             }
             if r.state.is_live() {
                 s.live += 1;
@@ -614,15 +752,31 @@ pub struct BoardSummary {
     /// Of those, the ones waiting on the person (see `ForgeCounts`).
     #[serde(default)]
     pub forge_needs_you: usize,
+    /// Questions and permissions still waiting on a person **whose session is
+    /// no longer running**. Filled by the daemon, which holds that state.
+    ///
+    /// **A separate number rather than part of `needs_you`, and the separation
+    /// is the point twice over.** `needs_you` is a column in a breakdown of
+    /// *sessions* — every session is in exactly one of them, and a test says so
+    /// — and an ask that outlived its run is not a session at all. But leaving
+    /// it out of the line entirely is how a machine with an unanswered question
+    /// from yesterday came to print *"0 need you"*, which is the exact failure
+    /// the durable ask exists to prevent, one layer up in the summary.
+    #[serde(default)]
+    pub asks_waiting: usize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::event::{Source, WaitingFor};
+    use crate::core::event::WaitingFor;
 
+    /// An envelope carrying the channel the event actually comes from. A
+    /// roster sample is not a hook, and labelling it as one tells the reducer
+    /// a channel is connected that is not.
     fn env(run: &str, e: Event) -> EventEnvelope {
-        EventEnvelope::new(RunId::new(run), Source::Hook, e)
+        let source = e.test_source();
+        EventEnvelope::new(RunId::new(run), source, e)
     }
 
     /// A run on the board, with the name the provider gave its session.
@@ -792,6 +946,9 @@ mod tests {
                 Event::QuestionAsked {
                     question: "Keep the legacy route?".into(),
                     options: vec!["yes".into(), "no".into()],
+                    ask: None,
+                    request_id: None,
+                    form: None,
                 },
             ),
             RunHint::default(),
@@ -840,6 +997,7 @@ mod tests {
                     waiting_for: WaitingFor::Permission,
                     message: Some("Bash".into()),
                     request_id: None,
+                    ask: None,
                     options: vec![],
                     call: None,
                 },
@@ -860,6 +1018,7 @@ mod tests {
 
     fn roster_row(status: Option<&str>, started_ms: i64) -> Event {
         Event::RosterSeen {
+            jobs: None,
             kind: "interactive".into(),
             state: None,
             status: status.map(Into::into),
@@ -950,6 +1109,9 @@ mod tests {
                 Event::QuestionAsked {
                     question: "which one?".into(),
                     options: vec![],
+                    ask: None,
+                    request_id: None,
+                    form: None,
                 },
             ),
             RunHint::default(),
@@ -1042,8 +1204,8 @@ mod tests {
             &Default::default(),
             &|_| None,
             &Health {
-                gate_down: None,
                 broken_configs: &broken,
+                ..Default::default()
             },
             Vec::new(),
         );
@@ -1077,8 +1239,8 @@ mod tests {
             &Default::default(),
             &|_| None,
             &Health {
-                gate_down: None,
                 broken_configs: &both,
+                ..Default::default()
             },
             Vec::new(),
         );
@@ -1088,14 +1250,187 @@ mod tests {
             &Default::default(),
             &|_| None,
             &Health {
-                gate_down: None,
                 broken_configs: &both,
+                ..Default::default()
             },
             Vec::new(),
         );
         let ids: Vec<_> = inbox.iter().map(|i| i.id.clone()).collect();
         let ids_again: Vec<_> = again.iter().map(|i| i.id.clone()).collect();
         assert_eq!(ids, ids_again, "the id must not move between polls");
+    }
+
+    /// **A hole in the record gets a row, and a whole record gets none.**
+    ///
+    /// The store write that fails is logged and dropped on purpose — losing
+    /// history beats stalling the hook a session is blocked on — and that log
+    /// line goes to a daemon's stderr, which is nobody's screen. So for as
+    /// long as this row did not exist, every count, every audit answer and
+    /// every "who decided this" on the board was derived from a log that could
+    /// be missing anything at all, and looked exactly as it does when it is
+    /// complete.
+    #[test]
+    fn a_record_with_a_hole_in_it_says_so_and_a_whole_one_stays_quiet() {
+        let w = World::new();
+        let quiet = w.inbox_with_health(
+            &[],
+            &Default::default(),
+            &|_| None,
+            &Health::default(),
+            Vec::new(),
+        );
+        assert!(
+            quiet.is_empty(),
+            "a healthy machine raises nothing: {quiet:?}"
+        );
+
+        let inbox = w.inbox_with_health(
+            &[],
+            &Default::default(),
+            &|_| None,
+            &Health {
+                unwritten: (3, 1, Some("database or disk is full")),
+                ..Default::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(inbox.len(), 1);
+        let item = &inbox[0];
+        assert_eq!(item.kind, crate::core::AttentionKind::RecordIncomplete);
+        // Critical: this is the one failure the product cannot absorb, because
+        // every other screen is a reading of the thing that is now incomplete.
+        assert_eq!(item.level, crate::core::attention::Level::Critical);
+        // Both counts, said separately — a lost decision is not a lost event.
+        assert!(
+            item.title.contains('3') && item.title.contains('1'),
+            "{}",
+            item.title
+        );
+        // The store's own words, not a paraphrase of them.
+        let detail = item.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("database or disk is full"), "{detail}");
+        // Nothing to click: the fix is disk space or a file permission.
+        assert!(item.actions.is_empty());
+
+        // Stable, so a disk that stays full is one open row rather than one
+        // per write that failed — which would be the loudest possible way to
+        // make this unreadable.
+        let again = w.inbox_with_health(
+            &[],
+            &Default::default(),
+            &|_| None,
+            &Health {
+                unwritten: (9_001, 12, Some("database or disk is full")),
+                ..Default::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(again[0].id, item.id, "one open row, whatever the count");
+        assert!(again[0].title.contains("9001"), "{}", again[0].title);
+
+        // One of each, singular. `1 events` is how a person learns the row was
+        // generated rather than written.
+        let one = w.inbox_with_health(
+            &[],
+            &Default::default(),
+            &|_| None,
+            &Health {
+                unwritten: (1, 0, None),
+                ..Default::default()
+            },
+            Vec::new(),
+        );
+        assert!(one[0].title.starts_with("1 event "), "{}", one[0].title);
+        assert!(!one[0].title.contains("1 events"), "{}", one[0].title);
+    }
+
+    /// **Three states, not two: asked, unreadable, and silent.**
+    ///
+    /// Shipped briefly with the last two collapsed, and on a real machine that
+    /// rendered as *"16 report a mode this build does not know"* about sixteen
+    /// idle editors that had simply not spoken yet — a security incident made
+    /// of nothing. A session that said something unreadable and a session that
+    /// said nothing are different facts and only one of them is alarming.
+    #[test]
+    fn a_silent_session_is_not_a_session_running_something_exotic() {
+        let mut w = World::new();
+        for id in ["quiet", "auto", "strange", "manual"] {
+            seed(&mut w, id, None);
+        }
+        let say = |w: &mut World, id: &str, mode: &str| {
+            w.apply(
+                env(id, Event::PermissionModeSeen { mode: mode.into() }),
+                RunHint::default(),
+            );
+        };
+        say(&mut w, "auto", "auto");
+        say(&mut w, "strange", "hypervigilant");
+        say(&mut w, "manual", "default");
+        // `quiet` says nothing at all.
+
+        let all = w.permission_modes();
+        let unsupervised: usize = all.iter().map(|p| p.unsupervised).sum();
+        let unknown: usize = all.iter().map(|p| p.unknown).sum();
+        let unreported: usize = all.iter().map(|p| p.unreported).sum();
+        assert_eq!(unsupervised, 1, "only `auto` decides without a person");
+        assert_eq!(unknown, 1, "only `strange` reported something unreadable");
+        assert_eq!(unreported, 1, "only `quiet` has said nothing");
+        assert_eq!(
+            unknown + unreported,
+            2,
+            "the two must not be the same number"
+        );
+
+        // Least supervised first: the row worth reading must not be buried by
+        // an alphabetical sort.
+        let sessions = &all[0].sessions;
+        assert_eq!(
+            sessions[0].asks_a_person,
+            Some(false),
+            "the unsupervised session is not first: {sessions:?}"
+        );
+        assert!(
+            sessions.last().unwrap().mode.is_none(),
+            "the silent session is not last: {sessions:?}"
+        );
+        // "Seen", never "since" — and only for one that actually reported.
+        assert!(sessions[0].seen.is_some());
+        assert!(sessions.last().unwrap().seen.is_none());
+    }
+
+    /// A run that has ended is not an answer to a present-tense question.
+    #[test]
+    fn only_live_sessions_are_asked_what_mode_they_are_in() {
+        let mut w = World::new();
+        seed(&mut w, "gone", None);
+        w.apply(
+            env(
+                "gone",
+                Event::PermissionModeSeen {
+                    mode: "auto".into(),
+                },
+            ),
+            RunHint::default(),
+        );
+        assert_eq!(
+            w.permission_modes()
+                .iter()
+                .map(|p| p.unsupervised)
+                .sum::<usize>(),
+            1
+        );
+        w.apply(
+            env("gone", Event::SessionEnded { reason: None }),
+            RunHint::default(),
+        );
+        assert_eq!(
+            w.permission_modes()
+                .iter()
+                .map(|p| p.sessions.len())
+                .sum::<usize>(),
+            0,
+            "a session that ended in auto is history, not a row"
+        );
     }
 
     /// The numbers above the board add up to the board.

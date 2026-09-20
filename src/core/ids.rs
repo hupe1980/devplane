@@ -9,6 +9,14 @@ macro_rules! string_id {
         #[doc = $doc]
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(transparent)]
+        // `transparent` on the wire, so it is a string on the wire, and the
+        // generated TypeScript says so rather than inventing a wrapper object
+        // the interface would then have to unwrap.
+        #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+        #[cfg_attr(
+            feature = "typescript",
+            ts(type = "string", export, export_to = "wire/")
+        )]
         pub struct $name(pub String);
 
         impl $name {
@@ -56,6 +64,20 @@ string_id!(
      session we did not start has no other identity we can correlate on."
 );
 string_id!(AttentionId, "One item in the inbox.");
+string_id!(
+    AskId,
+    "One thing an agent asked a person. **An opaque token, and that is the \
+     point**: it is what an answer is addressed to, from any surface, however \
+     long afterwards and whatever process is alive by then. Addressing an \
+     answer by session is what made an answer undeliverable the moment the \
+     session was gone."
+);
+string_id!(
+    BatchId,
+    "One person's intent, sent once, to many targets. The reviewable unit of a \
+     fan-out: six runs from one prompt are not six things to review, they are \
+     one thing that happened six times."
+);
 string_id!(
     WorkId,
     "One unit of work: durable across sessions, and the thing a branch, a \

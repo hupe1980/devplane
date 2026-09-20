@@ -265,7 +265,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
     // twelve failed sessions, so twelve of thirty-eight went unmentioned in a
     // line that reads like a breakdown.
     println!(
-        "{} · {} · {} working · {} need you · {} idle{}{}{}",
+        "{} · {} · {} working · {} need you · {} idle{}{}{}{}",
         paint(BOLD, &format!("{} projects", s.projects)),
         format_args!("{} sessions", s.runs),
         s.working,
@@ -282,6 +282,22 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
         },
         if s.cost_usd > 0.0 {
             paint(DIM, &format!(" · ${:.2}", s.cost_usd))
+        } else {
+            String::new()
+        },
+        // Questions nobody answered whose sessions are gone. Its own clause,
+        // because the columns above are a breakdown of sessions and this is not
+        // a session — and silence here is how a machine with a question waiting
+        // since yesterday printed "0 need you".
+        if s.asks_waiting > 0 {
+            paint(
+                render::YELLOW,
+                &format!(
+                    " · {} unanswered from earlier session{}",
+                    s.asks_waiting,
+                    if s.asks_waiting == 1 { "" } else { "s" }
+                ),
+            )
         } else {
             String::new()
         },
@@ -402,15 +418,11 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         println!("  limits     {window} {pct:.0}% used{when}");
     }
     if let Some(v) = v["claude_version"].as_str() {
-        let note = if crate::core::policy::is_ahead_of_baseline(v) {
-            paint(
-                render::YELLOW,
-                " — newer than the release the gate was measured against",
-            )
-        } else {
-            String::new()
-        };
-        println!("  harness    Claude Code {v}{note}");
+        // No note beside it. This line used to carry "— newer than the release
+        // the gate was measured against" in yellow, which outlived the gate
+        // that was measured: `doctor` had already stopped claiming a live
+        // check while this one went on implying one.
+        println!("  harness    Claude Code {v}");
     }
 
     if let Some(b) = v["blocked_on"].as_object() {
@@ -526,7 +538,10 @@ pub async fn cmd_tail(run: &str, thinking: bool, history: i64) -> Result<()> {
     let mode = detail["mode"].as_str().unwrap_or("observed");
     if mode != "driven" {
         anyhow::bail!(
-            "that is a session Devplane watches, not one it drives, and the documented \n             channels carry no transcript: hooks report lifecycle and tool inputs, and \n             telemetry redacts prompts and responses.\n\n             Its own window already has the conversation:\n  devplane focus {run}"
+            "that is a session Devplane watches, not one it drives, and the documented \
+             channels carry no transcript: hooks report lifecycle and tool inputs, and \
+             telemetry redacts prompts and responses.\n\n\
+             Its own window already has the conversation:\n  devplane focus {run}"
         );
     }
 

@@ -56,6 +56,16 @@ pub struct StartRequest {
     /// The specification this work answers, already validated as a path inside
     /// the project. A file, or the folder every spec-driven framework produces.
     pub spec: Option<String>,
+    /// The fan-out this work belongs to, when it belongs to one.
+    ///
+    /// **The only thing a batch adds to this path.** Every accepted target goes
+    /// through exactly this function, so a call inside a fan-out meets the same
+    /// trust check, the same worktree creation, the same gates and the same
+    /// permission machinery a single dispatch meets. A batch that had its own
+    /// start path would be a second place for a call to be decided, and the
+    /// claim that a fan-out weakens nothing would be a hope rather than a
+    /// consequence.
+    pub batch_id: Option<crate::core::BatchId>,
 }
 
 /// Stamps the specification a work answers onto a gate's verdict.
@@ -132,6 +142,7 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<WorkId> {
         req.prompt.clone(),
     );
     work.spec = req.spec.clone();
+    work.batch_id = req.batch_id.clone();
 
     // The isolated checkout, named the way Claude Code names its own so the two
     // are indistinguishable on disk and its cleanup sweep understands both.
@@ -396,7 +407,7 @@ pub(crate) async fn record_gate(state: &Shared, id: &WorkId, report: &crate::cor
     state
         .record(
             crate::core::Decision::new(
-                crate::core::Actor::Daemon,
+                crate::core::Authority::Daemon,
                 "gate:run",
                 report
                     .commands
@@ -450,7 +461,7 @@ pub(crate) async fn open_pull_request(state: &Shared, id: &WorkId, config: &Proj
         state
             .record(
                 crate::core::Decision::new(
-                    crate::core::Actor::Daemon,
+                    crate::core::Authority::Daemon,
                     "git:push",
                     branch.clone(),
                     "fail",
@@ -464,7 +475,7 @@ pub(crate) async fn open_pull_request(state: &Shared, id: &WorkId, config: &Proj
     state
         .record(
             crate::core::Decision::new(
-                crate::core::Actor::Daemon,
+                crate::core::Authority::Daemon,
                 "git:push",
                 branch.clone(),
                 "done",
@@ -485,7 +496,7 @@ pub(crate) async fn open_pull_request(state: &Shared, id: &WorkId, config: &Proj
             state
                 .record(
                     crate::core::Decision::new(
-                        crate::core::Actor::Daemon,
+                        crate::core::Authority::Daemon,
                         "gh:pr.create",
                         pr.url.clone(),
                         "done",
@@ -670,7 +681,7 @@ pub(crate) async fn charge(state: &Shared, id: &WorkId, config: &ProjectConfig) 
     tracing::info!(work = %id, spent, turns, %bound, "a bound was reached");
     state
         .record(
-            crate::core::Decision::new(crate::core::Actor::Daemon, "work:stop", title, "done")
+            crate::core::Decision::new(crate::core::Authority::Daemon, "work:stop", title, "done")
                 .because(&bound)
                 .for_work(id),
         )
@@ -965,7 +976,7 @@ pub async fn resume(state: &Shared, id: &WorkId) -> Result<()> {
     state
         .record(
             crate::core::Decision::new(
-                crate::core::Actor::Human,
+                crate::core::Authority::Person,
                 "work:resume",
                 run.to_string(),
                 "resumed",
@@ -1089,7 +1100,7 @@ pub async fn retry(state: &Shared, id: &WorkId) -> Result<()> {
     };
     state
         .record(
-            crate::core::Decision::new(crate::core::Actor::Human, "work:retry", title, "done")
+            crate::core::Decision::new(crate::core::Authority::Person, "work:retry", title, "done")
                 .because(format!(
                     "{} — handed back again, round {rounds}, past the project's bound",
                     stopped.headline()
@@ -1172,7 +1183,7 @@ async fn mark_done(state: &Shared, id: &WorkId, basis: Completion) {
         state
             .record(
                 crate::core::Decision::new(
-                    crate::core::Actor::Human,
+                    crate::core::Authority::Person,
                     "work:done",
                     w.title.clone(),
                     "done",

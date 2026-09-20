@@ -1,0 +1,19 @@
+{
+  "name": "devplane-ui",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Devplane's interface. Built to a bundle that the Rust binary embeds at compile time — there is no second thing to run, and nothing is fetched from the network at any point.",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.3.0",
+    "svelte": "5.57.1",
+    "svelte-check": "4.7.6",
+    "typescript": "5.9.3",
+    "vite": "8.3.0"
+  }
+}

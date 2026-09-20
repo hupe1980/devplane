@@ -1,0 +1,14 @@
+{
+  "name": "devplane",
+  "description": "Devplane: the control plane for AI coding agents.",
+  "owner": { "name": "hupe1980", "url": "https://github.com/hupe1980" },
+  "plugins": [
+    {
+      "name": "devplane",
+      "source": "./plugin",
+      "description": "Ask Devplane what is happening across every project on this machine — read-only.",
+      "category": "productivity",
+      "tags": ["agents", "supervision", "observability"]
+    }
+  ]
+}

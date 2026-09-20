@@ -47,6 +47,9 @@ run     = ["pnpm test -- --run tests/repro"]
 expect  = "fail"          # one that passes proved nothing
 timeout = "2m"            # optional; the project's otherwise
 
+[questions]
+deadline = "never"        # never | 90s | 30m | 4h — how long an ask waits
+
 [policy]                  # prohibit and defer; Devplane never approves
 never_auto = ["Bash(rm -rf *)", "Read(.env)"]
 always_ask = ["Bash(git push *)"]
@@ -154,16 +157,16 @@ See [Verified done](/docs/verified-done/) for how gates run.
 |---|---|---|---|
 | `never_auto` | list of rules | empty | refused |
 | `always_ask` | list of rules | empty | put in front of a person |
-| `auto_allow` | list of rules | empty | **decides nothing.** Kept so an older file still parses — see below |
 | `max_parallel_runs` | integer | unlimited | pieces of work with an agent in them |
 | `stall_timeout` | duration | the machine's | how long this project's work may be quiet |
 
 The rule syntax has [a page of its own](/docs/permissions/).
 
-**`auto_allow` is inert.** It was the allow list until 2026-09-18. Devplane no longer approves a tool
-call at all, so nothing in it decides anything; `devplane check` prints those rules as `inert` rather
-than as grants. The key is still read so a `devplane.toml` written before that does not fail to load.
-Rules you want *enforced* go in your agent's own settings, where the thing enforcing them lives.
+**There are two lists and neither of them grants anything.** Devplane refuses and defers; it does
+not approve a tool call, because approving would be a claim that your agent would have approved too.
+
+Any other key under `[policy]` **fails the file and names the line**. Rules you want *enforced* go in
+your agent's own `settings.json` under `permissions.allow`, where the thing enforcing them lives.
 
 `max_parallel_runs` counts **pieces of work with an agent in them**, not runs. A declared chain is
 one unit however many steps it has taken — its steps share a worktree and run one after another, so
@@ -217,6 +220,30 @@ Devplane regardless, so discarding it was never a privacy measure.
 
 Off writes nothing, including the prompts Devplane itself sent, and does not stop the agent reading
 anything. Sessions Devplane merely watches are unaffected either way.
+
+## `[questions]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `deadline` | duration or `never` | `never` | how long an unanswered question or permission waits in this repository |
+
+**The default is that it waits.** Devplane will not pick an answer for you, and it will not let a
+clock pick one unless you write the clock down here. Your agent's own vendor makes the same choice:
+Claude Code's question timeout is off unless you turn it on, and permission prompts never
+auto-resolve on idle.
+
+Set one where a repository runs unattended and you would rather the agent stopped than sat:
+
+```toml
+[questions]
+deadline = "4h"    # never | 90s | 30m | 4h
+```
+
+When it fires the agent is told **no**, and `devplane audit` names **a clock** as the authority, with
+the duration and this file.
+
+A value that will not parse fails `devplane check` and the wait stays unbounded — ending a question
+early on the strength of a typo is the one outcome that must not happen.
 
 ## `[spec]`
 

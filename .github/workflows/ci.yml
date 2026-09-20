@@ -37,6 +37,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # **Node is declared rather than assumed.** It was present on both runner
+      # images by accident and `tests/ui_contract.rs` skips silently without it,
+      # so 56 of the interface's checks were conditional on something nothing
+      # stated. The interface is a node project now; this makes the dependency a
+      # fact of the workflow instead of a property of the image.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build the interface
+        run: cd ui && npm ci && npm run build
+
+      # The wire types are generated from the Rust shapes. This fails when what
+      # is checked in is not what they would produce.
+      - name: Check the generated wire types
+        run: TS_RS_EXPORT_DIR=ui/src cargo test --features typescript --quiet export_bindings
+
+      - name: Type-check the interface
+        run: cd ui && npx svelte-check --tsconfig ./tsconfig.json
+
       # Formatting first: it is the cheapest thing that can fail.
       - name: Format
         run: cargo fmt --all --check

@@ -91,6 +91,24 @@ impl Phase {
     pub fn is_finished(&self) -> bool {
         matches!(self, Phase::Done | Phase::Failed | Phase::Cancelled)
     }
+
+    /// Whether this phase is waiting on a person rather than on a machine.
+    ///
+    /// `Review` is work that finished and wants a look; `Human` is a step the
+    /// project asked for. Both stop until somebody acts, and a fan-out surface
+    /// puts them above everything else — a batch row that buried the one target
+    /// asking a question under five that finished is the failure the row exists
+    /// to prevent.
+    pub fn needs_a_person(&self) -> bool {
+        matches!(self, Phase::Review | Phase::Human)
+    }
+
+    /// Whether it stopped badly. Distinct from `is_finished`, which is true of
+    /// `Done` as well — the batch surface needs *failed* separately so failures
+    /// sort above successes without a second lookup.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Phase::Failed | Phase::Cancelled)
+    }
 }
 
 /// Why a piece of work stopped, written when it stops.
@@ -169,7 +187,7 @@ impl Stopped {
 /// Four bases, legitimately different rather than degrees of one thing. What
 /// must never happen is that the record is silent about which.
 ///
-/// **No person is named.** `Actor::Human` is the only notion of identity here,
+/// **No person is named.** `Authority::Person` is the only notion of identity here,
 /// so a `who` field could not be filled with anything truthful, and a field that
 /// lies is worse than one that is absent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -590,6 +608,66 @@ pub struct GateReport {
     pub commit: Option<CommitStamp>,
 }
 
+/// What a gate run in a repository amounts to.
+///
+/// **Four values, because there are four situations and `passed: bool` carries
+/// two of them.** *The checks failed*, *this repository declares no checks* and
+/// *this repository's configuration could not be read* are three different
+/// sentences, and only the first is a failing gate. Collapsing them is how a
+/// repository with no gates comes to look verified, or a broken configuration
+/// comes to look like a red suite.
+///
+/// It exists because something outside this process reads the answer — a Spec
+/// Kit workflow asks an agent to run the gate and report it — and a caller that
+/// sees `false` cannot tell *nothing was checked* from *the checks said no*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub enum GateState {
+    /// Gates were declared and every command passed.
+    Verified,
+    /// Gates were declared and at least one did not pass.
+    Failed,
+    /// No `devplane.toml`, or one that declares no checks.
+    NoGates,
+    /// The configuration exists and will not parse, so the project's own rules
+    /// are not in force and nothing was run.
+    ConfigUnreadable,
+}
+
+impl GateState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GateState::Verified => "verified",
+            GateState::Failed => "failed",
+            GateState::NoGates => "no_gates",
+            GateState::ConfigUnreadable => "config_unreadable",
+        }
+    }
+
+    /// **Only one of the four is a pass**, and the other three are not failures
+    /// of the same kind. A caller that treats *nothing was checked* as success
+    /// is the failure this product exists to prevent.
+    pub fn passed(self) -> bool {
+        matches!(self, GateState::Verified)
+    }
+
+    /// One sentence, and no two of them read alike.
+    pub fn says(self) -> &'static str {
+        match self {
+            GateState::Verified => "This project's own checks passed.",
+            GateState::Failed => "A check did not pass. Nothing here has been marked done.",
+            GateState::NoGates => {
+                "This repository declares no checks, so nothing is verified and nothing pretends to be."
+            }
+            GateState::ConfigUnreadable => {
+                "This repository's devplane.toml could not be read, so nothing was run — and this is not a pass."
+            }
+        }
+    }
+}
+
 impl GateReport {
     pub fn passed(&self) -> bool {
         // An empty gate is never a pass. A definition of done with no commands
@@ -824,6 +902,17 @@ pub struct Work {
     pub spec: Option<String>,
     pub worktree: Option<PathBuf>,
     pub branch: Option<String>,
+    /// The fan-out this work is a member of, when it is one.
+    ///
+    /// **A member is a `Work` row and not a new entity.** Everything a batch
+    /// surface needs — the project, the phase, the runs, the gates, the
+    /// question that is waiting — is already here, and a parallel entity would
+    /// be a second lifecycle to keep in step with this one.
+    ///
+    /// `None` for an ordinary single dispatch, and **a batch of one sets it**,
+    /// so the same path serves both. Two paths means the less-used one rots.
+    #[serde(default)]
+    pub batch_id: Option<crate::core::BatchId>,
     /// Runs that have worked on this, oldest first.
     pub runs: Vec<RunId>,
     /// What preparing the checkout did, when the project asked for it.
@@ -899,6 +988,7 @@ impl Work {
             spec: None,
             worktree: None,
             branch: None,
+            batch_id: None,
             runs: Vec::new(),
             setup: None,
             gates: Vec::new(),
@@ -1387,5 +1477,46 @@ mod tests {
         };
         assert!(!report.passed());
         assert!(report.summary().contains("timed out"));
+    }
+    /// **Four situations, four sentences, one pass.**
+    ///
+    /// The task this covers is the one the feature is most likely to lose:
+    /// collapsing *no gates* into *failed* is how a repository that checks
+    /// nothing comes to look verified, and collapsing *unreadable* into
+    /// *failed* is how a broken configuration comes to look like a red suite.
+    #[test]
+    fn only_a_verified_gate_is_a_pass_and_no_two_states_read_alike() {
+        use GateState::*;
+        let all = [Verified, Failed, NoGates, ConfigUnreadable];
+
+        assert!(Verified.passed());
+        for state in [Failed, NoGates, ConfigUnreadable] {
+            assert!(!state.passed(), "{state:?} must not be a pass");
+        }
+
+        let said: Vec<&str> = all.iter().map(|s| s.says()).collect();
+        for (i, a) in said.iter().enumerate() {
+            for b in said.iter().skip(i + 1) {
+                assert_ne!(a, b);
+            }
+        }
+
+        // The two that are not failures must not say they are, and the one that
+        // is must not read like a pass.
+        assert!(!NoGates.says().contains("passed"), "{}", NoGates.says());
+        assert!(
+            !ConfigUnreadable.says().contains("passed"),
+            "{}",
+            ConfigUnreadable.says()
+        );
+        assert!(Failed.says().contains("did not pass"));
+
+        // The wire spellings are asked of serde rather than reconstructed.
+        for state in all {
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{}\"", state.as_str())
+            );
+        }
     }
 }

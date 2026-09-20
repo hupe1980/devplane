@@ -568,7 +568,7 @@ mod sc003 {
         let (a, r) = set.totals();
         assert!(a + r >= 500, "the sample is the size the criterion names");
         println!(
-            "SC-003: {} files, +{a}/-{r} lines · parse {parsed:?} · render {rendered:?} · {} KB of HTML",
+            "diff budget: {} files, +{a}/-{r} lines · parse {parsed:?} · render {rendered:?} · {} KB of HTML",
             set.files.len(),
             html.len() / 1024
         );

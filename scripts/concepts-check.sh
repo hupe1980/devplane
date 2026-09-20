@@ -37,12 +37,17 @@ for id in $cited; do echo "$defined" | grep -qx "$id" || { echo "cited but undef
 # directory that the single-crate layout removed, so it greped nothing and
 # passed; and its own word-boundary filter matched every three-digit id, because
 # digits are alphanumeric. Hence the explicit path list, checked for existence.
+# `ui/` now carries a node project, so every scan over the published tree skips
+# `node_modules/` (somebody else's code, which cites its own identifiers) and
+# `ui/dist/` (generated, and a copy of what is already checked at source).
+# Without that, `lib.dom.d.ts` reports an `R8` and this guard fails on
+# TypeScript's own type definitions.
 published="src ui examples tests site README.md CONTRIBUTING.md"
 for path in $published; do
   [ -e "../$path" ] || { echo "concepts-check: published path '$path' is missing"; fail=1; }
 done
 leaked=$(cd .. && grep -rInoE '\b(D|R)[0-9]+\b' $published 2>/dev/null \
-  | grep -vE '/target/|site/public/' \
+  | grep -vE '/target/|site/public/|/node_modules/|^ui/dist/' \
   | grep -vE '[A-Za-z0-9_](D|R)[0-9]|(D|R)[0-9]+[A-Za-z_]')
 # The same rule, spelled out rather than numbered: a path into a gitignored
 # directory, or a phrase that sends the reader to a document they do not have.
@@ -65,7 +70,7 @@ bt=$(printf '\140')
 fence="$bt$bt$bt"
 notes='concepts/|reference/|architecture notes|these notes|design notes'
 examples_excluded=$(cd .. && grep -rInoE "$notes" \
-  $published 2>/dev/null | grep -vE '/target/|site/public/|^tests/documentation\.rs:' \
+  $published 2>/dev/null | grep -vE '/target/|site/public/|/node_modules/|^ui/dist/|^tests/documentation\.rs:' \
   | while IFS= read -r hit; do
       file=${hit%%:*}; rest=${hit#*:}; line=${rest%%:*}
       text=$(sed -n "${line}p" "$file" 2>/dev/null)
@@ -97,7 +102,7 @@ fi
 # sentence *about* the format Spec Kit writes is a fact about the world, and the
 # test fixtures that contain `- [ ] T001` are a user's specification, not ours.
 ids=$(cd .. && grep -rInE '^[[:space:]]*(//|///|//!)' $published 2>/dev/null \
-  | grep -vE '/target/|site/public/' \
+  | grep -vE '/target/|site/public/|/node_modules/|^ui/dist/' \
   | while IFS= read -r hit; do
       text=${hit#*:}; text=${text#*:}
       printf '%s' "$text" | sed "s/$bt[^$bt]*$bt//g" \
@@ -125,7 +130,7 @@ if [ -d ../specs ]; then
     [ -d "$feature" ] || continue
     name=$(basename "$feature")
     hits=$(cd .. && grep -rIn --fixed-strings "$name" $published 2>/dev/null \
-      | grep -vE '/target/|site/public/')
+      | grep -vE '/target/|site/public/|/node_modules/|^ui/dist/')
     if [ -n "$hits" ]; then
       echo "published tree names a gitignored specification ($name):"
       echo "$hits" | sed 's/^/  /'
@@ -133,10 +138,67 @@ if [ -d ../specs ]; then
     fi
   done
 fi
+# A specification and the roadmap item it serves must agree about whether the
+# work is done, and until 2026-09-19 nothing compared them. ROADMAP.md calls
+# itself "the only file in these notes that may record unfinished work" while
+# `specs/*/tasks.md` held 106 checkboxes exempt from that rule by living outside
+# concepts/ — and the two disagreed for two passes: the roadmap said "neither is
+# built" while the task lists said 31/31 and 29/29 and the code agreed with the
+# task lists (D262).
+#
+# Two rules, both cheap:
+#   1. every specification folder is named by exactly one roadmap item, so a
+#      specification nobody is working from is visible;
+#   2. a specification whose tasks are ALL complete is not named at all, because
+#      it has shipped and the convention is that it is deleted (003-007 are gone).
+if [ -d ../specs ]; then
+  for feature in ../specs/*/; do
+    [ -d "$feature" ] || continue
+    name=$(basename "$feature")
+    # `grep -c` prints 0 AND exits 1 when nothing matches, so `|| echo 0` yields
+    # "0\n0" and every downstream `[` throws "integer expression expected" — which
+    # bash reports to stderr while the check goes on to pass. Caught by watching
+    # this guard fail, which is the only reason it is not still here.
+    mentions=$(grep -c -- "$name" ROADMAP.md 2>/dev/null || true)
+    mentions=${mentions:-0}
+    tasks="$feature/tasks.md"
+    if [ -f "$tasks" ]; then
+      open_tasks=$(grep -c '^- \[ \]' "$tasks" 2>/dev/null || true)
+      open_tasks=${open_tasks:-0}
+    else
+      open_tasks=1
+    fi
+    if [ "$open_tasks" -eq 0 ]; then
+      [ "$mentions" -eq 0 ] || {
+        echo "specs/$name has no open tasks but ROADMAP.md still names it — it shipped; delete the folder (D262)"
+        fail=1
+      }
+    else
+      [ "$mentions" -ge 1 ] || {
+        echo "specs/$name has $open_tasks open task(s) and no roadmap item names it (D262)"
+        fail=1
+      }
+    fi
+  done
+fi
+
 # And the machinery beside them. Unlike a feature name this string is fixed, so
 # it is checked whether or not the directory is here.
+#
+# **`extensions.yml` is exempt, and the exemption is the point rather than a
+# hole in the check.** This guard exists so the published tree never points a
+# reader at a path that is not in the repository. That reasoning held while
+# `.specify/` meant only this project's own gitignored working copy. It stopped
+# holding when `devplane speckit install` shipped: that file is now a documented
+# interface in **the user's** repository, and a reference to it is as ordinary
+# as one to `devplane.toml`. Suppressing it would have meant documenting a
+# command without naming the file it writes.
+#
+# Everything else under `.specify/` — the templates, the memory, the scripts —
+# is still this project's scratch, and still fails here.
 specify_hits=$(cd .. && grep -rIn --fixed-strings '.specify/' $published 2>/dev/null \
-  | grep -vE '/target/|site/public/')
+  | grep -vE '/target/|site/public/|/node_modules/|^ui/dist/' \
+  | grep -v '\.specify/extensions\.yml')
 if [ -n "$specify_hits" ]; then
   echo "published tree points into .specify/ (gitignored):"
   echo "$specify_hits" | sed 's/^/  /'
@@ -173,21 +235,146 @@ if [ "${tests_in_tree:-0}" -gt 0 ]; then
   fi
 fi
 
+# The line count, on the same rule and for the same reason (D292). The test
+# count has had a guard since the first pass and was right in four places; this
+# figure had none and was wrong in two on the day after it was written — inside
+# a row whose whole purpose was to stop a figure living in four files.
+#
+# `src/` only, because that is the figure the notes quote and because a number
+# covering tests moves for reasons nobody means by "how big is this". As with
+# the test count, **bold** is what makes a figure a claim: "42,826 lines of
+# Rust" in a sentence about 2026-09-19 is history and is deliberately invisible
+# here, while `**49,603 lines**` is an assertion about today.
+src_lines=$(find ../src -name '*.rs' -exec cat {} + 2>/dev/null | wc -l | tr -d ' ')
+if [ "${src_lines:-0}" -gt 0 ]; then
+  # The notes write thousands with a comma and `wc` does not, so the comparison
+  # is made on the digits and the message quotes the claim as it is written.
+  claimed_lines=$(grep -rhoE '\*\*[0-9][0-9,]* lines\*\*' *.md | grep -oE '[0-9][0-9,]*' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  claimed_digits=$(echo "$claimed_lines" | tr -d ',')
+  if [ -n "$claimed_lines" ] && [ "$claimed_digits" != "$src_lines" ]; then
+    echo "the line count has drifted: src/ has $src_lines, these notes say $claimed_lines"; fail=1
+  fi
+fi
+
+# Every attention kind in the code is documented, and every kind documented as
+# built exists in the code.
+#
+# This guard exists because ATTENTION.md's header said "eighteen kinds", D250
+# said "twenty-two item kinds", and the enum had twenty-one — three numbers for
+# one set, none of them checked. Counting was the wrong instrument anyway: the
+# table spells two kinds on one row, so a count disagreed with the truth while
+# the *set* matched exactly.
+#
+# So this compares sets, not totals, in both directions. An enum variant nobody
+# documented is a surface with no description; a kind documented as ✅ that the
+# enum does not have is the "documented trigger with no code" rule failing in
+# the file that states it.
+if [ -f ../src/core/attention.rs ]; then
+  code_kinds=$(sed -n '/pub enum AttentionKind/,/^}/p' ../src/core/attention.rs \
+    | grep -oE '^    [A-Z][A-Za-z]+' | tr -d ' ' \
+    | sed -E 's/([a-z0-9])([A-Z])/\1_\2/g' | tr 'A-Z' 'a-z' | sort -u)
+  # A row may carry several kinds: "| ✅ `issue_assigned` · `review_requested` |".
+  # ⏳ counts as present-in-code too: it means built and incomplete, not absent.
+  doc_kinds=$(grep -oE '^\| (✅|⏳) (`[a-z_]+`( · )?)+' ATTENTION.md \
+    | grep -oE '`[a-z_]+`' | tr -d '`' | sort -u)
+  missing_doc=$(comm -23 <(echo "$code_kinds") <(echo "$doc_kinds"))
+  missing_code=$(comm -13 <(echo "$code_kinds") <(echo "$doc_kinds"))
+  [ -z "$missing_doc" ] || {
+    echo "attention kinds in the code and not in ATTENTION.md: $(echo $missing_doc)"; fail=1; }
+  [ -z "$missing_code" ] || {
+    echo "attention kinds ATTENTION.md calls built that the code lacks: $(echo $missing_code)"; fail=1; }
+fi
+
+# The claim ledger's size, against the script that produces it. This guard exists
+# because the figure it checks was wrong by twenty-six for a pass: STATE.md said
+# `**209/209**` while `verify-claims.sh` was checking 235, and QUALITY.md's own
+# header said `179/179` — three spellings of one number, in the two files that
+# state the rule that there may only be one. The test count has had a guard for
+# passes and this, beside it, had none.
+#
+# Counted from the `chk` lines rather than by running the script: the ledger needs
+# a fetched corpus and this check must stay green in a clean checkout. The two
+# numbers therefore agree by construction unless somebody writes a `chk` the shell
+# would not run, which is the same assumption the test-count guard makes.
+# The claim-ledger figure, against the script that produces it — by running it,
+# not by counting its source. A static count of `chk` lines was tried first and
+# was wrong twice in five minutes: 235, then 227, against the script's own 238.
+# The counter is incremented at *run* time, inside three differently-named
+# helpers, some of whose calls sit in conditionals and loops, so the only honest
+# count is the one the script prints. That is the same rule this repository
+# applies to everything else — a document is not the product — turned on itself.
+#
+# Skipped without comment when the corpus is absent, exactly like the network
+# checks below, so a clean checkout stays green.
+if [ -d reference ]; then
+  ledger_line=$(sh ../scripts/verify-claims.sh 2>/dev/null | grep -oE '[0-9]+ claims checked')
+  claims_in_script=${ledger_line%% *}
+  if [ -n "${claims_in_script:-}" ] && [ "${claims_in_script:-0}" -gt 0 ]; then
+    # Scoped to lines that say `ledger`, because `**N/M**` is also how these notes
+    # spell "3 of 75 papers" — REFERENCES.md carries one, and an unscoped pattern
+    # reported it as a ledger figure that was not N/N. A guard whose first run
+    # produces a false positive teaches the next reader to skip its output.
+    claimed=$(grep -rhiE '.*ledger.*' *.md | grep -ohE '\*\*[0-9]+/[0-9]+\*\*' | sort -u | tr '\n' ' ' | sed 's/ $//')
+    for c in $claimed; do
+      n=$(echo "$c" | sed 's/\*//g; s|/.*||')
+      d=$(echo "$c" | sed 's/\*//g; s|.*/||')
+      [ "$n" = "$d" ] || { echo "a ledger figure is not N/N: $c"; fail=1; }
+      [ "$n" = "$claims_in_script" ] || {
+        echo "the claim-ledger figure has drifted: verify-claims.sh checks $claims_in_script, these notes say $c"; fail=1; }
+    done
+  fi
+fi
+
+# The decision and risk counts, against the tables that define them. `DECISIONS.md`
+# and `RISKS.md` are the homes; a prose figure elsewhere ("252 decisions") is a
+# copy, and every copy in this repository has rotted at least once.
+d_defined=$(grep -c '^| D[0-9]\+ ' DECISIONS.md 2>/dev/null || echo 0)
+r_defined=$(grep -c '^| R[0-9]\+ ' RISKS.md 2>/dev/null || echo 0)
+for pair in "$d_defined decisions" "$r_defined risks"; do
+  set -- $pair
+  [ "$1" -gt 0 ] || continue
+  claimed=$(grep -rhoE "\*\*[0-9]+ $2\*\*" *.md | grep -oE '[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  if [ -n "$claimed" ] && [ "$claimed" != "$1" ]; then
+    echo "the $2 count has drifted: the table has $1, these notes say $claimed"; fail=1
+  fi
+done
+
 # The board page's size, against the page. D167 refuses React on a measurement,
 # and the measurement was prose: D16's "270 lines" was wrong by a factor of
 # three before anybody noticed, and the figure that replaced it went stale in
 # one pass. `tests::ui_contract` holds the *ceiling*; this holds the *claim*.
 # Written `N lines and M KB` or `N lines, M KB`, with an optional thin space in
 # the thousands, which is how these notes spell numbers.
-page="../ui/index.html"
+#
+# **And in the other order, which is the hole this guard had.** It matched lines
+# before KB only, so `96 KB and 2 091 lines` in [UX.md](UX.md) Â§7 sat two
+# figures stale through every pass that ran this script green â in the
+# document that defines the page-weight budget. A guard that reads one spelling
+# of a figure is a guard that teaches the next writer the other spelling.
+# The **legacy** page, deliberately, and only until the switch. `ui/index.html`
+# is now the built interface's entry — seventeen lines that say nothing about
+# the served size — and pointing this at it turned a guard over the thing being
+# replaced into a guard over a stub. The figure it protects is the one the
+# rebuild is measured against, so it follows the artefact rather than the name.
+page="../ui/legacy.html"
 if [ -f "$page" ]; then
   page_lines=$(wc -l < "$page" | tr -d ' ')
   page_kb=$(( ($(wc -c < "$page" | tr -d ' ') + 512) / 1024 ))
-  bad=$(grep -rhoE '[0-9][0-9 ]* lines(,| and) [0-9]+ KB' *.md | sort -u | while read -r claim; do
-    l=$(echo "$claim" | grep -oE '^[0-9][0-9 ]*' | tr -d ' ')
+  bad=$( { grep -rhoE '[0-9][0-9 ]* lines(,| and) [0-9]+ KB' *.md
+           grep -rhoE '[0-9]+ KB(,| and) [0-9][0-9 ]* lines' *.md
+         } | sort -u | while read -r claim; do
+    l=$(echo "$claim" | grep -oE '[0-9][0-9 ]* lines' | grep -oE '^[0-9][0-9 ]*' | tr -d ' ')
     k=$(echo "$claim" | grep -oE '[0-9]+ KB' | grep -oE '[0-9]+')
     [ "$l" = "$page_lines" ] && [ "$k" = "$page_kb" ] || echo "$claim"
   done)
+  # **And a bare line count, with no KB beside it.** The pair guard above reads
+  # two spellings of *lines and KB together*; `a hand-rolled renderer at 2435
+  # lines` matched neither, so one decision row carried two different counts for
+  # one file — the constitution's "one figure, one home" broken inside a single
+  # sentence. Any four-digit "NNNN lines" in these notes is about this page.
+  bare=$(grep -rhoE '\b[0-9]{4} lines\b' *.md | sort -u | grep -v "^$page_lines lines$" || true)
+  [ -n "$bare" ] && bad="$bad
+$bare"
   if [ -n "$bad" ]; then
     echo "the page figures have drifted; it is $page_lines lines and $page_kb KB, these notes say:"
     echo "$bad" | sed 's/^/  /'
@@ -206,6 +393,28 @@ while read -r line; do
 done <<EOF
 $(grep -ohnE '\]\(([A-Z_]+\.md)\) §[0-9]+' *.md >/dev/null 2>&1; \
   for f in *.md; do grep -oE '\]\(([A-Z_]+\.md)\) §[0-9]+' "$f" \
+    | sed -E "s/^\]\(//; s/\) §/ §/" | sort -u | sed "s|^|$f:|"; done)
+EOF
+
+# And the same check for a sub-section, which the pattern above could not see
+# because it stops at the first `.` — so `§2.1` was read as `§2`, matched a
+# heading about something else, and passed. Twelve such references were live on
+# 2026-09-20: `MARKET_LANDSCAPE.md` §2.1, §3.1, §3.2, §3.3 and §4.1 all named
+# content that had been rewritten out of the file, and four of them pointed at a
+# second persona the file no longer described at all. A reference that resolves
+# to the wrong thing and one that resolves to nothing fail the same way — the
+# reader follows it and finds a stranger (D291).
+#
+# Sub-sections are written `### 2.1 Title` or `#### 5.1.1 Title` — no dot after
+# the number, unlike the top-level `## 2. Title` — so both forms are accepted
+# here rather than assuming one.
+while read -r line; do
+  [ -n "$line" ] || continue
+  src=${line%%:*}; rest=${line#*:}; target=${rest%% *}; sec=${rest##*§}
+  grep -qE "^#{2,4} ${sec}[. ]" "$target" \
+    || { echo "$src: dangling sub-section reference -> $target §${sec}"; fail=1; }
+done <<EOF
+$(for f in *.md; do grep -oE '\]\(([A-Z_]+\.md)\) §[0-9]+\.[0-9]+[a-z]?' "$f" \
     | sed -E "s/^\]\(//; s/\) §/ §/" | sort -u | sed "s|^|$f:|"; done)
 EOF
 
@@ -445,6 +654,87 @@ if [ -z "${DEVPLANE_NO_NET:-}" ] && command -v curl >/dev/null 2>&1; then
       fail=1
     fi
   fi
+fi
+
+# Star counts, and the rule is consistency rather than correctness.
+#
+# A figure about somebody else's repository cannot be recomputed here, so this
+# guard cannot say whether 28,136 is right. What it can say is that the notes
+# spell it **one way**, which is the rule STATE.md's own header states and the
+# one thing no guard was enforcing.
+#
+# It was bought by the defect it now catches: Vibe Kanban's star count was
+# written `28,125` in DIRECTION.md, DECISIONS.md and ROADMAP.md and `28,129` in
+# README.md, RISKS.md and STATE.md — with MARKET_LANDSCAPE.md carrying *both*,
+# eleven lines apart. Six files, two numbers, one repository, and 242/242 claims
+# green throughout, because the ledger pins claims to fetched sources and a star
+# count has no fetched source to pin to.
+#
+# The instrument is near-duplicate detection: two star figures that differ by
+# less than 1 % are the same repository spelled twice, because no two distinct
+# projects these notes cite are that close together. That is a heuristic, and it
+# is the right one here — an exact-match rule cannot tell 28,136 (Vibe Kanban)
+# from 32,843 (ZeroClaw), and an entity-aware rule would need to parse prose.
+# Both separators the notes use: `137,999` and `137 947`. The space form was a
+# fourth spelling of Spec Kit's count that the comma-only first draft of this
+# guard walked straight past — which is this file's recurring lesson, that a
+# guard is not installed until it has been run against a figure known to be
+# wrong.
+stars=$(grep -rhoE '[0-9]{1,3}([ ,][0-9]{3})+ ?(★|stars?)|[0-9]{4,} ?(★|stars?)' *.md 2>/dev/null \
+  | grep -oE '[0-9][0-9, ]*[0-9]|[0-9]+' | tr -d ', ' | sort -un)
+if [ -n "$stars" ]; then
+  dupes=$(echo "$stars" | awk '
+    { n[NR]=$1 }
+    END {
+      for (i=1; i<=NR; i++)
+        for (j=i+1; j<=NR; j++)
+          if (n[j] != n[i] && (n[j]-n[i]) < n[i]*0.01)
+            printf "%s/%s ", n[i], n[j]
+    }')
+  if [ -n "$dupes" ]; then
+    echo "one repository's star count is spelled two ways: $dupes"
+    echo "  (a figure about somebody else's machine has one home in STATE.md; the rest cite it)"
+    fail=1
+  fi
+fi
+
+# A 📐 is a claim about `src/`, and nothing checked it.
+#
+# Bought by D307: PROVIDERS.md §2 marked `elicitation/create` as *designed,
+# unbuilt* while the handler had shipped the day before. From that one table
+# cell came a decision, a roadmap item, a promotion into *Now* and a
+# twenty-two-task specification — four artefacts, none of which read the code.
+# STATE.md had the shipping recorded correctly the whole time; the two files
+# disagreed and nothing compared them.
+#
+# The instrument is exact rather than clever: the ACP client registers a handler
+# per request type it answers, so the set of `on_receive_request` closures IS the
+# set of protocol methods Devplane implements. A method with a handler that
+# PROVIDERS.md still marks 📐 is the defect, in the one direction nobody looks.
+#
+# Only the mapping below is checked — adding a row costs a line and a missing
+# one fails open, which is the right way round for a guard whose job is to catch
+# a stale *claim* rather than to inventory the protocol.
+acp_impl="../src/acp/session.rs"
+if [ -f "$acp_impl" ] && [ -f PROVIDERS.md ]; then
+  # request type in the handler  →  the method name the notes spell
+  while IFS='|' read -r rust_type method; do
+    [ -n "$rust_type" ] || continue
+    grep -q "async move |request: $rust_type" "$acp_impl" || continue
+    # It is implemented. The row naming it must not still say "designed".
+    # **The mark, not the prose.** `| 📐` is the cell's own marker; a 📐 further
+    # along a line is a row *quoting* its old state in order to retire it — which
+    # this guard matched on its first run, against the very row D307 corrected.
+    # The same mistake this file's other guards have each made once.
+    row=$(grep -F -- "\`$method\`" PROVIDERS.md | grep -E '\| 📐' | head -1)
+    if [ -n "$row" ]; then
+      echo "PROVIDERS.md marks \`$method\` as 📐 and src/acp/session.rs handles it ($rust_type) — a 📐 is a claim about the tree (D307)"
+      fail=1
+    fi
+  done <<'ACP'
+CreateElicitationRequest|elicitation/create
+RequestPermissionRequest|session/request_permission
+ACP
 fi
 
 [ $fail = 0 ] && echo "concepts-check: ok ($(ls *.md | wc -l | tr -d ' ') files)"

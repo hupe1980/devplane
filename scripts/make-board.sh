@@ -21,13 +21,13 @@ BIN=./target/debug/devplane
 [ -x "$CHROME" ] || { echo "make-board: no Chrome at $CHROME — set CHROME=" >&2; exit 2; }
 [ -x "$BIN" ]    || { echo "make-board: build first (just build)" >&2; exit 2; }
 
-# **The page is compiled into the binary**, so an edit to `ui/index.html` is not
+# **The page is compiled into the binary**, so an edit to `ui/legacy.html` is not
 # in the picture until a rebuild. Running this script directly rather than
 # through `just make-board` skips that, and the shots come back showing the old
 # page while reporting success — which cost two rounds of "the CSS does not
 # work" before anybody checked which page was being served.
-if [ ui/index.html -nt "$BIN" ]; then
-  echo "make-board: ui/index.html is newer than $BIN — run 'just make-board'" >&2
+if [ ui/legacy.html -nt "$BIN" ]; then
+  echo "make-board: ui/legacy.html is newer than $BIN — run 'just make-board'" >&2
   exit 2
 fi
 

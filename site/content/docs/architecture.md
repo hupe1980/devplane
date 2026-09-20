@@ -60,15 +60,16 @@ the matcher itself, because a guard that cannot fail is a guard nobody should tr
 The one thing deliberately allowed there is a **synchronous** read of a small local file, which is how
 a project's rules are read on the permission hook and is bounded in a way a network call is not.
 
-## One store, three kinds of row
+## One store, four kinds of row
 
 SQLite, WAL, FTS5, in one file.
 
 It holds **observations** — events and the run and work rows derived from them. Query-heavy, and
 rebuildable from the providers, which is why losing the file costs history rather than correctness.
 It holds **transcripts**: what driven agents said, pruned on the same sweep because that is history
-too. And it holds the **decision log**, which is the exception to every rule above: appended, never
-updated, never pruned, outside the sweep.
+too. It holds the **decision log**: appended, never updated, never pruned, outside the sweep. And it
+holds **asks** — what an agent put to a person and what became of it. An ask is neither of the first
+two: nothing can re-derive what somebody was asked, so losing one loses the question itself.
 
 The retention sweep prunes the event log **and its search index together** — an index that outlives
 what it indexes is both the larger half of the file and a search that finds things that are no longer
@@ -85,8 +86,8 @@ a URL, and SSE is one line in a browser and needs no client library.
 
 | | |
 |---|---|
-| **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/runs/{id}`, `/api/runs/{id}/events`, `/api/runs/{id}/messages`, `/api/runs/{id}/rewind-gap`, `/api/agents`, `/api/work`, `/api/decisions`, `/api/search`, `/api/diagnostics`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz` |
-| **Write** | `/api/dispatch`, `/api/work`, `/api/work/{id}/{verify,finish,approve,retry}`, `/api/issues`, `/api/projects/trust`, `/api/runs/{id}/{prompt,decide,stop,snooze,focus}`, `/api/shutdown` |
+| **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/asks`, `/api/runs/{id}`, `/api/runs/{id}/{events,messages,rewind-gap}`, `/api/agents`, `/api/work`, `/api/work/{id}/{changes,certificate}`, `/api/batch`, `/api/library`, `/api/modes`, `/api/decisions`, `/api/explain`, `/api/search`, `/api/forge`, `/api/diagnostics`, `/api/setup`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz` |
+| **Write** | `/api/dispatch`, `/api/asks/{id}/answer`, `/api/work`, `/api/work/{id}/{verify,finish,approve,retry,resume}`, `/api/issues`, `/api/projects/trust`, `/api/runs/{id}/{prompt,stop,snooze,focus}`, `/api/shutdown` |
 | **Receivers** | `/devplane/hook`, `/devplane/policy`, `/devplane/statusline`, `/devplane/otel/v1/{logs,metrics}` |
 
 Everything under `/api` and `/devplane` requires the token, except `/healthz` — which proves the port

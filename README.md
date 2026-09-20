@@ -66,11 +66,25 @@ Devplane watches all of them, on documented interfaces, and stays out of the way
 ## 📦 Install
 
 ```sh
-# a prebuilt binary: macOS (Apple Silicon), Linux, Windows
+# a prebuilt binary: macOS (Apple Silicon and Intel), Linux, Windows
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
+
+# or run it without installing anything, if you have Node
+npx devplane ls
 
 # from source, needs Rust 1.90+
 cargo install devplane
+```
+
+An `npx` run and an installed binary share `~/.devplane/` and produce one daemon — the same Devplane,
+not two.
+
+Inside Claude Code, as a **read-only** plugin — the MCP surface and a skill that explains what to ask
+it, with nothing in it that changes anything:
+
+```sh
+claude plugin marketplace add hupe1980/devplane
+/plugin install devplane@devplane
 ```
 
 On macOS use the installer rather than the releases page: the binaries are not notarised, and macOS
@@ -96,6 +110,8 @@ devplane rewind <run>       # files a shell command wrote past Claude Code's che
 devplane audit              # what Devplane decided, and on whose authority
 devplane attention          # whether the inbox is worth reading, per kind
 devplane explain --replay   # which rule to write so it stops asking
+devplane library diff       # which of your six copies of a skill drifted
+devplane dispatch --to a,b,c "bump deps"   # one prompt, three repositories
 ```
 
 `devplane ls` works before you connect anything: sessions are discovered from Claude Code's own
@@ -106,9 +122,46 @@ evaluated in Devplane's own process and never translated into either vendor's co
 `never_auto = ["Read(.env)"]` stops Claude's `Read` and Copilot's `view`, and both name the rule in
 `devplane audit`. Copilot has no session roster, so there it is connect-first-then-see.
 
+**One prompt, six repositories, one row to review.** `dispatch --to` sends the same intent to several
+projects and reports every refusal — untrusted, dirty worktree, unparseable config — **before
+anything is written**, never as one failure after three successes. Cost is stated in runs, not
+dollars.
+
+```console
+$ devplane dispatch --to api,web,jobs,billing --mode gate "bump deps and run gates"
+  refused   web   uncommitted changes — commit or stash first
+
+  draft
+  draft was chosen for you: more than 3 targets
+  `--mode gate` was not honoured, for the reason above
+
+  3 projects × one run
+```
+
+Above three targets **draft is chosen for you** — each project opens with the prompt typed and not
+sent — and you are told, rather than discovering it. `devplane batch` shows the fan-out as one row
+with one outcome per target, questions first, **with no percentage or pass rate anywhere**.
+
+**No position merges, and none weakens a permission**: each accepted target goes through the same
+single-target dispatch, so the same rules decide it and the same rule is credited.
+
+**One library, every project.** The prompts and skills you reuse live in a directory you own, in the
+vendors' own formats, unmodified. `devplane library diff` says which copies drifted and which way,
+which projects lack one, and which frontmatter fields are a documented hard error on Anthropic's own
+distribution paths. It invents no format, rewrites no artefact and grades nothing.
+
+```console
+$ devplane library diff review-findings
+  DRIFT      payments-api    the project's copy was edited
+  STALE      billing         the library moved; this copy is the one you installed
+  UNRECORDED api             a copy is here that Devplane did not install
+  ok         infra
+```
+
 Every command starts the daemon if it is not already running, and every command takes `--json`.
 
 [Quickstart →](https://hupe1980.github.io/devplane/docs/quickstart/) ·
+[The library →](https://hupe1980.github.io/devplane/docs/library/) ·
 [CLI reference →](https://hupe1980.github.io/devplane/docs/cli/)
 
 ## ✅ Verified done
@@ -344,6 +397,39 @@ tries something else — so a rule that is too tight and a rule that is working 
 board, and the difference only shows up on the bill. Five refusals in one run says which rule keeps
 stopping it.
 
+## ⏳ A question outlives the agent that asked it
+
+An agent asks you something. You are not at the desk; the machine reboots; the daemon stops. **The
+question is still there** — still in the inbox, still answerable — and answering it resumes the
+session the agent left behind and delivers what you chose.
+
+```console
+$ devplane asks
+7c3f9a21  Keep the legacy /v1/login route?
+    question · it waits — nothing answers this but you
+    devplane answer 7c3f9a21 --option 'Keep it'
+```
+
+The id is the ask's own token, not a session id: an answer addressed to a session is undeliverable
+the moment the session is gone, which is what every restart leaves behind. The answer is written
+down **before** anything is delivered, so a crash between *answered* and *acted* replays as answered
+rather than as ask-again.
+
+**Nothing ends an unanswered ask unless your project asks for that.** No default timeout, no
+"proceed", and no re-asking — re-asking would be Devplane composing a prompt in your name.
+
+```toml
+[questions]
+deadline = "4h"   # never (the default) | 90s | 30m | 4h
+```
+
+When it fires the agent is told *no*, and the audit row names **a clock** with the duration and the
+file that set it.
+
+What became of an ask is a sentence rather than a status — *delivered to the waiting agent*,
+*delivered into a resumed session*, *a clock refused it after 4h — set in devplane.toml*, *nobody
+answered*. No two read alike, because telling them apart without opening a transcript is the point.
+
 ## 🚫 Devplane never approves
 
 It can **prohibit** a call and **defer** one to you. It cannot approve one — `Verdict` has no `Allow`
@@ -396,6 +482,30 @@ are still writing the rule.
 
 **Your prohibitions hold in auto mode**, where a classifier approves routine calls and no permission
 prompt ever appears: they go out on a hook that fires before every tool call in every mode.
+
+**And two commands tell you what that means for you.** `devplane attention` opens with one line —
+*you answered 3 of the 619 decisions taken in your name* — whose denominator is everything that ran,
+not just what you were asked about. It is a count. There is no threshold for that ratio alone: the
+published criterion it comes from is over residual risk and needs an error rate nothing here can
+observe, so the paper is cited and never restated as a verdict.
+
+**And `devplane modes` tells you which sessions are running that way.** `auto` is the built-in
+starting mode on Pro, Max and Team; with six repositories open, each session knows its own mode and
+nothing collects them.
+
+```console
+$ devplane modes
+devplane
+  devplane-d1           auto  seen 2026-09-19T18:34:4…
+  devplane-ba           not reported yet
+
+3 of 18 live session(s) decide without you.
+```
+
+A mode this build does not recognise prints as a question rather than as *supervised*, and a session
+that has not reported one says so instead of hiding — the hook that fires on every tool call does not
+carry the mode, so silence is common and is not a finding. Read, never set: Devplane does not change
+a permission mode, for the same reason it writes no rule.
 
 Grants belong in your agent's own settings, where its own permission system enforces them — and
 `devplane explain --replay` tells you which one to write.
@@ -486,6 +596,21 @@ be re-derived from the provider, but “this command ran because rule X allowed 
 request exists because these checks passed” cannot be re-derived from anything, so they are appended
 and never pruned.
 
+Every row in it carries **on whose authority** — and there are five, because three of them are
+things no other tool records:
+
+| | |
+|---|---|
+| `person` | you were asked, and you answered |
+| `rule` | one of your own `never_auto` or `always_ask` rules matched, and the rule is on the row |
+| `timer` | **a clock decided**, because nobody answered in time |
+| `nobody` | **asked, never answered, and the moment passed** — the run ended under the question, or the daemon stopped while it was waiting |
+| `daemon` | Devplane doing what your project told it to: a gate ran, a pipeline advanced, a pull request opened |
+
+There is no `classifier` — Devplane cannot attribute an individual call to a model's approval, and
+`devplane modes` tells you which sessions run under one instead. There is no `unknown` either: a row
+whose authority cannot be established is a row Devplane does not write.
+
 [Architecture →](https://hupe1980.github.io/devplane/docs/architecture/) ·
 [Security →](https://hupe1980.github.io/devplane/docs/security/)
 
@@ -496,7 +621,7 @@ One crate.
 | Path | What |
 |---|---|
 | `src/core/` | Types, the reducer, the attention engine, the permission policy, `devplane.toml`. **May not reach the outside world** — no `async fn`, no `.await`, no runtime, no database, no HTTP |
-| `src/` | Everything that does: daemon, receivers, HTTP API, protocol client, gates, git, GitHub, SQLite, CLI, and the board (`ui/index.html`) |
+| `src/` | Everything that does: daemon, receivers, HTTP API, protocol client, gates, git, GitHub, SQLite, CLI, and the board (`ui/legacy.html`) |
 | `tests/purity.rs` | Fails the build if `src/core/` ever breaks that rule |
 | `site/` | The documentation site (Zola) |
 | `scripts/` | Fetching the third-party reference docs, and the checks that keep the claims honest |
@@ -515,7 +640,7 @@ just check                   # what CI runs: fmt, clippy, build, test
 just verify                  # that, plus the claim and dependency ledgers and the site
 just open                    # the board in a browser
 just site                    # the documentation site, at http://127.0.0.1:1111
-just ui                      # the board served from ui/index.html — edit, reload, no rebuild
+just ui                      # the board served from ui/legacy.html — edit, reload, no rebuild
 
 DEVPLANE_HOME=/tmp/vp just vp ls    # an isolated instance, touching nothing of yours
 ```
@@ -527,9 +652,8 @@ check could read either.
 
 `just channels` fails the build until every row of Claude Code's changelog that touches a channel
 Devplane actually uses — hooks, permission modes, the settings deciding whether a hook is consulted
-at all — is written down as covered or declined with a reason. The rule ledger that used to sit
-beside it is gone with the approval path: Devplane no longer mirrors anybody's permission semantics,
-so a changed rule shape is the vendor's business and a changed hook contract is still ours.
+at all — is written down as covered or declined with a reason. Devplane mirrors nobody's permission
+semantics, so a changed rule shape is the vendor's business and a changed hook contract is ours.
 
 The protocol tests drive a real agent process — `examples/echo_agent` — rather than
 a vendor's, and the GitHub tests parse captured `gh` output rather than calling GitHub. That is what
@@ -543,7 +667,7 @@ another port rather than refusing to start.
 `DEVPLANE_CLAUDE_BIN` points at a `claude` binary if yours is not on `PATH` — which is common, since
 the VS Code extension ships its own copy and installs nothing.
 
-`DEVPLANE_UI` points the daemon at `ui/index.html` on disk, so editing the board is a browser reload
+`DEVPLANE_UI` points the daemon at `ui/legacy.html` on disk, so editing the board is a browser reload
 rather than a rebuild and a restart — `just ui` is that with the path filled in. The copy compiled
 into the binary is what ships.
 

@@ -98,10 +98,11 @@ pub fn contains_analysis_barrier(command: &str) -> bool {
 ///
 /// **This is the allowlist half, and it is the important half.**
 /// [`unapprovable_by_prefix`] is a blocklist: allow unless one of the hazards
-/// somebody thought of is present. Every widening this gate has been found to
-/// have was a hazard nobody had thought of yet, which is why that list only
-/// ever grows and why the differential harness has to run forever to find the
-/// next one.
+/// somebody thought of is present. Every widening this gate was found to have
+/// was a hazard nobody had thought of yet, which is why that list only ever
+/// grows — and why keeping a blocklist honest needed a harness running for
+/// ever to find the next one. That harness is gone, with the approval it
+/// protected.
 ///
 /// This asks the opposite question: **is every construct here one we claim to
 /// understand?** A command carrying anything else cannot be approved, whatever
@@ -112,8 +113,10 @@ pub fn contains_analysis_barrier(command: &str) -> bool {
 /// It is also why this needs no oracle. *Narrower than the vendor* is the safe
 /// side of Principle II, and refusing to approve what we cannot parse is
 /// narrower by construction, on every release the vendor has ever shipped and
-/// every one it will. The harness stays for the shapes we *do* claim to read;
-/// it stops being the only thing between here and a class nobody enumerated.
+/// every one it will. **This is why the approval path could be deleted without
+/// deleting the safety it bought**: refusing what cannot be parsed needs no
+/// agreement from anybody, so it survives the harness that used to be the only
+/// thing between here and a class nobody enumerated.
 ///
 /// Found by asking what the blocklist lets through: `cat $'\x2e\x65nv'` was
 /// approved under `Bash(cat *)` while `cat .env` was correctly denied by

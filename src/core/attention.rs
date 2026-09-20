@@ -150,6 +150,22 @@ pub enum AttentionKind {
     /// Critical for the same reason as [`AttentionKind::GateDown`], and narrower:
     /// prohibitions are inert in one repository rather than in all of them.
     ConfigBroken,
+    /// **Something Devplane decided or observed could not be written down.**
+    ///
+    /// Critical, and the only kind that is about this product's own record
+    /// rather than about anything it watches. Every count, every audit row and
+    /// every answer to *who decided this* is missing at least this much, and
+    /// the board looks complete while it is.
+    RecordIncomplete,
+    /// **An agent a previous daemon started is still running with nothing
+    /// attached to it.**
+    ///
+    /// A daemon killed rather than stopped gives its connections no chance to
+    /// tear the agents' process groups down, so the agent re-parents to pid 1
+    /// and blocks on a dead pipe — holding a worktree, and spending if it was
+    /// mid-turn. Nothing else on the machine knows the process is there, which
+    /// is the definition of the thing this product is for.
+    AgentLeaked,
 }
 
 impl AttentionKind {
@@ -177,6 +193,8 @@ impl AttentionKind {
             AttentionKind::Refused => "refused",
             AttentionKind::GateDown => "gate_down",
             AttentionKind::ConfigBroken => "config_broken",
+            AttentionKind::RecordIncomplete => "record_incomplete",
+            AttentionKind::AgentLeaked => "agent_leaked",
         }
     }
 
@@ -197,6 +215,13 @@ impl AttentionKind {
             // One repository's committed prohibitions are not loaded and
             // nothing else on the board would say so.
             AttentionKind::ConfigBroken => Level::Critical,
+            // The product's own record has a hole in it, and no other surface
+            // can say so — the thing that would report it is the thing that
+            // failed.
+            AttentionKind::RecordIncomplete => Level::Critical,
+            // Nothing else on this machine knows the process is there, which is
+            // the definition of the thing this product is for.
+            AttentionKind::AgentLeaked => Level::Critical,
             AttentionKind::Interrupted => Level::High,
             // Normal, not high: the pipeline stopped exactly where the project
             // asked it to. An expected pause is not an alarm.
@@ -362,8 +387,27 @@ pub struct AttentionItem {
     pub options: Vec<Choice>,
     pub actions: Vec<Action>,
     /// The protocol request this item answers, when it can be answered.
+    ///
+    /// **Useful only to the connection that issued it**, which is why it is no
+    /// longer what a surface offers: see `ask`.
     #[serde(default)]
     pub request_id: Option<String>,
+    /// The durable ask this item is about — the token every surface answers by.
+    ///
+    /// Present exactly when an answer can still be recorded, which is a wider
+    /// set than *a connection is holding this right now*: an ask whose daemon
+    /// was restarted is still answerable, and this is what makes that sentence
+    /// true rather than aspirational.
+    #[serde(default)]
+    pub ask: Option<crate::core::AskId>,
+    /// The whole form behind a question: which field each answer goes back
+    /// under, and the free-text box where the agent offered one.
+    ///
+    /// **`options` alone is not the question.** An agent that offered an
+    /// *Other* box asked something wider than a list of buttons, and a surface
+    /// rendering only the buttons is showing a smaller question than was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<serde_json::Value>,
     /// Where `open_pr` goes. Present exactly when that action is offered.
     #[serde(default)]
     pub url: Option<String>,
@@ -469,6 +513,64 @@ impl KindStats {
     }
 }
 
+/// Whether anything is reaching the person at all.
+///
+/// **A different question from [`KindStats`], with a different denominator.**
+/// That one asks *is the inbox worth reading* — of the items raised, how many
+/// were acted on. This asks *is anything being raised in the first place*, over
+/// everything the agents did. Only the second can say the product is not
+/// working.
+///
+/// The numerator and the denominator come from the places the facts actually
+/// live, which is a correction rather than a preference: `asked` was once
+/// counted from event kinds and returned nought on a real machine while the
+/// attention log held sixty-nine raised permissions, because a driven run's
+/// permission raises an item without writing those events.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Oversight {
+    /// Tool calls the agents made in the window.
+    pub unattended: i64,
+    /// Of everything that happened, how much was put to a person.
+    pub asked: i64,
+    /// Of those, how many a person answered.
+    pub answered: i64,
+}
+
+impl Oversight {
+    /// Everything that happened that could have needed somebody.
+    pub fn total(self) -> i64 {
+        self.unattended + self.asked
+    }
+
+    /// The share a person saw.
+    ///
+    /// **Absent rather than nought when nothing happened**, because *none of
+    /// nothing* is a quiet week and *none of four hundred* is the finding, and
+    /// one number cannot say both.
+    pub fn reviewed(self) -> Option<f64> {
+        let total = self.total();
+        (total > 0).then(|| self.answered as f64 / total as f64)
+    }
+
+    /// The seat's own number, in one sentence, or nothing to say.
+    ///
+    /// **A count and never a verdict.** The published criterion for when
+    /// oversight stops meaning anything is over *residual risk* and needs a
+    /// per-agent error rate this product cannot observe; the ratio is one input
+    /// to that model. So the sentence states what this product measured and the
+    /// surface prints the citation separately, marked as somebody else's
+    /// result.
+    pub fn sentence(self) -> Option<String> {
+        let total = self.total();
+        (total > 0).then(|| {
+            format!(
+                "You answered {} of the {total} decisions taken in your name.",
+                self.answered
+            )
+        })
+    }
+}
+
 /// Thresholds the inbox uses. Kept in one struct so the daemon can expose them
 /// and the tests can set them.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -519,8 +621,10 @@ pub fn gate_down_item(why: &str) -> AttentionItem {
              Run `devplane doctor` for the command it tried, then \
              `devplane connect claude` to reinstall it."
         )),
+        ask: None,
         options: Vec::new(),
         actions: Vec::new(),
+        form: None,
         request_id: None,
         url: None,
         launch: None,
@@ -528,6 +632,168 @@ pub fn gate_down_item(why: &str) -> AttentionItem {
         offer: None,
         no_offer: None,
         since: jiff::Timestamp::now(),
+    }
+}
+
+/// `s`, or nothing. One place, because three call sites spelled it twice.
+fn plural(n: u64) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Something Devplane decided or observed could not be written down.
+///
+/// **Two counts rather than one**, because a lost *decision* is worse than a
+/// lost event: an event is an observation that something happened and a
+/// decision is the answer to *who decided this*, which is the question the
+/// whole product exists to answer.
+///
+/// No action, like the other rows about the machine. The fix is disk space or a
+/// permission on a file, and there is no button for either.
+pub fn record_incomplete_item(events: u64, decisions: u64, last: &str) -> AttentionItem {
+    let what = match (events, decisions) {
+        (0, d) => format!("{d} decision{}", plural(d)),
+        (e, 0) => format!("{e} event{}", plural(e)),
+        (e, d) => format!("{e} event{} and {d} decision{}", plural(e), plural(d)),
+    };
+    AttentionItem {
+        // Stable, so a disk that stays full is one open item and not one per
+        // write that failed — which would be the loudest possible way to make
+        // this unreadable.
+        id: AttentionId::from("record-incomplete".to_string()),
+        kind: AttentionKind::RecordIncomplete,
+        level: AttentionKind::RecordIncomplete.default_level(),
+        run_id: None,
+        project_id: None,
+        title: format!("{what} could not be written down"),
+        detail: Some(format!(
+            "Devplane kept going and the board looks complete; it is not. \
+             Every count, every audit row and every answer to \"who decided \
+             this\" is now missing at least this much.\n{last}\n\n\
+             Check the disk and the permissions on the store, then restart \
+             the daemon. The gap does not fill in afterwards."
+        )),
+        ask: None,
+        options: Vec::new(),
+        actions: Vec::new(),
+        request_id: None,
+        form: None,
+        url: None,
+        launch: None,
+        work_id: None,
+        offer: None,
+        no_offer: None,
+        since: jiff::Timestamp::now(),
+    }
+}
+
+/// An agent a previous daemon started that is still running with nothing
+/// attached to it.
+///
+/// A graceful stop tears every agent's process group down; a `kill -9` gives it
+/// no chance, and the agent re-parents to pid 1 and blocks on a dead pipe —
+/// holding a worktree, and spending if it was mid-turn.
+///
+/// **It is never killed automatically, and that is the whole shape of this
+/// row.** The process may be part-way through writing what it was last asked to
+/// do, so the person is handed the command that ends it and decides. A
+/// supervision tool that killed a model mid-write to tidy its own bookkeeping
+/// would be the worst possible answer to *nothing else knows this is here*.
+///
+/// The command is `kill -TERM -<pid>` — the **negative** form, which signals a
+/// process *group*. It is correct here for a reason rather than by convention:
+/// an agent the protocol crate spawns is its own group leader, so its pid and
+/// its group id are the same number, and that identity is part of how a leaked
+/// one is recognised at all. Signalling the group is what reaches the model's
+/// own children.
+pub fn agent_leaked_item(pid: u32, command: &str, worktree: Option<&str>) -> AttentionItem {
+    AttentionItem {
+        // Stable per process, so one leaked agent is one row for as long as it
+        // is there.
+        id: AttentionId::from(format!("agent-leaked-{pid}")),
+        kind: AttentionKind::AgentLeaked,
+        level: AttentionKind::AgentLeaked.default_level(),
+        run_id: None,
+        project_id: None,
+        title: format!("An agent from a previous daemon is still running (pid {pid})"),
+        detail: Some(format!(
+            "Nothing is attached to it: it is blocked on a pipe that closed when \
+             the daemon it belonged to was killed, and it is holding{} — and \
+             spending, if it was mid-turn.\n{command}\n\n\
+             End it with:  kill -TERM -{pid}\n\n\
+             Devplane will not do that for you: it may be part-way through \
+             writing what it was last asked to do.",
+            match worktree {
+                Some(w) => format!(" {w}"),
+                None => String::new(),
+            }
+        )),
+        ask: None,
+        options: Vec::new(),
+        actions: Vec::new(),
+        request_id: None,
+        form: None,
+        url: None,
+        launch: None,
+        work_id: None,
+        offer: None,
+        no_offer: None,
+        since: jiff::Timestamp::now(),
+    }
+}
+
+/// An ask that outlived the process that asked it.
+///
+/// **This is the item that makes the durability claim true rather than
+/// aspirational.** Every other item in this module is derived from a live run;
+/// this one is derived from a row, because the whole point is that the run is
+/// gone. A daemon restarted with a question waiting used to say *"Nothing needs
+/// you"* while the question sat unanswered and the run read `completed` — the
+/// failure the feature exists to prevent, wearing the one word the product
+/// distrusts most.
+///
+/// It says plainly that the agent is not there. An answer given here is
+/// recorded and then delivered into a resumed session where the agent can be
+/// resumed; where it cannot, the answer is still the person's and still on the
+/// record, and the surface says which happened rather than implying a delivery.
+pub fn stranded_ask_item(ask: &crate::core::ask::Ask) -> AttentionItem {
+    let kind = match ask.kind {
+        crate::core::ask::Kind::Permission => AttentionKind::Permission,
+        crate::core::ask::Kind::Question => AttentionKind::Question,
+    };
+    let options: Vec<Choice> = ask
+        .payload
+        .get("options")
+        .and_then(|o| serde_json::from_value(o.clone()).ok())
+        .unwrap_or_default();
+    AttentionItem {
+        // Keyed on the ask, so one waiting question is one row however many
+        // times the daemon has restarted under it.
+        id: AttentionId::from(format!("ask-{}", ask.id)),
+        level: kind.default_level(),
+        kind,
+        run_id: Some(ask.run.clone()),
+        project_id: ask.project.clone(),
+        title: ask.message.clone(),
+        detail: Some(format!(
+            "Asked {} and still unanswered. The agent that asked is no longer \
+             running, so answering this records your answer and delivers it by \
+             resuming that session — {}",
+            ask.asked_at,
+            ask.deadline.says()
+        )),
+        ask: Some(ask.id.clone()),
+        options,
+        // Answerable, which is the whole claim. Nothing else is offered: there
+        // is no run to focus and no window to raise.
+        actions: vec![Action::Choose, Action::Reply],
+        request_id: Some(ask.request_id.clone()),
+        form: ask.payload.get("form").cloned(),
+        url: None,
+        launch: None,
+        work_id: None,
+        offer: None,
+        no_offer: None,
+        since: ask.asked_at,
     }
 }
 
@@ -558,8 +824,10 @@ pub fn config_broken_item(root: &Path, why: &str) -> AttentionItem {
              Run `devplane check {where_}` for the line, and the gates and \
              prohibitions come back as soon as the file parses."
         )),
+        ask: None,
         options: Vec::new(),
         actions: Vec::new(),
+        form: None,
         request_id: None,
         url: None,
         launch: None,
@@ -602,7 +870,11 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
             detail,
             options,
             actions,
+            // The token, where the run is holding one. Every surface answers by
+            // this and none of them by `request_id`.
+            ask: run.blocked_on.as_ref().and_then(|b| b.ask.clone()),
             request_id: run.blocked_on.as_ref().and_then(|b| b.request_id.clone()),
+            form: run.blocked_on.as_ref().and_then(|b| b.form.clone()),
             url: None,
             // A blocked session is already open somewhere; the errand is to
             // reach *it*, not to start a second one beside it.
@@ -873,8 +1145,10 @@ pub fn items_for_work_in(
             project_id: Some(work.project_id.clone()),
             title,
             detail,
+            ask: None,
             options: Vec::new(),
             actions,
+            form: None,
             request_id: None,
             work_id: Some(work.id.clone()),
             // A work item is not about a tool call, so no rule answers it.
@@ -1389,9 +1663,11 @@ mod tests {
         r.blocked_on = Some(BlockedOn {
             waiting_for: WaitingFor::Question,
             message: Some("which one?".into()),
+            ask: None,
             request_id: None,
             tool: None,
             input: None,
+            form: None,
             options: vec![],
             since: Timestamp::now(),
         });
@@ -1411,10 +1687,12 @@ mod tests {
         BlockedOn {
             waiting_for,
             message: Some("keep the legacy route?".into()),
+            ask: None,
             request_id: Some("req-1".into()),
             tool: None,
             input: None,
             options,
+            form: None,
             since: Timestamp::now(),
         }
     }
@@ -1631,5 +1909,144 @@ mod one_row_per_thing {
             src.contains(r#"RunId::new(format!("acp-{}""#),
             "driven run ids stopped carrying a prefix"
         );
+    }
+    // ── The machine's own rows, and the seat's own number ────────────────
+    //
+    // These cover the pieces reconstructed on 2026-09-20 after `git checkout`
+    // discarded this file's uncommitted work — the destructive command this
+    // repository's own standing rules say never to use on a scratch edit. The
+    // behaviour is re-derived from the callers and from the notes that describe
+    // it, so it is pinned here rather than trusted.
+
+    #[test]
+    fn a_lost_record_says_which_kind_was_lost() {
+        assert!(
+            record_incomplete_item(3, 0, "disk full")
+                .title
+                .contains("3 events")
+        );
+        assert!(
+            record_incomplete_item(0, 1, "disk full")
+                .title
+                .contains("1 decision")
+        );
+        let both = record_incomplete_item(2, 5, "disk full");
+        assert!(both.title.contains("2 events"), "{}", both.title);
+        assert!(both.title.contains("5 decisions"), "{}", both.title);
+        // Singular and plural, because a row that says "1 events" is a row
+        // somebody stops reading carefully.
+        assert!(record_incomplete_item(1, 0, "x").title.contains("1 event "));
+    }
+
+    /// The machine rows offer no action, and the reason is the same for all
+    /// three: there is no button for disk space, for a TOML file, or for
+    /// deciding to kill somebody else's model mid-write.
+    #[test]
+    fn the_rows_about_the_machine_offer_nothing_to_press() {
+        for item in [
+            record_incomplete_item(1, 1, "x"),
+            agent_leaked_item(4242, "claude --acp", None),
+            gate_down_item("it exited 127"),
+        ] {
+            assert!(item.actions.is_empty(), "{:?} offers an action", item.kind);
+            assert_eq!(item.level, Level::Critical, "{:?}", item.kind);
+            assert!(item.run_id.is_none(), "{:?} claims a run", item.kind);
+        }
+    }
+
+    /// A leaked agent is handed over with the command that ends it — and is
+    /// never ended automatically, because it may be part-way through writing.
+    #[test]
+    fn a_leaked_agent_carries_the_command_that_ends_it() {
+        let item = agent_leaked_item(4242, "claude --acp", Some("/repo/.claude/worktrees/x"));
+        let detail = item.detail.expect("a detail");
+        assert!(detail.contains("kill -TERM -4242"), "{detail}");
+        assert!(detail.contains("/repo/.claude/worktrees/x"), "{detail}");
+        assert!(
+            detail.contains("will not do that for you"),
+            "the refusal to kill it is stated, not implied: {detail}"
+        );
+        // Stable per process: one leaked agent is one row, not one per sweep.
+        assert_eq!(item.id, agent_leaked_item(4242, "other", None).id);
+        assert_ne!(item.id, agent_leaked_item(4243, "claude --acp", None).id);
+    }
+
+    /// The item that makes the durability claim true: an ask whose run is gone
+    /// is still answerable, and says so.
+    #[test]
+    fn a_stranded_ask_is_answerable_and_says_the_agent_is_gone() {
+        let ask = crate::core::ask::Ask::new(
+            crate::core::AskId::new("a1"),
+            crate::core::RunId::new("r1"),
+            crate::core::ask::Asked {
+                kind: crate::core::ask::Kind::Question,
+                request_id: "req".into(),
+                message: "Keep the legacy route?".into(),
+                payload: serde_json::json!({ "options": [ { "id": "keep", "label": "Keep it" } ] }),
+                at: Timestamp::now(),
+                deadline: crate::core::ask::Deadline::Never,
+            },
+        );
+        let item = stranded_ask_item(&ask);
+        assert_eq!(item.kind, AttentionKind::Question);
+        assert_eq!(item.ask.as_ref().map(|a| a.as_str()), Some("a1"));
+        assert!(item.actions.contains(&Action::Choose));
+        assert_eq!(
+            item.options.first().and_then(|o| o.id.as_deref()),
+            Some("keep"),
+            "the agent's own options survive the restart with their ids"
+        );
+        let detail = item.detail.expect("a detail");
+        assert!(detail.contains("no longer running"), "{detail}");
+        assert!(
+            detail.contains("nothing answers this but you"),
+            "the deadline sentence is carried: {detail}"
+        );
+        // One row per ask, however many times the daemon restarts under it.
+        assert_eq!(item.id, stranded_ask_item(&ask).id);
+    }
+
+    /// *None of nothing* is a quiet week and *none of four hundred* is the
+    /// finding. One number cannot say both, so a quiet week says nothing.
+    #[test]
+    fn the_oversight_ratio_is_absent_rather_than_nought_when_nothing_happened() {
+        let quiet = Oversight {
+            unattended: 0,
+            asked: 0,
+            answered: 0,
+        };
+        assert_eq!(quiet.total(), 0);
+        assert_eq!(quiet.reviewed(), None);
+        assert_eq!(quiet.sentence(), None);
+    }
+
+    #[test]
+    fn the_oversight_sentence_is_a_count_and_never_a_verdict() {
+        let o = Oversight {
+            unattended: 47,
+            asked: 2,
+            answered: 1,
+        };
+        assert_eq!(o.total(), 49);
+        assert_eq!(o.reviewed(), Some(1.0 / 49.0));
+        let said = o.sentence().expect("a sentence");
+        assert!(said.contains("1 of the 49"), "{said}");
+        // No threshold, no grade, no judgement about the person: the published
+        // criterion needs inputs this product cannot observe, so the surface
+        // prints the citation separately.
+        for weasel in ["should", "too few", "not enough", "vacuous", "risk"] {
+            assert!(!said.to_lowercase().contains(weasel), "{said}");
+        }
+    }
+
+    #[test]
+    fn the_two_machine_kinds_spell_themselves_on_the_wire() {
+        for (kind, spelt) in [
+            (AttentionKind::RecordIncomplete, "record_incomplete"),
+            (AttentionKind::AgentLeaked, "agent_leaked"),
+        ] {
+            assert_eq!(kind.as_str(), spelt);
+            assert_eq!(kind.default_level(), Level::Critical);
+        }
     }
 }

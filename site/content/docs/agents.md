@@ -14,12 +14,17 @@ devplane agents                                   # what can be driven
 devplane dispatch "add rate limiting to /login"   # starts Claude Code here
 devplane dispatch --agent codex --cwd ../core-lib "review the auth change"
 devplane say <run> "use the existing middleware"  # another turn
-devplane decide <run> --request <id> --decision allow
+devplane answer <ask> --allow                     # the id `devplane inbox` prints
 ```
 
 A driven run is a run like any other: same board, same project grouping, same inbox. The difference
-is that its permission requests can be *answered* from Devplane rather than only looked at — and
-the same `[policy]` rules that auto-decide a hook decide these first.
+is that its permission requests and its questions can be *answered* from Devplane rather than only
+looked at — and the same `[policy]` rules that auto-decide a hook decide these first.
+
+**An ask outlives the agent that made it.** Stop the daemon with a question waiting and the question
+is still there afterwards, still in the inbox and still answerable; answering it resumes the session
+the agent left behind and delivers what you chose. Nothing ends an unanswered ask unless the project
+asked for that — see [`[questions]`](/devplane/docs/configuration/#questions).
 
 ## Trust comes first
 
@@ -42,6 +47,28 @@ Five are built in, each pinned to an exact version:
 | `opencode` | OpenCode | `opencode acp` |
 | `copilot` | GitHub Copilot | `npx -y @github/copilot@1.0.83 --acp` |
 | `gemini` | Gemini CLI | `npx -y @google/gemini-cli@0.59.0 --acp` |
+
+### What each one actually supports
+
+The table above is what Devplane will launch. What an agent can *do* is advertised by the agent
+during its handshake, so `devplane agents` reports it for the ones it has started:
+
+```console
+claude     Claude Code    npx -y @agentclientprotocol/claude-agent-acp@0.76
+           resume · load · modes · measured 2026-09-20
+```
+
+| | |
+|---|---|
+| `resume` | continues a session without replaying it |
+| `load` | continues it with a replay — some agents have only one of the two |
+| `list` | the agent can enumerate its own sessions |
+| `modes` | the agent declares a session mode |
+| `needs sign-in` | the agent advertises an authentication method |
+
+This is what *that* agent reported at *that* version, with the date it said so. **An agent you have
+never started has no line at all** — not a row of crosses. *Not probed* and *not supported* are
+different facts.
 
 ### If an agent needs signing in
 

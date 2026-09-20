@@ -34,16 +34,45 @@ the rule that produced it; a right answer with a wrong reason is a bug here. `Ve
 `Allow` variant and will not be given one. A dependency bump is a
 reviewed change: agents and packages are pinned on purpose.
 
-The `ui/` directory is one HTML file with no build step. Keep it that way; if a change needs a
-bundler, open an issue first. `just ui` serves it from disk, so editing it is a browser reload.
-`tests/ui_contract.rs` holds it to the API, to escaping every value it prints, and to rendering at
-all — that last one needs `node`, and skips without it.
+## The interface
+
+**`ui/` is a Svelte project**, being ported from the single hand-written page the binary still
+serves. The reason for the build step is that the interfaces this product now needs are editors
+rather than lists.
+
+```sh
+cd ui && npm install     # Node 22+
+npm run build            # → ui/dist/, embedded into the binary at compile time
+npm run dev              # a dev server that proxies /api to a running daemon
+npm run check            # svelte-check, over TypeScript and every component
+```
+
+**Two properties are not preferences, and both are enforced rather than requested.**
+
+**The built output stays readable** — `minify: false`. This is a product about being able to see what
+was decided on your machine, and the interface has always been the one artefact a person could read
+without this repository: over a tunnel, with `curl`, on a machine that has never built it. Shipping
+an opaque bundle would make the accountability tool the least accountable thing in it.
+
+**Nothing is fetched from outside the machine, in any build, for any asset — including a font.** A
+control plane whose own interface phones somewhere is not one.
+
+`tests/ui_contract.rs` holds the interface to the API, to escaping every value it prints, and to
+rendering at all. That last one needs `node` and **skips silently without it**, so install node
+before trusting a green run of the interface tests.
+
+**Versions are pinned on purpose**, including the toolchain. TypeScript is held at 5.9 because
+`svelte-check` does not accept 7 yet; the registry's `latest` is not usable here.
+
+`ui/legacy.html` is the page being replaced. It is still what the binary serves, and it goes in the
+same change that serves the bundle — one switch, revertible in one move. Serving both at once is
+refused: two interfaces that must not diverge is a worse problem than one.
 
 ## Scope
 
 Things that will not be merged, so nobody spends a weekend on them: a model deciding a permission
 or a gate result; a cloud relay or account; a second rule language; parsing transcript JSONL on the
-critical path; a React or WASM rewrite of the board. The public docs explain the reasoning:
+critical path; a React or WASM interface, which were measured against and rejected on weight. The public docs explain the reasoning:
 <https://hupe1980.github.io/devplane/docs/decisions/>.
 
 ## Licence

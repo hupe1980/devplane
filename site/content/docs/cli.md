@@ -307,6 +307,10 @@ resolution says what became of it.
 
 ```console
 $ devplane attention
+You answered 3 of the 619 decisions taken in your name.
+There is no threshold for this ratio on its own. The published criterion (arXiv:2607.28317) is over
+residual risk and needs an error rate nothing here can observe; this is the count, not a verdict.
+
 kind               raised   acted  dismissed  elsewhere   open   acted
 permission             41      36          0          4      1     90%
 gate_failed             9       8          1          0      0     89%
@@ -320,6 +324,24 @@ stalled                12       0          2         10      0      0%
 | `acted` | you used one of the item's own actions — answered, allowed, denied, approved, retried, resumed |
 | `dismissed` | you snoozed it. The clearest evidence a kind is too loud |
 | `elsewhere` | it stopped asking on its own: the agent unblocked, the checks went green, you answered in a terminal |
+
+**The first line is a different question from the table.** The table asks *is the inbox worth
+reading* — its denominator is items Devplane raised. The line above it asks *is anything reaching you
+at all* — its denominator is everything that happened in your name, including every action no
+permission prompt was ever shown for. On a machine where each session runs in a mode that decides on
+its own, the second number is much larger than the first, and nothing else will tell you.
+
+**It is a count, and the threshold beside it is somebody else's result.** The idea comes from
+published work that defines *vacuous* oversight — oversight statistically indistinguishable from
+none — but that criterion is over **residual risk**, expected undetected errors per round, and needs
+a per-agent error rate, a confidence distribution and an error-correlation structure. The fraction
+you reviewed is one **input** to that model. Devplane has the fraction and cannot observe the rest
+without knowing which of an agent's actions were wrong. So the paper is cited by identifier, and the
+product does not tell you which side of a line you are on, because it does not know.
+
+**And it will never rank anything by how confident an agent sounded.** The same work measures five of
+six models' self-reported confidence as near-constant, AUROC ≈ 0.5, *"operationally useless"*, and
+past a located threshold that ranking is worse than random.
 
 Three numbers, not one score: `elsewhere` is ambiguous — the item was right that you were needed and
 wrong about where — so it is reported rather than averaged away. A kind that is mostly `dismissed` is
@@ -347,18 +369,17 @@ Whether the tool itself is telling you the truth: hook latency, when telemetry w
 roster, each channel's last error **with the date it happened**, and any project whose
 `devplane.toml` will not parse — whose permission rules are therefore not in force.
 
-**It also says how far the running release has moved since the rules were checked against it.** That
-number is frozen — see [the baseline](/docs/permissions/#the-release-this-was-measured-against) — but
-the gap is still worth knowing.
+**It also names the release this build's rule syntax was modelled on**, so a rule you write here and
+a rule you write in Claude Code mean the same thing:
 
 ```console
 gate
-  verified against Claude Code 2.1.273
-            1 release behind a session on this machine (2.1.274)
+  rule syntax modelled on Claude Code 2.1.273
+  prohibitions are Devplane's own and need no agreement from the agent
 ```
 
-Only the status-line shim reports a version, so with none installed `doctor` says nothing is
-reporting rather than implying there is no gap.
+A fact with a date, not a warning — see
+[the baseline](/docs/permissions/#the-release-the-rule-syntax-was-modelled-on).
 
 **It runs the gate rather than reading about it.** No hook can enforce its own presence, so a
 settings file containing the right line is evidence about a settings file. `doctor` writes a
@@ -417,6 +438,64 @@ Devplane reads this and never writes it. If nothing is configured it says so: an
 classifier trusts only the working repository and its remotes, which is the usual cause of denials
 people blame on the agent. `/auto-mode-setup` in Claude Code drafts the entries.
 
+### `devplane modes`
+
+**Which of your projects is deciding without you.** One line per live session, grouped by project,
+least-supervised first.
+
+```console
+$ devplane modes
+a 60s timer on your questions was set for you, in managed settings — after that, whatever is
+selected is submitted, and your own settings cannot turn it off
+  /Library/Application Support/ClaudeCode/managed-settings.json
+
+cim-rs
+  cim-rs-e0             auto  seen 2026-09-19T18:34:4…
+
+devplane
+  devplane-d1           auto  seen 2026-09-19T18:34:4…
+  devplane-ba           not reported yet
+
+3 of 18 live session(s) decide without you.
+15 have not reported a mode yet — the hook that fires on every tool call does not carry one, so this fills in at their next prompt.
+Devplane reads the mode and never sets it: change it where the session runs.
+```
+
+**And what can answer without any of them.** `askUserQuestionTimeout` auto-continues an unanswered
+question, *submitting whatever options you had already selected*. It is off by default and permission
+prompts are exempt, so the line appears only when something set it — and in **yellow when somebody
+else did**, because its scope is user *or managed* and the vendor's own settings UI hides that row
+while managed settings are in force.
+
+Devplane reads it and never writes it. Managed settings also compose from drop-ins, a policy helper
+and a Windows registry chain, so an absent line means *nothing in the two files I read*, never
+*there is no timer*.
+
+**Why this exists.** Claude Code's `auto` mode reviews actions with a classifier rather than a
+person, and it is the built-in starting mode on Pro, Max and Team. With six repositories open there
+is no way to find out which of them are running that way — each session knows its own mode and
+nothing collects them.
+
+**Three states, and they do not read the same:**
+
+| Shown | Means |
+|---|---|
+| a mode in red, e.g. `auto` | no person is asked about an ordinary call in this session |
+| a mode in yellow with `(unknown to this build)` | the session reported a mode this version does not recognise, so whether anybody is asked **cannot be said**. It is not assumed to be the supervised one |
+| `not reported yet` | nothing has said. Eleven of Claude Code's hook events carry the permission mode and `PreToolUse` — the one that fires on every tool call — is not among them, so a busy session may genuinely not have mentioned it. It fills in at the next prompt |
+
+**"Seen", not "since".** No hook announces a mode *change*, so the timestamp is when Devplane first
+heard the session at that mode — at best the person's next prompt after they switched. A line saying
+*"in auto since 09:14"* would be a claim about a moment nothing here witnessed.
+
+**Read, never set.** Devplane does not change a permission mode, for the same reason it writes no
+permission rule: an agent on this machine runs as the same user, so a path that could loosen
+supervision would be reachable by the party being supervised. Change it where the session runs.
+
+Live sessions only — the question is present tense. A run that ended yesterday in `auto` is history.
+
+`--json` gives the same answer with a count of `unsupervised`, `unknown` and `unreported`.
+
 ## Acting
 
 ### `devplane focus <run>`
@@ -438,22 +517,116 @@ Start an agent and give it something to do.
 |---|---|
 | `--agent <id>` | `claude`, `codex`, `opencode`, `gemini`, anything in `agents.toml`, or a command line |
 | `--cwd <path>` | where it runs (default: here) |
+| `--to <projects>` | comma-separated project names. **Turns this into a fan-out** |
+| `--mode <draft\|gate\|pr>` | how far it may go without you (default `draft`) |
+| `--apply` | without it, the preflight prints and nothing is sent or opened |
+
+#### One prompt, several repositories
+
+```console
+$ devplane dispatch --to api,web,jobs "bump deps and run gates"
+  refused   web   uncommitted changes — commit or stash first
+
+  draft
+  nothing runs — each project opens with the prompt typed, not sent
+
+  2 projects × one run
+
+  run with --apply
+```
+
+**Every refusal is named before anything is written**, never as one failure after three successes.
+The reasons are *not trusted*, *uncommitted changes*, *cannot run that agent*, *its `devplane.toml`
+will not parse* and *over the parallel-run ceiling*; each carries the command that fixes it.
+
+A project name that matches nothing **stops the whole dispatch** rather than sending to the rest.
+
+**Cost is in runs, never in currency.**
+
+#### The three positions
+
+| `--mode` | Runs without you | Still stops |
+|---|---|---|
+| `draft` | nothing. Each project opens with the prompt typed and **not sent** | everything. You send it |
+| `gate` | the agent works; your gates run when it stops | a failing gate, a prohibited permission, a question, the pull request |
+| `pr` | the above, plus opening a pull request | **merging. Always.** |
+
+**No position merges, and no flag adds one. No position weakens a permission**: each accepted target
+goes through the same single-target dispatch, so a call inside a fan-out meets the rules a call
+outside one meets, and the same rule is credited.
+
+#### Draft is chosen for you above three targets
+
+```console
+$ devplane dispatch --to api,web,jobs,billing --mode gate "bump deps"
+  draft
+  draft was chosen for you: more than 3 targets
+  `--mode gate` was not honoured, for the reason above
+```
+
+Above three, a mistake stops being a wrong row and starts being several repositories. You are told
+the choice was made for you rather than discovering it.
+
+### `devplane batch [id]`
+
+A fan-out as one row with one outcome per target. Questions first, then failures, then the rest.
+
+```console
+$ devplane batch
+b-01a0bbb6  bump deps and run gates
+  to_gate       still going
+  needs you     api             bump deps and run gates
+  failed        web             bump deps and run gates
+  done          jobs            bump deps and run gates
+  refused       billing         untrusted
+```
+
+**There is no aggregate**: no percentage, no `n/m`, no pass rate, no colour on the batch itself. Four
+green, one red and one asking is what a fan-out looks like, and a summary over that hides the row
+that needs you.
+
+Targets the preflight refused stay on the record.
+
+**Four states look empty and are four different facts**: composed and not sent; every target refused
+so nothing ran; the daemon stopped mid-flight; finished having produced nothing.
 
 ### `devplane say <run> <prompt…>`
 
 Send another prompt to a run Devplane drives.
 
-### `devplane decide <run> --request <id>`
+### `devplane answer <ask>`
 
-Answer a permission request from a driven run.
+Answer something an agent asked you — a permission or a question, with one command.
+
+The id comes from `devplane inbox`. **It is not a session id**: it is the ask's own token, and it
+outlives the process that asked. An answer given tomorrow morning still reaches the agent — through a
+resumed session where the original one is gone, which the reply says out loud.
 
 | Flag | What |
 |---|---|
-| `--decision <allow\|deny>` | default `deny`; omitting it refuses |
-| `--option <id>` | an exact option id from the inbox item, when the agent offers more than two |
+| `--allow` | allow it — a permission |
+| `--deny` | refuse it — a permission; also what you get if you say nothing else |
+| `--option <what the agent offered>` | one of the agent's own options, spelled as it wrote it |
+| `--custom <your words>` | where the agent offered an *Other* box; beats `--option`, which is the agent's rule rather than ours |
+| `--field <id>` | which question, when the agent asked several at once |
 
-Option ids belong to the agent — one calls it `allow`, another `proceed_once` — so `--decision` is
-resolved against the options it actually offered rather than a guessed string.
+Option ids belong to the agent — one calls it `allow`, another `proceed_once` — so `--allow` and
+`--deny` are resolved against the options it actually offered rather than a guessed string.
+
+**There is no way to dismiss one.** An agent that asked and was told nothing proceeds on nothing,
+which is the failure this exists to prevent.
+
+**It answers exactly once.** Two surfaces, two devices, one agent: the first answer wins and the
+second is told who gave it, rather than the agent hearing two different things.
+
+### `devplane asks`
+
+Everything an agent has asked you, and what became of each one.
+
+Open ones first, oldest first among those — a queue of what is owed to you rather than a feed.
+Settled ones follow with the sentence that ended them: **you answered it**, **a clock refused it
+after 4h — set in devplane.toml**, or **nobody answered**. No two of those read alike, because
+telling them apart without opening a transcript is the whole point.
 
 ### `devplane snooze <id>`
 
@@ -496,6 +669,39 @@ Phase, pipeline stepper, runs, cost, and what each check actually said.
 ### `devplane work verify <id>`
 
 Run the project's gates now. A read: it never changes a phase a person asked for.
+
+### `devplane gate run`
+
+Run this repository's `[gates]` now and report the verdict. Repository-scoped, daemon-free, and made
+to be read by something other than a person — a Spec Kit hook invokes it and reports what it said.
+
+| `state` | Exit | Means |
+|---|---|---|
+| `verified` | 0 | every declared command passed |
+| `failed` | 1 | one did not, and it is named |
+| `no_gates` | 1 | this repository declares no checks |
+| `config_unreadable` | 1 | `devplane.toml` would not parse, so nothing ran |
+
+`--cwd <path>` picks the repository; `--json` gives `state`, `passed`, `summary` and `commands[]`.
+
+**Only `verified` exits 0.** A workflow reading the exit code alone would otherwise treat an empty
+`devplane.toml` as a green build. It decides on exit codes: no specification is read and no prose is
+graded, and it records nothing — [`devplane work verify`](#devplane-work-verify-id) is the one that
+leaves a row.
+
+### `devplane speckit install`
+
+Register that gate as a Spec Kit extension hook in `.specify/extensions.yml`, so a workflow whose own
+commands only report gets a verdict from outside the agent.
+
+| Flag | What |
+|---|---|
+| `--event <hook>` | which of the twenty hook points; default `after_implement` |
+| `--dry-run` | print the entry and write nothing |
+
+It writes the file only when there is none, and otherwise prints the entry and the key to add it
+under. That file is committed, may carry other people's hooks, and round-tripping it through a YAML
+parser would keep the entries and lose the comments.
 
 ### `devplane work approve <id>`
 
@@ -582,6 +788,11 @@ Four things it will tell you that a green tick would hide:
 Exporting work that is not finished is a fair question with an honest answer: it says where the work
 is and what its last gate said, rather than erroring or inventing a certificate.
 
+### `devplane library`
+
+Prompts and skills reused across projects, in the vendors' own formats. Five verbs — `list`, `diff`,
+`report`, `install`, `sync` — documented on their own page: [Library](/docs/library/).
+
 ## Setup and health
 
 ### `devplane trust [path]`
@@ -633,7 +844,9 @@ writable. `--json` returns the same read-back the board shows under `,`.
 
 ### `devplane agents`
 
-The agents Devplane can drive.
+The agents Devplane can drive, and — for those it has started — what each advertised at its
+handshake: `resume`, `load`, `list`, whether it declares a mode, whether it needs signing into, with
+the date measured. An agent never started has no such line.
 
 ### `devplane mcp`
 
@@ -681,6 +894,11 @@ Run the daemon in the foreground. Every other command starts it in the backgroun
 
 When the default port is taken by something else, the daemon takes another one and clients follow via
 `~/.devplane/daemon.json`. A port you asked for explicitly is never silently swapped.
+
+**A second daemon on the same home is refused, and a crashed one does not lock you out.** A daemon
+that was killed leaves its record behind and the pid gets reused, so Devplane checks the pid is
+actually a Devplane process before believing it. A stale record is reported and ignored. If the
+process table cannot be read at all, it refuses and names the file to delete.
 
 ### `devplane stop`
 

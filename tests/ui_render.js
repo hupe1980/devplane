@@ -95,7 +95,7 @@ vm.createContext(context);
 // `let state` lives in the script's declarative scope, not on the global, so
 // the page exports the two handles this test drives it by.
 const epilogue = `\n;globalThis.__ui = { render, renderGithub, setState: (v) => { state = v; }, setGh: (v) => { gh = v; } };`;
-vm.runInContext(script + epilogue, context, { filename: "ui/index.html" });
+vm.runInContext(script + epilogue, context, { filename: "ui/legacy.html" });
 
 // ── The fixtures carry an attack in every field a person reads ──────────────
 const NASTY = `<img src=x onerror="alert(1)">`;
@@ -187,6 +187,86 @@ const fail = (m) => {
   console.error("ui_render: " + m);
   process.exit(1);
 };
+
+// ── A question renders the whole question, and promises no deadline ─────────
+//
+// Two properties, and both were got wrong once before being measured.
+//
+// The **free-text box** exists because the agent's form may carry one beside
+// the buttons: a page rendering only the buttons shows a smaller question than
+// was asked, which the first design did, having modelled the payload from
+// documentation rather than from the wire.
+//
+// The **absence of a countdown** is the other half. An earlier draft specified
+// `answerable for 29d`, written against a mechanism where the vendor keeps a
+// paused session on disk under a retention sweep. A question is held on a live
+// connection with no timeout — it waits as long as its run and not one second
+// less — so any deadline on this surface is a promise the channel cannot keep.
+{
+  const asked = {
+    ...item,
+    kind: "question",
+    title: "Keep the legacy /v1/login route?",
+    request_id: "req-q",
+    options: [
+      { id: "Keep it", label: "Keep it" },
+      { id: "Drop it", label: "Drop it" },
+    ],
+    actions: ["choose", "open"],
+    form: [
+      {
+        field: "question_0",
+        title: "/v1/login",
+        options: [
+          { value: "Keep it", label: "Keep it", detail: "Retain it as-is." },
+          { value: "Drop it", label: "Drop it", detail: "Remove it." },
+        ],
+        custom_field: "question_0_custom",
+      },
+    ],
+  };
+  context.__ui.setState({ board: board_, inbox: [asked], work: [work], sel: 0, showAll: false });
+  context.__ui.render();
+  const q = el("inbox").innerHTML;
+
+  if (!q.includes("askbox")) {
+    fail("a question offering a free-text answer rendered only its buttons");
+  }
+  // **Found by rendering a real question and reading it**, after every test
+  // above passed: the agent writes a sentence per option explaining the
+  // trade-off, the form carries it, and the page showed only the labels. The
+  // difference between "JWT" and "JWT — stateless, but cannot be revoked before
+  // expiry" is the entire reason a person is being asked rather than told.
+  // Checked as the **visible** span, not merely as text present somewhere in
+  // the markup: the first version of this assertion passed on a rendering where
+  // the description survived only in a `title` tooltip — present in the HTML,
+  // invisible to the person, and indistinguishable from working.
+  for (const why of ["Retain it as-is.", "Remove it."]) {
+    if (!q.includes(`<span class="odetail">${why}</span>`)) {
+      fail(`an option's own description is not rendered (${why}); the person sees a label where the agent wrote a reason`);
+    }
+  }
+  if (!q.includes('data-field="question_0"')) {
+    fail("the free-text answer would go back under no field, or the wrong one");
+  }
+  for (const banned of ["answerable", "expires", "countdown", "days left"]) {
+    if (q.toLowerCase().includes(banned)) {
+      fail(`a question promised a deadline (${banned}); this channel has none`);
+    }
+  }
+
+  // A question with no free-text field must not grow an empty box.
+  const plain = { ...asked, form: [{ ...asked.form[0], custom_field: null }] };
+  context.__ui.setState({ board: board_, inbox: [plain], work: [work], sel: 0, showAll: false });
+  context.__ui.render();
+  if (el("inbox").innerHTML.includes("askbox")) {
+    fail("a question the agent gave no free-text field grew one anyway");
+  }
+
+  // Put the fixture back for everything below.
+  context.__ui.setState({ board: board_, inbox: [item], work: [work], sel: 0, showAll: false });
+  context.__ui.render();
+}
 
 const board = el("board").innerHTML;
 const inbox = el("inbox").innerHTML;
@@ -399,6 +479,91 @@ context.__ui.render();
 const offered = el("inbox").innerHTML;
 if (!offered.includes("permissions")) fail("the offered rule does not name where it goes");
 if (offered.includes("auto_allow"))
-  fail("the offered rule is TOML for a key Devplane no longer reads");
+  fail("the offered rule is TOML for a key that no longer exists");
+
+// **The supervision badge shows exactly the two states worth showing.**
+//
+// The first version of this rendered "unknown mode" for every session that had
+// simply not reported one yet, which on a real machine described sixteen idle
+// editors as running something exotic. Silence is not a finding.
+{
+  const row = (extra) => ({ ...board_.runs[0], ...extra });
+  const show = (r) => {
+    context.__ui.setState({ board: { ...board_, runs: [r] }, inbox: [], work: [],
+                            sel: 0, showAll: false, checkedAt: Date.now() });
+    context.__ui.render();
+    return el("board").innerHTML;
+  };
+
+  const nobody = show(row({ permission_mode: "auto", asks_a_person: false }));
+  if (!nobody.includes("pmode nobody"))
+    fail("a session nobody supervises carries no badge");
+  if (!nobody.includes("auto")) fail("the badge does not name the mode");
+
+  const asks = show(row({ permission_mode: "manual", asks_a_person: true }));
+  if (asks.includes("pmode"))
+    fail("a supervised session was badged; then every row is decorated and none stands out");
+
+  const strange = show(row({ permission_mode: "hypervigilant", asks_a_person: null }));
+  if (!strange.includes("pmode unsure"))
+    fail("an unreadable mode must read as a question, not as an alarm");
+  if (strange.includes("pmode nobody"))
+    fail("an unreadable mode was rendered as unsupervised");
+
+  const silent = show(row({ permission_mode: null, asks_a_person: null }));
+  if (silent.includes("pmode"))
+    fail("a session that has not reported a mode was badged as though it had");
+}
+
+// **The seat's own number, and the four rules it may not break.**
+//
+// This is the only line on the page that can say the product is not working, so
+// the failure that matters is it rendering as a grade. Each rule below is one
+// the CLI already enforces, asserted here because the page is a second reader of
+// the same daemon field and a second reader is where a rule stops being one.
+{
+  const over = (oversight, agents) => {
+    context.__ui.setState({
+      board: board_, inbox: [], work: [], sel: 0, showAll: false,
+      checkedAt: Date.now(),
+      attention: oversight === null ? null : { oversight, agents: agents || [] },
+    });
+    context.__ui.render();
+    return el("oversight").innerHTML;
+  };
+
+  // Nought of a non-zero total is the one case worth the contrast.
+  const zero = over({ sentence: "You answered 0 of the 49 decisions taken in your name.",
+                      answered: 0, total: 49, asked: 0, unattended: 49 });
+  if (!zero.includes("count none"))
+    fail("none of a non-zero total must carry the contrast; it is the whole finding");
+  if (!zero.includes("2607.28317"))
+    fail("the citation is missing, so the count reads as a verdict this product did not make");
+  if (!zero.includes("devplane modes"))
+    fail("nothing was put to the person and the line that explains why is absent");
+
+  // A low ratio is not a failing grade — this product does not grade.
+  const some = over({ sentence: "You answered 3 of the 49 decisions taken in your name.",
+                      answered: 3, total: 49, asked: 6, unattended: 43 });
+  if (some.includes("count none"))
+    fail("a low ratio was painted as an alarm; that is grading");
+  if (some.includes("devplane modes"))
+    fail("the 'not one of them' line fired while six were asked");
+
+  // A caveat shown always is a caveat nobody reads.
+  const one = over({ sentence: "s", answered: 1, total: 2, asked: 2, unattended: 0 }, ["claude"]);
+  if (one.includes("compare the ratios"))
+    fail("the multi-vendor caveat fired on a single-vendor machine");
+  const two = over({ sentence: "s", answered: 1, total: 2, asked: 2, unattended: 0 },
+                   ["claude", "copilot"]);
+  if (!two.includes("compare the ratios"))
+    fail("two vendors in the window and nothing says the denominators differ");
+
+  // Absent rather than nought: a quiet week is not a finding.
+  if (over({ sentence: null, answered: 0, total: 0, asked: 0, unattended: 0 }) !== "")
+    fail("a week where nothing happened must say nothing at all");
+  if (over(null) !== "")
+    fail("an unreachable measurement must leave the line absent, never render a zero");
+}
 
 console.log("ui_render: ok");

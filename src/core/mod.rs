@@ -26,14 +26,19 @@
 //! * [`world`](crate::core::world) — the in-memory state and the derived inbox.
 //! * [`policy`](crate::core::policy), [`policy_cache`](crate::core::policy_cache) — permission rules, per project.
 //! * [`config`](crate::core::config) — `devplane.toml`, and what it means for it to be wrong.
+//! * [`ask`](crate::core::ask) — a question an agent put to a person, as a row that outlives the process that asked it.
+//! * [`clock`](crate::core::clock) — whose timer can answer a question in your name, and where it was set.
 //! * [`decision`](crate::core::decision) — what Devplane decided, and on whose authority.
 //! * [`deeplink`](crate::core::deeplink) — links that open a coding agent.
 //! * [`text`](crate::core::text) — cutting strings a human reads and an agent wrote.
 //! * [`transcript`](crate::core::transcript) — what a driven agent said.
 //! * [`forge`](crate::core::forge) — a project's open issues and pull requests, and what of them needs a person.
 
+pub mod ask;
 pub mod attention;
+pub mod batch;
 pub mod certificate;
+pub mod clock;
 pub mod command;
 pub mod config;
 pub mod decision;
@@ -43,12 +48,13 @@ pub mod event;
 pub mod forge;
 pub mod hash;
 pub mod ids;
-pub mod measured;
+pub mod library;
 pub mod offer;
 pub mod policy;
 pub mod policy_cache;
 pub mod project;
 pub mod provider;
+pub mod question;
 pub mod reduce;
 pub mod run;
 pub mod setup;
@@ -61,14 +67,16 @@ pub mod world;
 
 pub use attention::{Action, AttentionConfig, AttentionItem, AttentionKind, Level};
 pub use config::{ConfigError, GlobalConfig, Problem, ProjectConfig};
-pub use decision::{Actor, DecidedEnvelope, Decision};
+pub use decision::{Authority, DecidedEnvelope, Decision};
 pub use event::{ApiUsage, Choice, Event, EventEnvelope, Source, WaitingFor};
 pub use forge::{ForgeCounts, ForgeIssue, ForgePullRequest, ProjectForge};
-pub use ids::{AttentionId, ProjectId, RunId, SessionId, WorkId};
+pub use ids::{AskId, AttentionId, BatchId, ProjectId, RunId, SessionId, WorkId};
 pub use policy::{Policy, Rule, Verdict};
 pub use policy_cache::PolicyCache;
 pub use project::Project;
-pub use run::{BlockedOn, PlanStep, Run, RunMode, RunState, RunTotals, ToolCall};
+pub use run::{
+    AgentCapabilityRecord, BlockedOn, PlanStep, Run, RunMode, RunState, RunTotals, ToolCall,
+};
 pub use spec::Spec;
 pub use text::{clip, tail};
 pub use transcript::{Coalescer, Frame, Message, Role};

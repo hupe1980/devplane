@@ -1,7 +1,7 @@
 [package]
 name = "devplane"
 description = "The local-first control plane for AI coding agents: one page for every project on your machine — what needs you, what is red, and which finished work can prove its checks passed."
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -13,9 +13,18 @@ keywords = ["ai", "agents", "claude-code", "developer-tools", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
 # The crate root is the repository root, so the published package is named
 # explicitly rather than taking the site, the scripts and the CI with it.
+# `ui/` is named file by file rather than as a directory: it is a node project
+# now, and `/ui` swept 1 460 files of `node_modules` into the package.
 include = [
   "/src",
-  "/ui",
+  "/build.rs",
+  "/ui/legacy.html",
+  "/ui/src",
+  # The built interface, without its source map: four times the bundle, and
+  # nothing loads it. `build.rs` excludes maps from the embed for the same reason.
+  "/ui/dist/*.html",
+  "/ui/dist/*.js",
+  "/ui/dist/*.css",
   "/examples",
   "/README.md",
   "/CHANGELOG.md",
@@ -40,7 +49,20 @@ path = "src/main.rs"
 [[example]]
 name = "echo_agent"
 
+# The interface's wire types are **generated** from the Rust shapes rather than
+# hand-written beside them, because a second copy of a wire format is a second
+# thing to keep true — and the one that drifts is always the copy.
+#
+# Optional and off by default, so it contributes **nothing** to the shipped
+# binary: `scripts/deps-count.sh` measures `cargo tree --edges normal`, which
+# does not traverse a feature nobody enabled. It is turned on by the one test
+# that writes the bindings, and by CI.
+[features]
+default = []
+typescript = ["dep:ts-rs"]
+
 [dependencies]
+ts-rs = { version = "12", optional = true, features = ["no-serde-warnings"] }
 agent-client-protocol = "2.1"
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
@@ -80,13 +102,27 @@ inherits = "release"
 [workspace.metadata.dist]
 cargo-dist-version = "0.32.0"
 ci = ["github"]
-installers = ["shell"]
+# Unscoped: `npm-package` defaults to the crate's name, which is the name held
+# on npm.
+installers = ["shell", "npm"]
+# npm publishes through trusted publishing, as crates.io already does here — no
+# registry token is stored in this repository.
+#
+# The `npm` job in `release.yml` is **hand-written**: `dist` generates one with
+# no `permissions:` block, Node 20.x and `NODE_AUTH_TOKEN`. OIDC needs
+# `id-token: write`, npm 11.5.1+ and Node 22.14.0+, and no `--provenance` — it
+# attaches the attestation itself.
+publish-jobs = ["npm"]
 # musl rather than gnu so one Linux artifact runs everywhere. `libsqlite3-sys`
-# is C, so a musl build needs a musl C toolchain. No `x86_64-apple-darwin`:
-# Intel Macs build from source, which the install docs say rather than leaving
-# somebody to find out from a failing installer.
+# is C, so a musl build needs a musl C toolchain. dist renames a plain `musl`
+# target to `musl-static` and offers it for `linux-gnu` and `linux-musl-dynamic`
+# as well, which is what makes one Linux build reach every Linux user.
+#
+# `x86_64-apple-darwin` cross-compiles from the Apple Silicon runner with
+# nothing but `rustup target add` — the C in `libsqlite3-sys` included.
 targets = [
   "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
   "aarch64-unknown-linux-musl",
   "x86_64-unknown-linux-musl",
   "x86_64-pc-windows-msvc",

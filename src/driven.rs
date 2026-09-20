@@ -76,9 +76,20 @@ async fn start(
     require_trust(state, &cwd).await?;
     require_capacity(state, &cwd, for_work).await?;
     let keep_transcript = transcripts_wanted(&cwd);
+    // Read this daemon's own group-leading children either side of the spawn.
+    // The one that appears is the agent, and it is recorded so that a daemon
+    // **killed** rather than stopped leaves enough behind to find what it
+    // abandoned (`observe::procs`). Purely additive: if the reading fails, or
+    // two dispatches race closely enough to be ambiguous, nothing is recorded
+    // and everything else works exactly as before.
+    let before = crate::observe::procs::own_group_leading_children();
     let (session, events) = crate::acp::spawn(spec, cwd.clone())
         .await
         .with_context(|| format!("starting {}", spec.id))?;
+    let agent_pid = crate::observe::procs::one_new_child(
+        &before,
+        &crate::observe::procs::own_group_leading_children(),
+    );
 
     // The run id is minted here rather than taken from the agent: the board
     // needs a row the moment the process starts, and the agent's own session id
@@ -103,6 +114,22 @@ async fn start(
             },
         )
         .await;
+
+    if let Some(pid) = agent_pid {
+        state
+            .ingest_as(
+                run_id.clone(),
+                Source::Daemon,
+                Event::AgentProcessSpawned { pid },
+                crate::core::RunHint {
+                    cwd: Some(cwd.clone()),
+                    mode: RunMode::Driven,
+                    agent: spec.id.clone(),
+                    agent_command: Some(spec.command.clone()),
+                },
+            )
+            .await;
+    }
 
     register(
         state,
@@ -183,7 +210,7 @@ pub async fn resume(state: &Shared, run: &RunId) -> Result<RunId> {
     state
         .record(
             crate::core::Decision::new(
-                crate::core::Actor::Human,
+                crate::core::Authority::Person,
                 "run:resume",
                 agent_session,
                 "resumed",
@@ -259,16 +286,40 @@ async fn register(
             )
             .await;
         }
+        // **A fallback, not a second ending.** An agent that dies without
+        // saying so closes the channel and never sends `Ended`, and this is the
+        // only thing that records the stop. But `Ended` normally *does* arrive,
+        // and this block then ingested a second `SessionEnded` over the top of
+        // it — which, before the `interrupted` arm existed, silently promoted a
+        // just-recorded interruption back to `completed`.
+        //
+        // So it fires only where there is still something live to end, and it
+        // ends it the way the teardown would.
+        let still_live = {
+            let w = pump_state.world.lock().await;
+            w.run(&pump_run).is_some_and(|r| r.state.is_live())
+        };
+        if still_live {
+            let reason = pump_state
+                .tearing_down
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then(|| "interrupted".to_string());
+            pump_state
+                .ingest(
+                    pump_run.clone(),
+                    Source::Daemon,
+                    Event::SessionEnded { reason },
+                    Some(pump_cwd),
+                    RunMode::Driven,
+                )
+                .await;
+        }
+        // **Last, so that an empty `sessions` map means every pump has
+        // finished writing.** This used to be the first thing the pump did on
+        // the way out, which made the map say *drained* while the final
+        // `SessionEnded` was still in flight — and `shutdown()` reads this map
+        // to decide when it is safe to return.
         pump_state.sessions.lock().await.remove(&pump_run);
-        pump_state
-            .ingest(
-                pump_run,
-                Source::Daemon,
-                Event::SessionEnded { reason: None },
-                Some(pump_cwd),
-                RunMode::Driven,
-            )
-            .await;
     });
 }
 
@@ -467,7 +518,277 @@ fn standing(kind: Option<&str>) -> bool {
 }
 
 /// Answers an outstanding permission request.
-pub async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -> Result<()> {
+/// Delivers a person's answer to a question a driven run asked.
+///
+/// The form the agent sent is re-read from the run rather than trusted from the
+/// caller: the content that goes back must match the schema the agent
+/// published, and the only copy of that schema this process can vouch for is
+/// the one it recorded when the question arrived. A caller naming a field or an
+/// option the agent never offered gets it dropped, not forwarded.
+/// Delivers an answer down a live connection. Reached only through
+/// [`answer_ask`], because an answer that has not been written down first is one
+/// a crash can lose.
+async fn answer_question(
+    state: &Shared,
+    run: &RunId,
+    request_id: &str,
+    chosen: &[(String, crate::core::question::Chosen)],
+) -> Result<()> {
+    let session = state
+        .sessions
+        .lock()
+        .await
+        .get(run)
+        .cloned()
+        .context("that run is not one Devplane drives")?;
+
+    let form: Vec<crate::core::question::Question> = {
+        let w = state.world.lock().await;
+        w.run(run)
+            .and_then(|r| r.blocked_on.as_ref())
+            .and_then(|b| b.form.clone())
+            .and_then(|f| serde_json::from_value(f).ok())
+            .unwrap_or_default()
+    };
+    if form.is_empty() {
+        anyhow::bail!("no question is waiting on that run");
+    }
+    let ask = crate::core::question::Ask {
+        session_id: String::new(),
+        tool_call_id: None,
+        message: String::new(),
+        questions: form,
+    };
+    let content = ask.content(chosen);
+    if content.as_object().is_none_or(|o| o.is_empty()) {
+        anyhow::bail!("none of those answers matches what the agent asked");
+    }
+    session.answer(request_id, Some(content.clone())).await?;
+
+    // **Who answered, recorded at the moment it happens.** This is the
+    // one row in the ledger whose authority is *known* rather than inferred:
+    // everything else Devplane can say about who decided something is derived
+    // from what did or did not arrive, and this is a person having typed. The
+    // reason carries what they chose, because "somebody answered" without the
+    // answer is a row nobody can check.
+    let chose = content
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    state
+        .record(
+            crate::core::Decision::new(
+                crate::core::Authority::Person,
+                "agent:question",
+                request_id.to_string(),
+                "answered",
+            )
+            .because(format!("a person answered: {chose}"))
+            .for_run(run),
+        )
+        .await;
+    Ok(())
+}
+
+// ── Answering by token ──────────────────────────────────────────────────────
+//
+// Everything below addresses an ask by its own opaque id rather than by the
+// session that happens to be holding it. That is the fourth of the five
+// durable-execution properties and the one that decides whether the other four
+// are worth anything: an answer addressed to a session is undeliverable the
+// moment the session is gone, which is the state every restart leaves behind.
+
+/// What a person chose, as it crosses from a surface into the record.
+#[derive(Debug, Clone)]
+pub enum Answer {
+    /// A permission: allow, deny, or an exact option the agent offered.
+    Permission(Decision),
+    /// A question: one option per field, or the person's own words.
+    Question(Vec<(String, crate::core::question::Chosen)>),
+}
+
+/// Records a person's answer to an ask, then tries to deliver it.
+///
+/// **In that order, and the order is the feature.** A crash between *answered*
+/// and *delivered* then replays as answered rather than as ask-again, and two
+/// surfaces racing each other is harmless: the first wins, the second is told
+/// who did, and the agent hears one answer.
+///
+/// Delivery is reported separately ([`Delivery`](crate::core::ask::Delivery)),
+/// because *recorded and delivered later into a resumed session* and *recorded
+/// and never delivered* are different outcomes and only one may be claimed.
+pub async fn answer_ask(
+    state: &Shared,
+    ask_id: &str,
+    answer: Answer,
+    from: &str,
+) -> Result<crate::core::ask::Ask> {
+    use crate::core::ask::Ended;
+
+    let mut ask = state
+        .store
+        .ask(ask_id)
+        .await?
+        .with_context(|| format!("no ask with id `{ask_id}`"))?;
+
+    // What the person chose, in the shape the record keeps. Composed before the
+    // idempotency check so that a second answer is refused having been fully
+    // understood rather than half-parsed.
+    let recorded = match &answer {
+        Answer::Permission(d) => serde_json::json!({ "permission": d.label() }),
+        Answer::Question(choices) => serde_json::json!({
+            "question": choices
+                .iter()
+                .map(|(f, c)| match c {
+                    crate::core::question::Chosen::Option(v) =>
+                        serde_json::json!({ "field": f, "option": v }),
+                    crate::core::question::Chosen::Custom(t) =>
+                        serde_json::json!({ "field": f, "custom": t }),
+                })
+                .collect::<Vec<_>>()
+        }),
+    };
+
+    if let Err(refused) = ask.answer(recorded, from, jiff::Timestamp::now()) {
+        // Not an error the caller made. The guarantee held, and the second
+        // surface is told what the first one chose rather than being handed a
+        // failure it cannot act on.
+        anyhow::bail!("{}", refused.says());
+    }
+    // **Durable before the effect.** Everything after this line may fail; none
+    // of it may lose what the person said.
+    state.store.save_ask(&ask).await?;
+
+    let delivery = deliver(state, &ask, answer).await;
+    ask.delivery = Some(delivery.clone());
+    state.store.save_ask(&ask).await?;
+
+    state
+        .record(
+            crate::core::Decision::new(
+                crate::core::Authority::Person,
+                match ask.kind {
+                    crate::core::ask::Kind::Permission => "agent:tool.use",
+                    crate::core::ask::Kind::Question => "agent:question",
+                },
+                ask.message.clone(),
+                "answered",
+            )
+            .because(format!("answered from the {from} — {}", delivery.says()))
+            .for_run(&ask.run),
+        )
+        .await;
+
+    // The ending is already `person`; this is only the log catching up with a
+    // row that was written first.
+    debug_assert!(matches!(ask.ended, Some(Ended::Person)));
+    Ok(ask)
+}
+
+/// Gets the person's answer to the agent, by whatever route is still open.
+///
+/// Three outcomes and each is named rather than collapsed into success: the
+/// connection that asked is still there; the agent is gone but its session can
+/// be resumed; or neither, in which case the answer stays recorded and the row
+/// says plainly that nobody received it.
+async fn deliver(
+    state: &Shared,
+    ask: &crate::core::ask::Ask,
+    answer: Answer,
+) -> crate::core::ask::Delivery {
+    use crate::core::ask::Delivery;
+
+    let live = state.sessions.lock().await.contains_key(&ask.run);
+    if live {
+        let sent = match answer {
+            Answer::Permission(d) => decide(state, &ask.run, &ask.request_id, d).await,
+            Answer::Question(c) => answer_question(state, &ask.run, &ask.request_id, &c).await,
+        };
+        return match sent {
+            Ok(()) => Delivery::Live,
+            Err(e) => Delivery::Undeliverable {
+                because: e.to_string(),
+            },
+        };
+    }
+
+    // The agent that asked is gone — a restart, a crash, a `devplane stop` —
+    // but its session is on the vendor's disk and the protocol can continue it.
+    //
+    // **A new message, not a reply**, because the turn that asked ended with the
+    // process. Every surface says so, and so does the text handed over.
+    //
+    // One case is deliberately not guarded, having been looked at: a `kill -9`
+    // leaves the agent running and blocked on a dead pipe, so resuming puts a
+    // second agent on that session. The leaked one can never receive another
+    // prompt, and refusing delivery on a worktree match would trade a real
+    // answer for a hypothetical conflict.
+    match resume(state, &ask.run).await {
+        Err(e) => Delivery::Undeliverable {
+            because: format!("the agent could not be resumed: {e}"),
+        },
+        Ok(_) => {
+            let text = resumed_answer_text(ask);
+            match prompt(state, &ask.run, text).await {
+                Ok(()) => Delivery::Resumed,
+                Err(e) => Delivery::Undeliverable {
+                    because: e.to_string(),
+                },
+            }
+        }
+    }
+}
+
+/// What a resumed agent is told, which is the person's own answer and a sentence
+/// saying when it was given.
+///
+/// **Devplane writes exactly one sentence of its own here** — the frame — and
+/// never a word of the answer. Composing an answer is the one thing this product
+/// may not do, and the line between *carrying somebody's words* and *speaking
+/// for them* is the whole of it.
+fn resumed_answer_text(ask: &crate::core::ask::Ask) -> String {
+    let chosen = ask
+        .answer
+        .as_ref()
+        .map(|a| match a.get("permission").and_then(|p| p.as_str()) {
+            Some(p) => p.to_string(),
+            None => a
+                .get("question")
+                .and_then(|q| q.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|i| {
+                            i.get("option")
+                                .or_else(|| i.get("custom"))
+                                .and_then(|v| v.as_str())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default(),
+        })
+        .unwrap_or_default();
+    let when = ask
+        .answered_at
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "just now".to_string());
+    format!(
+        "Answering the question you asked before this session was interrupted.\n\n\
+         You asked: {}\n\
+         The answer, given at {when}: {chosen}",
+        ask.message
+    )
+}
+
+/// Delivers a permission decision down a live connection. Reached only through
+/// [`answer_ask`], for the same reason.
+async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -> Result<()> {
     let session = state
         .sessions
         .lock()
@@ -544,7 +865,7 @@ pub async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decisio
             .unwrap_or_else(|| request_id.to_string())
     };
     let mut record = crate::core::Decision::new(
-        crate::core::Actor::Human,
+        crate::core::Authority::Person,
         "agent:tool.use",
         subject,
         decision,
@@ -690,6 +1011,184 @@ async fn keep(
     }
 }
 
+/// Writes down what an agent just asked, before anything else happens.
+///
+/// **The row is the question; everything else on this path is a projection.**
+/// Run state can be replayed from the event log and the inbox is derived from
+/// run state, but nothing anywhere can re-derive *what somebody was asked* —
+/// so this is written first and a failure to write it is loud rather than
+/// swallowed: a write a promise rests on may not be answered with `.ok()`, and
+/// this is the promise the product is named for.
+///
+/// The deadline comes from the project's own `devplane.toml` and is
+/// [`Never`](crate::core::ask::Deadline::Never) unless it says otherwise.
+async fn persist_ask(
+    state: &Shared,
+    run: &RunId,
+    kind: crate::core::ask::Kind,
+    request_id: &str,
+    message: &str,
+    payload: serde_json::Value,
+) -> Option<crate::core::AskId> {
+    let (cwd, project) = {
+        let w = state.world.lock().await;
+        let r = w.run(run)?;
+        (r.working_dir().clone(), r.project_id.clone())
+    };
+    let deadline = deadline_for(&cwd);
+    let ask = crate::core::ask::Ask::new(
+        crate::core::AskId::new(uuid::Uuid::now_v7().simple().to_string()),
+        run.clone(),
+        crate::core::ask::Asked {
+            kind,
+            request_id: request_id.to_string(),
+            message: message.to_string(),
+            payload,
+            at: jiff::Timestamp::now(),
+            deadline,
+        },
+    )
+    .in_project(project);
+
+    if let Err(e) = state.store.save_ask(&ask).await {
+        // A question that could not be written down is a question that will be
+        // lost on the next restart, and the person needs to know that *now*
+        // rather than discovering an empty inbox later.
+        tracing::error!(error = %e, run = %run, "could not write down what the agent asked");
+        // Where `doctor` reads it: a recorded diagnostic is a displayed one,
+        // and a failure written nowhere is the same as no failure handling at
+        // all.
+        let _ = state
+            .store
+            .record_channel("asks", 0, Some(&e.to_string()))
+            .await;
+        return None;
+    }
+    Some(ask.id)
+}
+
+/// Ends one ask on the project's own clock: the agent is told, the row is
+/// written, and the person is shown.
+///
+/// **All three, because the version that did only the middle one is what this
+/// replaced.** A permission nobody answered used to be refused after ten
+/// minutes by a constant in this crate; the decision row was written and no
+/// surface mentioned it, so a call refused in somebody's name was discoverable
+/// only by running `devplane audit` and knowing to look. A clock that ends a
+/// question is a decision taken on your behalf, which is the one class of event
+/// this product exists to put in front of you.
+pub(crate) async fn expire(
+    state: &Shared,
+    ask: &crate::core::ask::Ask,
+    ended: &crate::core::ask::Ended,
+) {
+    // The agent first. It is blocked on an answer that is never coming, and
+    // telling it *no* is the only honest thing left to say — the same direction
+    // the old timeout chose, now with a name on it.
+    if let Some(session) = state.sessions.lock().await.get(&ask.run).cloned() {
+        match ask.kind {
+            crate::core::ask::Kind::Permission => {
+                let _ = session.decide(&ask.request_id, None).await;
+            }
+            crate::core::ask::Kind::Question => {
+                // `None` is *cancel*, never *decline*: the adapter folds a
+                // decline into "answered, with no answers", which is the agent
+                // proceeding on nothing — the exact failure this feature
+                // exists to prevent, reached through the politer word.
+                let _ = session.answer(&ask.request_id, None).await;
+            }
+        }
+    }
+
+    state
+        .record(
+            crate::core::Decision::new(
+                crate::core::Authority::Timer,
+                match ask.kind {
+                    crate::core::ask::Kind::Permission => "agent:tool.use",
+                    crate::core::ask::Kind::Question => "agent:question",
+                },
+                ask.message.clone(),
+                match ask.kind {
+                    crate::core::ask::Kind::Permission => "deny",
+                    crate::core::ask::Kind::Question => "unanswered",
+                },
+            )
+            .because(ended.says())
+            .for_run(&ask.run),
+        )
+        .await;
+
+    // `Source::Daemon`, because this is Devplane's own clock rather than
+    // anything the agent said — and a surface that reads the source has to be
+    // able to tell those apart.
+    let event = match ask.kind {
+        crate::core::ask::Kind::Permission => Event::PermissionDecided {
+            tool: String::new(),
+            decision: "deny".into(),
+            by: "timer".into(),
+        },
+        crate::core::ask::Kind::Question => Event::QuestionEnded {
+            request_id: ask.request_id.clone(),
+        },
+    };
+    state
+        .ingest(
+            ask.run.clone(),
+            crate::core::Source::Daemon,
+            event,
+            None,
+            crate::core::RunMode::Driven,
+        )
+        .await;
+}
+
+/// Closes every ask still open on one run, with an authority on each.
+///
+/// Never overwrites an ending, so a person who answered a moment before the run
+/// died keeps the credit for it — `Ask::end` enforces that and this is only the
+/// caller of it.
+async fn end_open_asks(state: &Shared, run: &RunId, ended: crate::core::ask::Ended) {
+    let open = match state.store.open_asks().await {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the open asks");
+            return;
+        }
+    };
+    let now = jiff::Timestamp::now();
+    for mut ask in open.into_iter().filter(|a| &a.run == run) {
+        ask.end(ended.clone(), now);
+        if let Err(e) = state.store.save_ask(&ask).await {
+            tracing::error!(error = %e, ask = %ask.id, "could not close an ask");
+        }
+    }
+}
+
+/// The deadline this repository sets for an unanswered ask.
+///
+/// **Absent means it waits**, which is both the default and the only honest
+/// reading of an absent setting. A value that will not parse is treated as
+/// `never` too — the same direction, and the file's own `check` command is
+/// where a typo is reported, because ending somebody's question early on the
+/// strength of a misspelling is the one outcome this must not produce.
+fn deadline_for(cwd: &Path) -> crate::core::ask::Deadline {
+    let root = crate::core::project::governing_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    crate::core::ProjectConfig::load(&root)
+        .ok()
+        .and_then(|c| c.questions.deadline())
+        .unwrap_or(crate::core::ask::Deadline::Never)
+}
+
+/// What was run for this run, where it was recorded.
+///
+/// Recorded at spawn so that a daemon **killed** rather than stopped leaves
+/// enough behind to find the agents it abandoned; reused here because it is
+/// also the only stable key for *which agent this is*.
+async fn agent_command(state: &Shared, run: &RunId) -> Option<String> {
+    state.world.lock().await.run(run)?.agent_command.clone()
+}
+
 async fn handle(
     state: &Shared,
     run: &RunId,
@@ -710,6 +1209,49 @@ async fn handle(
     };
 
     match event {
+        // **The cross-vendor half of *which sessions decide without you*.**
+        // `devplane modes` reads Claude Code's settings files; this is the same
+        // question answered by any agent that speaks the protocol.
+        AcpEvent::ModeChanged { mode } => {
+            // Observed at session creation rather than at `initialize`, so it
+            // amends the capability record rather than being part of it.
+            if let Some(cmd) = agent_command(state, run).await
+                && let Err(e) = state.store.note_agent_declares_modes(&cmd).await
+            {
+                tracing::debug!(error = %e, "could not note that this agent declares modes");
+            }
+            ingest(Event::AgentModeSeen { mode }).await;
+        }
+
+        AcpEvent::Capabilities {
+            agent_name,
+            resume,
+            load_session,
+            list_sessions,
+            needs_auth,
+        } => {
+            // **Keyed on what was actually run.** The session does not know how
+            // it was started; the run does, because the command is recorded at
+            // spawn so a killed daemon leaves enough behind to find what it
+            // abandoned.
+            if let Some(command) = agent_command(state, run).await {
+                let record = crate::core::AgentCapabilityRecord {
+                    command,
+                    agent_name,
+                    resume,
+                    load_session,
+                    list_sessions,
+                    // Amended by `ModeChanged`, which is a later observation.
+                    declares_modes: false,
+                    needs_auth,
+                    measured_at: jiff::Timestamp::now(),
+                };
+                if let Err(e) = state.store.save_agent_capabilities(&record).await {
+                    tracing::debug!(error = %e, "could not record what this agent supports");
+                }
+            }
+        }
+
         AcpEvent::Ready {
             agent_name,
             session_id,
@@ -803,7 +1345,7 @@ async fn handle(
             // person is asked — which is the direction that is safe to be
             // wrong in.
             let verdict = match call.policy_subject() {
-                Some((tool, input)) => state.policy.evaluate(cwd, tool, &input),
+                Some((tool, input)) => state.policy.restrictive(cwd, tool, &input),
                 None => Verdict::Undecided,
             };
 
@@ -818,7 +1360,7 @@ async fn handle(
                     state
                         .record(
                             crate::core::Decision::new(
-                                crate::core::Actor::Policy,
+                                crate::core::Authority::Rule,
                                 "agent:tool.use",
                                 title.clone(),
                                 "deny",
@@ -844,18 +1386,32 @@ async fn handle(
             // session, this one can actually be answered from the inbox — and
             // the answer has to name one of *these* ids, which is why they are
             // carried through rather than guessed at the far end.
+            let choices: Vec<Choice> = options
+                .into_iter()
+                .map(|o| Choice {
+                    id: Some(o.id),
+                    label: o.label,
+                    kind: Some(o.kind),
+                })
+                .collect();
+            // **The row first, and the event second.** Everything below this
+            // line is a projection that can be rebuilt; the ask cannot. It is
+            // the one thing on this path nothing else on the machine knows.
+            let token = persist_ask(
+                state,
+                run,
+                crate::core::ask::Kind::Permission,
+                &request_id,
+                &title,
+                serde_json::json!({ "options": choices }),
+            )
+            .await;
             ingest(Event::Blocked {
                 waiting_for: WaitingFor::Permission,
                 message: Some(title),
                 request_id: Some(request_id),
-                options: options
-                    .into_iter()
-                    .map(|o| Choice {
-                        id: Some(o.id),
-                        label: o.label,
-                        kind: Some(o.kind),
-                    })
-                    .collect(),
+                ask: token.map(|t| t.0),
+                options: choices,
                 call: None,
             })
             .await;
@@ -913,6 +1469,75 @@ async fn handle(
             crate::work::on_turn_ended(state, run).await;
         }
 
+        // The agent asked the person something. Not a permission: no rule can
+        // answer it, so nothing here consults one — it goes straight to the
+        // person, and waits.
+        AcpEvent::QuestionAsked { request_id, ask } => {
+            let options = ask
+                .questions
+                .first()
+                .map(|q| {
+                    q.options
+                        .iter()
+                        .map(|o| crate::core::event::Choice {
+                            id: Some(o.value.clone()),
+                            label: o.label.clone(),
+                            kind: None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let form = serde_json::to_value(&ask.questions).ok();
+            let token = persist_ask(
+                state,
+                run,
+                crate::core::ask::Kind::Question,
+                &request_id,
+                &ask.message,
+                serde_json::json!({ "form": form, "options": options }),
+            )
+            .await;
+            ingest(Event::QuestionAsked {
+                question: ask.message.clone(),
+                options,
+                ask: token.map(|a| a.0),
+                request_id: Some(request_id),
+                form,
+            })
+            .await;
+        }
+
+        // Devplane said it could render a form and then could not. The agent has
+        // already been told no; the person is told too, because an agent that
+        // asked and gave up with nobody knowing is this feature's whole subject.
+        AcpEvent::QuestionUnrenderable { what } => {
+            state
+                .record(
+                    crate::core::Decision::new(
+                        crate::core::Authority::Daemon,
+                        "agent:question",
+                        run.to_string(),
+                        "unrenderable",
+                    )
+                    .because("the agent asked in a form Devplane cannot show")
+                    .for_run(run),
+                )
+                .await;
+            ingest(Event::TurnFailed {
+                message: format!(
+                    "the agent asked something Devplane cannot show, so it was cancelled: {what}"
+                ),
+            })
+            .await;
+        }
+
+        // Nobody answered and the call was cancelled, or the run ended under it.
+        // Recorded for the reason `PermissionExpired` is: the inbox has to stop
+        // offering an answer that can no longer be delivered.
+        AcpEvent::QuestionCancelled { request_id } => {
+            ingest(Event::QuestionEnded { request_id }).await;
+        }
+
         // The request timed out inside the connection and was refused there.
         // Recording it is what takes the item out of the inbox; without it the
         // board went on offering a decision the session could no longer accept.
@@ -920,7 +1545,11 @@ async fn handle(
             state
                 .record(
                     crate::core::Decision::new(
-                        crate::core::Actor::Daemon,
+                        // A clock decided, and this row is how a person finds
+                        // that out later. It read `daemon` until 2026-09-19,
+                        // which spelled it the same way as Devplane running a
+                        // gate.
+                        crate::core::Authority::Timer,
                         "agent:tool.use",
                         request_id,
                         "deny",
@@ -939,8 +1568,74 @@ async fn handle(
 
         AcpEvent::Ended { error } => {
             flush_transcript(state, run, pump).await;
+            // **A question dies with its run, and must not be swallowed by the
+            // word `completed`.** Measured 2026-09-19: stopping the daemon
+            // killed the agent under a waiting question, and the run came back
+            // reading `completed` with an empty inbox — which is the failure
+            // this feature exists to prevent, wearing the one word the whole
+            // product distrusts. Recorded first, so the ending cannot overwrite
+            // it.
+            // **Who killed this agent decides whether its question is still
+            // owed an answer**, and both cases arrive here as the same closed
+            // connection. A turn that ended on its own leaves a question
+            // nobody can answer any more. A daemon that was stopped leaves one
+            // that is perfectly answerable: the vendor's session is on disk,
+            // the protocol continues it, and the person's answer can still be
+            // delivered into it — so the ask stays **open** and the inbox goes
+            // on offering it after the restart.
+            let tearing_down = state.tearing_down.load(std::sync::atomic::Ordering::SeqCst);
+            if !tearing_down {
+                end_open_asks(
+                    state,
+                    run,
+                    crate::core::ask::Ended::Nobody {
+                        because: "the run ended before anybody answered".into(),
+                    },
+                )
+                .await;
+            }
+            let unanswered = {
+                let w = state.world.lock().await;
+                w.run(run)
+                    .and_then(|r| r.blocked_on.as_ref())
+                    .filter(|b| b.waiting_for == crate::core::WaitingFor::Question)
+                    .and_then(|b| b.request_id.clone())
+            };
+            if let Some(request_id) = unanswered.filter(|_| !tearing_down) {
+                state
+                    .record(
+                        crate::core::Decision::new(
+                            // **Nobody decided.** This is the row the whole
+                            // product exists to be able to write, and it said
+                            // `daemon` — Devplane taking the blame for a
+                            // question it faithfully delivered and nobody
+                            // answered.
+                            crate::core::Authority::Nobody,
+                            "agent:question",
+                            request_id.clone(),
+                            "unanswered",
+                        )
+                        .because("the run ended before anybody answered")
+                        .for_run(run),
+                    )
+                    .await;
+                ingest(Event::QuestionEnded { request_id }).await;
+            }
             match error {
                 Some(e) => ingest(Event::TurnFailed { message: e }).await,
+                // **The daemon stopping is not the agent finishing**, and the
+                // same closed connection arrives here for both. Measured
+                // 2026-09-20: a run that was `Working` when `devplane` was
+                // stopped came back from the store reading `completed` — this
+                // line, via the reducer's catch-all — which is the sentence
+                // three paragraphs above saying the feature exists to prevent
+                // exactly that, defeated by the code underneath it.
+                None if tearing_down => {
+                    ingest(Event::SessionEnded {
+                        reason: Some("interrupted".into()),
+                    })
+                    .await
+                }
                 None => ingest(Event::SessionEnded { reason: None }).await,
             }
         }

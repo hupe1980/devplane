@@ -27,7 +27,21 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
             paint(DIM, &format!("[{}]", i.kind))
         );
         if let Some(d) = &i.detail {
-            println!("     {}", clip(d, 100));
+            // **Per line, and indented per line.** A detail is prose an agent
+            // or this product wrote and several kinds write more than one line
+            // of it; clipping the whole thing as if it were one string cut the
+            // `gate_down` row mid-path on its second line and left the third
+            // hard against the margin, so the most alarming item in the inbox
+            // was also the least readable one.
+            for line in d.lines() {
+                // A blank line in the middle keeps its blank; five spaces
+                // followed by nothing is trailing whitespace somebody's diff
+                // will complain about and nobody can see.
+                match line.trim().is_empty() {
+                    true => println!(),
+                    false => println!("     {}", clip(line, 100)),
+                }
+            }
         }
         for (n, o) in i.options.iter().enumerate() {
             println!("     {}. {}", n + 1, o.label);
@@ -95,15 +109,18 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
             println!("     {}", paint(DIM, &format!("devplane work resume {w}")));
         }
         // Spell out the command only when Devplane can actually run it. For a
-        // session it merely watches there is nothing to decide from here, and
+        // session it merely watches there is nothing to answer from here, and
         // printing a command that would fail is worse than printing none.
-        if let (Some(req), Some(run)) = (&i.request_id, &i.run_id) {
+        //
+        // **One command for both kinds now**, because the ask knows which it
+        // is. There used to be two, chosen here by guessing from `kind` — and
+        // the question branch printed the option's *label* where the protocol
+        // wanted its *value*, which worked against the captured fixture and
+        // against no real agent at all.
+        if let Some(ask) = &i.ask {
             println!(
                 "     {}",
-                paint(
-                    DIM,
-                    &format!("devplane decide {run} --request {req} --decision allow")
-                )
+                paint(DIM, &answer_command(ask, &i.kind, &i.options))
             );
         }
     }
@@ -117,6 +134,57 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
+    // **The seat's own number, printed before the per-kind table.**
+    //
+    // `kinds` answers *is the inbox worth reading*; this answers *is anything
+    // reaching you at all*. Different denominators, and only the second can
+    // say the product is not working.
+    //
+    // **The measurement and the citation are visually separate and that is the
+    // whole design.** The paper this idea came from defines vacuous oversight
+    // over residual risk, needing an error rate Devplane cannot observe; the
+    // ratio is one input to that model. So the first line is a fact this
+    // product owns end to end, and anything about a threshold is marked as
+    // somebody else's result with its identifier attached.
+    if let Some(o) = v.get("oversight").filter(|o| !o.is_null()) {
+        let n = |k: &str| o.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+        if let Some(sentence) = o.get("sentence").and_then(|s| s.as_str()) {
+            let (answered, total) = (n("answered"), n("total"));
+            // Red only when nothing at all reached a person. A low ratio is
+            // not a failing grade — this product does not grade — but nought
+            // of a large number is the one case worth the contrast.
+            let colour = if answered == 0 && total > 0 {
+                render::RED
+            } else {
+                BOLD
+            };
+            println!("{}", paint(colour, sentence));
+            if n("asked") == 0 && n("unattended") > 0 {
+                // Only when the attention log agrees. This sentence once
+                // printed above a table showing sixty-nine raised permissions,
+                // because the two numbers came from different tables.
+                println!(
+                    "{}",
+                    paint(
+                        DIM,
+                        "Not one of them was put in front of you: every session here \
+                         is in a mode that decides on its own. `devplane modes` says which."
+                    )
+                );
+            }
+            println!(
+                "{}",
+                paint(
+                    DIM,
+                    "There is no threshold for this ratio on its own. The published \
+                     criterion (arXiv:2607.28317) is over residual risk and needs an \
+                     error rate nothing here can observe; this is the count, not a verdict."
+                )
+            );
+            println!();
+        }
+    }
+
     let empty = serde_json::Map::new();
     let kinds = v.get("kinds").and_then(|k| k.as_object()).unwrap_or(&empty);
     if kinds.is_empty() {
@@ -151,11 +219,13 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
             n(st, "open"),
         );
         // A kind nobody has resolved yet and a kind everybody ignores are
-        // opposite facts; they must not print the same.
-        let closed = acted + dismissed + elsewhere;
-        let share = match closed {
-            0 => paint(DIM, "—"),
-            _ => format!("{:.0}%", 100.0 * acted as f64 / closed as f64),
+        // opposite facts; they must not print the same — and the daemon is
+        // where that rule lives. This recomputed the ratio *and* the rule from
+        // the raw counts, which is one rule in two places and only one of them
+        // tested.
+        let share = match st.get("acted_share").and_then(|s| s.as_f64()) {
+            Some(f) => format!("{:.0}%", 100.0 * f),
+            None => paint(DIM, "—"),
         };
         println!(
             "{kind:<18}{raised:>7}{acted:>8}{dismissed:>11}{elsewhere:>11}{open:>7}{share:>8}"
@@ -169,6 +239,32 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
              elsewhere = it stopped asking on its own",
         )
     );
+    // **Said only when it is true.** How often an agent asks is a property of
+    // the model — implicit escalation thresholds differ markedly by family and
+    // the models' own confidence is miscalibrated per family — so a `raised`
+    // column spanning two vendors is two escalation policies added together.
+    // The ratio beside it is about the person and is unaffected; the count is
+    // not, and a reader comparing weeks deserves to know which is which.
+    //
+    // A caveat printed on every run is a caveat nobody reads, so a machine with
+    // one vendor never sees this line.
+    let agents: Vec<&str> = v["agents"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    if agents.len() > 1 {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "raised spans {} — how often an agent asks is a property of the model, so \
+                     compare the ratios rather than the counts",
+                    agents.join(" and ")
+                )
+            )
+        );
+    }
     Ok(())
 }
 
@@ -183,30 +279,6 @@ pub async fn cmd_say(run: &str, prompt: String) -> Result<()> {
     match v.get("error").and_then(|e| e.as_str()) {
         Some(e) => anyhow::bail!("{e}"),
         None => println!("{}", paint(DIM, "sent")),
-    }
-    Ok(())
-}
-
-pub async fn cmd_decide(
-    run: &str,
-    request: &str,
-    decision: &str,
-    option: Option<String>,
-) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
-    let v: serde_json::Value = c
-        .post_json(
-            &format!("/api/runs/{run}/decide"),
-            &serde_json::json!({
-                "request_id": request,
-                "decision": decision,
-                "option_id": option,
-            }),
-        )
-        .await?;
-    match v.get("error").and_then(|e| e.as_str()) {
-        Some(e) => anyhow::bail!("{e}"),
-        None => println!("{}", paint(render::GREEN, "answered")),
     }
     Ok(())
 }
@@ -231,4 +303,399 @@ pub async fn cmd_snooze(id: &str, minutes: i64, json: bool) -> Result<()> {
         println!("Quiet for {minutes} minutes.");
     }
     Ok(())
+}
+
+/// Answers something an agent asked, by the ask's own token.
+///
+/// **One command for both kinds.** There were two — `decide` for a permission
+/// and `answer` for a question — and a person had to know which protocol
+/// channel a thing had arrived on before they could reply to it. The row knows;
+/// the caller says what the person chose, and the daemon validates it against
+/// the row.
+pub async fn cmd_answer(
+    ask: &str,
+    allow: bool,
+    deny: bool,
+    option: Option<String>,
+    custom: Option<String>,
+    field: Option<String>,
+) -> Result<()> {
+    if !allow && !deny && option.is_none() && custom.is_none() {
+        anyhow::bail!(
+            "say what the answer is: --allow, --deny, --option '<what the agent offered>' or \
+             --custom '<your words>'"
+        );
+    }
+    let c = client::Client::connect_or_start().await?;
+    let decision = match (allow, deny) {
+        (true, _) => Some("allow"),
+        (_, true) => Some("deny"),
+        _ => None,
+    };
+    let v: serde_json::Value = c
+        .post_json(
+            &format!("/api/asks/{ask}/answer"),
+            &serde_json::json!({
+                "decision": decision,
+                "option": option,
+                "custom": custom,
+                "field": field,
+                "from": "cli",
+            }),
+        )
+        .await?;
+    match v.get("error").and_then(|e| e.as_str()) {
+        Some(e) => anyhow::bail!("{e}"),
+        // **What became of it, not just "answered".** Whether the answer
+        // reached a waiting agent, went into a resumed session, or is recorded
+        // and undelivered is the difference between the feature working and the
+        // feature having been polite about failing.
+        None => println!(
+            "{}  {}",
+            paint(render::GREEN, "answered"),
+            paint(
+                DIM,
+                v.get("outcome")
+                    .and_then(|o| o.as_str())
+                    .unwrap_or_default()
+            )
+        ),
+    }
+    Ok(())
+}
+
+/// Everything an agent has asked, and what became of each one.
+pub async fn cmd_asks(json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let v = raw(&c, "/api/asks").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let empty = vec![];
+    let open = v["open"].as_array().unwrap_or(&empty);
+    let settled = v["settled"].as_array().unwrap_or(&empty);
+
+    if open.is_empty() && settled.is_empty() {
+        println!("{}", paint(DIM, "No agent has asked you anything yet."));
+        return Ok(());
+    }
+    if open.is_empty() {
+        println!("{}", paint(DIM, "Nothing is waiting on you."));
+    }
+    for a in open {
+        println!(
+            "{}  {}",
+            paint(render::BOLD, a["id"].as_str().unwrap_or("")),
+            a["message"].as_str().unwrap_or("")
+        );
+        println!(
+            "{:>4}{}",
+            "",
+            paint(
+                DIM,
+                &format!(
+                    "{} · {}",
+                    a["kind"].as_str().unwrap_or(""),
+                    a["deadline_says"].as_str().unwrap_or("")
+                )
+            )
+        );
+        println!(
+            "{:>4}{}",
+            "",
+            paint(
+                DIM,
+                &format!("devplane answer {}", a["id"].as_str().unwrap_or(""))
+            )
+        );
+    }
+    for a in settled.iter().take(10) {
+        println!(
+            "{}  {}",
+            paint(DIM, &clip(a["message"].as_str().unwrap_or(""), 48)),
+            paint(DIM, a["outcome"].as_str().unwrap_or(""))
+        );
+    }
+    Ok(())
+}
+
+/// Which projects are deciding without you.
+///
+/// **The one surface the 2026-09-19 measurement left standing.** Forty-nine
+/// consecutive tool calls across four sessions put nothing in front of a
+/// person, so a ledger of *what was decided without you* is a transcript of
+/// everything. *Which of my repositories is in `auto`, and since when we knew*
+/// is one short list, and nothing on this machine could answer it.
+pub async fn cmd_modes(json: bool) -> Result<()> {
+    let c = client::Client::connect_or_start().await?;
+    let v = raw(&c, "/api/modes").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let empty = Vec::new();
+    let projects = v
+        .get("projects")
+        .and_then(|p| p.as_array())
+        .unwrap_or(&empty);
+    // **Before the sessions, because it is true of all of them.** A timer that
+    // answers a question in somebody's name is the same kind of fact as a
+    // session running unsupervised, and it is the one this machine cannot
+    // discover any other way: the vendor's own settings UI hides the row while
+    // managed settings set it.
+    if let Some(c) = v.get("question_clock").filter(|c| !c.is_null()) {
+        let says = c.get("says").and_then(|s| s.as_str()).unwrap_or_default();
+        let mine = c
+            .get("chosen_by_the_person")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(true);
+        println!(
+            "{}",
+            match mine {
+                true => paint(DIM, says),
+                // Somebody else set a clock on this person's attention. That is
+                // the row this whole product exists to be able to show.
+                false => paint(render::YELLOW, says),
+            }
+        );
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!("  {}", c.get("file").and_then(|f| f.as_str()).unwrap_or(""))
+            )
+        );
+        println!();
+    }
+    if projects.is_empty() {
+        println!("{}", paint(DIM, "No session is running."));
+        return Ok(());
+    }
+    for p in projects {
+        let name = p
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("(no project)");
+        println!("\n{}", paint(BOLD, name));
+        for s in p
+            .get("sessions")
+            .and_then(|s| s.as_array())
+            .unwrap_or(&empty)
+        {
+            // Three outcomes, three colours, and the third is not the second.
+            // A mode nobody here recognises is not "supervised" and it is not
+            // "unsupervised" either — it is a question, and it prints as one.
+            let (label, colour) = match (
+                s.get("label").and_then(|l| l.as_str()),
+                s.get("asks_a_person").and_then(|a| a.as_bool()),
+            ) {
+                (Some(l), Some(false)) => (l.to_string(), render::RED),
+                (Some(l), Some(true)) => (l.to_string(), render::GREEN),
+                (Some(l), None) => (format!("{l} (unknown to this build)"), render::YELLOW),
+                // **A fourth case, and it is not "unknown to this build".** An
+                // ACP agent declares its own mode as a string of its choosing.
+                // There is no cross-vendor vocabulary for it and nothing maps
+                // it onto the four a vendor documents, so **no `asks_a_person`
+                // can be derived from it** — and it is attributed to the agent
+                // rather than printed as though a settings file said it.
+                //
+                // Not coloured as an alarm: a mode this build cannot classify
+                // is a fact about the protocol, not a finding about the person.
+                (None, _)
+                    if s.get("agent_mode")
+                        .and_then(|m| m.as_str())
+                        .is_some_and(|m| !m.is_empty()) =>
+                {
+                    (
+                        format!(
+                            "{} (the agent's own mode)",
+                            s.get("agent_mode").and_then(|m| m.as_str()).unwrap_or("")
+                        ),
+                        DIM,
+                    )
+                }
+                // Not a gap: the hook that fires on every tool call carries no
+                // mode, so a session can be busy and genuinely not have said.
+                (None, _) => ("not reported yet".to_string(), DIM),
+            };
+            let who = s
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| clip(s.get("run").and_then(|r| r.as_str()).unwrap_or("?"), 8));
+            // "seen", never "since": nothing announces a mode change, so this
+            // is when Devplane first heard it at this value.
+            let seen = s
+                .get("seen")
+                .and_then(|t| t.as_str())
+                .or_else(|| s.get("agent_mode_seen").and_then(|t| t.as_str()))
+                .map(|t| format!("  {}", paint(DIM, &format!("seen {}", clip(t, 19)))))
+                .unwrap_or_default();
+            println!("  {:<22}{}{}", who, paint(colour, &label), seen);
+        }
+    }
+    let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let (total, unsup, unknown, unreported) = (
+        n("sessions"),
+        n("unsupervised"),
+        n("unknown"),
+        n("unreported"),
+    );
+    println!();
+    // **Three sentences, because there are three facts.** Counting a session
+    // that has not spoken as one running an exotic mode made sixteen idle
+    // editors look like a security incident — found by running this against a
+    // real machine, which is the only way it could have been found.
+    if unsup > 0 {
+        println!(
+            "{}",
+            paint(
+                render::RED,
+                &format!("{unsup} of {total} live session(s) decide without you.")
+            )
+        );
+    }
+    if unknown > 0 {
+        println!(
+            "{}",
+            paint(
+                render::YELLOW,
+                &format!(
+                    "{unknown} report a mode this build does not know, so whether \
+                     anybody is asked cannot be said."
+                )
+            )
+        );
+    }
+    if unreported > 0 {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "{unreported} have not reported a mode yet — the hook that fires on \
+                     every tool call does not carry one, so this fills in at their \
+                     next prompt."
+                )
+            )
+        );
+    }
+    if unsup == 0 && unknown == 0 && unreported < total {
+        println!(
+            "{}",
+            paint(render::GREEN, "Every session that has reported asks you.")
+        );
+    }
+    if unsup > 0 || unknown > 0 {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                "Devplane reads the mode and never sets it: change it where the session runs."
+            )
+        );
+    }
+    Ok(())
+}
+
+/// The command that answers one inbox item, spelled so that it runs.
+///
+/// **Pure, and separate from the printing, because it has been wrong twice.**
+/// It printed `devplane decide` for a question, which fails with *"no permission
+/// request is waiting"*; and then it printed the option's **label** where the
+/// protocol wants its **value**, which is equal in the captured fixture and in
+/// nothing else — so it passed every test and failed against real agents.
+///
+/// A command this product prints is a promise that it works, and the two ways
+/// of breaking that promise are now pinned by tests rather than by a comment
+/// asking the next person to be careful.
+fn answer_command(ask: &str, kind: &str, options: &[crate::core::Choice]) -> String {
+    match (kind, options.first().and_then(|o| o.id.as_deref())) {
+        // The option's own id — the schema's `const`, not its `title`.
+        ("question", Some(first)) => format!("devplane answer {ask} --option '{first}'"),
+        // A question with no options is answered in prose; there is nothing to
+        // pick, and offering `--option` would be offering an empty list.
+        ("question", None) => format!("devplane answer {ask} --custom '<your words>'"),
+        // A permission means a grant or a refusal however the agent spells its
+        // options, so the shorthand is honest here and only here.
+        _ => format!("devplane answer {ask} --allow"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Choice;
+
+    fn choice(id: &str, label: &str) -> Choice {
+        Choice {
+            id: Some(id.to_string()),
+            label: label.to_string(),
+            kind: None,
+        }
+    }
+
+    /// The bug this exists for: the **id**, never the label. An agent whose
+    /// option reads *Keep it* and answers to `keep_route` is the ordinary case
+    /// everywhere except the fixture.
+    #[test]
+    fn a_question_is_answered_with_the_option_the_agent_will_accept() {
+        let cmd = answer_command(
+            "a1",
+            "question",
+            &[choice("keep_route", "Keep it — retains /v1/login")],
+        );
+        assert_eq!(cmd, "devplane answer a1 --option 'keep_route'");
+        assert!(
+            !cmd.contains("Keep it"),
+            "the label is what a person reads and not what the protocol takes: {cmd}"
+        );
+    }
+
+    /// The older bug, in the same two lines: a question is not a permission and
+    /// `--allow` on one is a command that fails.
+    #[test]
+    fn a_question_is_never_answered_with_a_permission_shorthand() {
+        assert!(!answer_command("a1", "question", &[choice("x", "X")]).contains("--allow"));
+        assert!(answer_command("a1", "permission", &[]).contains("--allow"));
+    }
+
+    /// An agent that offered no options asked something wider than a list, and
+    /// a command offering a choice from an empty list is one that cannot run.
+    #[test]
+    fn a_question_with_nothing_to_pick_is_answered_in_prose() {
+        let cmd = answer_command("a1", "question", &[]);
+        assert!(cmd.contains("--custom"), "{cmd}");
+        assert!(!cmd.contains("--option"), "{cmd}");
+    }
+
+    /// An option a provider's own dialog owns carries no id, and Devplane
+    /// cannot answer it. It must not be offered as a pick.
+    #[test]
+    fn an_option_with_no_id_is_not_offered_as_a_choice() {
+        let unanswerable = Choice {
+            id: None,
+            label: "Yes".into(),
+            kind: None,
+        };
+        let cmd = answer_command("a1", "question", std::slice::from_ref(&unanswerable));
+        assert!(cmd.contains("--custom"), "{cmd}");
+    }
+
+    /// Every command this function can produce names the ask and nothing else.
+    /// Addressing by run or by protocol request is what made an answer
+    /// undeliverable the moment the session was gone.
+    #[test]
+    fn every_command_is_addressed_by_the_ask() {
+        for (kind, opts) in [
+            ("question", vec![choice("a", "A")]),
+            ("question", vec![]),
+            ("permission", vec![]),
+        ] {
+            let cmd = answer_command("tok", kind, &opts);
+            assert!(cmd.starts_with("devplane answer tok "), "{cmd}");
+            assert!(!cmd.contains("--request"), "{cmd}");
+        }
+    }
 }

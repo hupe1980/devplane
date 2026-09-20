@@ -85,7 +85,13 @@ impl Message {
 #[serde(tag = "frame", rename_all = "snake_case")]
 pub enum Frame {
     /// Something changed about a run, a project or a piece of work.
-    Event(crate::core::event::EventEnvelope),
+    ///
+    /// **Boxed**, because an envelope is an order of magnitude larger than a
+    /// message fragment and this enum is cloned once per subscriber per frame.
+    /// A broadcast channel of the unboxed shape pays the largest variant's size
+    /// for every transcript chunk of a talkative run, which is the traffic this
+    /// type mostly carries.
+    Event(Box<crate::core::event::EventEnvelope>),
     /// A fragment of what a driven agent said.
     Message(Message),
 }

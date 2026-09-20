@@ -59,6 +59,9 @@ impl AgentRow {
 
     pub fn to_event(&self) -> Event {
         Event::RosterSeen {
+            // The roster does not know; the poller fills this in from the
+            // process table before the event is reduced.
+            jobs: None,
             kind: self.kind.clone().unwrap_or_else(|| "interactive".into()),
             // Only a background row carries a state the provider's daemon owns.
             // Inventing one for an interactive row would let a poll overwrite

@@ -389,7 +389,11 @@ async fn advance(state: &Shared, id: &WorkId) -> Result<()> {
             let w = works.get_mut(id).context("no such work")?;
             let p = w.pipeline.as_mut().context("no pipeline")?;
             // One entry is the first, honest pass; `max` counts the returns.
-            let spent = p.entries.get(target).copied().unwrap_or(0) > fd.max;
+            // Through the accessor, which is where "how many times has this
+            // step been entered" is defined and tested — the index arithmetic
+            // was written out here as well, and two copies of an off-by-one are
+            // worse than one.
+            let spent = p.entries_for(&fd.back_to) > fd.max;
             if !spent {
                 p.step = target;
                 p.findings = Some(text.clone());
@@ -478,7 +482,7 @@ pub async fn approve(state: &Shared, id: &WorkId) -> Result<String> {
     state
         .record(
             crate::core::Decision::new(
-                crate::core::Actor::Human,
+                crate::core::Authority::Person,
                 "work:advance",
                 released.clone(),
                 "done",

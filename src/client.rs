@@ -13,6 +13,29 @@ pub struct Client {
     http: reqwest::Client,
 }
 
+/// What a failed request means, in a sentence a person can act on.
+///
+/// **404 is the interesting one and it almost never means what it says.** A
+/// route this binary asks for is a route this binary has; a daemon that does
+/// not is an older build — which the version check cannot catch between
+/// releases, because an unreleased tree changes routes without changing its
+/// version number. Two builds of `0.5.0` are the ordinary case while somebody
+/// is working on it, and *404 Not Found* sends them looking for a feature that
+/// is right there.
+fn explain_status(path: &str, status: reqwest::StatusCode) -> String {
+    match status {
+        reqwest::StatusCode::NOT_FOUND => format!(
+            "{path} returned 404 — this binary knows that route, so the running daemon is \
+             probably an older build of it. `devplane stop` and run the command again."
+        ),
+        reqwest::StatusCode::UNAUTHORIZED => format!(
+            "{path} returned 401 — the token in ~/.devplane/token is not the one the running \
+             daemon started with. `devplane stop` and run the command again."
+        ),
+        other => format!("{path} returned {other}"),
+    }
+}
+
 impl Client {
     /// Connects to a running daemon.
     pub fn connect() -> Result<Self> {
@@ -132,7 +155,7 @@ impl Client {
             .await
             .with_context(|| format!("GET {path}"))?;
         if !res.status().is_success() {
-            bail!("{path} returned {}", res.status());
+            bail!("{}", explain_status(path, res.status()));
         }
         res.json().await.with_context(|| format!("decoding {path}"))
     }
@@ -146,7 +169,7 @@ impl Client {
             .await
             .with_context(|| format!("POST {path}"))?;
         if !res.status().is_success() {
-            bail!("{path} returned {}", res.status());
+            bail!("{}", explain_status(path, res.status()));
         }
         res.json().await.with_context(|| format!("decoding {path}"))
     }

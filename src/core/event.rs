@@ -54,6 +54,17 @@ pub enum WaitingFor {
     Question,
     /// The turn ended and the agent is waiting for the next prompt.
     Idle,
+    /// The turn ended and the agent is waiting on a command **it** started —
+    /// a background job, most often a test suite.
+    ///
+    /// **This is not idleness and it is not a person's turn.** Every provider
+    /// reports such a session as `idle`, because from the model's side it is:
+    /// no tokens are being generated. But the session will resume by itself
+    /// when the job exits, and nothing is owed by anybody. Rendering it as
+    /// *waiting for a prompt* tells a person they are the blocker in the one
+    /// situation where they are not, and a board that does that on every long
+    /// test run is a board people stop believing.
+    Job,
     /// Something else the provider named but we do not model — `sandbox
     /// request`, `worker request`, `dialog open`, or whatever is added next.
     ///
@@ -62,6 +73,31 @@ pub enum WaitingFor {
     /// thing we recognise, therefore not urgent" is how three documented
     /// blocked states reached the board and never reached the inbox.
     Other(String),
+}
+
+impl WaitingFor {
+    /// What the roster's `waitingFor` says a session is blocked on.
+    ///
+    /// The vendor documents five values — *"`permission prompt` for an
+    /// approval, `input needed` for a question from Claude or an MCP server's
+    /// input request, `sandbox request`, `worker request`, or `dialog
+    /// open`"* — and the field is present **only while `status` is
+    /// `waiting`**, so reaching this function at all means a person is being
+    /// waited on.
+    ///
+    /// `None` maps to [`Question`](Self::Question) rather than to nothing: the
+    /// roster said the session is waiting, and a wait whose reason did not
+    /// arrive is still a wait. Anything unrecognised keeps its own words —
+    /// this vocabulary has grown twice, and *not a value we model* must never
+    /// become *not urgent*.
+    pub fn parse_roster(waiting_for: Option<&str>) -> Self {
+        match waiting_for {
+            Some(w) if w.contains("permission") => WaitingFor::Permission,
+            Some(w) if w.contains("input") || w.contains("question") => WaitingFor::Question,
+            Some(other) => WaitingFor::Other(other.to_string()),
+            None => WaitingFor::Question,
+        }
+    }
 }
 
 /// What one API call cost. Reported by OpenTelemetry per request, which is the
@@ -170,10 +206,10 @@ pub struct StatusSample {
     pub model: Option<String>,
     /// The Claude Code release **this session** is running.
     ///
-    /// The gate is differentially tested against one version; a session ahead
-    /// of it is running against rules nobody has measured. Machine-wide that is
-    /// an assumption, and per session it is a fact — see
-    /// [`crate::core::policy::VERIFIED_AGAINST`].
+    /// Carried because a fact about *this* session beats an assumption about
+    /// the machine. It used to feed a warning about how far past the gate's
+    /// measured baseline a session had drifted; that baseline measured the
+    /// decay of a claim this product no longer makes, and went with it.
     pub claude_version: Option<String>,
     /// Session cost as the provider computes it, with no telemetry connected.
     pub cost_usd: Option<f64>,
@@ -217,6 +253,21 @@ pub enum Event {
     AgentSessionOpened {
         agent_session: String,
     },
+    /// The operating-system process behind a **driven** run, once Devplane has
+    /// worked out which one it is.
+    ///
+    /// Recorded for one purpose and it is not liveness: a driven run's liveness
+    /// is decided by whether its ACP connection exists, never by whether a
+    /// process does. This is how a *leaked* agent is found — one that outlived
+    /// the daemon that started it because the daemon was killed rather than
+    /// stopped, and which is now holding a worktree with nobody able to reach
+    /// it. Absent when two dispatches raced closely enough that the new child
+    /// could not be attributed to one of them without guessing.
+    AgentProcessSpawned {
+        /// Also the process-group id: the protocol crate spawns an agent as
+        /// its own group leader, which is half of what identifies it later.
+        pid: u32,
+    },
     /// The human submitted a prompt. The text itself is not stored: telemetry
     /// is redacted by default and Devplane never turns that off.
     PromptSubmitted {
@@ -234,6 +285,19 @@ pub enum Event {
         tool: String,
         ok: bool,
         duration_ms: Option<u64>,
+    },
+    /// The permission mode a watched session reports it is running in.
+    ///
+    /// **Observed off whatever hook happened to carry it**, because no hook
+    /// announces a mode *change*. Eleven of the vendor's events include the
+    /// field and `PreToolUse` — the obvious candidate — is not one of them, so
+    /// this is emitted from any payload that has it rather than from a chosen
+    /// event. That makes it idempotent by necessity: the same mode arrives
+    /// over and over, and only a *different* one means anything.
+    PermissionModeSeen {
+        /// The vendor's own spelling, parsed by `PermissionMode` at the edge
+        /// and kept verbatim when it is a value this build does not know.
+        mode: String,
     },
     /// A permission decision was taken, by a rule, a hook or the human.
     PermissionDecided {
@@ -280,6 +344,10 @@ pub enum Event {
         /// decide and one you can only go and look at.
         #[serde(default)]
         request_id: Option<String>,
+        /// The durable ask this belongs to — the token an answer is addressed
+        /// to, which outlives the connection `request_id` names.
+        #[serde(default)]
+        ask: Option<String>,
         /// The answers the agent will accept, with the ids it expects back.
         #[serde(default)]
         options: Vec<Choice>,
@@ -293,11 +361,36 @@ pub enum Event {
         #[serde(default)]
         call: Option<ToolCallRef>,
     },
-    /// The agent asked a question with options. Observed sessions cannot be
-    /// answered from Devplane, only focused.
+    /// The agent asked a question with options.
+    ///
+    /// Two sources, and the difference is whether it can be answered here.
+    /// An **observed** session's dialog belongs to the provider: it carries no
+    /// `request_id` and can only be focused. A **driven** run's question arrives
+    /// over the protocol as a form elicitation and *is* answerable, which is
+    /// what `request_id` and `detail` are for.
     QuestionAsked {
         question: String,
         options: Vec<Choice>,
+        /// Present when this question can be answered from here.
+        #[serde(default)]
+        request_id: Option<String>,
+        /// The durable ask this belongs to — the token an answer is addressed
+        /// to, which outlives the connection `request_id` names.
+        #[serde(default)]
+        ask: Option<String>,
+        /// The field each option answers, where several questions were asked at
+        /// once, and the free-text box where one was offered.
+        #[serde(default)]
+        form: Option<serde_json::Value>,
+    },
+    /// A question stopped being answerable without having been answered — the
+    /// call was cancelled, or the run ended under it.
+    ///
+    /// Recorded for the reason [`PermissionDecided`](Event::PermissionDecided)
+    /// is: an inbox that goes on offering an answer nothing can receive is an
+    /// inbox that lies.
+    QuestionEnded {
+        request_id: String,
     },
     /// The turn ended normally.
     TurnEnded,
@@ -345,6 +438,19 @@ pub enum Event {
     SessionEnded {
         reason: Option<String>,
     },
+    /// An ACP agent says which mode it is now in.
+    ///
+    /// **Deliberately a separate event from `PermissionModeSeen`, carrying a
+    /// bare string rather than a `PermissionMode`.** That type is the four
+    /// values Claude Code documents plus `Unrecognised`; an ACP session mode is
+    /// an identifier the *agent* declares, with no cross-vendor vocabulary and
+    /// no specification mapping it onto anybody's four. Parsing it into
+    /// `PermissionMode` would turn every unknown agent string into
+    /// `Unrecognised(..)` and file it under a heading that says what a *vendor*
+    /// decided — which is this product asserting an authority it cannot derive.
+    AgentModeSeen {
+        mode: String,
+    },
     /// A row of `claude agents --json`.
     ///
     /// The roster lists **every** live session, interactive ones included — it
@@ -370,6 +476,16 @@ pub enum Event {
         /// Without it the board dates every discovered session to the moment
         /// the daemon happened to look, and a three-day-old tab reads as new.
         started_at_ms: Option<i64>,
+        /// How many commands this session has running right now, from the
+        /// process table — the evidence the roster's `status` does not carry.
+        ///
+        /// **`None` means nobody looked, and never means zero.** The
+        /// distinction is the whole value of the field: a `Some(0)` is a
+        /// checked, empty answer that may clear a stale job block, and a
+        /// `None` must leave what is already known alone. Old stored events
+        /// decode as `None`, which is exactly right — they were not checked.
+        #[serde(default)]
+        jobs: Option<u32>,
     },
     /// A status-line sample: the only channel that carries rate limits.
     StatusSample(StatusSample),
@@ -399,21 +515,47 @@ pub struct ToolCallRef {
     pub input: serde_json::Value,
 }
 
+#[cfg(test)]
+impl Event {
+    /// The channel an event of this kind actually arrives on.
+    ///
+    /// **For tests only, and it exists because getting this wrong hid three
+    /// bugs at once.** Every test envelope in this crate was labelled
+    /// `Source::Hook`, including roster samples, which no hook produces. The
+    /// reducer stands the roster down as soon as a hook has spoken, so those
+    /// tests were asserting against a machine where a channel was connected
+    /// that was not — and the roster paths they were meant to cover never ran.
+    ///
+    /// One reader, in one place: the same rule was written twice in two test
+    /// modules before it was put here.
+    pub fn test_source(&self) -> Source {
+        match self {
+            Event::RosterSeen { .. } => Source::AgentsJson,
+            Event::StatusSample(_) => Source::StatusLine,
+            Event::Stalled { .. } | Event::Lost { .. } | Event::Refresh => Source::Daemon,
+            _ => Source::Hook,
+        }
+    }
+}
+
 impl Event {
     /// A short, stable label for logs and the diagnostics view.
     pub fn label(&self) -> &'static str {
         match self {
             Event::SessionStarted { .. } => "session_started",
             Event::AgentSessionOpened { .. } => "agent_session_opened",
+            Event::AgentProcessSpawned { .. } => "agent_process_spawned",
             Event::PromptSubmitted { .. } => "prompt_submitted",
             Event::ToolStarted { .. } => "tool_started",
             Event::ToolFinished { .. } => "tool_finished",
+            Event::PermissionModeSeen { .. } => "permission_mode_seen",
             Event::PermissionDecided { .. } => "permission_decided",
             Event::QuestionAnswered { .. } => "question_answered",
             Event::ConfigChanged { .. } => "config_changed",
             Event::TaskChanged { .. } => "task_changed",
             Event::Blocked { .. } => "blocked",
             Event::QuestionAsked { .. } => "question_asked",
+            Event::QuestionEnded { .. } => "question_ended",
             Event::TurnEnded => "turn_ended",
             Event::TurnFailed { .. } => "turn_failed",
             Event::ApiRequest { .. } => "api_request",
@@ -425,6 +567,7 @@ impl Event {
             Event::Compacted => "compacted",
             Event::ModelChanged { .. } => "model_changed",
             Event::SessionEnded { .. } => "session_ended",
+            Event::AgentModeSeen { .. } => "agent_mode_seen",
             Event::RosterSeen { .. } => "roster_seen",
             Event::StatusSample(_) => "status_sample",
             Event::Stalled { .. } => "stalled",
@@ -468,10 +611,5 @@ impl EventEnvelope {
             source,
             event,
         }
-    }
-
-    pub fn with_project(mut self, project: Option<ProjectId>) -> Self {
-        self.project_id = project;
-        self
     }
 }

@@ -15,7 +15,8 @@ board — there is no service to run and nothing to configure before it is usefu
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 ```
 
-Fetches a prebuilt binary for macOS (Apple Silicon), Linux and Windows. No Rust toolchain.
+Fetches a prebuilt binary for macOS (Apple Silicon and Intel), Linux and Windows. No Rust
+toolchain.
 
 > [!IMPORTANT]
 > **On macOS, use this rather than downloading from the releases page.**
@@ -27,8 +28,21 @@ Fetches a prebuilt binary for macOS (Apple Silicon), Linux and Windows. No Rust 
 > The artifacts on the releases page are what this command fetches. They are not a second install
 > path, and saying so is more useful than letting you find out.
 
-Intel Macs are not covered: the release builds `aarch64-apple-darwin` only. Build from source
-there.
+## Without installing anything
+
+If you have Node, you can run Devplane without putting it on your PATH:
+
+```console
+npx devplane ls
+```
+
+It fetches the same prebuilt binary the installer above would, for your platform, and runs it. The
+daemon, the database and the token live in the same `~/.devplane/` either way — an `npx` run and an
+installed binary are the **same** Devplane, not two of them.
+
+The package is published by this repository's release workflow through npm **trusted publishing**, so
+it carries a provenance attestation: npm can show which workflow run and which commit built the
+binary you are running.
 
 ## From source
 
@@ -38,6 +52,23 @@ cargo install devplane
 
 Requires Rust 1.90 or later, and builds from source — a few minutes the first time. This is the
 path for contributors and for platforms the release matrix does not cover, not the front door.
+
+## Inside Claude Code, as a plugin
+
+```sh
+claude plugin marketplace add hupe1980/devplane
+/plugin install devplane@devplane
+```
+
+**The plugin is read-only.** It adds Devplane's MCP surface — so an agent can ask what is running,
+what needs a person, what was decided and on whose authority, and whether work is verifiably done —
+plus a skill explaining those answers. Nothing in it changes a file, answers a permission, starts an
+agent or merges anything.
+
+**It installs no hooks.** They carry this machine's loopback port and bearer token, which no file in
+a public repository can know, so `devplane connect claude` writes them into your own settings.
+
+Install the binary first: the plugin runs it, and a plugin whose server cannot start does nothing.
 
 ## Check it works
 
@@ -77,6 +108,7 @@ Everything lives in one directory, `~/.devplane`:
 | File | What |
 |---|---|
 | `devplane.db` | SQLite: events, runs, work, transcripts, the decision log |
+| `devplane.v<n>.bak` | a database written by an older schema, moved aside rather than migrated. Everything in it except the decision log is re-derivable, so once you have what you need from it, delete it — it is as large as the database was |
 | `token` | the bearer token for the local API, mode `0600` |
 | `daemon.json` | the running daemon's pid and the port it actually bound |
 | `policy.toml` | optional machine-wide permission rules |

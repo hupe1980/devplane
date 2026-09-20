@@ -28,6 +28,8 @@ pub struct ProjectConfig {
     pub transcripts: Transcripts,
     pub github: GitHub,
     pub spec: SpecSection,
+    /// What happens to a question nobody answers. Nothing, unless this says so.
+    pub questions: Questions,
     /// Declared chains of agent runs, keyed by the Work kind they serve
     /// (`quick`, `chore`, `bug`, `feature`) or by any name for a standing one.
     pub pipelines: BTreeMap<String, Pipeline>,
@@ -345,6 +347,53 @@ impl Default for Transcripts {
 /// this, and Devplane says so rather than implying a guard it does not have:
 /// `devplane check` warns when a budget is set, and `devplane work show`
 /// prints the cost so far or "not reported".
+/// What happens to a question nobody answers.
+///
+/// **The default is that nothing happens to it, and that is the whole
+/// section.** A product whose argument is that vendors end your questions on
+/// clocks you never set does not get to ship a clock you never set — so the
+/// only way an ask here ever ends on a timer is a project writing one down,
+/// and the row that ends it then names the duration *and this file*.
+///
+/// It is per project rather than global for the same reason the fan-out dial
+/// is: a setting somebody chose once and forgot is a setting that decides
+/// things nobody is thinking about. A repository that runs unattended
+/// overnight can bound its own waits; the one you are sitting in front of does
+/// not have to.
+///
+/// **Devplane's own ten-minute refusal is gone.** Until 2026-09-20 a permission
+/// request nobody answered was denied after six hundred seconds by a constant
+/// in this crate, with no surface saying so — which is the trade this product
+/// indicts four vendors for, shipped here, and aggravated by the fact that the
+/// vendor it mirrors refuses to apply its own question timer to permission
+/// prompts at all.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Questions {
+    /// `never` (the default), or a duration like `30m`, `4h`, `90s`.
+    ///
+    /// An unparseable value is a configuration error rather than a silent
+    /// fallback: the difference between `4h` and a typo is the difference
+    /// between a bounded wait and an unbounded one, and guessing which the
+    /// author meant is how a supervision tool ends a question nobody meant it
+    /// to end.
+    pub deadline: Option<String>,
+}
+
+impl Questions {
+    /// The deadline this project sets, and nothing where it sets none.
+    ///
+    /// Returns `None` for an unparseable value so the caller can report it as a
+    /// problem; `Deadline::Never` is what an absent setting means and the two
+    /// are never conflated.
+    pub fn deadline(&self) -> Option<crate::core::ask::Deadline> {
+        match self.deadline.as_deref() {
+            None => Some(crate::core::ask::Deadline::Never),
+            Some(s) => crate::core::ask::parse_deadline(s),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Budget {
@@ -461,18 +510,6 @@ pub struct SpecSection {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PolicySection {
-    /// Rules that **no longer approve anything**, kept so existing project
-    /// files still parse.
-    ///
-    /// This was the allow list. Answering *yes* here meant claiming the agent
-    /// would have answered yes too, and Devplane stopped making that claim —
-    /// [`crate::core::policy::Verdict`] has no `Allow` variant to return. The
-    /// key is still read so that a `devplane.toml` written before that does not
-    /// fail to load, and `devplane check` still reports the spellings in it
-    /// that cannot work, but no call is decided by anything in this list.
-    ///
-    /// Rules meant to be *enforced* go in the agent's own settings.
-    pub auto_allow: Vec<String>,
     /// Rules that refuse a permission request.
     pub never_auto: Vec<String>,
     /// Rules that always put the call in front of a person.
@@ -521,11 +558,7 @@ impl GlobalConfig {
     }
 
     pub fn policy(&self) -> crate::core::Policy {
-        crate::core::Policy::with_ask(
-            &self.policy.auto_allow,
-            &self.policy.never_auto,
-            &self.policy.always_ask,
-        )
+        crate::core::Policy::rules(&self.policy.never_auto, &self.policy.always_ask)
     }
 
     /// Rules in the machine-wide file that cannot do what they say.
@@ -560,11 +593,7 @@ impl ProjectConfig {
 
     /// The compiled permission policy.
     pub fn policy(&self) -> crate::core::Policy {
-        crate::core::Policy::with_ask(
-            &self.policy.auto_allow,
-            &self.policy.never_auto,
-            &self.policy.always_ask,
-        )
+        crate::core::Policy::rules(&self.policy.never_auto, &self.policy.always_ask)
     }
 
     pub fn has_gates(&self) -> bool {
@@ -583,6 +612,23 @@ impl ProjectConfig {
     pub fn validate(&self) -> Vec<Problem> {
         let mut out = Vec::new();
         let named: Vec<&str> = self.gates.named.keys().map(String::as_str).collect();
+
+        // A deadline that will not parse is an **error**, not a default. It is
+        // the one setting in this file that ends somebody's question on their
+        // behalf, and a typo in it is the difference between a bounded wait and
+        // an unbounded one. Devplane leaves the wait unbounded — the safe
+        // direction — and says the file is wrong rather than guessing which
+        // duration was meant.
+        if self.questions.deadline().is_none() {
+            out.push(Problem::error(
+                "[questions] deadline".into(),
+                format!(
+                    "is {:?}, which is not a duration — write `never`, `90s`, `30m` or `4h`. \
+                     Until it is fixed, a question waits for a person",
+                    self.questions.deadline.as_deref().unwrap_or_default()
+                ),
+            ));
+        }
 
         for (name, gate) in &self.gates.named {
             if gate.run.is_empty() {
@@ -832,11 +878,10 @@ impl ProjectConfig {
             "policy": {
                 "deny": rules(policy.deny_rules()),
                 "ask": rules(policy.ask_rules()),
-                "allow": rules(policy.allow_rules()),
                 "max_parallel_runs": self.policy.max_parallel_runs,
                 "stall_timeout": self.policy.stall_timeout.map(human),
                 "unused": policy.redundancies(),
-                "overbroad": policy.overbroad().into_iter().map(|o| json!({
+                "overbroad": crate::core::policy::overbroad(&[]).into_iter().map(|o| json!({
                     "rule": o.rule, "why": o.why, "suggestion": o.suggestion,
                 })).collect::<Vec<_>>(),
                 "half_protected": policy.half_protected_paths(),
@@ -1202,7 +1247,6 @@ steps = [
         let c = parse(
             r#"
 [policy]
-auto_allow = ["mcp__*"]
 never_auto = ["Write(src/**)", "Bash(command:rm *)", "mcp__github(create_issue)"]
 "#,
         );
@@ -1212,7 +1256,6 @@ never_auto = ["Write(src/**)", "Bash(command:rm *)", "mcp__github(create_issue)"
             "never consulted", // Write(path) is accepted and not checked
             "content field",   // Bash(command:…) is ignored by Claude Code
             "skips any",       // an mcp__ rule with brackets
-            "approves",        // an unanchored allow glob grants nothing
         ] {
             assert!(all.contains(expected), "missing `{expected}` in:\n{all}");
         }
@@ -1230,8 +1273,6 @@ never_auto = ["Write(src/**)", "Bash(command:rm *)", "mcp__github(create_issue)"
         let c = parse(
             r#"
 [policy]
-auto_allow = ["Read", "Bash(npm run *)", "Bash(git commit:*)", "Edit(src/**)",
-              "WebFetch(domain:example.com)", "mcp__puppeteer__*"]
 never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
 "#,
         );
@@ -1319,7 +1360,7 @@ steps = [
         assert!(!c.has_gates());
         assert_eq!(c.gates.max_feedback_rounds, 2);
         // And no rule decides anything on the user's behalf.
-        assert!(c.policy.auto_allow.is_empty());
+        assert!(c.policy.never_auto.is_empty());
         assert_eq!(c.policy.stall_timeout, None);
     }
 
@@ -1345,7 +1386,6 @@ on_fail = "feedback"
 max_feedback_rounds = 3
 
 [policy]
-auto_allow = ["Read", "Bash(pnpm test *)"]
 never_auto = ["Bash(git push *)"]
 max_parallel_runs = 2
 
@@ -1362,7 +1402,7 @@ ready_label = "devplane:ready"
         assert_eq!(c.gates.timeout, Duration::from_secs(600));
         assert_eq!(c.gates.max_feedback_rounds, 3);
         assert!(matches!(
-            c.policy().evaluate(
+            c.policy().restrictive(
                 &crate::core::policy::Context::at(&dir),
                 "Bash",
                 &serde_json::json!({"command": "git push origin"})
@@ -1401,13 +1441,13 @@ ready_label = "devplane:ready"
         let dir = tempdir("global");
         std::fs::write(
             dir.join("policy.toml"),
-            "[policy]\nauto_allow = [\n  \"Read\",  # a comment\n  \"Bash(ls *)\",\n]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
+            "[policy]\nnever_auto = [\n  \"Bash(rm -rf *)\",  # a comment\n  \"Read(.env)\",\n]\n",
         )
         .unwrap();
         let g = GlobalConfig::load(&dir).unwrap();
-        assert_eq!(g.policy.auto_allow, ["Read", "Bash(ls *)"]);
+        assert_eq!(g.policy.never_auto, ["Bash(rm -rf *)", "Read(.env)"]);
         assert!(matches!(
-            g.policy().evaluate(
+            g.policy().restrictive(
                 &crate::core::policy::Context::at(&dir),
                 "Bash",
                 &serde_json::json!({"command": "rm -rf /"})
@@ -1420,8 +1460,8 @@ ready_label = "devplane:ready"
     #[test]
     fn a_missing_global_policy_decides_nothing() {
         let g = GlobalConfig::load(Path::new("/definitely/not/here")).unwrap();
-        assert!(g.policy.auto_allow.is_empty());
         assert!(g.policy.never_auto.is_empty());
+        assert!(g.policy.always_ask.is_empty());
     }
 
     #[test]

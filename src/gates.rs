@@ -114,17 +114,15 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
     let started = Instant::now();
 
     if timeout.is_zero() {
-        return CommandResult {
-            command: command.to_string(),
-            outcome: Outcome::NeverStarted {
+        // The constructor, not the fields: *a command that never produced a
+        // verdict* is one shape with one set of empty values, and writing it
+        // out here is how two of them end up differing by a digest.
+        return CommandResult::without_verdict(
+            command,
+            Outcome::NeverStarted {
                 reason: "the gate ran out of time before this command started".into(),
             },
-            duration_ms: 0,
-            output_tail: String::new(),
-            output_bytes: 0,
-            output_digest: crate::core::hash::hex(b""),
-            failures: Vec::new(),
-        };
+        );
     }
 
     // Through a shell, because the commands are written by a person in a TOML
@@ -154,17 +152,12 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
             // **Structurally distinct, not a message to be parsed later.** A
             // missing binary is a broken gate, not a broken change, and a
             // reader should never have to recover that from prose.
-            return CommandResult {
-                command: command.to_string(),
-                outcome: Outcome::NeverStarted {
+            return CommandResult::without_verdict(
+                command,
+                Outcome::NeverStarted {
                     reason: e.to_string(),
                 },
-                duration_ms: started.elapsed().as_millis() as u64,
-                output_tail: String::new(),
-                output_bytes: 0,
-                output_digest: crate::core::hash::hex(b""),
-                failures: Vec::new(),
-            };
+            );
         }
     };
 

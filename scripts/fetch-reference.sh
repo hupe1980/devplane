@@ -11,14 +11,57 @@ UA='devplane-specs-fetch'
 # was checking is worse than no guard, and this one reported the deletion as FAIL 200 —
 # a success code beside the word FAIL, which is what it looks like when the check is wrong
 # rather than the fetch. The HTML sniff is the real test; size only has to be non-zero.
+#
+# And a guard may refuse, but it may not destroy. This function used to `rm -f`
+# the destination on a failed fetch, and on 2026-09-19 that deleted a page that
+# had been correct for five passes: `agents.md` moved to a Next.js site with no
+# markdown endpoint, the HTML sniff refused it — correctly — and then removed
+# the good copy underneath it. Three claims went from pinned to MISS, and every
+# one of the three is still true on the live page. **The fetch broke, not the
+# fact**, and a destructive guard makes those two indistinguishable. A failed
+# fetch now leaves the previous copy where it is and says it is stale; only a
+# page nobody has ever fetched is absent, which is the one case the claim ledger
+# should fail on.
 fetch() { # url dest
   local code sz
-  code=$(curl -sL -A "$UA" -o "$2" -w '%{http_code}' "$1"); sz=$(wc -c < "$2" | tr -d ' ')
-  if [ "$code" = 200 ] && [ "$sz" -gt 0 ] && ! head -c 300 "$2" | grep -qi '<!doctype html\|<html'; then
-    echo "OK   $2"
+  local tmp="$2.fetching"
+  code=$(curl -sL -A "$UA" -o "$tmp" -w '%{http_code}' "$1"); sz=$(wc -c < "$tmp" | tr -d ' ')
+  if [ "$code" = 200 ] && [ "$sz" -gt 0 ] && ! head -c 300 "$tmp" | grep -qi '<!doctype html\|<html'; then
+    mv "$tmp" "$2"; echo "OK   $2"
+  elif [ -s "$2" ]; then
+    rm -f "$tmp"; echo "STALE $code $1 (keeping the copy already on disk)"
   else
-    echo "FAIL $code $1"; rm -f "$2"
+    rm -f "$tmp"; echo "FAIL $code $1"
   fi
+}
+
+# A page that serves only HTML, rendered to text. Used for exactly one source and
+# deliberately not made general: `agents.md` is the governance evidence for the one
+# standard in these notes that has any, it publishes no markdown, and a claim about
+# it is worth a few lines of `sed` rather than a footnote saying it could not be
+# checked. Everything else in this file is fetched as markdown or not at all.
+fetch_html_as_text() { # url dest
+  local code tmp="$2.fetching"
+  code=$(curl -sL -A "$UA" -o "$tmp" -w '%{http_code}' "$1")
+  if [ "$code" = 200 ] && [ -s "$tmp" ]; then
+    # Tags become newlines and entities become characters; script and style
+    # bodies are deliberately *kept*, because this page is a Next.js build whose
+    # readable prose lives in a `__NEXT_DATA__` JSON blob rather than in the
+    # markup. Stripping scripts the tidy way produced an 11-byte file — and, on
+    # a minified single-line document, a greedy `s/<script.*<\/script>//`
+    # deletes everything between the first script and the last one, which is the
+    # whole page. Kept as a warning: the tidier transformation was the one that
+    # silently destroyed the content.
+    sed -e 's/<[^>]*>/\n/g' "$tmp" \
+      | sed -e 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#x27;/'"'"'/g; s/&#39;/'"'"'/g; s/&nbsp;/ /g; s/\\u0026/\&/g' \
+      | tr -s ' \t' ' ' | grep -v '^ *$' > "$2.text"
+    if [ "$(wc -c < "$2.text" | tr -d ' ')" -gt 1000 ]; then
+      mv "$2.text" "$2"; rm -f "$tmp"; echo "OK   $2 (html -> text)"; return
+    fi
+    rm -f "$2.text"
+  fi
+  rm -f "$tmp"
+  if [ -s "$2" ]; then echo "STALE $code $1 (keeping the copy already on disk)"; else echo "FAIL $code $1"; fi
 }
 # Claude Code docs (Mintlify serves markdown at <page>.md)
 for p in hooks hooks-guide headless cli-reference worktrees sessions agent-view statusline channels permissions monitoring-usage \
@@ -73,7 +116,9 @@ fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/
 # document holds, and how its task list is written. `--spec` reads the second.
 fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/spec-template.md concepts/reference/sdd/spec-kit-spec-template.md
 fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/tasks-template.md concepts/reference/sdd/spec-kit-tasks-template.md
-fetch https://agents.md/ concepts/reference/standards/agents-md.md
+# HTML-only since 2026-09: the format with the governance is the one whose own page
+# cannot be fetched as markdown.
+fetch_html_as_text https://agents.md/ concepts/reference/standards/agents-md.md
 # Codex app-server (JSON-RPC)
 fetch https://raw.githubusercontent.com/openai/codex/main/codex-rs/app-server/README.md concepts/reference/codex/app-server-README.md
 # Codex app-server protocol: generated JSON Schema + TypeScript types (listed via GitHub API)
@@ -111,4 +156,52 @@ fetch https://raw.githubusercontent.com/agentclientprotocol/claude-agent-acp/mai
 fetch https://raw.githubusercontent.com/agentclientprotocol/registry/main/README.md concepts/reference/acp/registry-README.md
 # claude-view (closest existing observer)
 fetch https://raw.githubusercontent.com/tombelieber/claude-view/main/README.md concepts/reference/claude-view-README.md
+# Agent Skills: the portable core the library carries, and the only authority
+# for which six fields survive leaving a vendor (#library, D272).
+mkdir -p concepts/reference/standards
+fetch https://agentskills.io/specification.md concepts/reference/standards/agent-skills-spec.md
+fetch https://agentskills.io/llms.txt concepts/reference/standards/agent-skills-llms.txt
+# ── Papers ───────────────────────────────────────────────────────────────────
+#
+# **Twenty-three papers were cited in these notes and nought were checkable.**
+# `verify-claims.sh` has tested every vendor claim since it was written and had
+# no arXiv entry at all, in a corpus whose own standing rule is that every
+# number names its test. Reading one of them in full on 2026-09-19 found a
+# correlation quoted in the opposite direction and a feature designed around a
+# criterion the paper does not contain (D269).
+#
+# HTML rather than the PDF: arXiv renders most recent submissions, the text is
+# greppable, and a claim check against a PDF is a claim check against nothing.
+# Tags are stripped here so the checks downstream match prose rather than
+# markup. A paper with no HTML rendering is fetched as its abstract page, and
+# a check that needs the body will simply miss — which is the correct outcome
+# and is why this does not fall back silently to something smaller.
+arxiv() { # id dest
+  local dest="concepts/reference/papers/$2.txt" code
+  mkdir -p concepts/reference/papers
+  code=$(curl -sL -A "$UA" -o /tmp/dp-arxiv.$$ -w '%{http_code}' "https://arxiv.org/html/$1v1")
+  if [ "$code" != 200 ]; then
+    code=$(curl -sL -A "$UA" -o /tmp/dp-arxiv.$$ -w '%{http_code}' "https://arxiv.org/abs/$1")
+    [ "$code" = 200 ] && echo "NOTE $1 has no HTML rendering; abstract only"
+  fi
+  if [ "$code" = 200 ]; then
+    python3 -c '
+import sys, re, html
+t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+t = re.sub(r"<(script|style).*?</\1>", " ", t, flags=re.S | re.I)
+t = re.sub(r"<[^>]+>", " ", t)
+t = re.sub(r"[ \t]+", " ", html.unescape(t))
+open(sys.argv[2], "w", encoding="utf-8").write(t)
+' /tmp/dp-arxiv.$$ "$dest" && echo "OK   $dest"
+  else
+    echo "FAIL $code arxiv:$1"
+  fi
+  rm -f /tmp/dp-arxiv.$$
+}
+arxiv 2607.28317 oversight-vacuity
+arxiv 2606.08919 oversight-capacity
+arxiv 2606.05647 sabotage-detection
+arxiv 2607.25152 self-evaluation-bias
+arxiv 2604.05485 auditability-dimensions
+
 date -u +'fetched: %Y-%m-%dT%H:%MZ' > concepts/reference/FETCHED.txt

@@ -15,7 +15,9 @@
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::StopReason;
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
+    CancelNotification, ClientCapabilities, ContentBlock, CreateElicitationRequest,
+    CreateElicitationResponse, ElicitationAction, ElicitationCapabilities,
+    ElicitationFormCapabilities, InitializeRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     ResumeSessionRequest, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
     TextContent,
@@ -30,11 +32,21 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 
 use super::agent::AgentSpec;
 
-/// How long a permission request waits for an answer before it is refused.
-///
-/// A session blocked on a question nobody is going to answer is worse than one
-/// that gave up: the refusal is visible, recoverable and honest.
-const PERMISSION_TIMEOUT: Duration = Duration::from_secs(600);
+// A `PERMISSION_TIMEOUT` of six hundred seconds lived here until 2026-09-20,
+// and deleting it is the point rather than a tidy-up.
+//
+// It refused a permission nobody had answered after ten minutes, in the
+// person's name, on a number nobody chose, and no surface said it had happened
+// — the decision row was the only trace and `devplane audit` was the only way
+// to find it. That is the trade this product indicts four vendors for, shipped
+// here; and the vendor it mirrors most closely is stricter than this was, since
+// Claude Code's own question timer is off by default and "permission prompts,
+// including plan approval, never auto-resolve on idle".
+//
+// What replaces it is a deadline a **project** sets, in its own `devplane.toml`,
+// defaulting to `never`, swept by the daemon against a durable row, and ending
+// with an authority that names the duration and the file it came from.
+// `core::ask` holds that; this connection now waits.
 
 /// How long a cancelled turn has to acknowledge before the connection — and
 /// with it the agent's process group — is torn down anyway.
@@ -87,6 +99,54 @@ pub enum AcpEvent {
         call: ToolRequest,
         options: Vec<PermissionOption>,
     },
+    /// The agent asked the person a question. Answer it with
+    /// [`Session::answer`].
+    ///
+    /// Not a permission: no rule can answer *which of these do you want*, and
+    /// it arrives on a different protocol method.
+    QuestionAsked {
+        request_id: String,
+        ask: crate::core::question::Ask,
+    },
+    /// What the agent advertised at `initialize`, measured rather than assumed.
+    ///
+    /// **Carries no command**, because the session does not know how it was
+    /// started — the caller has the spec and keys the record with it.
+    ///
+    /// Emitted once per connection, after the handshake and before anything is
+    /// asked of the agent. Every field is a runtime fact about *that* agent at
+    /// *that* version, which is the whole reason it is recorded with a date
+    /// rather than written into a table by hand.
+    Capabilities {
+        agent_name: Option<String>,
+        resume: bool,
+        load_session: bool,
+        list_sessions: bool,
+        needs_auth: bool,
+    },
+    /// The agent says which mode it is now in.
+    ///
+    /// **The agent's own string, and never one of the vendor's four.** An ACP
+    /// session mode is an identifier the agent declares; there is no
+    /// cross-vendor vocabulary for it, and nothing in the specification maps it
+    /// onto Claude Code's `default`/`acceptEdits`/`plan`/`bypassPermissions`.
+    /// Presenting it as one of those would assert an equivalence no
+    /// specification supports — in the one product whose argument is that an
+    /// authority is recorded rather than inferred.
+    ModeChanged { mode: String },
+    /// The agent asked something over the question channel that Devplane could
+    /// not render, so it was cancelled.
+    ///
+    /// Reported rather than swallowed: Devplane told the agent it could show a
+    /// form, and a case where it cannot is a gap in this product, not a
+    /// non-event. The alternative is an agent that asked and gave up with
+    /// nobody ever knowing it asked.
+    QuestionUnrenderable { what: String },
+    /// A question was cancelled without being answered — the session ended, or
+    /// somebody stopped the run. Reported so the inbox stops offering an answer
+    /// that can no longer be delivered, for the same reason as
+    /// [`AcpEvent::PermissionExpired`].
+    QuestionCancelled { request_id: String },
     /// A permission request expired unanswered and was refused on the agent's
     /// behalf. Reported so the inbox stops offering a decision that can no
     /// longer be taken: a request that has timed out cannot be answered, and an
@@ -213,11 +273,18 @@ pub struct PermissionOption {
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>;
 
+/// Waiting questions. Separate from [`Pending`] because an answer is not an
+/// option id: it is a map of fields to what the person chose or typed, and
+/// squeezing it through the permission channel would mean encoding one as the
+/// other and decoding it wrong exactly once.
+type Asked = Arc<Mutex<HashMap<String, oneshot::Sender<Option<serde_json::Value>>>>>;
+
 /// A handle on a running agent.
 #[derive(Debug, Clone)]
 pub struct Session {
     commands: mpsc::Sender<Command>,
     pending: Pending,
+    asked: Asked,
     /// Raised by [`Session::stop`]. Separate from the command channel because
     /// stopping has to reach a session that is *busy*, and the command loop is
     /// not reading while a turn is in flight.
@@ -246,6 +313,28 @@ impl Session {
                 Ok(())
             }
             None => anyhow::bail!("no permission request {request_id} is waiting"),
+        }
+    }
+
+    /// Answers a question the agent asked.
+    ///
+    /// `None` cancels it. **There is deliberately no way to *decline*:** the
+    /// adapter turns a decline into *answered, with no answers*, so the agent
+    /// proceeds having asked and heard nothing — which is the failure this
+    /// whole feature exists to prevent, reachable through a button somebody
+    /// would have called "dismiss".
+    pub async fn answer(
+        &self,
+        request_id: &str,
+        content: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let sender = self.asked.lock().await.remove(request_id);
+        match sender {
+            Some(tx) => {
+                let _ = tx.send(content);
+                Ok(())
+            }
+            None => anyhow::bail!("no question {request_id} is waiting"),
         }
     }
 
@@ -322,6 +411,7 @@ async fn connect(
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(32);
     let (ev_tx, ev_rx) = mpsc::channel::<AcpEvent>(1024);
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let asked: Asked = Arc::new(Mutex::new(HashMap::new()));
     let stop: Arc<Notify> = Arc::new(Notify::new());
 
     let agent = AcpAgent::from_str(&spec.command)
@@ -330,12 +420,15 @@ async fn connect(
     let session = Session {
         commands: cmd_tx,
         pending: pending.clone(),
+        asked: asked.clone(),
         stop: stop.clone(),
     };
 
     let ev_for_notify = ev_tx.clone();
     let ev_for_perm = ev_tx.clone();
     let pending_for_perm = pending.clone();
+    let ev_for_ask = ev_tx.clone();
+    let asked_for_ask = asked.clone();
     // `session/load` replays the conversation, as ordinary notifications
     // arriving before the response. Devplane already holds that transcript, so
     // taking the replay too would write every sentence down twice — the same
@@ -381,6 +474,17 @@ async fn connect(
                             None => RequestPermissionOutcome::Cancelled,
                         };
                         responder.respond(RequestPermissionResponse::new(outcome))
+                    })
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: CreateElicitationRequest, responder, cx| {
+                    let events = ev_for_ask.clone();
+                    let asked = asked_for_ask.clone();
+                    cx.spawn(async move {
+                        let outcome = ask_person(&events, &asked, &request).await;
+                        responder.respond(CreateElicitationResponse::new(outcome))
                     })
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -442,11 +546,41 @@ async fn run(
     // not written down a second time.
     replaying: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> agent_client_protocol::Result<()> {
+    // **Declaring this is what makes an agent able to ask a question at all.**
+    // The Claude adapter offers its `AskUserQuestion` tool only to a client that
+    // says it can render a form elicitation, and Devplane declared no
+    // capabilities at all until 2026-09-19 — so the tool was withheld, the agent
+    // asked in prose, and the run went idle with nothing raised. Measured, not
+    // read: the adapter's own source gates on `clientCapabilities.elicitation.form`.
     let init = connection
-        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+        .send_request(
+            InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+                ClientCapabilities::new().elicitation(
+                    ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+                ),
+            ),
+        )
         .block_task()
         .await?;
 
+    // **Measured before anything is asked of the agent.** What it supports is
+    // advertised here and nowhere else, and a record written after a session
+    // exists would miss an agent whose session creation fails.
+    let _ = events
+        .send(AcpEvent::Capabilities {
+            agent_name: init.agent_info.as_ref().map(|i| i.name.clone()),
+            resume: init
+                .agent_capabilities
+                .session_capabilities
+                .resume
+                .is_some(),
+            load_session: init.agent_capabilities.load_session,
+            list_sessions: init.agent_capabilities.session_capabilities.list.is_some(),
+            needs_auth: !init.auth_methods.is_empty(),
+        })
+        .await;
+
+    let mut initial_mode: Option<String> = None;
     let session_id = match resuming {
         Some(previous) => {
             // Checked before it is attempted: an agent that supports neither
@@ -519,7 +653,16 @@ async fn run(
                 .block_task()
                 .await
             {
-                Ok(r) => r.session_id,
+                Ok(r) => {
+                    // **The mode a session starts in, which no update reports.**
+                    // `current_mode_update` fires when a mode *changes*, so an
+                    // agent that starts in one mode and stays there would never
+                    // be reported at all — and that is the case the surface
+                    // most wants: a session nobody is supervising, sitting in
+                    // the mode it began in.
+                    initial_mode = r.modes.as_ref().map(|m| m.current_mode_id.to_string());
+                    r.session_id
+                }
                 Err(e) => {
                     // An agent that needs signing in advertises `authMethods`
                     // at initialize, often with the literal command to run.
@@ -553,6 +696,12 @@ async fn run(
             agent_name: init.agent_info.as_ref().map(|i| i.name.clone()),
         })
         .await;
+
+    // After `Ready`, because the run has to exist before anything can be
+    // recorded against it.
+    if let Some(mode) = initial_mode {
+        let _ = events.send(AcpEvent::ModeChanged { mode }).await;
+    }
 
     loop {
         let command = tokio::select! {
@@ -667,27 +816,105 @@ async fn ask(
         })
         .await;
 
-    let answer = tokio::time::timeout(PERMISSION_TIMEOUT, rx).await;
+    // **It waits.** Not for ten minutes, not for a number in this file: until a
+    // person answers, until the project's own deadline sweeps it, or until the
+    // connection goes away. Those are the only three things that end it and
+    // each of them has a name on it.
+    let answer = rx.await;
     pending.lock().await.remove(&request_id);
 
-    match answer {
-        Ok(Ok(choice)) => choice,
-        // Nobody answered, or the daemon went away. Refusing is the safe end:
-        // the agent learns the answer is no and can say so, instead of the
-        // session hanging until someone notices.
+    // An `Err` is the sender being dropped: the daemon is tearing this session
+    // down, or a deadline sweep closed the ask and released the wait. Either
+    // way the ending has already been recorded by whoever did it, with its own
+    // authority — so nothing is invented here and nothing is announced twice.
+    // The agent is told no, which is the only safe thing to say when the answer
+    // is that there is no longer anybody to ask.
+    answer.unwrap_or_default()
+}
+
+/// Publishes a question and waits — with no timeout — for the person.
+///
+/// **No timeout is the feature, and since 2026-09-20 it is the rule on both
+/// channels rather than a distinction between them.** Neither a permission nor
+/// a question has a safe default, and inventing one is the thing this product
+/// refuses to do — so both wait, and the only clock that ever ends either is
+/// one a project wrote down for itself. The wait happens off the handler, so a
+/// question left overnight does not stop the connection reading anything else.
+///
+/// **Cancel, never decline.** `decline` is folded by the adapter into
+/// *answered, with no answers*, so the agent proceeds as though it had asked and
+/// been told nothing. `cancel` stops the call instead, which is the honest
+/// outcome when there is no answer to give.
+async fn ask_person(
+    events: &mpsc::Sender<AcpEvent>,
+    asked: &Asked,
+    request: &CreateElicitationRequest,
+) -> ElicitationAction {
+    let Some(parsed) = serde_json::to_value(request)
+        .ok()
+        .as_ref()
+        .and_then(crate::core::question::Ask::parse)
+    else {
+        // The same method carries elicitations from MCP servers, in shapes this
+        // cannot render. Guessing at one would put words in somebody's mouth,
+        // so it is cancelled — **and said out loud**.
         //
-        // And it has to be said out loud. The refusal happens here, inside the
-        // connection, so without this the run stays `waiting` for ever and the
-        // inbox keeps offering an Allow button whose request no longer exists —
-        // `decide` then fails with "no permission request is waiting", which is
-        // true and useless.
+        // Cancelling silently is the exact failure this whole feature exists to
+        // prevent: an agent asked a person something, a person was never told,
+        // and the only trace was the agent giving up. Devplane declared it could
+        // render a form; where it turns out it cannot, that is news.
+        let _ = events
+            .send(AcpEvent::QuestionUnrenderable {
+                what: serde_json::to_value(request)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("message")
+                            .and_then(|m| m.as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "an agent asked something".to_string()),
+            })
+            .await;
+        return ElicitationAction::Cancel;
+    };
+
+    let request_id = uuid::Uuid::new_v4().simple().to_string();
+    let (tx, rx) = oneshot::channel();
+    asked.lock().await.insert(request_id.clone(), tx);
+
+    let _ = events
+        .send(AcpEvent::QuestionAsked {
+            request_id: request_id.clone(),
+            ask: parsed,
+        })
+        .await;
+
+    let answered = rx.await;
+    asked.lock().await.remove(&request_id);
+
+    match answered {
+        // The protocol's own content type rather than raw JSON: converting here
+        // means a shape the schema would reject fails at the boundary, where it
+        // can still be turned into a cancel, instead of on the wire.
+        Ok(Some(content)) => match serde_json::from_value::<
+            std::collections::BTreeMap<
+                String,
+                agent_client_protocol::schema::v1::ElicitationContentValue,
+            >,
+        >(content)
+        {
+            Ok(map) => ElicitationAction::Accept(
+                agent_client_protocol::schema::v1::ElicitationAcceptAction::new().content(map),
+            ),
+            Err(_) => ElicitationAction::Cancel,
+        },
         _ => {
             let _ = events
-                .send(AcpEvent::PermissionExpired {
+                .send(AcpEvent::QuestionCancelled {
                     request_id: request_id.clone(),
                 })
                 .await;
-            None
+            ElicitationAction::Cancel
         }
     }
 }
@@ -796,8 +1023,14 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
         // records what it sent at the moment it sends it, so taking this too
         // would write every prompt down twice.
         SessionUpdate::UserMessageChunk(_) => Vec::new(),
-        // Mode changes and command lists are real and nothing consumes them
-        // yet. An event the product does nothing with is noise in the log.
+        // **The cross-vendor answer to *which sessions decide without you*.**
+        // `devplane modes` reads one vendor's settings files; this is the same
+        // question asked of any agent that speaks the protocol.
+        SessionUpdate::CurrentModeUpdate(m) => vec![AcpEvent::ModeChanged {
+            mode: m.current_mode_id.to_string(),
+        }],
+        // Command lists are real and nothing consumes them yet. An event the
+        // product does nothing with is noise in the log.
         _ => Vec::new(),
     }
 }
@@ -832,6 +1065,7 @@ mod tests {
         let s = Session {
             commands: tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
+            asked: Arc::new(Mutex::new(HashMap::new())),
             stop: Arc::new(Notify::new()),
         };
         assert!(s.decide("nope", Some("x".into())).await.is_err());
@@ -883,8 +1117,102 @@ mod tests {
         let s = Session {
             commands: tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
+            asked: Arc::new(Mutex::new(HashMap::new())),
             stop: Arc::new(Notify::new()),
         };
         assert!(s.prompt("hello").await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    /// The one line that decides whether an agent can ask a question at all.
+    ///
+    /// Until 2026-09-19 Devplane sent no client capabilities, and the Claude
+    /// adapter withheld its question tool for exactly that reason — the agent
+    /// asked in prose instead and the run went idle with nothing raised. The
+    /// adapter gates on `clientCapabilities.elicitation.form`, so this asserts
+    /// the wire shape rather than the builder call: a rename upstream that kept
+    /// the method and changed the JSON would pass a test written the other way
+    /// and silently take the feature away again.
+    #[test]
+    fn the_initialize_request_says_it_can_render_a_question() {
+        let init = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+            ClientCapabilities::new().elicitation(
+                ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
+            ),
+        );
+        let v = serde_json::to_value(&init).expect("serialises");
+        assert_eq!(
+            v["clientCapabilities"]["elicitation"]["form"],
+            serde_json::json!({}),
+            "the adapter tests `clientCapabilities?.elicitation?.form`"
+        );
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+
+    fn waiting() -> (Asked, oneshot::Receiver<Option<serde_json::Value>>) {
+        let (tx, rx) = oneshot::channel();
+        let mut m = HashMap::new();
+        m.insert("q1".to_string(), tx);
+        (Arc::new(Mutex::new(m)), rx)
+    }
+
+    /// Two tabs, or a phone and a laptop, answering at once.
+    ///
+    /// The winner is whoever takes the waiter out of the map; the loser is told
+    /// there is no question waiting, which is a **normal outcome** rather than
+    /// an error to show. The alternative — both answers reaching the agent — is
+    /// the one bug this feature cannot afford.
+    #[tokio::test]
+    async fn an_answer_is_delivered_exactly_once() {
+        let (asked, rx) = waiting();
+        let s = Session {
+            commands: mpsc::channel(1).0,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            asked: asked.clone(),
+            stop: Arc::new(Notify::new()),
+        };
+        let first = s
+            .answer("q1", Some(serde_json::json!({"question_0": "a"})))
+            .await;
+        let second = s
+            .answer("q1", Some(serde_json::json!({"question_0": "b"})))
+            .await;
+
+        assert!(first.is_ok(), "the first answer is delivered");
+        assert!(second.is_err(), "the second finds nothing waiting");
+        assert_eq!(
+            rx.await.unwrap(),
+            Some(serde_json::json!({"question_0": "a"})),
+            "the agent receives the first answer, once"
+        );
+    }
+
+    /// There is deliberately no `decline`.
+    ///
+    /// The adapter folds a decline into *answered, with no answers*, so the
+    /// agent proceeds having asked and heard nothing. A "dismiss" button would
+    /// be that failure with a friendly name on it, so the only two things that
+    /// can happen to a question are an answer and a cancel.
+    #[tokio::test]
+    async fn nothing_can_answer_a_question_with_nothing() {
+        let (asked, rx) = waiting();
+        let s = Session {
+            commands: mpsc::channel(1).0,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            asked,
+            stop: Arc::new(Notify::new()),
+        };
+        // `None` is the cancel path, and the waiter must read it as a cancel
+        // rather than as an empty answer.
+        s.answer("q1", None).await.expect("cancel is deliverable");
+        assert_eq!(rx.await.unwrap(), None, "a cancel is not an empty answer");
     }
 }

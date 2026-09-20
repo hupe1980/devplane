@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-const PAGE: &str = include_str!("../ui/index.html");
+const PAGE: &str = include_str!("../ui/legacy.html");
 
 /// Every `r.<field>`, `i.<field>` and `w.<field>` the page reads.
 ///
@@ -68,6 +68,9 @@ async fn serve_one_run() -> (std::net::SocketAddr, reqwest::Client) {
             devplane::core::event::Event::QuestionAsked {
                 question: "Keep it?".into(),
                 options: vec!["yes".into()],
+                ask: None,
+                request_id: None,
+                form: None,
             },
             Some("/tmp/repo".into()),
             devplane::core::run::RunMode::Observed,
@@ -348,8 +351,20 @@ fn the_answers_an_agent_offered_are_answerable() {
         "and picking it must send that option's own id, not a guessed string"
     );
     assert!(
-        PAGE.contains("option_id: opt"),
-        "the choice goes to the API as option_id"
+        PAGE.contains("answer({ option: opt"),
+        "the choice goes to the API as the option the agent offered"
+    );
+    // **Addressed by the ask, never by the session.** The two routes this page
+    // used to choose between are one, and the token it posts to outlives the
+    // process that asked — which is what makes a control on a question whose
+    // agent has gone a button that works rather than one that fails.
+    assert!(
+        PAGE.contains("/api/asks/${req}/answer"),
+        "answering goes to the ask's own route"
+    );
+    assert!(
+        PAGE.contains(r#"data-req="${esc(i.ask || "")}""#),
+        "an answer control carries the ask, not the protocol request id"
     );
     // An option with no id belongs to a provider dialog Devplane cannot
     // answer. Readable, never dressed up as a button.
@@ -705,7 +720,7 @@ fn the_sections_that_hold_rows_say_they_are_lists() {
 #[test]
 fn the_page_renders_and_escapes_what_it_renders() {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ui_render.js");
-    let page = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/index.html");
+    let page = concat!(env!("CARGO_MANIFEST_DIR"), "/ui/legacy.html");
     let out = match std::process::Command::new("node")
         .arg(script)
         .arg(page)
@@ -1193,8 +1208,35 @@ fn the_rule_is_offered_and_never_written() {
         "the board must not reach a policy route: {writes:?}"
     );
     assert!(
-        !PAGE.contains(r#"data-act="writerule""#) && !PAGE.contains("auto_allow\", {"),
+        !PAGE.contains(r#"data-act="writerule""#),
         "no control writes a permission rule"
+    );
+
+    // **The page and the daemon compose the same paste line.**
+    //
+    // They drifted apart once already: the destination became the agent's
+    // JSON settings and the page kept emitting TOML for a key that by then
+    // decided nothing. Both now render exactly one shape, so the test is that
+    // the page contains the shape `core::offer::RuleOffer::pasteable` builds.
+    let from_the_daemon = devplane::core::offer::RuleOffer {
+        rule: "Bash(cargo test *)".into(),
+        basis: devplane::core::offer::Basis::Call,
+        covers: 1,
+        more: false,
+        file: "/repo/.claude/settings.json".into(),
+        section: devplane::core::offer::ALLOW_KEY.into(),
+    }
+    .pasteable();
+    let (prefix, _) = from_the_daemon
+        .split_once('[')
+        .expect("a list to paste into");
+    assert!(
+        PAGE.contains(prefix),
+        "the page composes a different paste line from the daemon's {from_the_daemon:?}"
+    );
+    assert!(
+        !PAGE.contains("auto_allow"),
+        "the page offers a key that no longer exists"
     );
 
     // The rule stays on the screen. A toast is not a fallback for a line
@@ -1675,4 +1717,229 @@ fn the_page_does_not_re_sort_what_the_daemon_ranked() {
         !inbox.contains(".sort("),
         "the page re-sorts the waiting list, so there are two authorities on what is urgent"
     );
+}
+
+/// **No control on the page reaches a merge or weakens a permission.**
+///
+/// An absence check, because that is the only way an absence stays true. Both
+/// properties are ones a reasonable person removes by accident while adding
+/// something helpful — a "merge when green" button is an obvious convenience,
+/// and a "don't ask me during a fan-out" toggle is an obvious kindness — and
+/// neither failure is loud.
+#[test]
+fn no_page_control_reaches_a_merge_or_a_weaker_permission() {
+    // Fetch calls the page makes, and the parameters it sends with them.
+    for line in PAGE.lines() {
+        let l = line.to_lowercase();
+        if !l.contains("fetch(") && !l.contains("api/") {
+            continue;
+        }
+        for forbidden in ["merge", "squash", "rebase-and-merge", "no_verify"] {
+            assert!(
+                !l.contains(forbidden),
+                "a page request names `{forbidden}`:\n  {line}"
+            );
+        }
+    }
+
+    // And nothing anywhere in the page offers to skip, bypass or pre-approve.
+    // `allow` on its own is legitimate — it is how a permission item's own
+    // answer is spelled — so only the weakening forms are named.
+    for forbidden in [
+        "dangerously",
+        "skip-permissions",
+        "skippermissions",
+        "bypasspermissions",
+        "auto_allow",
+        "allow_always",
+    ] {
+        assert!(
+            !PAGE.to_lowercase().contains(forbidden),
+            "the page offers `{forbidden}`, which would let a surface weaken a decision \
+             the permission system owns"
+        );
+    }
+}
+
+/// **The page colours a gauge by the number the inbox raises at, not by one of
+/// its own.**
+///
+/// `context_high_percent` is configurable and the page had `85` written into
+/// it, so a machine that lowered the threshold got an inbox item at 70 % and a
+/// gauge that stayed calm until 85 — one rule, two surfaces, and no way to
+/// notice from either.
+#[test]
+fn the_page_reads_its_thresholds_from_the_daemon() {
+    assert!(
+        PAGE.contains("thresholds?.context_high_percent"),
+        "the gauge threshold must come from the board payload"
+    );
+    assert!(
+        !PAGE.contains("pct >= 85"),
+        "a threshold written into the page is one that cannot follow the configuration"
+    );
+}
+
+/// **The two renderers say the same thing about a session with nothing to say.**
+///
+/// A run the roster found before any hook did has no summary, and both surfaces
+/// substitute words for the empty column — `render::summary_line` for the
+/// terminal and `SUMMARY_FALLBACK` for the page. They are the same six
+/// sentences written twice in two languages, and nothing compared them: a
+/// person moving between `devplane ls` and the board would have had no way to
+/// tell a changed sentence from a changed session.
+#[test]
+fn both_renderers_describe_a_silent_session_identically() {
+    // **Both sides are parsed into `state -> sentence` and the maps compared.**
+    //
+    // The first version of this test asked whether the page's sentence appeared
+    // *anywhere* in the Rust function, which the match arms' own state names
+    // satisfy: changing the page's `idle` line to `"idle"` left it green,
+    // because `"idle"` is the pattern on the left of the arrow. A check that
+    // reads as a comparison and compares something else is the failure class
+    // this repository keeps finding in its own guards, so this one was run
+    // against a wrong value in both directions before it was believed.
+    let page_map = {
+        let page = PAGE
+            .split("const SUMMARY_FALLBACK = {")
+            .nth(1)
+            .and_then(|s| s.split("};").next())
+            .expect("the page's fallback map");
+        let mut m = std::collections::BTreeMap::new();
+        for line in page.lines() {
+            let Some((state, said)) = line.split_once(':') else {
+                continue;
+            };
+            let said = said.trim().trim_end_matches(',');
+            let Some(said) = said.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else {
+                continue;
+            };
+            m.insert(state.trim().to_string(), said.to_string());
+        }
+        m
+    };
+
+    let rust_map = {
+        let rust = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/render.rs"))
+            .expect("render.rs");
+        let arm = rust
+            .split("pub fn summary_line(")
+            .nth(1)
+            .and_then(|s| s.split("\n}").next())
+            .expect("summary_line");
+        let mut m = std::collections::BTreeMap::new();
+        for line in arm.lines() {
+            let line = line.trim();
+            let Some((left, right)) = line.split_once("=>") else {
+                continue;
+            };
+            let Some(said) = right
+                .trim()
+                .trim_end_matches(',')
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+            else {
+                continue;
+            };
+            // A guarded arm is keyed by what it guards on, not by the state:
+            // `"waiting" if waiting_for == Some("job")` is the board's `job`
+            // row. Without this the parse would silently skip the arm and the
+            // comparison would pass while the two renderers disagreed — the
+            // exact failure this test was rewritten to stop.
+            if let Some(guard) = left
+                .split_once("Some(\"")
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(v, _)| v)
+            {
+                m.insert(guard.to_string(), said.to_string());
+                continue;
+            }
+            for state in left.split('|') {
+                let state = state.trim().trim_matches('"');
+                if !state.is_empty() && state != "_" {
+                    m.insert(state.to_string(), said.to_string());
+                }
+            }
+        }
+        m
+    };
+
+    assert!(
+        page_map.len() >= 5 && rust_map.len() >= 5,
+        "the parse read {} page states and {} terminal states, so it is reading neither",
+        page_map.len(),
+        rust_map.len()
+    );
+    assert_eq!(
+        page_map, rust_map,
+        "the board and the terminal describe a silent session differently"
+    );
+}
+
+/// **Every action the inbox can offer is one some surface performs.**
+///
+/// *An offered action is an implemented action* is a standing rule here, and
+/// nothing checked it: a new `Action` variant becomes a word in a trailer and a
+/// button nobody wired, and the failure is silent in the worst direction —
+/// somebody presses it and nothing happens.
+///
+/// Three of them are deliberately not buttons and are listed here rather than
+/// discovered: `open`, `open_pr` and `open_issue` are **links or the enter
+/// key**, because opening a thing is navigation and a button that navigates is
+/// a link somebody has hidden.
+#[test]
+fn every_offered_action_is_one_a_surface_performs() {
+    let core = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/core/attention.rs"
+    ))
+    .expect("attention.rs");
+
+    // The wire spellings, read from the one place they are written.
+    let offered: Vec<String> = core
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            let rest = t.strip_prefix("Action::")?;
+            let (_, said) = rest.split_once("=> \"")?;
+            Some(said.trim_end_matches("\",").trim_matches('"').to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    assert!(
+        offered.len() >= 10,
+        "the scan found {} actions, so it is not reading the enum",
+        offered.len()
+    );
+
+    // Navigation rather than a verb, and each one's implementation named here
+    // so that "it is handled elsewhere" is a claim with an address rather than
+    // an excuse. `open` is the row: select it and press enter. `open_pr` and
+    // `open_issue` are the item's own `url`, rendered as a link — a button that
+    // navigates is a link somebody has hidden.
+    const NAVIGATION: &[(&str, &str)] = &[
+        ("open", "openTalk("),
+        ("open_pr", "i.url"),
+        ("open_issue", "i.url"),
+    ];
+
+    for action in &offered {
+        if let Some((_, how)) = NAVIGATION.iter().find(|(a, _)| a == action) {
+            assert!(
+                PAGE.contains(how),
+                "`{action}` is navigation, implemented by `{how}`, and the page has no such thing"
+            );
+            continue;
+        }
+        assert!(
+            PAGE.contains(&format!("kind === \"{action}\"")),
+            "the inbox can offer `{action}` and the board has no handler for it — \
+             an offered action is an implemented action"
+        );
+        assert!(
+            PAGE.contains(&format!("data-act=\"{action}\"")),
+            "the board handles `{action}` and renders no control for it, so it is \
+             reachable only by somebody reading the source"
+        );
+    }
 }

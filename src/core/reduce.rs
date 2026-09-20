@@ -21,6 +21,11 @@ const RECENT_TOOLS: usize = 20;
 /// that nobody is asking any more.
 pub fn apply(run: &mut Run, env: &EventEnvelope) {
     run.last_event_at = env.at;
+    // Which channels are carrying this session decides whose word counts about
+    // its state, so it is recorded before anything acts on it.
+    if matches!(env.source, crate::core::Source::Hook) {
+        run.last_hook_at = Some(env.at);
+    }
     if env.event.is_activity() {
         run.last_activity_at = env.at;
         // Anything the session says about itself makes it real rather than
@@ -66,6 +71,14 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             run.state = RunState::Working;
         }
 
+        Event::AgentProcessSpawned { pid } => {
+            // Not a liveness signal. A driven run is live while its connection
+            // is, and `poller::still_running` deliberately never consults this
+            // for one. It is here so that a daemon which was killed rather than
+            // stopped leaves behind enough to find the agent it abandoned.
+            run.pid = Some(*pid);
+        }
+
         Event::PromptSubmitted { .. } => {
             run.state = RunState::Working;
             run.blocked_on = None;
@@ -108,6 +121,29 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             }
             if !ok {
                 run.totals.errors += 1;
+            }
+        }
+
+        Event::PermissionModeSeen { mode } => {
+            let seen = crate::core::run::PermissionMode::parse(mode);
+            // **Only a change moves the clock.** This arrives on every prompt
+            // and every finished tool call, so stamping it each time would
+            // make "seen in auto since" mean "a moment ago", for ever, which
+            // is worse than not showing it: the one fact the row exists to
+            // carry is *how long this has been true*.
+            if run.permission_mode.as_ref() != Some(&seen) {
+                run.permission_mode = Some(seen);
+                run.permission_mode_seen = Some(env.at);
+            }
+        }
+
+        Event::AgentModeSeen { mode } => {
+            // Only a change moves the clock, for the same reason
+            // `PermissionModeSeen` above does: the fact worth carrying is how
+            // long this has been true.
+            if run.agent_mode.as_deref() != Some(mode.as_str()) {
+                run.agent_mode = Some(mode.clone());
+                run.agent_mode_seen = Some(env.at);
             }
         }
 
@@ -169,6 +205,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             waiting_for,
             message,
             request_id,
+            ask,
             options,
             call,
         } => {
@@ -186,6 +223,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                     waiting_for: waiting_for.clone(),
                     message: message.clone(),
                     request_id: request_id.clone(),
+                    ask: ask.clone().map(crate::core::AskId::new),
                     // **The event first, the run's in-flight call second.**
                     // `BlockedOn::input` was `None` at every site, which made
                     // it a field the type documented and nothing ever set —
@@ -200,23 +238,45 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                         .map(|c| c.input.clone())
                         .or_else(|| last_pending_tool(run).and_then(|c| c.input.clone())),
                     options: options.clone(),
+                    form: None,
                     since: env.at,
                 });
             }
         }
 
-        Event::QuestionAsked { question, options } => {
+        Event::QuestionAsked {
+            question,
+            options,
+            request_id,
+            ask,
+            form,
+        } => {
             run.state = RunState::Waiting(WaitingFor::Question);
             run.blocked_on = Some(BlockedOn {
                 waiting_for: WaitingFor::Question,
                 message: Some(question.clone()),
-                request_id: None,
+                // Present only for a driven run. An observed session's dialog
+                // belongs to the provider, and a row offering to answer one
+                // would be offering something no route can deliver.
+                request_id: request_id.clone(),
+                ask: ask.clone().map(crate::core::AskId::new),
                 tool: None,
                 input: None,
                 options: options.clone(),
+                form: form.clone(),
                 since: env.at,
             });
             run.summary = Some(question.clone());
+        }
+
+        // The question stopped being answerable. Clearing the block is what
+        // takes the row out of the inbox; leaving it would keep a button whose
+        // request no longer exists.
+        Event::QuestionEnded { .. } => {
+            if matches!(run.state, RunState::Waiting(WaitingFor::Question)) {
+                run.state = RunState::Working;
+                run.blocked_on = None;
+            }
         }
 
         Event::TurnEnded => {
@@ -293,13 +353,28 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                 (_, RunState::Failed) => RunState::Failed,
                 (Some("error") | Some("failed"), _) => RunState::Failed,
                 (Some("clear") | Some("logout"), _) => RunState::Stopped,
+                // **The daemon stopping is not the work finishing.** Without
+                // this arm the catch-all below promoted every run the shutdown
+                // tore down to `Completed`, so interrupted work came back from
+                // a restart wearing the one word this product distrusts — and
+                // `blocked_on` was cleared with it, so the question it was
+                // holding vanished from the run even though the ask row
+                // survived.
+                (Some("interrupted"), _) => RunState::Interrupted,
                 _ => RunState::Completed,
             };
-            run.blocked_on = None;
+            // **A run that was interrupted keeps what it was blocked on.** That
+            // is the difference between *this ended* and *this was cut off
+            // while waiting for you*: the second is answerable after a restart
+            // and the surface has to be able to say so.
+            if !matches!(run.state, RunState::Interrupted) {
+                run.blocked_on = None;
+            }
             run.subagents.clear();
         }
 
         Event::RosterSeen {
+            jobs,
             kind,
             state,
             status,
@@ -340,14 +415,9 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                 // it knows better than we do what it is doing.
                 run.state = match state.as_str() {
                     "working" => RunState::Working,
-                    "blocked" => RunState::Waiting(match waiting_for.as_deref() {
-                        Some(w) if w.contains("permission") => WaitingFor::Permission,
-                        Some(w) if w.contains("input") || w.contains("question") => {
-                            WaitingFor::Question
-                        }
-                        Some(other) => WaitingFor::Other(other.to_string()),
-                        None => WaitingFor::Question,
-                    }),
+                    "blocked" => {
+                        RunState::Waiting(WaitingFor::parse_roster(waiting_for.as_deref()))
+                    }
                     "done" => RunState::Idle,
                     "failed" => RunState::Failed,
                     "stopped" => RunState::Stopped,
@@ -361,23 +431,145 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                         },
                         message: waiting_for.clone(),
                         request_id: None,
+                        ask: None,
                         tool: None,
                         input: None,
                         options: Vec::new(),
+                        form: None,
                         since: env.at,
                     });
                 }
+            } else if run.last_hook_at.is_none() {
+                // **An interactive row for a session no hook has ever spoken
+                // about, which on an unconnected machine is every session.** The
+                // roster is the only channel there is, so it decides on every
+                // sample rather than once.
+                //
+                // `last_hook_at` is the test, and the run's state is not: a
+                // condition on `Starting` is cleared by the roster's own first
+                // sample, so it would run once and shut.
+                //
+                // All three documented values have an arm. `waiting` means the
+                // vendor is reporting a person blocked on its own dialog, and
+                // for an unconnected session nothing else can say so.
+                let reason = waiting_for.clone();
+                match status.as_deref() {
+                    Some("busy") => {
+                        run.state = RunState::Working;
+                        run.blocked_on = None;
+                    }
+                    Some("waiting") => {
+                        let what = WaitingFor::parse_roster(reason.as_deref());
+                        // Only ever additive: a block a hook recorded carries a
+                        // request id, the options and a token to answer by, and
+                        // the roster carries none of those. Replacing it would
+                        // turn an answerable question into a row that can only
+                        // be looked at.
+                        if !run.state.needs_human() {
+                            run.state = RunState::Waiting(what.clone());
+                            run.blocked_on = Some(BlockedOn {
+                                waiting_for: what,
+                                message: reason,
+                                // Nothing to answer by: this session is the
+                                // vendor's, and the errand is to reach its own
+                                // window. `attention` already renders such an
+                                // item without Allow and Deny buttons.
+                                request_id: None,
+                                ask: None,
+                                tool: None,
+                                input: None,
+                                options: Vec::new(),
+                                form: None,
+                                since: env.at,
+                            });
+                        }
+                    }
+                    Some("idle") => {
+                        // **`idle` is a statement about token generation, and
+                        // it is true of a session waiting on its own test suite
+                        // as well as of one waiting for you.** The job count
+                        // below is the finer signal and ends itself on a
+                        // checked zero; overwriting it here would take a
+                        // running suite off the board twice a second.
+                        if !run.state.waits_on_a_job() {
+                            run.state = RunState::Idle;
+                            run.blocked_on = None;
+                        }
+                    }
+                    // A value this build does not know, and no value at all,
+                    // are the same answer: the session exists and that is the
+                    // whole claim. Neither is evidence for a change, and
+                    // calling either one working would be an invention.
+                    _ => {
+                        if matches!(run.state, RunState::Starting) {
+                            run.state = RunState::Idle;
+                        }
+                    }
+                }
             } else if matches!(run.state, RunState::Starting) {
-                // An interactive row for a session we have never heard from.
-                // The roster is all we know, so it decides — but only until the
-                // first hook arrives, which is always fresher than a poll.
+                // A hook has spoken about this session but has not yet said
+                // what it is doing — the mode and the working directory arrive
+                // before any turn does. `Starting` never ages out, so leaving
+                // it there would keep a dormant tab in the working set for
+                // ever; the roster is the only thing here with an opinion.
                 run.state = match status.as_deref() {
                     Some("busy") => RunState::Working,
-                    Some(_) => RunState::Idle,
-                    // No status at all: the session exists and that is the
-                    // whole claim. Calling it working would be an invention.
-                    None => RunState::Idle,
+                    _ => RunState::Idle,
                 };
+            }
+
+            // **What the roster calls `idle` is two different situations, and
+            // only one of them is a person's turn.**
+            //
+            // Every provider reports a session as idle whenever it is not
+            // generating — including while it waits on a background command it
+            // started itself, which for agent work is most often a test suite.
+            // The board said *waiting for a prompt* for both, so a forty-minute
+            // suite read as *you are the blocker* for forty minutes. The
+            // process table is the evidence the roster does not carry: the
+            // session's own running commands, counted.
+            //
+            // It decides only between *idle* and *waiting on a job*. A session
+            // blocked on a permission or a question is untouched, because a
+            // person is genuinely owed something there and a running command
+            // does not change that.
+            if let Some(count) = jobs
+                && !run.state.needs_human()
+                && run.state.is_live()
+            {
+                match count {
+                    0 => {
+                        // A checked zero: the job finished. Only a block this
+                        // same rule put there is cleared — anything else was
+                        // put there by something that knew more.
+                        if run.state.waits_on_a_job() {
+                            run.state = RunState::Idle;
+                            run.blocked_on = None;
+                        }
+                    }
+                    _ => {
+                        // `Working` is left alone: the provider saying the
+                        // model is generating is a stronger claim than ours,
+                        // and a command running during a turn is ordinary.
+                        if !matches!(run.state, RunState::Working) {
+                            run.state = RunState::Waiting(WaitingFor::Job);
+                            run.blocked_on = Some(BlockedOn {
+                                waiting_for: WaitingFor::Job,
+                                message: Some(match count {
+                                    1 => "running a command it started".to_string(),
+                                    n => format!("running {n} commands it started"),
+                                }),
+                                request_id: None,
+                                ask: None,
+                                tool: None,
+                                input: None,
+                                options: Vec::new(),
+                                form: None,
+                                since: env.at,
+                            });
+                        }
+                    }
+                }
             }
             let _ = kind;
         }
@@ -604,7 +796,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::core::event::{ApiUsage, Source};
+    use crate::core::event::ApiUsage;
     use crate::core::ids::SessionId;
     use crate::core::run::RunMode;
     use serde_json::json;
@@ -619,8 +811,82 @@ mod tests {
         )
     }
 
+    /// An envelope carrying the channel the event actually comes from.
+    ///
+    /// This labelled everything `Source::Hook`, including roster samples, which
+    /// no hook has ever produced. The mislabelling was invisible while nothing
+    /// read the source — and it hid the roster bugs completely, because every
+    /// test that drove a roster event was telling the reducer a hook had
+    /// spoken, which is the one condition that makes the roster stand down.
     fn ev(e: Event) -> EventEnvelope {
-        EventEnvelope::new(crate::core::ids::RunId::new("s1"), Source::Hook, e)
+        let source = e.test_source();
+        EventEnvelope::new(crate::core::ids::RunId::new("s1"), source, e)
+    }
+
+    /// **Only a change moves the clock, because the clock is the whole point.**
+    ///
+    /// This event arrives on every prompt and every finished tool call, so
+    /// stamping the timestamp each time would make *"in auto, seen 3 seconds
+    /// ago"* true for ever — which reads as reassuring and is the opposite of
+    /// the fact the row exists to carry. A person with six repositories wants
+    /// to know one of them has been deciding without them since Tuesday.
+    #[test]
+    fn a_repeated_mode_does_not_reset_how_long_it_has_been_true() {
+        use crate::core::run::PermissionMode;
+        let mut r = run();
+        assert_eq!(r.permission_mode, None, "unknown until a carrier arrives");
+
+        apply(
+            &mut r,
+            &ev(Event::PermissionModeSeen {
+                mode: "auto".into(),
+            }),
+        );
+        let first = r.permission_mode_seen.expect("stamped on first sight");
+        assert_eq!(r.permission_mode, Some(PermissionMode::Auto));
+
+        // The same mode again, later. Nothing changed, so nothing moves.
+        let mut again = ev(Event::PermissionModeSeen {
+            mode: "auto".into(),
+        });
+        again.at = first + jiff::SignedDuration::from_secs(600);
+        apply(&mut r, &again);
+        assert_eq!(
+            r.permission_mode_seen,
+            Some(first),
+            "an unchanged mode reset the clock, so the age is always zero"
+        );
+
+        // A different mode is a different fact and does move it.
+        let mut switched = ev(Event::PermissionModeSeen {
+            mode: "default".into(),
+        });
+        switched.at = first + jiff::SignedDuration::from_secs(1200);
+        apply(&mut r, &switched);
+        assert_eq!(r.permission_mode, Some(PermissionMode::Default));
+        assert_eq!(r.permission_mode_seen, Some(switched.at));
+    }
+
+    /// A mode this build does not know is carried, not flattened.
+    #[test]
+    fn an_unknown_mode_reaches_the_run_intact() {
+        use crate::core::run::PermissionMode;
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::PermissionModeSeen {
+                mode: "somethingNew".into(),
+            }),
+        );
+        assert_eq!(
+            r.permission_mode,
+            Some(PermissionMode::Unrecognised("somethingNew".into()))
+        );
+        assert_eq!(
+            r.permission_mode.as_ref().unwrap().asks_a_person(),
+            None,
+            "and it still refuses to claim anybody is supervising it"
+        );
     }
 
     #[test]
@@ -664,6 +930,9 @@ mod tests {
             &ev(Event::QuestionAsked {
                 question: "Keep the legacy route?".into(),
                 options: vec!["Keep".into(), "Remove".into()],
+                ask: None,
+                request_id: None,
+                form: None,
             }),
         );
         apply(&mut r, &ev(Event::TurnEnded));
@@ -680,6 +949,7 @@ mod tests {
                 waiting_for: WaitingFor::Permission,
                 message: Some("Bash wants to run".into()),
                 request_id: None,
+                ask: None,
                 options: vec![],
                 call: None,
             }),
@@ -690,6 +960,7 @@ mod tests {
                 waiting_for: WaitingFor::Idle,
                 message: None,
                 request_id: None,
+                ask: None,
                 options: vec![],
                 call: None,
             }),
@@ -706,6 +977,7 @@ mod tests {
                 waiting_for: WaitingFor::Permission,
                 message: None,
                 request_id: None,
+                ask: None,
                 options: vec![],
                 call: None,
             }),
@@ -772,6 +1044,7 @@ mod tests {
                 pid: Some(42),
                 name: Some("flaky-test-fix".into()),
                 started_at_ms: None,
+                jobs: None,
             }),
         );
         assert_eq!(r.state, RunState::Waiting(WaitingFor::Permission));
@@ -780,6 +1053,10 @@ mod tests {
     }
 
     fn roster(kind: &str, status: Option<&str>) -> Event {
+        roster_with_jobs(kind, status, None)
+    }
+
+    fn roster_with_jobs(kind: &str, status: Option<&str>, jobs: Option<u32>) -> Event {
         Event::RosterSeen {
             kind: kind.into(),
             state: None,
@@ -789,7 +1066,250 @@ mod tests {
             name: Some("repo-a1".into()),
             entrypoint: Some("claude-vscode".into()),
             started_at_ms: None,
+            jobs,
         }
+    }
+
+    /// **A session with no hooks is the only thing the roster speaks for, and
+    /// it was consulted once and then ignored for the rest of the session.**
+    ///
+    /// The condition said *"until the first hook arrives"* and tested whether
+    /// the state was still `Starting` — which the roster's own first sample
+    /// clears. So the branch ran once and shut. On a machine where nothing is
+    /// connected, that is every session on the board frozen at whatever it
+    /// happened to be doing the first time Devplane looked.
+    #[test]
+    fn a_session_with_no_hooks_is_not_frozen_at_its_first_sighting() {
+        let mut r = run();
+        apply(&mut r, &ev(roster("interactive", Some("busy"))));
+        assert_eq!(r.state, RunState::Working);
+
+        apply(&mut r, &ev(roster("interactive", Some("idle"))));
+        assert_eq!(
+            r.state,
+            RunState::Idle,
+            "the turn ended and the board says so"
+        );
+
+        apply(&mut r, &ev(roster("interactive", Some("busy"))));
+        assert_eq!(r.state, RunState::Working, "and it starts again");
+    }
+
+    /// **The third status value, which had no arm and fell into idleness.**
+    ///
+    /// `status` is documented as `busy`, `waiting` or `idle`. `waiting` means
+    /// the session is blocked on a person and `waitingFor` names the reason.
+    /// Both were discarded: the state became `Idle`, `needs_human()` was false,
+    /// and a permission dialog sitting on somebody's screen never reached the
+    /// inbox at all — for an unconnected session, the only channel that could
+    /// have said so.
+    #[test]
+    fn a_permission_the_roster_reports_reaches_the_inbox() {
+        for (reported, expected) in [
+            ("permission prompt", WaitingFor::Permission),
+            ("input needed", WaitingFor::Question),
+            (
+                "sandbox request",
+                WaitingFor::Other("sandbox request".into()),
+            ),
+            ("worker request", WaitingFor::Other("worker request".into())),
+            ("dialog open", WaitingFor::Other("dialog open".into())),
+        ] {
+            let mut r = run();
+            apply(
+                &mut r,
+                &ev(Event::RosterSeen {
+                    kind: "interactive".into(),
+                    state: None,
+                    status: Some("waiting".into()),
+                    waiting_for: Some(reported.into()),
+                    pid: Some(7),
+                    name: None,
+                    entrypoint: None,
+                    started_at_ms: None,
+                    jobs: None,
+                }),
+            );
+            assert_eq!(r.state, RunState::Waiting(expected), "for {reported:?}");
+            assert!(
+                r.state.needs_human(),
+                "{reported:?} is somebody being waited on"
+            );
+            assert_eq!(
+                r.blocked_on.as_ref().unwrap().message.as_deref(),
+                Some(reported),
+                "and the vendor's own words are kept"
+            );
+            // Nothing to answer by, which is what stops the inbox offering a
+            // button that cannot reach this session.
+            assert!(r.blocked_on.as_ref().unwrap().request_id.is_none());
+
+            // And it clears when the vendor says the wait ended.
+            apply(&mut r, &ev(roster("interactive", Some("busy"))));
+            assert_eq!(r.state, RunState::Working);
+            assert!(r.blocked_on.is_none());
+        }
+    }
+
+    /// **The roster never downgrades what a hook recorded.** A hook-set block
+    /// carries a request id, the options and a token to answer by; the roster
+    /// carries none of them. Overwriting would turn an answerable question into
+    /// a row a person can only look at.
+    #[test]
+    fn the_roster_does_not_replace_a_block_a_hook_can_answer() {
+        let mut r = run();
+        let id = r.id.clone();
+        apply(
+            &mut r,
+            &EventEnvelope::new(
+                id,
+                crate::core::Source::Hook,
+                Event::QuestionAsked {
+                    question: "Which database?".into(),
+                    options: vec!["postgres".into(), "sqlite".into()],
+                    request_id: Some("req-1".into()),
+                    ask: Some("ask-1".into()),
+                    form: None,
+                },
+            ),
+        );
+        apply(
+            &mut r,
+            &ev(Event::RosterSeen {
+                kind: "interactive".into(),
+                state: None,
+                status: Some("waiting".into()),
+                waiting_for: Some("input needed".into()),
+                pid: Some(7),
+                name: None,
+                entrypoint: None,
+                started_at_ms: None,
+                jobs: None,
+            }),
+        );
+        let b = r.blocked_on.as_ref().expect("still blocked");
+        assert_eq!(
+            b.request_id.as_deref(),
+            Some("req-1"),
+            "the answerable one survives"
+        );
+        assert_eq!(b.options.len(), 2, "and so do its options");
+
+        // And once a hook has spoken, the roster stops deciding the state at
+        // all — the hook channel is the fresher and richer one.
+        apply(&mut r, &ev(roster("interactive", Some("busy"))));
+        assert_eq!(r.state, RunState::Waiting(WaitingFor::Question));
+    }
+
+    /// **The bug a person found on their own board**, and the reason it is
+    /// worth a state of its own.
+    ///
+    /// A session was running a test suite it had started in the background.
+    /// The roster called it `idle`, because no tokens were being generated, and
+    /// Devplane rendered that as *waiting for a prompt* — telling the person
+    /// they were the blocker for as long as the suite ran. Agents wait on long
+    /// suites constantly, so this was not an edge case; it was the board being
+    /// wrong about its own central question most afternoons.
+    #[test]
+    fn a_session_waiting_on_its_own_test_suite_is_not_waiting_for_a_person() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(roster_with_jobs("interactive", Some("idle"), Some(1))),
+        );
+
+        assert_eq!(r.state, RunState::Waiting(WaitingFor::Job));
+        assert!(!r.state.needs_human(), "nothing is owed by anybody");
+        assert!(r.state.waits_on_a_job());
+        assert!(
+            r.blocked_on.as_ref().unwrap().message.as_deref()
+                == Some("running a command it started"),
+            "and the row says what it is waiting on"
+        );
+
+        // **And it stays on the board.** `is_active` ages an idle session out
+        // after six hours; a suite that runs longer than that would take the
+        // session off the board exactly when it mattered, and the person would
+        // come back to a finished run they were never shown.
+        r.last_activity_at -= jiff::Span::new().hours(9);
+        assert!(r.is_active(), "a running job never ages out");
+    }
+
+    /// The other half, which is what makes the first half safe to act on: a
+    /// checked zero ends the block. Without it the state would be sticky and a
+    /// session really waiting for a prompt would read as busy for ever — the
+    /// same bug pointed the other way.
+    #[test]
+    fn the_job_finishing_hands_the_session_back_to_the_person() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(roster_with_jobs("interactive", Some("idle"), Some(2))),
+        );
+        assert_eq!(r.state, RunState::Waiting(WaitingFor::Job));
+        assert_eq!(
+            r.blocked_on.as_ref().unwrap().message.as_deref(),
+            Some("running 2 commands it started")
+        );
+
+        apply(
+            &mut r,
+            &ev(roster_with_jobs("interactive", Some("idle"), Some(0))),
+        );
+        assert_eq!(r.state, RunState::Idle);
+        assert!(r.blocked_on.is_none());
+    }
+
+    /// **`None` is not zero, and this is where that distinction earns its
+    /// keep.** A poll that could not read the process table — or one taken
+    /// before this field existed — must leave the board as it found it rather
+    /// than reporting that every job on the machine just finished.
+    #[test]
+    fn a_poll_that_did_not_look_changes_nothing() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(roster_with_jobs("interactive", Some("idle"), Some(1))),
+        );
+        assert_eq!(r.state, RunState::Waiting(WaitingFor::Job));
+        apply(
+            &mut r,
+            &ev(roster_with_jobs("interactive", Some("idle"), None)),
+        );
+        assert_eq!(
+            r.state,
+            RunState::Waiting(WaitingFor::Job),
+            "an unchecked poll is not evidence the job ended"
+        );
+    }
+
+    /// A person waiting on a permission outranks a command running underneath
+    /// it. The agent may well have left something in the background; what the
+    /// board must say is the thing only a person can clear.
+    #[test]
+    fn a_running_job_never_hides_a_question_somebody_is_owed() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::Blocked {
+                waiting_for: WaitingFor::Permission,
+                message: Some("Bash(rm -rf /)".into()),
+                request_id: Some("r1".into()),
+                ask: None,
+                options: Vec::new(),
+                call: None,
+            }),
+        );
+        apply(
+            &mut r,
+            &ev(roster_with_jobs("interactive", Some("idle"), Some(3))),
+        );
+        assert_eq!(
+            r.state,
+            RunState::Waiting(WaitingFor::Permission),
+            "a running command does not answer a permission"
+        );
+        assert!(r.state.needs_human());
     }
 
     #[test]
@@ -813,6 +1333,9 @@ mod tests {
             &ev(Event::QuestionAsked {
                 question: "which one?".into(),
                 options: vec![],
+                ask: None,
+                request_id: None,
+                form: None,
             }),
         );
         apply(&mut r, &ev(roster("interactive", Some("busy"))));
@@ -836,6 +1359,7 @@ mod tests {
                 waiting_for: WaitingFor::Permission,
                 message: Some("rm -rf node_modules".into()),
                 request_id: Some("req-1".into()),
+                ask: None,
                 options: vec![],
                 call: None,
             }),

@@ -73,6 +73,28 @@ async fn poll_once(state: &Shared) -> anyhow::Result<usize> {
             .and_then(|e| e.entrypoint.clone())
     };
 
+    // **What the roster calls `idle` is two situations, and one `ps` tells
+    // them apart.** A session waiting on a test suite it started reports
+    // exactly as one waiting for a person to type, and the board said the same
+    // sentence for both. The process table carries the difference and the
+    // roster does not.
+    //
+    // Only asked when a row could be affected, so a machine whose sessions are
+    // all busy or all connected pays nothing. One `ps` answers for every
+    // session at once, beside the `claude agents --json` this loop already
+    // spawns each pass — a second short-lived process on a poll that has one.
+    let jobs = {
+        let idle_pids: Vec<u32> = rows
+            .iter()
+            .filter(|r| r.status.as_deref() != Some("busy"))
+            .filter_map(|r| r.pid)
+            .collect();
+        match idle_pids.is_empty() {
+            true => std::collections::HashMap::new(),
+            false => crate::observe::procs::running_jobs(&idle_pids),
+        }
+    };
+
     let mut seen = 0;
     for row in &rows {
         let Some(key) = row.run_key() else { continue };
@@ -87,11 +109,18 @@ async fn poll_once(state: &Shared) -> anyhow::Result<usize> {
         };
         let mut event = row.to_event();
         if let crate::core::Event::RosterSeen {
-            ref mut entrypoint, ..
+            ref mut entrypoint,
+            jobs: ref mut jobs_field,
+            ..
         } = event
-            && entrypoint.is_none()
         {
-            *entrypoint = entrypoint_of(&key);
+            if entrypoint.is_none() {
+                *entrypoint = entrypoint_of(&key);
+            }
+            // Absent unless this row was actually looked at, because the
+            // reducer treats a checked zero as *the job finished* and must
+            // never be handed one that means *nobody asked*.
+            *jobs_field = row.pid.and_then(|pid| jobs.get(&pid).copied());
         }
         state
             .ingest(
@@ -117,6 +146,67 @@ async fn poll_once(state: &Shared) -> anyhow::Result<usize> {
 /// to know is to look at the clock. The sweeper also drives desktop
 /// notifications, because the inbox changes for reasons no event announces —
 /// a run going quiet is one of them.
+/// Ends asks whose project-set deadline has passed.
+///
+/// **The third of the five durable-execution properties, and the one this
+/// product does differently from every system it took the other four from.**
+/// Temporal, Inngest, Restate, Step Functions and LangGraph all let an
+/// unanswered request end; none of them records *who ended it*. An ask that
+/// ends here ends with an authority, the duration, and the file the duration
+/// came from — and if nothing wrote a duration down, nothing ends.
+///
+/// It is a query rather than a timer per waiting ask, which is what makes the
+/// second property (*the wait costs nothing*) true after a restart as well as
+/// before one: the rows are the state, and a daemon that has just started knows
+/// exactly as much as one that has been up for a week.
+pub async fn expiry_sweeper(state: Shared) {
+    loop {
+        // A minute is fine and deliberately coarse. The alternative — waking at
+        // each deadline — is a timer per waiting ask, which is the design this
+        // one exists instead of, and nobody sets a deadline where a minute of
+        // slack matters.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        let now = jiff::Timestamp::now();
+        let overdue: Vec<crate::core::ask::Ask> = match state.store.open_asks().await {
+            Ok(a) => a.into_iter().filter(|a| a.is_overdue(now)).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the open asks");
+                continue;
+            }
+        };
+
+        for mut ask in overdue {
+            let crate::core::ask::Deadline::After(after) = ask.deadline else {
+                continue;
+            };
+            // **The file, not "a setting"**: a person reading this row has to be
+            // able to go and change the thing that did it.
+            //
+            // Which means the *path*, not the filename. Both arms of this used
+            // to produce the bare string `devplane.toml` — a conditional that
+            // computed the same answer either way — so the row that exists to
+            // say *where the clock that ended your question is configured* told
+            // somebody with six projects to go and look in six places. The
+            // project id is the project's path, so the real file is one join
+            // away.
+            let set_by = deadline_source(ask.project.as_ref());
+            let ended = crate::core::ask::Ended::Timer { after, set_by };
+            ask.end(ended.clone(), now);
+            if let Err(e) = state.store.save_ask(&ask).await {
+                tracing::error!(error = %e, ask = %ask.id, "could not close an expired ask");
+                continue;
+            }
+
+            // **Told to the agent, recorded in the log, and shown to the
+            // person — in that order and all three.** The old ten-minute
+            // refusal did only the middle one, which is how a call refused in
+            // somebody's name became findable only by running `devplane audit`.
+            crate::driven::expire(&state, &ask, &ended).await;
+        }
+    }
+}
+
 pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
     let mut notifier = crate::notify::Notifier::new(notify_enabled);
     loop {
@@ -428,14 +518,94 @@ pub async fn retention(state: Shared, keep_event_days: i64, keep_run_days: i64) 
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        // **Zero is not a process id, and `kill` does not treat it as one.**
+        // `kill(0, sig)` addresses every process in the *caller's own process
+        // group*, so `process_alive(0)` asked whether this daemon exists and
+        // answered yes — a run that ever recorded a pid of 0 would have been
+        // considered alive for ever. The same is true of negative values,
+        // which address a group; `pid` is unsigned here, so only zero can
+        // reach it. Found by writing the test rather than by anything failing.
+        if pid == 0 {
+            return false;
+        }
         // SAFETY: `kill` with signal 0 performs no action; it only reports
         // whether the pid exists and is signalable.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+        //
+        // **`EPERM` means the process exists.** `kill(pid, 0)` fails two ways
+        // that mean opposite things: `ESRCH` is *no such process*, `EPERM` is
+        // *it is there and you may not signal it* — owned by another user, or
+        // by root. Comparing the return code to zero conflates them, and reads
+        // everything this daemon does not own as dead.
+        if unsafe { libc::kill(pid as i32, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
         true
+    }
+}
+
+/// Which file set the deadline that ended an ask.
+///
+/// Pure, and separated from the sweeper for the same reason [`still_running`]
+/// is: the rule can then be stated and tested without a store, a clock or a
+/// waiting agent.
+///
+/// **A path, not a filename.** The row this feeds says *a clock refused your
+/// question, and here is where that clock is configured* — so `devplane.toml`
+/// alone sends somebody with six projects to look in six places. A project id
+/// **is** the project's path, so the answer is one join away.
+///
+/// Without a project there is no path to give, and the bare filename is then
+/// the honest answer rather than a misleading one.
+pub fn deadline_source(project: Option<&crate::core::ProjectId>) -> String {
+    match project {
+        Some(p) => std::path::Path::new(p.as_str())
+            .join(crate::core::config::CONFIG_FILE)
+            .to_string_lossy()
+            .into_owned(),
+        None => crate::core::config::CONFIG_FILE.to_string(),
+    }
+}
+
+/// Whether a restored run is still being run by something, at startup.
+///
+/// Pure, and separated from [`reconcile_at_startup`] so the rule can be stated
+/// and tested rather than inferred from a closure inside an async function that
+/// needs a database and a roster to call.
+///
+/// Three cases, and the middle one was wrong for months:
+///
+/// * the provider's roster names it — alive, and the roster outranks everything
+///   because it is the provider speaking about its own sessions;
+/// * **Devplane drove it — not alive, whatever the row says.** It was driven
+///   over an ACP connection on the old daemon's stdio, and those pipes died
+///   with the process that held them. No new daemon can re-establish them:
+///   `sessions` is rebuilt empty on every boot by construction. This answered
+///   *alive* until 2026-09-19, on the reasoning that "its own hooks correct the
+///   record the moment it does anything" — but a driven agent does nothing,
+///   because nothing is driving it. A run Devplane started therefore read
+///   **working** for ever after a bounce, and a question it was holding sat
+///   behind a row that looked busy;
+/// * anything else — a pid if it reported one, and otherwise the benefit of the
+///   doubt, because an interactive session reports no pid and its own hooks
+///   really do correct the record.
+///
+/// `roster` is `None` when it could not be read, which is not the same as
+/// empty: conflating them marks every restored run lost at once.
+pub fn still_running(run: &crate::core::Run, roster: Option<&[String]>) -> bool {
+    if roster.is_some_and(|r| r.iter().any(|k| k == run.id.as_str())) {
+        return true;
+    }
+    if run.mode == crate::core::RunMode::Driven {
+        return false;
+    }
+    match run.pid {
+        Some(pid) => process_alive(pid),
+        None => true,
     }
 }
 
@@ -474,6 +644,106 @@ pub async fn reconcile_at_startup(state: &Shared) {
         },
     };
 
+    // **Agents a previous daemon abandoned.**
+    //
+    // Read before reconciliation, because reconciliation is about to mark
+    // these runs not-live and this needs their recorded pid and worktree while
+    // the rows still carry them.
+    //
+    // A driven run that this daemon did not start, whose recorded process is
+    // still alive and still leads its own group and still looks like the agent
+    // it was: that process outlived the daemon that spawned it, which only
+    // happens when the daemon was killed rather than stopped. Nothing can
+    // reach it — its stdio was the dead daemon's pipes — so it will never
+    // finish and never be answered, and until this ran nothing on the machine
+    // knew it was there.
+    {
+        let recorded: Vec<(u32, String, Option<String>)> = {
+            let w = state.world.lock().await;
+            w.runs()
+                .filter(|r| r.mode == crate::core::RunMode::Driven && r.state.is_live())
+                .filter_map(|r| {
+                    Some((
+                        r.pid?,
+                        r.agent_command.clone()?,
+                        r.worktree
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .or_else(|| Some(r.cwd.display().to_string())),
+                    ))
+                })
+                .collect()
+        };
+        let pairs: Vec<(u32, String)> = recorded
+            .iter()
+            .map(|(pid, cmd, _)| (*pid, cmd.clone()))
+            .collect();
+        let found = crate::observe::procs::leaked(&pairs);
+        if !found.is_empty() {
+            let leaked: Vec<(u32, String, Option<String>)> = found
+                .into_iter()
+                .map(|p| {
+                    let worktree = recorded
+                        .iter()
+                        .find(|(pid, _, _)| *pid == p.pid)
+                        .and_then(|(_, _, w)| w.clone());
+                    (p.pid, p.command, worktree)
+                })
+                .collect();
+            tracing::warn!(
+                count = leaked.len(),
+                "agents started by a previous daemon are still running and cannot be reached"
+            );
+            *state.leaked_agents.lock().await = leaked;
+        }
+    }
+
+    // Questions a driven run was holding when the daemon stopped, captured
+    // **before** reconciliation resolves the run, because resolving it clears
+    // `blocked_on` and the question would then have never existed.
+    //
+    // Each one gets a row naming `nobody`: the agent asked, the person was
+    // never given the chance, and the moment passed.
+    //
+    // **This is the killed-daemon case and only that.** A daemon that is
+    // *stopped* tears its agents down deliberately, and the teardown records
+    // `interrupted` rather than ending the ask — the vendor's session is on
+    // disk, the question is still answerable, and the inbox goes on offering
+    // it. Such a run is not live by the time this runs, so the filter
+    // below never sees it. What reaches here is a run that was still `working`
+    // when the process died, which only happens when nothing got to tear
+    // anything down. That is the authority the
+    // decision log exists to be able to write, and the row it wrote before
+    // 2026-09-19 said `daemon` — Devplane taking responsibility for a question
+    // it had faithfully delivered and nobody had answered.
+    let abandoned: Vec<(crate::core::RunId, String)> = {
+        let w = state.world.lock().await;
+        w.runs()
+            .filter(|r| r.state.is_live() && r.mode == crate::core::RunMode::Driven)
+            .filter_map(|r| {
+                let b = r.blocked_on.as_ref()?;
+                if b.waiting_for != crate::core::WaitingFor::Question {
+                    return None;
+                }
+                Some((r.id.clone(), b.request_id.clone()?))
+            })
+            .collect()
+    };
+    for (run, request_id) in abandoned {
+        state
+            .record(
+                crate::core::Decision::new(
+                    crate::core::Authority::Nobody,
+                    "agent:question",
+                    request_id,
+                    "unanswered",
+                )
+                .because("the daemon did not stop cleanly, and the question went with it")
+                .for_run(&run),
+            )
+            .await;
+    }
+
     let lost = {
         let mut w = state.world.lock().await;
         w.reconcile(&|run| {
@@ -483,17 +753,7 @@ pub async fn reconcile_at_startup(state: &Shared) {
             {
                 return true;
             }
-            match run.pid {
-                Some(pid) => process_alive(pid),
-                // An interactive session reports no pid, and neither does a run
-                // Devplane drove: the process is behind an ACP connection that
-                // did not survive the restart. Its own hooks correct the record
-                // the moment it does anything, and calling it lost on a hunch
-                // would fill the inbox with ghosts every time the daemon
-                // bounced. Whether a *driven* run can still be reached is a
-                // question about sessions, and the inbox asks it separately.
-                None => true,
-            }
+            still_running(run, roster.as_deref())
         })
     };
 
@@ -501,7 +761,7 @@ pub async fn reconcile_at_startup(state: &Shared) {
         if let Err(e) = state.store.append_event(&env).await {
             tracing::warn!(error = %e, "could not persist reconciliation");
         }
-        let _ = state.tx.send(crate::core::Frame::Event(env));
+        let _ = state.tx.send(crate::core::Frame::Event(Box::new(env)));
     }
 }
 
@@ -552,5 +812,125 @@ pub async fn gate_watch(state: Shared) {
             }
         }
         tokio::time::sleep(EVERY).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    /// **A process you may not signal is still a process.**
+    ///
+    /// `kill(pid, 0)` fails two ways that mean opposite things: `ESRCH` is *no
+    /// such process*, `EPERM` is *it exists and is not yours*. Comparing the
+    /// return code to zero — which is what this function did — reports every
+    /// process owned by another user as dead. pid 1 is the case every Unix has:
+    /// `launchd` or `init`, always running, never signalable by a normal user.
+    ///
+    /// What believed it: reconciliation, which would mark a live run `lost`,
+    /// and the guard that stops a second daemon starting on one home.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_we_may_not_signal_is_still_alive() {
+        assert!(
+            process_alive(1),
+            "pid 1 always exists; EPERM was being read as 'no such process'"
+        );
+        // Our own pid is the control: alive and signalable, so this passed
+        // before the fix too and must still pass after it.
+        assert!(process_alive(std::process::id()));
+        // And a pid nothing can plausibly hold is still dead, which is the
+        // property the fix must not trade away.
+        assert!(!process_alive(0), "0 addresses a group, never a process");
+    }
+
+    /// **The timer row names a file somebody can open.**
+    ///
+    /// This is the authority column's whole promise applied to itself: a clock
+    /// ended your question, and the row has to say *which* clock. It said
+    /// `devplane.toml` for every project on the machine, from a conditional
+    /// whose two branches returned the same string.
+    #[test]
+    fn the_deadline_row_names_the_project_s_own_file() {
+        let p = crate::core::ProjectId::from_path(std::path::Path::new("/repos/saas"));
+        let named = deadline_source(Some(&p));
+        assert_eq!(named, "/repos/saas/devplane.toml");
+        assert!(
+            named.contains("/repos/saas"),
+            "a person with six projects has to be told which one: {named}"
+        );
+
+        // Two projects must not produce the same answer, which is the property
+        // the old shape violated for every pair.
+        let q = crate::core::ProjectId::from_path(std::path::Path::new("/repos/mobile"));
+        assert_ne!(deadline_source(Some(&p)), deadline_source(Some(&q)));
+
+        // With no project there is no path to give, and the bare filename is
+        // then honest rather than misleading.
+        assert_eq!(deadline_source(None), "devplane.toml");
+    }
+
+    use super::*;
+    use crate::core::RunMode;
+
+    fn run(mode: RunMode) -> crate::core::Run {
+        let mut r = crate::core::Run::new(
+            crate::core::SessionId::new("s1"),
+            std::path::PathBuf::from("/tmp"),
+            mode,
+            "claude",
+        );
+        r.state = crate::core::RunState::Working;
+        r
+    }
+
+    /// **The measured bug.** A run Devplane drove came back from a restart
+    /// reading `working` for ever: nothing was driving it, nothing ever would
+    /// be, and no hook was going to correct the record because a driven agent
+    /// with no connection does nothing at all.
+    #[test]
+    fn a_driven_run_is_never_still_running_after_a_restart() {
+        assert!(
+            !still_running(&run(RunMode::Driven), None),
+            "its ACP pipes died with the daemon that held them"
+        );
+        // Not even with an empty roster, and not even if it reported a pid:
+        // the process being alive is a fact about a process nobody is talking
+        // to. Answering `alive` here is what left the run reading `working`.
+        let mut with_pid = run(RunMode::Driven);
+        with_pid.pid = Some(std::process::id());
+        assert!(!still_running(&with_pid, Some(&[])));
+    }
+
+    /// The one thing that outranks it: the provider saying the session is its
+    /// own and is live. That is the provider speaking about its own roster,
+    /// which beats anything inferred here.
+    #[test]
+    fn the_providers_roster_outranks_the_rule() {
+        assert!(still_running(
+            &run(RunMode::Driven),
+            Some(&[run(RunMode::Driven).id.to_string()])
+        ));
+    }
+
+    /// An observed session is given the benefit of the doubt, and this is the
+    /// half that must not change: a closed editor tab reports no pid, its own
+    /// hooks correct the record the moment it does anything, and calling it
+    /// lost on a bounce fills the inbox with ghosts.
+    #[test]
+    fn an_observed_run_without_a_pid_is_given_the_benefit_of_the_doubt() {
+        assert!(still_running(&run(RunMode::Observed), None));
+        assert!(still_running(&run(RunMode::Observed), Some(&[])));
+    }
+
+    /// And one that reported a pid is checked against the machine.
+    #[test]
+    fn an_observed_run_with_a_dead_pid_is_not_still_running() {
+        let mut r = run(RunMode::Observed);
+        // Zero is not a process id: `kill(0, …)` addresses the caller's own
+        // process group, so this used to answer "alive".
+        r.pid = Some(0);
+        assert!(!still_running(&r, Some(&[])));
+        r.pid = Some(std::process::id());
+        assert!(still_running(&r, Some(&[])), "this test's own process");
     }
 }

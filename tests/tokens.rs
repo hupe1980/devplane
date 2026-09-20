@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-const PAGE: &str = include_str!("../ui/index.html");
+const PAGE: &str = include_str!("../ui/legacy.html");
 
 /// The floor for text, and the floor for everything else.
 ///
@@ -237,10 +237,10 @@ fn the_reason_pane_renders_and_escapes_what_it_is_given() {
 
     let rows = vec![DecisionRow {
         at: "14:02".into(),
-        actor: "policy".into(),
+        authority: "rule".into(),
         action: r#"Bash(<img src=x onerror=alert(1)>)"#.into(),
-        outcome: "allow".into(),
-        reason: Some(r#"auto_allow = ["Bash(pnpm test *)"]"#.into()),
+        outcome: "deny".into(),
+        reason: Some(r#"never_auto = ["Bash(rm -rf *)"]"#.into()),
     }];
 
     let out = reason_pane(
@@ -281,4 +281,77 @@ fn the_reason_pane_renders_and_escapes_what_it_is_given() {
         !empty.as_str().contains(r#"class="e""#),
         "an empty pane rendered a row"
     );
+}
+
+/// **The rebuilt interface's tokens are the page's, unchanged.**
+///
+/// A port is exactly when somebody re-picks a palette by eye. Every value in
+/// `ui/src/tokens.css` was computed, contrast-checked and colour-blindness
+/// validated, and two real defects were found by that validator on its first
+/// run — so the rebuild carries them rather than deciding them again.
+///
+/// This compares the two files' **token values**, not their bytes: the new file
+/// carries a header explaining where it came from, and a whitespace difference
+/// is not a palette change. What may not differ is a single colour.
+///
+/// It goes away with `ui/legacy.html`, at which point the contrast checks above
+/// become the only guard — which is why they compute rather than list.
+#[test]
+fn the_rebuilt_interface_carries_the_pages_tokens_unchanged() {
+    const REBUILT: &str = include_str!("../ui/src/tokens.css");
+
+    let parse = |src: &str| -> Vec<(String, Tokens)> {
+        let mut out = Vec::new();
+        for (at, _) in src.match_indices(":root") {
+            let rest = &src[at..];
+            let Some(open) = rest.find('{') else { continue };
+            let selector = rest[..open].trim().to_string();
+            let Some(close) = rest.find('}') else {
+                continue;
+            };
+            let body = &rest[open..close];
+            if !body.contains("--bg:") {
+                continue;
+            }
+            out.push((selector, theme(body)));
+        }
+        out
+    };
+
+    let from_page = parse(PAGE);
+    let from_css = parse(REBUILT);
+
+    assert!(
+        !from_page.is_empty() && !from_css.is_empty(),
+        "one of the two files stopped carrying tokens, so this compares nothing"
+    );
+    assert_eq!(
+        from_page.len(),
+        from_css.len(),
+        "the two files declare a different number of token blocks"
+    );
+
+    for ((page_sel, page_tokens), (css_sel, css_tokens)) in from_page.iter().zip(&from_css) {
+        assert_eq!(page_sel, css_sel, "the blocks are in a different order");
+        assert_eq!(
+            page_tokens.keys().collect::<Vec<_>>(),
+            css_tokens.keys().collect::<Vec<_>>(),
+            "{page_sel}: a token was added or dropped in the rebuild"
+        );
+        for (name, (value, role)) in page_tokens {
+            let (rebuilt_value, rebuilt_role) = css_tokens
+                .get(name)
+                .unwrap_or_else(|| panic!("{page_sel}: `--{name}` is missing from the rebuild"));
+            assert_eq!(
+                value, rebuilt_value,
+                "{page_sel}: `--{name}` was changed by the rebuild — \
+                 the palette is computed and is not re-picked by eye"
+            );
+            assert_eq!(
+                role, rebuilt_role,
+                "{page_sel}: `--{name}`'s declared role changed, so it is now \
+                 held to a different contrast floor"
+            );
+        }
+    }
 }

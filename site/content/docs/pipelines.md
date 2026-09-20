@@ -243,6 +243,43 @@ the steps, so declare it as one and use your own prompts — a Spec Kit command,
 suspends until somebody releases it, the cursor that survives a crash, and the row in
 `devplane audit` saying why each step proceeded.
 
+### A verdict inside somebody else's workflow
+
+Spec Kit's own commands read a specification and report on it; none of them decides. Each one looks
+in `.specify/extensions.yml` for a hook, and a hook marked `optional: false` must be invoked and
+waited for. Devplane's fits there:
+
+```sh
+devplane speckit install            # prints the entry, or writes the file if there is none
+devplane gate run                   # what the hook runs
+```
+
+The gate runs this repository's `[gates]` and reports what they exited with. Four outcomes, and only
+`verified` is a pass:
+
+| `state` | Exit | Means |
+|---|---|---|
+| `verified` | 0 | every declared command passed |
+| `failed` | 1 | one did not, and it is named |
+| `no_gates` | 1 | this repository declares no checks, so nothing was verified |
+| `config_unreadable` | 1 | `devplane.toml` would not parse, so nothing ran |
+
+*Nothing was checked* is not success, which is why it exits non-zero: a workflow reading only the
+exit code would otherwise treat an empty `devplane.toml` as a green build.
+
+It decides on exit codes. No `tasks.md` is parsed, no requirement coverage is scored, no prose is
+graded, and the hook never blocks on a person — a gate waiting for a human inside somebody's
+`/speckit-implement` run is a stalled workflow, not supervision. A red gate reports; you decide
+afterwards, from the inbox.
+
+`speckit install` writes `.specify/extensions.yml` only when there is none. Where the file exists it
+prints the entry and the key to put it under, because that file is committed, may carry other
+people's hooks, and round-tripping it through a YAML parser would preserve the entries and destroy
+the comments.
+
+`devplane gate run` reports and records nothing — it runs against a repository rather than a piece
+of work. `devplane work verify <id>` is the one that leaves a row in `devplane audit`.
+
 ## What `check` refuses
 
 ```sh

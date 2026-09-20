@@ -48,6 +48,10 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+          # Cross-compiled from the same Apple Silicon runner: the SDK carries
+          # both slices, so `libsqlite3-sys` builds with no extra toolchain.
+          - os: macos-latest
+            target: x86_64-apple-darwin
           # Native ARM rather than a cross toolchain: `libsqlite3-sys` is C, and
           # `musl-gcc` only targets the host architecture.
           - os: ubuntu-24.04-arm
@@ -120,6 +124,56 @@ jobs:
               --notes "Install: \`curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh\`" \
               "${files[@]}"
           fi
+
+  npm:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      # **Trusted publishing, exactly as crates.io below.** npm mints a
+      # short-lived credential from this workflow's own OIDC identity, so no
+      # registry token is stored in this repository. The trust is configured on
+      # the npm side against `hupe1980/devplane` and this file.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      # Hand-written because `dist`'s generated `publish-npm` is token-shaped:
+      # no `permissions:`, Node 20.x, `NODE_AUTH_TOKEN`.
+      #
+      # OIDC needs npm 11.5.1+ on Node 22.14.0+; `npm stage` would need 11.15.0+.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          registry-url: 'https://registry.npmjs.org'
+      - name: An npm new enough for OIDC
+        run: npm install -g npm@11.5.1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          merge-multiple: true
+          path: target/distrib
+      - name: Install dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      # Built from the same manifest the binaries came from, so the published
+      # shim and the release cannot disagree about versions or platforms.
+      - name: Build the npm package
+        run: dist build --artifacts=global > /dev/null
+      # No `--provenance`: OIDC attaches the attestation itself.
+      #
+      # Fails the release if the package is missing or the publish is refused —
+      # shipping one door and not the other silently is worse than stopping.
+      - name: Publish to npm
+        shell: bash
+        run: |
+          shopt -s nullglob
+          pkgs=(target/distrib/*-npm-package.tar.gz)
+          if [ ${#pkgs[@]} -ne 1 ]; then
+            echo "expected exactly one npm package, found ${#pkgs[@]}" >&2
+            printf '  %s\n' "${pkgs[@]}" >&2
+            exit 1
+          fi
+          echo "publishing ${pkgs[0]}"
+          npm publish --access public "${pkgs[0]}"
 
   crates-io:
     if: startsWith(github.ref, 'refs/tags/v')

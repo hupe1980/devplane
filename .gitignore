@@ -63,3 +63,8 @@ node_modules/
 # in the directory the client named — which for a test that dispatches into the
 # repository itself is the repository itself.
 .devplane/
+
+# The interface's build output. Embedded into the binary at compile time by
+# `build.rs`, so it is a derived artefact like `target/` — and committing it
+# would mean two copies of the served bytes that must not diverge.
+ui/dist/

@@ -11,6 +11,9 @@
 //! | Prompt contains | What the agent does                       |
 //! |-----------------|-------------------------------------------|
 //! | `permission`    | asks for permission before finishing      |
+//! | `question`      | asks the **person** a question and waits for the answer |
+//! | `question2`     | asks two questions in one form            |
+//! | `unrenderable`  | sends an elicitation no client can render as a question |
 //! | `tool`          | reports a tool call                       |
 //! | `fail`          | ends the turn with a refusal              |
 //! | `criticise`     | writes the findings file it was asked to  |
@@ -22,6 +25,20 @@
 //! session's working directory, so a test can assert what an agent was told —
 //! which the event log cannot answer, because prompt text is never stored.
 //!
+//! **The question shapes are a capture, not an invention.** A real agent's
+//! question does not arrive as a permission request: the Claude adapter renders
+//! its `AskUserQuestion` tool as an `elicitation/create` **form**, and only when
+//! the client declares `elicitation.form`. The schema below — `question_0` with
+//! a `oneOf`, each branch carrying `const`, `title` and `description`, plus a
+//! `question_0_custom` free-text field marked with `_askUserQuestionCustomAnswer`
+//! — is what `claude-agent-acp@0.76` put on the wire on 2026-09-19, copied
+//! field for field. Inventing a plausible shape here would make every test
+//! below a statement about this file rather than about the product.
+//!
+//! **And it only asks when the client says it can render one**, which is the
+//! behaviour that cost a day to find: before Devplane declared the capability,
+//! the tool was withheld and the agent asked in prose with nobody told.
+//!
 //! An ACP agent owns stdout for JSON-RPC, so anything diagnostic goes to stderr.
 
 use agent_client_protocol::schema::v1::{
@@ -29,11 +46,44 @@ use agent_client_protocol::schema::v1::{
     InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
     NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
     PromptResponse, RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionId, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-    StopReason, TextContent, ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
-    UsageUpdate,
+    SessionCapabilities, SessionId, SessionMode, SessionModeId, SessionModeState,
+    SessionNotification, SessionResumeCapabilities, SessionUpdate, StopReason, TextContent,
+    ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields, UsageUpdate,
 };
 use agent_client_protocol::{Agent, Client, Result, Stdio};
+
+/// Whether the client said it can render a form elicitation.
+///
+/// **The whole question path hangs off this.** A real agent withholds its
+/// question tool from a client that did not declare `elicitation.form`, and
+/// asks in prose instead — which looks, from the outside, exactly like an agent
+/// that had nothing to ask.
+static CAN_RENDER_FORMS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An `elicitation/create` in the shape the Claude adapter emits.
+fn create_elicitation(
+    session: SessionId,
+    message: &str,
+    schema: serde_json::Value,
+) -> agent_client_protocol::schema::v1::CreateElicitationRequest {
+    use agent_client_protocol::schema::v1;
+    v1::CreateElicitationRequest::new(
+        v1::ElicitationFormMode::new(
+            v1::ElicitationSessionScope::new(session.to_string()),
+            serde_json::from_value(schema).expect("the fixture's own schema parses"),
+        ),
+        message,
+    )
+}
+
+/// One question's schema branch, in the shape the Claude adapter emits.
+fn one_of(title: &str, options: &[(&str, &str)]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "string", "title": title,
+        "oneOf": options.iter().map(|(v, d)| serde_json::json!(
+            { "const": v, "title": v, "description": d })).collect::<Vec<_>>(),
+    })
+}
 
 /// The working directory the client gave this session.
 static CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
@@ -124,6 +174,24 @@ async fn main() -> Result<()> {
         .name("echo-agent")
         .on_receive_request(
             async move |init: InitializeRequest, responder, _cx| {
+                // **Remember whether this client can be asked a question.** A
+                // real agent gates its question tool on exactly this, and a
+                // client that declares nothing gets prose instead — the failure
+                // this fixture exists to be able to reproduce offline.
+                // `DEVPLANE_ECHO_NO_FORMS=1` makes the fixture an agent whose
+                // question tool is withheld whatever the client declares — the
+                // state every agent was in before Devplane declared the
+                // capability, and the one a real one cannot be put back into.
+                CAN_RENDER_FORMS.store(
+                    std::env::var_os("DEVPLANE_ECHO_NO_FORMS").is_none()
+                        && init
+                            .client_capabilities
+                            .elicitation
+                            .as_ref()
+                            .and_then(|e| e.form.as_ref())
+                            .is_some(),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
                 // **Two ways to continue a session, advertised separately.**
                 // `session/resume` continues without replaying; `session/load`
                 // continues *with* a replay, and an agent may have either.
@@ -184,7 +252,22 @@ async fn main() -> Result<()> {
                 // apart cannot check the thing resume exists for.
                 let id = mint_session();
                 open_session(&id);
-                responder.respond(NewSessionResponse::new(SessionId::new(id)))
+                // `DEVPLANE_ECHO_MODE=<id>` makes the fixture an agent that
+                // declares a session mode, so the cross-vendor half of *which
+                // sessions decide without you* can be exercised against
+                // something rather than described. The id is arbitrary on
+                // purpose: an ACP mode is a string the agent chooses, and a
+                // fixture that only ever said `default` would quietly suggest
+                // the vendor's vocabulary is the protocol's.
+                let resp = NewSessionResponse::new(SessionId::new(id));
+                let resp = match std::env::var("DEVPLANE_ECHO_MODE") {
+                    Ok(m) if !m.is_empty() => resp.modes(SessionModeState::new(
+                        SessionModeId::new(m.clone()),
+                        vec![SessionMode::new(SessionModeId::new(m), "Echo's own mode")],
+                    )),
+                    _ => resp,
+                };
+                responder.respond(resp)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -432,6 +515,48 @@ async fn take_turn(
             .block_task()
             .await?;
         connection.send_notification(say(format!("permission outcome: {:?}", answer.outcome)))?;
+    }
+
+    if text.contains("question") || text.contains("unrenderable") {
+        // Only if the client said it can show one. A client that declared no
+        // capability gets prose — the real failure this fixture exists to
+        // reproduce, and the reason `asks_nothing_when_the_client_cannot_render`
+        // is a test rather than a comment.
+        if !CAN_RENDER_FORMS.load(std::sync::atomic::Ordering::SeqCst) {
+            connection.send_notification(say(
+                "`AskUserQuestion` isn't available in this session — asking in plain text instead."
+                    .to_string(),
+            ))?;
+        } else {
+            let schema = if text.contains("unrenderable") {
+                // A form with no options: legitimate for an MCP server, and not
+                // a question this client can present.
+                serde_json::json!({ "type": "object",
+                    "properties": { "name": { "type": "string", "title": "Your name" } } })
+            } else if text.contains("question2") {
+                serde_json::json!({ "type": "object", "properties": {
+                    "question_0": one_of("Language", &[("Rust", "Fast."), ("Go", "Simple.")]),
+                    "question_1": one_of("Runtime", &[("Tokio", "Big."), ("smol", "Small.")]) } })
+            } else {
+                serde_json::json!({ "type": "object", "properties": {
+                    "question_0": one_of("/v1/login",
+                        &[("Keep it", "Retain the legacy route as-is."),
+                          ("Drop it", "Remove the legacy route.")]),
+                    "question_0_custom": { "type": "string", "title": "Other",
+                        "description": "Type your own answer instead of choosing an option above (optional).",
+                        "_meta": { "_askUserQuestionCustomAnswer":
+                            { "questionId": "question_0", "isCustomAnswer": true } } } } })
+            };
+            let answer = connection
+                .send_request(create_elicitation(
+                    req.session_id.clone(),
+                    "Should the legacy /v1/login route be kept or dropped?",
+                    schema,
+                ))
+                .block_task()
+                .await?;
+            connection.send_notification(say(format!("answer: {:?}", answer.action)))?;
+        }
     }
 
     Ok(if text.contains("fail") {

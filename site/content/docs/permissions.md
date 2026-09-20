@@ -29,10 +29,12 @@ A machine-wide set with the same shape lives in `~/.devplane/policy.toml`. One r
 callers: the synchronous permission hook for sessions Devplane only watches, the protocol's
 permission request for runs it drives, and its own effects in the [decision log](/docs/decisions/).
 
-> [!NOTE]
-> `auto_allow` still parses, so a `devplane.toml` written before 2026-09-18 still loads, but **nothing
-> in it decides a call**. `devplane check` prints those rules as `inert`. Grants belong in your
-> agent's settings — see [Which rule to write next](#which-rule-to-write-next).
+> [!IMPORTANT]
+> **There is no allow list.** `never_auto` and `always_ask` are the only two keys `[policy]` has.
+> Devplane refuses and defers; it never approves, because approving would be a claim that your agent
+> would have approved too. Grants belong in your agent's own `settings.json`, under
+> `permissions.allow`; see [Which rule to write next](#which-rule-to-write-next). Any other key under
+> `[policy]` fails the file and names the line.
 
 ## The syntax is Claude Code's
 
@@ -279,11 +281,11 @@ failure is silent, and on `never_auto` silence reads as permission. `devplane ch
 | `Write(src/**)`, `Glob(src/**)`, `NotebookEdit(x)` | file permissions are only checked against `Read(…)` and `Edit(…)`; these are accepted and never consulted |
 | `mcp__github(create_issue)` | an `mcp__` rule with brackets is skipped on load |
 | `Bash(command:rm *)` | bypassable by a compound command, so it is ignored; write `Bash(rm *)` |
-| `Agent(model:opus)` in `auto_allow` | parameter rules are deny-side only |
-| `!Bash(ls *)` in `auto_allow` | an allow list is already the list of what is permitted, so an exception to it means nothing. In `never_auto` and `always_ask` a `!` rule **is** an exception and is honoured — see [Exceptions, with `!`](#exceptions-with) |
-| `*` or `mcp__*` in `auto_allow` | an unanchored wildcard approves nothing |
 | `Agent(researcher)` | that tool has no field for a bare specifier to match |
 | `Bash(rm -rf *` | the bracket was never closed |
+
+A `!`-prefixed rule is not in that list: in `never_auto` and `always_ask` it **is** an exception and
+is honoured, scoped to the file it was written in — see [Exceptions, with `!`](#exceptions-with).
 
 And one **warning**, because the list behind it is a snapshot of somebody else's tool reference:
 
@@ -291,23 +293,21 @@ And one **warning**, because the list behind it is a snapshot of somebody else's
 |---|---|
 | `Bahs(rm *)`, `Stop Task` in `never_auto` or `always_ask` | the tool name is not one Claude Code documents, so the rule matches nothing. A prohibition with a typo in it is a dead prohibition. The name shown in the transcript is not always the one rules use — `Stop Task` is written `TaskStop` |
 
-### The release this was measured against
+### The release the rule syntax was modelled on
 
-The matcher was differentially tested against a running Claude Code up to one release, and that
-number is **frozen**: the harness went with the approval path, because there is no longer a claim
-about the vendor's behaviour to keep current. Prohibition is Devplane's own decision.
-
-It is still reported, because a session running a much newer release is worth knowing about:
+Devplane reads `never_auto` and `always_ask` rules in Claude Code's own spelling, so that one rule
+means the same thing in both places. That syntax was read against **Claude Code 2.1.273**, and
+`devplane doctor` says so:
 
 ```console
 $ devplane doctor
 gate
-  verified against Claude Code 2.1.273
-            1 release behind a session on this machine (2.1.274)
+  rule syntax modelled on Claude Code 2.1.273
+  prohibitions are Devplane's own and need no agreement from the agent
 ```
 
-Only sessions running the [status-line shim](/docs/observe/#the-status-line) report a version, so
-only those can be named.
+It is a fact with a date, not a warning: Devplane only prohibits and defers, and being **stricter**
+than your agent needs no agreement from it. There is nothing to keep in step.
 
 ## The one place Devplane is stricter than Claude Code, on purpose
 
@@ -349,6 +349,37 @@ unused invites you to delete it, so the only mistake this is allowed to make is 
 
 `devplane trust` prints the same findings for a repository's own `devplane.toml` before you let an
 agent loose in it.
+
+### And rules in *your agent's* allow list that grant nothing
+
+The section above is about Devplane's own rules. `devplane check` also reads
+`.claude/settings.json` and reports allow rules that **approve nothing at all** — which is worth
+knowing, because a rule that reads as permission and grants none costs you trust rather than safety,
+and nothing else tells you:
+
+```console
+$ devplane check
+  overbroad Bash(python:*)
+            `python` runs whatever follows `-c`, so this approves `python -c
+            '…'` — any code at all. Claude Code reads it the same way
+            narrow it, e.g. Bash(python <the subcommand you mean> *)
+
+  grants no `!Bash(rm *)` is a negation in an allow list, and Claude Code
+            reads `!` only in a deny or ask list, where it carves an
+            exception. An allow list is already the list of exceptions — write
+            the narrower rule instead
+  grants no `mcp__*` is an unanchored wildcard in an allow list, which
+            approves nothing — a tool-name glob is a deny-side pattern. An
+            allow glob is only read after a literal `mcp__<server>__` prefix
+```
+
+The two are halves of one question: `overbroad` is a rule that grants **more** than it looks like,
+`grants no` is one that grants **nothing** while reading as permission.
+
+**Devplane reports and changes nothing.** These are your rules in your agent's file; Devplane does
+not enforce them and does not write to that file. A rule whose specifier does not close — `Bash(ls`
+— is skipped entirely, because your agent already says so at startup and two tools complaining about
+one typo is worse than one.
 
 ## Globs in a command
 

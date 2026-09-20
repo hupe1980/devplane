@@ -44,11 +44,35 @@ sessions in every repository on the machine.
 
 `claude agents --json` reports `waitingFor` only while a session is waiting, so every value means a
 person is being waited on. Devplane raises an item for all five documented ones, and for any value
-Claude Code adds later — titled in its own words rather than dropped for being unfamiliar.
+Claude Code adds later — titled in its own words rather than dropped for being unfamiliar. This holds
+for an interactive session as much as a background one: with no hooks installed, the roster is the
+only thing that can say a permission dialog is open, so it is believed.
+
+Such an item carries no Allow or Deny. That session belongs to Claude Code, not to Devplane, and a
+button that cannot reach it would be a button that lies; the errand is to open its own window.
 
 Discovery is free. `devplane ls` is useful the moment it is installed, because the roster lists
 **every live session on the machine** — interactive ones included, not only the background sessions
 the Agent View shows.
+
+## Idle is two situations
+
+A provider reports a session as `idle` whenever it is not generating tokens — including while it
+waits on a command it started itself, which for agent work is usually a test suite. Those are
+opposite situations for the person reading the board: one wants a prompt and the other wants nothing
+at all.
+
+Devplane tells them apart by reading the process table for commands the session is running, which is
+what the roster does not carry:
+
+```
+mako    running a command it started
+```
+
+A session waiting on its own command is **not** in the inbox, because nothing is owed, and it does
+not age off the board the way a quiet session does — a four-hour suite would otherwise disappear
+exactly while it mattered. Anything the process table cannot recognise as a tool command counts as
+none, so the board errs towards telling you that you are needed.
 
 ## Connecting
 
@@ -181,7 +205,7 @@ Several of its facts arrive through **no other channel** — no telemetry to ena
 | **The model** | Otherwise this needs OpenTelemetry, or a `SessionStart` hook the reference says Claude Code *"doesn't always include"*. |
 | **The context window's size** | 200 000, or 1 000 000 on an extended-context model — stated, rather than inferred from which model is in play. |
 | **Cost, and the lines it changed** | Cost without telemetry, and the only report of what a session changed rather than how long it took. |
-| **The Claude Code release this session runs** | Recorded so a session's behaviour can be attributed to a version. Devplane no longer mirrors the vendor's permission rules, so this is context rather than a compatibility claim |
+| **The Claude Code release this session runs** | Recorded so a session's behaviour can be attributed to a version. Devplane does not mirror the vendor's permission rules, so this is context rather than a compatibility claim |
 
 ```console
 $ devplane show 7c
@@ -211,7 +235,7 @@ doing something nor asking for something is counted rather than shown:
 ```
 
 Two things are never counted away, however old they are: a session that is **working**, and a
-session that is **asking** you something. Everything else — idle, failed, lost — is on the board
+session that is **asking** you something. Everything else — idle, failed, lost, interrupted — is on the board
 while it is still today's business and quiet afterwards. A quiet session that starts asking for
 something joins the working set immediately. This is about noise, never about silencing a question.
 
@@ -222,6 +246,71 @@ reads like one.
 Rows are **grouped by project**, and a run's age is the **session's own start time**, not the moment
 the daemon first noticed it — otherwise every session discovered in one poll shows the same age and
 sorting by recency sorts by nothing.
+
+## Modes
+
+`devplane modes` answers *which projects are deciding without you*. For Claude Code it reads the
+documented modes out of the settings files, and says who set each one.
+
+An agent that speaks the Agent Client Protocol reports its own mode instead, and Devplane shows it in
+the agent's own words:
+
+```console
+saas
+  7c                    plan-only (the agent's own mode)   seen 2026-09-20T08:14
+```
+
+**It is not translated into `default`, `acceptEdits`, `plan` or `bypassPermissions`.** An ACP mode is
+a string the agent chooses and no specification maps it onto a vendor's. It is shown uncoloured,
+because it does not say whether a person is ever asked.
+
+The mode a session **starts** in is reported, not only changes to it.
+
+Devplane never sets an agent's mode. Changing it is a mutation; this reads.
+
+## The number the board keeps about itself
+
+Under *Needs you*, one sentence:
+
+```console
+You answered 0 of the 49 decisions taken in your name.
+```
+
+**It is a count, not a grade.** A low ratio is not a failing mark; the colour changes only when
+*nothing at all* reached you out of a non-zero total.
+
+It is **absent** in a week where nothing happened — *none of nothing* and *none of four hundred* are
+different findings, and one sentence cannot carry both.
+
+A citation sits beside it, marked as somebody else's result. The published criterion for vacuous
+oversight is defined over residual risk and needs an error rate Devplane cannot observe, so this is
+the input, not the verdict.
+
+Where more than one vendor is behind the counts, it says so: how often an agent asks is a property of
+the model, so compare the ratios rather than the counts.
+
+## What each state means
+
+Every row carries a glyph as well as a colour: red and amber cannot be told apart under deuteranopia
+at any usable lightness, so colour never carries a state on its own.
+
+| | State | What it means | Counted as |
+|---|---|---|---|
+| `●` | `working` · `starting` | the agent is generating | working |
+| `◆` | `waiting` | **it is asking you something** — a permission, a question, or a plan to approve | needs you |
+| `○` | `idle` | alive, and waiting for a prompt | idle |
+| `✓` | `completed` | the turn ended on its own | idle |
+| `✗` | `failed` | the turn ended with an error | failed |
+| `?` | `lost` | Devplane expected a process and could not find it at startup | failed |
+| `◌` | `stopped` | **you** stopped it | idle |
+| `⊘` | `interrupted` | **Devplane** stopped it, because the daemon was shutting down | idle |
+
+**`interrupted` is not `completed`.** Stopping Devplane tears down every agent it started; that work
+was not finished. An interrupted run keeps what it was waiting on, its branch and worktree are
+untouched, and where the vendor can resume the session the inbox offers to pick it up.
+
+It counts as idle rather than as needing you: the **inbox item** is what asks for a person, and
+counting it in both places would charge one interruption twice.
 
 ## GitHub, for every project
 
@@ -246,14 +335,53 @@ rather than retried on every poll.
 
 ## What `doctor` will tell you that nothing else does
 
-Three failures are invisible on the board, because in each one the symptom is an
+Five failures are invisible on the board, because in each one the symptom is an
 *absence* — and an absence looks exactly like nothing having happened:
 
 | Reported as | What it means |
 |---|---|
 | `channels` | which observation channels are arriving, how fast, and the worst latency seen. A channel that stopped is silence, and silence is what a quiet machine looks like too |
 | `unreadable configuration` | a repository whose `devplane.toml` will not load. The rules it had stay cached — but a restarted daemon has none to cache, so that project's `never_auto` list is simply not in force |
-| `unreadable rows` | stored runs or work this build can no longer decode. The schema changes here without migrations on purpose, so a changed shape makes rows vanish from the board. A **work** row is the one to read first: it names a branch and a worktree, so losing it orphans a checkout nobody is left to tell you about. Observations rebuild from the providers, so deleting the database costs you nothing *except the decision log*, which is in the same file and is the one thing that cannot be re-derived from anything |
+| `unwritten` | events and decisions the store refused, counted. A failed write is logged and dropped on purpose — failing the hook a session is blocked on is the worse trade — so the board keeps looking complete when it is not: every count, and every answer to *who decided this*, is missing at least that much. It does not fill in afterwards. Check the disk and the database's permissions. Also an inbox row |
+| `leaked agents` | an agent Devplane started that is **still running with nothing attached to it**. See below — it also raises an inbox row, because this is the one failure where the cost keeps going up while nobody is looking |
+| `unreadable rows` | stored runs or work this build cannot decode. The schema changes without migrations on purpose, so a changed shape makes rows vanish. Read the **work** count first: a work row names a branch and a worktree, so losing it orphans a checkout nobody is left to tell you about. Observations rebuild from the providers; the decision log does not, and it is in the same file |
+
+## Agents that outlived the daemon
+
+When you stop Devplane, every agent it drove is torn down with it: each connection kills the agent's
+whole process group, and `devplane stop` waits for them — **and now waits for their endings to be
+written**, not only for the processes to go. A run that was mid-flight when you stopped Devplane is
+recorded as `interrupted`, never as `completed`.
+
+**Devplane does not look for other Devplane daemons**, only for leaked agents. If you have started
+daemons under different `DEVPLANE_HOME` values, or one was killed after its record was cleared,
+nothing here will mention it — `ps ax | grep devplane` is the answer until that changes.
+
+**A daemon that is *killed* gets no such chance.** `kill -9`, a crash, an OOM kill or a power cut
+leave the agent running, blocked on a pipe whose other end is gone — unable to finish, unable to be
+answered, still holding its worktree and still spending.
+
+Devplane records the process behind each agent it starts, so the next daemon finds these:
+
+```console
+$ devplane inbox
+◆ critical  An agent Devplane started is still running, and nothing can reach it (pid 48120)
+            A previous daemon was killed rather than stopped, so this agent was never torn
+            down. It is blocked on output nobody is reading: it cannot be answered and cannot
+            finish.
+            It is holding /Users/you/src/saas/.claude/worktrees/fix-login.
+
+            node /usr/local/bin/claude-agent-acp --stdio
+
+            Devplane does not kill it for you, because it may be part-way through writing what
+            it was last asked to do. To end it and everything it started:
+              kill -TERM -48120
+```
+
+The negative pid is the process *group*, so it ends the agent and anything it started.
+
+The check runs once, at startup: a running daemon cannot leak an agent, so there is nothing to
+re-read on a timer.
 
 ## Who wins when channels disagree
 
@@ -263,7 +391,10 @@ inbox. So:
 
 - a **background** row carries `state`, and the provider's daemon owns that process — its verdict wins;
 - an **interactive** row contributes identity (pid, name, cwd, entrypoint) and sets state only for a
-  session no hook has ever spoken for.
+  session no hook has ever spoken for — but for that session it keeps setting it, every poll, because
+  it is the only channel there is;
+- a block a hook recorded is never replaced by one the roster inferred: the hook's carries a request
+  id, the options and a token to answer by, and the roster's carries none of them.
 
 ## Transcripts
 

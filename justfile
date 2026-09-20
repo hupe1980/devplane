@@ -14,9 +14,9 @@ default:
 open: build
     ./target/debug/devplane open
 
-# The same, serving ui/index.html from disk: edit, save, reload. No rebuild.
+# The same, serving ui/legacy.html from disk: edit, save, reload. No rebuild.
 ui: build
-    DEVPLANE_UI=$PWD/ui/index.html ./target/debug/devplane serve
+    DEVPLANE_UI=$PWD/ui/legacy.html ./target/debug/devplane serve
 
 # The daemon in the foreground.
 serve: build
@@ -129,3 +129,21 @@ publish-check:
 clean:
     cargo clean
     rm -rf site/public
+
+# Regenerate the interface's wire types from the Rust shapes.
+#
+# The TypeScript is generated, never written beside the Rust: a second copy of a
+# wire format is a second thing to keep true, and the copy is the one that
+# drifts. `tests/ui_bundle.rs` fails when what is checked in is not what this
+# would produce.
+wire:
+    TS_RS_EXPORT_DIR=ui/src cargo test --features typescript --quiet export_bindings
+
+# Build the interface. Needs node; `cargo build` works without it and serves
+# the legacy page until the switch.
+ui-build:
+    cd ui && npm install && npm run build
+
+# Type-check every component and every wire type.
+ui-check:
+    cd ui && npx svelte-check --tsconfig ./tsconfig.json

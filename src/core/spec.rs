@@ -520,3 +520,116 @@ mod dogfood {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The extension hook, which is somebody else's contract
+// ---------------------------------------------------------------------------
+
+/// Where Spec Kit looks for extension hooks, relative to the repository root.
+pub const EXTENSIONS_FILE: &str = ".specify/extensions.yml";
+
+/// The hook points Spec Kit defines — `before_` and `after_` for each of its
+/// ten commands.
+///
+/// **Read from the installed copy rather than from documentation**, because the
+/// thing that has to be true is what the agent in front of the user does. A
+/// name not on this list is one no command will ever look for, so registering
+/// under it would write a hook that can never fire.
+pub const HOOK_EVENTS: &[&str] = &[
+    "before_analyze",
+    "after_analyze",
+    "before_checklist",
+    "after_checklist",
+    "before_clarify",
+    "after_clarify",
+    "before_constitution",
+    "after_constitution",
+    "before_converge",
+    "after_converge",
+    "before_implement",
+    "after_implement",
+    "before_plan",
+    "after_plan",
+    "before_specify",
+    "after_specify",
+    "before_tasks",
+    "after_tasks",
+    "before_taskstoissues",
+    "after_taskstoissues",
+];
+
+/// Where Devplane registers by default.
+///
+/// `after_implement` rather than `after_converge`: `/speckit-implement` is where
+/// code is written, so it is where a gate has something to check. Converge
+/// assesses a codebase and appends unbuilt work to a task list — running a
+/// suite after an append answers a question nobody asked in that turn.
+pub const DEFAULT_HOOK_EVENT: &str = "after_implement";
+
+/// The command name the entry carries. The agent turns dots into hyphens, so
+/// this is invoked as `/devplane-gate`.
+pub const HOOK_COMMAND: &str = "devplane.gate";
+
+/// The entry Devplane registers, as YAML, under `hooks.<event>`.
+///
+/// **No `condition` key, and its absence is the load-bearing part.** Every Spec
+/// Kit command skips a hook whose condition is non-empty, deferring evaluation
+/// to a `HookExecutor` that does not exist — so an entry carrying one would look
+/// correct, be committed, and never fire.
+///
+/// `optional: false` because an optional hook is merely *offered* to the agent,
+/// and a workflow that offers a gate has no gate.
+pub fn hook_entry() -> String {
+    format!(
+        "    - extension: devplane\n\
+         \x20     command: {HOOK_COMMAND}\n\
+         \x20     description: Run this project's own gates and report what they said\n\
+         \x20     prompt: Run the project's gates and report the verdict verbatim.\n\
+         \x20     optional: false\n\
+         \x20     enabled: true\n"
+    )
+}
+
+/// A whole `extensions.yml`, for a repository that has none.
+pub fn extensions_file(event: &str) -> String {
+    format!("hooks:\n  {event}:\n{}", hook_entry())
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    #[test]
+    fn the_entry_carries_no_condition_and_is_not_optional() {
+        let entry = hook_entry();
+        assert!(
+            !entry.contains("condition"),
+            "a condition makes every agent skip the hook, silently, for ever:\n{entry}"
+        );
+        assert!(entry.contains("optional: false"), "{entry}");
+        assert!(entry.contains(HOOK_COMMAND), "{entry}");
+    }
+
+    /// The command name is what the agent turns into a slash command, so the
+    /// dot form and the hyphen form have to be the two spellings of one thing.
+    #[test]
+    fn the_command_becomes_the_skill_the_plugin_ships() {
+        assert_eq!(HOOK_COMMAND.replace('.', "-"), "devplane-gate");
+    }
+
+    #[test]
+    fn the_default_event_is_one_spec_kit_defines() {
+        assert!(HOOK_EVENTS.contains(&DEFAULT_HOOK_EVENT));
+        assert_eq!(HOOK_EVENTS.len(), 20, "ten commands, before and after each");
+    }
+
+    /// A file written for a repository that has none must be the whole file,
+    /// not a fragment that happens to look like one.
+    #[test]
+    fn a_fresh_file_is_a_whole_document() {
+        let f = extensions_file(DEFAULT_HOOK_EVENT);
+        assert!(f.starts_with("hooks:\n"));
+        assert!(f.contains("  after_implement:\n"));
+        assert!(f.contains("    - extension: devplane"));
+    }
+}

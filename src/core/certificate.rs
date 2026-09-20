@@ -129,7 +129,16 @@ impl<'a> Certificate<'a> {
         // **Where to get it, before what to do with it.** A commit with no
         // repository beside it is an instruction nobody can follow, and the
         // omission survived every test until somebody read the page.
-        if let Some(url) = report.commit.as_ref().and_then(|c| c.remote.as_deref()) {
+        // `checkable_by_others` is the predicate this page turns on and it
+        // lives on the stamp, where it is tested. The clone line asks for the
+        // remote; the sentence below asks the same question a second way, and
+        // the two used to be able to disagree.
+        if let Some(url) = report
+            .commit
+            .as_ref()
+            .filter(|c| c.checkable_by_others())
+            .and_then(|c| c.remote.as_deref())
+        {
             out.push(format!("git clone {url} && cd $(basename {url} .git)"));
         }
         if let Some(sha) = report.commit.as_ref().and_then(|c| c.commit.as_deref()) {

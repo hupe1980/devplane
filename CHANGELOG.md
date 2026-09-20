@@ -4,27 +4,79 @@ Notable changes per release. Dates are UTC.
 
 ## Unreleased
 
-**Breaking: Devplane no longer approves a tool call.** `Verdict` has no `Allow`
-variant, so the type cannot express an approval. A call your `[policy]` rules
-used to answer *yes* for is now answered by your agent's own permission system,
-exactly as if Devplane had said nothing. `auto_allow` still parses so an older
-`devplane.toml` loads, but nothing in it decides anything; `devplane check`
-prints those rules as `inert`. Move rules you want enforced into your agent's
-settings — `devplane explain --replay` composes them for you.
+## 0.6.0 — 2026-09-20
 
-**Renamed from Vibeplane, and every name moves with it.** The binary, the project
-file `devplane.toml`, the machine directory `~/.devplane/`, the `DEVPLANE_*`
-environment variables and the `devplane:ready` label. Nothing is read under the
-old names and nothing migrates itself:
+A question an agent asked you now outlives the process that asked it; Devplane
+stops answering *yes* on your agent's behalf; and the project is renamed from
+Vibeplane. Each of those changes something you have already configured, so the
+breaking list below is the part to read.
 
-```sh
-mv ~/.vibeplane ~/.devplane && mv ~/.devplane/vibeplane.db ~/.devplane/devplane.db
-mv vibeplane.toml devplane.toml          # in each project
-devplane connect claude                  # the installed hooks name the old binary
-```
+**And Devplane stopped telling itself one lie.** Work that was interrupted by a
+clean shutdown was recorded as `completed` — *done*, written by the tool, over
+work nobody finished. There is an `interrupted` state for it now, `devplane stop`
+waits for the endings it causes to be written, and a process you are not allowed
+to signal is no longer reported as dead.
+
+### Breaking
+
+- **`state` can now be `interrupted`.** A new run state, in `devplane ls --json`,
+  `/api/board` and every other surface that carries one. Anything matching on the
+  set of states needs the new arm; it means **Devplane stopped this run** because
+  the daemon was shutting down, as distinct from `stopped` (you did) and `lost`
+  (a process was expected and not found).
+
+- **Renamed from Vibeplane**: the binary, the project file `devplane.toml`, the
+  machine directory `~/.devplane/`, the `DEVPLANE_*` variables and the
+  `devplane:ready` label. Nothing is read under the old names and nothing
+  migrates itself:
+
+  ```sh
+  mv ~/.vibeplane ~/.devplane && mv ~/.devplane/vibeplane.db ~/.devplane/devplane.db
+  mv vibeplane.toml devplane.toml          # in each project
+  devplane connect claude                  # the installed hooks name the old binary
+  ```
+- **Devplane no longer approves a tool call.** `Verdict` has no `Allow` variant,
+  so the type cannot express an approval, and a `devplane.toml` containing
+  `auto_allow` fails to load and names the line. Calls those rules used to answer
+  *yes* for are answered by your agent's own permission system, exactly as if
+  Devplane had said nothing; `devplane explain --replay` composes the grants to
+  move into its settings.
+- **`devplane decide` is deleted.** `devplane answer <ask>` covers a permission
+  and a question alike, because the ask records which it is. `POST
+  /api/asks/{id}/answer` and `GET /api/asks` replace `/api/runs/{id}/decide` and
+  `/api/runs/{id}/answer`.
+- **Nothing refuses a permission after ten minutes any more.** That clock was a
+  constant nobody chose and no surface reported. A permission and a question both
+  wait, and the only clock that ends one is a project's own:
+
+  ```toml
+  [questions]
+  deadline = "4h"   # never (the default) | 90s | 30m | 4h
+  ```
+
+  When it fires the agent is told **no**, and the audit row names *a clock*, the
+  duration and the file that set it. A value that will not parse fails
+  `devplane check` and the wait stays unbounded.
+- **The decision log records `authority`, not `actor`**, with five values:
+  `person`, `rule`, `timer`, `nobody`, `daemon`. Three of those were spelled
+  `daemon`, so *a clock refused a call* and *a question died unanswered* were
+  indistinguishable from *Devplane ran a gate* in the one column the table exists
+  to be filtered by.
+- **There is no database migration.** The store schema is **version 1** — the
+  count starts here, because nothing before this release describes a database
+  anybody has. A file stamped with any other version is moved aside to
+  `devplane.v<n>.bak` and a fresh one takes its place. Everything but the
+  decision log is re-derivable, which is why the old file is moved, never
+  deleted.
 
 ### Removed
 
+- **Devplane's own ten-minute clock**, and `devplane decide` with it.
+- **Three functions the permission gate's deletion had orphaned**, including one
+  whose job — *never compose a rule for a command whose quoting this matcher
+  cannot read* — turned out to still have a home: the rule Devplane offers you
+  to paste into your agent's settings is now refused for such a command, because
+  a suggestion that widens silently arrives with this product's name on it.
 - **The permission mirror, and everything built to keep it honest.** Answering
   *yes* on the vendor's behalf was a claim about somebody else's code. Keeping it
   true needed three compatibility floors, a differential harness and a release
@@ -34,20 +86,120 @@ devplane connect claude                  # the installed hooks name the old bina
   conformance dialect axis and the release cadence. What is left prohibits and
   defers, which claims nothing about anyone and cannot decay.
 - **`devplane gate`.** The command reported how current the mirror's measurement
-  was; there is no mirror to measure. `devplane doctor` still prints the frozen
-  baseline and how far a running session has moved past it.
+  was; there is no mirror to measure.
+- **The version-gap warning.** `devplane ls` and `doctor` counted how many
+  releases a running Claude Code was past the release the rules were measured
+  against. It measured the decay of a claim Devplane stopped making. `doctor`
+  now states the release the rule syntax was modelled on, and nothing else.
+- **Source maps from the shipped binary.** Four times the size of the bundle,
+  and readable output makes them unnecessary.
 
 ### Added
 
+- **`npx devplane`.** The release publishes an npm package alongside the shell
+  installer, so a machine with Node can run Devplane without installing it. An
+  `npx` run and an installed binary share `~/.devplane/` and produce one daemon.
+  Published through npm trusted publishing, so the package carries a provenance
+  attestation and no publishing token is stored in this repository.
+
+- **`devplane agents` shows what each agent advertised when it started** —
+  `resume`, `load`, `list`, whether it declares a mode, whether it needs signing
+  into — with the date it was measured:
+
+  ```console
+  claude     Claude Code    npx @zed-industries/claude-code-acp
+             resume · load · modes · measured 2026-09-20
+  ```
+
+  An agent you have never started has **no line at all**, rather than a row of
+  crosses: *not probed* and *not supported* are different facts.
+
+- **`devplane modes` reports the mode an ACP agent declares for itself**, so
+  *which projects are deciding without you* is answerable beyond Claude Code:
+
+  ```console
+  saas
+    7c                    plan-only (the agent's own mode)   seen 2026-09-20T08:14
+  ```
+
+  Shown in the agent's own word, never mapped onto
+  `default`/`acceptEdits`/`plan`/`bypassPermissions`, and uncoloured: it does not
+  say whether a person is asked. The mode a session **starts** in is reported,
+  not only changes to it. `session/set_mode` is not sent; changing a mode is a
+  mutation and this reads.
+
+- **The board carries the number the inbox keeps about itself** — *You answered
+  0 of the 49 decisions taken in your name.* `devplane attention` had printed it;
+  the board had not.
+
+  A **count, not a grade**: the contrast fires only when nothing at all reached
+  you out of a non-zero total, and a week in which nothing happened shows
+  nothing. The citation sits beside it, marked as somebody else's result.
+
+- **A verdict for the workflows that only report.** `devplane gate run` runs this
+  repository's `[gates]` and says what they exited with; `devplane speckit install`
+  registers it as a Spec Kit extension hook, so a `/speckit-implement` run gets a
+  verdict from outside the agent. Four outcomes and only `verified` exits 0 —
+  *no checks declared* and *configuration unreadable* are distinct from each other
+  and from success, because a workflow reading the exit code alone would treat an
+  empty `devplane.toml` as a green build. It decides on exit codes: no
+  specification is read and no prose is graded.
+- **A question an agent asked you outlives the process that asked it.** An ask is
+  a row with its own id, answerable from any surface however long afterwards. Stop
+  the daemon with a question waiting and it is still there: still in the inbox,
+  still answerable, and answering it resumes the session the agent left behind and
+  delivers what you chose. It was held in memory on a live connection, so a
+  restart took the run, the agent and the question together.
+- **Intel Macs are a release target.** `x86_64-apple-darwin` cross-compiles from
+  the same runner that builds the ARM one, so nothing needs to build from source
+  on macOS.
+- **A Claude Code plugin.** `claude plugin marketplace add hupe1980/devplane`,
+  then `/plugin install devplane@devplane`, adds Devplane's **read-only** MCP
+  surface and a skill that says what to ask it. It ships no hooks: those carry a
+  machine-specific port and token, so `devplane connect claude` still writes
+  them into your own settings where you can read them back.
+- **`devplane modes` says whose clock can answer a question in your name.**
+  Claude Code's `askUserQuestionTimeout` is `user or managed` scope, so an
+  administrator can set one and the vendor's own settings UI hides the row while
+  they have. Devplane reports the duration and the file — in yellow when you did
+  not choose it — and never writes the setting.
+- **`devplane asks`** — everything an agent has asked you and what became of
+  each one. Open first and oldest first, because it is a queue of what is owed
+  to you rather than a feed; settled ones carry the sentence that ended them,
+  and no two of those read alike.
+- **`devplane audit --without-me`** — only what was decided *instead of* you: a
+  rule, a clock, or nobody. Your own answers and Devplane running a gate are
+  left out, because those are the rows you already know about.
+- **`devplane check` says what happens to a question nobody answers**, because
+  that is a decision the file takes on your behalf.
+- **`devplane library report` says where a copy would go and who documents that
+  path**, which is the line that answers *why this directory and no other*.
+- **`devplane library`** — prompts and skills reused across projects, in the
+  vendors' own formats, unmodified. `diff` says which copies drifted and which
+  way, which projects lack one, and which frontmatter fields are a documented
+  hard error on Anthropic's distribution paths; `report` says what a skill will
+  be allowed to do and where it came from; `install` copies byte-for-byte into
+  vendor-documented paths only, naming every refusal before the first write;
+  `sync` writes nothing without `--apply`. No verb grades anything, and none
+  translates between vendors.
+- **`devplane dispatch --to`** — one prompt to several repositories, as one
+  reviewable row. `--mode draft|gate|pr`; draft is chosen for you above three
+  targets and says so. Every refusal is named before anything is written, and a
+  project name matching nothing stops the whole dispatch. No position merges and
+  none weakens a permission.
+- **`devplane batch`** — a fan-out with one outcome per target, questions first.
+  No percentage, no pass rate, no colour on the batch itself.
+- **Leaked agents are found and reported.** A daemon killed rather than stopped
+  leaves its agents running, unreachable and still spending. The next daemon
+  finds them from the process table and raises a critical inbox row with the
+  command that ends one. It does not kill them: one may be part-way through
+  writing what it was last asked to do.
 - **The page opens on what needs you.** One list across every project, ordered
-  by what is waiting on a person rather than by project or session count — work
-  and requests together, because a red check on yesterday's branch and a
-  permission asked two minutes ago are the same question. Sessions are still
-  there, below it: Claude Code ships `claude agents` and does that better.
-  Three empty states, because they are three different facts — *nothing needs
-  you* is the tool working, *Devplane has not answered recently* means the page
-  is not current, and *some projects could not be read* means the list is
-  narrower than it looks. The last one used to render as the first.
+  by what is waiting on a person — work and requests together, because a red
+  check on yesterday's branch and a permission asked two minutes ago are the
+  same question. Sessions sit below it. Three empty states, because they are
+  three different facts: *nothing needs you*, *Devplane has not answered
+  recently*, and *some projects could not be read*.
 - **A done certificate a reviewer can check without trusting this tool.** The
   repository, the commit, the commands, their outcomes, and how to re-run them —
   as Markdown or JSON. It is deliberately **unsigned**: the standard for this
@@ -63,14 +215,11 @@ devplane connect claude                  # the installed hooks name the old bina
   before you are shown it**, so one that would not have decided it is refused
   rather than handed over.
 - **A work view: what changed, what the checks said, and the release control
-  beside both.** `tab` and `enter`, or a click, on a work row opens what its
-  branch changed — against the **merge base**, so commits that landed on `main`
-  since are not reported as this work's doing — with every gate command, its exit
-  code, and the failing lines the agent was handed. A reproduction gate reads as
-  passing when its commands failed, and says why; a gate that recorded no
-  commands is distinguishable from one that passed. Uncommitted *and untracked*
-  files count. A change too large reports what is withheld and the command that
-  shows the rest, rather than a silent subset.
+  beside both.** A work row opens what its branch changed — against the **merge
+  base**, so commits that landed on `main` since are not reported as this work's
+  doing — with every gate command, its exit code and the failing lines the agent
+  was handed. Uncommitted *and untracked* files count, and a change too large
+  names what is withheld rather than showing a silent subset.
 - **A navigable shell, and two themes that were measured rather than eyeballed.**
   Every contrast pair is computed by a test against the surface it sits on, in
   both themes, so a token that fails is a failing build rather than something
@@ -88,6 +237,15 @@ devplane connect claude                  # the installed hooks name the old bina
 
 ### Changed
 
+- **A run Devplane drove no longer reads as `working` after a restart.** Its
+  connection died with the daemon that held it, so it is `interrupted` — and a
+  question it was holding is now **still waiting for you**, rather than recorded
+  as answered by nobody. The two cases are told apart by who ended the agent: a
+  turn that ended on its own leaves a question nobody can answer any more, and a
+  daemon that was stopped leaves one that is perfectly answerable.
+- **The interface is a Svelte project.** One binary still, with the built assets
+  embedded at compile time and nothing fetched at runtime; the served output is
+  readable rather than minified. Building it needs node; `cargo build` does not.
 - **The fetched third-party corpus moved from `specs/` to `reference/`**, and
   `scripts/fetch-specs.sh` with it. Spec Kit hard-codes `specs/` for the
   project's own feature specifications, and one directory cannot be both a
@@ -101,6 +259,79 @@ devplane connect claude                  # the installed hooks name the old bina
 
 ### Fixed
 
+- **Stopping Devplane no longer records interrupted work as `completed`.** A
+  driven run that was working when the daemon stopped came back reading
+  `completed`, with whatever it was waiting on cleared. The new `interrupted`
+  state says **Devplane stopped it** — distinct from `stopped` (you did) and
+  `lost` (a process was expected and not found) — and keeps what the run was
+  waiting on. The branch and worktree are untouched.
+
+  ```console
+  saas
+    ⊘ 7c         vscode      –    $1.04   3m  interrupted — the daemon stopped this
+  ```
+
+  Two fixes came with it: a duplicate session-ended event that could overwrite
+  the ending just recorded, and `devplane stop` returning before the endings it
+  caused were written.
+
+- **A process you may not signal is no longer reported as dead.** `kill(pid, 0)`
+  fails two ways that mean opposite things — `ESRCH` is *no such process*,
+  `EPERM` is *it exists and is not yours* — and Devplane compared the return
+  code to zero, so every process owned by another user or by root read as gone.
+  Reconciliation could mark a live run `lost` because of it.
+- **A stale `daemon.json` no longer stops the daemon starting.** The guard asked
+  only whether the recorded pid was alive, so after a daemon was killed and the
+  pid reused, `devplane serve` refused to start — naming somebody else's process,
+  with no hint that the repair was deleting a file. It now checks the pid is
+  actually a Devplane process: a stale record is reported and ignored, and if the
+  process table cannot be read it refuses and names the file to delete.
+
+- **The `timer` row now names the file that set the deadline, not just its
+  name.** It recorded `devplane.toml` for every project on the machine, which
+  tells somebody with six repositories to go and look in six places — from a
+  conditional whose two branches computed the same string. It now records the
+  project's own path, so the row points at the file you would edit.
+- **The `nobody` row no longer blames a clean shutdown.** Its reason read *"the
+  daemon stopped while the question was waiting"*, which is the one case that
+  does **not** produce it: stopping Devplane leaves the question open and
+  answerable. The row is for a daemon that was killed, and it now says so.
+
+
+- **A session waiting on a background job no longer reads as waiting for you.**
+  Providers report such a session as `idle`, and the board turned that into
+  *waiting for a prompt* — which says you are the blocker, wrongly, for as long
+  as the suite runs. Devplane reads the process table and says `running a command
+  it started`. It is not in the inbox, because nothing is owed, and it never ages
+  off the board.
+- **The board follows a session that has no hooks**, instead of freezing at the
+  first thing it saw. Without `devplane connect` the session roster is the only
+  channel there is, and it was read once per session and then ignored: one first
+  seen idle stayed idle through every turn it ran afterwards.
+- **A permission the roster reports now reaches the inbox.** Session `status` has
+  three documented values — `busy`, `waiting`, `idle` — and `waiting` was being
+  read as idle, so a session its own vendor reported as blocked on a person showed
+  as *waiting for a prompt*. It carries the vendor's words for what it is waiting
+  on, and no Allow or Deny, because that session belongs to Claude Code.
+- **`devplane doctor` printed a section called `gate` twice**, from two code
+  paths, opening with the same sentence. It is one section now, and where the
+  running daemon was built against a different release from the binary you are
+  holding, it says so instead of rendering the difference as a repeat.
+- **The command `devplane inbox` printed for a question could not work.** It
+  passed the option's *label* where the protocol wants its *value* — equal in
+  the captured fixture and in nothing else, so it worked in the tests and failed
+  against any agent that spells the two differently.
+- **`devplane library --help` advertised blueprints, which this command does not
+  have, and called its five verbs four.**
+- **Two generated interface types silently overwrote each other.** Rust has
+  modules and the wire has one namespace, so two `Kind`s and two `Finding`s each
+  exported one file; whichever generated last won, and a page could have
+  compiled against a type describing something else entirely.
+- **A 404 from a stale daemon now says so.** A route this binary asks for is a
+  route this binary has, and between releases the version number cannot tell two
+  builds apart — so *404 Not Found* used to send people looking for a feature
+  that was right there.
+
 - **Two suggestion defects were shipped.** A `WebFetch` rule was suggested as
   `WebFetch(docs.rs)`, missing the `domain:` the vendor's syntax requires — so
   pasting it granted nothing. And the suggestion never appeared at all for a
@@ -111,16 +342,12 @@ devplane connect claude                  # the installed hooks name the old bina
   file somebody was editing to be interrupted less. The page was fixed from a
   screenshot; the terminal was not, because nothing read it. Both now render the
   same line from one function, and a test parses it as the file it names.
-- **The key legend described keys the row would not answer.** The footer listed
-  nine fixed shortcuts on every screen; `y`/`n` only answers a permission,
-  `1`–`9` needs options the agent actually offered, `f` and `a` need a session
-  behind the row. It is now derived from the same `actions` array the row's
-  buttons and the key handler read, so it cannot describe a key that does
-  nothing — and on a **touch device it is not shown at all**, where it was six
-  rows of key caps above two items, more of a phone screen than the list the
-  page exists for. The tools beside it stay, because without a keyboard they are
-  the only route to those surfaces; they drop their key caps and become buttons
-  that look like buttons.
+- **The key legend described keys the row would not answer.** It listed nine
+  fixed shortcuts on every screen, when `y`/`n` only answers a permission and
+  `f`/`a` need a session behind the row. It is derived from the same `actions`
+  array the buttons and the key handler read, so it cannot name a key that does
+  nothing — and on a touch device it is not shown at all, where six rows of key
+  caps sat above two items.
 - **`devplane check` showed inert rules in green.** An `auto_allow` rule decides
   nothing, and a green `allow` badge beside it told somebody a protection was in
   force when it was not.

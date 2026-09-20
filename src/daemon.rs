@@ -17,8 +17,75 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 
+/// Writes the store refused, counted so that a person can be told.
+///
+/// **Why a counter and not a `Result` the caller handles.** The caller is a
+/// hook Claude Code is blocked on, or an agent's own output stream. Making
+/// either of them fail because a disk is full trades a gap in the record for a
+/// stopped machine, and a stopped machine is the worse of the two. Vault makes
+/// the opposite trade — it refuses the API request if it cannot audit it — and
+/// that is right for Vault, whose whole job is the record. Devplane's job is
+/// the work, and the record of it; so it keeps working and says, in the one
+/// place a person looks, exactly what it lost.
+///
+/// Atomics rather than a lock, because both call sites are on paths that are
+/// already holding something, and because the number only ever goes up.
+#[derive(Debug, Default)]
+pub struct Unwritten {
+    events: std::sync::atomic::AtomicU64,
+    decisions: std::sync::atomic::AtomicU64,
+    /// The last reason the store gave. One line, because the row shows one:
+    /// a full disk says the same thing every time and the count carries the
+    /// rest.
+    last: std::sync::Mutex<Option<String>>,
+}
+
+impl Unwritten {
+    fn note(&self, why: &str) {
+        if let Ok(mut l) = self.last.lock() {
+            *l = Some(why.to_string());
+        }
+    }
+
+    /// An event the store would not take.
+    pub fn lost_event(&self, why: &str) {
+        self.events
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.note(why);
+    }
+
+    /// A decision the store would not take. Worse than an event: this is the
+    /// answer to *who decided this*, which is what the product is for.
+    pub fn lost_decision(&self, why: &str) {
+        self.decisions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.note(why);
+    }
+
+    /// Events lost, decisions lost, and the last reason.
+    pub fn counts(&self) -> (u64, u64, Option<String>) {
+        (
+            self.events.load(std::sync::atomic::Ordering::Relaxed),
+            self.decisions.load(std::sync::atomic::Ordering::Relaxed),
+            self.last.lock().ok().and_then(|l| l.clone()),
+        )
+    }
+}
+
 /// Shared daemon state.
 pub struct AppState {
+    /// Set the moment a graceful stop begins, and read by the one handler that
+    /// has to tell *the agent's session ended* from *we killed it*.
+    ///
+    /// **The distinction is the whole of whether a question is still owed an
+    /// answer.** An agent whose turn ended having asked and proceeded leaves a
+    /// question nobody can answer any more; a daemon that stopped with a
+    /// question waiting leaves one that is still perfectly answerable, because
+    /// the vendor's session is on disk and the protocol can continue it. Both
+    /// arrive here as the same closed connection, so the difference has to be
+    /// recorded by the side that knows it — which is this flag, set before a
+    /// single session is torn down.
+    pub tearing_down: std::sync::atomic::AtomicBool,
     pub world: Mutex<World>,
     /// Live ACP sessions, by run. Only driven runs appear here; an observed
     /// session belongs to whoever started it.
@@ -48,6 +115,25 @@ pub struct AppState {
     /// the answer here, and the inbox raises it — because `devplane doctor`
     /// only ever helps the person who thinks to run it.
     pub gate_down: Mutex<Option<String>>,
+    /// What the store would not take, and why it last said no.
+    ///
+    /// A failed write is logged and dropped, and that trade is deliberate:
+    /// losing history is survivable and stalling the receiver is not. What was
+    /// not deliberate is that the loud log line it relies on goes to a
+    /// daemon's stderr — so for as long as this counter did not exist, the
+    /// board reported a complete record it did not have. Kept in memory on
+    /// purpose: it is a fact about *this* daemon's run, and persisting it
+    /// would mean writing to the thing that is not accepting writes.
+    pub unwritten: Unwritten,
+    /// Agents a **previous** daemon started that are still running with nothing
+    /// attached to them: `(pid, command, worktree)`.
+    ///
+    /// Read once, at startup, from the process table. Not re-read on a timer:
+    /// this daemon cannot leak an agent while it is alive — the guard on each
+    /// connection tears the group down — so the set is fixed the moment the
+    /// process table is first consulted, and re-reading it would be one
+    /// subprocess per tick to learn nothing.
+    pub leaked_agents: Mutex<Vec<(u32, String, Option<String>)>>,
     /// What GitHub says about every registered project, from the last poll.
     ///
     /// In memory and rebuilt on restart, like the roster: it is an observation
@@ -201,6 +287,7 @@ impl AppState {
         );
 
         Ok(Arc::new(AppState {
+            tearing_down: std::sync::atomic::AtomicBool::new(false),
             remote_asked: Mutex::new(Default::default()),
             world: Mutex::new(world),
             sessions: Mutex::new(std::collections::HashMap::new()),
@@ -209,6 +296,8 @@ impl AppState {
             store,
             agents,
             gate_down: Mutex::new(None),
+            unwritten: Unwritten::default(),
+            leaked_agents: Mutex::new(Vec::new()),
             forge: Mutex::new(ForgeState::default()),
             policy: PolicyCache::new(policy, home, dirs::home_dir()),
             token,
@@ -271,6 +360,7 @@ impl AppState {
 
         if let Err(e) = self.store.append_event(&env).await {
             tracing::warn!(error = %e, "could not persist event");
+            self.unwritten.lost_event(&e.to_string());
         }
 
         // The project row goes in before the run that references it. The other
@@ -312,7 +402,7 @@ impl AppState {
             tracing::warn!(error = %e, "could not persist run");
         }
 
-        let _ = self.tx.send(crate::core::Frame::Event(env));
+        let _ = self.tx.send(crate::core::Frame::Event(Box::new(env)));
     }
 
     /// Records a fragment of what a driven agent said, and streams it.
@@ -335,23 +425,30 @@ impl AppState {
     /// stream, and a reader should not have to know that an empty status sample
     /// secretly means "look again".
     pub fn notify_changed(&self) {
-        let _ = self.tx.send(crate::core::Frame::Event(EventEnvelope::new(
-            RunId::new("-"),
-            Source::Daemon,
-            Event::Refresh,
-        )));
+        let _ = self
+            .tx
+            .send(crate::core::Frame::Event(Box::new(EventEnvelope::new(
+                RunId::new("-"),
+                Source::Daemon,
+                Event::Refresh,
+            ))));
     }
 
     /// Appends a decision to the log and wakes the subscribers.
     ///
     /// Deliberately infallible from the caller's point of view: nothing that
     /// Devplane does should fail because the audit trail could not be written.
-    /// It is logged loudly instead, because an audit trail that is quietly not
-    /// being written is worse than none at all.
+    ///
+    /// **And a log line is not loud enough.** "Logged loudly instead" was the
+    /// whole answer here for a long time, and it went to a daemon's stderr —
+    /// so the thing that makes this product worth trusting could be failing
+    /// while every screen reported a complete record. The loss is counted now
+    /// and raises an inbox row of its own ([`Unwritten`]).
     pub async fn record(&self, decision: crate::core::Decision) {
         tracing::info!(decision = %decision.line());
         if let Err(e) = self.store.append_decision(&decision).await {
             tracing::error!(error = %e, "the decision log was not written");
+            self.unwritten.lost_decision(&e.to_string());
         }
     }
 
@@ -375,7 +472,9 @@ impl AppState {
         // repositories a rule was asked for and the file would not load, which
         // is the set where a missing `never_auto` is actually costing something.
         let broken_configs = self.policy.broken();
+        let (lost_events, lost_decisions, last_loss) = self.unwritten.counts();
         let forge = self.forge.lock().await.items(&works);
+        let leaked_agents = self.leaked_agents.lock().await.clone();
         let mut items = {
             let w = self.world.lock().await;
             w.inbox_with_health(
@@ -385,10 +484,33 @@ impl AppState {
                 &crate::core::world::Health {
                     gate_down: gate_down.as_deref(),
                     broken_configs: &broken_configs,
+                    unwritten: (lost_events, lost_decisions, last_loss.as_deref()),
+                    leaked_agents: &leaked_agents,
                 },
                 forge,
             )
         };
+        // **Asks that outlived the process that asked them.** Every item above
+        // is derived from a live run; these are derived from rows, because the
+        // whole point is that the run is gone. Without this, a daemon restarted
+        // with a question waiting says "Nothing needs you" while the question
+        // sits unanswered — which is the exact failure measured on 2026-09-19
+        // and the reason the durability clause was withdrawn rather than
+        // quietly dropped.
+        //
+        // Only where the run is **not** live: a live run already produced its
+        // own item above, and two rows for one question is the surface
+        // contradicting itself.
+        let live: std::collections::HashSet<RunId> =
+            self.sessions.lock().await.keys().cloned().collect();
+        for ask in self.store.open_asks().await.unwrap_or_default() {
+            if live.contains(&ask.run) {
+                continue;
+            }
+            items.push(crate::core::attention::stranded_ask_item(&ask));
+        }
+        items = crate::core::attention::rank(items);
+
         self.fill_offers(&mut items).await;
         items
     }
@@ -486,7 +608,7 @@ impl AppState {
                 .into_iter()
                 .filter(|(c, _)| {
                     matches!(
-                        self.policy.evaluate(&c.cwd, &c.tool, &c.input),
+                        self.policy.restrictive(&c.cwd, &c.tool, &c.input),
                         Verdict::Undecided
                     )
                 })
@@ -543,9 +665,18 @@ impl AppState {
     /// there. The failure is invisible until you go looking with `ps`, which is
     /// exactly why it has to be handled here rather than left to Drop.
     pub async fn shutdown(&self) {
+        // Before anything is torn down, so no `Ended` that follows can be
+        // mistaken for an agent finishing on its own.
+        self.tearing_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // **Read, not drained.** Each run's pump removes itself from this map
+        // as the last thing it does, so an empty map is the signal that every
+        // pump has finished *writing* — which is what this function has to wait
+        // for. Draining it here threw that signal away and left `shutdown()`
+        // returning while the endings it had just caused were still in flight.
         let sessions: Vec<_> = {
-            let mut map = self.sessions.lock().await;
-            map.drain().collect()
+            let map = self.sessions.lock().await;
+            map.iter().map(|(id, s)| (id.clone(), s.clone())).collect()
         };
         if sessions.is_empty() {
             return;
@@ -556,9 +687,27 @@ impl AppState {
         }
         // Each connection tears its agent's process group down as it closes.
         // Bounded, because a wedged agent must not hold the daemon open.
+        //
+        // **Two conditions, and the second is the one that was missing.** The
+        // command channel closing says the agent has gone; the pump leaving the
+        // map says the run's final state has been persisted. Returning on the
+        // first alone is why a graceful stop could lose the ending it had just
+        // written — measured as a run coming back `working` when the process
+        // exited inside the gap.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while sessions.iter().any(|(_, s)| s.is_live()) && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        loop {
+            let agents_gone = !sessions.iter().any(|(_, s)| s.is_live());
+            let pumps_drained = self.sessions.lock().await.is_empty();
+            if (agents_gone && pumps_drained) || std::time::Instant::now() >= deadline {
+                if !pumps_drained {
+                    tracing::warn!(
+                        "shut down before every run's final state was written; \
+                         a run may come back looking live and be reconciled"
+                    );
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 }
@@ -582,6 +731,7 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     let poller = tokio::spawn(crate::poller::run(state.clone()));
     let sweeper = tokio::spawn(crate::poller::stall_sweeper(state.clone(), notifications));
     let retention = tokio::spawn(crate::poller::retention(state.clone(), 30, 7));
+    let expiry = tokio::spawn(crate::poller::expiry_sweeper(state.clone()));
     let prs = tokio::spawn(crate::poller::pull_requests(state.clone()));
     // Nothing else can notice a gate that has stopped deciding: a broken one
     // and a quiet machine look identical from the event log.
@@ -603,6 +753,7 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     poller.abort();
     sweeper.abort();
     retention.abort();
+    expiry.abort();
     gate.abort();
     prs.abort();
     forge.abort();

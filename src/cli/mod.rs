@@ -12,16 +12,18 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod admin;
+mod batch;
 mod board;
 mod inbox;
+mod library;
 mod work;
 
 use admin::{
     cmd_agents, cmd_audit, cmd_connect, cmd_diagnostics, cmd_disconnect, cmd_rewind, cmd_search,
 };
 use board::{cmd_attach, cmd_focus, cmd_ls, cmd_open, cmd_show, cmd_tail, cmd_watch};
-use inbox::{cmd_attention, cmd_decide, cmd_inbox, cmd_say, cmd_snooze};
-use work::{cmd_check, cmd_dispatch, cmd_trust, cmd_work};
+use inbox::{cmd_answer, cmd_asks, cmd_attention, cmd_inbox, cmd_say, cmd_snooze};
+use work::{cmd_check, cmd_dispatch, cmd_gate_run, cmd_speckit_install, cmd_trust, cmd_work};
 
 #[derive(Parser)]
 #[command(
@@ -125,9 +127,21 @@ pub enum Command {
     Audit {
         /// Narrow to one run or one piece of work.
         about: Option<String>,
+        /// Only what was decided **instead of** you — a rule, a clock, or
+        /// nobody. Your own answers and Devplane running a gate are left out,
+        /// because those are the rows you already know about.
+        #[arg(long = "without-me")]
+        without_me: bool,
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+    /// Which projects are deciding without you, and what mode each is in.
+    ///
+    /// A person with six repositories cannot find this out from anything else
+    /// on the machine. Live sessions only, least-supervised first; a session
+    /// that has not reported a mode is shown as unknown rather than hidden,
+    /// because the hook that fires on every tool call does not carry one.
+    Modes,
     /// Show whether the inbox is worth reading, per kind.
     ///
     /// The product is a filter, and this is the only thing that measures it:
@@ -143,7 +157,11 @@ pub enum Command {
     Focus { run: String },
     /// Attach a terminal to a run, resuming its session.
     Attach { run: String },
-    /// Start an agent on a project and give it something to do.
+    /// Start an agent on a project — or send one prompt to several.
+    ///
+    /// With `--to`, this is a fan-out: one intent, many repositories, one
+    /// reviewable row. **Draft is chosen for you above three targets**, and no
+    /// position merges.
     Dispatch {
         /// What to ask for.
         prompt: Vec<String>,
@@ -153,22 +171,91 @@ pub enum Command {
         /// Where it runs. Defaults to the current directory.
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Project names, comma-separated. Turns this into a fan-out.
+        #[arg(long, value_delimiter = ',')]
+        to: Vec<String>,
+        /// How far it may go without you: `draft`, `gate`, `pr`.
+        ///
+        /// Defaults to `draft`, and stays draft above three targets whatever
+        /// you pass — six terminals holding a readable prompt is a better first
+        /// version than six running agents.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Without this, the preflight prints and nothing is sent or opened.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// A fan-out: one row, one outcome per target.
+    ///
+    /// **No aggregate.** Four green, one red and one asking a question is what
+    /// a fan-out looks like; a percentage over that hides the one that needs
+    /// you.
+    Batch {
+        /// One batch, or the most recent when omitted.
+        id: Option<String>,
     },
     /// Send another prompt to a run Devplane drives.
     Say { run: String, prompt: Vec<String> },
-    /// Answer a permission request from a driven run.
-    Decide {
-        run: String,
-        /// `allow` or `deny`. Omit to refuse.
-        #[arg(long, default_value = "deny")]
-        decision: String,
-        /// An exact option id from the inbox item, when the agent offers more
-        /// than the usual two.
+    /// Answer something an agent asked you — a permission or a question.
+    ///
+    /// The id is the one `devplane inbox` prints, and it is **not** a session
+    /// id: it outlives the process that asked, so an answer given tomorrow
+    /// morning still reaches the agent, through a resumed session where the
+    /// original one is gone.
+    ///
+    /// There is no way to dismiss one. An agent that asked and was told nothing
+    /// proceeds on nothing, which is what this exists to prevent.
+    Answer {
+        /// The ask, from `devplane inbox`.
+        ask: String,
+        /// Allow it — for a permission.
+        #[arg(long, conflicts_with_all = ["deny", "custom"])]
+        allow: bool,
+        /// Refuse it — for a permission. The default where neither is given,
+        /// because a refusal is the safe end of the range.
+        #[arg(long, conflicts_with_all = ["allow", "custom"])]
+        deny: bool,
+        /// An exact option the agent offered, as it wrote it.
         #[arg(long)]
         option: Option<String>,
+        /// Your own words, where the agent offered an "Other" box. Wins over
+        /// `--option`, which is the agent's own rule rather than ours.
         #[arg(long)]
-        request: String,
+        custom: Option<String>,
+        /// Which question, when the agent asked several at once.
+        #[arg(long)]
+        field: Option<String>,
     },
+    /// Run this repository's own gates and report what they exited with.
+    ///
+    /// The verdict half of `check`: that one says what the file will do, this
+    /// one says what the commands in it just said. It decides on exit codes and
+    /// nothing else — no specification is opened and no task list is parsed.
+    ///
+    /// Exits 0 only when the checks passed. A repository that declares none,
+    /// and one whose configuration will not parse, both exit non-zero: a caller
+    /// that reads "nothing was checked" as success is the failure this exists
+    /// to prevent.
+    Gate {
+        #[command(subcommand)]
+        what: GateCmd,
+    },
+    /// Register Devplane's gate as a Spec Kit extension hook.
+    ///
+    /// Spec Kit's commands look in `.specify/extensions.yml` for a hook to
+    /// invoke and wait for. Devplane's runs this project's gates and reports
+    /// what they said, which is the one thing that whole workflow has no way to
+    /// do: its own analysers report and none of them decides.
+    Speckit {
+        #[command(subcommand)]
+        what: SpeckitCmd,
+    },
+    /// Everything an agent has asked you, and what became of each one.
+    ///
+    /// Open ones first, oldest first among those — a queue of what is owed to
+    /// you rather than a feed. Settled ones follow with the sentence that says
+    /// what ended them: you, a clock your project set, or nobody.
+    Asks,
     /// List the agents Devplane can drive.
     Agents,
     /// Read this repository's devplane.toml and say what it will do.
@@ -239,6 +326,23 @@ pub enum Command {
     Work {
         #[command(subcommand)]
         what: WorkCmd,
+    },
+    /// Prompts and skills you reuse across projects.
+    ///
+    /// Five verbs over artefacts **in the vendors' own formats, unmodified**.
+    /// Devplane owns the verbs and none of the nouns: nothing here invents a
+    /// format, rewrites an artefact, or translates one vendor's fields into
+    /// another's.
+    //
+    // This said "blueprints" and "four verbs" until 2026-09-20, and both were
+    // wrong in the direction that costs the most: it advertised a noun this
+    // command does not have — a blueprint carries a shell hook and needs its own
+    // safety argument, which is why it is not in the feature — and then
+    // miscounted the verbs it does have, with all five listed underneath. The
+    // help text is the first page anybody reads.
+    Library {
+        #[command(subcommand)]
+        what: LibraryCmd,
     },
     /// Hide a run's or a piece of work's inbox items for a while.
     Snooze {
@@ -314,6 +418,71 @@ pub enum Command {
 }
 
 #[derive(Subcommand)]
+pub enum SpeckitCmd {
+    /// Add the hook to `.specify/extensions.yml`, or print it where one exists.
+    Install {
+        /// Which hook point. Defaults to `after_implement` — where code has
+        /// just been written, so a gate has something to check.
+        #[arg(long)]
+        event: Option<String>,
+        /// Print and write nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GateCmd {
+    /// Run this repository's gates now and report the verdict.
+    Run {
+        /// Which repository. Defaults to the working directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LibraryCmd {
+    /// Every artefact this machine can reach.
+    List,
+    /// Which of your copies drifted, which projects lack it, and what a
+    /// distribution path will reject. **Reports; changes nothing.**
+    Diff {
+        /// One artefact, or every one when omitted.
+        artefact: Option<String>,
+    },
+    /// What it will be allowed to do, and where it came from.
+    ///
+    /// Never a verdict. Not *safe*, not *risky*, not a tick.
+    Report { artefact: String },
+    /// Copy it into projects, byte for byte, into vendor-documented paths only.
+    ///
+    /// Every refusal is named **before the first byte is written**.
+    Install {
+        artefact: String,
+        /// Project names, comma-separated. Every registered project when omitted.
+        #[arg(long, value_delimiter = ',')]
+        to: Vec<String>,
+        /// Replace a copy that differs. Never overrides an untrusted target.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Bring one copy into line, in a direction you name.
+    Sync {
+        artefact: String,
+        /// `library` (library → project) or `project` (project → library).
+        #[arg(long)]
+        from: String,
+        /// The project.
+        #[arg(long)]
+        to: String,
+        /// Without this, it prints what would change and writes nothing.
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum WorkCmd {
     /// Begin a new piece of work.
     Start {
@@ -428,20 +597,74 @@ pub async fn run(cli: Cli) -> Result<()> {
         }) => cmd_tail(&run, thinking, history).await,
         Some(Command::Search { query }) => cmd_search(&query, cli.json).await,
         Some(Command::Rewind { run }) => cmd_rewind(&run, cli.json).await,
-        Some(Command::Audit { about, limit }) => cmd_audit(about.as_deref(), limit, cli.json).await,
+        Some(Command::Audit {
+            about,
+            without_me,
+            limit,
+        }) => cmd_audit(about.as_deref(), without_me, limit, cli.json).await,
+        Some(Command::Modes) => crate::cli::inbox::cmd_modes(cli.json).await,
+        Some(Command::Library { what }) => match what {
+            LibraryCmd::List => crate::cli::library::cmd_list(cli.json).await,
+            LibraryCmd::Diff { artefact } => {
+                crate::cli::library::cmd_diff(artefact, cli.json).await
+            }
+            LibraryCmd::Report { artefact } => {
+                crate::cli::library::cmd_report(artefact, cli.json).await
+            }
+            LibraryCmd::Install {
+                artefact,
+                to,
+                force,
+            } => crate::cli::library::cmd_install(artefact, to, force, cli.json).await,
+            LibraryCmd::Sync {
+                artefact,
+                from,
+                to,
+                apply,
+            } => crate::cli::library::cmd_sync(artefact, from, to, apply, cli.json).await,
+        },
         Some(Command::Attention { days }) => cmd_attention(days, cli.json).await,
         Some(Command::Focus { run }) => cmd_focus(&run).await,
         Some(Command::Attach { run }) => cmd_attach(&run).await,
-        Some(Command::Dispatch { prompt, agent, cwd }) => {
-            cmd_dispatch(&agent, cwd, prompt.join(" "), cli.json).await
+        Some(Command::Dispatch {
+            prompt,
+            agent,
+            cwd,
+            to,
+            mode,
+            apply,
+        }) => {
+            if to.is_empty() {
+                cmd_dispatch(&agent, cwd, prompt.join(" "), cli.json).await
+            } else {
+                crate::cli::batch::cmd_fan_out(
+                    &agent,
+                    to,
+                    prompt.join(" "),
+                    mode.as_deref(),
+                    apply,
+                    cli.json,
+                )
+                .await
+            }
         }
+        Some(Command::Batch { id }) => crate::cli::batch::cmd_batch(id, cli.json).await,
         Some(Command::Say { run, prompt }) => cmd_say(&run, prompt.join(" ")).await,
-        Some(Command::Decide {
-            run,
-            decision,
+        Some(Command::Answer {
+            ask,
+            allow,
+            deny,
             option,
-            request,
-        }) => cmd_decide(&run, &request, &decision, option).await,
+            custom,
+            field,
+        }) => cmd_answer(&ask, allow, deny, option, custom, field).await,
+        Some(Command::Asks) => cmd_asks(cli.json).await,
+        Some(Command::Gate {
+            what: GateCmd::Run { cwd },
+        }) => cmd_gate_run(cwd, cli.json).await,
+        Some(Command::Speckit {
+            what: SpeckitCmd::Install { event, dry_run },
+        }) => cmd_speckit_install(event, dry_run),
         Some(Command::Agents) => cmd_agents(cli.json).await,
         Some(Command::Check { path }) => cmd_check(path, cli.json),
         Some(Command::Explain {
@@ -487,15 +710,43 @@ async fn cmd_serve(port: u16) -> Result<()> {
         )
         .init();
 
+    // **A live pid is not a running daemon.** `daemon.json` outlives a daemon
+    // that was killed, and the operating system reuses the pid — after which
+    // this guard refused to start for ever, naming somebody else's process.
+    // Three outcomes, and the middle one is the one that was missing.
     if let Some(info) = config::read_daemon_info()?
-        && poller::process_alive(info.pid)
         && info.pid != std::process::id()
+        && poller::process_alive(info.pid)
     {
-        anyhow::bail!(
-            "a daemon is already running (pid {}, port {}). Stop it with `devplane stop`.",
-            info.pid,
-            info.port
-        );
+        match crate::observe::procs::is_daemon(info.pid) {
+            // It is there and it is us. The original, correct refusal.
+            Some(true) => anyhow::bail!(
+                "a daemon is already running (pid {}, port {}). Stop it with `devplane stop`.",
+                info.pid,
+                info.port
+            ),
+            // The pid is alive and belongs to something else, so the record is
+            // stale and the pid has come round again. Clearing it is the whole
+            // repair, and saying so beats leaving somebody to guess.
+            Some(false) => {
+                tracing::warn!(
+                    pid = info.pid,
+                    "daemon.json names a pid that belongs to something else; the last daemon did not shut down cleanly. Ignoring it."
+                );
+                config::clear_daemon_info().ok();
+            }
+            // The process table could not be read, so this cannot tell a stale
+            // record from a live daemon. **Refuse**, because two daemons on one
+            // database both poll, both reconcile and both start agents, which
+            // is worse than a refusal — and name the file, because at this
+            // point a person has to decide.
+            None => anyhow::bail!(
+                "a daemon may already be running (pid {}, port {}), and the process table could not be read to confirm it.\nIf you are sure it is not, delete {} and try again.",
+                info.pid,
+                info.port,
+                config::home()?.join("daemon.json").display()
+            ),
+        }
     }
 
     let token = config::load_or_create_token()?;
@@ -545,8 +796,8 @@ fn load_policy() -> crate::core::Policy {
         Ok(g) => {
             let policy = g.policy();
             tracing::info!(
-                allow = policy.allow_rules().len(),
                 deny = policy.deny_rules().len(),
+                ask = policy.ask_rules().len(),
                 "policy loaded"
             );
             policy

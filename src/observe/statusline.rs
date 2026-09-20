@@ -7,9 +7,8 @@
 //! installed: the subscription rate limits and when they reset, the provider's
 //! own context percentage and the window it is a percentage *of*, the model,
 //! the session cost, the lines it changed, and the Claude Code release this
-//! session is running — which is what turns
-//! [`crate::core::policy::VERIFIED_AGAINST`] from a machine-wide assumption
-//! into a per-session fact.
+//! session is running — which is the difference between an assumption about
+//! this machine and a fact about one session.
 //!
 //! Updates are event-driven and debounced at 300 ms: session start and resume,
 //! a new assistant message, `/compact` finishing, a permission-mode change, a

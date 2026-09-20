@@ -7,6 +7,100 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// The permission mode a watched session is running in, as its vendor reports it.
+///
+/// **This is the one thing a person with six repositories cannot find out
+/// today**, and it is the first slice of the seat: not *what was decided
+/// without you*, which measured as everything, but *which of my projects is
+/// deciding without me at all*.
+///
+/// Six values because the vendor documents six. The one labelled **Manual** in
+/// the interface arrives on the wire as `default`, never as `manual`, which is
+/// exactly the sort of detail that makes a hand-rolled string comparison wrong
+/// in a way nobody notices.
+///
+/// [`Self::Unrecognised`] carries the text rather than collapsing into
+/// `Default`. A mode this build has never heard of is a mode whose supervision
+/// properties are unknown, and reading it as the vendor's *most* supervised
+/// value is the widening-by-silence failure this project keeps finding in
+/// itself: the screen would say `default` about a session running something
+/// stricter or looser, and nothing would be wrong anywhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Shown as **Manual**. Arrives as `default`.
+    Default,
+    /// Reads and plans; changes nothing until the plan is accepted.
+    Plan,
+    /// Edits go through without asking. Other tools still ask.
+    AcceptEdits,
+    /// **A classifier decides**, not a person. The built-in starting mode on
+    /// Pro, Max and Team, which is the whole reason this type exists.
+    Auto,
+    /// Nothing is asked.
+    DontAsk,
+    /// The permission system is off.
+    BypassPermissions,
+    /// A value this build does not know, kept verbatim.
+    Unrecognised(String),
+}
+
+impl PermissionMode {
+    /// From the wire. Never guesses: an unknown string is kept as one.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "default" => Self::Default,
+            "plan" => Self::Plan,
+            "acceptEdits" => Self::AcceptEdits,
+            "auto" => Self::Auto,
+            "dontAsk" => Self::DontAsk,
+            "bypassPermissions" => Self::BypassPermissions,
+            other => Self::Unrecognised(other.to_string()),
+        }
+    }
+
+    /// The vendor's own spelling, so a value round-trips.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Auto => "auto",
+            Self::DontAsk => "dontAsk",
+            Self::BypassPermissions => "bypassPermissions",
+            Self::Unrecognised(raw) => raw,
+        }
+    }
+
+    /// What a person reads. `default` is shown as the vendor labels it.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Default => "manual",
+            Self::Plan => "plan",
+            Self::AcceptEdits => "accept edits",
+            Self::Auto => "auto",
+            Self::DontAsk => "don't ask",
+            Self::BypassPermissions => "no permissions",
+            Self::Unrecognised(raw) => raw,
+        }
+    }
+
+    /// Whether a person is in the loop for an ordinary tool call.
+    ///
+    /// `None` for a mode this build does not recognise — **not `false`**. The
+    /// question "is anybody supervising this" has three answers and the third
+    /// is *we do not know*, which is the one a row has to be able to show.
+    pub fn asks_a_person(&self) -> Option<bool> {
+        match self {
+            Self::Default | Self::Plan => Some(true),
+            // `acceptEdits` still asks about everything that is not an edit.
+            Self::AcceptEdits => Some(true),
+            Self::Auto | Self::DontAsk | Self::BypassPermissions => Some(false),
+            Self::Unrecognised(_) => None,
+        }
+    }
+}
+
 /// How much control Devplane has over a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +140,12 @@ pub enum RunState {
     Completed,
     Failed,
     Stopped,
+    /// Devplane stopped this run, because the daemon was shutting down.
+    ///
+    /// Distinct from `Stopped`, which is a person, and from `Lost`, which is a
+    /// process that was expected and not found. Here the cause is known and it
+    /// is us — and it is never `Completed`, because the work did not finish.
+    Interrupted,
     /// Recorded as alive, but reconciliation could not find it.
     Lost,
 }
@@ -68,6 +168,7 @@ impl RunState {
             RunState::Completed => "completed",
             RunState::Failed => "failed",
             RunState::Stopped => "stopped",
+            RunState::Interrupted => "interrupted",
             RunState::Lost => "lost",
         }
     }
@@ -89,7 +190,15 @@ impl RunState {
     /// being waited on. Listing known-good is the wrong default for a signal
     /// whose vocabulary the vendor extends.
     pub fn needs_human(&self) -> bool {
-        matches!(self, RunState::Waiting(w) if !matches!(w, WaitingFor::Idle))
+        matches!(self, RunState::Waiting(w) if !matches!(w, WaitingFor::Idle | WaitingFor::Job))
+    }
+
+    /// Whether the session is waiting on a command it started rather than on a
+    /// person. Kept separate from [`needs_human`](Self::needs_human) because
+    /// the two answers differ: nothing is owed, and the row still belongs on
+    /// the board for as long as the job runs.
+    pub fn waits_on_a_job(&self) -> bool {
+        matches!(self, RunState::Waiting(WaitingFor::Job))
     }
 }
 
@@ -269,12 +378,35 @@ pub struct Run {
     pub model: Option<String>,
     /// The Claude Code release **this session** is running.
     ///
-    /// Only the status line reports it, so it is absent without the shim. It
-    /// exists for one question: the gate is tested against a single release
-    /// ([`crate::core::policy::VERIFIED_AGAINST`]), and a session ahead of it
-    /// is governed by rules nobody has measured against it. `doctor` says so.
+    /// Only the status line reports it, so it is absent without the shim.
+    ///
+    /// It existed for one question — how far past the gate's measured baseline
+    /// this session had drifted — and that baseline was deleted with the claim
+    /// it protected. What it is still for is smaller and honest: `doctor`
+    /// reports how many live sessions are telling us what they run, because
+    /// *nothing is reporting* and *nothing is wrong* are different answers.
     #[serde(default)]
     pub claude_version: Option<String>,
+    /// The permission mode this session last reported, and when we first saw
+    /// it at that value.
+    ///
+    /// **Observed, never subscribed.** No hook announces a mode change, so the
+    /// timestamp is *when Devplane first heard this mode*, which is at best the
+    /// person's next prompt after they switched. Anything on screen has to say
+    /// "seen" rather than "since", because "in auto since 09:14" would be a
+    /// claim about a moment nothing here witnessed.
+    pub permission_mode: Option<PermissionMode>,
+    pub permission_mode_seen: Option<Timestamp>,
+    /// The mode an **ACP agent** declared for this session, in the agent's own
+    /// spelling.
+    ///
+    /// Kept apart from `permission_mode` on purpose. That one is a vendor's
+    /// documented mode, read from a named settings file, with an authority
+    /// behind it. This one is a string an agent chose, and the two are only
+    /// superficially the same question — presenting them under one heading
+    /// would assert an equivalence no specification supports.
+    pub agent_mode: Option<String>,
+    pub agent_mode_seen: Option<Timestamp>,
     /// OpenTelemetry's `app.entrypoint`: which surface started this session.
     pub entrypoint: Option<String>,
     /// A name the provider gave the session, when it has one.
@@ -327,6 +459,16 @@ pub struct Run {
     /// live status arrives, the run is dormant and stays out of the way.
     #[serde(default)]
     pub reporting: bool,
+    /// When a hook last spoke about this session, if one ever has.
+    ///
+    /// **It decides whose word counts about the state.** A hook reports an
+    /// event at the moment it happens and carries the reason — which tool,
+    /// which question, which request id to answer by. The roster reports a
+    /// coarse sample two seconds late. Where both exist the hook wins, and
+    /// where only the roster exists it must be believed rather than consulted
+    /// once and then ignored, which is what it was.
+    #[serde(default)]
+    pub last_hook_at: Option<Timestamp>,
     /// Whether this session has ever produced an event that *is* activity — a
     /// hook, a telemetry record, a turn of a driven run.
     ///
@@ -360,10 +502,24 @@ pub struct BlockedOn {
     /// Set when this can be answered from Devplane.
     #[serde(default)]
     pub request_id: Option<String>,
+    /// The durable ask, when there is one.
+    ///
+    /// **The token a surface offers, and `request_id` is not.** A request id
+    /// means something only to the connection that issued it; this one is what
+    /// an answer is addressed to from any surface at any later time, including
+    /// after the process that asked has gone.
+    #[serde(default)]
+    pub ask: Option<crate::core::AskId>,
     pub tool: Option<String>,
     pub input: Option<serde_json::Value>,
     /// What the run will accept as an answer, with the ids the protocol needs.
     pub options: Vec<Choice>,
+    /// The whole form, where the agent asked several questions at once or
+    /// offered a free-text box. `options` is the first question flattened for
+    /// surfaces that show one line; this is what an answer is validated
+    /// against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<serde_json::Value>,
     pub since: Timestamp,
 }
 
@@ -373,12 +529,19 @@ impl Run {
         Self {
             id: RunId::from_session(&session_id),
             session_id,
+            last_hook_at: None,
             agent_session: None,
             project_id: None,
             agent: agent.to_string(),
             agent_command: None,
             mode,
             state: RunState::Starting,
+            // Unknown until a hook that carries it arrives. `PreToolUse` is
+            // not one of them, whatever it feels like it should be.
+            permission_mode: None,
+            permission_mode_seen: None,
+            agent_mode: None,
+            agent_mode_seen: None,
             cwd,
             worktree: None,
             branch: None,
@@ -431,7 +594,14 @@ impl Run {
     /// idle, failed, lost — is today's business for [`IN_PLAY_SECONDS`] and
     /// history afterwards, counted rather than listed (`--all` lists them).
     pub fn is_active(&self) -> bool {
-        if self.state.needs_human() || matches!(self.state, RunState::Working | RunState::Starting)
+        if self.state.needs_human()
+            || matches!(self.state, RunState::Working | RunState::Starting)
+            // **A running job is something happening**, so it never ages out.
+            // Without this a four-hour test suite drops off the board after
+            // six, and the session most worth watching is the one that
+            // vanishes — the person comes back to a finished run they were
+            // never shown.
+            || self.state.waits_on_a_job()
         {
             return true;
         }
@@ -456,4 +626,131 @@ impl Run {
     pub fn is_snoozed(&self) -> bool {
         self.snoozed.any()
     }
+}
+
+#[cfg(test)]
+mod permission_mode_tests {
+    use super::PermissionMode;
+
+    /// **`default` is the one labelled Manual, and `manual` is not a value.**
+    ///
+    /// The vendor's reference says so in a sentence buried in a table: *"The
+    /// mode labeled Manual arrives as `default`, never as `manual`, so scripts
+    /// that match `default` keep working."* A matcher written from the visible
+    /// interface instead of the wire would miss every supervised session.
+    #[test]
+    fn the_wire_spelling_is_the_vendors_and_manual_is_not_one() {
+        assert_eq!(PermissionMode::parse("default"), PermissionMode::Default);
+        assert_eq!(PermissionMode::Default.label(), "manual");
+        assert_eq!(PermissionMode::Default.as_str(), "default");
+        // `manual` on the wire would be a value the vendor does not send, so
+        // it is kept rather than helpfully mapped onto `Default`.
+        assert!(matches!(
+            PermissionMode::parse("manual"),
+            PermissionMode::Unrecognised(_)
+        ));
+        // camelCase, not snake: `acceptEdits`, not `accept_edits`.
+        assert_eq!(
+            PermissionMode::parse("acceptEdits"),
+            PermissionMode::AcceptEdits
+        );
+        assert!(matches!(
+            PermissionMode::parse("accept_edits"),
+            PermissionMode::Unrecognised(_)
+        ));
+    }
+
+    /// **A mode nobody here has heard of is not "supervised".**
+    ///
+    /// The whole class of bug this project keeps finding in itself is a widening
+    /// that nothing reports. Collapsing an unknown mode into `Default` would put
+    /// the most-supervised label on a session running something else entirely,
+    /// and no test anywhere would fail. So the third answer exists.
+    #[test]
+    fn an_unknown_mode_answers_neither_yes_nor_no() {
+        assert_eq!(PermissionMode::Default.asks_a_person(), Some(true));
+        assert_eq!(PermissionMode::Auto.asks_a_person(), Some(false));
+        assert_eq!(PermissionMode::DontAsk.asks_a_person(), Some(false));
+        assert_eq!(
+            PermissionMode::BypassPermissions.asks_a_person(),
+            Some(false)
+        );
+        assert_eq!(
+            PermissionMode::parse("hypervigilant").asks_a_person(),
+            None,
+            "an unrecognised mode must not answer this question at all"
+        );
+    }
+
+    /// Every value survives the round trip, so a mode is never silently
+    /// rewritten on its way through the store.
+    #[test]
+    fn every_mode_round_trips_through_its_wire_spelling() {
+        for raw in [
+            "default",
+            "plan",
+            "acceptEdits",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+            "something-new-in-2027",
+        ] {
+            assert_eq!(PermissionMode::parse(raw).as_str(), raw, "{raw}");
+        }
+    }
+
+    /// No two modes read the same on screen. A label collision would make two
+    /// different supervision states indistinguishable in the one place the
+    /// distinction is the entire point.
+    #[test]
+    fn no_two_modes_share_a_label() {
+        let all = [
+            PermissionMode::Default,
+            PermissionMode::Plan,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Auto,
+            PermissionMode::DontAsk,
+            PermissionMode::BypassPermissions,
+        ];
+        let mut labels: Vec<&str> = all.iter().map(|m| m.label()).collect();
+        labels.sort_unstable();
+        let before = labels.len();
+        labels.dedup();
+        assert_eq!(
+            before,
+            labels.len(),
+            "two modes render the same: {labels:?}"
+        );
+    }
+}
+
+/// What one agent said it could do, the last time Devplane started it.
+///
+/// Capabilities are advertised per agent at `initialize`, so this is a fact
+/// about *that* agent at *that* version, with a date on it.
+///
+/// **Absence is *not probed*, never *not supported*.** An agent nobody has
+/// started has no record at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCapabilityRecord {
+    /// What was actually run. Keyed on this rather than a friendly name because
+    /// two registry entries can point at one binary, and a rename must not read
+    /// as a new agent.
+    pub command: String,
+    /// What the agent calls itself, where it says.
+    pub agent_name: Option<String>,
+    /// `session/resume` — continue without replaying.
+    pub resume: bool,
+    /// `session/load` — continue *with* a replay. An agent may have either, and
+    /// GitHub Copilot advertises this one and not `resume`.
+    pub load_session: bool,
+    /// `session/list` — the agent can enumerate its own sessions.
+    pub list_sessions: bool,
+    /// Whether the agent declared a session mode. Not a capability flag: the
+    /// protocol has none for modes, and what is observable is whether the
+    /// session response carried one.
+    pub declares_modes: bool,
+    /// Whether the agent advertised any authentication method.
+    pub needs_auth: bool,
+    pub measured_at: Timestamp,
 }

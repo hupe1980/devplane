@@ -391,13 +391,10 @@ fn the_refused_rules_table_on_the_site_is_the_one_the_gate_refuses() {
                 .and_then(|s| s.split('`').next())
                 .filter(|s| !s.is_empty())
         }) {
-            // An allow-side-only refusal is only refused on that side.
-            let class = if cell.contains("auto_allow") || line.contains("auto_allow") {
-                Class::Allow
-            } else {
-                Class::Deny
-            };
-            let Some(rule) = Rule::parse(raw, class) else {
+            // Every row is a deny-side rule now. The page used to carry
+            // allow-side-only refusals and the branch that classified them
+            // went with the allow list itself.
+            let Some(rule) = Rule::parse(raw, Class::Deny) else {
                 continue; // a rule that does not parse at all is refused enough
             };
             assert!(
@@ -432,20 +429,20 @@ fn the_refused_rules_table_on_the_site_is_the_one_the_gate_refuses() {
     }
 }
 
-/// Wherever the published tree states the release the gate was measured
-/// against, it is the number the binary holds.
+/// Wherever the published tree names the release the rule syntax was modelled
+/// on, it is the number the binary holds.
 ///
 /// It used to live in comments in three source files, in a shell script and in
 /// four published pages — eight copies of one number, and nothing read any of
 /// them. The harness that moved it is gone with the approval path, so the
 /// number is frozen now; what is still worth protecting is the copying.
 ///
-/// `VERIFIED_AGAINST` is the authority. The scan is over **every** published
+/// `SYNTAX_MODELLED_ON` is the authority. The scan is over **every** published
 /// page rather than a list of four, because the previous version of this test
 /// named its files and a fifth page could say anything it liked.
 #[test]
 fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
-    let baseline = devplane::core::policy::VERIFIED_AGAINST;
+    let baseline = devplane::core::policy::SYNTAX_MODELLED_ON;
     let root = repo_root();
     // The phrasings the published tree actually uses, each followed by the
     // version. A page that invents a ninth phrasing is invisible here, which is
@@ -458,7 +455,7 @@ fn every_page_that_names_the_gate_baseline_names_the_one_the_binary_holds() {
     // and real money. Collapsing them is the mistake this project already made
     // once; a test that collapses them teaches the same error with authority.
     let patterns = [
-        "verified against Claude Code ",
+        "rule syntax modelled on Claude Code ",
         "last full run: ",
         "ran in full against ",
         "full run, against Claude Code ",
@@ -579,4 +576,457 @@ fn the_agent_facing_index_names_every_command() {
         "site/static/llms.txt does not name: {missing:?} — an agent reading it \
          would be told about a binary that does not exist"
     );
+}
+
+/// **The plugin manifests say what this crate is, and a reserved name would
+/// make the marketplace unloadable.**
+///
+/// A plugin is the cheapest door this project has — two JSON files — and both
+/// ways it can rot are silent. A version that trails the crate installs an
+/// older story than the binary tells; a name on the vendor's reserved list
+/// stops the marketplace loading entirely, and that list **grows**: names are
+/// re-checked on every load, so a marketplace that worked last month can stop
+/// working because somebody else reserved its name.
+#[test]
+fn the_plugin_manifests_match_this_crate() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let plugin: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("plugin/.claude-plugin/plugin.json"))
+            .expect("the plugin manifest"),
+    )
+    .expect("valid JSON");
+    let market: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".claude-plugin/marketplace.json"))
+            .expect("the marketplace manifest"),
+    )
+    .expect("valid JSON");
+
+    assert_eq!(
+        plugin["version"].as_str(),
+        Some(env!("CARGO_PKG_VERSION")),
+        "the plugin's version has drifted from the crate's"
+    );
+
+    // Reserved by the vendor for its own use, plus the package-manager names it
+    // blocks in any casing. A marketplace called one of these is reported as
+    // registered from an untrusted source.
+    const RESERVED: &[&str] = &[
+        "claude-code-marketplace",
+        "claude-code-plugins",
+        "claude-plugins-official",
+        "claude-plugins-community",
+        "claude-community",
+        "anthropic-marketplace",
+        "anthropic-plugins",
+        "agent-skills",
+        "anthropic-agent-skills",
+        "knowledge-work-plugins",
+        "life-sciences",
+        "claude-for-legal",
+        "claude-for-financial-services",
+        "financial-services-plugins",
+        "first-party-plugins",
+        "claude-tag-plugins",
+        "healthcare",
+        "npm",
+        "pip",
+        "uv",
+        "cargo",
+        "github",
+        "gh",
+    ];
+    for name in [market["name"].as_str(), plugin["name"].as_str()] {
+        let name = name.expect("a name").to_ascii_lowercase();
+        assert!(
+            !RESERVED.contains(&name.as_str()),
+            "`{name}` is reserved by the vendor; the marketplace would not load"
+        );
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "`{name}` is not kebab-case"
+        );
+    }
+
+    // Every entry points at a directory that is here, with a manifest in it.
+    for entry in market["plugins"].as_array().expect("plugins") {
+        let source = entry["source"].as_str().expect("a source");
+        let dir = root.join(source.trim_start_matches("./"));
+        assert!(
+            dir.join(".claude-plugin/plugin.json").is_file(),
+            "{source} has no plugin manifest, so the entry installs nothing"
+        );
+    }
+
+    // The MCP server the plugin ships is this binary's own read-only surface.
+    // Naming a different command here would ship a door into something else.
+    let mcp: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("plugin/mcp.json")).expect("the MCP config"),
+    )
+    .expect("valid JSON");
+    assert_eq!(
+        mcp["mcpServers"]["devplane"]["command"].as_str(),
+        Some("devplane")
+    );
+    assert_eq!(
+        mcp["mcpServers"]["devplane"]["args"][0].as_str(),
+        Some("mcp"),
+        "the plugin must start the read-only surface and nothing else"
+    );
+}
+
+/// **Every skill the plugin ships is loadable, and says only what the binary
+/// does.**
+///
+/// A skill with broken frontmatter is not reported as broken: it is silently
+/// absent, so the failure looks like an agent that ignored an instruction.
+/// `claude plugin validate` catches the shape by hand; this catches it on every
+/// run, and adds the rule that tool has no way to know — a skill may only tell
+/// an agent to run commands this binary actually has.
+#[test]
+fn every_skill_the_plugin_ships_is_loadable_and_runs_only_real_commands() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let skills = root.join("plugin/skills");
+    let mut seen = 0;
+
+    for entry in std::fs::read_dir(&skills).expect("the plugin ships skills") {
+        let dir = entry.expect("a readable entry").path();
+        if !dir.is_dir() {
+            continue;
+        }
+        seen += 1;
+        let folder = dir.file_name().unwrap().to_string_lossy().to_string();
+        let body = std::fs::read_to_string(dir.join("SKILL.md"))
+            .unwrap_or_else(|_| panic!("{folder} has no SKILL.md, so it loads nothing"));
+
+        // Frontmatter, delimited exactly: the loader reads the first block and
+        // a file that merely starts with prose is skipped without a word.
+        let rest = body
+            .strip_prefix("---\n")
+            .unwrap_or_else(|| panic!("{folder}: SKILL.md must open with `---`"));
+        let (front, _) = rest
+            .split_once("\n---\n")
+            .unwrap_or_else(|| panic!("{folder}: the frontmatter block is not closed"));
+
+        let field = |key: &str| -> String {
+            front
+                .lines()
+                .find_map(|l| l.strip_prefix(&format!("{key}: ")))
+                .unwrap_or_else(|| panic!("{folder}: SKILL.md declares no `{key}`"))
+                .trim()
+                .to_string()
+        };
+
+        let name = field("name");
+        assert_eq!(
+            name, folder,
+            "a skill's name must be its directory, or the loader and the \
+             marketplace disagree about what it is called"
+        );
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "{folder}: `{name}` is not kebab-case"
+        );
+
+        // The description is the whole of what an agent sees before deciding to
+        // load the skill. One that does not say *when* to use it is a skill
+        // that is never used.
+        let description = field("description");
+        assert!(
+            description.len() < 1024,
+            "{folder}: the description is {} characters; the loader truncates it",
+            description.len()
+        );
+        assert!(
+            description.to_ascii_lowercase().contains("use when"),
+            "{folder}: the description must say when to use the skill: {description}"
+        );
+
+        // **And the commands it names exist.** A skill that tells an agent to
+        // run something this binary does not have fails in somebody's session,
+        // which is the most expensive place to find out.
+        let help = String::from_utf8(
+            std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+                .arg("--help")
+                .output()
+                .expect("the binary runs")
+                .stdout,
+        )
+        .expect("help is text");
+        for line in body.lines() {
+            let Some(rest) = line.trim().strip_prefix("devplane ") else {
+                continue;
+            };
+            let Some(word) = rest.split_whitespace().next() else {
+                continue;
+            };
+            if word.starts_with('-') {
+                continue;
+            }
+            assert!(
+                help.contains(&format!("  {word}")),
+                "{folder}: names `devplane {word}`, which this binary has no \
+                 subcommand for"
+            );
+        }
+    }
+
+    assert!(
+        seen >= 2,
+        "expected the plugin's skills to be found, saw {seen}"
+    );
+}
+
+/// **Somebody else's contract, pinned to the copy this repository read.**
+///
+/// The whole Spec Kit feature rests on four sentences in a file this project
+/// does not own and cannot version. Each of them can change without a release
+/// note, and each failure is silent in the worst way: a hook that is registered
+/// correctly, committed, and never fires. A `condition` is the sharpest of
+/// them — every command defers evaluation to a `HookExecutor` that does not
+/// exist, so an entry carrying one looks right and does nothing.
+///
+/// This fails here, on a Spec Kit upgrade, rather than in somebody's workflow.
+/// It skips when Spec Kit is not installed, because the contract is only worth
+/// checking against a copy that is present.
+#[test]
+fn the_speckit_hook_contract_still_says_what_this_feature_relies_on() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let skill = root.join(".claude/skills/speckit-implement/SKILL.md");
+    let Ok(body) = std::fs::read_to_string(&skill) else {
+        // Not installed here. The feature still works; nothing can be checked.
+        return;
+    };
+
+    // Quoted from the installed copy, not paraphrased — a paraphrase would keep
+    // passing across exactly the rewording that matters.
+    const CLAUSES: &[(&str, &str)] = &[
+        (
+            "hooks come from `.specify/extensions.yml`",
+            "`.specify/extensions.yml` exists in the project root",
+        ),
+        (
+            "the event this feature registers under",
+            "hooks.after_implement",
+        ),
+        (
+            "a non-empty condition is skipped, so our entry carries none",
+            "skip the hook and leave condition evaluation to the HookExecutor",
+        ),
+        (
+            "dots in the command name become hyphens",
+            "replace dots (`.`) with hyphens (`-`)",
+        ),
+        (
+            "a mandatory hook must actually be invoked and waited for",
+            "you MUST actually invoke the hook and wait for it to finish",
+        ),
+        (
+            "`enabled: false` turns a hook off",
+            "Filter out hooks where `enabled` is explicitly `false`",
+        ),
+        (
+            "an unparseable extensions.yml is reported rather than skipped",
+            "do not skip silently",
+        ),
+    ];
+
+    let mut gone = Vec::new();
+    for (why, quote) in CLAUSES {
+        if !body.contains(quote) {
+            gone.push(format!("{why} — no longer says: {quote:?}"));
+        }
+    }
+    assert!(
+        gone.is_empty(),
+        "Spec Kit's hook contract changed under this feature. Re-read \
+         {skill:?} and `devplane speckit install` before trusting it:\n  {}",
+        gone.join("\n  ")
+    );
+
+    // And the event we default to is one the installed copy actually reads.
+    assert!(
+        body.contains(&format!(
+            "hooks.{}",
+            devplane::core::spec::DEFAULT_HOOK_EVENT
+        )),
+        "`{}` is not an event this Spec Kit version looks for",
+        devplane::core::spec::DEFAULT_HOOK_EVENT
+    );
+}
+
+/// **The vendor's session vocabulary, pinned to the reference this code was
+/// written from.**
+///
+/// Three bugs came out of one gap here: `status` is documented as `busy`,
+/// `waiting` **or** `idle`, and the reducer had arms for two of them. The third
+/// fell into the wrong one, so a session its own vendor reported as blocked on
+/// a person was shown as waiting for a prompt and never reached the inbox.
+///
+/// Nothing in this repository could have noticed, because the code and its
+/// tests agreed with each other and neither had read the list. So the list is
+/// read: if the vendor adds a fourth status, a sixth thing to be blocked on, or
+/// a new session state, this fails here rather than by silently mishandling it
+/// on somebody's machine. It skips when the reference is not checked out.
+#[test]
+fn every_session_state_the_vendor_documents_is_one_this_build_handles() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Ok(reference) =
+        std::fs::read_to_string(root.join("concepts/reference/claude-code/agent-view.md"))
+    else {
+        return;
+    };
+
+    // The row that defines `status`, read out of the field table rather than
+    // remembered. Its wording is the vendor's: "one of `busy`, `waiting`, or
+    // `idle`".
+    let status_row = reference
+        .lines()
+        .find(|l| l.contains("`pid`, `status`"))
+        .expect("the field table still documents `status`");
+    let documented: Vec<&str> = ["busy", "waiting", "idle"]
+        .into_iter()
+        .filter(|v| status_row.contains(&format!("`{v}`")))
+        .collect();
+    assert_eq!(
+        documented.len(),
+        3,
+        "the three status values this build handles are no longer the ones \
+         documented; the row now reads: {status_row}"
+    );
+    // And nothing has been added beside them. Counted rather than matched,
+    // because the point is to notice a value nobody here has thought about.
+    let backticked = status_row.matches('`').count() / 2;
+    assert_eq!(
+        backticked, 5,
+        "`pid`, `status` and three values is five quoted terms; the row now has \
+         {backticked}, so something was added or removed: {status_row}"
+    );
+
+    // What a waiting session can be blocked on. Every one of these must map to
+    // something `needs_human()` is true of — the reducer's own rule is that an
+    // unrecognised value keeps its words rather than becoming *not urgent*.
+    let waiting_row = reference
+        .lines()
+        .find(|l| l.contains("`waitingFor`"))
+        .expect("the field table still documents `waitingFor`");
+    for value in [
+        "permission prompt",
+        "input needed",
+        "sandbox request",
+        "worker request",
+        "dialog open",
+    ] {
+        assert!(
+            waiting_row.contains(value),
+            "`{value}` is no longer documented as something a session waits on"
+        );
+        let parsed = devplane::core::event::WaitingFor::parse_roster(Some(value));
+        assert!(
+            devplane::core::RunState::Waiting(parsed).needs_human(),
+            "`{value}` must reach a person"
+        );
+    }
+
+    // The background `state` vocabulary, which decides a row the provider's own
+    // daemon owns. Read from its own field-table row for the same reason.
+    let state_row = reference
+        .lines()
+        .find(|l| l.contains("| `state`"))
+        .expect("the field table still documents `state`");
+    for value in ["working", "blocked", "done", "failed", "stopped"] {
+        assert!(
+            state_row.contains(&format!("`{value}`")),
+            "`{value}` is no longer a documented session state: {state_row}"
+        );
+    }
+    let state_terms = state_row.matches('`').count() / 2;
+    assert_eq!(
+        state_terms, 6,
+        "`state` plus five values is six quoted terms; the row now has          {state_terms}, so the vocabulary changed: {state_row}"
+    );
+
+    // The sentence the whole inbox rests on, quoted because a change to it is a
+    // change to what Devplane is entitled to claim.
+    assert!(
+        reference.contains("`blocked` always means the session needs something from you"),
+        "the vendor no longer says `blocked` always means a person is needed, \
+         so the inbox's central inference needs re-reading"
+    );
+}
+
+/// **Every command this binary has is in the CLI reference, or is named here as
+/// deliberately absent.**
+///
+/// `llms.txt` has had this guard since an agent was told about a binary that did
+/// not exist; the page a *person* reads had none, and two commands shipped
+/// without an entry. The exemption list is the point: a command is left out on
+/// purpose and says why, rather than by nobody noticing.
+#[test]
+fn every_command_is_in_the_cli_reference_or_deliberately_not() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let page =
+        std::fs::read_to_string(root.join("site/content/docs/cli.md")).expect("the CLI reference");
+
+    // Not in the reference, each for a reason a reader would agree with.
+    const UNDOCUMENTED: &[(&str, &str)] = &[
+        (
+            "statusline",
+            "the status-line shim's own entry point. `devplane connect` installs \
+             it and nobody types it",
+        ),
+        ("help", "clap's builtin"),
+    ];
+
+    let help = String::from_utf8(
+        std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+            .arg("--help")
+            .output()
+            .expect("the binary runs")
+            .stdout,
+    )
+    .expect("help is text");
+
+    let commands: Vec<String> = help
+        .lines()
+        .skip_while(|l| !l.starts_with("Commands:"))
+        .filter_map(|l| {
+            let rest = l.strip_prefix("  ")?;
+            let word = rest.split_whitespace().next()?;
+            match rest.starts_with(char::is_alphabetic) {
+                true => Some(word.to_string()),
+                false => None,
+            }
+        })
+        .collect();
+    assert!(
+        commands.len() > 20,
+        "the parse found {} commands, so it is not reading the help",
+        commands.len()
+    );
+
+    let mut missing = Vec::new();
+    for c in &commands {
+        if UNDOCUMENTED.iter().any(|(name, _)| name == c) {
+            continue;
+        }
+        if !page.contains(&format!("devplane {c}")) {
+            missing.push(c.clone());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "site/content/docs/cli.md does not name: {missing:?} — a person reading \
+         the reference would not know these exist"
+    );
+
+    // And the exemptions are real commands, so the list cannot rot into a set of
+    // names for things that no longer exist.
+    for (name, why) in UNDOCUMENTED {
+        assert!(
+            commands.iter().any(|c| c == name),
+            "`{name}` is exempted from the reference ({why}) but is not a command"
+        );
+    }
 }
