@@ -48,22 +48,47 @@ fn the_process_table_contains_the_process_that_asked_for_it() {
 /// which is the pid-reuse case.
 #[test]
 fn a_group_leading_process_is_found_and_a_mismatched_one_is_not() {
-    // `sleep` is everywhere and takes an argument distinctive enough to match
-    // on without matching this test binary or the harness around it.
+    // **A symlink rather than a shell, because `exec -a` is not portable.** The
+    // probe needs a distinctive `argv[0]`, and the obvious way to get one —
+    // `sh -c 'exec -a <name> sleep 30'` — is a bashism: on Debian and Ubuntu
+    // `/bin/sh` is dash, which answers `exec: -a: not found`, never execs, and
+    // leaves a zombie whose command column reads `[sh] <defunct>`. The test
+    // then failed for a reason that had nothing to do with the reader it
+    // checks, and only on the platform CI runs.
+    //
+    // Executing a symlink gives the same thing with no shell at all: the
+    // process really is named by the path it was started from, which is what a
+    // real agent's row looks like.
     let marker = format!("devplane-leak-probe-{}", std::process::id());
-    let Ok(child) = std::process::Command::new("/bin/sh")
-        .args(["-c", &format!("exec -a {marker} sleep 30")])
+    let dir = std::env::temp_dir().join(format!("devplane-probe-{}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let probe = dir.join(&marker);
+    let Some(sleep) = ["/bin/sleep", "/usr/bin/sleep"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+    else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    if std::os::unix::fs::symlink(sleep, &probe).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let Ok(child) = std::process::Command::new(&probe)
+        .arg("30")
         .process_group(0)
         .spawn()
     else {
         // A machine that will not spawn a process has nothing to tell us about
         // a reader of the process table.
+        let _ = std::fs::remove_dir_all(&dir);
         return;
     };
     let pid = child.id();
 
-    // Give the exec a moment to replace the shell, so the command column shows
-    // the marker rather than `/bin/sh`.
+    // A moment for the process table to show it.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Everything below runs against a real process, and the result is computed
@@ -100,6 +125,7 @@ fn a_group_leading_process_is_found_and_a_mismatched_one_is_not() {
     }
     let mut child = child;
     let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
 
     // **Asserted after the cleanup and never skipped.** The first version of
     // this test wrapped every assertion in `if let Some(p) = found`, so a

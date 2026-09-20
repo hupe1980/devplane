@@ -259,6 +259,14 @@ to signal is no longer reported as dead.
 
 ### Fixed
 
+- **The live process-table test no longer depends on a bash builtin.** It gave
+  its probe a recognisable name with `sh -c 'exec -a <name> sleep 30'`, which is
+  a bashism: on Debian and Ubuntu `/bin/sh` is dash, `exec -a` is not a thing,
+  and the probe became a zombie reading `[sh] <defunct>`. The test failed on
+  Linux for a reason unrelated to what it checks. It now executes a symlink, so
+  the process is really named by the path it was started from — no shell
+  involved.
+
 - **Stopping Devplane no longer records interrupted work as `completed`.** A
   driven run that was working when the daemon stopped came back reading
   `completed`, with whatever it was waiting on cleared. The new `interrupted`
