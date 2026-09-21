@@ -111,18 +111,27 @@
     </dl>
   {/if}
 <style>
-  h2 { font-size: 1rem; margin: 0 0 .5rem; }
-  .cert { display: grid; grid-template-columns: max-content 1fr; gap: .2rem .8rem; margin: 0; }
-  dt { color: var(--dim); font-size: .82rem; }
-  dd { margin: 0; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  li { display: flex; gap: .5rem; align-items: baseline; }
+  .cert {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--s-1) var(--s-4);
+    margin: 0;
+    padding: var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+  }
+  dt { color: var(--dim); font-size: var(--t-sm); }
+  dd { margin: 0; min-width: 0; }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+  li { display: flex; gap: var(--s-2); align-items: baseline; }
+  /* The glyph is decorative; the word beside it is what carries the outcome. */
   .mark.ok { color: var(--done); }
   .mark.bad { color: var(--fail); }
-  .outcome, .dim { color: var(--dim); }
+  .outcome, .dim { color: var(--dim); font-size: var(--t-sm); }
   .warn { color: var(--wait); }
-  .said { color: var(--dim); font-size: .82rem; margin: .1rem 0; }
-  .acts { display: flex; gap: .3rem; margin-bottom: .4rem; }
-  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden;
-        clip-path: inset(50%); white-space: nowrap; }
+  .sr {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
 </style>

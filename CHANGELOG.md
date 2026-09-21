@@ -365,6 +365,10 @@ Notable changes per release. Dates are UTC.
 
 ### Fixed
 
+- **The diff surface printed no file count.** `plural(n, one, many)` returns the
+  word and the call passed two arguments, so the line read `· file` with no
+  number. `svelte-check` had been reporting it; nothing ran `svelte-check`.
+
 - **The board's empty state made a claim about your machine that it could not
   check.** It said *"No agent session is running on this machine"*. On a machine
   running three Codex sessions that is false — Devplane cannot see those at all —
@@ -618,6 +622,16 @@ Notable changes per release. Dates are UTC.
   exactly as before** and both are still in the CLI reference.
 
 ### Internal
+
+- **This repository's own gate was weaker than its CI.** `devplane.toml`
+  declared four checks; CI ran three more over the interface — a build, a
+  `svelte-check` and the wire-type export. So `devplane gate run` could pass and
+  the build fail ten minutes later, which it did: an extraction left an unused
+  import, a dead prop and eight orphaned CSS selectors.
+
+  A product that ships a definition of done, whose own definition of done is
+  narrower than the thing that actually gates its merges, has the defect it
+  exists to surface — pointed inward. The gate runs the interface checks now.
 
 - **The crate would have published with no interface.** `ui/dist/` is generated
   and gitignored, so a clean checkout has none — and `include` in `Cargo.toml`

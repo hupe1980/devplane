@@ -95,7 +95,7 @@
       against <code>{set.base}</code> ·
       <b class="add">+{totals.added}</b>
       <b class="del">−{totals.removed}</b>
-      · {plural(set.files.length, "file")}
+      · {set.files.length} {plural(set.files.length, "file", "files")}
     </p>
 
     {#if set.files.length === 0}

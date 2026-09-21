@@ -10,7 +10,6 @@
   // can re-derive it, and a surface with its own phrasing would be a second
   // description of the same completion with nothing able to notice they had
   // drifted.
-  import { clip } from "../../lib/text";
   import { api } from "../../lib/api";
   import Certificate from "./Certificate.svelte";
 
@@ -41,14 +40,11 @@
     limits?: string;
   };
 
-  type Brief = { id: string; title: string; phase: string };
-
   let {
     title = "",
     id = "",
     phase = "",
-    all = [],
-  }: { title?: string; id?: string; phase?: string; all?: Brief[] } = $props();
+  }: { title?: string; id?: string; phase?: string } = $props();
 
   let said = $state("");
 
@@ -144,18 +140,10 @@
   {/if}
 </section>
 <style>
-  h2 { font-size: 1rem; margin: 0 0 .5rem; }
-  .cert { display: grid; grid-template-columns: max-content 1fr; gap: .2rem .8rem; margin: 0; }
-  dt { color: var(--dim); font-size: .82rem; }
-  dd { margin: 0; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  li { display: flex; gap: .5rem; align-items: baseline; }
-  .mark.ok { color: var(--done); }
-  .mark.bad { color: var(--fail); }
-  .outcome, .dim { color: var(--dim); }
-  .warn { color: var(--wait); }
-  .said { color: var(--dim); font-size: .82rem; margin: .1rem 0; }
-  .acts { display: flex; gap: .3rem; margin-bottom: .4rem; }
-  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden;
-        clip-path: inset(50%); white-space: nowrap; }
+  h2 { font-size: var(--t-lg); margin: 0 0 var(--s-3); }
+  .said { color: var(--dim); font-size: var(--t-xs); margin: var(--s-1) 0; }
+  .said:empty { display: none; }
+  .acts { display: flex; gap: var(--s-2); margin-bottom: var(--s-3); }
+  .acts:empty { display: none; }
+  .dim { color: var(--dim); max-width: 70ch; }
 </style>
