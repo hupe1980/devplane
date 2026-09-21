@@ -8,10 +8,15 @@
 //!
 //! # Why a missing bundle is not an error
 //!
-//! `cargo build` must work on a machine with no node, and it must work in a
-//! clean checkout where `ui/dist/` has never existed — it is generated, and
-//! therefore ignored. So this emits `BUNDLE: Option<&[Asset]>`, and the absence
-//! is a value rather than a failure.
+//! `cargo build` must work on a machine with no node. **The bundle is committed**
+//! — `cargo publish` packages what is in git, and publishing bytes that exist in
+//! no commit would leave nobody able to check the interface they installed
+//! against the tag — so an ordinary checkout has one and needs no toolchain to
+//! use it.
+//!
+//! It can still be absent: somebody deleted it, or a tree that has never run the
+//! interface build. So this emits `BUNDLE: Option<&[Asset]>` and the absence is
+//! a value rather than a failure.
 //!
 //! What that must never become is a silent downgrade: a release binary that
 //! quietly shipped without an interface because somebody forgot to build it.

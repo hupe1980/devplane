@@ -1,0 +1,5 @@
+# The built interface is committed, so a review would otherwise scroll past
+# 7 000 lines of generated JavaScript. It stays readable — that is deliberate —
+# but it is not something anybody reviews.
+ui/dist/** linguist-generated=true
+ui/dist/** -diff

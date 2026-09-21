@@ -1801,3 +1801,48 @@ fn the_quickstart_names_every_surface_the_registry_has() {
          page is a copy of it."
     );
 }
+
+/// **The bundle is in git, and the publish path does not reach for
+/// `--allow-dirty`.**
+///
+/// `Cargo.toml` packages `ui/dist/*.{html,js,css}`. If those are ignored, cargo
+/// refuses to publish a tree it cannot account for — and the flag that silences
+/// it would put bytes on crates.io that exist in no commit. Nobody could then
+/// check the interface they installed against the tag, which is the opposite of
+/// what this product asks of everybody else.
+///
+/// The build is byte-reproducible, so committing costs a diff and buys a
+/// verifiable artefact.
+#[test]
+fn the_published_bundle_is_accountable_to_a_commit() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let ignore = std::fs::read_to_string(root.join(".gitignore")).expect(".gitignore");
+    assert!(
+        !ignore
+            .lines()
+            .any(|l| l.trim() == "ui/dist/" || l.trim() == "ui/dist"),
+        "`ui/dist/` is ignored wholesale, so the files `Cargo.toml` packages are not in git. \
+         `cargo publish` then refuses, and the flag that silences it publishes bytes no commit \
+         contains."
+    );
+    assert!(
+        ignore.contains("ui/dist/*.map"),
+        "the source map is not ignored: four times the bundle, packaged by nothing and loaded \
+         by nothing"
+    );
+
+    let wf =
+        std::fs::read_to_string(root.join(".github/workflows/release.yml")).expect("release.yml");
+    assert!(
+        !wf.contains("--allow-dirty"),
+        "the release publishes with `--allow-dirty`. Whatever that flag lets through is \
+         content the crate carries and no commit contains — and this product's whole claim \
+         is that a reviewer does not have to trust it."
+    );
+    assert!(
+        wf.contains("git diff --exit-code -- ui/dist"),
+        "nothing checks that the committed bundle is what the sources produce, so it can go \
+         stale silently — which is the one cost of committing it"
+    );
+}

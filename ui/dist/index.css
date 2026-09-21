@@ -1,0 +1,814 @@
+/* Devplane's colour palette, and nothing else.
+ *
+ * **Only colours live here**, because `tests/tokens.rs` reads every token in
+ * this file and computes a contrast ratio from it — a `--space-3: 12px` in here
+ * would be a length handed to a luminance function. The scales, the reset and
+ * the base element styles are in `base.css`.
+ *
+ * Every value is computed, contrast-checked and colour-blindness-validated, and
+ * two real defects were found by that validator on its first run.
+ *
+ * **The check computes rather than compares.** It held these values against the
+ * hand-written page's until that page was deleted at the switch; what it never
+ * did was compare them to a *reference*, which is why it survived the page and
+ * why the palette can be improved. Every colour, in both themes, is held to its
+ * floor against every surface it sits on — a new colour to the same standard as
+ * an old one. What is gone is only the requirement that it be the same colour.
+ *
+ * The three blocks repeat rather than share, which is explained where it happens.
+ */
+
+/* Every token declares its own role, beside its own value, because the check
+     in `tests/tokens.rs` reads them from here rather than from a copy. A list
+     of approved pairs kept somewhere else goes stale the first time somebody
+     adds a token and forgets its row — which is exactly how this page came to
+     promise AA contrast while `--faint` sat at 3.2:1 dark and 2.9:1 light,
+     carrying the two numbers a person scans most.
+
+       surface  a background other things sit on
+       line     a separator between things; decorative, no floor
+       edge     the boundary of a control; held to 3:1, because an input
+                whose edge you cannot see is a control you cannot find
+       text     carries words; held to 4.5:1 against every surface
+
+     `line` and `edge` were one token until the check above was first run and
+     reported it at 1.2:1. Raising the separator to 3:1 would have made every
+     row boundary shout, which is the two-visual-weights rule broken to satisfy
+     a floor that never applied to it. Two tokens, two obligations.  */
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa;      /* surface */
+    --panel: #fff;      /* surface */
+    --line: #e6e4e0;    /* line */
+    --edge: #918b83;    /* edge */
+    --ink: #1c1b19;     /* text */
+    --dim: #6f6b66;     /* text */
+    --faint: #726c64;   /* text */
+    --work: #2d6cdf;    /* text */
+    --wait: #8a7000;    /* text */
+    --fail: #c0392b;    /* text */
+    --done: #1f7a4d;    /* text */
+    --accent: #1c1b19;  /* text */
+    font-synthesis: none;
+  }
+  /* The system preference is the **default**, not the only say. A person who
+     works in a light editor and wants a dark board is not overridden by their
+     operating system, and a person who has expressed no preference still gets
+     the one their system implies.
+
+     `:root[data-theme="dark"]` repeats the block rather than sharing it,
+     because a media query and an attribute cannot be one selector. The check
+     in `tests/tokens.rs` reads both and fails when they drift.
+
+     `lib/theme.svelte.ts` is what sets the attribute, and it removes it rather
+     than writing `system` — the media query is what answers then, and a third
+     value would be one every selector has to know to ignore. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16161a;      /* surface */
+      --panel: #1c1c21;   /* surface */
+      --line: #2b2b32;    /* line */
+      --edge: #6b6b76;    /* edge */
+      --ink: #e8e6e3;     /* text */
+      --dim: #9b968f;     /* text */
+      --faint: #8b857c;   /* text */
+      --work: #6ea8ff;    /* text */
+      --wait: #e3b341;    /* text */
+      --fail: #f0715f;    /* text */
+      --done: #57c98a;    /* text */
+      --accent: #e8e6e3;  /* text */
+    }
+  }
+  :root[data-theme="dark"] {
+      --bg: #16161a;      /* surface */
+      --panel: #1c1c21;   /* surface */
+      --line: #2b2b32;    /* line */
+      --edge: #6b6b76;    /* edge */
+      --ink: #e8e6e3;     /* text */
+      --dim: #9b968f;     /* text */
+      --faint: #8b857c;   /* text */
+      --work: #6ea8ff;    /* text */
+      --wait: #e3b341;    /* text */
+      --fail: #f0715f;    /* text */
+      --done: #57c98a;    /* text */
+      --accent: #e8e6e3;  /* text */
+    }
+/* The base layer: the scales, the reset, and how a bare element looks.
+ *
+ * **Separate from `tokens.css` on purpose.** That file is the colour palette
+ * and nothing else, because the contrast check reads every token in it and
+ * computes a ratio — a `--space-3: 12px` in there would be a length handed to a
+ * luminance function. Keeping the two apart means the check never has to know
+ * which tokens are colours.
+ *
+ * Imported by `main.ts`, which is also where `tokens.css` is imported. Both
+ * have a guard behind them: a stylesheet nobody imports still builds, and the
+ * page still renders — that is how twenty-seven `var(--dim)` uses resolved to
+ * nothing for a week without anybody noticing.
+ */
+
+:root {
+  /* **One spacing scale, and every gap comes from it.** The alternative is a
+     dozen hand-picked paddings that are each defensible and together look
+     unconsidered — which is what makes an interface feel homemade even when
+     every individual value is fine. */
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.5rem;
+  --s-6: 2rem;
+  --s-7: 3rem;
+
+  /* A tight type scale. This is a dense operational screen, not an article:
+     the useful range is small, and a heading four times the size of a row is a
+     magazine layout imposed on a table. */
+  --t-xs: 0.75rem;
+  --t-sm: 0.8125rem;
+  --t-base: 0.875rem;
+  --t-md: 1rem;
+  --t-lg: 1.25rem;
+
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* **The system stack, because nothing is fetched from outside this machine.**
+     A web font would be a network request from a control plane whose whole
+     claim is that it is local — and on a machine with no route to the internet
+     it would be a page that renders in Times. */
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Identifiers, commands, paths and costs. Tabular figures so a column of
+     numbers lines up, which is the whole reason to reach for it here. */
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* One duration. Nothing here animates to *communicate* — reduced motion
+     removes all of it and no interaction becomes ambiguous — so this exists
+     only to stop a hover reading as a flicker. */
+  --quick: 120ms;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Always a scrollbar gutter: without it, a surface that happens to be one row
+     shorter than the viewport shifts the whole layout sideways when you switch
+     to it, and the page reads as unstable. */
+  scrollbar-gutter: stable;
+}
+
+body {
+  margin: 0;
+  /* **An explicit background, rather than the browser's.** The palette has a
+     dark theme, and a `body` with no background renders white behind it — which
+     is a bright rectangle around a dark interface on exactly the machines the
+     dark theme exists for. */
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: var(--t-base);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4 {
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.011em;
+}
+
+p { margin: 0; }
+
+code, kbd, samp, pre {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  font-variant-numeric: tabular-nums;
+}
+
+a {
+  color: var(--work);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+/* **The focus ring is load-bearing, more than in most interfaces.** There are
+   no keyboard shortcuts here, so tabbing is the entire keyboard story: somebody
+   operating this without a mouse has the focus ring and nothing else. It is on
+   `:focus-visible` so it does not fire on a mouse click, and it is drawn with
+   an outline rather than a border so it never moves the thing it is around. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--work);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+/* Controls inherit the page's type instead of the platform's. A browser default
+   button is 13px Arial next to 14px system-ui, and the mismatch is the single
+   most reliable way to make an interface look unfinished. */
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* The default control: quiet until pointed at. Most buttons on this page sit
+   inside dense rows, where a filled button per row would turn a list into a
+   wall of colour and tell somebody every action is equally urgent. */
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: var(--t-sm);
+  cursor: pointer;
+  transition: background var(--quick), border-color var(--quick);
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--edge);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  /* **Dimmed *and* still legible.** A disabled control a person cannot read is
+     one they cannot reason about — and the most common question about a
+     disabled button is what it would have done. */
+  color: var(--dim);
+  background: transparent;
+}
+
+input, select, textarea {
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+input::placeholder { color: var(--faint); }
+
+ul, ol { margin: 0; padding: 0; }
+
+/* Available to every surface, because "visible to a screen reader and nothing
+   else" came up in three of them and three copies is how one of them drifts.
+   Position matters: `display: none` would take the text away from the people it
+   is for. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+  .counts.svelte-ehfks7 { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: var(--s-4) 0 var(--s-5); }
+
+  .card.svelte-ehfks7 {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 5.5rem;
+    padding: var(--s-2) var(--s-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    font-size: var(--t-xs);
+    color: var(--dim);
+  }
+  .card.svelte-ehfks7 b:where(.svelte-ehfks7) {
+    font-size: var(--t-lg);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    line-height: 1.1;
+  }
+
+  /* **Weight, not only colour.** The cards that are a claim on your attention
+     carry a coloured edge and a heavier figure; the rest are context and read
+     as context in greyscale too. */
+  .loud.svelte-ehfks7 { border-color: currentColor; }
+  .loud.svelte-ehfks7 b:where(.svelte-ehfks7) { font-size: 1.5rem; }
+  .wait.svelte-ehfks7 { color: var(--wait); }
+  .wait.svelte-ehfks7 b:where(.svelte-ehfks7) { color: var(--wait); }
+  .fail.svelte-ehfks7 { color: var(--fail); }
+  .fail.svelte-ehfks7 b:where(.svelte-ehfks7) { color: var(--fail); }
+  .quiet.svelte-ehfks7 { align-self: center; border: 0; background: none; min-width: 0; }
+
+  .pm.svelte-1ewfh4c { font-size: .78rem; padding: 0 .3rem; border-radius: 3px; border: 1px solid var(--line); }
+  .nobody.svelte-1ewfh4c { color: var(--fail); font-weight: 700; }
+  .unsure.svelte-1ewfh4c { color: var(--wait); }
+
+  h2.svelte-13ck13b { font-size: var(--t-lg); margin: 0; }
+
+  h3.svelte-13ck13b {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    font-size: var(--t-sm);
+    font-weight: 600;
+    margin: var(--s-5) 0 var(--s-2);
+    color: var(--ink);
+  }
+  .n.svelte-13ck13b {
+    color: var(--dim);
+    font-weight: 400;
+    font-size: var(--t-xs);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0 var(--s-2);
+  }
+
+  ul.svelte-13ck13b { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-1); }
+
+  /* **A row, not a table cell.** Nine equal columns made every field shout at
+     the same volume, so nothing told a reader where to look. Now the state
+     leads, what it is doing is the subject, and the numbers are metadata
+     against the right edge. */
+  li.svelte-13ck13b {
+    display: grid;
+    grid-template-columns: 7.5rem minmax(0, 1fr) auto auto;
+    gap: var(--s-4);
+    align-items: center;
+    padding: var(--s-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+  }
+  li.svelte-13ck13b:hover { border-color: var(--edge); }
+
+  .state.svelte-13ck13b {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    font-size: var(--t-sm);
+    color: var(--dim);
+  }
+  .state.svelte-13ck13b .dot:where(.svelte-13ck13b) { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+  .s-working.svelte-13ck13b { color: var(--work); }
+  .s-waiting.svelte-13ck13b { color: var(--wait); font-weight: 600; }
+  .s-failed.svelte-13ck13b { color: var(--fail); font-weight: 600; }
+
+  .what.svelte-13ck13b { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .says.svelte-13ck13b {
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-decoration: none;
+    display: block;
+  }
+  .says.svelte-13ck13b:hover { text-decoration: underline; text-underline-offset: 2px; }
+  .sub.svelte-13ck13b { display: flex; gap: var(--s-2); color: var(--dim); font-size: var(--t-xs); align-items: center; }
+  .who.svelte-13ck13b { font-family: var(--mono); }
+
+  .nums.svelte-13ck13b {
+    display: flex;
+    gap: var(--s-4);
+    color: var(--dim);
+    font-size: var(--t-sm);
+    font-variant-numeric: tabular-nums;
+  }
+  .nums.svelte-13ck13b .cost:where(.svelte-13ck13b), .nums.svelte-13ck13b .ctx:where(.svelte-13ck13b) { min-width: 3.2rem; text-align: right; }
+  .nums.svelte-13ck13b .idle:where(.svelte-13ck13b) { min-width: 2.5rem; text-align: right; }
+  .ctx.crowded.svelte-13ck13b { color: var(--wait); font-weight: 600; }
+
+  /* **Quiet until the row is pointed at.** Twenty always-lit buttons told a
+     reader every row was equally worth acting on, which is the opposite of
+     what this list is for. They stay in the document and in the tab order —
+     hiding them would take them from the people who cannot hover. */
+  .acts.svelte-13ck13b { display: inline-flex; gap: var(--s-1); }
+  .acts.svelte-13ck13b button:where(.svelte-13ck13b) { font-size: var(--t-xs); padding: 2px var(--s-2); opacity: .55; }
+  li.svelte-13ck13b:hover .acts:where(.svelte-13ck13b) button:where(.svelte-13ck13b),
+  .acts.svelte-13ck13b button:where(.svelte-13ck13b):focus-visible { opacity: 1; }
+
+  .empty.svelte-13ck13b, .said.svelte-13ck13b { color: var(--dim); }
+  .said.svelte-13ck13b { font-size: var(--t-xs); margin: var(--s-1) 0; }
+  .said.svelte-13ck13b:empty { display: none; }
+
+  .empty.svelte-13ck13b p:where(.svelte-13ck13b) { margin: 0 0 var(--s-2); }
+  .empty.svelte-13ck13b p:where(.svelte-13ck13b):last-child { margin-bottom: 0; }
+  .empty.svelte-13ck13b .seen:where(.svelte-13ck13b) { color: var(--dim); }
+  .empty.svelte-13ck13b .unseen:where(.svelte-13ck13b) { color: var(--wait); }
+  .empty.svelte-13ck13b {
+    max-width: 68ch;
+    border: 1px dashed var(--line);
+    border-radius: var(--radius-lg);
+    padding: var(--s-6) var(--s-5);
+    margin-top: var(--s-4);
+    text-align: center;
+  }
+
+  .coverage.svelte-13ck13b {
+    color: var(--wait);
+    font-size: var(--t-sm);
+    margin: var(--s-3) 0;
+    border: 1px solid currentColor;
+    border-radius: var(--radius);
+    padding: var(--s-2) var(--s-3);
+  }
+  .coverage.svelte-13ck13b .miss:where(.svelte-13ck13b) { display: block; color: var(--ink); }
+
+  /* On a phone the numbers wrap under the subject rather than competing with
+     it for a 390-point line. */
+  @media (max-width: 52rem) {
+    li.svelte-13ck13b { grid-template-columns: 1fr auto; gap: var(--s-2); }
+    .state.svelte-13ck13b { grid-column: 1; }
+    .acts.svelte-13ck13b { grid-column: 2; grid-row: 1; }
+    .acts.svelte-13ck13b button:where(.svelte-13ck13b) { opacity: 1; }
+    .what.svelte-13ck13b { grid-column: 1 / -1; }
+    .nums.svelte-13ck13b { grid-column: 1 / -1; justify-content: flex-start; }
+    .nums.svelte-13ck13b .cost:where(.svelte-13ck13b), .nums.svelte-13ck13b .ctx:where(.svelte-13ck13b), .nums.svelte-13ck13b .idle:where(.svelte-13ck13b) { min-width: 0; text-align: left; }
+  }
+
+  /* Visible to a screen reader, and to nothing else. Position matters: a
+     `display:none` here would take the row count away from the people it is
+     for. */
+  .sr.svelte-13ck13b {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+
+  h2.svelte-ap3eez { font-size: var(--t-lg); margin: 0 0 var(--s-3); }
+  .pick.svelte-ap3eez { display: flex; align-items: center; gap: var(--s-2); margin-bottom: var(--s-3); }
+  .pick.svelte-ap3eez label:where(.svelte-ap3eez) { color: var(--dim); font-size: var(--t-sm); }
+  .said.svelte-ap3eez { color: var(--fail); font-size: var(--t-sm); margin: 0 0 var(--s-2); }
+  .said.svelte-ap3eez:empty { display: none; }
+  .dim.svelte-ap3eez { color: var(--dim); }
+
+  .base.svelte-ap3eez { color: var(--dim); font-size: var(--t-sm); margin-bottom: var(--s-4); }
+  .add.svelte-ap3eez { color: var(--done); }
+  .del.svelte-ap3eez { color: var(--fail); }
+
+  .finding.svelte-ap3eez {
+    border: 1px solid var(--wait);
+    border-radius: var(--radius);
+    padding: var(--s-3) var(--s-4);
+    margin: var(--s-3) 0;
+    max-width: 70ch;
+  }
+
+  .file.svelte-ap3eez {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin-bottom: var(--s-3);
+    overflow: hidden;
+  }
+  .file.svelte-ap3eez h3:where(.svelte-ap3eez) {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s-3);
+    margin: 0;
+    padding: var(--s-2) var(--s-3);
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    font-size: var(--t-sm);
+  }
+  .path.svelte-ap3eez { font-family: var(--mono); font-weight: 600; word-break: break-all; }
+  .status.svelte-ap3eez { color: var(--dim); font-size: var(--t-xs); }
+  .counts.svelte-ap3eez { margin-left: auto; font-variant-numeric: tabular-nums; flex: none; }
+
+  .hunk.svelte-ap3eez {
+    margin: 0;
+    padding: var(--s-2) 0;
+    overflow-x: auto;
+    font-size: var(--t-xs);
+    line-height: 1.45;
+  }
+  .hunk.svelte-ap3eez code:where(.svelte-ap3eez) { display: block; }
+  /* A line's own background, so a long line stays marked to its right edge
+     rather than losing its colour where the text stops. */
+  .hunk.svelte-ap3eez span:where(.svelte-ap3eez) { display: block; padding: 0 var(--s-3); white-space: pre; }
+  .hdr.svelte-ap3eez { color: var(--dim); }
+  /* **The sign carries it and the colour helps.** Red and green are the one
+     pair that cannot be separated under deuteranopia, and a diff is exactly
+     where that matters — so every line starts with `+`, `−` or a space. */
+  .added.svelte-ap3eez { color: var(--done); }
+  .removed.svelte-ap3eez { color: var(--fail); }
+  .context.svelte-ap3eez { color: var(--dim); }
+
+  h2.svelte-7irco5 { font-size: 1rem; margin: 0 0 .5rem; }
+  textarea.svelte-7irco5 { width: 100%; max-width: 44rem; font: inherit; padding: .4rem;
+             background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+  fieldset.svelte-7irco5 { border: 1px solid var(--line); margin: .5rem 0; padding: .4rem .6rem; }
+  legend.svelte-7irco5 { color: var(--dim); font-size: .8rem; }
+  label.svelte-7irco5 { margin-right: .8rem; }
+  .will.svelte-7irco5 { margin-top: .6rem; }
+  .will.svelte-7irco5 ul:where(.svelte-7irco5) { list-style: none; margin: .2rem 0; padding: 0; }
+  .refused.svelte-7irco5 { color: var(--fail); }
+  .warn.svelte-7irco5 { color: var(--wait); }
+  .dim.svelte-7irco5 { color: var(--dim); }
+
+  h2.svelte-1n13jp3 { font-size: 1rem; margin: 0 0 .3rem; }
+  [role="tablist"].svelte-1n13jp3 { display: flex; gap: .3rem; margin-bottom: .3rem; }
+  ul.svelte-1n13jp3 { list-style: none; margin: 0; padding: 0; }
+  li.svelte-1n13jp3 { display: flex; gap: .6rem; padding: .1rem 0; align-items: baseline; }
+  .where.svelte-1n13jp3 { color: var(--dim); font-weight: 600; }
+  .wait.svelte-1n13jp3 { color: var(--wait); }
+  .empty.svelte-1n13jp3 { color: var(--dim); max-width: 60ch; }
+
+  h2.svelte-ytvk4v { font-size: var(--t-lg); margin: 0 0 var(--s-1); }
+  .hairline.svelte-ytvk4v, .said.svelte-ytvk4v { color: var(--dim); font-size: var(--t-xs); margin: 0; }
+  .said.svelte-ytvk4v { display: flex; align-items: center; gap: var(--s-2); min-height: 1.6em; }
+  .undo.svelte-ytvk4v { font-size: var(--t-xs); padding: 1px var(--s-2); }
+
+  ul.svelte-ytvk4v { list-style: none; margin: var(--s-4) 0 0; padding: 0; display: grid; gap: var(--s-2); }
+
+  /* **A card per item, with the level on its edge.** The list this replaces was
+     hairline-separated rows, which is the right density for a table you scan
+     and the wrong one for a queue you act on: every row here carries a
+     question, a detail and up to six buttons, and without a boundary the
+     buttons of one item read as belonging to the one above. */
+  .item.svelte-ytvk4v {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    padding: var(--s-3) var(--s-4);
+  }
+  /* Colour on the edge, never alone: the word is in `.lvl` beside the title and
+     is what a screen reader and a greyscale display get. */
+  .item.critical.svelte-ytvk4v { border-left-color: var(--fail); }
+  .item.high.svelte-ytvk4v { border-left-color: var(--wait); }
+
+  .t.svelte-ytvk4v { display: flex; gap: var(--s-2); align-items: baseline; flex-wrap: wrap; }
+  .t.svelte-ytvk4v b:where(.svelte-ytvk4v) { font-size: var(--t-md); font-weight: 600; }
+
+  /* The level as a word, in the flow, rather than a glyph needing a legend. */
+  .lvl.svelte-ytvk4v { font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .04em; color: var(--dim); }
+  .item.critical.svelte-ytvk4v .lvl:where(.svelte-ytvk4v) { color: var(--fail); font-weight: 700; }
+  .item.high.svelte-ytvk4v .lvl:where(.svelte-ytvk4v) { color: var(--wait); font-weight: 600; }
+
+  .kind.svelte-ytvk4v {
+    font-size: var(--t-xs);
+    color: var(--dim);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0 var(--s-2);
+  }
+
+  .unseen.svelte-ytvk4v {
+    font-size: var(--t-xs);
+    font-weight: 700;
+    color: var(--done);
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    padding: 0 var(--s-2);
+  }
+
+  .meta.svelte-ytvk4v { display: flex; gap: var(--s-3); color: var(--dim); font-size: var(--t-xs); margin-top: var(--s-1); }
+  .dim.svelte-ytvk4v { color: var(--dim); }
+  .d.svelte-ytvk4v { margin: var(--s-2) 0 0; max-width: 78ch; }
+
+  .opts.svelte-ytvk4v, .acts.svelte-ytvk4v { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-top: var(--s-3); }
+  /* An answer the agent is waiting for is the one thing on this page worth a
+     filled button. Everything else stays quiet so this does not have to shout. */
+  .choice.svelte-ytvk4v { border-color: var(--edge); font-weight: 500; }
+  .dead.svelte-ytvk4v { color: var(--dim); font-size: var(--t-sm); align-self: center; }
+
+  .reply.svelte-ytvk4v { display: flex; gap: var(--s-2); margin-top: var(--s-3); }
+  .reply.svelte-ytvk4v input:where(.svelte-ytvk4v) { flex: 1; max-width: 28rem; }
+
+  .offer.svelte-ytvk4v {
+    margin: var(--s-3) 0 0;
+    padding-top: var(--s-3);
+    border-top: 1px dashed var(--line);
+    display: flex;
+    gap: var(--s-2);
+    align-items: center;
+    flex-wrap: wrap;
+    font-size: var(--t-sm);
+  }
+  .offer.svelte-ytvk4v code:where(.svelte-ytvk4v) {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 0 var(--s-2);
+  }
+
+  /* **The close is the best thing this page ever gets to say**, so it is given
+     room rather than rendered as the absence of a list. */
+  .close.svelte-ytvk4v {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--panel);
+    padding: var(--s-6) var(--s-5);
+    margin-top: var(--s-4);
+    text-align: center;
+  }
+  .close.svelte-ytvk4v p:where(.svelte-ytvk4v) { margin: var(--s-1) 0; }
+  .close.svelte-ytvk4v p:where(.svelte-ytvk4v):first-child { font-size: var(--t-lg); }
+
+  .sr.svelte-ytvk4v {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+
+  h2.svelte-1acjvix { font-size: 1rem; margin: 0 0 .3rem; }
+  form.svelte-1acjvix { display: flex; gap: .3rem; }
+  input.svelte-1acjvix { flex: 1; max-width: 30rem; font: inherit; padding: .25rem .35rem;
+          background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+  ul.svelte-1acjvix { list-style: none; margin: .4rem 0 0; padding: 0; }
+  li.svelte-1acjvix { display: flex; gap: .6rem; padding: .1rem 0; }
+  .said.svelte-1acjvix, .empty.svelte-1acjvix { color: var(--dim); }
+  .empty.svelte-1acjvix { max-width: 60ch; }
+
+  h2.svelte-1y95tkv { font-size: 1rem; margin: 0 0 .3rem; }
+  dl.svelte-1y95tkv { display: grid; grid-template-columns: max-content 1fr; gap: .15rem .8rem; margin: .3rem 0; }
+  dt.svelte-1y95tkv { color: var(--dim); font-size: .82rem; }
+  dd.svelte-1y95tkv { margin: 0; }
+  .dim.svelte-1y95tkv, .empty.svelte-1y95tkv, .foot.svelte-1y95tkv { color: var(--dim); }
+  .foot.svelte-1y95tkv { font-size: .82rem; margin-top: .6rem; max-width: 70ch; }
+  .empty.svelte-1y95tkv { max-width: 60ch; }
+
+  h2.svelte-1r7h8sn { font-size: 1rem; margin: 0 0 .3rem; }
+  ul.svelte-1r7h8sn { list-style: none; margin: 0; padding: 0; }
+  li.svelte-1r7h8sn { display: flex; gap: .6rem; align-items: baseline; padding: .1rem 0; flex-wrap: wrap; }
+  .at.svelte-1r7h8sn { color: var(--faint); }
+  .who.svelte-1r7h8sn { width: 4rem; flex: none; color: var(--dim); }
+  .outcome.svelte-1r7h8sn, .dim.svelte-1r7h8sn, .said.svelte-1r7h8sn, .empty.svelte-1r7h8sn { color: var(--dim); }
+  .reason.svelte-1r7h8sn { flex-basis: 100%; color: var(--dim); padding-left: 1rem; }
+  .empty.svelte-1r7h8sn { max-width: 60ch; }
+
+  .cert.svelte-17rlgir {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--s-1) var(--s-4);
+    margin: 0;
+    padding: var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+  }
+  dt.svelte-17rlgir { color: var(--dim); font-size: var(--t-sm); }
+  dd.svelte-17rlgir { margin: 0; min-width: 0; }
+  ul.svelte-17rlgir { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+  li.svelte-17rlgir { display: flex; gap: var(--s-2); align-items: baseline; }
+  /* The glyph is decorative; the word beside it is what carries the outcome. */
+  .mark.ok.svelte-17rlgir { color: var(--done); }
+  .mark.bad.svelte-17rlgir { color: var(--fail); }
+  .outcome.svelte-17rlgir, .dim.svelte-17rlgir { color: var(--dim); font-size: var(--t-sm); }
+  .warn.svelte-17rlgir { color: var(--wait); }
+  .sr.svelte-17rlgir {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+
+  h2.svelte-17kmig3 { font-size: var(--t-lg); margin: 0 0 var(--s-3); }
+  .said.svelte-17kmig3 { color: var(--dim); font-size: var(--t-xs); margin: var(--s-1) 0; }
+  .said.svelte-17kmig3:empty { display: none; }
+  .acts.svelte-17kmig3 { display: flex; gap: var(--s-2); margin-bottom: var(--s-3); }
+  .acts.svelte-17kmig3:empty { display: none; }
+  .dim.svelte-17kmig3 { color: var(--dim); max-width: 70ch; }
+
+  /* **First in the tab order and invisible until focused.** With no keyboard
+     shortcuts, tabbing is the entire keyboard story here, and without this
+     every visit starts by tabbing through the whole nav. */
+  .skip.svelte-1n46o8q {
+    position: absolute;
+    left: -9999px;
+    top: var(--s-2);
+    padding: var(--s-2) var(--s-3);
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    z-index: 3;
+  }
+  .skip.svelte-1n46o8q:focus { left: var(--s-4); }
+
+  /* **A sidebar, not a strip of tabs.** Nine surfaces whose names are
+     sentences — *what needs you*, *is this actually done* — do not fit across
+     the top without becoming a menu bar you read left to right. Down the side
+     they are a list you scan, and the sentences stay, because they are what
+     tells a first-time reader what the thing is for. */
+  .app.svelte-1n46o8q {
+    display: grid;
+    grid-template-columns: 15rem 1fr;
+    /* **Rows are named, not implied.** Two implicit rows under a `min-height`
+       share the viewport between them, which on a phone gave the nav strip a
+       third of the screen and the surface the rest. */
+    grid-template-rows: 1fr;
+    min-height: 100vh;
+  }
+
+  aside.svelte-1n46o8q {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-5);
+    padding: var(--s-4);
+    border-right: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+  }
+
+  .mark.svelte-1n46o8q { display: flex; flex-direction: column; gap: 2px; }
+  .mark.svelte-1n46o8q b:where(.svelte-1n46o8q) { font-size: var(--t-md); letter-spacing: -0.02em; }
+  .what.svelte-1n46o8q { color: var(--dim); font-size: var(--t-xs); line-height: 1.35; }
+
+  nav.svelte-1n46o8q { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
+  nav.svelte-1n46o8q ul:where(.svelte-1n46o8q) { list-style: none; display: flex; flex-direction: column; gap: 1px; }
+
+  /* The current surface is marked by weight, a ground and a bar — so it
+     survives being read in greyscale, which colour alone would not. */
+  .tab.svelte-1n46o8q {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+    border: 0;
+    border-left: 2px solid transparent;
+    border-radius: var(--radius);
+    background: none;
+    padding: var(--s-2) var(--s-3);
+    color: var(--dim);
+    line-height: 1.3;
+  }
+  .tab.svelte-1n46o8q:hover:not([aria-current]) { color: var(--ink); background: var(--panel); }
+  .tab[aria-current="page"].svelte-1n46o8q {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--panel);
+    border-left-color: var(--accent);
+  }
+
+  .foot.svelte-1n46o8q {
+    margin-top: auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-2);
+  }
+  .pulse.svelte-1n46o8q { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--dim); font-size: var(--t-xs); }
+  .pulse.svelte-1n46o8q .dot:where(.svelte-1n46o8q) { width: 6px; height: 6px; border-radius: 50%; background: var(--done); }
+  /* **The word changes, not only the dot.** Colour may never be the only thing
+     carrying a distinction — this one matters most to the people least able to
+     see it. */
+  .pulse.bad.svelte-1n46o8q { color: var(--fail); }
+  .pulse.bad.svelte-1n46o8q .dot:where(.svelte-1n46o8q) { background: var(--fail); }
+  .theme.svelte-1n46o8q { font-size: var(--t-xs); padding: 1px var(--s-2); }
+
+  main.svelte-1n46o8q { padding: var(--s-6) var(--s-6) var(--s-7); max-width: 72rem; min-width: 0; }
+
+  .problem.svelte-1n46o8q {
+    color: var(--fail);
+    border: 1px solid currentColor;
+    border-radius: var(--radius);
+    padding: var(--s-3) var(--s-4);
+    margin-bottom: var(--s-4);
+  }
+
+  /* **The phone is a different errand, not a narrower desktop.** Read the
+     queue, answer one thing, close it — so the sidebar becomes a scrolling
+     strip at the top and gives up its subtitle, which is a first-run aid and
+     not worth a fifth of a phone screen. */
+  @media (max-width: 52rem) {
+    .app.svelte-1n46o8q { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    aside.svelte-1n46o8q {
+      position: static;
+      height: auto;
+      flex-direction: row;
+      align-items: center;
+      gap: var(--s-3);
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+      padding: var(--s-3) var(--s-4);
+      overflow-x: auto;
+    }
+    .what.svelte-1n46o8q { display: none; }
+    .mark.svelte-1n46o8q { flex: none; }
+    /* The nav is the only thing that scrolls sideways; the mark and the
+       status sit outside it, or a scrolled tab slides under them. */
+    nav.svelte-1n46o8q { flex-direction: row; gap: var(--s-2); min-width: 0; overflow-x: auto; scrollbar-width: none; }
+    nav.svelte-1n46o8q::-webkit-scrollbar { display: none; }
+    nav.svelte-1n46o8q ul:where(.svelte-1n46o8q) { flex-direction: row; gap: var(--s-1); }
+    .tab.svelte-1n46o8q { white-space: nowrap; border-left: 0; border-bottom: 2px solid transparent; border-radius: 0; }
+    .tab[aria-current="page"].svelte-1n46o8q { border-left-color: transparent; border-bottom-color: var(--accent); }
+    /* **A ground of its own.** The nav scrolls sideways underneath it, and
+       without a background a scrolled tab reads as text printed through the
+       status. */
+    .foot.svelte-1n46o8q {
+      margin-top: 0;
+      flex: none;
+      background: var(--bg);
+      padding-left: var(--s-3);
+      box-shadow: -8px 0 8px -4px var(--bg);
+    }
+    main.svelte-1n46o8q { padding: var(--s-4); }
+  }
+
+  /* **No state is carried by motion**, so removing it costs nothing. This is
+     the contract rather than a preference: every interaction completes with
+     animation disabled, because nothing here animates to communicate. */
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }

@@ -18,15 +18,8 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
   "/src",
   "/build.rs",
-  # **The built interface, and not its sources.** `build.rs` embeds `ui/dist`
-  # and reads nothing else, so `ui/src` was 324 KB the package could not use —
-  # and could not have used, because `package.json`, `vite.config.ts`,
-  # `tsconfig.json` and `index.html` were never included, so nothing in the
-  # package could rebuild the bundle from them. Sources are in the repository
-  # this manifest already names.
-  #
-  # The source map is excluded too: four times the bundle, and nothing loads it.
-  # `build.rs` leaves maps out of the embed for the same reason.
+  # The built interface, not its sources: `build.rs` embeds `ui/dist` and reads
+  # nothing else. The map is left out — four times the bundle, loaded by nothing.
   "/ui/dist/*.html",
   "/ui/dist/*.js",
   "/ui/dist/*.css",

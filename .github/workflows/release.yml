@@ -36,18 +36,20 @@ jobs:
           path: dist-plan.json
       # crates.io rejects a bad manifest only at publish time, which is after
       # the tag is pushed and the artifacts are built.
-      # **The interface, before anything packages the crate.** `ui/dist/` is
-      # generated and gitignored, so a clean checkout has none — and `include`
-      # in Cargo.toml matches nothing rather than failing. The crate would
-      # publish, install, and serve a page saying it was built without an
-      # interface.
+      # **The bundle is committed, so this checks it rather than making it.**
+      # `cargo publish` packages what is in git; a bundle rebuilt here would be
+      # content the published crate carries and no commit contains, which is
+      # the opposite of what this product asks of everybody else. The build is
+      # byte-reproducible, so a difference means the committed bundle is stale.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: ui/package-lock.json
-      - name: Build the interface
-        run: cd ui && npm ci && npm run build
+      - name: The committed interface is the one the sources produce
+        run: |
+          cd ui && npm ci && npm run build
+          cd .. && git diff --exit-code -- ui/dist
       - name: Check the crate is publishable
         run: cargo publish --dry-run --locked
 
@@ -215,18 +217,20 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      # **The interface, before anything packages the crate.** `ui/dist/` is
-      # generated and gitignored, so a clean checkout has none — and `include`
-      # in Cargo.toml matches nothing rather than failing. The crate would
-      # publish, install, and serve a page saying it was built without an
-      # interface.
+      # **The bundle is committed, so this checks it rather than making it.**
+      # `cargo publish` packages what is in git; a bundle rebuilt here would be
+      # content the published crate carries and no commit contains, which is
+      # the opposite of what this product asks of everybody else. The build is
+      # byte-reproducible, so a difference means the committed bundle is stale.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: ui/package-lock.json
-      - name: Build the interface
-        run: cd ui && npm ci && npm run build
+      - name: The committed interface is the one the sources produce
+        run: |
+          cd ui && npm ci && npm run build
+          cd .. && git diff --exit-code -- ui/dist
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
       - run: cargo publish --locked

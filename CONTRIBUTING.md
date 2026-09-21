@@ -47,6 +47,10 @@ npm run dev              # a dev server that proxies /api to a running daemon
 npm run check            # svelte-check, over TypeScript and every component
 ```
 
+**`ui/dist/` is committed**, because `cargo publish` packages what is in git. Change a surface, run
+`npm run build`, and commit the result — CI rebuilds it and fails if it differs. The build is
+byte-reproducible, so it only differs when it is stale.
+
 **Two properties are not preferences, and both are enforced rather than requested.**
 
 **The built output stays readable** — `minify: false`. This is a product about being able to see what

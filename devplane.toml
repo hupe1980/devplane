@@ -18,11 +18,8 @@ check = [
   "cargo clippy --all-targets --all-features -- -D warnings",
   "cargo build --examples --locked",
   "cargo test --locked",
-  # **The interface, because CI checks it and this did not.** A gate weaker than
-  # CI is a gate that says done and is contradicted ten minutes later: an
-  # extraction left an unused import, a dead prop and eight orphaned CSS
-  # selectors, `devplane gate run` passed, and `svelte-check` failed the build.
-  # The interface is half this product and its own toolchain checks it.
+  # The interface, which CI checks too. It is half this product, and a gate that
+  # skips it says done while the build is about to fail.
   "cd ui && npm run build",
   "cd ui && npm run check",
   "cd ui && npm run render",

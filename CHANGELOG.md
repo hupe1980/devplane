@@ -652,15 +652,22 @@ Notable changes per release. Dates are UTC.
   narrower than the thing that actually gates its merges, has the defect it
   exists to surface — pointed inward. The gate runs the interface checks now.
 
-- **The crate would have published with no interface.** `ui/dist/` is generated
-  and gitignored, so a clean checkout has none — and `include` in `Cargo.toml`
-  matches nothing rather than failing. Both jobs that run `cargo publish` did so
-  without building it, so `cargo install devplane` would have produced a binary
-  whose one page says it was built without an interface.
+- **The built interface is committed, and the release publishes what is in
+  git.** `ui/dist/` was generated and ignored while `Cargo.toml` packaged it, so
+  `cargo publish` refused a tree it could not account for — and the two jobs that
+  publish did not build it at all, which would have put a crate on crates.io with
+  no interface in it.
 
-  The guard that exists for this asked whether `release.yml` *mentions*
-  `npm run build`. It does — in the job that builds the release binaries, which
-  is not the job that publishes. It checks per job now.
+  The flag that silences cargo here is `--allow-dirty`, and it is the wrong
+  direction for this product: it publishes bytes that exist in no commit, so
+  nobody can check the interface they installed against the tag. Devplane ships
+  certificates precisely so a reviewer does not have to trust it; an
+  unverifiable artefact is that claim made backwards.
+
+  The bundle is 270 KB and the build is byte-reproducible, so it is committed and
+  CI rebuilds it and fails on any difference — it cannot drift from the sources.
+  The source map stays ignored: four times the size, packaged by nothing, loaded
+  by nothing.
 
 - **The render harness could pass on its own prose, and did.** A check that
   greps a surface for the construct it forbids finds the comment explaining why
