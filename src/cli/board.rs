@@ -225,9 +225,16 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                  Sessions are discovered by running `claude agents --json`, and no \n\
                  `claude` binary was found on PATH, in ~/.claude/local, or in a VS Code\n\
                  extension.\n\n\
-                 Point at it with {} if it lives somewhere else.",
+                 Point at it with {} if it lives somewhere else.\n\n\
+                 {}",
                 paint(render::YELLOW, "Claude Code was not found on this machine."),
-                paint(BOLD, "DEVPLANE_CLAUDE_BIN=/path/to/claude")
+                paint(BOLD, "DEVPLANE_CLAUDE_BIN=/path/to/claude"),
+                // **The branch a person who does not use Claude Code sees**, and
+                // it said nothing about them. Telling somebody to install a
+                // vendor they have not chosen, while never saying that their own
+                // agent is one Devplane can drive but not watch, answers a
+                // question they did not ask and leaves theirs open.
+                paint(DIM, &unwatched_note())
             ),
         }
         return Ok(());

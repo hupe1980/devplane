@@ -2385,60 +2385,90 @@ fn doctor_says_what_is_watched_per_vendor_and_per_channel() {
     );
 }
 
-/// **`ls` and the board say the same thing about what cannot be seen, because
-/// they compose it in the same place.**
+/// **An empty list names the vendors it cannot see — on either way of being
+/// empty.**
 ///
-/// They did not. `devplane ls` said *no **Claude Code** sessions are running* —
-/// correctly naming the vendor — and the board said *no agent session is
-/// running on this machine*, which is a claim about the machine rather than
-/// about what Devplane watches. On a machine running three Codex sessions the
-/// second is false, in the reassuring direction, on the surface people trust to
-/// tell them nothing needs them.
+/// `devplane ls` has two empty states and they are different facts: Claude Code
+/// is installed and running nothing, or Claude Code is not here at all. Both are
+/// lists that show nothing, and both have to say what Devplane could not have
+/// shown — a session opened in Codex never appears, and nothing else on the
+/// machine says so.
+///
+/// **The second branch is the one a person who does not use Claude Code sees**,
+/// and it said nothing about them: it told them to install a vendor they had not
+/// chosen and left their own question open.
+///
+/// # Why this is driven rather than observed
+///
+/// The first version read whatever `ls` printed on the machine running it. It
+/// passed here, where `claude` is on `PATH`, and failed on CI, where it is not —
+/// it had asserted a precondition that is a property of the developer's laptop.
+/// A guard whose branch depends on the host tests the host.
 #[test]
 fn an_empty_list_names_the_vendors_it_cannot_see() {
-    let home = gate_home("empty-list");
-
-    // **An empty roster, forced.** Without this the sessions on the developer's
-    // own machine are discovered and the empty branch never runs — which is how
-    // the first version of this guard passed while the sentence it checks was
-    // deleted. `make-board.sh` points at an empty config for the same reason.
-    let claude = gate_home("empty-list-claude");
-    std::fs::create_dir_all(claude.join("projects")).expect("an empty roster");
-
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-        .arg("ls")
-        .env("NO_COLOR", "1")
-        .env("DEVPLANE_HOME", &home)
-        .env("CLAUDE_CONFIG_DIR", &claude)
-        .output()
-        .expect("the binary runs");
-    let text = String::from_utf8_lossy(&out.stdout);
-
-    // **Asserted, never skipped.** A guard that returns early when its
-    // precondition is unmet is a guard that reports success for not having run.
-    assert!(
-        text.contains("No Claude Code sessions are running"),
-        "this guard needs an empty list and did not get one, so it checks nothing. \
-         Output was:\n{text}"
-    );
-
     let driven_only = core_vendors_driven_only();
     assert!(
         !driven_only.is_empty(),
         "this guard assumes at least one vendor is driven-only; if that changed, \
          the empty-list sentence needs rewriting rather than this assert relaxing"
     );
-    for vendor in &driven_only {
+
+    // An empty roster, so neither branch finds a session to list.
+    let claude = gate_home("empty-list-claude");
+    std::fs::create_dir_all(claude.join("projects")).expect("an empty roster");
+
+    // `claude_binary()` takes `DEVPLANE_CLAUDE_BIN` when it names a real file,
+    // then falls back to `PATH`. Both branches are reached by controlling those
+    // two rather than by hoping about the machine.
+    let cases: [(&str, &str, &str); 2] = [
+        (
+            "installed and quiet",
+            "/bin/echo",
+            "No Claude Code sessions are running",
+        ),
+        (
+            "not installed at all",
+            "/nonexistent/claude",
+            "Claude Code was not found on this machine",
+        ),
+    ];
+
+    for (what, bin, expect) in cases {
+        let home = gate_home("empty-list");
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+            .arg("ls")
+            .env("NO_COLOR", "1")
+            .env("DEVPLANE_HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", &claude)
+            .env("DEVPLANE_CLAUDE_BIN", bin)
+            // Emptied so the fallback cannot find a `claude` the developer has
+            // and CI does not. This is the difference that broke the first
+            // version of this guard.
+            //
+            // `HOME` too: the lookup also tries the native installer's path and
+            // a VS Code extension under it, and this machine has the second.
+            .env("PATH", "/nonexistent")
+            .env("HOME", &home)
+            .output()
+            .expect("the binary runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+
         assert!(
-            text.contains(vendor.as_str()),
-            "`devplane ls` reports an empty list without saying it cannot see `{vendor}`. \
-             A session opened there never appears, and nothing else on this machine says so."
+            text.contains(expect),
+            "`{what}`: expected the empty list to say `{expect}`. Output was:\n{text}"
+        );
+        for vendor in &driven_only {
+            assert!(
+                text.contains(vendor.as_str()),
+                "`{what}`: an empty list without saying it cannot see `{vendor}`. \
+                 A session opened there never appears, and nothing else says so.\n{text}"
+            );
+        }
+        assert!(
+            text.contains("not listed here"),
+            "`{what}`: the unwatchable vendors are named without saying what that means"
         );
     }
-    assert!(
-        text.contains("not listed here"),
-        "the unwatchable vendors are named without saying what that means for the list above"
-    );
 }
 
 /// The driven-only vendors, as the product's own table reports them.

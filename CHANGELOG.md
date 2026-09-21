@@ -365,6 +365,13 @@ Notable changes per release. Dates are UTC.
 
 ### Fixed
 
+- **`devplane ls` told a person without Claude Code to install it, and nothing
+  else.** It has two empty states — Claude Code is here and running nothing, or
+  Claude Code is not here at all — and only the first said what Devplane cannot
+  watch. The second is the one a Copilot or Codex user sees on their first run:
+  it answered a question they had not asked and left theirs open. Both branches
+  now name the agents that appear only when Devplane starts them.
+
 - **The diff surface printed no file count.** `plural(n, one, many)` returns the
   word and the call passed two arguments, so the line read `· file` with no
   number. `svelte-check` had been reporting it; nothing ran `svelte-check`.
@@ -622,6 +629,18 @@ Notable changes per release. Dates are UTC.
   exactly as before** and both are still in the CLI reference.
 
 ### Internal
+
+- **A guard asserted a property of the developer's laptop.** The check that an
+  empty list names what it cannot see read whatever `devplane ls` printed on the
+  machine running it. Here `claude` is on `PATH`, so it took one branch and
+  passed; on CI there is no `claude`, so it took the other and failed on its own
+  precondition.
+
+  It had been written that way on purpose — an earlier version *skipped* when the
+  list was not empty, which reports success for not having run. Asserting the
+  precondition turned a false pass into a false failure; neither tested the
+  product. It now drives both branches by pinning `DEVPLANE_CLAUDE_BIN`, `PATH`
+  and `HOME`, and checks the property in each.
 
 - **This repository's own gate was weaker than its CI.** `devplane.toml`
   declared four checks; CI ran three more over the interface — a build, a
