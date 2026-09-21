@@ -16,6 +16,8 @@ use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::path::{Path, PathBuf};
+// Only the in-memory store parses a connection string, and that is test-only.
+#[cfg(test)]
 use std::str::FromStr;
 
 /// The shape of `schema.sql`, stamped into every database this build writes.
@@ -26,17 +28,20 @@ use std::str::FromStr;
 /// (`Store::retire_if_stale`), which is affordable because everything here
 /// except `decisions` is re-derivable from the event log or the provider.
 ///
-/// **It is 1, and the count starts here.** It had reached 5 by recording every
+/// **It is 2. The count started at 1 on 2026-09-20 and moved once, the same
+/// day, when `decisions` grew a `server_source` column.** A database written by
+/// the previous build is moved aside rather than migrated, which is what the
+/// number is for. It had reached 5 by recording every
 /// shape this schema passed through before anybody could have a database — and
 /// with nothing released, none of those numbers described a file that exists.
 /// A version is for telling *your* file from *another* one, not for keeping a
 /// history; the history is in the changelog.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// The statement that stamps it. Written out rather than formatted, because
 /// `PRAGMA user_version` accepts no bind parameter and a formatted string
 /// would be a dynamic SQL string for a value that is a literal in this file.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 1";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 3";
 
 /// A handle on the observation store.
 #[derive(Debug, Clone)]
@@ -155,6 +160,13 @@ impl Store {
     /// Configured exactly like the real one — foreign keys included. A test
     /// database with the constraints turned off proves nothing about the
     /// database the product ships.
+    ///
+    /// **Gated, because it was shipping.** Nothing outside this file's own test
+    /// module has ever called it, so it was a test fixture compiled into every
+    /// released binary — and invisible to the no-reader guard until that guard
+    /// was widened past `src/core/`. Gating it is the honest form of the
+    /// exemption: the compiler now enforces what the doc comment always said.
+    #[cfg(test)]
     pub async fn open_in_memory() -> Result<Self> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
         let pool = SqlitePoolOptions::new()
@@ -763,8 +775,9 @@ impl Store {
     pub async fn append_decision(&self, d: &crate::core::Decision) -> Result<()> {
         sqlx::query(
             "INSERT OR IGNORE INTO decisions
-               (id, at, authority, action, subject, outcome, reason, tool, project_id, run_id, work_id)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (id, at, authority, action, subject, outcome, reason, tool, server_source,
+                project_id, run_id, work_id)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
         .bind(d.at.to_string())
@@ -774,6 +787,7 @@ impl Store {
         .bind(&d.outcome)
         .bind(d.reason.as_deref())
         .bind(d.tool.as_deref())
+        .bind(d.server_source.as_deref())
         .bind(d.project_id.as_ref().map(|p| p.as_str()))
         .bind(d.run_id.as_ref().map(|r| r.as_str()))
         .bind(d.work_id.as_ref().map(|w| w.as_str()))
@@ -977,7 +991,9 @@ impl Store {
                     SUM(resolution = 'acted')     AS acted,
                     SUM(resolution = 'dismissed') AS dismissed,
                     SUM(resolution = 'elsewhere') AS elsewhere,
-                    SUM(resolved_at IS NULL)      AS open
+                    SUM(resolved_at IS NULL)      AS open,
+                    SUM(folded_at IS NOT NULL)    AS folded,
+                    SUM(folded_at IS NOT NULL AND resolution = 'acted') AS folded_then_acted
              FROM attention_log WHERE raised_at >= ? GROUP BY kind ORDER BY raised DESC",
         )
         .bind(since.to_string())
@@ -995,6 +1011,8 @@ impl Store {
                         dismissed: r.try_get("dismissed").unwrap_or(0),
                         elsewhere: r.try_get("elsewhere").unwrap_or(0),
                         open: r.try_get("open").unwrap_or(0),
+                        folded: r.try_get("folded").unwrap_or(0),
+                        folded_then_acted: r.try_get("folded_then_acted").unwrap_or(0),
                     },
                 )
             })
@@ -1003,6 +1021,101 @@ impl Store {
 
     /// The decision log, newest first, optionally about one run or one work
     /// item.
+    /// When somebody last read the inbox on this machine.
+    /// Stamps the items a read folded, so folding can be measured.
+    ///
+    /// **Only on a read.** The board polls every couple of seconds; counting a
+    /// fold per render would measure polling, which is the same mistake the
+    /// boundary mark exists to avoid. First fold wins — `folded_at` is the
+    /// moment a kind was first summarised rather than listed, and overwriting
+    /// it on every read would turn a measurement into a timestamp of the last
+    /// time anybody looked.
+    pub async fn mark_folded(&self, ids: &[crate::core::AttentionId]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let list: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        sqlx::query(
+            "UPDATE attention_log SET folded_at = ?
+             WHERE resolved_at IS NULL AND folded_at IS NULL
+               AND item_id IN (SELECT value FROM json_each(?))",
+        )
+        .bind(jiff::Timestamp::now().to_string())
+        .bind(serde_json::to_string(&list)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn last_look(&self) -> Option<jiff::Timestamp> {
+        sqlx::query("SELECT at FROM looks WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.get::<String, _>("at").parse().ok())
+    }
+
+    /// Records that the inbox was read.
+    ///
+    /// **Called on a dwell, never on a render.** See the table's own comment:
+    /// advancing this on every paint erases the boundary it exists to draw.
+    pub async fn mark_look(&self, at: jiff::Timestamp) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO looks (id, at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET at = ?",
+        )
+        .bind(at.to_string())
+        .bind(at.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// One day's decisions and the day's questions, for the close.
+    ///
+    /// **Bounded by the day rather than by a count**, because the tally is a
+    /// statement about a day and a `LIMIT` would silently make it a statement
+    /// about the most recent N of it. The index on `at` is what makes that
+    /// cheap.
+    pub async fn day(&self, since: &str) -> Result<(Vec<crate::core::Decision>, u32, u64)> {
+        let rows =
+            sqlx::query("SELECT * FROM decisions WHERE at >= ? ORDER BY at DESC, rowid DESC")
+                .bind(since)
+                .fetch_all(&self.pool)
+                .await?;
+        let decisions: Vec<crate::core::Decision> =
+            rows.iter().filter_map(decode_decision).collect();
+
+        // Questions that waited for somebody at any point today, and the
+        // longest any one of them waited. An ask still open is counted with the
+        // wait it has accrued so far, because a question that has been waiting
+        // six hours is the most interesting row on the page.
+        let asks = sqlx::query(
+            "SELECT asked_at, ended_at FROM asks WHERE asked_at >= ? ORDER BY asked_at ASC",
+        )
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        let now = jiff::Timestamp::now();
+        let mut longest = 0u64;
+        for r in &asks {
+            let Ok(start) = r.get::<String, _>("asked_at").parse::<jiff::Timestamp>() else {
+                continue;
+            };
+            let end = r
+                .get::<Option<String>, _>("ended_at")
+                .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+                .unwrap_or(now);
+            longest = longest.max(u64::try_from(end.as_second() - start.as_second()).unwrap_or(0));
+        }
+        Ok((
+            decisions,
+            u32::try_from(asks.len()).unwrap_or(u32::MAX),
+            longest,
+        ))
+    }
+
     pub async fn decisions(
         &self,
         about: Option<&str>,
@@ -1011,48 +1124,18 @@ impl Store {
         let rows = match about {
             Some(id) => sqlx::query(
                 "SELECT * FROM decisions WHERE run_id = ? OR work_id = ?
-                 ORDER BY at DESC LIMIT ?",
+                 ORDER BY at DESC, rowid DESC LIMIT ?",
             )
             .bind(id)
             .bind(id)
             .bind(limit),
-            None => sqlx::query("SELECT * FROM decisions ORDER BY at DESC LIMIT ?").bind(limit),
+            None => sqlx::query("SELECT * FROM decisions ORDER BY at DESC, rowid DESC LIMIT ?")
+                .bind(limit),
         }
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
-            .iter()
-            .filter_map(|r| {
-                Some(crate::core::Decision {
-                    id: r.get("id"),
-                    at: r
-                        .get::<String, _>("at")
-                        .parse()
-                        .unwrap_or_else(|_| jiff::Timestamp::now()),
-                    // An unrecognised authority is **dropped**, not defaulted.
-                    // Reading it as `daemon` would put the most reassuring label
-                    // on the least known row, in the one table a person queries
-                    // by exactly this column.
-                    authority: match crate::core::Authority::parse(
-                        r.get::<String, _>("authority").as_str(),
-                    ) {
-                        Some(a) => a,
-                        None => return None,
-                    },
-                    action: r.get("action"),
-                    subject: r.get("subject"),
-                    outcome: r.get("outcome"),
-                    reason: r.get("reason"),
-                    tool: r.get("tool"),
-                    project_id: r.get::<Option<String>, _>("project_id").map(ProjectId::new),
-                    run_id: r.get::<Option<String>, _>("run_id").map(RunId::new),
-                    work_id: r
-                        .get::<Option<String>, _>("work_id")
-                        .map(crate::core::WorkId::new),
-                })
-            })
-            .collect())
+        Ok(rows.iter().filter_map(decode_decision).collect())
     }
 
     /// Records that a channel delivered something, with how long the handler
@@ -1297,7 +1380,7 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<EventEnvelope> {
 fn searchable_text(e: &crate::core::event::Event) -> Option<String> {
     use crate::core::event::Event as E;
     match e {
-        E::ToolStarted { tool, input } => {
+        E::ToolStarted { tool, input, .. } => {
             let detail = input
                 .get("command")
                 .or_else(|| input.get("file_path"))
@@ -1319,6 +1402,38 @@ fn searchable_text(e: &crate::core::event::Event) -> Option<String> {
 /// here — never migrated and never guessed at. Dropping an ask loses a
 /// question, which is why every field that decides *whether it is still open*
 /// is required and only the descriptive ones are tolerant.
+/// One `decisions` row as SQLite hands it back.
+///
+/// **An unrecognised authority drops the row rather than defaulting it.**
+/// Reading it as `daemon` would put the most reassuring label on the least
+/// known row, in the one table a person queries by exactly this column.
+fn decode_decision(r: &sqlx::sqlite::SqliteRow) -> Option<crate::core::Decision> {
+    use sqlx::Row as _;
+    Some(crate::core::Decision {
+        id: r.get("id"),
+        at: r
+            .get::<String, _>("at")
+            .parse()
+            .unwrap_or_else(|_| jiff::Timestamp::now()),
+        // An unrecognised authority is **dropped**, not defaulted.
+        // Reading it as `daemon` would put the most reassuring label
+        // on the least known row, in the one table a person queries
+        // by exactly this column.
+        authority: crate::core::Authority::parse(r.get::<String, _>("authority").as_str())?,
+        action: r.get("action"),
+        subject: r.get("subject"),
+        outcome: r.get("outcome"),
+        reason: r.get("reason"),
+        tool: r.get("tool"),
+        server_source: r.get("server_source"),
+        project_id: r.get::<Option<String>, _>("project_id").map(ProjectId::new),
+        run_id: r.get::<Option<String>, _>("run_id").map(RunId::new),
+        work_id: r
+            .get::<Option<String>, _>("work_id")
+            .map(crate::core::WorkId::new),
+    })
+}
+
 fn decode_ask(r: &sqlx::sqlite::SqliteRow) -> Option<crate::core::ask::Ask> {
     use crate::core::ask::{Ask, Deadline};
     let deadline = match r.get::<Option<i64>, _>("deadline_secs") {
@@ -1567,10 +1682,10 @@ mod tests {
             let env = EventEnvelope::new(
                 RunId::new("s1"),
                 Source::Hook,
-                Event::ToolStarted {
-                    tool: format!("Tool{i}"),
-                    input: serde_json::json!({"command": format!("cmd {i}")}),
-                },
+                Event::tool_started(
+                    format!("Tool{i}"),
+                    serde_json::json!({"command": format!("cmd {i}")}),
+                ),
             );
             s.append_event(&env).await.unwrap();
         }
@@ -1588,10 +1703,7 @@ mod tests {
         s.append_event(&EventEnvelope::new(
             RunId::new("s1"),
             Source::Hook,
-            Event::ToolStarted {
-                tool: "Bash".into(),
-                input: serde_json::json!({"command": "pnpm typecheck"}),
-            },
+            Event::tool_started("Bash", serde_json::json!({"command": "pnpm typecheck"})),
         ))
         .await
         .unwrap();
@@ -1629,10 +1741,10 @@ mod tests {
         s.append_event(&EventEnvelope::new(
             RunId::new("s1"),
             Source::Hook,
-            Event::ToolStarted {
-                tool: "Bash".into(),
-                input: serde_json::json!({"command": "cargo test --workspace"}),
-            },
+            Event::tool_started(
+                "Bash",
+                serde_json::json!({"command": "cargo test --workspace"}),
+            ),
         ))
         .await
         .unwrap();
@@ -1659,10 +1771,7 @@ mod tests {
         s.append_event(&EventEnvelope::new(
             RunId::new("s1"),
             Source::Hook,
-            Event::ToolStarted {
-                tool: "Bash".into(),
-                input: serde_json::json!({"command": "pnpm typecheck"}),
-            },
+            Event::tool_started("Bash", serde_json::json!({"command": "pnpm typecheck"})),
         ))
         .await
         .unwrap();
@@ -1682,10 +1791,7 @@ mod tests {
         let env = EventEnvelope::new(
             RunId::new("s1"),
             Source::Hook,
-            Event::ToolStarted {
-                tool: "Bash".into(),
-                input: serde_json::json!({"command": "pnpm build"}),
-            },
+            Event::tool_started("Bash", serde_json::json!({"command": "pnpm build"})),
         );
         s.append_event(&env).await.unwrap();
         s.append_event(&env).await.unwrap();
@@ -1987,6 +2093,47 @@ mod tests {
         let about = s.decisions(Some("s1"), 10).await.unwrap();
         assert_eq!(about.len(), 1);
         assert_eq!(about[0].reason.as_deref(), Some("Bash(pnpm test *)"));
+    }
+
+    /// **Decisions taken in the same instant come back in the order they were
+    /// taken.**
+    ///
+    /// `at` ties constantly — a gate finishing and the run it was about ending
+    /// share a second — and under `ORDER BY at DESC` alone SQLite may return
+    /// either first. This surfaced as the test above passing alone and failing
+    /// under parallel load; the real cost is an audit page showing two
+    /// decisions in the wrong sequence, in the one table whose purpose is
+    /// saying what happened in what order.
+    ///
+    /// The tie-break is `rowid`, which is the append order. The row's own id
+    /// cannot serve: it is a uuid v7 whose head is a millisecond and whose tail
+    /// is random, so two rows written in the same millisecond sort by the
+    /// random part — which is not an order at all.
+    #[tokio::test]
+    async fn decisions_taken_in_one_instant_keep_the_order_they_were_taken_in() {
+        let s = Store::open_in_memory().await.unwrap();
+        let at = jiff::Timestamp::now();
+        for n in 0..8 {
+            let mut d = crate::core::Decision::new(
+                crate::core::Authority::Daemon,
+                &format!("step:{n}"),
+                "subject",
+                "done",
+            );
+            // The same stamp on every row, which is what a fast sequence
+            // produces anyway — this only makes it certain rather than likely.
+            d.at = at;
+            s.append_decision(&d).await.unwrap();
+        }
+        let back = s.decisions(None, 10).await.unwrap();
+        let order: Vec<&str> = back.iter().map(|d| d.action.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "step:7", "step:6", "step:5", "step:4", "step:3", "step:2", "step:1", "step:0"
+            ],
+            "eight decisions sharing one timestamp did not come back newest-first"
+        );
     }
 
     #[tokio::test]

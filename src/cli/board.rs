@@ -211,9 +211,14 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                 "No Claude Code sessions are running.\n\n\
                  {}\n\n\
                  Start one, and it appears here. For live state — what each session is \n\
-                 doing, what it costs, what it is blocked on — run {}.",
+                 doing, what it costs, what it is blocked on — run {}.\n\n\
+                 {}",
                 paint(DIM, &format!("using {}", bin.display())),
-                paint(BOLD, "devplane connect claude")
+                paint(BOLD, "devplane connect claude"),
+                // **What this list cannot see**, which a person has no other way
+                // to discover. The board says the same thing from the same
+                // source, so the two cannot disagree about it.
+                paint(DIM, &unwatched_note())
             ),
             None => println!(
                 "{}\n\n\
@@ -967,4 +972,21 @@ pub async fn cmd_forge_prs(json: bool) -> Result<()> {
         println!("    {}", paint(DIM, &p.url));
     }
     Ok(())
+}
+
+/// The sentence naming the vendors this machine cannot watch.
+///
+/// **Composed from the same table the board reads**, so `devplane ls` and the
+/// interface cannot disagree about what is invisible here — which is the class
+/// of defect that had one of them saying *no Claude Code sessions* and the
+/// other *no agent session is running on this machine*.
+fn unwatched_note() -> String {
+    let w = crate::core::vendors::watching();
+    if w.driven_only.is_empty() {
+        return String::new();
+    }
+    format!(
+        "{} appear only when Devplane starts them.\nA session you opened yourself in one of those is not listed here.\n`devplane doctor` says what is watched, per channel.",
+        w.driven_only.join(", ")
+    )
 }

@@ -201,8 +201,11 @@ pub fn cmd_explain(
     // `~/.devplane/policy.toml`, which let the surface built to say *what
     // would the gate decide* answer `allow` for a call the machine denies.
     let (cache, global_error) = crate::core::PolicyCache::from_disk();
-    let verdict = cache.evaluate(&dir, &tool, &input);
-    let restrictive = cache.restrictive(&dir, &tool, &input);
+    // One evaluator, so this surface cannot print two answers to one question.
+    // It used to call `evaluate` and `restrictive` and label them *the verdict*
+    // and *what a `PreToolUse` hook would answer* — two names over one value,
+    // from the days when only one of them could return `allow`.
+    let verdict = cache.restrictive(&dir, &tool, &input);
 
     // **Where the rules came from, and whether they loaded.** `undecided` used
     // to be one sentence covering three different situations, and only one of
@@ -227,9 +230,9 @@ pub fn cmd_explain(
                 "input": input,
                 "verdict": verdict.as_str(),
                 "rule": verdict.rule(),
-                // What a `PreToolUse` hook would answer, which is a different
-                // question and the one that holds in auto mode.
-                "restrictive": restrictive.as_str(),
+                // Set only for `unresolved`, where there is no rule to name and
+                // this sentence is the whole of the answer.
+                "why": verdict.why(),
                 // Which of the three `undecided` situations this is.
                 "rules": rules.as_json(),
             }))?
@@ -240,12 +243,17 @@ pub fn cmd_explain(
     let (colour, headline) = match &verdict {
         crate::core::Verdict::Deny { .. } => (render::RED, "deny"),
         crate::core::Verdict::Ask { .. } => (YELLOW, "ask"),
+        crate::core::Verdict::Unresolved { .. } => (YELLOW, "ask — unreadable"),
         crate::core::Verdict::Undecided => (DIM, "undecided"),
     };
     println!("{}  {}", paint(colour, headline), paint(BOLD, &tool));
-    match verdict.rule() {
-        Some(r) => println!("        {}", paint(DIM, &format!("by {r}"))),
-        None => println!("        {}", paint(DIM, rules.why_nothing_answered())),
+    match (verdict.rule(), verdict.why()) {
+        (Some(r), _) => println!("        {}", paint(DIM, &format!("by {r}"))),
+        // No rule, but a reason: the matcher could not read the command and a
+        // prohibition here is about what runs. Printing `why_nothing_answered`
+        // would say "no rule covers this", which is the false half.
+        (None, Some(why)) => println!("        {}", paint(DIM, &format!("because {why}"))),
+        (None, None) => println!("        {}", paint(DIM, rules.why_nothing_answered())),
     }
     if let Some(e) = &global_error {
         println!(
@@ -310,7 +318,12 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
         .unwrap_or_else(|| scope.display().to_string());
     let calls = store.observed_tool_calls(Some(&scope), limit).await?;
 
-    let cache = crate::core::PolicyCache::for_projects_only();
+    // **The machine-wide file included**, which this command did not do. The
+    // `for_projects_only` constructor says in its own doc that it is for tests
+    // and that `devplane explain` using it was a bug — the fix reached
+    // `explain` and not `explain --replay`, so the replay answered "no rule
+    // here" for every call `~/.devplane/policy.toml` forbids.
+    let (cache, _) = crate::core::PolicyCache::from_disk();
     // The third is every call no rule here decides — which is most of them, and
     // it is *not* the same as "interrupted a person": the agent's own settings
     // answered most of these silently. This counter said "reached you" until
@@ -323,9 +336,9 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     let mut open: std::collections::BTreeMap<String, Vec<String>> = Default::default();
 
     for c in &calls {
-        let verdict = cache.evaluate(&c.cwd, &c.tool, &c.input);
+        let verdict = cache.restrictive(&c.cwd, &c.tool, &c.input);
         let slot = match verdict {
-            crate::core::Verdict::Ask { .. } => 0,
+            crate::core::Verdict::Ask { .. } | crate::core::Verdict::Unresolved { .. } => 0,
             crate::core::Verdict::Deny { .. } => 1,
             crate::core::Verdict::Undecided => 2,
         };
@@ -460,7 +473,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
 ///
 /// It decides on exit codes and nothing else. No specification is opened, no
 /// task list is parsed, no prose is graded.
-pub async fn cmd_gate_run(cwd: Option<PathBuf>, json: bool) -> Result<()> {
+pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool) -> Result<()> {
     use crate::core::work::GateState;
 
     let here = match cwd {
@@ -498,7 +511,48 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, json: bool) -> Result<()> {
         Ok(c) => c,
     };
 
-    if config.gates.check.is_empty() {
+    // **A named gate, where one was asked for.** `check` is the definition of
+    // done and always resolves; anything else has to be declared, and asking for
+    // one that is not is an error rather than a silent pass — an empty gate that
+    // reads as success is the failure this layer exists to prevent.
+    let (label, commands, expect, timeout) = match name.as_deref() {
+        None => (
+            "check",
+            config.gates.check.clone(),
+            crate::core::config::Expect::Pass,
+            config.gates.timeout,
+        ),
+        Some(n) => match config.gate_named(n) {
+            Some((run, expect, timeout)) => (n, run, expect, timeout),
+            None => {
+                let declared: Vec<&str> = config.gates.named.keys().map(String::as_str).collect();
+                let known = match declared.is_empty() {
+                    true => "this repository declares no named gates".to_string(),
+                    false => format!("declared here: {}", declared.join(", ")),
+                };
+                match json {
+                    true => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "state": "unknown_gate",
+                            "passed": false,
+                            "summary": format!("no gate named `{n}`"),
+                            "declared": declared,
+                            "commands": [],
+                        }))?
+                    ),
+                    false => {
+                        println!("{}  {n}", paint(render::RED, "no such gate"));
+                        println!();
+                        println!("  {}", paint(DIM, &known));
+                    }
+                }
+                std::process::exit(1);
+            }
+        },
+    };
+
+    if commands.is_empty() {
         let state = GateState::NoGates;
         if json {
             println!(
@@ -518,9 +572,15 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, json: bool) -> Result<()> {
         std::process::exit(1);
     }
 
-    let report =
-        crate::gates::run("check", &config.gates.check, &root, config.gates.timeout, 1).await;
-    let state = match report.passed() {
+    let report = crate::gates::run(label, &commands, &root, timeout, 1).await;
+    // **A named gate may be declared `expect = "fail"`**, and a reader that
+    // ignored that would call a gate which did exactly what it was asked to do
+    // a failure. `check` is always `Pass`, so this is a no-op for it.
+    let passed = match expect {
+        crate::core::config::Expect::Pass => report.passed(),
+        crate::core::config::Expect::Fail => !report.passed(),
+    };
+    let state = match passed {
         true => GateState::Verified,
         false => GateState::Failed,
     };
@@ -529,6 +589,7 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, json: bool) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "gate": label,
                 "state": state.as_str(),
                 "passed": state.passed(),
                 // The gate's own sentence, which names what failed; the state's
@@ -546,9 +607,9 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, json: bool) -> Result<()> {
                 false => ("failed", render::RED),
             };
             println!(
-                "{:<10}{:<22}{}",
-                paint(colour, label),
-                c.command,
+                "{}{}{}",
+                render::pad(&paint(colour, label), 10),
+                render::pad(&c.command, 24),
                 paint(DIM, &c.outcome.headline())
             );
         }
@@ -590,7 +651,7 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, json: bool) -> Result<()> {
 /// present one is left alone and the person is handed the four lines and the
 /// key they go under — which they can read, review and commit like the code it
 /// is.
-pub fn cmd_speckit_install(event: Option<String>, dry_run: bool) -> Result<()> {
+pub fn cmd_speckit_install(event: Option<String>, dry_run: bool, anyway: bool) -> Result<()> {
     use crate::core::spec::{DEFAULT_HOOK_EVENT, EXTENSIONS_FILE, HOOK_COMMAND, HOOK_EVENTS};
 
     let here = std::env::current_dir()?;
@@ -605,6 +666,33 @@ pub fn cmd_speckit_install(event: Option<String>, dry_run: bool) -> Result<()> {
         anyhow::bail!(
             "`{event}` is not a hook point Spec Kit defines. It knows:\n  {}",
             HOOK_EVENTS.join("\n  ")
+        );
+    }
+
+    // **A mandatory hook is one the agent must invoke and wait for**, so
+    // registering one whose command nothing defines does not degrade to no gate:
+    // the workflow reaches a step it may not skip and cannot perform. Checked
+    // before anything is written, and refused rather than warned, because the
+    // failure is silent from inside — the same shape as a deny rule that matches
+    // nothing.
+    if !anyway
+        && let Some(why) = crate::core::spec::unreachable_skill(&root, dirs::home_dir().as_deref())
+    {
+        let places = crate::core::spec::skill_locations(&root, dirs::home_dir().as_deref());
+        anyhow::bail!(
+            "{why}.\n\n\
+             A hook registered `optional: false` is one the agent is told it may not skip. \n\
+             Registering it now would put a step in the workflow that cannot run.\n\n\
+             Two ways to make it reachable:\n  \
+             · install the plugin — `claude plugin marketplace add hupe1980/devplane`, then \
+             `/plugin install devplane@devplane`\n  \
+             · or put a skill of that name at one of:\n      {}\n\n\
+             Then run this again. `--anyway` writes it regardless.",
+            places
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n      ")
         );
     }
 
@@ -829,7 +917,7 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         for finding in &policy.redundancies() {
             let mut lines = crate::core::text::wrap(finding, 66).into_iter();
             if let Some(first) = lines.next() {
-                println!("  {:<10}{}", paint(BOLD, "unused"), first);
+                println!("  {}{}", render::pad(&paint(BOLD, "unused"), 10), first);
             }
             for rest in lines {
                 println!("  {:<10}{}", "", rest);
@@ -845,7 +933,11 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
             println!();
         }
         for finding in &wide {
-            println!("  {:<10}{}", paint(BOLD, "overbroad"), finding.rule);
+            println!(
+                "  {}{}",
+                render::pad(&paint(BOLD, "overbroad"), 10),
+                finding.rule
+            );
             for line in crate::core::text::wrap(&finding.why, 66) {
                 println!("  {:<10}{}", "", line);
             }
@@ -873,7 +965,7 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         for what in &inert {
             let mut lines = crate::core::text::wrap(what, 66).into_iter();
             if let Some(first) = lines.next() {
-                println!("  {:<10}{}", paint(BOLD, "grants no"), first);
+                println!("  {}{}", render::pad(&paint(BOLD, "grants no"), 10), first);
             }
             for rest in lines {
                 println!("  {:<10}{}", "", rest);

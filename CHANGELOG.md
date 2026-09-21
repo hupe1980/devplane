@@ -2,7 +2,680 @@
 
 Notable changes per release. Dates are UTC.
 
-## Unreleased
+## 0.7.0 — 2026-09-21
+
+### Breaking
+
+- **`ui/legacy.html` is gone, and `DEVPLANE_UI` points at a directory.** It took
+  a path to the single HTML file; it now takes a built `ui/dist`. The interface
+  is a bundle the binary embeds, and a build without one serves a page saying so
+  rather than falling back.
+
+- **`GET /api/work/{id}/changes` no longer returns `html`.** It returns
+  `changes` only. The rendered form existed for the deleted page; anything
+  reading the field should render the structured change set.
+
+- **The interface has no keyboard shortcuts.** Every action is a control.
+
+- **`devplane mcp` and `devplane statusline` are hidden from `--help`.** Both
+  still exist and both still work — an agent runs the first and `devplane
+  connect claude` writes the shim that calls the second. Anything parsing the
+  help listing to discover commands will not see them.
+
+- **The store schema is version 3.** `attention_log` gained `folded_at`. There
+  is no migration: delete `~/.devplane/devplane.db` or let it be recreated.
+
+### Added
+
+- **A surface can be opened *about* something.** The shell reads
+  `#<surface>/<focus>` and hands the second half to the surface, which is the
+  only thing that makes a detail view addressable. It does not know what the
+  focus means and must not.
+
+  Three surfaces had no way in. *Why this is here* rendered "open a row and this
+  shows what was decided" on every visit — with no row to open and nothing able
+  to give it one. The work view read whichever Work happened to be first. Board
+  rows link to their decision log now, as anchors rather than click handlers, so
+  they work from the keyboard and open in a new tab.
+
+- **Undo where it works, and a plain sentence where it cannot.** The inbox has
+  one reversible action and one irreversible one, and until now it treated them
+  the same: silently.
+
+  Snooze can be taken back — `minutes=0` un-snoozes and the daemon has always
+  accepted it, with a comment calling it *"the only way back"*. **No surface
+  ever offered it.** So the one thing on the page a person could undo was the
+  one thing they could not: they waited out the hour, or restarted the daemon.
+  It is offered now, attached to the confirmation of the action that created it,
+  and cleared by every path that is not reversible — a stale undo button offers
+  to take back something else.
+
+  Answering is the opposite case. It reaches the agent and nothing this page can
+  send recalls it, so there is no control; the sentence says so at the moment it
+  happens. Where an action cannot be taken back, saying so is the honest
+  substitute for a button that could not keep its promise.
+
+- **A surface that shows what a Work actually changed.** `ui/src/surfaces/changes/`
+  reads the structured change set the daemon already served and renders it: file
+  by file, hunk by hunk, with the four answers kept apart — hunks, a binary
+  file's size, a body deliberately not shown with the reason, and a branch that
+  changed nothing, which is a **finding** rather than an empty state because a
+  gate that passed over no change verified nothing.
+
+  **It renders the parsed shape, never HTML.** A diff is the densest
+  concentration of somebody else's text this product shows — file names, commit
+  content, whatever an agent wrote — so it is the worst possible place for a
+  surface to insert markup a server composed. Every line carries `+`, `−` or a
+  space, because red and green are the one pair that cannot be separated under
+  deuteranopia and a diff is exactly where that matters.
+
+  It was added as a **directory**, with no edit to any existing surface, no line
+  in the shell and no route table — which is what the shell rebuild was for, now
+  demonstrated rather than asserted.
+
+- **`devplane doctor` says what is watched here, per vendor and per channel.**
+  The product's headline sentence is about every agent on your machine, and that
+  covers **two different lists**: an agent Devplane *drives* reports through the
+  protocol by construction, and an agent somebody started *themselves* is
+  readable only as far as that vendor publishes channels. Collapsing the two is
+  how a claim becomes half true without anybody lying — and it had been
+  collapsed, in the README.
+
+  Three states, and the middle one is the point. `read` means demonstrated end
+  to end. `not published` means the vendor offers nothing, so an empty surface
+  for that vendor means *Devplane cannot see it* rather than *nothing is
+  happening*. **`unproved`** is the honest description of a channel that is
+  built and has never been run; collapsing it into either neighbour is the lie.
+
+  Every row carries the date it was checked against the vendor's own
+  documentation, and a guard fails when an agent that can be driven has no row
+  saying whether it can be watched.
+
+- **The board marks a session close to compaction, and the number comes from the
+  daemon.** The context percentage was plain text at every value, so the one
+  thing on this board worth catching early — a window about to compact — looked
+  exactly like a window at three percent.
+
+  It was the **last guard the rebuild owed**, carried on the ledger through
+  every pass since the port began, and it was owed because there was nothing to
+  hold: no surface coloured a gauge. It is closed by building the thing rather
+  than by reclassifying it.
+
+  The threshold is `context_high_percent`, read from the board payload the
+  daemon already served and nothing read. A figure written into the page would
+  disagree with the one `devplane ls` uses the moment somebody changed it, and
+  the two surfaces would call the same session crowded and fine. **No threshold
+  means no opinion**: a default invented in the page would be this surface
+  deciding what "crowded" means on its own, which is the failure the guard
+  exists to prevent arriving by the back door. The mark carries a word, not only
+  a colour.
+
+  With it the ledger over the deleted page closes: **35 carried, 17 dropped, 0
+  owed.**
+
+- **`devplane rules` — which of your repositories is missing a rule.** The
+  fleet half of *answer once*: `devplane explain` answers for one call on one
+  machine, this asks across every registered project.
+
+  Both files are read and never conflated — a `devplane.toml` prohibition is
+  what Devplane refuses, a `permissions.deny` entry is what the agent refuses.
+  Four states per file: **has it**, **covered** by a named wider rule,
+  **missing**, or **unreadable**, whose fix is `devplane check` rather than a
+  paste. Coverage uses the containment procedure that already finds redundant
+  rules; a pair it cannot decide is reported as missing rather than guessed at.
+
+  With no argument, the rules some projects hold and others do not.
+
+  **It writes nothing and offers no apply-to-all**, proved over the source and
+  mutation-tested. Adding instruction files helped 27.7% of 148 measured
+  projects and hurt 26.35% — what separated them was what the rules said.
+
+- **The inbox folds instead of growing without bound.** Above twelve rows,
+  kinds whose members are interchangeable to you — issues assigned, reviews
+  requested, stalled sessions, context warnings — collapse into one row naming
+  the kind, the project and the count. And where one raised item is a *named*
+  consequence of another (a configuration that will not parse explains the
+  refusals in that project; a gate that is not answering explains calls with no
+  verdict; a leaked agent explains the sessions it holds) the consequence is
+  counted on the cause's row.
+
+  **Nothing is ever hidden without a count.** Rendered + summarised +
+  counted-on-a-cause == raised, asserted over a set spanning every kind, with
+  every id reachable. An inbox short enough to read renders exactly as it did
+  before, with no summary rows at all.
+
+  **Four kinds are never folded** — a question, an abandoned question, a
+  permission, a human step. Each needs an answer only you can give, and a
+  summary row is a question nobody saw with a number beside it. The foldable
+  set is enumerated in the code, so a kind added later is unfoldable until
+  somebody decides otherwise.
+
+  The reason is a measurement rather than taste: oversight modelled as a finite
+  attention budget is an inverted U, and at a reviewer capacity of 50,
+  escalating **100 %** of actions lets **39 %** of danger through against 22 %
+  at 72 %. A list that grows without bound stops being read exactly when it
+  matters.
+
+- **`devplane attention` reports whether folding was right.** Two columns per
+  kind: how often it was folded, and how often it was folded **and then acted
+  on once opened**. A kind always folded and never acted on is one nobody
+  needed as a row; a kind folded and then acted on is one the summary was
+  standing in front of. Counted on a read, never on a poll — the board fetches
+  the inbox every couple of seconds, and counting folds per render would
+  measure polling.
+
+- **The done certificate is on the page.** It existed only behind
+  `devplane work export` — a command nobody types — while the board showed the
+  gate that produced it and never what it proves. Opening a piece of work now
+  shows the basis, the commands with their outcomes, where the evidence came
+  from, and one button that puts the whole certificate on the clipboard as
+  markdown: the same bytes the command writes. Two clicks from a finished Work
+  to a pull request body.
+
+  Every sentence is composed by the daemon. The page renders and words nothing,
+  held by an absence check — a certificate described twice is one that can
+  disagree with itself, and nothing would notice.
+
+- **The certificate says where its predicate came from.** `gen_ai.evidence.origin`,
+  the name the OpenTelemetry GenAI conventions have open for it, on the in-toto
+  statement, in the markdown and on the page:
+
+  | Value | What carries it |
+  |---|---|
+  | `externally_observed` | the gate transcript — commands this tool ran, and the codes they ended on |
+  | `self_reported` | the agent's own account, carried as a claim and never as the predicate |
+  | *absent* | not known — **never defaulted** |
+
+  The third state is the point: the only value anybody would default to is the
+  flattering one, and a certificate that quietly promotes *the agent said so* to
+  *a check observed it* is the failure the document exists to prevent. This had
+  been recorded as adopted in four places and implemented nowhere.
+
+- **All four ways a Work reaches done render as a sentence**, and *no gate was
+  declared* is one of them rather than an empty block — a blank reads as
+  *nothing to show* where it means *this project never said what done means*. A
+  Work that finished before Devplane kept a record says **that**, which is
+  neither *unfinished* nor an empty certificate.
+
+- **`devplane gate run --name <gate>` runs one gate from `[gates.named]`.** A
+  named gate could be declared, validated by `devplane check` and listed by it —
+  and the only thing that could *run* one was a pipeline step. So a person who
+  wrote one down had no way to try it before wiring a pipeline around it, which
+  is a configuration key with no reader for its commonest use.
+
+  With no `--name` it runs `check`, exactly as before. `expect = "fail"` is
+  honoured, so a gate that did what it was asked to do is not reported as a
+  failure. A name nothing declares exits non-zero and prints the names that are
+  declared, rather than passing silently — an empty gate that reads as success
+  is the failure that layer exists to prevent.
+
+- **An empty inbox says what the day came to.** It printed *"Nothing needs
+  you"* and stopped. Now it says what was decided without you, by whom, and what
+  will want you next — the close is the one moment this product has something
+  good to report, and an absence of rows is not it.
+
+- **An audit row for an MCP tool call says where that server came from.**
+  Claude Code began carrying the server's name and a **source** — `plugin`,
+  `sdk`, `user`, `project` — on five hook events on 2026-09-18, with the
+  instruction to base trust on `source` rather than on the name or the
+  `mcp__<server>__` prefix. Devplane read neither, and an audit row for a call
+  into a server a cloned repository defined read exactly like one into a server
+  the person installed themselves.
+
+  It is now recorded and shown. **Nothing is derived from it**, and an absence
+  check over the policy holds that no verdict may read the field: deciding which
+  provenances are acceptable is a judgement the owner makes in their own
+  settings. A value this build has never seen is printed as received rather than
+  mapped to a guess, and rows that cannot have a provenance say nothing rather
+  than reserving a blank.
+
+- **`devplane --help` groups its thirty-five commands by errand.** See what is
+  happening · what needs you and what happened without you · start and steer
+  work · set up a project · the daemon. A test asserts every visible command
+  belongs to exactly one group, so adding one without filing it fails the build.
+
+  Nothing was renamed, merged or removed: the list is long because the product
+  does a lot, and the five *seat* surfaces each answer a question the others
+  cannot.
+
+- **`CLICOLOR_FORCE` turns colour on where it would otherwise be off** — for a
+  pager, or a CI log that renders escapes. `NO_COLOR` still wins.
+
+- **When Devplane cannot read a command line, it asks you** instead of saying
+  nothing. `rm$IFS-rf x`, `$(echo rm) -rf x`, `eval "…"` and `curl … | sh` hide
+  what runs behind something no matcher can resolve, and reporting *no rule
+  answers this* would be true and misleading.
+
+  The verdict is `unresolved`, on Devplane's own authority rather than credited
+  to a rule that did not decide it, and it carries the reason. Only in a project
+  whose rules could have applied, so an inbox does not fill with questions
+  nobody asked for.
+
+- **A question an agent asked and moved past no longer disappears.** When a session Devplane
+  *watches* asks you something and then starts another tool call without an answer, the question used
+  to leave the inbox exactly as if you had answered it — the two produced identical state and nothing
+  anywhere recorded that nobody had. It is now a `question_abandoned` item naming the question as the
+  agent wrote it, the options it was choosing between, and what it did instead; and it is in
+  `devplane asks` as *nobody answered*, the same word the durable asks use.
+
+  **No answer action, deliberately**: the tool call is over, so a button there would offer something
+  no route can deliver. The item offers the session instead.
+
+  **And an empty list says which vendors it cannot speak for.** The derivation is Claude Code's hook
+  events and no other vendor documents an equivalent, so *no question was abandoned* and *this cannot
+  be seen for Copilot* are printed as two different sentences.
+
+  One thing it deliberately does not claim: a question closed by your agent's own auto-continue
+  timer. That **submits**, so the tool succeeds and it is indistinguishable from an answer from
+  outside — `devplane modes` is the surface that covers that half.
+
+- **`devplane modes` reports the question timer per session, including the one that overrides your
+  settings.** `CLAUDE_AFK_TIMEOUT_MS` takes precedence over `askUserQuestionTimeout` and turns
+  auto-continue on **even where your settings say `never`**; `0` closes each question immediately
+  rather than turning the timeout off. Devplane reads it from the environment each session was
+  started in — its `SessionStart` hook runs as a child of that session — and shows it under that
+  session, with the machine-wide setting it overrode.
+
+  **This closes a hole in which the surface could say the opposite of the truth.** Before it,
+  `devplane modes` read two settings files and nothing else, so a session running with
+  `CLAUDE_AFK_TIMEOUT_MS=0` — every question ended by nobody the instant it was asked — showed no
+  timer at all, and the summary line read *Every session that has reported asks you*.
+
+  Three states, and no two of them read alike: a clock, **no clock**, and **not read** — a session
+  that started before `devplane connect` has no environment reading, is counted separately, and is
+  never rendered as *nothing is set*.
+
+### Changed
+
+- **The interface is rebuilt, and `ui/legacy.html` is deleted.** Svelte 5 on
+  Vite, built to a bundle the binary embeds — one artefact, nothing fetched, and
+  the output stays readable so the page can be followed without this repository.
+
+  **It opens on what needs you**, and the rest is a sidebar in three bands:
+  what is asking for you, what you are doing, how the machine is set up. Nine
+  surfaces whose names are sentences do not fit across the top without becoming
+  a menu bar you read left to right.
+
+  **Adding a surface is adding a directory.** `import.meta.glob` resolves
+  `ui/src/surfaces/*/index.ts`; no shared file names a surface, so a new one is
+  not a merge conflict.
+
+  **A session row leads with its state**, what it is doing is the subject, and
+  the numbers are metadata against the right edge. The row links to its decision
+  log, so a detail surface can be opened *about* something rather than hoping
+  the right thing is first.
+
+  **Escaping is structural rather than remembered.** Svelte escapes by
+  construction, so the rule is that no surface uses the one construct that opts
+  out — which matters most on the diff surface, the densest concentration of
+  somebody else's text the product renders.
+
+  **There are no keyboard shortcuts.** Every action is a control, so the focus
+  ring and a skip link are the whole keyboard story.
+
+  The switch was one change: the two interfaces were never live together. The 52
+  guards over the page it replaces are each carried by a named guard or dropped
+  with a reason, and the sixteen controls it offered are accounted for the same
+  way.
+
+- **The property ratchet was rebuilt, because a floor that moves when it is
+  inconvenient is not a floor.** The constant had been re-seated twice in one day
+  — once for the keyboard removal, once at the switch — and neither could be
+  attributed afterwards, because the counter was fixed in the same window.
+
+  The floor is no longer a constant anybody edits. It is the measured peak less
+  the properties listed in `REMOVED_WITH_FEATURE`, each with a count and a
+  reason, so deleting guards fails the check until the deletion is **written
+  down** — and the write-down is a diff a reviewer sees rather than a number that
+  quietly got smaller. The accounting now happens at the moment of removal, by
+  the person who knows what they removed.
+
+- **The property counter was wrong a second time, in the same direction.** It
+  had been fixed once — it matched `fail(` only at the start of a line and
+  missed every `if (…) fail("…")`, reporting 60 against a true 99. The fix
+  matched `fail("`, which misses every message written with a backtick: eight
+  of them, all the ones that name a surface.
+
+  It no longer matches messages at all. It counts the calls, then asserts that
+  each one it counted is one it knows how to read, so a third quote style fails
+  the check instead of quietly lowering the number. A counter that measures the
+  wrong thing is worse than none, because it is believed — and this one was
+  being read to decide whether switching was safe.
+
+- **Devplane says what it records, instead of naming a category four other
+  projects lead with.** Every published surface opened on *the local-first
+  control plane for AI coding agents* — a six-word noun phrase held by
+  `builderz-labs/mission-control` (6,247★), `loopx-project/loopx` (5,906★),
+  `mixpeek/amux` (481★) and `preloop/preloop`, with the field's largest project
+  at 12,213★ describing the same thing as *supervising* coding agents. A first
+  line a reader compares against somebody with six thousand stars is not one to
+  write.
+
+  The phrase is gone from `Cargo.toml`, `site/zola.toml`, `site/static/llms.txt`,
+  the plugin marketplace description, `devplane --help` and the rustdoc, and all
+  six now lead with what is actually recorded:
+
+  > Devplane records who decided, when nobody asked you — a person, a rule, a
+  > classifier, a timer, or nobody — across every project and every coding agent
+  > on your machine.
+
+  `README.md` leads with the same sentence and **`Devplane never approves a tool
+  call` moves from paragraph three to paragraph two**, which is where the
+  strongest thing this project does belongs.
+
+### Fixed
+
+- **The board's empty state made a claim about your machine that it could not
+  check.** It said *"No agent session is running on this machine"*. On a machine
+  running three Codex sessions that is false — Devplane cannot see those at all —
+  and it is false in the reassuring direction, on the surface people trust to
+  tell them nothing needs them.
+
+  `devplane ls` had always got this right: *no **Claude Code** sessions are
+  running*. One surface was honest and its twin was not, which is what happens
+  when two surfaces compose the same sentence in two places.
+
+  Both read one table now. The board says what it watches, names the vendors
+  whose channels are read but unproved as a separate sentence — folding them in
+  would be the same overstatement in a smaller font — and names the ones that
+  appear **only when Devplane starts them**, which is the gap a person has no
+  other way to discover.
+
+- **A message shipped with a newline and nine spaces in the middle of a
+  sentence**, and the guard that exists to catch exactly that waved it through.
+
+  `no_message_carries_a_collapsed_line_continuation` exempted any run of spaces
+  under ten that followed a `\n`, reasoning that a two- or four-space
+  continuation indent is deliberate. The reasoning is sound and the exemption
+  was useless: the check only fires on a run of **six or more**, so a deliberate
+  indent never reaches it. All the exemption could do was wave through runs of
+  six to nine — and it did.
+
+  Measured before removing it: every `\n`-plus-spaces run in `src/` is two or
+  four spaces, or a `.join("\n   ")` whose spaces end at the closing quote and
+  was already excluded. Nothing legitimate depended on it. With the exemption
+  gone the check immediately found the one real instance and nothing else.
+
+- **Copilot's `notification` event was never mapped** — the one that says
+  somebody is waiting on you. Eleven of GitHub's fourteen hook events were read;
+  the missing one carries `notification_type: "permission_prompt"` in the same
+  vocabulary Claude Code uses, so a Copilot session with a dialog open produced
+  no block on the surface the product is named for.
+
+  Twelve are mapped now. `permissionRequest` is silent by decision: it fires
+  before the permission service runs, so it says a decision is about to be taken
+  rather than what it was, and recording it as a block would mark every
+  auto-allowed call as waiting on a person. A guard fails when the vendor's
+  event count moves.
+
+- **A `doctor` column was one character out of line.** `render::pad` guarantees
+  at least one space, so a string exactly as long as the column comes back one
+  wider — correct for a table whose columns must not touch, and wrong when the
+  caller adds its own separator on top. The gap is part of the column now.
+
+- **The decision log could come back in the wrong order.** `decisions` sorted by
+  timestamp alone, and `at` ties constantly — a gate finishing and the run it was
+  about ending share a second — so SQLite was free to return either first.
+
+  It surfaced as a test that passed alone and failed under parallel load, which
+  is the mild version. The real cost is the audit page showing two decisions in
+  the wrong sequence, in the one table whose entire purpose is saying what
+  happened in what order.
+
+  The tie-break is `rowid`, which is the append order of an append-only log. The
+  row's own id cannot serve: it is a uuid v7 whose head is a millisecond and
+  whose tail is random, so two rows written in the same millisecond would sort
+  by the random part — which is not an order at all.
+
+- **Nothing ever marked the items you had not seen.** The inbox has shown
+  *since you last looked · 16h* since 0.6.0, and the response has carried the
+  moment it was measured from so a surface could compare — and neither surface
+  ever did. Items raised inside the gap looked exactly like the ones that were
+  already there.
+
+  They are marked `new` now, on `devplane inbox` and on the board, as a **word**
+  rather than a colour: red and amber cannot be separated under deuteranopia at
+  any usable lightness, so nothing here is distinguishable by colour alone. The
+  daemon decides which rows are new, so the two surfaces cannot draw the
+  boundary in different places, and nothing is marked before your first look —
+  there is no boundary yet to be on the far side of.
+
+- **The board said nothing about the question clock.** `devplane modes` has
+  reported what can answer a question on this machine without you; the board
+  did not carry it at all, so the two surfaces disagreed about a fact about the
+  machine. The board now shows the same sentence, composed in the same place —
+  and **only where a clock actually answers**. A clock set to `never` is
+  somebody having written down that nothing may answer for them, which is true,
+  reassuring, and not what a header is for.
+
+- **An audit row could not tell *no server* from *a server whose origin nobody
+  reported*.** Both printed nothing, so an MCP tool call from a vendor whose
+  channel has no provenance field read exactly like `Bash(ls)` — a blank that
+  taught you *ordinary tool* when it meant *unknowable here*. There are three
+  states now, and the middle one says so.
+
+- **`devplane modes` called the setting's own default a timer answering in your
+  name.** `askUserQuestionTimeout` takes one of four values — `60s`, `5m`,
+  `10m`, or **`never`, which is its default** — and every string in the settings
+  file was read as a duration. So a person who had explicitly set `never` was
+  told:
+
+  ```text
+  you set a never timer on your own questions — after that, whatever is
+  selected is submitted
+  ```
+
+  False, about the most likely value in any file, and in the direction of alarm.
+  It was worst where it mattered most: an administrator deploying `never` in
+  managed settings is **hardening** the machine, and Devplane reported it as
+  somebody taking the person's attention away.
+
+  `never` is now a value rather than a missing case. The line stays — somebody
+  wrote it down — and says the questions wait. A clock that does not answer is
+  told apart from one that does, and from nothing being set at all, by a flag on
+  the wire rather than by comparing a rendered string.
+
+- **The clock line never said where the clock was set.** The settings path was
+  read as `file`; the field had been renamed `where_set` two releases earlier,
+  and the reader fell back to an empty string — so a person was told a clock was
+  answering their questions and never told where to change it. Every test
+  passed, because none of them asserted on the location and `""` is a valid
+  string.
+
+  The CLI now deserialises the same type the API serialises, so a rename is a
+  compile error. An absence check keeps the clock path from going back to
+  reading its own API key by key.
+
+- **Every aligned column collapsed when colour was on.** `{:<10}` pads to a
+  string's character count, and a painted string carries ten characters of escape
+  code that occupy no columns — so a ten-wide column holding a coloured `failed`
+  measured sixteen, padded to nothing, and the next field began immediately after
+  it:
+
+  ```text
+  failedcargo clippy --all-targets --all-features -- -D warningsexit 101
+  ```
+
+  Uncoloured, the same code was correct — and **every test in this repository
+  captures stdout, which is not a terminal**, so every test had only ever seen
+  the version that worked. Fixed by padding to *visible* width at eleven call
+  sites across five surfaces, with a column now a minimum rather than a promise,
+  so a field that overruns still separates from the next one.
+
+- **`devplane speckit install` refuses to register a hook nothing can run.** The
+  entry it writes is `optional: false`, which means the agent is told it may not
+  skip it — so registering it where no `/devplane-gate` skill is reachable put a
+  step in the workflow that cannot be performed. It now checks, names the two
+  ways to fix it, and takes `--anyway`.
+
+- **The `typescript` feature did not compile.** `AbandonedQuestion` carried a
+  `Vec<Choice>` and `Choice` had no export, so `cargo build --features
+  typescript` failed on a tree where everything else was green.
+
+- **A prohibition no longer walks past `sudo`, `exec`, `env` or an absolute
+  path.** With `never_auto = ["Bash(rm *)"]` set, `rm -rf x` was refused and
+  `sudo rm -rf x`, `doas rm -rf x`, `exec rm -rf x`, `env FOO=1 rm -rf x`,
+  `watch rm -rf x` and `/bin/rm -rf x` were **allowed without a word** — while
+  `nohup rm -rf x` and `timeout 5 rm -rf x` were refused, because those two
+  wrappers happened to be on a different list.
+
+  A restrictive rule now looks through the wrappers that run something else
+  under another user, environment or process image, and matches a program's file
+  name as well as the path it was spelled with.
+
+  **Claude Code does neither**, and this module spent its life agreeing with it —
+  correctly, while Devplane could still *approve*, because a matcher broader than
+  the vendor's would have approved calls the user's own settings refuse. Devplane
+  has not been able to approve since the permission gate was deleted, so the only
+  thing a broader match can do now is refuse more, and refusing more is free. The
+  premise changed and the matcher did not.
+
+- **Five writers no longer reach a protected file past an `Edit` rule.**
+  `never_auto = ["Edit(secrets/**)"]` refused `tee secrets/k.txt` and
+  `echo x > secrets/k.txt` and allowed `cp /tmp/a secrets/k.txt`,
+  `truncate -s 0 secrets/k.txt`, `dd of=secrets/k.txt`,
+  `install -m 600 /tmp/a secrets/k.txt`, `rsync /tmp/a secrets/k.txt` and
+  `ln -s /tmp/a secrets/k.txt`. Claude Code does not apply file rules to those
+  commands, and this table mirrored it.
+
+  On the restrictive side it no longer does. The direction is kept, so
+  `cp secrets/k.txt /tmp/b` is a **read** of the protected file and meets a
+  `Read(…)` rule rather than an `Edit(…)` one.
+
+- **`devplane explain --replay` no longer ignores your machine-wide rules.** It
+  built its evaluator from the projects' files alone, so every call
+  `~/.devplane/policy.toml` forbids was reported as *no rule here*. The
+  constructor it used says in its own documentation that it is for tests and that
+  `devplane explain` using it was a bug; the fix had reached `explain` and not
+  `explain --replay`.
+
+- **One evaluator, not two.** `PolicyCache::evaluate` and
+  `PolicyCache::restrictive` had identical bodies — left over from the days when
+  one of them could return `allow` — and the hook chose between them by event,
+  under a comment explaining a difference that was not there.
+
+- **A question's deadline no longer counts the time Devplane was not running.**
+  A project setting `[questions] deadline` had every waiting question expired
+  within a minute of the next daemon start: the sweep measured wall-clock
+  seconds from the moment the question was asked, so closing a laptop at 17:00
+  with a `10m` deadline produced, at 09:00 the next morning, an audit row reading
+  *"a clock refused it after 10m"* about ten minutes nobody was ever given.
+
+  A deadline bounds how long a question waits for somebody who **could** have
+  answered it. While the daemon is down there is no board, no inbox and no
+  notification, so the clock is not running; it now starts at the later of *when
+  it was asked* and *when Devplane last started*. A restart can only ever lengthen
+  a wait, never shorten one.
+
+  This also restores a guarantee that was silently false for every project with a
+  deadline set: *a daemon that was stopped leaves the question open and
+  answerable after the restart*.
+
+### Documentation
+
+- **`devplane modes` names one thing it cannot see.** The `CLAUDE_AFK_TIMEOUT_MS` environment
+  variable overrides the `askUserQuestionTimeout` setting and turns question auto-continue on even
+  where the setting says `never`, so the absence of a timer line does not prove there is no timer.
+  The CLI reference now says so and says how to check. Reading it per session is specified as
+  `019-the-clock-on-this-session`.
+
+### Removed
+
+- **`core::diff::render` and the `html` field beside it.** The change-set route
+  served rendered HTML for `ui/legacy.html` to insert. That page is deleted, and
+  after the switch the function was read by nothing but its own tests while the
+  route went on composing markup no client asked for.
+
+  `esc` went with it — an HTML escaper whose doc comment said *the only way text
+  leaves this module*, which is now true of nothing, because no text leaves that
+  module as markup. The surface escapes by construction, which is a stronger
+  guarantee than a function everybody has to remember to call.
+
+  **Every claim the deleted tests made survives, relocated to where it is now
+  true.** The hostile-input test no longer asserts escaping — it asserts the
+  parser carries hostile text **verbatim**, because a parser that sanitises has
+  changed the diff it was asked to report, and a reviewer approving the
+  sanitised version is approving something nobody wrote.
+
+- **`in_force` and the `InForce` type.** They existed to answer *what did this
+  session's environment override?*, had no caller in the product, and could not
+  have worked: `never` — the value the question is entirely about — had no
+  representation, so the field meant to carry it could not. `devplane modes`
+  already prints the machine's clock and each session's own, and the session
+  sentence says in words that it overrides the files.
+
+- **`AcpEvent::PermissionExpired`.** Orphaned when the hard-coded ten-minute
+  permission timeout was deleted in 0.6.0: the variant stayed declared and
+  handled while nothing could construct it, and its handler wrote a decision row
+  reading *"nobody answered within ten minutes"* about a rule that no longer
+  exists. Nothing observable changes — the handler could never run. An expiry now
+  comes only from a project's own deadline.
+
+- **`devplane mcp` and `devplane statusline` are no longer listed in `--help`.**
+  Both are surfaces for a machine — one goes in an agent's configuration file, the
+  other is invoked by Claude Code — and neither is a command anybody types, which
+  is the same reason `devplane hook` has been hidden all along. **Both still work
+  exactly as before** and both are still in the CLI reference.
+
+### Internal
+
+- **The crate would have published with no interface.** `ui/dist/` is generated
+  and gitignored, so a clean checkout has none — and `include` in `Cargo.toml`
+  matches nothing rather than failing. Both jobs that run `cargo publish` did so
+  without building it, so `cargo install devplane` would have produced a binary
+  whose one page says it was built without an interface.
+
+  The guard that exists for this asked whether `release.yml` *mentions*
+  `npm run build`. It does — in the job that builds the release binaries, which
+  is not the job that publishes. It checks per job now.
+
+- **The render harness could pass on its own prose, and did.** A check that
+  greps a surface for the construct it forbids finds the comment explaining why
+  the construct is forbidden — so it passes for ever afterwards, including once
+  the thing it guards has been deleted.
+
+  This has now caught the repository **five times**, twice within the hour the
+  diff surface and the undo contract were written. It is no longer something to
+  remember: `source()` strips comments and is the only way the harness reads a
+  surface, and a guard fails if any check opens one directly. Both halves
+  mutation-verified.
+
+- **The property counter was corrected a third time, and this time it caught
+  itself.** It reads `fail(` calls and asserts every one carries a message it
+  can parse; two new calls put their message on the next line after the
+  formatter wrapped them, and the assert refused to undercount rather than
+  quietly reporting a smaller number. The quote is looked for past any
+  whitespace now. The count is **123**, up from 104.
+
+- **The README's command count is guarded.** It has drifted twice in opposite
+  directions — once counted by eye as thirty-six and corrected only by piping
+  `--help` through `wc`, once left at thirty-five when a thirty-sixth command
+  landed. It is checked against `COMMAND_GROUPS` now.
+
+- **A latency budget was being measured by the test suite rather than by the
+  gate.** `the_policy_gate_answers_fast_enough_to_be_invisible` asserted on the
+  **worst** of twenty runs — the right statistic for *must not be felt*, and the
+  wrong one to measure inside `cargo test`, where fifteen binaries run in
+  parallel and each spawns processes. It passed for months on luck and started
+  failing at **598ms** the day another test began spawning a process, while the
+  same test run alone measured well inside budget.
+
+  A budget that fails for reasons unrelated to what it measures gets raised
+  until it stops failing, and then it is not a budget. The **median** carries it
+  now — a real regression moves every run, scheduler noise moves the tail — with
+  a loose five-second ceiling on the worst run, set where only a hang can reach
+  it. That catches a gate that answers instantly nineteen times and hangs once,
+  which the median alone would not.
+
+- **`agent-client-protocol` 2.1 → 2.2**, schema 1.7.0 → **1.9.1**. Clean —
+  nothing this product uses changed, and session notices are still not
+  advertised.
+
+- Three public functions with no reader are gone (`api::content_type_of`,
+  `github::Issue::has_label`) or are now `#[cfg(test)]`-gated
+  (`store::open_in_memory`, which was a test fixture compiled into every shipped
+  binary). The guard that finds them read `src/core/` only and now reads the
+  whole crate.
 
 ## 0.6.0 — 2026-09-20
 

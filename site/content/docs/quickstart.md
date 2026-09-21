@@ -68,28 +68,27 @@ groups by project, and puts what needs you at the top. It is a document rather t
 state has a word as well as a colour, the sections are lists, and one polite live region says how
 many things need you — so it reads aloud, and it survives being screenshotted in greyscale.
 
-| Key | What |
+It opens on **what needs you**. The sidebar holds the rest, in three bands: what is asking for you,
+what you are doing, and how the machine is set up.
+
+| Surface | What |
 |---|---|
-| `j` `k` · `enter` | move · open what a session is saying |
-| `tab` · `enter` on a work row | **what it changed** — the diff, the gate's commands, the agent's account |
-| `1`–`9` | pick one of the answers the agent offered |
-| `y` `n` · `r` | allow · deny a permission · reply |
-| `?` | **why is this here** — the decision log for the row under the cursor |
-| `,` | **what is configured** — this machine, and every repository's `devplane.toml` read back |
-| `g` | **every open issue and pull request**, across every registered project — `i` and `p` switch |
-| `⌘K` | jump to any project, piece of work or session by name |
-| `⌘N` | dispatch work: prompt, project, kind, and the project's own templates |
-| `f` · `s` · `/` | raise the editor window · snooze · search |
+| **What needs you** | one list across every project, ordered by what is waiting |
+| **What is happening** | every session, grouped by project, with cost and context |
+| **Is this actually done** | a finished Work's certificate, and one button that copies it |
+| **Why this is here** | the decision log for one session or Work |
+| **What changed** | a Work's diff against its base branch |
+| **Start work** | a prompt, a project, a kind, and the project's own templates |
+| **Issues and pull requests** | every open one, across every registered project |
+| **What is configured** | this machine, and every repository's `devplane.toml` read back |
+| **Search** | tool commands, questions and errors across every session |
+
+**Every action is a button, and there are no keyboard shortcuts.** A session row opens its decision
+log; the counts in a project heading open the lists behind them. A count you cannot open is a number
+telling you to go and look somewhere else.
 
 A permission also carries **the rule that stops it being asked again**, with the file to paste it
 into — see [Permissions](/docs/permissions/#which-rule-to-write-next). Nothing here writes it.
-
-The counts are the same door: `4 issues · 2 PRs` in the header, and the same figures on a project
-heading, are buttons. A count you cannot open is a number telling you to go and look somewhere else.
-
-`⌘N` opens with the cursor in the prompt and everything else already decided by the project, and it
-tells you what it will do before it does it. `⌘K` matches by subsequence, so `crlb` finds
-`core-lib`.
 
 ## 4. Answer what needs you
 
@@ -160,7 +159,7 @@ saas
 ```
 
 Every open issue and pull request across every registered project, read through your own `gh`. On
-the board, press `g` for the same two lists, or click the counts in a project heading. `◆` is what
+the board, the **github** surface holds the same two lists, and the counts in a project heading open them. `◆` is what
 is waiting on you — an issue assigned to you, a review requested from you, your own pull request
 that is red, contested, or approved and unmerged. Those are inbox items too.
 

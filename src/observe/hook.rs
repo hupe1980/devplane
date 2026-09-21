@@ -44,11 +44,36 @@ pub struct HookPayload {
     /// `Elicitation` / `ElicitationResult`: which MCP server is asking.
     #[serde(default)]
     pub mcp_server_name: Option<String>,
+    /// **Where the MCP server behind this tool call came from.** Carried on
+    /// `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`
+    /// and `PermissionDenied` since Claude Code v2.1.274, with a `name` and a
+    /// `source` naming the definition's origin — `plugin`, `sdk`, or a
+    /// configuration scope such as `user` or `project`.
+    ///
+    /// **Recorded, never read by a verdict.** The reference says to base trust
+    /// decisions on `source` rather than on the name or the `mcp__<server>__`
+    /// prefix; this product bases nothing on either, because it cannot approve.
+    /// What the field is for is the **ledger**: a call into a server a cloned
+    /// repository defined reads today exactly like one into a server the person
+    /// installed themselves.
+    #[serde(default)]
+    pub mcp_server: Option<McpServer>,
     #[serde(default)]
     pub message: Option<String>,
     /// `SessionStart` / `SessionEnd`.
     #[serde(default)]
     pub source: Option<String>,
+    /// **Devplane's own field, not the vendor's.** `CLAUDE_AFK_TIMEOUT_MS` as
+    /// it stood in the environment the session was started from, injected by
+    /// `devplane hook` before the payload is forwarded.
+    ///
+    /// It can only be read there: `SessionStart` accepts only `command` hooks,
+    /// so that process is a child of the session and inherits its environment,
+    /// while the daemon has an environment of its own and the HTTP hooks carry
+    /// a payload the vendor defines. Prefixed so it can never collide with a
+    /// field the vendor adds later.
+    #[serde(default)]
+    pub devplane_afk_timeout_ms: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
     /// `SubagentStart` / `SubagentStop`.
@@ -93,6 +118,20 @@ impl HookPayload {
             _ => None,
         }
     }
+}
+
+/// The MCP server behind a tool call, as the vendor reports it.
+///
+/// **`source` is a string rather than an enum on purpose.** The SDK enumerates
+/// the values it knows and says how to treat one you do not; mapping an unknown
+/// to a default would replace a fact with a guess, which is the rule the
+/// authority column follows one field over.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct McpServer {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// What the daemon should record for a hook payload.
@@ -152,6 +191,13 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
             source: p.source.clone(),
             model: p.model_name(),
             entrypoint: None,
+            // Read here or never: this is the one moment a process that
+            // inherited the session's environment reports in.
+            question_clock: p
+                .devplane_afk_timeout_ms
+                .as_deref()
+                .and_then(crate::core::clock::from_environment),
+            clock_read: true,
         }),
 
         "UserPromptSubmit" => HookOutcome::just(Event::PromptSubmitted {
@@ -182,6 +228,11 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
             HookOutcome::just(Event::ToolStarted {
                 tool,
                 input: p.tool_input.clone().unwrap_or(Value::Null),
+                server_source: p
+                    .mcp_server
+                    .as_ref()
+                    .and_then(|m| m.source.clone())
+                    .filter(|s| !s.is_empty()),
             })
         }
 
@@ -561,6 +612,11 @@ pub fn permission_reply(verdict: &crate::core::Verdict) -> PermissionResponse {
         // rule is recorded, because "nobody had an opinion" and "the project
         // asked to be asked" are different facts.
         Verdict::Ask { .. } | Verdict::Undecided => PermissionResponse::undecided(),
+        // The dialog this hook fires for is already on its way to a person, so
+        // there is nothing to escalate to. The verdict is still recorded, which
+        // is the half that matters here: the decision log says the matcher
+        // could not read the command rather than that no rule spoke for it.
+        Verdict::Unresolved { .. } => PermissionResponse::undecided(),
     }
 }
 
@@ -578,12 +634,108 @@ pub fn pre_tool_use_reply(verdict: &crate::core::Verdict) -> PreToolUseResponse 
         Verdict::Ask { rule } => {
             PreToolUseResponse::ask(format!("{rule} asks that a person decides this"))
         }
-        _ => PreToolUseResponse::undecided(),
+        // **The one case where Devplane asks without a rule to name**, and the
+        // reason is in the sentence it prints: a prohibition was written about
+        // what may run here and this line hides what runs. Answering
+        // `undecided` would hand the call to a classifier that reads the same
+        // unreadable string.
+        Verdict::Unresolved { why } => PreToolUseResponse::ask(format!(
+            "Devplane cannot tell whether a prohibition covers this: {why}"
+        )),
+        Verdict::Undecided => PreToolUseResponse::undecided(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    use super::*;
+
+    fn session_start(extra: serde_json::Value) -> Vec<crate::core::Event> {
+        let mut body = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "s1",
+            "cwd": "/tmp/repo",
+            "source": "startup",
+        });
+        let obj = body.as_object_mut().expect("an object");
+        for (k, v) in extra.as_object().expect("an object") {
+            obj.insert(k.clone(), v.clone());
+        }
+        let p: HookPayload = serde_json::from_value(body).expect("parses");
+        to_events(&p).events
+    }
+
+    fn clock_of(
+        events: &[crate::core::Event],
+    ) -> (Option<crate::core::clock::QuestionClock>, bool) {
+        match events.first() {
+            Some(crate::core::Event::SessionStarted {
+                question_clock,
+                clock_read,
+                ..
+            }) => (question_clock.clone(), *clock_read),
+            other => panic!("expected a SessionStarted, got {other:?}"),
+        }
+    }
+
+    /// **The case the feature exists for.** A session whose environment carries
+    /// a timer, on a machine whose settings say `never`, was reported as having
+    /// no clock at all — the sentence that means *your questions wait for you*,
+    /// about a session that was answering them without anybody.
+    #[test]
+    fn a_session_reports_the_timer_its_own_environment_put_on_it() {
+        let (clock, read) = clock_of(&session_start(
+            serde_json::json!({"devplane_afk_timeout_ms": "60000"}),
+        ));
+        let c = clock.expect("the session carries its own clock");
+        assert!(read, "the environment was read");
+        assert_eq!(c.source, crate::core::clock::Source::Environment);
+        assert_eq!(c.after.says(), "60s", "the vendor's own spelling");
+        assert_eq!(c.where_set, crate::core::clock::ENV_KEY);
+        assert!(
+            c.says().contains("overrides your settings"),
+            "a person has to be told it beats the file they set: {}",
+            c.says()
+        );
+    }
+
+    /// Zero is the worst case and it is not a small number: every question in
+    /// that session ended by nobody, the instant it is asked.
+    #[test]
+    fn zero_is_reported_as_closing_immediately() {
+        let (clock, _) = clock_of(&session_start(
+            serde_json::json!({"devplane_afk_timeout_ms": "0"}),
+        ));
+        let c = clock.expect("a clock");
+        assert!(c.is_immediate());
+        assert!(!c.says().contains("0s"), "{}", c.says());
+    }
+
+    /// **Read, and nothing was set** — which is a different row from *not read*
+    /// and must not be conflated with it.
+    #[test]
+    fn a_session_with_no_such_variable_is_read_and_empty() {
+        let (clock, read) = clock_of(&session_start(serde_json::json!({})));
+        assert_eq!(clock, None);
+        assert!(
+            read,
+            "a SessionStart that reached this process is one whose environment was read"
+        );
+    }
+
+    /// A value the vendor decides the meaning of is not one this product
+    /// invents a reading for.
+    #[test]
+    fn a_timeout_that_is_not_a_number_is_ignored_rather_than_guessed() {
+        for bad in ["", "soon", "5m", "-1"] {
+            let (clock, read) = clock_of(&session_start(
+                serde_json::json!({"devplane_afk_timeout_ms": bad}),
+            ));
+            assert_eq!(clock, None, "{bad}");
+            assert!(read, "{bad}");
+        }
+    }
 
     /// **The mode rides on whatever carried it, and `PreToolUse` does not.**
     ///
@@ -652,7 +804,7 @@ mod tests {
             "a mode was reported for a hook that does not carry one"
         );
     }
-    use super::*;
+
     use serde_json::json;
 
     fn payload(v: serde_json::Value) -> HookPayload {

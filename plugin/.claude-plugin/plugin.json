@@ -1,7 +1,7 @@
 {
   "name": "devplane",
   "description": "See every coding-agent session on this machine, answer what needs you, and prove a piece of work passed its checks. Read-only from inside Claude Code: the plugin asks the daemon questions and changes nothing.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": {
     "name": "hupe1980",
     "url": "https://github.com/hupe1980"

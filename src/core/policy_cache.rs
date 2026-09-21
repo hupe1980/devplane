@@ -190,38 +190,19 @@ impl PolicyCache {
 
     /// Decides one tool call, for an agent working in `dir`.
     ///
-    /// Deny wins across both rule sets and in either direction: a project
-    /// cannot allow what the machine forbids, and the machine's allow does not
-    /// override a project's deny. Anything else would make adding a rule
-    /// somewhere able to quietly widen a prohibition written somewhere else.
-    pub fn evaluate(&self, dir: &Path, tool: &str, input: &serde_json::Value) -> Verdict {
-        forget_resolved();
-        let project = self.for_dir(dir).map(|r| r.policy);
-        let source = repo_root_of(dir).unwrap_or_else(|| dir.to_path_buf());
-        let sets = self.sets(dir, &source, project.as_ref());
-
-        // **One question, asked across every rule set that governs this
-        // directory.** `restrictive_over` returns the first deny anywhere, then
-        // the first ask anywhere, then nothing.
-        //
-        // There used to be two more steps after this and both were dead. A
-        // redirect-target check returned `Undecided` — which is what falling
-        // through returns — and a loop re-asked each set the question
-        // `restrictive_over` had just asked all of them. Both existed to stop an
-        // **allow** covering a command whose write target no rule spoke for, and
-        // when approving was deleted there was nothing left for them to stop.
-        // They survived because dead code that returns the right answer is
-        // invisible.
-        restrictive_over(&sets, tool, input)
-    }
-
-    /// The prohibitions only, across both rule sets.
+    /// Deny wins across every rule set and in either direction: a project
+    /// cannot soften what the machine forbids, and the machine cannot soften a
+    /// project's deny. Then ask, then — for a command line the matcher could
+    /// not read while a prohibition about what runs was in force —
+    /// [`Verdict::Unresolved`].
     ///
-    /// What the `PreToolUse` hook answers with, and the only path by which a
-    /// project's `never_auto` or `always_ask` rule reaches a session running in
-    /// **auto mode** — where a classifier approves routine actions with no
-    /// prompt, so `PermissionRequest` never fires and the rest of this file
-    /// would never be consulted at all.
+    /// **There used to be two of these.** `evaluate` was *the full verdict* and
+    /// this was *the prohibitions only*, from the days when a third answer was
+    /// `allow`; after that was deleted the two functions had byte-identical
+    /// bodies and the caller still chose between them by hook event, with a
+    /// comment explaining a difference that was not there. One evaluator, one
+    /// answer, and the hook event decides only how the answer is *replied* to
+    /// (`crate::observe::hook`).
     pub fn restrictive(&self, dir: &Path, tool: &str, input: &serde_json::Value) -> Verdict {
         forget_resolved();
         let project = self.for_dir(dir).map(|r| r.policy);
@@ -229,8 +210,12 @@ impl PolicyCache {
         restrictive_over(&self.sets(dir, &source, project.as_ref()), tool, input)
     }
 
-    /// The prohibitions from the machine-wide file, for a call naming no
-    /// directory. Same reasoning as [`Self::evaluate_global_only`].
+    /// The rules from the machine-wide file alone, for a call naming no
+    /// directory.
+    ///
+    /// Evaluating a payload with no `cwd` against `"."` would use the
+    /// *daemon's* working directory, letting whichever repository it happened to
+    /// start in answer for a session somewhere else.
     pub fn restrictive_global_only(&self, tool: &str, input: &serde_json::Value) -> Verdict {
         forget_resolved();
         let ctx = Context::at(&self.global_root)
@@ -291,6 +276,16 @@ fn restrictive_over(
     for v in &verdicts {
         if let Verdict::Ask { rule } = v {
             return Verdict::Ask { rule: rule.clone() };
+        }
+    }
+    // **Last, because a named rule is always the better answer.** If any set
+    // could not read the command line while holding a prohibition about what
+    // runs, the call goes to a person — but only after every set has had the
+    // chance to answer it with a rule, so "the machine-wide file denies this"
+    // is never replaced by "the project could not read it".
+    for v in &verdicts {
+        if let Verdict::Unresolved { why } = v {
+            return Verdict::Unresolved { why: why.clone() };
         }
     }
     Verdict::Undecided
@@ -363,14 +358,6 @@ impl PolicyCache {
             .with_home(self.home.as_deref())
             .with_realpath(realpath);
         crate::core::offer::compose(tool, input, &ctx, others, &dest)
-    }
-
-    pub fn evaluate_global_only(&self, tool: &str, input: &serde_json::Value) -> Verdict {
-        forget_resolved();
-        let ctx = Context::at(&self.global_root)
-            .with_home(self.home.as_deref())
-            .with_realpath(realpath);
-        self.global.restrictive(&ctx, tool, input)
     }
 
     /// How long a run working in `dir` may be quiet before it has stalled.

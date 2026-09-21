@@ -930,3 +930,268 @@ async fn outside_a_repository_there_is_no_stamp_at_all() {
     let dir = scratch("norepo");
     assert!(devplane::git::commit_stamp(&dir).await.is_none());
 }
+
+/// **Where the predicate came from, under the name somebody else is
+/// specifying** — and the third state is the one that matters.
+///
+/// The OpenTelemetry GenAI conventions carry an open proposal for
+/// `gen_ai.evidence.origin = self_reported | externally_observed`, **unset when
+/// unknown**. These notes adopted the vocabulary in four places and the code
+/// carried none of it: the certificate drew the distinction in prose and never
+/// in a field a machine could read.
+///
+/// The value of the attribute is entirely in its absence being possible. The
+/// only value anybody would default to is the flattering one, and a certificate
+/// that quietly promotes *the agent said so* to *a check observed it* is the
+/// failure the whole document is arranged against.
+#[test]
+fn the_certificate_says_where_its_predicate_came_from_and_never_defaults_it() {
+    use devplane::core::certificate::Origin;
+
+    let key = Origin::KEY;
+
+    // A gate transcript is observed by something the agent does not control.
+    let w = passing();
+    let cert = Certificate::of(&w, Some("I added rate limiting and it all works."));
+    let j = cert.json();
+    let predicate = &j["predicate"];
+
+    assert_eq!(
+        predicate["evidence"][key], "externally_observed",
+        "a gate transcript is the one thing here that is not the agent's word"
+    );
+    assert_eq!(
+        predicate["agent_claim"][key], "self_reported",
+        "the agent's account has to say that is what it is"
+    );
+    assert_eq!(
+        predicate["agent_claim"]["text"], "I added rate limiting and it all works.",
+        "the claim itself still travels"
+    );
+
+    // **And the document a person reads says the same thing**, so the two
+    // renderings cannot describe one sentence two ways.
+    let md = cert.markdown();
+    assert!(md.contains(&format!("{key}: externally_observed")), "{md}");
+    assert!(md.contains(&format!("{key}: self_reported")), "{md}");
+
+    // **Absent, never defaulted.** A work with no gate has no externally
+    // observed anything, and a work with no claim has nothing self-reported —
+    // and neither may acquire an origin by being rendered.
+    let bare = finished(
+        work(),
+        Completion::NoGateDeclared {
+            at: jiff::Timestamp::now(),
+        },
+    );
+    let none = Certificate::of(&bare, None);
+    let jn = none.json();
+    assert!(
+        jn["predicate"]["evidence"].is_null(),
+        "no gate ran, so there is no evidence to carry an origin"
+    );
+    assert!(
+        jn["predicate"]["agent_claim"].is_null(),
+        "the agent said nothing, which is not the same as saying something unverified"
+    );
+    assert!(
+        !none.markdown().contains(key),
+        "an origin appeared on a certificate that has no evidence and no claim"
+    );
+}
+
+/// **All four ways a Work reaches done render, and *no gate declared* is not
+/// an empty block.**
+///
+/// The four are: gates passed, reproduced, no gate declared, finished by hand.
+/// The third is the one that used to come out as an absence — which reads as
+/// *nothing to show here* when it means *this project never said what done
+/// means, and nothing was checked*.
+#[test]
+fn every_way_a_work_reaches_done_says_which_one_it_was() {
+    let at = jiff::Timestamp::now();
+
+    let cases: Vec<(&str, Work)> = vec![
+        ("gates passed", passing()),
+        (
+            "reproduced",
+            finished(
+                work(),
+                Completion::Reproduced {
+                    gate: "repro".into(),
+                    attempt: 1,
+                    attempts: 1,
+                    at,
+                },
+            ),
+        ),
+        (
+            "no gate declared",
+            finished(work(), Completion::NoGateDeclared { at }),
+        ),
+        (
+            "by hand",
+            finished(
+                work(),
+                Completion::ByHand {
+                    at,
+                    last_gate: None,
+                },
+            ),
+        ),
+    ];
+
+    for (name, w) in &cases {
+        let page = Certificate::of(w, None).page();
+        assert_eq!(page["finished"], true, "{name}");
+
+        let basis = page["basis"].as_str().unwrap_or_default();
+        assert!(!basis.is_empty(), "{name} renders no basis at all");
+
+        // The one this test exists for.
+        if *name == "no gate declared" {
+            assert!(
+                basis.contains("never said what done means"),
+                "an empty evidence block is what this used to render: {basis}"
+            );
+            assert_eq!(page["checked"], false);
+            assert!(
+                page["unchecked"].is_string(),
+                "an unchecked completion must carry its warning"
+            );
+        }
+        if *name == "gates passed" || *name == "reproduced" {
+            assert_eq!(page["checked"], true, "{name}");
+            assert!(
+                page["unchecked"].is_null(),
+                "{name} is checked, so nothing warns about it"
+            );
+        }
+    }
+
+    // **A work finished by hand names that no check ran**, rather than showing
+    // a blank where the evidence would be.
+    let by_hand = finished(
+        work(),
+        Completion::ByHand {
+            at,
+            last_gate: None,
+        },
+    );
+    let page = Certificate::of(&by_hand, None).page();
+    assert!(
+        page["basis"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("finished by hand"),
+        "{:?}",
+        page["basis"]
+    );
+    assert!(
+        page["no_evidence"].is_string(),
+        "no gate ran and nothing says so"
+    );
+
+    // Four distinct sentences: a basis a reader cannot tell from another is
+    // not a basis.
+    let said: std::collections::BTreeSet<String> = cases
+        .iter()
+        .map(|(_, w)| {
+            Certificate::of(w, None).page()["basis"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(said.len(), 4, "two completions read the same: {said:?}");
+}
+
+/// **The page truncates a command; the copy carries it whole** — and they
+/// differ by nothing else.
+///
+/// A reformatted command is one a reviewer cannot paste, which is the whole of
+/// what this certificate has that a verdict does not.
+#[test]
+fn a_long_command_is_short_on_the_page_and_complete_in_the_copy() {
+    let long = format!(
+        "cargo test {} -- --nocapture",
+        "-p some-very-long-crate-name ".repeat(12)
+    );
+    let mut w = work();
+    w.gates.push(report(
+        "check",
+        1,
+        vec![CommandResult::exited(&long, 0)],
+        false,
+    ));
+    let w = finished(
+        w,
+        Completion::GatesPassed {
+            gate: "check".into(),
+            attempt: 1,
+            attempts: 1,
+            at: jiff::Timestamp::now(),
+        },
+    );
+
+    let cert = Certificate::of(&w, None);
+    let page = cert.page();
+    let cmd = &page["evidence"]["commands"][0];
+
+    assert_eq!(cmd["command"], long, "the full command has to travel");
+    assert_eq!(cmd["truncated"], true);
+
+    let shown = cmd["shown"].as_str().expect("a shown form");
+    assert!(
+        shown.chars().count() < long.chars().count(),
+        "nothing was truncated"
+    );
+
+    // **Differ only by truncation**: what is shown is a prefix of the real
+    // command, not a reflowed or re-quoted version of it.
+    let head: String = shown.chars().take_while(|c| *c != '…').collect();
+    assert!(
+        long.starts_with(head.trim_end()),
+        "the shown command is not a prefix of the real one:\n  shown: {shown}\n  real:  {long}"
+    );
+
+    // And the document a reviewer pastes has it whole.
+    assert!(cert.markdown().contains(&long), "the copy lost the command");
+}
+
+/// **A Work that reached done before completions were recorded says so.**
+///
+/// It is neither *unfinished* — which would be false — nor an empty
+/// certificate, which is worse: a reader takes a blank evidence block for
+/// *nothing was checked* when it means *nobody kept the record*. Those are
+/// opposite facts and the blank favours the flattering one.
+#[test]
+fn a_work_finished_before_the_record_existed_says_the_evidence_was_not_recorded() {
+    let mut w = work();
+    w.phase = Phase::Done;
+    w.completion = None; // done, with no basis written down
+
+    let page = Certificate::of(&w, None).page();
+
+    assert_eq!(
+        page["finished"], true,
+        "it is done; saying otherwise is false"
+    );
+    assert!(
+        page["unfinished"].is_null(),
+        "a done work must not be reported as unfinished"
+    );
+
+    let basis = page["basis"].as_str().expect("a basis sentence");
+    assert!(
+        basis.contains("not recorded"),
+        "the honest answer is that the evidence is missing: {basis}"
+    );
+    assert_eq!(page["checked"], false);
+
+    let unchecked = page["unchecked"].as_str().expect("the warning");
+    assert!(
+        unchecked.contains("not evidence that nothing was"),
+        "an absent record must not read as a failed check: {unchecked}"
+    );
+}

@@ -76,27 +76,74 @@ pub async fn cmd_audit(
     for d in rows {
         let authority = d["authority"].as_str().unwrap_or("");
         println!(
-            "{} {:<7} {:<16} {}",
+            "{} {} {} {}",
             paint(DIM, d["at"].as_str().unwrap_or("").get(0..19).unwrap_or("")),
             // `nobody` is coloured like a refusal whatever its outcome says,
             // because it is one: the agent asked, the moment passed, and the
             // thing that did not happen was a person deciding. It is the row
             // this log exists to be able to show, so it does not read as dim
             // background the way `daemon` does.
-            match (authority, d["outcome"].as_str().unwrap_or("")) {
-                ("nobody", _) => paint(render::RED, authority),
-                (_, "deny") | (_, "fail") => paint(render::RED, authority),
-                ("person", _) => paint(render::BLUE, authority),
-                ("timer", _) => paint(render::YELLOW, authority),
-                _ => paint(DIM, authority),
-            },
-            d["action"].as_str().unwrap_or(""),
+            render::pad(
+                &match (authority, d["outcome"].as_str().unwrap_or("")) {
+                    ("nobody", _) => paint(render::RED, authority),
+                    (_, "deny") | (_, "fail") => paint(render::RED, authority),
+                    ("person", _) => paint(render::BLUE, authority),
+                    ("timer", _) => paint(render::YELLOW, authority),
+                    _ => paint(DIM, authority),
+                },
+                7
+            ),
+            render::pad(d["action"].as_str().unwrap_or(""), 16),
             clip(d["subject"].as_str().unwrap_or(""), 48)
         );
         // The reason is the whole point: "allowed" is not an answer, "allowed
         // by `Bash(pnpm test *)`" is.
         if let Some(r) = d["reason"].as_str() {
             println!("{:>21}{}", "", paint(DIM, &format!("↳ {}", clip(r, 70))));
+        }
+        // **Where the thing that acted came from**, on the rows that can have
+        // one. Not a column: a tool that is not an MCP tool cannot have a
+        // source, and a reserved blank would teach the reader that the blank
+        // means something.
+        //
+        // Reported, never graded. Nothing here says one provenance is safer
+        // than another — the person decides what `project` is worth in a
+        // repository they have just cloned.
+        //
+        // **Three states, and the middle one used to be invisible.** A call
+        // that cannot have a source prints nothing, and so did an MCP call
+        // whose source nobody sent — so `mcp__linear__create` from a vendor
+        // with no such field looked exactly like `Bash(ls)`, and a blank
+        // taught the reader *ordinary tool* when it meant *unknowable here*.
+        // The same distinction the capability table draws between *not probed*
+        // and *not supported*.
+        let tool = d["tool"].as_str().unwrap_or("");
+        match (
+            d["server_source"].as_str(),
+            crate::core::decision::could_carry_provenance(tool),
+        ) {
+            (Some(src), _) => {
+                let named = match tool.is_empty() {
+                    true => "that server",
+                    false => tool,
+                };
+                println!(
+                    "{:>21}{}",
+                    "",
+                    paint(DIM, &format!("↳ {named} was defined by: {src}"))
+                );
+            }
+            (None, true) => println!(
+                "{:>21}{}",
+                "",
+                paint(
+                    DIM,
+                    &format!("↳ {tool}: where it was defined was not reported here")
+                )
+            ),
+            // Not an MCP tool. There is no source to have, and a reserved blank
+            // would teach the reader that the blank means something.
+            (None, false) => {}
         }
     }
     Ok(())
@@ -259,6 +306,32 @@ fn gate_section(diag: &Option<serde_json::Value>) {
             paint(DIM, &format!("{n} session(s) report a version"))
         ),
     }
+
+    // **How much of the question-clock reading this machine actually has.**
+    // `CLAUDE_AFK_TIMEOUT_MS` is readable only by the `SessionStart` hook, which
+    // runs as a child of the session — so a session that started before
+    // `devplane connect` has no reading at all, and `devplane modes` staying
+    // silent about it would be saying *your questions wait for you* about
+    // sessions it has never looked at. The coverage of a surface is a fact
+    // about it, not something a reader should assume.
+    if let Some(d) = diag.as_ref() {
+        let read = d["modes"]["clock_read"].as_i64().unwrap_or(0);
+        let unread = d["modes"]["clock_unread"].as_i64().unwrap_or(0);
+        if read + unread > 0 {
+            println!(
+                "  {}",
+                paint(
+                    DIM,
+                    &format!(
+                        "{read} of {} live session(s) had their environment read for \
+                         `{}`; {unread} started before Devplane could",
+                        read + unread,
+                        crate::core::clock::ENV_KEY
+                    )
+                )
+            );
+        }
+    }
 }
 
 /// Reads a project's configuration and reports on it.
@@ -296,6 +369,16 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                 "measurement": {
                     "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
                 },
+                "watched": {
+                    "checked": crate::core::vendors::CHECKED,
+                    "rows": crate::core::vendors::watched().iter().map(|r| serde_json::json!({
+                        "vendor": r.vendor,
+                        "channel": r.channel.as_str(),
+                        "reach": r.reach.as_str(),
+                        "because": r.because,
+                        "costs": r.channel.costs(),
+                    })).collect::<Vec<_>>(),
+                },
                 "spooled_decisions": spooled,
                 "diagnostics": diag,
                 "provider": {
@@ -329,6 +412,46 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
     // on four of the six providers the vendor's whole supervision layer is off
     // and Devplane is the only gate here, and a person needs telling that
     // before they are told a hook is installed.
+    // **What is watched here, per vendor.** Driving is not in this table: every
+    // agent that speaks the protocol is driven identically, so a column for it
+    // would be five identical ticks and would invite averaging the two halves
+    // into one impression — which is the misreading the table exists to stop.
+    println!("\n{}", paint(BOLD, "watched"));
+    println!(
+        "  {}",
+        paint(
+            DIM,
+            &format!(
+                "a session you started yourself. Anything Devplane starts is driven over the \
+                 protocol and reports in full. Checked {}",
+                crate::core::vendors::CHECKED
+            )
+        )
+    );
+    let rows = crate::core::vendors::watched();
+    let width = rows.iter().map(|r| r.vendor.len()).max().unwrap_or(0);
+    for vendor in crate::core::vendors::vendors() {
+        for r in rows.iter().filter(|r| r.vendor == vendor) {
+            use crate::core::vendors::Reach;
+            let colour = match r.reach {
+                Reach::Read => render::GREEN,
+                Reach::Unproved => render::YELLOW,
+                Reach::NotPublished => DIM,
+            };
+            // **`pad` guarantees at least one space**, so a string exactly
+            // `width` long comes back one column wider — which is right for a
+            // table whose columns must not touch, and wrong if the caller then
+            // adds its own separator. The gap is part of the column here.
+            println!(
+                "  {}{}{}{}",
+                render::pad(r.vendor, width + 2),
+                render::pad(r.channel.as_str(), 14),
+                render::pad(&paint(colour, r.reach.as_str()), 16),
+                paint(DIM, r.because)
+            );
+        }
+    }
+
     println!("\n{}", paint(BOLD, "provider"));
     println!(
         "  {}  {}",

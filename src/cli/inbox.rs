@@ -7,24 +7,63 @@ use anyhow::Result;
 
 pub async fn cmd_inbox(json: bool) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
-    let items: Vec<render::InboxItem> = c.get("/api/inbox").await?;
+    // **Running the command is reading it.** The output goes to somebody's
+    // screen, which is the whole of what the boundary measures.
+    let body = raw(&c, "/api/inbox?read=true").await?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&raw(&c, "/api/inbox").await?)?
-        );
+        println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
-    if items.is_empty() {
-        println!("{}", paint(render::GREEN, "Nothing needs you."));
+    let items: Vec<render::InboxItem> =
+        serde_json::from_value(body.get("items").cloned().unwrap_or_default()).unwrap_or_default();
+    let close = body
+        .get("close")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    // **The boundary, above everything.** One hairline saying how long it has
+    // been, and nothing at all where there is no previous look — there is no
+    // *last* to be since, and a line reading `0m` would be inventing one.
+    if let Some(since) = close.get("since_last_look").and_then(|v| v.as_str()) {
+        println!(
+            "{}",
+            paint(DIM, &format!("since you last looked · {since}"))
+        );
+        println!();
+    }
+
+    let folded: Vec<render::InboxSummary> =
+        serde_json::from_value(body.get("folded").cloned().unwrap_or_default()).unwrap_or_default();
+    let inhibited: Vec<render::InboxInhibited> =
+        serde_json::from_value(body.get("inhibited").cloned().unwrap_or_default())
+            .unwrap_or_default();
+
+    // **Empty means nothing was raised**, not merely that nothing is listed.
+    // Printing the close under a screen of summary rows would be telling
+    // somebody the day was quiet because the surface tidied it.
+    if items.is_empty() && folded.is_empty() && inhibited.is_empty() {
+        render_close(&close);
         return Ok(());
     }
     for i in &items {
+        // **The word carries it, the colour only helps** (the design system says so,
+        // and the rule is stated there). Red and amber cannot be told apart
+        // under deuteranopia at any usable lightness, so nothing in this product
+        // may be distinguishable by colour alone — and *new since you last
+        // looked* is exactly the distinction somebody scanning at 09:00 needs.
+        //
+        // Absent, not blank, where there is no boundary: a machine with no
+        // previous look marks nothing, because there is nothing to be new to.
+        let fresh = match i.new_to_you {
+            true => format!(" {}", paint(render::GREEN, "new")),
+            false => String::new(),
+        };
         println!(
-            "{} {} {}",
+            "{} {} {}{}",
             level_marker(&i.level),
             paint(BOLD, &i.title),
-            paint(DIM, &format!("[{}]", i.kind))
+            paint(DIM, &format!("[{}]", i.kind)),
+            fresh
         );
         if let Some(d) = &i.detail {
             // **Per line, and indented per line.** A detail is prose an agent
@@ -124,6 +163,54 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
             );
         }
     }
+
+    // **What was folded, and what it is of.** Nothing is hidden: each row says
+    // the kind, the project and the count, and names the command that opens it.
+    if !folded.is_empty() {
+        println!();
+        for f in &folded {
+            println!(
+                "{} {} {}",
+                level_marker(&f.level),
+                paint(BOLD, &format!("{} × {}", f.count, f.kind)),
+                paint(
+                    DIM,
+                    &match &f.project {
+                        Some(p) => format!("in {p}"),
+                        None => "across projects".to_string(),
+                    }
+                )
+            );
+        }
+        println!(
+            "{}",
+            paint(
+                DIM,
+                "     folded because the list is long — `devplane inbox --json` has every id"
+            )
+        );
+    }
+
+    // Symptoms counted on the row that explains them. Printed under the list
+    // rather than beside each cause, because the cause is already in it.
+    if !inhibited.is_empty() {
+        println!();
+        for s in &inhibited {
+            println!(
+                "{}",
+                paint(
+                    DIM,
+                    &format!(
+                        "     {} more {} — {}",
+                        s.count,
+                        plural_items(s.count),
+                        s.because
+                    )
+                )
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -203,8 +290,16 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
         paint(
             BOLD,
             &format!(
-                "{:<18}{:>7}{:>8}{:>11}{:>11}{:>7}{:>8}",
-                "kind", "raised", "acted", "dismissed", "elsewhere", "open", "acted"
+                "{:<18}{:>7}{:>8}{:>11}{:>11}{:>7}{:>8}{:>8}{:>9}",
+                "kind",
+                "raised",
+                "acted",
+                "dismissed",
+                "elsewhere",
+                "open",
+                "acted",
+                "folded",
+                "wrongly"
             )
         )
     );
@@ -227,8 +322,24 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
             Some(f) => format!("{:.0}%", 100.0 * f),
             None => paint(DIM, "—"),
         };
+        // **How often this kind was summarised rather than listed**, and how
+        // often that turned out to be wrong. A kind always folded and never
+        // acted on is one nobody needed as a row; a kind folded and then acted
+        // on once opened is one the fold was standing in front of.
+        let folded = n(st, "folded");
+        let wrongly = n(st, "folded_then_acted");
+        let f = match folded {
+            0 => paint(DIM, "—"),
+            v => v.to_string(),
+        };
+        let wr = match wrongly {
+            0 => paint(DIM, "—"),
+            v => paint(render::YELLOW, &v.to_string()),
+        };
         println!(
-            "{kind:<18}{raised:>7}{acted:>8}{dismissed:>11}{elsewhere:>11}{open:>7}{share:>8}"
+            "{kind:<18}{raised:>7}{acted:>8}{dismissed:>11}{elsewhere:>11}{open:>7}{share:>8}{}{}",
+            crate::render::pad_left(&f, 8),
+            crate::render::pad_left(&wr, 9)
         );
     }
     println!(
@@ -236,7 +347,8 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
         paint(
             DIM,
             "acted = you used one of the item's own actions · dismissed = you snoozed it · \
-             elsewhere = it stopped asking on its own",
+             elsewhere = it stopped asking on its own\nfolded = summarised rather than listed · \
+             wrongly = folded, then acted on once opened — the fold was in the way",
         )
     );
     // **Said only when it is true.** How often an agent asks is a property of
@@ -375,9 +487,38 @@ pub async fn cmd_asks(json: bool) -> Result<()> {
     let empty = vec![];
     let open = v["open"].as_array().unwrap_or(&empty);
     let settled = v["settled"].as_array().unwrap_or(&empty);
+    let abandoned = v["abandoned"].as_array().unwrap_or(&empty);
+    let blind: Vec<&str> = v["blind_to"]
+        .as_array()
+        .unwrap_or(&empty)
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
 
-    if open.is_empty() && settled.is_empty() {
+    // **The empty state is two sentences, not one.** *Nothing was abandoned*
+    // and *this vendor has no channel for it* are different facts, and printing
+    // the first while meaning the second is a silence reading as a claim — the
+    // defect the board's own empty state was written for, one surface further along.
+    let blindness = || {
+        if blind.is_empty() {
+            return;
+        }
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "Devplane cannot see abandoned questions for {} — the derivation is \
+                     Claude Code's hook events and no other vendor documents an equivalent.",
+                    blind.join(", ")
+                )
+            )
+        );
+    };
+
+    if open.is_empty() && settled.is_empty() && abandoned.is_empty() {
         println!("{}", paint(DIM, "No agent has asked you anything yet."));
+        blindness();
         return Ok(());
     }
     if open.is_empty() {
@@ -417,6 +558,36 @@ pub async fn cmd_asks(json: bool) -> Result<()> {
             paint(DIM, a["outcome"].as_str().unwrap_or(""))
         );
     }
+
+    // **The questions nobody answered**, from sessions Devplane only watches.
+    // Ordered newest first and never ranked by anything the agent authored:
+    // ranking these by importance means a model reading them.
+    if !abandoned.is_empty() {
+        println!();
+        println!(
+            "{}",
+            paint(render::YELLOW, "Questions the agent asked and moved past")
+        );
+        for a in abandoned.iter().take(10) {
+            println!("  {}", paint(BOLD, a["question"].as_str().unwrap_or("")));
+            let what = match a["moved_on_to"].as_str() {
+                Some(next) => format!("nobody answered — it did `{next}` instead"),
+                None => "nobody answered — the session ended".to_string(),
+            };
+            println!("{:>4}{}", "", paint(DIM, &what));
+        }
+        if abandoned.len() > 10 {
+            println!(
+                "{:>4}{}",
+                "",
+                paint(DIM, &format!("and {} more", abandoned.len() - 10))
+            );
+        }
+    } else {
+        println!();
+        println!("{}", paint(DIM, "No question was abandoned."));
+    }
+    blindness();
     Ok(())
 }
 
@@ -427,6 +598,14 @@ pub async fn cmd_asks(json: bool) -> Result<()> {
 /// person, so a ledger of *what was decided without you* is a transcript of
 /// everything. *Which of my repositories is in `auto`, and since when we knew*
 /// is one short list, and nothing on this machine could answer it.
+/// `1 item` / `2 items`, because a count in a sentence has to agree with it.
+fn plural_items(n: usize) -> &'static str {
+    match n {
+        1 => "item",
+        _ => "items",
+    }
+}
+
 pub async fn cmd_modes(json: bool) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
     let v = raw(&c, "/api/modes").await?;
@@ -444,28 +623,30 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
     // session running unsupervised, and it is the one this machine cannot
     // discover any other way: the vendor's own settings UI hides the row while
     // managed settings set it.
-    if let Some(c) = v.get("question_clock").filter(|c| !c.is_null()) {
-        let says = c.get("says").and_then(|s| s.as_str()).unwrap_or_default();
-        let mine = c
-            .get("chosen_by_the_person")
-            .and_then(|b| b.as_bool())
-            .unwrap_or(true);
+    // **Deserialised into the type the API serialised, never read key by key.**
+    // This block used to reach for `c.get("file")` — a field renamed to
+    // `where_set` three passes earlier — and `unwrap_or("")` printed a blank
+    // line where the path belongs, so a person was told a clock was set and
+    // never told where to change it. A rename is a compile error now.
+    if let Some(c) = v
+        .get("question_clock")
+        .filter(|c| !c.is_null())
+        .and_then(|c| serde_json::from_value::<crate::core::clock::ClockLine>(c.clone()).ok())
+    {
         println!(
             "{}",
-            match mine {
-                true => paint(DIM, says),
+            match (c.answers_for_you, c.chosen_by_the_person) {
+                // **`never` is not an alarm and not a finding — it is somebody
+                // having said no.** Printed because it was written down, dim
+                // because nothing about it needs acting on.
+                (false, _) => paint(DIM, &c.says),
+                (true, true) => paint(DIM, &c.says),
                 // Somebody else set a clock on this person's attention. That is
                 // the row this whole product exists to be able to show.
-                false => paint(render::YELLOW, says),
+                (true, false) => paint(render::YELLOW, &c.says),
             }
         );
-        println!(
-            "{}",
-            paint(
-                DIM,
-                &format!("  {}", c.get("file").and_then(|f| f.as_str()).unwrap_or(""))
-            )
-        );
+        println!("{}", paint(DIM, &format!("  set in {}", c.where_set)));
         println!();
     }
     if projects.is_empty() {
@@ -532,7 +713,51 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
                 .or_else(|| s.get("agent_mode_seen").and_then(|t| t.as_str()))
                 .map(|t| format!("  {}", paint(DIM, &format!("seen {}", clip(t, 19)))))
                 .unwrap_or_default();
-            println!("  {:<22}{}{}", who, paint(colour, &label), seen);
+            println!(
+                "  {}{}{}",
+                crate::render::pad(&who, 22),
+                paint(colour, &label),
+                seen
+            );
+            // **The session's own clock, under the mode it belongs to.**
+            // `CLAUDE_AFK_TIMEOUT_MS` overrides the settings files and turns
+            // auto-continue on even where they say `never`, so this is the one
+            // line that can contradict the machine-wide one above — and the
+            // person who needs it is the one whose file says `never`.
+            //
+            // Silence where nothing is set, deliberately: a caveat printed on
+            // every row is a caveat nobody reads.
+            if let Some(c) = s
+                .get("question_clock")
+                .filter(|c| !c.is_null())
+                .and_then(|c| {
+                    serde_json::from_value::<crate::core::clock::ClockLine>(c.clone()).ok()
+                })
+            {
+                println!(
+                    "  {:<22}{}",
+                    "",
+                    paint(
+                        // Red for the session that answers instantly, because
+                        // that is the one state where *a question waits for
+                        // you* is untrue right now. Yellow where a clock
+                        // answers at all. Dim for `never`, which is a session
+                        // whose questions wait — the reassuring case, and one
+                        // that was painted as an alarm until 2026-09-21.
+                        match (c.immediate, c.answers_for_you) {
+                            (true, _) => render::RED,
+                            (false, true) => render::YELLOW,
+                            (false, false) => DIM,
+                        },
+                        &c.says
+                    )
+                );
+                println!(
+                    "  {:<22}{}",
+                    "",
+                    paint(DIM, &format!("set in {}", c.where_set))
+                );
+            }
         }
     }
     let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -542,6 +767,7 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
         n("unknown"),
         n("unreported"),
     );
+    let unread = n("clock_unread");
     println!();
     // **Three sentences, because there are three facts.** Counting a session
     // that has not spoken as one running an exotic mode made sixteen idle
@@ -581,10 +807,55 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
             )
         );
     }
-    if unsup == 0 && unknown == 0 && unreported < total {
+    // **The reassuring sentence, and it may not be printed over a clock.**
+    // *Every session that has reported asks you* is about the permission mode,
+    // and a session whose questions a timer closes is one where nobody is asked
+    // whatever its mode says. Printing both — which is what this did on the
+    // first run of the feature that reads the timer — is the surface
+    // contradicting itself on one screen, and a person who catches that is
+    // right to stop believing the rest of it.
+    let clocked = projects
+        .iter()
+        .filter_map(|p| p.get("sessions").and_then(|s| s.as_array()))
+        .flatten()
+        .filter(|s| s.get("question_clock").is_some_and(|c| !c.is_null()))
+        .count();
+    if unsup == 0 && unknown == 0 && unreported < total && clocked == 0 {
         println!(
             "{}",
             paint(render::GREEN, "Every session that has reported asks you.")
+        );
+    }
+    if clocked > 0 {
+        println!(
+            "{}",
+            paint(
+                render::YELLOW,
+                &format!(
+                    "{clocked} of {total} live session(s) have a clock that can answer \
+                     for you, whatever their mode says."
+                )
+            )
+        );
+    }
+    // **The coverage of the clock reading, and it is not the same fact as
+    // *nothing is set*.** The environment can only be read by the hook that
+    // runs as a child of the session, so a session that started before
+    // `devplane connect` has no reading at all — and a surface that stayed
+    // silent about those would be saying *your questions wait for you* about
+    // sessions it has never looked at. Printed only when there are some.
+    if unread > 0 {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "{unread} of {total} started before Devplane could read their \
+                     environment, so a `{}` on them would not be seen here. \
+                     This fills in when they restart.",
+                    crate::core::clock::ENV_KEY
+                )
+            )
         );
     }
     if unsup > 0 || unknown > 0 {
@@ -620,6 +891,50 @@ fn answer_command(ask: &str, kind: &str, options: &[crate::core::Choice]) -> Str
         // A permission means a grant or a refusal however the agent spells its
         // options, so the shorthand is honest here and only here.
         _ => format!("devplane answer {ask} --allow"),
+    }
+}
+
+/// The empty state.
+///
+/// **Longer than the list it replaces, on purpose.** A clear inbox is the one
+/// moment a person has attention to spare, and the measured cost of making them
+/// go and reconstruct the day themselves is 101.4 s against 45.4 s for being
+/// told at a boundary. Every sentence here is the daemon's; this renders and
+/// composes nothing.
+fn render_close(close: &serde_json::Value) {
+    println!("{}", paint(render::GREEN, "Clear."));
+
+    let sentences: Vec<&str> = close
+        .get("sentences")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    if sentences.is_empty() {
+        // A day with nothing in it gets a sentence, never a table of zeroes.
+        println!(
+            "{}",
+            paint(DIM, "Nothing needed you, and nothing was decided for you.")
+        );
+    } else {
+        println!();
+        for s in sentences {
+            for line in crate::core::text::wrap(s, 76) {
+                println!("  {line}");
+            }
+        }
+    }
+
+    if let Some(next) = close.get("next").and_then(|v| v.as_str()) {
+        println!();
+        println!("  {}", paint(render::YELLOW, &format!("next · {next}")));
+    }
+
+    if let Some(keeps) = close.get("keeps_running").and_then(|v| v.as_str()) {
+        println!();
+        for line in crate::core::text::wrap(keeps, 76) {
+            println!("{}", paint(DIM, &line));
+        }
     }
 }
 

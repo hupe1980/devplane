@@ -7,6 +7,28 @@
 set -u
 cd "$(dirname "$0")/../concepts" || { echo "no concepts/ directory"; exit 1; }
 fail=0
+
+# ---- the vacuity rule, applied to this file instead of to one guard --------
+#
+# **A guard that finds nothing to compare must fail** (D309). That rule was
+# bought on 2026-09-20 by the line-count guard, written into QUALITY.md §4, and
+# then applied to exactly the one guard that bought it. On 2026-09-21 a sweep of
+# every extraction in this file found **three more that had never matched
+# anything** — including the release guard, whose own row in STATE.md cites it as
+# the model of a guard that works ("found stale within minutes of the tag going
+# up"). It had been inert since the row it reads was re-spelled, and while it was
+# inert the notes went on calling 0.5.0 the published release after v0.6.0 shipped.
+#
+# So the rule stops being advice and becomes a function. Any extraction that
+# feeds a comparison is wrapped in `expect`, and an empty one is a failure with
+# the guard's name on it — because *absent* and *correct* are different answers
+# and only one of them is what "every figure has one home" means.
+expect() { # expect <guard name> <extracted value>
+  [ -n "$2" ] && return 0
+  echo "guard '$1' matched nothing: the claim it reads is absent or has been re-spelled"
+  fail=1
+  return 1
+}
 for f in *.md; do
   # links
   grep -o '\]([A-Z_]*\.md\(#[a-z0-9-]*\)\?)' "$f" | sed 's/^](//; s/)$//; s/#.*//' | sort -u | while read -r t; do
@@ -245,13 +267,42 @@ fi
 # the test count, **bold** is what makes a figure a claim: "42,826 lines of
 # Rust" in a sentence about 2026-09-19 is history and is deliberately invisible
 # here, while `**49,603 lines**` is an assertion about today.
+#
+# **And this guard passed vacuously for the whole of its life**, which is the
+# defect it now also checks for. It looked for `**N lines**` and STATE.md's row
+# is written `| Lines of Rust | **53,280** in \`src/\`` — the bold ends before
+# the word. So `claimed_lines` was empty, the comparison never ran, the script
+# said `ok`, and the figure it was added for (D292) drifted by 556 lines
+# unseen. A guard that finds nothing to compare must say so rather than pass:
+# an absent claim and a correct one are not the same outcome, and only one of
+# them is what "every figure has one home" means.
 src_lines=$(find ../src -name '*.rs' -exec cat {} + 2>/dev/null | wc -l | tr -d ' ')
 if [ "${src_lines:-0}" -gt 0 ]; then
-  # The notes write thousands with a comma and `wc` does not, so the comparison
-  # is made on the digits and the message quotes the claim as it is written.
-  claimed_lines=$(grep -rhoE '\*\*[0-9][0-9,]* lines\*\*' *.md | grep -oE '[0-9][0-9,]*' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  # Two spellings, because the figure has one home and that home writes it as a
+  # table cell: `**N lines**` anywhere, and the first bold figure in the row
+  # labelled `Lines of Rust`. The notes write thousands with a comma and `wc`
+  # does not, so the comparison is made on the digits and the message quotes the
+  # claim as it is written.
+  #
+  # The authority row is read for its **first** bold figure and no other. The
+  # row explains the defect this guard was fixed for and therefore quotes the
+  # old spelling — `**53,280**` — in its own third column, so a guard reading
+  # every bold figure on the row fails on the history of its own repair. That
+  # is the fifth pass's lesson exactly: match the cell's mark, not its prose.
+  # And the copies are scoped to figures that are about *Rust*. The loose form
+  # — any `**N lines**` anywhere — matched a sentence in PASSES.md about how
+  # long ROADMAP.md was, which is a true figure about a markdown file and has
+  # nothing to do with `src/`. A guard that fails on an unrelated correct number
+  # is a guard somebody switches off.
+  claimed_lines=$( { grep -rh '^| Lines of Rust |' *.md \
+                       | grep -oE '\*\*[0-9][0-9,]*( lines)?\*\*' | head -1
+                     grep -rhE '(src/|lines of Rust)' *.md \
+                       | grep -oE '\*\*[0-9][0-9,]* lines\*\*'
+                   } | grep -oE '[0-9][0-9,]*' | sort -u | tr '\n' ' ' | sed 's/ $//')
   claimed_digits=$(echo "$claimed_lines" | tr -d ',')
-  if [ -n "$claimed_lines" ] && [ "$claimed_digits" != "$src_lines" ]; then
+  if [ -z "$claimed_lines" ]; then
+    echo "the line count has no guarded home: src/ has $src_lines and no file states it as a checkable figure"; fail=1
+  elif [ "$claimed_digits" != "$src_lines" ]; then
     echo "the line count has drifted: src/ has $src_lines, these notes say $claimed_lines"; fail=1
   fi
 fi
@@ -462,6 +513,67 @@ if grep -rnE '§[0-9]+ item [0-9]+' *.md | grep -v '"§'; then
   echo "a roadmap item is cited by position; cite its \`#anchor\` instead"; fail=1
 fi
 
+# ROADMAP.md's own scope line says it records unfinished work and nothing else,
+# and for six passes it recorded mostly finished work: five items headed
+# "Shipped" with their post-mortems attached, at about 350 lines. Three separate
+# passes wrote down that "no check in this repository compares a roadmap item to
+# the tree" and none of them added one.
+#
+# This is the honest form of that check. It cannot tell whether an *unbuilt*
+# item is secretly done — that needs a reading, and the reading is what found
+# `#vacuity` and `#work-view`. What it can do is enforce the rule that was
+# actually broken: **a finished item does not live in the backlog.** Its
+# reasoning goes to PASSES.md, which is the file for what a pass bought, and its
+# anchor goes to the Retired section so the citations from other documents still
+# resolve.
+#
+# The Retired section is quarantined rather than exempted: everything under it is
+# deleted work kept for its anchor, which is the one place a past tense belongs.
+retired_line=$(grep -nE '^## .*Retired' ROADMAP.md | head -1 | cut -d: -f1)
+: "${retired_line:=999999}"
+while IFS=: read -r ln item; do
+  [ "$ln" -ge "$retired_line" ] && continue
+  case "$item" in
+    *Shipped*|*shipped\ 2026-*|*✅*|*Settled\ 2026-*)
+      echo "ROADMAP.md:$ln: the backlog records finished work -> ${item:0:70}"
+      echo "  move what it bought to PASSES.md and its anchor to the Retired section"
+      fail=1 ;;
+  esac
+done < <(grep -nE '^### ' ROADMAP.md | grep -v '^[0-9]*:### M[0-9]')
+
+# And every item states the two things that make a backlog rankable. An item
+# with no size cannot be ordered against one that has one, and an item with no
+# exit condition is a wish: both were true of rows that sat near the top of this
+# list for six passes. The size is on the heading or the line under it; the exit
+# condition is the file's own "*Settled when:*" form.
+awk -v retired="$retired_line" '
+  /^### / && NR < retired {
+    if (anchor != "" && !(sized && exited)) {
+      printf "ROADMAP.md:%d: item %s is missing %s%s%s\n", start, anchor,
+        (sized ? "" : "a size"), ((!sized && !exited) ? " and " : ""), (exited ? "" : "an exit condition")
+      bad = 1
+    }
+    anchor = $2; start = NR; sized = 0; exited = 0; next
+  }
+  /^## / && NR < retired {
+    if (anchor != "" && !(sized && exited)) {
+      printf "ROADMAP.md:%d: item %s is missing %s%s%s\n", start, anchor,
+        (sized ? "" : "a size"), ((!sized && !exited) ? " and " : ""), (exited ? "" : "an exit condition")
+      bad = 1
+    }
+    anchor = ""; next
+  }
+  anchor != "" && /\*\((hours|an afternoon|days|a week|weeks|~?[0-9]+ ?(days|weeks))\)?/ { sized = 1 }
+  anchor != "" && /\*Settled when/ { exited = 1 }
+  END {
+    if (anchor != "" && !(sized && exited)) {
+      printf "ROADMAP.md:%d: item %s is missing %s%s%s\n", start, anchor,
+        (sized ? "" : "a size"), ((!sized && !exited) ? " and " : ""), (exited ? "" : "an exit condition")
+      bad = 1
+    }
+    exit bad
+  }' ROADMAP.md || fail=1
+
 # Three versions, and conflating any two of them is how a release goes wrong.
 #
 #   * the **manifest** version — what a build of this tree produces;
@@ -479,13 +591,30 @@ fi
 # notes call released. A build older than the published release is the one state
 # that cannot be explained.
 cargo_version=$(grep -m1 '^version = ' ../Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-claimed_release=$(grep -hoE '\*\*[0-9]+\.[0-9]+\.[0-9]+ (is released|shipped)' *.md 2>/dev/null \
-  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+#
+# **The pattern reads the row, not a turn of phrase.** It used to look for
+# `**N.N.N is released**` / `**N.N.N shipped**` — a spelling that appears nowhere
+# in these notes — so it matched nothing and skipped both halves of this check
+# for the life of the project. STATE.md §2's Release row is the one home for this
+# figure, so the guard reads that row's own shape and `expect` makes an absent
+# row as loud as a wrong one.
+claimed_release=$(grep -oE '^\| Release \| \*\*[0-9]+\.[0-9]+\.[0-9]+\*\*' STATE.md 2>/dev/null \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+expect "the released version (STATE.md \`| Release |\` row)" "$claimed_release" || :
 if [ -n "$cargo_version" ] && [ -n "$claimed_release" ]; then
-  # Every file has to agree on which version is the released one.
-  disagree=$(grep -lE '\*\*[0-9]+\.[0-9]+\.[0-9]+ (is released|shipped)' *.md 2>/dev/null \
+  # Every other file has to agree with that row, in whatever words it uses.
+  #
+  #    **PASSES.md is exempt, and the exemption is the register rather than a
+  #    convenience.** It is the pass log: it records what was true on a day, so
+  #    "the manifest led the released 0.5.0" is a correct sentence about
+  #    2026-09-20 and must stay wrong-looking for ever. The first run of this
+  #    re-pointed guard fired on exactly that line — the same shape as the npm
+  #    guard firing on files that were *quoting* a stale claim in order to
+  #    retire it — which is why a guard is run before it is believed.
+  disagree=$(grep -lE 'released [0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+ is (the )?(current|published) release' *.md 2>/dev/null \
+    | grep -v '^PASSES\.md$' \
     | while read -r f; do
-        grep -oE '\*\*[0-9]+\.[0-9]+\.[0-9]+ (is released|shipped)' "$f" \
+        grep -ohE 'released [0-9]+\.[0-9]+\.[0-9]+|[0-9]+\.[0-9]+\.[0-9]+ is (the )?(current|published) release' "$f" \
           | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | grep -qx "$claimed_release" || echo "$f"
       done)
   [ -z "$disagree" ] || { echo "these notes call $claimed_release released; these say otherwise: $(echo $disagree)"; fail=1; }
@@ -505,6 +634,59 @@ if [ -n "$site_version" ] && [ -n "$cargo_version" ] && [ "$site_version" != "$c
   fail=1
 fi
 
+
+# The schema version, which is a figure about this tree and drifted unnoticed.
+#
+# STATE.md said `version 1` while `store::SCHEMA_VERSION` said 2 — the `looks`
+# table bumped the constant and nobody re-read the row. It is exactly the class
+# every other guard here exists for and it had no guard, because the figure is
+# a word (`version N`) rather than a bold number.
+schema_code=$(grep -oE 'pub const SCHEMA_VERSION: i64 = [0-9]+' ../src/store.rs \
+  | grep -oE '[0-9]+$')
+expect "store::SCHEMA_VERSION" "$schema_code" || :
+schema_notes=$(grep -oE '^\| Schema \| \*\*version [0-9]+\*\*' STATE.md | grep -oE '[0-9]+')
+expect "the schema version in STATE.md" "$schema_notes" || :
+if [ -n "$schema_code" ] && [ -n "$schema_notes" ] && [ "$schema_code" != "$schema_notes" ]; then
+  echo "the schema version has drifted: the code says $schema_code, these notes say $schema_notes"
+  fail=1
+fi
+
+# The pass ordinal, which is a figure like any other and had no home until
+# 2026-09-21. PASSES.md's header says which pass is newest; the file's own
+# headings are the count. They disagreed for three passes — four documents cite
+# "the eleventh pass" while this file held thirteen — and a pass then named
+# itself the twelfth in four files before anybody read the headings (D313's
+# class, fourth instance).
+#
+# The citations elsewhere are deliberately NOT checked: "what the eleventh pass
+# changed" is a reference to a pass, not a count of them, and a guard that
+# conflated the two would force every historical mention to move.
+#
+# **The character class has to include the hyphen, and it did not.** The guard
+# read `([a-z]+)(th|st|nd|rd)`, which matches `twentieth` and not
+# `twenty-first` — so it went blank on the twenty-first pass and `expect`
+# caught it. An ordinal grows a hyphen at twenty-one, which is three passes
+# after the guard was written: exactly the input nobody supplies to a new check.
+newest_claim=$(grep -ohE 'the newest is the [a-z-]+ pass' PASSES.md \
+  | head -1 | sed -E 's/.*the newest is the ([a-z-]+) pass/\1/')
+expect "PASSES.md's newest-pass claim" "$newest_claim" || :
+#
+# **Counting the headings was the first attempt and it was wrong**, which is why
+# a guard is run before it is believed: this file caps itself at the last five
+# passes in full and compresses the rest under one "Earlier passes, compressed"
+# heading, so nine dated headings describe fourteen passes. There is no count to
+# compare against, and inventing one would put a second home under a figure whose
+# whole defect was having none.
+#
+# What IS checkable is the invariant that actually broke: the newest heading and
+# the header have to name the same pass.
+# And the newest heading has to carry that ordinal, so a pass cannot name itself
+# something the file already used.
+top=$(grep -E '^## [0-9]{4}-[0-9]{2}-[0-9]{2} \(' PASSES.md | head -1)
+case "$top" in
+  *"($newest_claim pass)"*) : ;;
+  *) echo "PASSES.md's newest heading does not carry the ordinal '$newest_claim': ${top:0:80}"; fail=1 ;;
+esac
 
 # The widening count (R24) and the provider release behaviour was verified
 # against. Both are counted rather than compared to a constant, because the
@@ -539,34 +721,18 @@ if [ "$(echo "$provider" | grep -c .)" -gt 1 ]; then
   fail=1
 fi
 
-# ...and against the code, which is the authority for both floors.
+# **Deleted 2026-09-21 with the constant it read.** This loop compared
+# `policy::VERIFIED_AGAINST` against the version these notes say behaviour was
+# verified against. The constant went with the permission gate (D249); the loop
+# stayed, found nothing, and `continue`d — a guard that reads as installed and
+# has checked nothing since the deletion.
 #
-# Agreeing with itself is not enough for these two. They are the only figures
-# here a *user* is shown — `devplane doctor` prints them, and the product's
-# central claim is how old they are — so the constant the binary reads is the
-# fact and these notes are a copy of it, exactly as the released version is a
-# copy of `Cargo.toml`. They could drift silently until this existed.
-for pair in "VERIFIED_AGAINST verified against"; do
-  set -- $pair
-  const=$1; shift
-  phrase="$*"
-  in_code=$(grep -oE "pub const $const: &str = \"[0-9]+\.[0-9]+\.[0-9]+\"" ../src/core/policy.rs \
-    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-  [ -n "$in_code" ] || continue
-  # `.{0,40}` rather than `[^|]*`: the figure's own row in STATE.md is a table
-  # cell, so the phrase and the version sit either side of a `|` and a pattern
-  # that refuses pipes reads every occurrence *except* the authoritative one.
-  # That is how the first version of this check passed a deliberately wrong
-  # figure — it was matching prose elsewhere and never the row it is about.
-  in_notes=$(grep -rhoiE "$phrase.{0,40}Claude Code \*\*[0-9]+\.[0-9]+\.[0-9]+\*\*" *.md \
-    | grep -oE 'Claude Code \*\*[0-9]+\.[0-9]+\.[0-9]+' \
-    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -u)
-  [ -n "$in_notes" ] || continue
-  if [ "$in_notes" != "$in_code" ]; then
-    echo "policy::$const is $in_code; these notes say $(echo $in_notes) for '$phrase'"
-    fail=1
-  fi
-done
+# It is the orphan class (D298, D312) found for a third time and for the first
+# time *outside* `src/`: after deleting a capability, grep for its vocabulary in
+# the guards as well as in the code. The frozen baseline it used to hold is
+# QUALITY.md's own prose now, and prose is what §4 says a figure may not be — so
+# if the baseline ever becomes load-bearing again it comes back as a STATE.md row
+# with a guard that `expect`s it, not as a pattern hoping a phrase survived.
 
 # ── Facts about somebody else's server ───────────────────────────────────────
 # Every guard above is a guard over *this* repository: the test count against the
@@ -644,14 +810,22 @@ if [ -z "${DEVPLANE_NO_NET:-}" ] && command -v curl >/dev/null 2>&1; then
   #    nothing is the failure this whole file exists to make loud, and it is
   #    why the check below was run against a deliberately wrong figure before
   #    being believed.
-  published_claim=$(grep -oE 'npm publishes [0-9]+\.[0-9]+\.[0-9]+' STATE.md 2>/dev/null \
-    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  if [ -n "$published_claim" ]; then
+  #    **And on 2026-09-21 it was found reading a home the figure was never put
+  #    in.** It grepped STATE.md for `npm publishes N.N.N`; that sentence is in
+  #    no file. The figure that exists is the *pin* — `@github/copilot@1.0.83` —
+  #    written in PROVIDERS.md and RISKS.md (R41). So the guard now reads the pin
+  #    wherever the notes spell it, which is the thing R41 actually asks for: a
+  #    version this project pins, against what that registry publishes today.
+  #    The pin does not move automatically (D29); what this produces is a
+  #    decision to make.
+  pinned=$(grep -rhoE '@github/copilot@[0-9]+\.[0-9]+\.[0-9]+' *.md 2>/dev/null \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -Vu | tail -1)
+  expect "the pinned @github/copilot version" "$pinned" || :
+  if [ -n "$pinned" ]; then
     published=$(get https://registry.npmjs.org/@github/copilot/latest \
       | grep -oE '"version":"[0-9]+\.[0-9]+\.[0-9]+"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    if [ -n "$published" ] && [ "$published" != "$published_claim" ]; then
-      echo "these notes say npm publishes @github/copilot $published_claim; it publishes $published"
-      fail=1
+    if [ -n "$published" ] && [ "$published" != "$pinned" ]; then
+      echo "note: these notes pin @github/copilot $pinned; npm publishes $published (R41 — a decision, not a failure)"
     fi
   fi
 fi

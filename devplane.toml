@@ -1,0 +1,38 @@
+# Devplane's own gates, so this repository is governed by the thing it ships.
+#
+# It declared none until 2026-09-20, which was found by registering its own Spec
+# Kit hook and watching the gate report "this repository declares no checks".
+# A project that ships a definition-of-done and has none of its own is the same
+# defect as a documented trigger with no code, pointed inward.
+
+[project]
+name        = "devplane"
+base_branch = "main"
+
+[gates]
+# The four an agent can break and a person would otherwise find out about later.
+# `cargo build --examples` first, because `cargo test` never rebuilds them and
+# the conformance suite needs the ACP fixture agent.
+check = [
+  "cargo fmt --all --check",
+  "cargo clippy --all-targets --all-features -- -D warnings",
+  "cargo build --examples --locked",
+  "cargo test --locked",
+]
+timeout             = "20m"
+on_fail             = "feedback"
+max_feedback_rounds = 2
+
+# Asked for by name: the guards that keep the notes honest about the tree.
+# Kept out of `check` deliberately — they need `concepts/`, which is gitignored,
+# so they pass vacuously in a clean checkout and would make `check` a weaker
+# claim than it looks.
+[gates.named.notes]
+run     = ["bash scripts/concepts-check.sh"]
+timeout = "10m"
+
+[policy]
+# Devplane only ever refuses or defers. Grants belong in the agent's own
+# settings.json, which is the file that enforces them.
+never_auto = ["Read(.env)", "Bash(rm -rf *)"]
+always_ask = ["Bash(git push *)"]

@@ -92,7 +92,12 @@ pub async fn cmd_list(json: bool) -> Result<()> {
             Kind::Skill => "skill",
             Kind::Prompt => "prompt",
         };
-        println!("{:<28}{:<8}{}", paint(BOLD, &a.name), kind, a.digest.digest);
+        println!(
+            "{}{}{}",
+            crate::render::pad(&paint(BOLD, &a.name), 28),
+            crate::render::pad(kind, 8),
+            a.digest.digest
+        );
         if let Some(s) = &a.sidecar {
             println!("{:<28}{}", "", paint(DIM, &s.origin));
         }
@@ -162,7 +167,11 @@ pub async fn cmd_diff(name: Option<String>, json: bool) -> Result<()> {
                     c.drift.says()
                 );
             } else if c.present {
-                println!("  {:<11}{}", paint(DIM, c.drift.label()), c.project);
+                println!(
+                    "  {}{}",
+                    crate::render::pad(&paint(DIM, c.drift.label()), 11),
+                    c.project
+                );
             } else {
                 println!(
                     "  {:<11}{:<16}{}",
@@ -273,7 +282,11 @@ pub async fn cmd_report(name: String, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<32}{}", paint(BOLD, &a.name), a.path.display());
+    println!(
+        "{}{}",
+        crate::render::pad(&paint(BOLD, &a.name), 32),
+        a.path.display()
+    );
     // Where a copy of this goes, and **who documents that path** — the line
     // that says why this directory and no other. Devplane writes only into
     // paths a vendor documents, and that claim is worth a sentence at the point
@@ -437,7 +450,11 @@ pub async fn cmd_install(name: String, to: Vec<String>, force: bool, json: bool)
                 paint(BOLD, "replaced"),
                 n
             ),
-            None if !json => println!("  {:<10}{}", paint(DIM, "installed"), n),
+            None if !json => println!(
+                "  {}{}",
+                crate::render::pad(&paint(DIM, "installed"), 10),
+                n
+            ),
             _ => {}
         }
     }

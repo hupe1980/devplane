@@ -31,7 +31,7 @@
 //! and no self-report can produce alone.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Markdown, in the extensions these tools actually write.
 const MARKDOWN: &[&str] = &["md", "markdown"];
@@ -572,10 +572,26 @@ pub const HOOK_COMMAND: &str = "devplane.gate";
 
 /// The entry Devplane registers, as YAML, under `hooks.<event>`.
 ///
-/// **No `condition` key, and its absence is the load-bearing part.** Every Spec
-/// Kit command skips a hook whose condition is non-empty, deferring evaluation
-/// to a `HookExecutor` that does not exist — so an entry carrying one would look
-/// correct, be committed, and never fire.
+/// **No `condition` key, and its absence is the load-bearing part.**
+///
+/// Every Spec Kit command skips a hook whose condition is non-empty, deferring
+/// evaluation to a `HookExecutor`. When this was written there was no such
+/// class, so an entry carrying a condition would look correct, be committed and
+/// never fire.
+///
+/// **Re-checked 2026-09-21: upstream now documents a `HookExecutor`, and the
+/// copy installed here still has none.** The conclusion is unchanged and the
+/// reason is now a different one, which is worth writing down rather than
+/// quietly leaving the old sentence to rot: Devplane has no condition to
+/// express. A gate either runs after the agent writes code or it is not a gate.
+/// A key whose behaviour depends on which version of somebody else's tool is
+/// installed is a key to leave out — the entry then means the same thing on
+/// every version, which is the property a committed file needs.
+///
+/// The upstream entry also gained a `priority` field, ordering hooks low-first.
+/// It is omitted for the same reason and one more: the documentation says the
+/// executor **does not sort by priority**, so writing one would express an
+/// intention nothing acts on.
 ///
 /// `optional: false` because an optional hook is merely *offered* to the agent,
 /// and a workflow that offers a gate has no gate.
@@ -590,6 +606,58 @@ pub fn hook_entry() -> String {
     )
 }
 
+/// The skill the hook's command resolves to, as an agent spells it.
+///
+/// The entry carries `devplane.gate`; every Spec Kit command turns dots into
+/// hyphens before invoking, so what the agent looks for is a skill of this name.
+pub const HOOK_SKILL: &str = "devplane-gate";
+
+/// Where a skill of that name can be defined, given a project root and a home
+/// directory.
+///
+/// **Pure, and takes its roots as arguments**, because `core` may not go and
+/// look up a home directory — the caller knows where it is and a test should not
+/// have to own one.
+///
+/// The plugin's own copy is deliberately **not** on this list. A plugin
+/// installed from the marketplace lands in a vendor-managed directory whose
+/// layout is not documented as an interface, and guessing it would produce a
+/// check that passes on one machine and fails on the next. What this answers is
+/// the question with an exact answer: *is there a skill file here that defines
+/// it?*
+#[must_use]
+pub fn skill_locations(root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let leaf = format!(".claude/skills/{HOOK_SKILL}/SKILL.md");
+    let mut out = vec![root.join(&leaf)];
+    if let Some(h) = home {
+        let user = h.join(&leaf);
+        if !out.contains(&user) {
+            out.push(user);
+        }
+    }
+    out
+}
+
+/// Why registering the hook here would produce a gate that cannot run.
+///
+/// **A mandatory hook is one the agent *must* invoke and wait for.** Registered
+/// against a command nothing defines, it does not degrade to no gate — the
+/// workflow reaches a step it is told it may not skip and cannot perform. That
+/// is the same failure as a deny rule that matches nothing, one layer out: it
+/// reads as a gate and is none.
+///
+/// `None` when a skill file exists at one of [`skill_locations`].
+#[must_use]
+pub fn unreachable_skill(root: &Path, home: Option<&Path>) -> Option<String> {
+    let places = skill_locations(root, home);
+    if places.iter().any(|p| p.is_file()) {
+        return None;
+    }
+    Some(format!(
+        "nothing here defines `/{HOOK_SKILL}`, which is what `{HOOK_COMMAND}` resolves to"
+    ))
+}
+
 /// A whole `extensions.yml`, for a repository that has none.
 pub fn extensions_file(event: &str) -> String {
     format!("hooks:\n  {event}:\n{}", hook_entry())
@@ -598,6 +666,49 @@ pub fn extensions_file(event: &str) -> String {
 #[cfg(test)]
 mod hook_tests {
     use super::*;
+
+    #[test]
+    fn the_command_and_the_skill_are_two_spellings_of_one_thing() {
+        // The agent turns dots into hyphens before invoking, so a hook naming
+        // `devplane.gate` looks for a skill called `devplane-gate`. If these
+        // two drift, the hook registers cleanly and nothing can ever run it.
+        assert_eq!(HOOK_COMMAND.replace('.', "-"), HOOK_SKILL);
+    }
+
+    #[test]
+    fn a_skill_nothing_defines_is_reported_as_unreachable() {
+        let tmp = std::env::temp_dir().join(format!("dp-spec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("temp dir");
+
+        // Nothing there: a mandatory hook here would be a step the workflow may
+        // not skip and cannot perform.
+        assert!(unreachable_skill(&tmp, None).is_some());
+
+        // A skill file in the project makes it reachable.
+        let skill = tmp.join(".claude/skills").join(HOOK_SKILL);
+        std::fs::create_dir_all(&skill).expect("skill dir");
+        std::fs::write(skill.join("SKILL.md"), "---\nname: x\n---\n").expect("skill file");
+        assert!(unreachable_skill(&tmp, None).is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn the_places_looked_at_are_the_project_then_the_user() {
+        let root = Path::new("/repo");
+        let home = Path::new("/home/dev");
+        let places = skill_locations(root, Some(home));
+        assert_eq!(places.len(), 2);
+        assert!(
+            places[0].starts_with(root),
+            "the project is looked at first"
+        );
+        assert!(places[1].starts_with(home));
+        // No home to look in is a value, not a failure: `core` may not go and
+        // find one.
+        assert_eq!(skill_locations(root, None).len(), 1);
+    }
 
     #[test]
     fn the_entry_carries_no_condition_and_is_not_optional() {

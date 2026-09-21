@@ -39,6 +39,8 @@ pub mod attention;
 pub mod batch;
 pub mod certificate;
 pub mod clock;
+/// The close: what the day came to, for an inbox that is empty.
+pub mod close;
 pub mod command;
 pub mod config;
 pub mod decision;
@@ -56,12 +58,14 @@ pub mod project;
 pub mod provider;
 pub mod question;
 pub mod reduce;
+pub mod rules;
 pub mod run;
 pub mod setup;
 pub mod spec;
 pub mod templates;
 pub mod text;
 pub mod transcript;
+pub mod vendors;
 pub mod work;
 pub mod world;
 

@@ -464,6 +464,102 @@ impl AppState {
     /// items the inbox did not show. Locks are taken in a fixed order — works,
     /// sessions, gate, forge, then the world — and none is held across another
     /// `await` that could take one of them back.
+    /// The close: the boundary, and — for an empty inbox — what the day came to.
+    ///
+    /// **Composed here, rendered by the surfaces.** Every sentence is built in
+    /// this process so the CLI and the board cannot word one day two ways, which
+    /// is the rule the vacuity number bought.
+    ///
+    /// `empty` decides how much is said, not whether anything is: the boundary
+    /// line is useful on a full list too, and the tally is the thing an empty
+    /// one exists for.
+    pub async fn close(&self, empty: bool) -> serde_json::Value {
+        let now = jiff::Timestamp::now();
+        let since = crate::core::close::since_last_look(now, self.store.last_look().await);
+        let looked_at = self.store.last_look().await.map(|t| t.to_string());
+        if !empty {
+            return serde_json::json!({
+                "since_last_look": since,
+                // The fact, beside the sentence. The hairline is `since`; this
+                // is what it was measured from, for a surface that wants to say
+                // it differently and for a test that cannot move a clock.
+                "looked_at": looked_at,
+            });
+        }
+        // Midnight local, because the day a person had is the day their machine
+        // was in — not a rolling twenty-four hours, which would make the tally
+        // disagree with the word "today" every time they read it.
+        let start = jiff::Zoned::now()
+            .start_of_day()
+            .map(|z| z.timestamp())
+            .unwrap_or(now - jiff::SignedDuration::from_hours(24));
+        let (decisions, waited, longest) = self
+            .store
+            .day(&start.to_string())
+            .await
+            .unwrap_or_else(|_| (Vec::new(), 0, 0));
+        let tally = crate::core::close::Tally::of(&decisions).with_waits(waited, longest);
+        serde_json::json!({
+            "since_last_look": since,
+            "looked_at": looked_at,
+            "clear": true,
+            "quiet": tally.quiet(),
+            "sentences": tally.sentences(),
+            "next": self.what_wants_you_next().await,
+            "keeps_running": self.what_keeps_running().await,
+        })
+    }
+
+    /// What is known to want the person next, where anything is.
+    ///
+    /// Absent rather than reassuring where nothing is known: a close that names
+    /// something that is not coming is worse than one that names nothing.
+    async fn what_wants_you_next(&self) -> Option<String> {
+        let asks = self.store.open_asks().await.unwrap_or_default();
+        let soonest = asks
+            .iter()
+            .filter_map(|a| match a.deadline {
+                crate::core::ask::Deadline::After(secs) => Some((secs, a)),
+                crate::core::ask::Deadline::Never => None,
+            })
+            .min_by_key(|(secs, _)| *secs)?;
+        Some(format!(
+            "a question in {} has a deadline of {}",
+            soonest.1.run,
+            crate::core::close::human_secs(u64::from(soonest.0))
+        ))
+    }
+
+    /// What continues while the person is away — **or what would not**.
+    ///
+    /// A close that is false is worse than none, so this checks before it
+    /// reassures: an ask with a project-declared deadline that expires tonight
+    /// is a thing that stops, and saying *nothing repeats if it restarts* over
+    /// the top of it would be the product telling somebody to stop looking at
+    /// the one moment they should not.
+    async fn what_keeps_running(&self) -> String {
+        let expiring = self
+            .store
+            .open_asks()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|a| matches!(a.deadline, crate::core::ask::Deadline::After(_)))
+            .count();
+        match expiring {
+            0 => "The daemon keeps watching and the pipelines keep running. \
+                  Nothing repeats if it restarts, so closing this costs nothing."
+                .to_string(),
+            1 => "One question has a deadline and will end without you. \
+                  Everything else keeps running and repeats nothing."
+                .to_string(),
+            n => format!(
+                "{n} questions have deadlines and will end without you. \
+                 Everything else keeps running and repeats nothing."
+            ),
+        }
+    }
+
     pub async fn current_inbox(&self) -> Vec<crate::core::AttentionItem> {
         let works: Vec<_> = self.works.lock().await.values().cloned().collect();
         let drivable = self.drivable_runs().await;

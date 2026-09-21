@@ -14,9 +14,10 @@ default:
 open: build
     ./target/debug/devplane open
 
-# The same, serving ui/legacy.html from disk: edit, save, reload. No rebuild.
+# The same, serving ui/dist from disk: rebuild the bundle, reload. No cargo rebuild.
 ui: build
-    DEVPLANE_UI=$PWD/ui/legacy.html ./target/debug/devplane serve
+    cd ui && npm run build
+    DEVPLANE_UI=$PWD/ui/dist ./target/debug/devplane serve
 
 # The daemon in the foreground.
 serve: build

@@ -23,11 +23,27 @@
 //! the synchronous hook a session is blocked on.
 //!
 //! It is a splitter, not a shell. Claude Code's own documentation is explicit
-//! that a Bash rule "isn't a security boundary around the program" — `/bin/rm`,
-//! `sh -c 'rm …'` and `git -C . push` are not covered by rules naming `rm` or
-//! `git push`, here or there. The goal is to agree with Claude Code, not to
-//! outdo it: a matcher that is stricter than the thing it mirrors would refuse
-//! calls the user's own settings allow.
+//! that a Bash rule "isn't a security boundary around the program", and that is
+//! true here too: this reads a line, it does not run one.
+//!
+//! **What changed is which direction it is allowed to be wrong in.** This module
+//! was built to *agree* with Claude Code — `/bin/rm`, `sudo rm` and `sh -c 'rm …'`
+//! are not covered there by a rule naming `rm`, and they were not covered here
+//! either. That was correct while Devplane could **approve**: a matcher broader
+//! than the vendor's would have approved calls the user's own settings refuse.
+//!
+//! Devplane cannot approve. [`crate::core::Verdict`] has no `Allow` and the type
+//! cannot express one, so the only thing a broader match can do is **refuse
+//! more**, and refusing more costs a prompt. So on the restrictive side:
+//!
+//! * [`strip_transparent`] looks through `sudo`, `doas`, `exec`, `env` and the
+//!   exec wrappers, so `sudo rm -rf /` meets `Bash(rm *)`;
+//! * [`basename_program`] reduces `/bin/rm` to `rm`;
+//! * and [`undecidable`] names the lines where neither works, so the call can go
+//!   to a person instead of past one.
+//!
+//! None of that reaches the allow-class analysis, which still describes what the
+//! vendor's own rules do, because that is what it is for.
 
 /// Shell operators that separate one command from the next.
 ///
@@ -172,8 +188,17 @@ pub fn unmodelled_construct(command: &str) -> Option<String> {
             );
         }
     }
-    // An unbalanced quote means the rest of the line is not what it looks like,
-    // and `dequoted` will read it differently from the shell.
+    if unbalanced_quote(command) {
+        return Some("it has an unbalanced quote, so the shell reads it differently".to_string());
+    }
+    None
+}
+
+/// Whether a quote opens and never closes.
+///
+/// The rest of the line is then not what it looks like, and [`dequoted`] reads
+/// it differently from the shell — so nothing downstream of it is a fact.
+pub fn unbalanced_quote(command: &str) -> bool {
     let (mut single, mut double) = (false, false);
     let mut chars = command.chars();
     while let Some(c) = chars.next() {
@@ -185,10 +210,7 @@ pub fn unmodelled_construct(command: &str) -> Option<String> {
             double = !double;
         }
     }
-    if single || double {
-        return Some("it has an unbalanced quote, so the shell reads it differently".to_string());
-    }
-    None
+    single || double
 }
 
 pub fn unapprovable_by_prefix(command: &str) -> Option<String> {
@@ -251,8 +273,9 @@ pub fn unapprovable_by_prefix(command: &str) -> Option<String> {
 ///
 /// `Bash(python:*)` matches `python -c 'import os; os.system("…")'` and answers
 /// `allow`, because the command *is* the one the rule names. **Claude Code
-/// allows it too** — which is why this list may only ever produce a *report*
-/// and must never change a verdict. A scan of 3,171 public agent setups found
+/// allows it too** — which is why this list may only ever produce a *report* on
+/// the **allow** side. On the restrictive side [`undecidable`] now reads it, and
+/// the difference is that a report cannot become a grant here, only a prompt. A scan of 3,171 public agent setups found
 /// **3.1 %** pre-approving arbitrary execution through a grant of this shape.
 ///
 /// Deliberately absent: [`EXEC_WRAPPERS`] and [`ANALYSIS_BARRIERS`], which
@@ -281,8 +304,7 @@ const RUNS_GIVEN_CODE: &[(&str, &str)] = &[
 /// Whether `program` runs code handed to it on the command line, and the flag
 /// that does it — for the sentence a report prints.
 ///
-/// See [`RUNS_GIVEN_CODE`]: this drives `devplane check` and the trust scan,
-/// and nothing that decides a call.
+/// This drives `devplane check`, the trust scan and [`undecidable`].
 pub fn runs_given_code(program: &str) -> Option<&'static str> {
     RUNS_GIVEN_CODE
         .iter()
@@ -857,6 +879,207 @@ pub fn strip(command: &str, any_assignment: bool) -> String {
         break;
     }
     rest.to_string()
+}
+
+/// Programs that run the command that follows them, with the arguments that
+/// follow that, under a different user, environment or process image.
+///
+/// **Deny side only, and that asymmetry is the whole point.** Claude Code does
+/// not look through these — `sudo rm -rf /` is not covered there by a rule
+/// naming `rm`, and `Bash(sudo *)` is the spelling its reference offers. This
+/// module spent its life agreeing with that, on a premise that no longer holds:
+/// agreeing mattered while Devplane could *approve*, because a matcher broader
+/// than the vendor's would have approved calls the user's own settings refuse.
+/// Devplane cannot approve, so the only thing a broader match can do now is
+/// **refuse more**, and refusing more is free.
+///
+/// Measured before it was changed: with `never_auto = ["Bash(rm *)"]` set,
+/// `nohup rm -rf /tmp/x` was denied and `sudo rm -rf /tmp/x` was not — because
+/// `nohup` is in [`WRAPPERS`] and `sudo` was in `ANALYSIS_BARRIERS`, a list
+/// about what an *allow* rule may reach through.
+const TRANSPARENT: &[&str] = &[
+    "sudo", "doas", "exec", "env", "watch", "setsid", "ionice", "flock",
+];
+
+/// Flags of a transparent wrapper that take a value in the next word.
+fn transparent_value_flags(program: &str) -> &'static [&'static str] {
+    match program {
+        "sudo" | "doas" => &[
+            "-u", "-g", "-p", "-C", "-h", "-r", "-t", "-U", "--user", "--group",
+        ],
+        "env" => &["-u", "-C", "-S", "--unset", "--chdir", "--split-string"],
+        "flock" => &["-w", "--timeout", "-E", "--conflict-exit-code"],
+        "ionice" => &["-c", "-n", "-p", "-P", "-u"],
+        _ => &[],
+    }
+}
+
+/// [`strip`], plus the wrappers that run something else under another user,
+/// environment or process image: `sudo`, `doas`, `exec`, `env`, `watch`,
+/// `setsid`, `ionice`, `flock`.
+///
+/// What a **restrictive** rule is matched against, in addition to everything
+/// [`strip`] already produces. `env FOO=1 sudo -u root /bin/rm -rf /` reduces to
+/// `/bin/rm -rf /` here, and [`basename_program`] takes it the last step to
+/// `rm -rf /`.
+///
+/// It loops, because these nest: `sudo env FOO=1 watch rm …` is three of them.
+/// The bound is the number of words, so the loop cannot spin on a line that
+/// reduces to itself.
+pub fn strip_transparent(command: &str) -> String {
+    let mut rest = strip(command, true);
+    for _ in 0..rest.split_whitespace().count().min(32) {
+        let Some((head, tail)) = rest.trim().split_once(char::is_whitespace) else {
+            break;
+        };
+        let word = head.rsplit('/').next().unwrap_or(head);
+        if !TRANSPARENT.contains(&word) {
+            break;
+        }
+        // Skip this wrapper's own options and any `VAR=value` before the
+        // program. A flag that takes a value eats the word after it, or
+        // `sudo -u root rm` would reduce to `root rm`.
+        let value_flags = transparent_value_flags(word);
+        let mut inner = tail.trim_start();
+        while let Some((w, t)) = inner.split_once(char::is_whitespace) {
+            if w == "--" {
+                inner = t.trim_start();
+                break;
+            }
+            if w.starts_with('-') {
+                inner = if value_flags.contains(&w) {
+                    t.trim_start()
+                        .split_once(char::is_whitespace)
+                        .map_or("", |(_, r)| r)
+                        .trim_start()
+                } else {
+                    t.trim_start()
+                };
+                continue;
+            }
+            if let Some((name, _)) = w.split_once('=')
+                && is_env_name(name)
+            {
+                inner = t.trim_start();
+                continue;
+            }
+            break;
+        }
+        if inner.trim().is_empty() {
+            break;
+        }
+        let next = strip(inner, true);
+        if next == rest {
+            break;
+        }
+        rest = next;
+    }
+    rest
+}
+
+/// The same command line with an absolute or relative program path reduced to
+/// its file name, when it has one.
+///
+/// `/bin/rm -rf /` becomes `rm -rf /`. Claude Code documents that it does *not*
+/// do this — a `Bash(rm *)` rule there does not cover `/bin/rm` — and for a
+/// prohibition that is a hole anybody can see. Deny side only, for
+/// the same reason the transparent wrappers are looked through.
+///
+/// `None` when the program has no path separator, so a caller can skip a second
+/// match that would ask the same question twice.
+pub fn basename_program(command: &str) -> Option<String> {
+    let trimmed = command.trim_start();
+    let (head, tail) = match trimmed.split_once(char::is_whitespace) {
+        Some((h, t)) => (h, t),
+        None => (trimmed, ""),
+    };
+    if !head.contains('/') || head.starts_with('-') {
+        return None;
+    }
+    let base = head.rsplit('/').next().filter(|b| !b.is_empty())?;
+    Some(if tail.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base} {tail}")
+    })
+}
+
+/// Why a prohibition cannot be decided by reading this command line.
+///
+/// `None` means every word that decides **what program runs** is a literal this
+/// matcher can compare against a rule, so "no rule matched" is a fact. `Some`
+/// means at least one of those words is produced by the shell, by another
+/// command, or by an interpreter reading a program this matcher has not seen —
+/// so "no rule matched" means *nobody looked*, and the two must not be answered
+/// the same way.
+///
+/// **This is deliberately about command position and nothing else.**
+/// `echo "$(date)"` is decidable: the substitution is an argument, and the
+/// program is `echo`. `$(echo rm) -rf /` is not: the program is whatever the
+/// substitution prints. An earlier version of this idea used
+/// [`unmodelled_construct`], which answers a different question — *is every
+/// part of this line modelled* — and flags the first of those two as well.
+///
+/// The list behind [`runs_given_code`] carries a note saying it "may only ever
+/// produce a report and must never change a verdict", because Claude Code allows those calls and a
+/// matcher that refused them would refuse calls the user's settings allow. That
+/// was true while Devplane could approve. It cannot, so the list may now change a
+/// verdict — in the one direction that is free, which is towards a
+/// person.
+pub fn undecidable(text: &str) -> Option<String> {
+    if text.chars().count() > MAX_ANALYSED {
+        return Some(format!(
+            "it is over {MAX_ANALYSED} characters, past what the command analysis reads"
+        ));
+    }
+    if unbalanced_quote(text) {
+        return Some("it has an unbalanced quote, so the shell reads it differently".to_string());
+    }
+    if subcommands(text).is_none() {
+        return Some("it ends in an operator, so what follows is not on this line".to_string());
+    }
+    for part in nested_commands(text) {
+        let stripped = strip_transparent(&part);
+        let mut words = stripped.split_whitespace();
+        let Some(program) = words.next() else {
+            continue;
+        };
+        // The program name is not a name: the shell builds it at run time.
+        if program.contains('$') || program.contains('`') {
+            return Some(format!(
+                "the program in `{program}` is produced by the shell, so no rule can name it"
+            ));
+        }
+        let base = program.rsplit('/').next().unwrap_or(program);
+        if ANALYSIS_BARRIERS.contains(&base) && !TRANSPARENT.contains(&base) {
+            return Some(format!(
+                "`{base}` runs a command assembled from its own arguments"
+            ));
+        }
+        if let Some(flag) = runs_given_code(base) {
+            let rest: Vec<&str> = words.collect();
+            if rest.contains(&flag) {
+                return Some(format!(
+                    "`{base} {flag}` runs a program given on its own command line"
+                ));
+            }
+            // No script to run means the program arrives on standard input,
+            // which is what `… | sh` is.
+            if !rest.iter().any(|w| !w.starts_with('-')) {
+                return Some(format!(
+                    "`{base}` with no script reads the program from its input"
+                ));
+            }
+        }
+        if base == "find"
+            && let Some(p) = stripped
+                .split_whitespace()
+                .find(|w| FIND_EXEC_PREDICATES.contains(w))
+        {
+            return Some(format!("`find {p}` runs a program or deletes files"));
+        }
+    }
+    None
 }
 
 /// Shell variables whose assignment is *evaluated* rather than stored, so the
@@ -1627,6 +1850,112 @@ const FILE_COMMANDS: &[(&str, Access)] = &[
     // Neither half is in the reference — both are measured.
     ("touch", Access::Write),
 ];
+
+/// Writers the vendor's own file-command table does not carry, and the operand
+/// each of them writes.
+///
+/// **Restrictive side only**, for the reason the transparent wrappers are:
+/// Claude Code does not apply `Read`/`Edit` rules to these, so mirroring it
+/// meant `never_auto = ["Edit(secrets/**)"]` stopped `tee secrets/k` and
+/// `echo x > secrets/k` and let `cp /tmp/a secrets/k`, `truncate -s 0 secrets/k`
+/// and `dd of=secrets/k` through. That asymmetry was correct while a broader
+/// reading could have produced a *grant*; it cannot any more, so the only thing
+/// it costs is a prompt.
+///
+/// It is the fifth of the five published shell-guard bypass classes — the one
+/// that reaches a protected file through a command a keyword filter did not
+/// think of — and the four before it are [`undecidable`]'s subject.
+///
+/// `chmod`, `chown` and `chgrp` are deliberately absent: they change a file's
+/// mode, not its contents, and an `Edit` rule is about what a file says.
+const EXTRA_WRITERS: &[(&str, ExtraWrite)] = &[
+    ("truncate", ExtraWrite::EveryOperand),
+    ("cp", ExtraWrite::LastOperand),
+    ("install", ExtraWrite::LastOperand),
+    ("rsync", ExtraWrite::LastOperand),
+    ("ln", ExtraWrite::LastOperand),
+    ("dd", ExtraWrite::OfAssignment),
+];
+
+/// Which operand of an [`EXTRA_WRITERS`] command is the one being written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtraWrite {
+    /// `truncate -s 0 a b` writes both.
+    EveryOperand,
+    /// `cp a b c dir/` writes only the last — the destination.
+    LastOperand,
+    /// `dd if=x of=y` writes the value of `of=`.
+    OfAssignment,
+}
+
+/// Flags of an [`EXTRA_WRITERS`] command that take a value in the next word, so
+/// the value is not mistaken for the destination.
+fn extra_writer_value_flags(program: &str) -> &'static [&'static str] {
+    match program {
+        "truncate" => &["-s", "-r", "--size", "--reference"],
+        "install" => &[
+            "-m", "-o", "-g", "-S", "--mode", "--owner", "--group", "--suffix",
+        ],
+        "cp" => &["-S", "--suffix", "-t", "--target-directory"],
+        "rsync" => &["-e", "--rsh", "--exclude", "--include", "--files-from"],
+        _ => &[],
+    }
+}
+
+/// Paths a restrictive rule should treat as written, beyond the ones
+/// [`file_targets`] finds.
+///
+/// Every command in the line is looked at, so `ls && cp /tmp/a secrets/k` is
+/// covered, and the search reaches into substitutions and control-flow bodies
+/// exactly as the deny side does everywhere else.
+pub fn extra_write_targets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in nested_commands(text) {
+        let stripped = strip_transparent(&part);
+        let without = without_redirections(&stripped);
+        let mut words = without.split_whitespace();
+        let Some(program) = words.next() else {
+            continue;
+        };
+        let base = program.rsplit('/').next().unwrap_or(program);
+        let Some((_, kind)) = EXTRA_WRITERS.iter().find(|(p, _)| *p == base) else {
+            continue;
+        };
+        if *kind == ExtraWrite::OfAssignment {
+            out.extend(
+                words
+                    .filter_map(|w| w.strip_prefix("of="))
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string),
+            );
+            continue;
+        }
+        let value_flags = extra_writer_value_flags(base);
+        let mut operands: Vec<&str> = Vec::new();
+        let mut skip_next = false;
+        for w in words {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if w.starts_with('-') {
+                skip_next = value_flags.contains(&w);
+                continue;
+            }
+            operands.push(w);
+        }
+        match kind {
+            ExtraWrite::EveryOperand => out.extend(operands.iter().map(|o| (*o).to_string())),
+            // One operand is a source with no destination — `cp a` — and names
+            // nothing this rule speaks for.
+            ExtraWrite::LastOperand if operands.len() >= 2 => {
+                out.push(operands[operands.len() - 1].to_string());
+            }
+            _ => {}
+        }
+    }
+    out
+}
 
 /// Commands whose first positional operand is a script, a pattern or an
 /// expression rather than a file.
@@ -2634,5 +2963,88 @@ mod suggestion_reach_tests {
         for tool in ["Read", "Edit", "Glob", "LSP", "WebFetch", "Agent"] {
             assert!(!crate::core::policy::is_command_tool(tool), "{tool}");
         }
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    #[test]
+    fn a_transparent_wrapper_is_looked_through() {
+        for (line, want) in [
+            ("sudo rm -rf /tmp/x", "rm -rf /tmp/x"),
+            ("sudo -u root rm -rf /tmp/x", "rm -rf /tmp/x"),
+            ("doas rm -rf /tmp/x", "rm -rf /tmp/x"),
+            ("exec rm -rf /tmp/x", "rm -rf /tmp/x"),
+            ("env FOO=1 rm -rf /tmp/x", "rm -rf /tmp/x"),
+            ("env -C /tmp FOO=1 rm -rf /tmp/x", "rm -rf /tmp/x"),
+            ("watch rm -rf /tmp/x", "rm -rf /tmp/x"),
+            ("sudo env FOO=1 watch rm -rf /tmp/x", "rm -rf /tmp/x"),
+            // Not a wrapper, so nothing is taken off.
+            ("rm -rf /tmp/x", "rm -rf /tmp/x"),
+            ("git commit -m x", "git commit -m x"),
+        ] {
+            assert_eq!(strip_transparent(line), want, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_wrapper_with_nothing_after_it_is_left_alone() {
+        // The loop must not walk off the end and return an empty command, which
+        // would make every rule match nothing at all.
+        for line in ["sudo", "env", "sudo -u root", "env -C /tmp"] {
+            assert!(!strip_transparent(line).is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_program_path_reduces_to_its_name() {
+        assert_eq!(
+            basename_program("/bin/rm -rf x").as_deref(),
+            Some("rm -rf x")
+        );
+        assert_eq!(
+            basename_program("./scripts/deploy").as_deref(),
+            Some("deploy")
+        );
+        // No separator: nothing to do, and the caller skips a second match.
+        assert_eq!(basename_program("rm -rf x"), None);
+        // A leading flag is not a program.
+        assert_eq!(basename_program("-x /a/b"), None);
+    }
+
+    #[test]
+    fn undecidable_is_about_command_position_only() {
+        // A substitution in an *argument* leaves the program readable.
+        assert_eq!(undecidable("echo \"$(date)\""), None);
+        assert_eq!(undecidable("grep -r \"$PATTERN\" ."), None);
+        // In command position it does not.
+        assert!(undecidable("$(echo rm) -rf /").is_some());
+        assert!(undecidable("rm$IFS-rf /").is_some());
+    }
+
+    #[test]
+    fn an_interpreter_given_a_script_is_readable() {
+        // The distinction that keeps this from firing on every python call.
+        assert_eq!(undecidable("python manage.py migrate"), None);
+        assert_eq!(undecidable("node build.js --watch"), None);
+        assert!(undecidable("python -c \"import os\"").is_some());
+        assert!(undecidable("node -e \"require('fs')\"").is_some());
+        // No script at all means the program arrives on standard input, which
+        // is what the tail of `… | sh` looks like once the pipe is split.
+        assert!(undecidable("sh").is_some());
+        assert!(undecidable("echo x | bash").is_some());
+    }
+
+    #[test]
+    fn an_unbalanced_quote_is_not_a_readable_line() {
+        assert!(undecidable("rm -rf \"/tmp").is_some());
+    }
+
+    #[test]
+    fn a_line_past_the_analysis_limit_is_not_readable() {
+        let long = format!("ls {}", "x".repeat(MAX_ANALYSED));
+        assert!(undecidable(&long).is_some());
     }
 }

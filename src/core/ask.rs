@@ -97,16 +97,40 @@ pub enum Deadline {
     /// true, which is a fact rather than a failure.
     #[default]
     Never,
-    /// Seconds from the moment it was asked, set by a project's `devplane.toml`.
+    /// Seconds a question may wait **while somebody could have answered it**,
+    /// set by a project's `devplane.toml`. Counted from [`Ask::clock_starts`],
+    /// not from `asked_at`: a daemon that was down was not showing anybody the
+    /// question, so that time is not part of the wait.
     After(u32),
 }
 
 impl Deadline {
-    /// When this ask stops being answerable, if ever.
-    pub fn at(self, asked_at: Timestamp) -> Option<Timestamp> {
+    /// When this ask stops being answerable, if ever — counted from the moment
+    /// it was **reachable by a person**, which is not always the moment it was
+    /// asked.
+    ///
+    /// **A deadline bounds how long a question waits for somebody who could
+    /// have answered it.** While the daemon is down there is no board, no
+    /// inbox and no notification: the question is not in front of anybody, so
+    /// the clock is not running. Counting wall-clock time from `asked_at`
+    /// instead meant that a project with any deadline set had every waiting
+    /// question killed within a minute of the next start — a laptop closed at
+    /// 17:00 with a `10m` deadline came back at 09:00 to a row reading *"a
+    /// clock refused it after 10m"*, about ten minutes nobody was given.
+    ///
+    /// That is [`Ended::Timer`] writing a sentence that is not true, in the
+    /// product whose whole argument is that a question must not end on a clock
+    /// its owner did not get to run against. It also silently contradicted the
+    /// durable ask: *a daemon that was stopped leaves the ask open and
+    /// answerable* was false for every project that set a deadline.
+    ///
+    /// The bias is deliberate and is the one this codebase always takes: a
+    /// restart **extends** the wait rather than shortening it, because guessing
+    /// that somebody is not needed when they are is the expensive mistake.
+    pub fn at(self, answerable_since: Timestamp) -> Option<Timestamp> {
         match self {
             Deadline::Never => None,
-            Deadline::After(secs) => asked_at
+            Deadline::After(secs) => answerable_since
                 .checked_add(SignedDuration::from_secs(secs as i64))
                 .ok(),
         }
@@ -384,13 +408,28 @@ impl Ask {
         self.ended.is_none()
     }
 
-    /// Whether this ask has passed a deadline as of `now`.
+    /// When this ask's clock starts: when it was asked, or when a person could
+    /// next have reached it, whichever is **later**.
     ///
-    /// A pure question about two timestamps, which is what lets the sweep be a
-    /// query rather than a timer task per waiting ask — the second of the five
-    /// properties.
-    pub fn is_overdue(&self, now: Timestamp) -> bool {
-        self.is_open() && self.deadline.at(self.asked_at).is_some_and(|d| now >= d)
+    /// `reachable_since` is the moment the surfaces came back — in the daemon,
+    /// its own start time. An ask asked while the daemon was up is unaffected,
+    /// because `asked_at` is then the later of the two.
+    pub fn clock_starts(&self, reachable_since: Timestamp) -> Timestamp {
+        self.asked_at.max(reachable_since)
+    }
+
+    /// Whether this ask has passed a deadline as of `now`, given when it last
+    /// became reachable by a person.
+    ///
+    /// A pure question about three timestamps, which is what lets the sweep be
+    /// a query rather than a timer task per waiting ask — the second of the
+    /// five properties. See [`Deadline::at`] for why the third one is here.
+    pub fn is_overdue(&self, now: Timestamp, reachable_since: Timestamp) -> bool {
+        self.is_open()
+            && self
+                .deadline
+                .at(self.clock_starts(reachable_since))
+                .is_some_and(|d| now >= d)
     }
 
     /// Records a person's answer, once.
@@ -493,7 +532,7 @@ mod tests {
         let a = ask();
         assert_eq!(a.deadline, Deadline::default());
         assert_eq!(a.deadline.at(a.asked_at), None);
-        assert!(!a.is_overdue(at("2027-01-01T00:00:00Z")));
+        assert!(!a.is_overdue(at("2027-01-01T00:00:00Z"), a.asked_at));
         assert_eq!(a.outcome(), "waiting for you");
     }
 
@@ -540,8 +579,8 @@ mod tests {
     fn a_deadline_that_is_set_expires_at_the_moment_it_says() {
         let mut a = ask();
         a.deadline = Deadline::After(3600);
-        assert!(!a.is_overdue(at("2026-09-21T09:59:59Z")));
-        assert!(a.is_overdue(at("2026-09-21T10:00:00Z")));
+        assert!(!a.is_overdue(at("2026-09-21T09:59:59Z"), a.asked_at));
+        assert!(a.is_overdue(at("2026-09-21T10:00:00Z"), a.asked_at));
         a.end(
             Ended::Timer {
                 after: 3600,
@@ -549,12 +588,78 @@ mod tests {
             },
             at("2026-09-21T10:00:00Z"),
         );
-        assert!(!a.is_overdue(at("2026-09-21T11:00:00Z")), "ended once");
+        assert!(
+            !a.is_overdue(at("2026-09-21T11:00:00Z"), a.asked_at),
+            "ended once"
+        );
         assert_eq!(a.ended.as_ref().unwrap().authority(), "timer");
         assert!(
             a.outcome().contains("set in devplane.toml"),
             "{}",
             a.outcome()
+        );
+    }
+
+    /// **The clock does not run while nobody can be reached.**
+    ///
+    /// A laptop closed at 17:00 with a question waiting and a `10m` deadline
+    /// came back at 09:00 the next morning to a row reading *"a clock refused
+    /// it after 10m"* — about ten minutes the person was never given. That is
+    /// this product ending a question on a clock its owner never got to run
+    /// against, which is the charge it makes against four vendors.
+    ///
+    /// It also contradicted the durable ask outright: *a daemon that was
+    /// stopped leaves the ask open and answerable* was false for every project
+    /// that set a deadline, and nothing anywhere said so.
+    #[test]
+    fn a_deadline_does_not_run_while_the_daemon_is_down() {
+        let mut a = ask();
+        a.asked_at = at("2026-09-20T17:00:00Z");
+        a.deadline = Deadline::After(600);
+
+        // Asked at 17:00, daemon stopped at 17:01, restarted at 09:00.
+        let restarted = at("2026-09-21T09:00:00Z");
+
+        // Sixteen hours of wall clock have passed and the ask is **not**
+        // overdue: it has been reachable for one minute.
+        assert!(
+            !a.is_overdue(at("2026-09-21T09:01:00Z"), restarted),
+            "a restart must not retroactively expire a question nobody could reach"
+        );
+        // The person gets the whole window the project asked for, from the
+        // moment the surfaces came back.
+        assert!(!a.is_overdue(at("2026-09-21T09:09:59Z"), restarted));
+        assert!(a.is_overdue(at("2026-09-21T09:10:00Z"), restarted));
+
+        // And an ask raised while the daemon was already up is unaffected,
+        // because `asked_at` is then the later of the two.
+        a.asked_at = at("2026-09-21T09:30:00Z");
+        assert!(!a.is_overdue(at("2026-09-21T09:39:59Z"), restarted));
+        assert!(a.is_overdue(at("2026-09-21T09:40:00Z"), restarted));
+    }
+
+    /// The clock only ever moves the deadline **later**, which is the direction
+    /// the doubt has to go: guessing that somebody is not needed, when they
+    /// are, is the expensive mistake.
+    #[test]
+    fn a_restart_can_only_extend_a_wait_never_shorten_it() {
+        let mut a = ask();
+        a.asked_at = at("2026-09-21T09:00:00Z");
+        a.deadline = Deadline::After(600);
+        for reachable in [
+            at("2026-09-20T00:00:00Z"),
+            at("2026-09-21T08:59:59Z"),
+            at("2026-09-21T09:00:00Z"),
+        ] {
+            assert_eq!(
+                a.clock_starts(reachable),
+                a.asked_at,
+                "a daemon that started before the ask changes nothing"
+            );
+        }
+        assert_eq!(
+            a.clock_starts(at("2026-09-21T09:05:00Z")),
+            at("2026-09-21T09:05:00Z")
         );
     }
 

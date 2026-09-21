@@ -90,7 +90,7 @@ parser's reason.
 
 **Nothing writes the rules back.** There is no API route and no button that edits `[policy]`, in a
 repository or in `~/.devplane/policy.toml`. An agent here runs as you and can read the bearer token,
-so a write path would be a widening path; the board's <kbd>,</kbd> panel reads every file and offers
+so a write path would be a widening path; the board's **setup** surface reads every file and offers
 nothing to save.
 
 *The rules cannot fail open; a channel can, and the channel is a local process.*

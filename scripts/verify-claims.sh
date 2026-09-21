@@ -82,6 +82,14 @@ chk "hooks: async flag"                             claude-code/hooks.md '"async
 chk "hooks: allowedHttpHookUrls"                    claude-code/hooks.md 'allowedHttpHookUrls'
 chk "hooks: httpHookAllowedEnvVars"                 claude-code/hooks.md 'httpHookAllowedEnvVars'
 chk "hooks: Notification permission_prompt"         claude-code/hooks.md 'permission_prompt'
+# Where an MCP tool call came from. Eight days old when it was adopted, which is
+# why every clause of it is pinned rather than remembered: the object, the
+# instruction not to trust the name, and the version floor.
+chk "hooks: mcp_server carries name and source"     claude-code/hooks.md 'mcp_server.*server.s .name. and a .source'
+chk "hooks: trust the source, not the name"         claude-code/hooks.md 'Base trust decisions on .source. rather than on .name'
+chk "hooks: mcp_server needs 2.1.274"               claude-code/hooks.md 'mcp_server. field requires Claude Code v2\.1\.274'
+chk "hooks: PermissionRequest carries mcp_server"   claude-code/hooks.md 'PermissionRequest hooks receive'
+
 chk "hooks: elicitation_dialog matcher"             claude-code/hooks.md 'elicitation_dialog'
 chk "hooks: agent_needs_input only in agent view"   claude-code/hooks.md 'agent_needs_input.*agent view|while \[agent view\]'
 chk "hooks: PermissionRequest decision object"      claude-code/hooks.md '"decision"'

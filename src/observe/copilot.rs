@@ -95,6 +95,14 @@ pub struct HookPayload {
     pub error: Option<String>,
     #[serde(default)]
     pub agent_name: Option<String>,
+    /// Which kind of notification, for the `notification` event.
+    ///
+    /// The same vocabulary Claude Code uses — `permission_prompt`,
+    /// `idle_prompt` — which is why the mapping below is the same mapping.
+    #[serde(default)]
+    pub notification_type: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 impl HookPayload {
@@ -113,9 +121,15 @@ impl HookPayload {
 
 /// What one Copilot hook payload means, in Devplane's own event model.
 ///
-/// Smaller than the Claude mapping because Copilot publishes fewer events that
-/// say anything new: no `PostCompact`, no model switch, no elicitation pair, no
-/// roster.
+/// **Copilot documents fourteen events and this maps twelve of them.** The
+/// shape is close to Claude Code's on purpose — the two vendors publish the
+/// same notification vocabulary — so the differences below are real
+/// differences rather than translation.
+///
+/// What Copilot does not have: a `PostCompact`, a model switch, an elicitation
+/// pair, and a roster. The absence of a roster is the one that costs something,
+/// and it is why a session Devplane has never received a hook for cannot be
+/// discovered at all.
 pub fn to_events(p: &HookPayload) -> Vec<Event> {
     match p.event.as_str() {
         "sessionStart" => vec![Event::SessionStarted {
@@ -126,14 +140,21 @@ pub fn to_events(p: &HookPayload) -> Vec<Event> {
             // is the vendor — which is what the board needs from this field and
             // is known from the channel the payload arrived on.
             entrypoint: Some("copilot".into()),
+            // **Not read, which is not the same as nothing set.** The question
+            // timer is Claude Code's, and this payload arrives over HTTP from a
+            // process Devplane did not spawn, so there is no environment to
+            // read. The surface says *not read* for this session rather than
+            // implying its questions wait.
+            question_clock: None,
+            clock_read: false,
         }],
         "userPromptSubmitted" => vec![Event::PromptSubmitted {
             chars: p.prompt.as_ref().map(|t| t.chars().count()).unwrap_or(0),
         }],
-        "preToolUse" => vec![Event::ToolStarted {
-            tool: p.tool(),
-            input: p.input(),
-        }],
+        // Copilot documents no equivalent of the vendor's `mcp_server`, so a
+        // row from it says nothing about provenance rather than saying it is
+        // unknown.
+        "preToolUse" => vec![Event::tool_started(p.tool(), p.input())],
         "postToolUse" => vec![Event::ToolFinished {
             tool: p.tool(),
             ok: true,
@@ -144,6 +165,62 @@ pub fn to_events(p: &HookPayload) -> Vec<Event> {
             ok: false,
             duration_ms: None,
         }],
+        // **A person is being asked, right now.**
+        //
+        // The same `notification_type` vocabulary Claude Code publishes, which
+        // is why this is the same mapping rather than an adapter. It was
+        // missing until 2026-09-21: eleven events were mapped and this one —
+        // the only one that says *somebody is waiting on you*, which is the
+        // product — was not. A vendor's channel being read is not the same as
+        // its channel being read for the thing the product is about.
+        "notification" => match p.notification_type.as_deref() {
+            Some("permission_prompt") => vec![Event::Blocked {
+                waiting_for: crate::core::WaitingFor::Permission,
+                message: p.message.clone(),
+                // An observed session's dialog is Copilot's own: Devplane can
+                // show that it is there, never answer it.
+                request_id: None,
+                ask: None,
+                options: Vec::new(),
+                call: None,
+            }],
+            Some("idle_prompt") => vec![Event::Blocked {
+                waiting_for: crate::core::WaitingFor::Idle,
+                message: None,
+                request_id: None,
+                ask: None,
+                options: Vec::new(),
+                call: None,
+            }],
+            _ => Vec::new(),
+        },
+
+        // **Deliberately no event, exactly as Claude Code's `PermissionRequest`
+        // produces none.**
+        //
+        // It fires *before* the permission service runs — before the rules
+        // engine, session approvals, auto-allow and auto-deny — so it says a
+        // decision is about to be taken and not what it was. Recording it as a
+        // block would mark every auto-allowed call as waiting on a person, and
+        // that error runs in the alarming direction on a surface whose whole
+        // job is to be trusted about what is waiting.
+        //
+        // What it is for is the **gate**, which rides `preToolUse` here for the
+        // reason documented at the top of this file.
+        "permissionRequest" => Vec::new(),
+
+        // `preCompact` fires while the window is still full, so there is
+        // nothing to record yet — and Copilot publishes no `postCompact` to
+        // pair it with, so unlike Claude Code the compaction itself is never
+        // observed. A row claiming a reset that may not have happened is worse
+        // than no row.
+        "preCompact" => Vec::new(),
+
+        // The prompt after Copilot's own rewriting. `userPromptSubmitted`
+        // already counted the characters a person typed, which is the figure
+        // the surface is about; counting both would double every prompt.
+        "userPromptTransformed" => Vec::new(),
+
         "agentStop" => vec![Event::TurnEnded],
         "errorOccurred" => vec![Event::TurnFailed {
             message: p
@@ -329,9 +406,18 @@ mod tests {
         assert_eq!(p.tool(), "Bash");
         assert_eq!(p.input()["command"], json!("pnpm test"));
         match &to_events(&p)[..] {
-            [Event::ToolStarted { tool, input }] => {
+            [
+                Event::ToolStarted {
+                    tool,
+                    input,
+                    server_source,
+                },
+            ] => {
                 assert_eq!(tool, "Bash");
                 assert_eq!(input["command"], json!("pnpm test"));
+                // Copilot documents no equivalent, so a row from it says
+                // nothing about provenance rather than saying it is unknown.
+                assert_eq!(*server_source, None);
             }
             other => panic!("expected a started tool, got {other:?}"),
         }
@@ -354,5 +440,139 @@ mod tests {
         assert_eq!(f["hooks"]["preToolUse"][0]["type"], json!("command"));
         assert_eq!(f["hooks"]["postToolUse"][0]["type"], json!("http"));
         assert_eq!(f["version"], json!(1));
+    }
+    fn payload(event: &str, v: Value) -> HookPayload {
+        let mut o = v.as_object().cloned().unwrap_or_default();
+        o.insert("event".into(), json!(event));
+        serde_json::from_value(Value::Object(o)).expect("a payload this reader can parse")
+    }
+
+    /// **Somebody is being asked, and the board can say so.**
+    ///
+    /// This is the event the product is about, and it was unmapped until
+    /// 2026-09-21 while eleven of its neighbours were not. Copilot publishes
+    /// the same `notification_type` vocabulary Claude Code does, so this is the
+    /// same mapping rather than an adapter — and reading a vendor's channel is
+    /// not the same as reading it for the thing the product exists to show.
+    #[test]
+    fn a_copilot_session_waiting_on_a_person_is_a_block_the_board_can_render() {
+        let out = to_events(&payload(
+            "notification",
+            json!({ "notificationType": "permission_prompt", "message": "Run `rm -rf build`?" }),
+        ));
+        match out.as_slice() {
+            [
+                Event::Blocked {
+                    waiting_for,
+                    message,
+                    request_id,
+                    ..
+                },
+            ] => {
+                assert_eq!(*waiting_for, crate::core::WaitingFor::Permission);
+                assert_eq!(message.as_deref(), Some("Run `rm -rf build`?"));
+                // **Never answerable from here.** An observed session's dialog
+                // belongs to Copilot; Devplane can show that it is there and
+                // must not imply it can reply.
+                assert!(
+                    request_id.is_none(),
+                    "an observed dialog was made to look answerable"
+                );
+            }
+            other => panic!("a permission prompt did not become a block: {other:?}"),
+        }
+
+        let idle = to_events(&payload(
+            "notification",
+            json!({ "notificationType": "idle_prompt" }),
+        ));
+        assert!(matches!(
+            idle.as_slice(),
+            [Event::Blocked {
+                waiting_for: crate::core::WaitingFor::Idle,
+                ..
+            }]
+        ));
+
+        // A notification kind this map does not know says nothing, rather than
+        // guessing at a state.
+        assert!(
+            to_events(&payload(
+                "notification",
+                json!({ "notificationType": "shell_completed" })
+            ))
+            .is_empty()
+        );
+    }
+
+    /// **`permissionRequest` fires before anything has been decided.**
+    ///
+    /// It runs ahead of the rules engine, session approvals, auto-allow and
+    /// auto-deny — so it says a decision is *about to be taken*, not what it
+    /// was. Recording it as a block would mark every auto-allowed call as
+    /// waiting on a person, and that error runs in the alarming direction on
+    /// the one surface whose job is to be trusted about what is waiting.
+    #[test]
+    fn a_permission_about_to_be_decided_is_not_a_person_waiting() {
+        assert!(
+            to_events(&payload(
+                "permissionRequest",
+                json!({ "toolName": "bash", "toolArgs": { "command": "ls" } }),
+            ))
+            .is_empty(),
+            "a permission the vendor may auto-allow was recorded as somebody waiting"
+        );
+    }
+
+    /// **Every event Copilot documents is either mapped or silent on purpose.**
+    ///
+    /// The list is the vendor's, read from its hooks reference on 2026-09-21.
+    /// The failure this catches is the one that already happened: eleven of
+    /// fourteen mapped, the gap unnoticed, and the missing one was the event
+    /// the product is named for. A vendor adding an event is normal; nobody
+    /// noticing is the defect.
+    #[test]
+    fn every_event_the_vendor_documents_has_been_decided_about() {
+        // Mapped: it produces at least one event.
+        const MAPPED: &[&str] = &[
+            "sessionStart",
+            "sessionEnd",
+            "userPromptSubmitted",
+            "preToolUse",
+            "postToolUse",
+            "postToolUseFailure",
+            "agentStop",
+            "errorOccurred",
+            "subagentStart",
+            "subagentStop",
+            "notification",
+        ];
+        // Silent by decision, each with its reason in `to_events`.
+        const SILENT: &[&str] = &["permissionRequest", "preCompact", "userPromptTransformed"];
+
+        for e in MAPPED {
+            let v = match *e {
+                "notification" => json!({ "notificationType": "idle_prompt" }),
+                _ => json!({ "toolName": "bash", "agentName": "a", "prompt": "hi" }),
+            };
+            assert!(
+                !to_events(&payload(e, v)).is_empty(),
+                "`{e}` is listed as mapped and produces no event"
+            );
+        }
+        for e in SILENT {
+            assert!(
+                to_events(&payload(e, json!({ "toolName": "bash" }))).is_empty(),
+                "`{e}` is listed as silent by decision and produces an event"
+            );
+        }
+        assert_eq!(
+            MAPPED.len() + SILENT.len(),
+            14,
+            "Copilot documents fourteen hook events and this ledger accounts for {}. \
+             Read the vendor's hooks reference and decide about the difference — a vendor \
+             adding an event is normal, and nobody noticing is the defect this catches.",
+            MAPPED.len() + SILENT.len()
+        );
     }
 }

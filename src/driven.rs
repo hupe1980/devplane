@@ -105,6 +105,14 @@ async fn start(
                 source: Some("dispatch".into()),
                 model: None,
                 entrypoint: Some(format!("acp:{}", spec.id)),
+                // **Read, and there is nothing to find.** Devplane spawned this
+                // agent, so it knows the environment it was given, and a test
+                // asserts nothing in this tree ever sets the variable. A driven
+                // run's questions are durable `asks` rows that wait; the
+                // vendor's own dialog — which is what that clock closes — is not
+                // what asks here.
+                question_clock: None,
+                clock_read: true,
             },
             crate::core::RunHint {
                 cwd: Some(cwd.clone()),
@@ -1119,9 +1127,15 @@ pub(crate) async fn expire(
         )
         .await;
 
-    // `Source::Daemon`, because this is Devplane's own clock rather than
-    // anything the agent said — and a surface that reads the source has to be
-    // able to tell those apart.
+    // `Source::Daemon` says **which process observed this**, not whose clock it
+    // was: the sweep produced the event, rather than the agent reporting it, and
+    // a surface reading the source has to be able to tell those apart.
+    //
+    // The comment here used to say *because this is Devplane's own clock* — the
+    // reasoning of the hard-coded ten-minute refusal that was deleted with the
+    // clock itself. Devplane has no clock. The authority for this ending is the
+    // **project's** timer, it is on the decision row above with the duration and
+    // the file that set it, and it is deliberately not derivable from the source.
     let event = match ask.kind {
         crate::core::ask::Kind::Permission => Event::PermissionDecided {
             tool: String::new(),
@@ -1261,6 +1275,8 @@ async fn handle(
                 source: Some("acp".into()),
                 model: agent_name,
                 entrypoint: None,
+                question_clock: None,
+                clock_read: true,
             })
             .await;
             // The id the agent will answer `session/resume` on. It was being
@@ -1328,7 +1344,17 @@ async fn handle(
                     })
                     .await
                 }
-                _ => ingest(Event::ToolStarted { tool: label, input }).await,
+                // A driven agent speaks the protocol, which has no field for
+                // where a server's definition came from. Absent, which reads
+                // differently from a source nobody understood.
+                _ => {
+                    ingest(Event::ToolStarted {
+                        tool: label,
+                        input,
+                        server_source: None,
+                    })
+                    .await
+                }
             }
         }
 
@@ -1379,7 +1405,10 @@ async fn handle(
                 }
                 // The project asked to be asked. Same outcome as no rule at
                 // all — a person decides — and the rule is named in the log.
-                Verdict::Ask { .. } | Verdict::Undecided => {}
+                // `Unresolved` lands here too: a driven run's permission
+                // request is already on its way to a person, so the escalation
+                // has nowhere to go and the value is the recorded reason.
+                Verdict::Ask { .. } | Verdict::Unresolved { .. } | Verdict::Undecided => {}
             }
 
             // Nobody's rule covers it, so a human decides. Unlike an observed
@@ -1532,38 +1561,10 @@ async fn handle(
         }
 
         // Nobody answered and the call was cancelled, or the run ended under it.
-        // Recorded for the reason `PermissionExpired` is: the inbox has to stop
-        // offering an answer that can no longer be delivered.
+        // Recorded because the inbox has to stop offering an answer that can no
+        // longer be delivered.
         AcpEvent::QuestionCancelled { request_id } => {
             ingest(Event::QuestionEnded { request_id }).await;
-        }
-
-        // The request timed out inside the connection and was refused there.
-        // Recording it is what takes the item out of the inbox; without it the
-        // board went on offering a decision the session could no longer accept.
-        AcpEvent::PermissionExpired { request_id } => {
-            state
-                .record(
-                    crate::core::Decision::new(
-                        // A clock decided, and this row is how a person finds
-                        // that out later. It read `daemon` until 2026-09-19,
-                        // which spelled it the same way as Devplane running a
-                        // gate.
-                        crate::core::Authority::Timer,
-                        "agent:tool.use",
-                        request_id,
-                        "deny",
-                    )
-                    .because("nobody answered within ten minutes")
-                    .for_run(run),
-                )
-                .await;
-            ingest(Event::PermissionDecided {
-                tool: String::new(),
-                decision: "deny".into(),
-                by: "timeout".into(),
-            })
-            .await;
         }
 
         AcpEvent::Ended { error } => {

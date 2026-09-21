@@ -115,7 +115,9 @@ pub fn router(state: Shared) -> Router {
             "/healthz",
             get(|| async { concat!("ok ", env!("CARGO_PKG_VERSION")) }),
         )
-        .route("/", get(index))
+        .route("/api/rules", get(rules))
+        .route("/", get(asset))
+        .route("/{file}", get(asset))
         .with_state(state)
 }
 
@@ -231,65 +233,256 @@ macro_rules! guard {
 /// Deliberately unauthenticated: it is a static page that contains no data and
 /// cannot fetch any without the token the user's browser holds. Gating it would
 /// only mean the page could not render the message explaining that.
-/// The board.
-///
 /// The built interface, embedded at compile time by `build.rs`.
 ///
 /// `None` when no bundle was present at build time — a clean checkout, or a
-/// machine with no node. That is a value rather than a failure, because
-/// `cargo build` must work without the second toolchain.
-///
-/// **Nothing serves this yet, and that is the point.** The interface is
-/// switched in one change: `ui/legacy.html` is deleted in the same commit that
-/// routes this, so the two are never live together. Serving both would be a
-/// second layout the contract does not cover, kept in step by hand — which is
-/// the risk this feature refused rather than a temporary convenience.
+/// machine with no node. `cargo build` must work without the second toolchain,
+/// so that is a value rather than a failure here, and **a failure at runtime**:
+/// the binary says so on the one page a person would open. Falling back to
+/// something is how a release ships with no interface and nobody finds out.
 mod bundle {
     include!(concat!(env!("OUT_DIR"), "/ui_bundle.rs"));
 }
 
 pub use bundle::{Asset, BUNDLE};
 
-/// What the bundle would be served as, by extension.
+// **What the bundle is served as lives with the route that serves it.** There
+// was a `content_type_of` here — six lines mapping four extensions — beside a
+// bundle that is embedded in the binary and routed by nothing, so the rule was
+// stated in the one file that would have to read it and never read. It comes
+// back with the router (`#shell-2`), which is where it can be wrong in a way a
+// test notices.
+
+/// What a built file is served as.
 ///
-/// Held here rather than guessed from a crate, because the set is four entries
-/// and a wrong `Content-Type` on the one document a person reads over a tunnel
-/// is the failure this whole interface exists to avoid.
-pub fn content_type_of(path: &str) -> &'static str {
-    match path.rsplit('.').next() {
+/// **Beside the route that serves it**, which is where a wrong answer is
+/// something a test can catch. It lived here once as six lines next to a bundle
+/// nothing routed — a rule stated in the only file that would read it, and
+/// never read.
+///
+/// The list is short because the bundle is: Vite inlines every asset under
+/// 100 KB into the document, so in practice this is a page, a script and a
+/// stylesheet. An extension nobody enumerated is served as bytes rather than
+/// guessed at — a guessed `text/html` is how a font becomes a script.
+fn content_type_of(path: &str) -> &'static str {
+    match path.rsplit_once('.').map(|(_, e)| e) {
         Some("html") => "text/html; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
-        Some("svg") => "image/svg+xml",
         Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     }
 }
 
-/// Embedded, so the binary is the whole product and the page works on a laptop
-/// with no network. `DEVPLANE_UI` points at the file on disk instead, which is
-/// the difference between a one-second edit-reload loop and a rebuild plus a
-/// daemon restart for every line of CSS. Development only: it reads a file the
-/// user named, so it is opt-in by an environment variable rather than a
-/// setting, and it falls back to the embedded copy rather than failing.
-async fn index() -> impl IntoResponse {
-    const EMBEDDED: &str = include_str!("../ui/legacy.html");
-    let body = match std::env::var_os("DEVPLANE_UI") {
-        Some(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            tracing::warn!(path = ?path, error = %e, "DEVPLANE_UI is set and unreadable; serving the embedded page");
-            EMBEDDED.to_string()
-        }),
-        None => EMBEDDED.to_string(),
+/// The interface: the built bundle, embedded, from the one binary.
+///
+/// `DEVPLANE_UI` points at a built `dist/` directory on disk instead, which is
+/// the difference between a one-second reload and a rebuild plus a daemon
+/// restart for every line of CSS. Development only, opt-in by environment
+/// variable, and it falls back to the embedded copy rather than failing.
+async fn asset(uri: axum::http::Uri) -> impl IntoResponse {
+    // `/` is the document; everything else is a file beside it. Vite emits flat
+    // names by configuration — `app.js`, `index.css` — so there is no directory
+    // to walk and no `..` to defend against: a path either matches an embedded
+    // name exactly or it does not exist.
+    let want = match uri.path().trim_start_matches('/') {
+        "" => "index.html",
+        p => p,
+    };
+
+    if let Some(dir) = std::env::var_os("DEVPLANE_UI") {
+        let path = std::path::Path::new(&dir).join(want);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                return (
+                    [
+                        (axum::http::header::CONTENT_TYPE, content_type_of(want)),
+                        (axum::http::header::CACHE_CONTROL, "no-store"),
+                    ],
+                    bytes,
+                )
+                    .into_response();
+            }
+            Err(e) => tracing::warn!(
+                path = ?path, error = %e,
+                "DEVPLANE_UI is set and unreadable; serving the embedded interface"
+            ),
+        }
+    }
+
+    let Some(bundle) = BUNDLE else {
+        // **A built binary with no interface says so, on the page.** This is
+        // reachable only when somebody built without running the interface
+        // build, which the release pipeline is guarded against doing. Serving
+        // a blank page, or the API's 404 JSON, would send them looking at the
+        // daemon.
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            "<!doctype html><meta charset=utf-8><title>No interface</title>\
+             <p style=\"font:16px system-ui;max-width:60ch;margin:4rem auto\">This binary was \
+             built without its interface. The bundle is compiled in, so this is a build that \
+             skipped <code>npm run build</code> in <code>ui/</code> — not a setting. The API is \
+             unaffected and <code>devplane</code> on the command line works.",
+        )
+            .into_response();
+    };
+
+    let Some(found) = bundle.iter().find(|a| a.path == want) else {
+        return (StatusCode::NOT_FOUND, "no such file").into_response();
     };
     (
         [
-            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            // The page is the binary's own; a stale one is a debugging session
-            // spent on a bug that was fixed.
+            (
+                axum::http::header::CONTENT_TYPE,
+                content_type_of(found.path),
+            ),
+            // The interface is the binary's own; a stale one is a debugging
+            // session spent on a bug that was fixed.
             (axum::http::header::CACHE_CONTROL, "no-store"),
         ],
-        body,
+        found.bytes,
     )
+        .into_response()
+}
+
+/// Which repository is missing the rule.
+///
+/// **Reads, and only reads.** There is no companion route that writes one, and
+/// there will not be: an agent on this machine runs as the same user as the
+/// daemon and can read the bearer token, so a route that edited a permission
+/// file would be reachable by the party the file exists to bound. Writing into
+/// the vendor's own settings would be strictly worse — that is the file its
+/// enforcement reads. `tests/purity.rs` proves the absence over this source.
+///
+/// With no `rule`, the reverse question: what do the projects disagree about.
+async fn rules(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<RulesQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let projects: Vec<crate::core::Project> = {
+        let w = state.world.lock().await;
+        w.projects().cloned().collect()
+    };
+    let read: Vec<crate::core::rules::ProjectRules> = projects.iter().map(read_rules).collect();
+
+    let Some(raw) = q.rule.as_deref().map(str::trim).filter(|r| !r.is_empty()) else {
+        return Json(json!({
+            "asked": null,
+            "disagreements": crate::core::rules::disagreements(&read),
+            "projects": read.len(),
+            "wrote_nothing": crate::core::rules::WROTE_NOTHING,
+            "why_no_apply_to_all": crate::core::rules::WHY_NO_APPLY_TO_ALL,
+        }))
+        .into_response();
+    };
+
+    // The class decides which key the paste names, and a rule is written the
+    // same way in both lists — so `ask` is opt-in per request rather than
+    // guessed from the text.
+    let class = if q.ask {
+        crate::core::policy::Class::Ask
+    } else {
+        crate::core::policy::Class::Deny
+    };
+    let Some(wanted) = crate::core::Rule::parse(raw, class).filter(|r| !r.is_malformed()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("`{raw}` is not a rule this syntax can express"),
+                "hint": "a rule looks like `Bash(curl:*)`, `Read(./.env)` or `mcp__github(create_issue)`",
+            })),
+        )
+            .into_response();
+    };
+
+    Json(json!({
+        "asked": wanted.as_str(),
+        "rows": crate::core::rules::compare(&read, &wanted),
+        "wrote_nothing": crate::core::rules::WROTE_NOTHING,
+        "why_no_apply_to_all": crate::core::rules::WHY_NO_APPLY_TO_ALL,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct RulesQuery {
+    rule: Option<String>,
+    /// Ask rather than deny, which changes the key the paste names.
+    #[serde(default)]
+    ask: bool,
+}
+
+/// One project's two rule files, read from disk.
+///
+/// **A file that will not parse yields an error, never an empty list.** The
+/// vendor says a settings file that does not parse has *none* of its settings
+/// in effect, so a broken file is a third state whose fix is `devplane check`
+/// rather than a paste. The reader this replaced for the allow list —
+/// `vendor_allow_rules` — silently `continue`s past a parse failure, which is
+/// correct for counting overbroad grants and wrong here: it would report a
+/// project with a broken file as missing every rule.
+fn read_rules(p: &crate::core::Project) -> crate::core::rules::ProjectRules {
+    use crate::core::rules::RuleSet;
+
+    let cfg = p.root.join(crate::core::config::CONFIG_FILE);
+    let devplane = match crate::core::ProjectConfig::load(&p.root) {
+        Ok(c) => RuleSet {
+            file: cfg.display().to_string(),
+            deny: c.policy.never_auto.clone(),
+            ask: c.policy.always_ask.clone(),
+            error: None,
+        },
+        Err(e) => RuleSet {
+            file: cfg.display().to_string(),
+            error: Some(e.to_string()),
+            ..Default::default()
+        },
+    };
+
+    // `settings.local.json` is a person's own overrides beside the committed
+    // file, and the agent reads both. Reported as one set: the question is what
+    // the agent will refuse here, and answering it per file would make a rule
+    // in the local file read as a disagreement with the repository.
+    let mut agent = RuleSet {
+        file: p.root.join(".claude/settings.json").display().to_string(),
+        ..Default::default()
+    };
+    for rel in [".claude/settings.json", ".claude/settings.local.json"] {
+        let path = p.root.join(rel);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => {
+                for (key, into) in [("deny", &mut agent.deny), ("ask", &mut agent.ask)] {
+                    if let Some(list) = v
+                        .get("permissions")
+                        .and_then(|p| p.get(key))
+                        .and_then(|a| a.as_array())
+                    {
+                        into.extend(list.iter().filter_map(|r| r.as_str().map(str::to_string)));
+                    }
+                }
+            }
+            Err(e) => {
+                agent.error = Some(format!("{}: {e}", path.display()));
+                agent.deny.clear();
+                agent.ask.clear();
+                break;
+            }
+        }
+    }
+    crate::core::rules::ProjectRules {
+        project: p.name.clone(),
+        devplane,
+        agent,
+    }
 }
 
 /// Raises the editor window that owns a run, for the browser shell.
@@ -373,6 +566,34 @@ pub async fn record_decided(state: &Shared, env: crate::core::DecidedEnvelope) {
     let run = RunId::new(env.session.clone());
     let subject = env.subject.clone();
 
+    // **An escalation with no rule to name.** The matcher held a prohibition
+    // about what may run and could not read the command, so the call went to a
+    // person. Authority is `Daemon` rather than `Rule`: no rule decided, and
+    // this is not a decision taken *for* somebody — it is the opposite, which
+    // is why it must not appear in a filter for what was decided without them.
+    if let Some(why) = env.why.as_deref()
+        && env.rule.is_none()
+    {
+        let mut d = crate::core::Decision::new(
+            crate::core::Authority::Daemon,
+            "agent:tool.use",
+            subject.clone(),
+            &env.verdict,
+        )
+        .because(if env.late {
+            format!("{why} (filed late: no daemon was running)")
+        } else {
+            why.to_string()
+        })
+        .by_tool(env.tool.clone())
+        .from_server(env.server_source.clone())
+        .for_run(&run);
+        if let Some(at) = env.at {
+            d = d.at(at);
+        }
+        state.record(d).await;
+    }
+
     if let Some(rule) = env.rule.as_deref() {
         let mut d = crate::core::Decision::new(
             crate::core::Authority::Rule,
@@ -389,6 +610,7 @@ pub async fn record_decided(state: &Shared, env: crate::core::DecidedEnvelope) {
             rule.to_string()
         })
         .by_tool(env.tool.clone())
+        .from_server(env.server_source.clone())
         .for_run(&run);
         if let Some(at) = env.at {
             d = d.at(at);
@@ -687,8 +909,41 @@ struct BoardResponse {
     /// health: a stale forge poll and a broken configuration are the two ways a
     /// project goes quiet, and both were already tracked per project.
     coverage: Coverage,
+    /// **Which vendors this board can see at all.**
+    ///
+    /// The same obligation `coverage` carries, one level up: an empty board on
+    /// a machine running three Codex sessions is not reporting quiet, it is
+    /// reporting the limit of its own sight. `devplane ls` has always said *no
+    /// **Claude Code** sessions are running*; the board said *no agent session
+    /// is running on this machine*, which is a claim about the machine rather
+    /// than about what Devplane watches.
+    watching: crate::core::vendors::Watching,
+    /// **What can answer a question on this machine without the person.**
+    ///
+    /// Machine-wide rather than per run, because that is what the setting is.
+    /// It is here so the board and `devplane modes` print the **same sentence
+    /// composed in the same place** — the page renders nothing it computes, and
+    /// a second wording of *somebody else set a timer on your questions* is a
+    /// second thing that can be wrong.
+    ///
+    /// `None` where nothing is set, which is a different fact from a clock that
+    /// answers `never`; the line carries `answers_for_you` for that.
+    question_clock: Option<crate::core::clock::ClockLine>,
     /// The working set by default; everything when `?all=true`.
     runs: Vec<RunView>,
+    /// **The Works this machine knows about, named and nothing more.**
+    ///
+    /// Deliberately not `WorkView`: that carries the agent's claim, which costs
+    /// a transcript read per work, and this rides a poll every couple of
+    /// seconds. What a surface needs from the feed is *which Works exist and
+    /// what to call them*; everything heavier is fetched per id by the surface
+    /// that wants it.
+    ///
+    /// It was missing entirely until 2026-09-21, and the work surface read
+    /// `board.work` the whole time — so it rendered its empty case on every
+    /// machine, permanently, while looking like a surface that had nothing to
+    /// show.
+    work: Vec<WorkBrief>,
     projects: Vec<crate::core::Project>,
     /// Per project id: open issues, open pull requests, and how many of them
     /// are waiting on the person. Absent for a project with no forge.
@@ -860,9 +1115,26 @@ async fn board(
             projects: w.projects().count(),
             unreadable,
         },
+        watching: crate::core::vendors::watching(),
         summary,
         thresholds,
+        question_clock: crate::observe::connect::question_clock()
+            .as_ref()
+            .map(crate::core::clock::ClockLine::from),
         runs,
+        work: {
+            let works = state.works.lock().await;
+            let mut all: Vec<_> = works.values().collect();
+            // Newest first, which is the order every other list of these uses.
+            all.sort_by_key(|w| std::cmp::Reverse(w.updated_at));
+            all.iter()
+                .map(|w| WorkBrief {
+                    id: w.id.to_string(),
+                    title: w.title.clone(),
+                    phase: w.phase.as_str().to_string(),
+                })
+                .collect()
+        },
         projects: w.projects().cloned().collect(),
         forge: forge
             .into_iter()
@@ -884,6 +1156,13 @@ async fn board(
 struct WaitingRow {
     #[serde(flatten)]
     item: crate::core::AttentionItem,
+    /// **Raised since this person last read the inbox.**
+    ///
+    /// Decided by the daemon rather than by each surface, so the CLI and the
+    /// board cannot disagree about which rows are new. It is `false`
+    /// on a machine with no previous look: there is no boundary, so nothing is
+    /// on the far side of one.
+    new_to_you: bool,
     /// `None` when the item belongs to no project, or to one the world no
     /// longer has. Absent rather than an empty string: *no project* and *a
     /// project whose name we could not find* are both true silences, and
@@ -891,7 +1170,27 @@ struct WaitingRow {
     project_name: Option<String>,
 }
 
-async fn inbox(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+/// Whether this request is somebody **reading** the inbox.
+#[derive(serde::Deserialize, Default)]
+struct InboxQuery {
+    /// **The surface says so; the daemon does not guess.**
+    ///
+    /// A poll is not a look. The board fetches this every couple of seconds to
+    /// stay current, and advancing the boundary on every fetch would erase the
+    /// thing it exists to draw — the hairline would simply always read `0m` and
+    /// nothing would ever look wrong. So the mark moves only when the caller
+    /// asserts a person is reading: the CLI always, because running the command
+    /// put the output on somebody's screen; the board only when its inbox
+    /// surface becomes visible after being away.
+    #[serde(default)]
+    read: bool,
+}
+
+async fn inbox(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<InboxQuery>,
+) -> impl IntoResponse {
     guard!(state, headers);
     let names: std::collections::BTreeMap<_, _> = {
         let w = state.world.lock().await;
@@ -899,19 +1198,72 @@ async fn inbox(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect()
     };
-    let rows: Vec<WaitingRow> = state
-        .current_inbox()
-        .await
+    // **Read before the mark is advanced**, so the rows this response calls new
+    // are the ones that were new when somebody opened it.
+    let mark = state.store.last_look().await;
+
+    // **Inhibit, then fold, then render — and nothing is ever dropped.**
+    //
+    // Inhibition first, because a symptom counted on its cause is not a
+    // candidate for folding: folding it as well would count it twice and make
+    // the arithmetic that keeps this honest stop adding up.
+    //
+    // Both are pure functions over the ranked list, so the CLI and the board
+    // receive the same three collections and cannot fold differently.
+    let (kept, inhibited) = crate::core::attention::inhibit(state.current_inbox().await);
+    let (listed, folded) = crate::core::attention::fold(kept);
+
+    let rows: Vec<WaitingRow> = listed
         .into_iter()
         .map(|item| WaitingRow {
             project_name: item
                 .project_id
                 .as_ref()
                 .and_then(|id| names.get(id).cloned()),
+            new_to_you: crate::core::close::new_to_you(item.since, mark),
             item,
         })
         .collect();
-    Json(rows).into_response()
+
+    // **The close.** An empty list is where this product has the best thing it
+    // will ever have to say, and every other board in the category renders it as
+    // an absence. The daemon composes every sentence: a surface that turned
+    // these counts into prose would be the second place a day is worded, and the
+    // two would disagree within a week.
+    //
+    // **Empty means nothing was raised at all** — not merely that nothing is
+    // listed. A list whose every row was folded or counted on a cause still has
+    // things in it, and answering *Clear* there would be the close telling
+    // somebody the day was quiet because the surface tidied it.
+    let nothing_raised = rows.is_empty() && folded.is_empty() && inhibited.is_empty();
+    let close = state.close(nothing_raised).await;
+
+    // Recorded **after** the close is composed, so the boundary this response
+    // reports is the one that was true when somebody opened it — not zero.
+    if q.read {
+        let _ = state.store.mark_look(jiff::Timestamp::now()).await;
+        // **Folds are counted on a read, never on a poll.** The board fetches
+        // this every couple of seconds; stamping every render would measure
+        // polling and make the number meaningless — the same reasoning the
+        // boundary mark is built on.
+        let hidden: Vec<crate::core::AttentionId> = folded
+            .iter()
+            .flat_map(|f| f.ids.iter().cloned())
+            .chain(inhibited.iter().flat_map(|i| i.ids.iter().cloned()))
+            .collect();
+        let _ = state.store.mark_folded(&hidden).await;
+    }
+    Json(json!({
+        "items": rows,
+        // **Counted, never hidden.** Each row names its kind, its project and
+        // how many, and carries the ids behind it — a summary that could not be
+        // opened would be a cap wearing a feature's clothes.
+        "folded": folded,
+        // Symptoms counted on the row that explains them, keyed by that row.
+        "inhibited": inhibited,
+        "close": close,
+    }))
+    .into_response()
 }
 
 /// What the board could and could not see.
@@ -1208,6 +1560,9 @@ async fn explain(
         "call": q.call,
         "verdict": verdict.as_str(),
         "rule": verdict.rule(),
+        // Set only for `unresolved`, where there is no rule to name and this
+        // sentence is the whole of the answer.
+        "why": verdict.why(),
         // `before_the_tool_runs` was here too, and it was the same value under a
         // second name — a leftover from when this table could also grant, with a
         // comment explaining a difference that had stopped existing. A reader
@@ -1370,9 +1725,51 @@ async fn asks_index(State(state): State<Shared>, headers: HeaderMap) -> impl Int
     let open = state.store.open_asks().await.unwrap_or_default();
     let recent = state.store.asks(50).await.unwrap_or_default();
     let settled: Vec<_> = recent.into_iter().filter(|a| !a.is_open()).collect();
+    // **Questions nobody answered, from sessions Devplane only watches.** They
+    // are not `asks` rows: an `asks` row is answerable and these are over. They
+    // belong on this surface all the same, because the question it answers is
+    // *what has an agent asked me, and what became of it* — and *the agent gave
+    // up* is one of the answers.
+    let w = state.world.lock().await;
+    let mut abandoned: Vec<serde_json::Value> = w
+        .runs()
+        .flat_map(|r| {
+            r.abandoned_questions.iter().map(move |q| {
+                json!({
+                    "run": r.id.as_str(),
+                    "project": r.project_id.as_ref().map(|p| p.as_str()),
+                    "question": q.question,
+                    "options": q.options,
+                    "asked_at": q.asked_at.to_string(),
+                    "abandoned_at": q.abandoned_at.to_string(),
+                    "moved_on_to": q.moved_on_to,
+                    // The same vocabulary the durable asks use, because it is
+                    // the same fact: nobody answered.
+                    "authority": "nobody",
+                    "outcome": "nobody answered: the agent asked and moved on",
+                })
+            })
+        })
+        .collect();
+    abandoned.sort_by(|a, b| b["abandoned_at"].as_str().cmp(&a["abandoned_at"].as_str()));
+    // **Which vendors this can and cannot be seen for**, so an empty list never
+    // reads as *nothing was abandoned*. The derivation is Claude Code's hook
+    // events; no other vendor documents an equivalent, and saying so is the
+    // difference between a silence and a claim.
+    let mut blind: Vec<String> = w
+        .runs()
+        .filter(|r| r.state.is_live())
+        .map(|r| r.agent.clone())
+        .filter(|a| !a.eq_ignore_ascii_case("claude"))
+        .collect();
+    blind.sort();
+    blind.dedup();
+    drop(w);
     Json(json!({
         "open": open.iter().map(render_ask).collect::<Vec<_>>(),
         "settled": settled.iter().map(render_ask).collect::<Vec<_>>(),
+        "abandoned": abandoned,
+        "blind_to": blind,
     }))
     .into_response()
 }
@@ -1967,6 +2364,14 @@ async fn resume_work(
 ///
 /// Computed on demand and never stored: git already holds it, and a second copy
 /// is a second thing to keep true.
+/// A Work, named and nothing more — what a surface needs to offer a choice.
+#[derive(Debug, Clone, serde::Serialize)]
+struct WorkBrief {
+    id: String,
+    title: String,
+    phase: String,
+}
+
 async fn work_changes(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -2011,9 +2416,12 @@ async fn work_changes(
         },
         None => crate::git::base_branch(&dir).await,
     };
+    // **The structured set, and nothing else.** A rendered `html` field rode
+    // beside this for the page that is now deleted; the interface renders the
+    // parsed shape, because a diff is the worst place in the product to insert
+    // markup a server composed.
     let set = crate::git::change_set(&dir, &base).await;
-    let html = crate::core::diff::render(&set);
-    Json(json!({ "changes": set, "html": html })).into_response()
+    Json(json!({ "changes": set })).into_response()
 }
 
 async fn snooze_work(
@@ -2145,6 +2553,12 @@ async fn work_certificate(
         "finished": cert.is_finished(),
         "markdown": cert.markdown_bounded(),
         "statement": cert.json(),
+        // **Every sentence already written**, so the page renders and computes
+        // nothing. The certificate is the one artifact here whose value is that
+        // a reviewer can re-derive it; a surface that worded its own version
+        // would be a second description of the same completion with nothing
+        // able to notice they had drifted.
+        "page": cert.page(),
     }))
     .into_response()
 }
@@ -2516,18 +2930,26 @@ async fn modes(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
     // *which projects are deciding without you* — is the same errand one step
     // further out.
     let clock = crate::observe::connect::question_clock();
+    // **How many sessions this feature can actually speak for.** A session that
+    // started before `devplane connect` has no environment reading, and the
+    // coverage of a surface is a fact about it rather than something a reader
+    // should assume — the same reason the roster reports *not probed*.
+    let (read, unread) =
+        projects
+            .iter()
+            .flat_map(|p| p.sessions.iter())
+            .fold((0usize, 0usize), |(r, u), m| match m.clock_read {
+                true => (r + 1, u),
+                false => (r, u + 1),
+            });
     Json(json!({
         "projects": projects,
         "sessions": sessions,
         "unsupervised": projects.iter().map(|p| p.unsupervised).sum::<usize>(),
         "unknown": projects.iter().map(|p| p.unknown).sum::<usize>(),
-        "question_clock": clock.as_ref().map(|c| json!({
-            "after": c.after,
-            "source": c.source.as_str(),
-            "file": c.file,
-            "says": c.says(),
-            "chosen_by_the_person": c.chosen_by_the_person(),
-        })),
+        "question_clock": clock.as_ref().map(crate::core::clock::ClockLine::from),
+        "clock_read": read,
+        "clock_unread": unread,
     }))
     .into_response()
 }
@@ -3030,6 +3452,14 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
         "gate": {
             "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
             "sessions_reporting_a_version": reporting,
+        },
+        // How many live sessions Devplane could read the environment of. Only
+        // the `SessionStart` hook can, because only it runs as a child of the
+        // session, so this is the coverage of the question-clock reading rather
+        // than a count of clocks.
+        "modes": {
+            "clock_read": w.runs().filter(|r| r.state.is_live() && r.question_clock_read.is_some()).count(),
+            "clock_unread": w.runs().filter(|r| r.state.is_live() && r.question_clock_read.is_none()).count(),
         },
         "leaked_agents": leaked,
         "pid": std::process::id(),

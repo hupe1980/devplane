@@ -29,6 +29,9 @@ use serde::{Deserialize, Serialize};
 pub const MAX_FILES: usize = 60;
 pub const MAX_LINES: usize = 4_000;
 
+// **Nothing here renders.** The change set is data; the interface renders it and
+// escapes by construction, which is why this module has no HTML and no escaper.
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -232,86 +235,6 @@ fn path_of(rest: &str) -> String {
     }
 }
 
-/// HTML-escapes one value. The only way text leaves this module.
-fn esc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// The change as HTML the page inserts.
-///
-/// Line classes and nothing else — no syntax highlighting, no language
-/// detection, no collapsing. The page supplies the colours.
-pub fn render(set: &ChangeSet) -> String {
-    if set.is_empty() {
-        return "<div class=\"dnone\">This branch changed nothing. \
-                A gate that passed over no change has verified nothing.</div>"
-            .to_string();
-    }
-    let mut out = String::new();
-    for f in &set.files {
-        let (verb, extra) = match &f.status {
-            Status::Added => ("added", String::new()),
-            Status::Deleted => ("deleted", String::new()),
-            Status::Modified => ("modified", String::new()),
-            Status::Renamed { from } => ("renamed", format!(" from {}", esc(from))),
-        };
-        out.push_str(&format!(
-            "<div class=\"dfile\"><span class=\"dpath\">{}</span>\
-             <span class=\"dstat\">{verb}{extra} · +{} −{}</span></div>",
-            esc(&f.path),
-            f.added,
-            f.removed
-        ));
-        match &f.body {
-            Body::Binary { bytes } => out.push_str(&format!(
-                "<div class=\"dnote\">binary{}</div>",
-                bytes.map(|b| format!(", {b} bytes")).unwrap_or_default()
-            )),
-            Body::Skipped { why } => {
-                out.push_str(&format!("<div class=\"dnote\">{}</div>", esc(why)))
-            }
-            Body::Hunks(hunks) => {
-                for h in hunks {
-                    out.push_str(&format!("<div class=\"dhunk\">{}</div>", esc(&h.header)));
-                    out.push_str("<pre class=\"dbody\">");
-                    for (kind, line) in &h.lines {
-                        let (cls, sign) = match kind {
-                            Kind::Added => ("da", "+"),
-                            Kind::Removed => ("dr", "-"),
-                            Kind::Context => ("dc", " "),
-                        };
-                        out.push_str(&format!(
-                            "<span class=\"{cls}\">{sign}{}</span>\n",
-                            esc(line)
-                        ));
-                    }
-                    out.push_str("</pre>");
-                }
-            }
-        }
-    }
-    if let Some(t) = &set.truncated {
-        out.push_str(&format!(
-            "<div class=\"dnote\">{} of {} files shown. The rest: <code>{}</code></div>",
-            t.files_shown,
-            t.files_total,
-            esc(&t.command)
-        ));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,11 +318,39 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
 -<script>alert('old')</script>
 +<script>alert(\"new\")</script>
 ";
-        let html = render(&parse("main", hostile, "git diff"));
-        assert!(!html.contains("<script>"), "{html}");
-        assert!(!html.contains("<img src=x"), "{html}");
-        assert!(html.contains("&lt;script&gt;"));
-        assert!(html.contains("&quot;new&quot;") || html.contains("&#39;old&#39;"));
+        // **The parser's obligation is to carry it verbatim, not to escape
+        // it.** Escaping was the renderer's job and the renderer is deleted:
+        // the interface renders the structured set through Svelte, which
+        // escapes by construction, and `ui/tests/render.ts` asserts that no
+        // surface reaches for `{@html}`.
+        //
+        // What would be wrong here is *interpretation* — stripping a tag,
+        // collapsing an entity, deciding a line is markup. A parser that
+        // sanitises has changed the diff it was asked to report, and a reviewer
+        // approving the sanitised version is approving something that was never
+        // written.
+        let set = parse("main", hostile, "git diff");
+        let f = &set.files[0];
+        assert_eq!(
+            f.path, "<img src=x onerror=alert(1)>.rs",
+            "the path was altered"
+        );
+        let Body::Hunks(hunks) = &f.body else {
+            panic!("expected hunks");
+        };
+        let lines: Vec<&str> = hunks[0].lines.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("<script>alert('old')</script>")),
+            "the removed line was not carried verbatim: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(r#"<script>alert("new")</script>"#)),
+            "the added line was not carried verbatim: {lines:?}"
+        );
     }
 
     /// A change too large reports what is missing, and how to see it.
@@ -419,21 +370,20 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
         assert_eq!(t.files_shown, MAX_FILES);
         assert_eq!(t.files_total, MAX_FILES + 5);
         assert!(t.command.contains("git diff"), "and how to see the rest");
-        let html = render(&set);
-        assert!(html.contains("of"), "the count is on the page: {html}");
-        assert!(html.contains("git diff"));
     }
 
     /// No change at all is a finding, not a blank.
     #[test]
     fn a_branch_that_changed_nothing_says_that_in_words() {
         let set = parse("main", "", "git diff");
+        // **The finding is that the set is empty and known to be**, not that a
+        // particular sentence exists: the sentence moved to the surface with
+        // the renderer, and `ui/tests/render.ts` asserts a branch that changed
+        // nothing renders as a finding rather than as an empty state.
         assert!(set.is_empty());
-        assert!(set.truncated.is_none());
-        let html = render(&set);
         assert!(
-            html.contains("has verified nothing"),
-            "a gate that passed over no change is worth a sentence: {html}"
+            set.truncated.is_none(),
+            "empty is not truncated, which is a different claim"
         );
     }
 
@@ -445,77 +395,6 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
         // rather than from the raw text.
         let set = parse("main", SAMPLE, "git diff");
         assert_eq!(set.totals(), (3, 2));
-    }
-}
-
-/// Every edge case gets its own sentence.
-///
-/// The failure this guards against is not a crash — it is four different
-/// situations rendering as the same blank region, so a reviewer reads *nothing
-/// changed* where the truth was *we chose not to show you*. Walked once by hand
-/// against a real repository; this is the part of that walk a machine can
-/// repeat.
-#[cfg(test)]
-mod sc004 {
-    use super::*;
-
-    fn one(body: Body) -> String {
-        render(&ChangeSet {
-            base: "main".into(),
-            files: vec![FileChange {
-                path: "asset.bin".into(),
-                status: Status::Modified,
-                added: 0,
-                removed: 0,
-                body,
-            }],
-            truncated: None,
-        })
-    }
-
-    #[test]
-    fn each_edge_case_reads_differently() {
-        let empty = render(&ChangeSet {
-            base: "main".into(),
-            files: Vec::new(),
-            truncated: None,
-        });
-        let binary = one(Body::Binary { bytes: None });
-        let sized = one(Body::Binary {
-            bytes: Some(4_194_304),
-        });
-        let skipped = one(Body::Skipped {
-            why: "too large to render".into(),
-        });
-        let mut truncated = ChangeSet {
-            base: "main".into(),
-            files: vec![FileChange {
-                path: "asset.bin".into(),
-                status: Status::Modified,
-                added: 0,
-                removed: 0,
-                body: Body::Binary { bytes: None },
-            }],
-            truncated: Some(Truncation {
-                files_shown: 60,
-                files_total: 312,
-                command: "git diff main...HEAD".into(),
-            }),
-        };
-        let more = render(&truncated);
-        truncated.truncated = None;
-
-        let all = [&empty, &binary, &sized, &skipped, &more];
-        for (i, a) in all.iter().enumerate() {
-            for b in all.iter().skip(i + 1) {
-                assert_ne!(a, b, "two edge cases render the same");
-            }
-        }
-        // And each says the thing it is about, not merely something different.
-        assert!(empty.contains("verified nothing"));
-        assert!(sized.contains("4194304 bytes"), "{sized}");
-        assert!(skipped.contains("too large to render"));
-        assert!(more.contains("60 of 312") && more.contains("git diff main...HEAD"));
     }
 }
 
@@ -561,16 +440,15 @@ mod sc003 {
         let t = std::time::Instant::now();
         let set = super::parse("main", &text, "git diff main...HEAD");
         let parsed = t.elapsed();
-        let t = std::time::Instant::now();
-        let html = super::render(&set);
-        let rendered = t.elapsed();
-
         let (a, r) = set.totals();
         assert!(a + r >= 500, "the sample is the size the criterion names");
+        // **Parse time only, since the renderer is gone.** What the interface
+        // does with the set is measured where the interface is measured; what
+        // this file owes is that reading a large diff off `git` is not itself
+        // the slow part.
         println!(
-            "diff budget: {} files, +{a}/-{r} lines · parse {parsed:?} · render {rendered:?} · {} KB of HTML",
-            set.files.len(),
-            html.len() / 1024
+            "diff budget: {} files, +{a}/-{r} lines · parse {parsed:?}",
+            set.files.len()
         );
     }
 }

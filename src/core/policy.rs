@@ -12,6 +12,13 @@
 //! The rule syntax is Claude Code's, so a prohibition can be moved between the
 //! two files by cutting and pasting it — the four specifier shapes, the four
 //! path anchors, the MCP prefixes, and the deny-side readings.
+//!
+//! **The syntax is shared; the reach is not.** A rule spelled the same way is
+//! read here at least as widely as the vendor reads it and sometimes more —
+//! through `sudo` and `env`, past an absolute program path — because Devplane
+//! can only refuse and defer, so a broader reading costs a prompt where the
+//! vendor's would have cost a grant. What a rule means never *narrows* in the
+//! move, which is the property that makes the paste safe.
 //! <https://hupe1980.github.io/devplane/docs/permissions/> is the reference.
 //!
 //! Two properties matter more than expressiveness:
@@ -22,6 +29,11 @@
 //! * **A rule that cannot work says so.** [`Rule::problems`] reports the
 //!   spellings Claude Code skips on load, because a deny rule that silently
 //!   matches nothing reads as protection and is none.
+//! * **And a call that cannot be read says so too.** Where a prohibition about
+//!   this tool is in force and the command line hides what runs —
+//!   `$(echo rm) -rf /`, `sh -c "…"`, `eval "…"` — the answer is
+//!   [`Verdict::Unresolved`] rather than silence. *No rule matched* and *nobody
+//!   looked* are different facts and used to be the same answer.
 
 use crate::core::command::Access;
 use serde::{Deserialize, Serialize};
@@ -68,6 +80,22 @@ pub enum Verdict {
     /// one is a decision the project wrote down, and the audit log should say
     /// so rather than implying nobody had an opinion.
     Ask { rule: String },
+    /// **Nothing matched, and nothing could have.** The rule set has a
+    /// prohibition about what may run in this tool, and the command line hides
+    /// what runs behind something this matcher cannot read — a program name the
+    /// shell builds, an interpreter given code on its command line or on its
+    /// input, a `find` that execs.
+    ///
+    /// Distinct from `Undecided`, and the distinction is the whole of why this
+    /// variant exists. `Undecided` means *the rules were consulted and none of
+    /// them spoke for this call*. This means *nobody looked*, and answering the
+    /// two the same way is how `never_auto = ["Bash(rm *)"]` used to let
+    /// `$(echo rm) -rf /` past without a word.
+    ///
+    /// It is answered to the provider as **ask**. Devplane still refuses to
+    /// approve and still refuses to guess; what it will not do any more is stay
+    /// quiet about a call its own rules were written to catch.
+    Unresolved { why: String },
     /// No rule matched. The provider's own dialog decides, and the request
     /// becomes an inbox item.
     Undecided,
@@ -77,15 +105,27 @@ impl Verdict {
     pub fn rule(&self) -> Option<&str> {
         match self {
             Verdict::Deny { rule } | Verdict::Ask { rule } => Some(rule),
-            Verdict::Undecided => None,
+            Verdict::Unresolved { .. } | Verdict::Undecided => None,
         }
     }
     pub fn as_str(&self) -> &'static str {
         match self {
             Verdict::Deny { .. } => "deny",
             Verdict::Ask { .. } => "ask",
+            Verdict::Unresolved { .. } => "unresolved",
             Verdict::Undecided => "undecided",
         }
+    }
+    /// Why the matcher could not decide, when that is the answer.
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            Verdict::Unresolved { why } => Some(why),
+            _ => None,
+        }
+    }
+    /// Whether this verdict puts the call in front of a person.
+    pub fn asks(&self) -> bool {
+        matches!(self, Verdict::Ask { .. } | Verdict::Unresolved { .. })
     }
 }
 
@@ -916,11 +956,30 @@ impl Rule {
         if self.class.is_restrictive() {
             // The whole line too: a rule may have been written against the
             // literal text, and a deny that matches more is the safe direction.
+            //
+            // **Each part is tried in four forms, and the last two are
+            // deny-side only.** As written and stripped, which `one` does; with
+            // the transparent wrappers removed, so `sudo rm -rf /` meets
+            // `Bash(rm *)`; and with an absolute program reduced to its file
+            // name, so `/bin/rm -rf /` meets it too. Claude Code does neither
+            // of the last two, and this module agreed with it until the day
+            // approving was deleted — after which the only thing a broader
+            // match can do is refuse more.
+            let one_resolved = |text: &str| {
+                if one(text, true) {
+                    return true;
+                }
+                let bare = crate::core::command::strip_transparent(text);
+                if bare != text && one(&bare, true) {
+                    return true;
+                }
+                crate::core::command::basename_program(&bare).is_some_and(|b| one(&b, true))
+            };
             let hits = |text: &str| {
-                one(text, true)
+                one_resolved(text)
                     || crate::core::command::nested_commands(text)
                         .iter()
-                        .any(|c| one(c, true))
+                        .any(|c| one_resolved(c))
             };
             if hits(command) {
                 return true;
@@ -1070,6 +1129,19 @@ impl Rule {
         // command nobody writes by hand and closes a prohibition that silently
         // did not fire.
         if restrictive && targets.truncated {
+            return true;
+        }
+        // **Writers the vendor's table does not carry.** `cp`'s destination,
+        // `truncate`, `dd of=`, `install`, `rsync` and `ln` reach a protected
+        // file through a command a keyword filter did not think of — the fifth
+        // published shell-guard bypass class. Restrictive side only: mirroring
+        // the vendor here is what let `cp /tmp/a secrets/k` past a rule that
+        // stopped `tee secrets/k`.
+        if restrictive
+            && crate::core::command::extra_write_targets(&command)
+                .iter()
+                .any(|t| p.matches(ctx, Path::new(t), self.class))
+        {
             return true;
         }
         for t in targets {
@@ -2393,7 +2465,42 @@ impl Policy {
                 rule: r.raw.clone(),
             };
         }
+        // **Nothing matched. Ask whether anything could have.**
+        //
+        // Only for a tool whose rules are about *what runs*, and only when this
+        // rule set actually has one: a project with no `Bash(…)` prohibition
+        // has said nothing about what may run, so an unreadable command line is
+        // not its business and asking about it would be noise. The literature
+        // is explicit that escalating everything lets more through than
+        // escalating most of it, so the trigger is scoped to the rules somebody
+        // wrote.
+        if is_command_tool(tool)
+            && self.constrains(tool)
+            && let Some(content) = rule_content(tool, input)
+            && let Some(why) = crate::core::command::undecidable(&content)
+        {
+            return Verdict::Unresolved { why };
+        }
         Verdict::Undecided
+    }
+
+    /// Whether any prohibition here constrains what this shell tool may do.
+    ///
+    /// Two kinds count, because both are walked past by the same trick. A
+    /// `Bash(rm *)` names a program; a `Read(.env)` names a file a shell command
+    /// may not reach, and `shell_path_matches` is what makes `cat .env` meet it.
+    /// `sh -c "cat .env"` hides the second exactly as `sh -c "rm -rf /"` hides
+    /// the first.
+    ///
+    /// `Spec::Any` is deliberately not counted: a bare `Bash` rule matches every
+    /// call, so it would have answered above, and reaching here with one means
+    /// the tool did not apply.
+    fn constrains(&self, tool: &str) -> bool {
+        self.deny.iter().chain(&self.ask).any(|r| match &r.spec {
+            Spec::Command { .. } => r.command_tool_applies(tool),
+            Spec::Path(_) => is_shell(tool),
+            _ => false,
+        })
     }
 
     /// Every rule in this policy that cannot do what it says.
@@ -3989,6 +4096,197 @@ mod tests {
         ));
     }
 
+    // -- the deny side resolves, and asks when it cannot ------------------
+    //
+    // Every case below was measured against the shipped binary before the
+    // behaviour changed, with `never_auto = ["Bash(rm *)"]` set. The first
+    // group was silently allowed; the second produced no answer at all.
+
+    fn rm_rule() -> Policy {
+        Policy::rules(&["Bash(rm *)".into()], &[])
+    }
+
+    #[test]
+    fn a_prohibition_reaches_through_the_wrappers_that_run_it() {
+        for line in [
+            "rm -rf /tmp/x",
+            "r''m -rf /tmp/x",
+            "sudo rm -rf /tmp/x",
+            "sudo -u root rm -rf /tmp/x",
+            "doas rm -rf /tmp/x",
+            "exec rm -rf /tmp/x",
+            "env FOO=1 rm -rf /tmp/x",
+            "env -C /tmp rm -rf /tmp/x",
+            "/bin/rm -rf /tmp/x",
+            "sudo -u root /usr/bin/rm -rf /tmp/x",
+            "watch rm -rf /tmp/x",
+            "setsid rm -rf /tmp/x",
+            "nohup rm -rf /tmp/x",
+            "timeout 5 rm -rf /tmp/x",
+            "ls && sudo rm -rf /tmp/x",
+        ] {
+            assert!(
+                matches!(
+                    rm_rule().restrictive(&ctx(), "Bash", &json!({ "command": line })),
+                    Verdict::Deny { .. }
+                ),
+                "`{line}` walked past Bash(rm *)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_command_the_matcher_cannot_read_goes_to_a_person() {
+        for line in [
+            "rm$IFS-rf /tmp/x",
+            "$(echo rm) -rf /tmp/x",
+            "`echo rm` -rf /tmp/x",
+            "eval \"rm -rf /tmp/x\"",
+            "sh -c \"rm -rf /tmp/x\"",
+            "bash -c 'rm -rf /tmp/x'",
+            "python -c \"import os\"",
+            "echo cm0= | base64 -d | sh",
+            "find . -delete",
+            "find . -exec rm {} +",
+        ] {
+            let v = rm_rule().restrictive(&ctx(), "Bash", &json!({ "command": line }));
+            assert!(
+                matches!(v, Verdict::Unresolved { .. }),
+                "`{line}` answered {v:?} instead of asking"
+            );
+            // The sentence is the whole of the accounting: an escalation names
+            // no rule, so if it cannot say why it says nothing useful at all.
+            assert!(v.why().is_some_and(|w| !w.is_empty()), "{line}: no reason");
+            assert!(v.rule().is_none(), "{line}: credited a rule it did not use");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_command_is_still_ordinary() {
+        // The inverted-U result in the literature is the reason this test
+        // exists beside the one above: escalating everything lets more through
+        // than escalating most of it, so over-firing here is a defect and not
+        // an excess of caution.
+        for line in [
+            "ls -la",
+            "pnpm test && echo ok",
+            "echo \"$(date)\"",
+            "python manage.py migrate",
+            "git commit -m \"it's fine\"",
+            "cat README.md | head -n 5",
+            "node build.js",
+        ] {
+            let v = rm_rule().restrictive(&ctx(), "Bash", &json!({ "command": line }));
+            assert_eq!(v, Verdict::Undecided, "`{line}` was escalated");
+        }
+    }
+
+    #[test]
+    fn a_writer_the_vendor_does_not_recognise_still_meets_an_edit_deny() {
+        // The fifth published shell-guard bypass class: reaching a protected
+        // file through a command a keyword filter did not think of. Each of
+        // these was measured going through `Edit(secrets/**)` while `tee` and
+        // `echo x > …` beside them were refused.
+        let p = Policy::rules(&["Edit(secrets/**)".into()], &[]);
+        for line in [
+            "cp /tmp/a secrets/k.txt",
+            "truncate -s 0 secrets/k.txt",
+            "dd if=/dev/zero of=secrets/k.txt",
+            "install -m 600 /tmp/a secrets/k.txt",
+            "rsync /tmp/a secrets/k.txt",
+            "ln -s /tmp/a secrets/k.txt",
+            "sudo cp /tmp/a secrets/k.txt",
+            "ls && cp /tmp/a secrets/k.txt",
+        ] {
+            assert!(
+                matches!(
+                    p.restrictive(&ctx(), "Bash", &json!({ "command": line })),
+                    Verdict::Deny { .. }
+                ),
+                "`{line}` walked past Edit(secrets/**)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_is_not_a_destination() {
+        // Direction matters: copying *out of* a protected directory is a read,
+        // not an edit, and an `Edit` rule must not claim it — the audit row
+        // would then name a rule that is about something else.
+        let edit = Policy::rules(&["Edit(secrets/**)".into()], &[]);
+        assert_eq!(
+            edit.restrictive(
+                &ctx(),
+                "Bash",
+                &json!({ "command": "cp secrets/k.txt /tmp/b" })
+            ),
+            Verdict::Undecided
+        );
+        assert_eq!(
+            edit.restrictive(&ctx(), "Bash", &json!({ "command": "cp /tmp/a /tmp/b" })),
+            Verdict::Undecided
+        );
+        // And the read rule does claim it.
+        let read = Policy::rules(&["Read(secrets/**)".into()], &[]);
+        assert!(matches!(
+            read.restrictive(
+                &ctx(),
+                "Bash",
+                &json!({ "command": "cp secrets/k.txt /tmp/b" })
+            ),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn a_path_rule_is_a_prohibition_about_this_shell_too() {
+        // `Read(.env)` reaches a shell command through its operands, so
+        // `cat .env` meets it — and `sh -c "cat .env"` hides the operand the
+        // same way `sh -c "rm -rf /"` hides the program.
+        let paths = Policy::rules(&["Read(.env)".into()], &[]);
+        assert!(matches!(
+            paths.restrictive(&ctx(), "Bash", &json!({ "command": "cat .env" })),
+            Verdict::Deny { .. }
+        ));
+        assert!(matches!(
+            paths.restrictive(&ctx(), "Bash", &json!({ "command": "sh -c \"cat .env\"" })),
+            Verdict::Unresolved { .. }
+        ));
+        assert_eq!(
+            paths.restrictive(&ctx(), "Bash", &json!({ "command": "ls -la" })),
+            Verdict::Undecided
+        );
+    }
+
+    #[test]
+    fn nothing_is_escalated_where_no_rule_speaks_about_this_tool() {
+        // A policy whose only rule is about a *different* tool has said nothing
+        // about what this shell may do.
+        let elsewhere = Policy::rules(&["WebFetch(domain:example.com)".into()], &[]);
+        let v = elsewhere.restrictive(&ctx(), "Bash", &json!({ "command": "eval \"rm -rf /\"" }));
+        assert_eq!(v, Verdict::Undecided);
+
+        // And a bare `Bash` rule answers before this ever runs.
+        let bare = Policy::rules(&["Bash".into()], &[]);
+        assert!(matches!(
+            bare.restrictive(&ctx(), "Bash", &json!({ "command": "eval \"x\"" })),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn a_named_rule_always_outranks_an_unreadable_line() {
+        // `sudo eval …` is both denied (it reaches `rm` through `sudo`) and
+        // unreadable (`eval`). A verdict that named no rule here would lose the
+        // only fact the audit log can check.
+        let v = rm_rule().restrictive(
+            &ctx(),
+            "Bash",
+            &json!({ "command": "rm -rf /tmp/x && eval \"y\"" }),
+        );
+        assert!(matches!(v, Verdict::Deny { .. }), "{v:?}");
+    }
+
     fn ctx() -> Context<'static> {
         Context {
             cwd: Path::new("/repo"),
@@ -4824,8 +5122,10 @@ mod tests {
             let alone = match &verdict {
                 Verdict::Deny { .. } => Policy::rules(&[named.to_string()], &[]),
                 Verdict::Ask { .. } => Policy::rules(&[], &[named.to_string()]),
-                // Nothing credits a rule for an undecided call.
-                Verdict::Undecided => continue,
+                // Nothing credits a rule for a call no rule answered — and
+                // `Unresolved` never names one, so `verdict.rule()` has already
+                // sent it past this loop.
+                Verdict::Unresolved { .. } | Verdict::Undecided => continue,
             };
             assert_eq!(
                 alone.restrictive(&ctx(), tool, input),
@@ -4851,6 +5151,41 @@ mod tests {
                 ),
                 "{cmd} reads .env"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod provenance_refusal {
+    /// **No verdict may read where a server came from.**
+    ///
+    /// Written while the field was fresh in the payload, because that is when
+    /// the convenience is tempting: `mcp_server.source` is now on the hook
+    /// payload, in the recorded call and in the decision row, and it is one line
+    /// from being a rule about which provenances are acceptable. Deciding that
+    /// is a judgement the owner makes in their own settings file; a product that
+    /// graded them would be putting a grade in front of exactly the case that
+    /// needs a person.
+    ///
+    /// An absence check rather than a behaviour, which is the only honest shape:
+    /// the property is that a field is *not* read, and the test has to fail when
+    /// somebody reasonably adds the branch.
+    #[test]
+    fn the_matcher_never_reads_where_a_server_came_from() {
+        for (name, src) in [
+            ("policy.rs", include_str!("policy.rs")),
+            ("policy_cache.rs", include_str!("policy_cache.rs")),
+        ] {
+            // The test module itself names the field, so only the part of the
+            // file above `#[cfg(test)]` is the matcher.
+            let impl_only = src.split("#[cfg(test)]").next().unwrap_or(src);
+            for forbidden in ["mcp_server", "server_source"] {
+                assert!(
+                    !impl_only.contains(forbidden),
+                    "`{name}` names `{forbidden}`. Where a server came from is \
+                     recorded and reported; it may not decide a call."
+                );
+            }
         }
     }
 }

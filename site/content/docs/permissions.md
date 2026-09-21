@@ -102,10 +102,11 @@ variable.
 
 > [!WARNING]
 > A `Bash` rule matches the text the agent writes, and it is **not a security boundary around the
-> program**. `Bash(rm *)` stops `rm -rf build/`; it does not stop `/bin/rm -rf build/` or
-> `bash -c 'rm -rf build/'`. That is Claude Code's behaviour and Devplane mirrors it rather than
-> inventing a stricter rule that would refuse calls your own settings allow. For a boundary that does
-> not depend on command text, use a sandbox — this layer is accountability, not containment.
+> program**. It reads the line; it does not run it. `Bash(rm *)` stops `rm -rf build/`,
+> `sudo rm -rf build/` and `/bin/rm -rf build/`, and it puts `bash -c 'rm -rf build/'` in front of you
+> because it cannot tell. What no matcher can do is follow a program that decides at run time what to
+> execute. For a boundary that does not depend on command text, use a sandbox — this layer is
+> accountability, not containment.
 
 ### Paths
 
@@ -309,13 +310,73 @@ gate
 It is a fact with a date, not a warning: Devplane only prohibits and defers, and being **stricter**
 than your agent needs no agreement from it. There is nothing to keep in step.
 
-## The one place Devplane is stricter than Claude Code, on purpose
+## Where Devplane is stricter than Claude Code, on purpose
 
-`eval`, `env`, `sudo`, `doas` and `exec` take a command and run it under another name. Claude Code
-treats what they are handed as opaque text; Devplane looks through it, so
-`never_auto = ["Read(.env)"]` also stops `eval "cat .env"`.
+Devplane cannot approve anything — there is no allow list, and no rule here can switch a permission
+check off. So the only direction it can be wrong in is *towards you*, and being stricter than your
+agent costs a prompt rather than a grant. Three places use that.
 
-The cost is a prompt, never a refusal: you are asked, rather than the call being blocked.
+**It looks through the wrappers that run something else.** `sudo`, `doas`, `exec`, `env`, `watch`,
+`setsid`, `ionice` and `flock` take a command and run it under another user, environment or process
+image. Claude Code treats what follows them as a different command, so `Bash(rm *)` does not cover
+`sudo rm -rf /` there. Here it does.
+
+**It matches the program's name as well as its path.** `Bash(rm *)` covers `/bin/rm -rf /`,
+`/usr/bin/rm -rf /` and `./rm -rf /`. Claude Code matches the word as written, so a rule naming `rm`
+does not cover `/bin/rm`.
+
+**It knows five more writers.** A path rule reaches the files a command names, and Claude Code's set
+does not include the destination of `cp`, `install`, `rsync` or `ln`, the operands of `truncate`, or
+`dd`'s `of=`. Devplane counts all of them, so `never_auto = ["Edit(secrets/**)"]` refuses
+`tee secrets/k`, `echo x > secrets/k` and `cp /tmp/a secrets/k` alike. Direction is kept:
+`cp secrets/k /tmp/b` reads the file and is `Read(…)` business, not `Edit(…)`.
+
+**And it asks when it cannot read the line at all.** That one has its own section below.
+
+Each of these only ever adds a prompt or a refusal. None of them can make a call go through that your
+agent's own settings would have stopped.
+
+## When Devplane cannot read the command, it asks
+
+A prohibition is only worth writing if it fires. Some command lines hide what runs behind something
+no matcher can resolve without running it:
+
+```console
+$ devplane explain 'rm$IFS-rf node_modules'      # never_auto = ["Bash(rm *)"]
+ask — unreadable  Bash
+        because the program in `rm$IFS-rf` is produced by the shell, so no rule can name it
+```
+
+The shapes that do it:
+
+| Shape | Example | Why |
+|---|---|---|
+| the program name is built by the shell | `rm$IFS-rf x`, `$(echo rm) -rf x` | the word is not known until the shell expands it |
+| a command assembled from arguments | `eval "rm -rf x"` | the command does not exist until `eval` runs |
+| an interpreter given code | `sh -c "…"`, `python -c "…"`, `node -e "…"` | the program is in a string, not on the command line |
+| an interpreter given no script | `curl … \| sh` | the program arrives on standard input |
+| `find` that runs or deletes | `find . -delete`, `find . -exec …` | the deletion is a predicate, not a command |
+| an unbalanced quote | `rm -rf "/tmp` | the shell reads the rest of the line differently |
+| past 10,000 characters | — | longer than the analysis reads |
+
+**It only happens where you wrote a rule that could have applied.** A project with no `Bash(…)` rule
+and no path rule has said nothing about what may run there, so nothing is escalated — an inbox that
+asks about everything is worse than one that asks about most things, and this is scoped to the rules
+somebody actually wrote.
+
+**A named rule always wins.** If any rule in any file answers the call, you get that answer and the
+rule's name. The escalation is the last thing tried, never a replacement for a verdict.
+
+**And it is recorded as what it is.** The audit row says a person was asked and why nobody could tell,
+on Devplane's own authority — not attributed to a rule, because no rule decided it:
+
+```console
+$ devplane audit
+ask   Bash   daemon   `sh -c` runs a program given on its own command line
+```
+
+Before this, those calls produced no answer and no row: `never_auto = ["Bash(rm *)"]` was set,
+`$(echo rm) -rf /` ran, and nothing anywhere said the prohibition had not been consulted.
 
 ## One thing rules cannot see
 

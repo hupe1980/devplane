@@ -36,6 +36,18 @@ jobs:
           path: dist-plan.json
       # crates.io rejects a bad manifest only at publish time, which is after
       # the tag is pushed and the artifacts are built.
+      # **The interface, before anything packages the crate.** `ui/dist/` is
+      # generated and gitignored, so a clean checkout has none — and `include`
+      # in Cargo.toml matches nothing rather than failing. The crate would
+      # publish, install, and serve a page saying it was built without an
+      # interface.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the interface
+        run: cd ui && npm ci && npm run build
       - name: Check the crate is publishable
         run: cargo publish --dry-run --locked
 
@@ -73,6 +85,24 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
+      # **The interface is built here, or the release ships without one.**
+      #
+      # `build.rs` treats a missing bundle as `None` rather than as a build
+      # failure, which is right — a clean checkout with no node still compiles.
+      # It also means a release job that forgets this step produces a binary
+      # that serves nothing, silently, and the first person to notice is
+      # somebody who installed it.
+      #
+      # Every target needs it: the bundle is embedded at compile time, so it
+      # has to exist before `dist build` runs on each one.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the interface
+        shell: bash
+        run: cd ui && npm ci && npm run build
       - name: Install dist
         shell: bash
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
@@ -185,6 +215,18 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      # **The interface, before anything packages the crate.** `ui/dist/` is
+      # generated and gitignored, so a clean checkout has none — and `include`
+      # in Cargo.toml matches nothing rather than failing. The crate would
+      # publish, install, and serve a page saying it was built without an
+      # interface.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the interface
+        run: cd ui && npm ci && npm run build
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
       - run: cargo publish --locked

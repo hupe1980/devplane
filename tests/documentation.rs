@@ -963,6 +963,15 @@ fn every_session_state_the_vendor_documents_is_one_this_build_handles() {
 /// not exist; the page a *person* reads had none, and two commands shipped
 /// without an entry. The exemption list is the point: a command is left out on
 /// purpose and says why, rather than by nobody noticing.
+///
+/// **Hidden commands are checked too, and they were the hole.** This read
+/// `--help`, so the moment a command was given `hide = true` it left the guard
+/// entirely — the site could stop documenting it and nothing would notice.
+/// `devplane mcp` is the case that matters: a person never types it and a
+/// person absolutely has to configure it, so hiding it from a help listing is
+/// right and dropping it from the reference is not. Hiding a command is now a
+/// deliberate act with a written consequence rather than a way out of this
+/// test.
 #[test]
 fn every_command_is_in_the_cli_reference_or_deliberately_not() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -976,8 +985,17 @@ fn every_command_is_in_the_cli_reference_or_deliberately_not() {
             "the status-line shim's own entry point. `devplane connect` installs \
              it and nobody types it",
         ),
+        (
+            "hook",
+            "the `SessionStart` shim. `devplane connect` installs it and nobody \
+             types it",
+        ),
         ("help", "clap's builtin"),
     ];
+
+    // Commands kept out of the help listing because they are surfaces for a
+    // machine — and still owed an entry, because somebody has to configure them.
+    const HIDDEN: &[&str] = &["mcp", "statusline", "hook"];
 
     let help = String::from_utf8(
         std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
@@ -988,18 +1006,39 @@ fn every_command_is_in_the_cli_reference_or_deliberately_not() {
     )
     .expect("help is text");
 
-    let commands: Vec<String> = help
+    // **Read from clap, not scraped from the text.** This parsed every
+    // two-space-indented line after `Commands:` until the end of the output,
+    // which was correct while `--help` ended there. It stopped being correct the
+    // moment the help grew a block of grouped command names below the listing:
+    // the parse read the group *headings* — `See`, `What`, `Start`, `Set`,
+    // `The` — as commands and demanded a reference page for each.
+    //
+    // The command list has an exact source, and asking clap for it cannot drift
+    // when the rendering changes again.
+    let commands: Vec<String> = {
+        use clap::CommandFactory;
+        devplane::cli::Cli::command()
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .collect()
+    };
+    // And what the person actually **sees**, read from the rendered listing, so
+    // "hidden" can still be checked against the surface rather than against the
+    // type. Bounded to the listing itself: everything after the blank line that
+    // ends it — the options, and the grouped block below them — is not a
+    // command list.
+    let listed: Vec<String> = help
         .lines()
         .skip_while(|l| !l.starts_with("Commands:"))
-        .filter_map(|l| {
-            let rest = l.strip_prefix("  ")?;
-            let word = rest.split_whitespace().next()?;
-            match rest.starts_with(char::is_alphabetic) {
-                true => Some(word.to_string()),
-                false => None,
-            }
-        })
+        .skip(1)
+        .take_while(|l| !l.trim().is_empty())
+        .filter_map(|l| Some(l.strip_prefix("  ")?.split_whitespace().next()?.to_string()))
         .collect();
+    assert!(
+        listed.len() > 20,
+        "the parse found {} listed commands, so it is not reading the help",
+        listed.len()
+    );
     assert!(
         commands.len() > 20,
         "the parse found {} commands, so it is not reading the help",
@@ -1021,12 +1060,210 @@ fn every_command_is_in_the_cli_reference_or_deliberately_not() {
          the reference would not know these exist"
     );
 
+    // A hidden command is absent from the listing above, so it is checked here
+    // by the only means left: asking the binary. `--help` on a name that is not
+    // a command exits non-zero, which is what makes this a real check rather
+    // than a list of strings.
+    for name in HIDDEN {
+        let ok = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+            .args([name, "--help"])
+            .output()
+            .expect("the binary runs")
+            .status
+            .success();
+        assert!(
+            ok,
+            "`{name}` is listed as a hidden command and the binary does not have it"
+        );
+        assert!(
+            !listed.iter().any(|c| c == name),
+            "`{name}` is listed as hidden and appears in the help listing"
+        );
+        if UNDOCUMENTED.iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        assert!(
+            page.contains(&format!("devplane {name}")),
+            "site/content/docs/cli.md does not name the hidden command `{name}` — \
+             hiding a command from `--help` is not a reason to stop documenting it, \
+             and somebody has to configure this one"
+        );
+    }
+
     // And the exemptions are real commands, so the list cannot rot into a set of
     // names for things that no longer exist.
     for (name, why) in UNDOCUMENTED {
+        // `help` is clap's own and is rendered without being a subcommand of
+        // ours, so both sets are consulted.
+        let known = commands.iter().any(|c| c == name)
+            || listed.iter().any(|c| c == name)
+            || HIDDEN.contains(name);
         assert!(
-            commands.iter().any(|c| c == name),
+            known,
             "`{name}` is exempted from the reference ({why}) but is not a command"
         );
     }
+}
+
+/// **The site's group table and the CLI's own grouping cannot disagree.**
+///
+/// `devplane --help` sorts its thirty-five commands into five errands, and
+/// `site/content/docs/cli.md` prints the same five as a table. They were two
+/// hand-maintained copies of one list: moving a command between groups in the
+/// code left the page asserting the old one, and nothing anywhere compared
+/// them.
+///
+/// This reads `COMMAND_GROUPS` — the one place the grouping is decided — and
+/// holds the page to it, group by group and command by command. The page may
+/// word a heading however it likes as long as it is the heading the code uses;
+/// what it may not do is put a command in a group the binary does not.
+#[test]
+fn the_site_and_the_binary_agree_which_group_a_command_is_in() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let page =
+        std::fs::read_to_string(root.join("site/content/docs/cli.md")).expect("the CLI reference");
+
+    // The table rows, as the page writes them:
+    //   | **Group name** | `a` `b` `c` |
+    let rows: Vec<(String, Vec<String>)> = page
+        .lines()
+        .filter(|l| l.starts_with("| **"))
+        .filter_map(|l| {
+            let mut cells = l.trim_matches('|').split('|');
+            let name = cells.next()?.trim().trim_matches('*').trim().to_string();
+            let commands = cells
+                .next()?
+                .split('`')
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase()))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            (!commands.is_empty()).then_some((name, commands))
+        })
+        .collect();
+
+    assert_eq!(
+        rows.len(),
+        devplane::cli::COMMAND_GROUPS.len(),
+        "the page lists {} groups and the binary has {} — found: {:?}",
+        rows.len(),
+        devplane::cli::COMMAND_GROUPS.len(),
+        rows.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+
+    for (name, commands) in devplane::cli::COMMAND_GROUPS {
+        let (_, on_page) = rows
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("the page has no group called {name:?}"));
+
+        let want: Vec<&str> = commands.to_vec();
+        let got: Vec<&str> = on_page.iter().map(String::as_str).collect();
+        assert_eq!(
+            got, want,
+            "group {name:?} differs between the page and the binary.\n\
+             page:   {got:?}\n\
+             binary: {want:?}\n\
+             The grouping is decided in `COMMAND_GROUPS`; the page is a copy of it."
+        );
+    }
+}
+
+/// **The README's command count is the binary's.**
+///
+/// This number has drifted twice. A pass counted a `--help` listing by eye,
+/// wrote **thirty-six** into two files, and found the error only by piping the
+/// listing through `wc`; the reverse happened when a thirty-sixth command was
+/// added and the prose stayed at thirty-five.
+///
+/// Counting by eye has now failed in both directions, so it is counted here.
+/// The number in the prose is the length of `COMMAND_GROUPS`, which is also
+/// what the grouped block prints — `help` is listed by clap and belongs to no
+/// errand, so it is not among them.
+#[test]
+fn the_readme_names_as_many_commands_as_the_binary_groups() {
+    const WORDS: &[(&str, usize)] = &[
+        ("thirty-three", 33),
+        ("thirty-four", 34),
+        ("thirty-five", 35),
+        ("thirty-six", 36),
+        ("thirty-seven", 37),
+    ];
+
+    let grouped: usize = devplane::cli::COMMAND_GROUPS
+        .iter()
+        .map(|(_, cmds)| cmds.len())
+        .sum();
+
+    let readme = std::fs::read_to_string("README.md").expect("README.md");
+    let found: Vec<(&str, usize)> = WORDS
+        .iter()
+        .filter(|(w, _)| readme.contains(&format!("{w} commands")))
+        .copied()
+        .collect();
+
+    assert_eq!(
+        found.len(),
+        1,
+        "the README should name the command count exactly once; it names {found:?}"
+    );
+    let (word, n) = found[0];
+    assert_eq!(
+        n, grouped,
+        "the README says `{word} commands` and `COMMAND_GROUPS` holds {grouped}. \
+         The grouped block is what a reader sees, and `help` is in no errand."
+    );
+}
+
+/// **The published package carries the interface, and nothing it cannot use.**
+///
+/// `build.rs` embeds `ui/dist` and reads nothing else. Two ways to get that
+/// wrong, and both are silent:
+///
+/// *Leaving the bundle out* ships a binary whose one page says it was built
+/// without an interface — the failure `build.rs`'s own comment names, and which
+/// the release workflow was already fixed for once.
+///
+/// *Putting the sources in* shipped 324 KB nobody could use: `ui/src` was
+/// packaged while `package.json`, `vite.config.ts`, `tsconfig.json` and
+/// `index.html` were not, so nothing in the package could rebuild the bundle
+/// from them. Half a build input is not a build input.
+#[test]
+fn the_package_carries_the_built_interface_and_not_its_sources() {
+    let manifest = std::fs::read_to_string("Cargo.toml").expect("Cargo.toml");
+    let include = manifest
+        .split("include = [")
+        .nth(1)
+        .and_then(|r| r.split(']').next())
+        .expect("an include list");
+
+    // What `build.rs` actually reads.
+    for want in ["/ui/dist/*.html", "/ui/dist/*.js", "/ui/dist/*.css"] {
+        assert!(
+            include.contains(want),
+            "`{want}` is not packaged, so a crates.io install builds a binary with no \
+             interface — which it reports on the one page a person would open, after they \
+             have installed it."
+        );
+    }
+
+    // A source map is four times the bundle and nothing loads it.
+    assert!(
+        !include.contains("/ui/dist/*.map"),
+        "the source map is packaged: four times the bundle, loaded by nothing"
+    );
+
+    // And the sources, which the package cannot build.
+    let build_rs = std::fs::read_to_string("build.rs").expect("build.rs");
+    assert!(
+        !build_rs.contains("ui/src"),
+        "`build.rs` reads `ui/src` now, so this guard's premise is wrong — \
+         either package the whole UI project or stop reading its sources"
+    );
+    assert!(
+        !include.contains("\"/ui/src\""),
+        "`ui/src` is packaged and nothing in the package can build it: the build files \
+         (`package.json`, `vite.config.ts`, `tsconfig.json`, `index.html`) are not included, \
+         and `build.rs` embeds `ui/dist` rather than compiling anything."
+    );
 }

@@ -44,6 +44,44 @@ use super::work::{CommandResult, CommitStamp, Completion, GateReport, Outcome, R
 
 /// The predicate type this emits. Versioned, because a consumer that cannot
 /// tell which shape it is holding is a consumer that guesses.
+/// Where a piece of evidence came from, in the OpenTelemetry GenAI conventions'
+/// own proposed vocabulary.
+///
+/// **The names are adopted rather than invented**, because somebody else is
+/// specifying this distinction and a private spelling of it would be one more
+/// thing for a reader to translate. The proposal is open rather than published,
+/// so the attribute travels under its own name and nothing here claims it is a
+/// standard yet.
+///
+/// The whole point is the **third** state. An origin that is not known is
+/// **absent**, never defaulted — because the only value anybody would default
+/// to is the flattering one, and a certificate that quietly upgrades *the agent
+/// said so* to *a check observed it* is the exact failure the document exists
+/// to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A gate transcript: commands this tool ran, with the exit codes they
+    /// ended on. Re-derivable by a reviewer who does not trust this tool.
+    ExternallyObserved,
+    /// The agent's own account of what it did. Carried as a **claim**, never as
+    /// a predicate — measured at a 1.7 % base rate of agentic pull requests
+    /// whose description asserts changes that were not implemented.
+    SelfReported,
+}
+
+impl Origin {
+    /// The attribute's key, as the conventions spell it.
+    pub const KEY: &'static str = "gen_ai.evidence.origin";
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::ExternallyObserved => "externally_observed",
+            Origin::SelfReported => "self_reported",
+        }
+    }
+}
+
 pub const PREDICATE_TYPE: &str = "https://devplane.dev/DoneCertificate/v1";
 /// The in-toto statement type, so the outer envelope is recognisable.
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
@@ -51,6 +89,13 @@ pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 /// The artifact's hard ceiling. A certificate nobody will read is not evidence,
 /// and "bounded" with no number attached is not a requirement anybody can check.
 pub const MAX_BYTES: usize = 64 * 1024;
+
+/// How much of a command a page shows before it truncates.
+///
+/// The **copy** carries the whole thing; this is only what fits on a row. A
+/// certificate whose page and whose clipboard differ in anything but length
+/// would be two documents.
+pub const PAGE_COMMAND_CHARS: usize = 120;
 
 /// What the artifact claims, in its own words, so it travels with the paste.
 pub const LIMITS: &str = "This is evidence that these commands ended as recorded against this \
@@ -336,6 +381,16 @@ impl Certificate<'_> {
         match self.evidence {
             None => o.push_str("No gate ran, so there is no evidence to show.\n\n"),
             Some(report) => {
+                // **Where the predicate came from**, named rather than implied.
+                // A gate transcript is observed by something the agent does not
+                // control, which is the whole of why it may stand as evidence
+                // at all — and the claim below carries the other value, so a
+                // reader is never left inferring which is which.
+                o.push_str(&format!(
+                    "`{}: {}`\n\n",
+                    Origin::KEY,
+                    Origin::ExternallyObserved.as_str()
+                ));
                 match report.commit.as_ref() {
                     Some(c) => o.push_str(&format!("{}\n\n", commit_sentence(c))),
                     None => o.push_str(
@@ -416,6 +471,14 @@ impl Certificate<'_> {
 
         if let Some(claim) = self.claim {
             o.push_str("## The agent's claim\n\n");
+            // The same distinction the statement carries, in the document a
+            // person reads — so the two renderings cannot say different things
+            // about where the same sentence came from.
+            o.push_str(&format!(
+                "`{}: {}`\n\n",
+                Origin::KEY,
+                Origin::SelfReported.as_str()
+            ));
             o.push_str(
                 "This is the agent's own account, shown beside the outcomes above and never in \
                  place of them. Across 5,851 sessions and 355,942 tool calls, such reports \
@@ -461,6 +524,11 @@ impl Certificate<'_> {
                           "branch": w.branch },
                 "completion": w.completion,
                 "evidence": self.evidence.map(|r| json!({
+                    // **Where this came from, under the name somebody else is
+                    // specifying it with.** A gate transcript is observed by
+                    // something the agent does not control, which is the whole
+                    // of why it may be a predicate.
+                    Origin::KEY: Origin::ExternallyObserved.as_str(),
                     "gate": r.gate,
                     "at": r.at,
                     "attempt": r.attempt,
@@ -471,7 +539,16 @@ impl Certificate<'_> {
                     "commands": r.commands,
                 })),
                 "specification": self.evidence.and_then(|r| r.spec.clone()),
-                "agent_claim": self.claim,
+                // **The agent's account, marked as the agent's account.** An
+                // object rather than a string so the origin rides with it: a
+                // bare field beside an evidence block that carries one is a
+                // reader's invitation to assume they are the same kind of
+                // thing. Absent entirely where the agent said nothing, because
+                // *nothing said* is not *said, and self-reported*.
+                "agent_claim": self.claim.map(|text| json!({
+                    Origin::KEY: Origin::SelfReported.as_str(),
+                    "text": text,
+                })),
                 "verification": {
                     "steps": self.verification_steps(),
                     "caveat": self.verification_caveat(),
@@ -480,6 +557,106 @@ impl Certificate<'_> {
                 "limits": LIMITS,
                 "signed": false,
             }
+        })
+    }
+
+    /// **The certificate as a page renders it, with every sentence already
+    /// written.**
+    ///
+    /// The surface computes nothing. Not a style rule: the certificate is the
+    /// one artifact in this product whose whole value is that a reviewer can
+    /// re-derive it, and a page that assembled its own wording would be a
+    /// second place the same completion gets described — with no guard able to
+    /// notice the two had drifted.
+    ///
+    /// **Four bases, and each renders.** *No gate was declared* is the one that
+    /// used to come out as an empty block, which reads as *nothing to show*
+    /// when it means *this project never said what done means*.
+    pub fn page(&self) -> serde_json::Value {
+        use serde_json::json;
+
+        let Some(basis) = self.work.completion.as_ref() else {
+            // **Done with no basis is its own answer, and it is not *unfinished*.**
+            // A piece of work that reached `Done` before completions were
+            // recorded has a real completion nobody wrote down — saying *this
+            // is not finished* about it would be false, and rendering an empty
+            // certificate would be worse: a reader takes a blank evidence block
+            // for *nothing was checked* when it means *nobody kept the record*.
+            if self.work.phase == crate::core::work::Phase::Done {
+                return json!({
+                    "finished": true,
+                    "basis": "the evidence was not recorded — this work was finished before \
+                              Devplane kept one, so what was checked cannot be reconstructed",
+                    "checked": false,
+                    "unchecked": "There is no record of what was checked for this completion. \
+                                  It is not evidence that nothing was, and it is not evidence \
+                                  that anything was.",
+                    "no_evidence": "No gate run is recorded against this work.",
+                    "limits": LIMITS,
+                });
+            }
+            return json!({
+                "finished": false,
+                // Not an error and not a certificate. A reader asking about
+                // unfinished work gets where it is.
+                "unfinished": format!("This work is not finished. It is at `{}`.",
+                                      self.work.phase.as_str()),
+                "last_gate": self.evidence.map(|g| g.summary()),
+            });
+        };
+
+        json!({
+            "finished": true,
+            "basis": basis.headline(),
+            "checked": basis.is_checked(),
+            // Present only where it applies, so a surface cannot render a
+            // reassurance and a warning in the same block.
+            "unchecked": (!basis.is_checked()).then_some(
+                "Nothing was checked by this tool for this completion. Read the basis \
+                 before reading anything below as a pass."
+            ),
+            "evidence": self.evidence.map(|r| json!({
+                Origin::KEY: Origin::ExternallyObserved.as_str(),
+                "commit": r.commit.as_ref().map(commit_sentence),
+                // **Absent rather than a sentence**, because a gate that ran
+                // outside a repository is a different fact from one whose
+                // commit nobody recorded.
+                "no_commit": r.commit.is_none().then_some(
+                    "No commit was recorded — this gate did not run in a repository."
+                ),
+                "commands": r.commands.iter().map(|c| json!({
+                    // **Verbatim.** A reformatted command is one a reviewer
+                    // cannot paste, which is the whole differentiator: the
+                    // others hand you a verdict and this hands you the
+                    // commands.
+                    "command": c.command,
+                    "shown": crate::core::text::clip(&c.command, PAGE_COMMAND_CHARS),
+                    "truncated": c.command.chars().count() > PAGE_COMMAND_CHARS,
+                    "outcome": c.outcome.headline(),
+                    "passed": c.passed(),
+                    "took_ms": c.duration_ms,
+                    "output_bytes": c.output_bytes,
+                })).collect::<Vec<_>>(),
+            })),
+            "no_evidence": self.evidence.is_none().then_some(
+                "No gate ran, so there is no evidence to show."
+            ),
+            "claim": self.claim.map(|text| json!({
+                Origin::KEY: Origin::SelfReported.as_str(),
+                "text": text,
+                "caveat": "The agent\u{2019}s own account, shown beside the outcomes and never in \
+                           place of them. Nothing here grades it against the evidence.",
+            })),
+            // **A position, not a gap.** `signed: false` on its own reads as
+            // something missing to anybody who has shipped attestations; with
+            // the flag beside it, it reads as a decision somebody can reverse.
+            "signing": {
+                "signed": false,
+                "says": "Unsigned on purpose — a signature would attest that this tool wrote \
+                         this, which is not the claim. Pass `--sign` if your reviewer needs one.",
+            },
+            "limits": LIMITS,
+            "rederivable": REDERIVABLE,
         })
     }
 

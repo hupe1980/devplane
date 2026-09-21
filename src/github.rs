@@ -211,12 +211,6 @@ pub struct Label {
 }
 
 impl Issue {
-    pub fn has_label(&self, name: &str) -> bool {
-        self.labels
-            .iter()
-            .any(|l| l.name.eq_ignore_ascii_case(name))
-    }
-
     /// The board's view of this issue, relative to the person whose `gh` this is.
     pub fn to_forge(&self, me: Option<&str>) -> crate::core::ForgeIssue {
         crate::core::ForgeIssue {
@@ -545,12 +539,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(issues[0].number, 7);
-        assert!(issues[0].has_label("devplane:ready"));
-        assert!(
-            issues[0].has_label("DEVPLANE:READY"),
-            "labels are not case law"
-        );
-        assert!(!issues[0].has_label("wontfix"));
+        // The labels themselves, because nothing in this build reads one yet.
+        // There was a `has_label` helper here with a case-insensitive match and
+        // three assertions about it, and no caller anywhere outside this test —
+        // a rule stated where nothing reads it. `#community` is what wants it,
+        // and it is three lines when it does.
+        let labels: Vec<&str> = issues[0].labels.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(labels, ["bug", "devplane:ready"]);
     }
 
     #[test]

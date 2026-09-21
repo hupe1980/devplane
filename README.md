@@ -1,19 +1,51 @@
 # Devplane
 
-**Where work that outlives a session lives.** One binary, one page, every project on your machine —
-what landed, what is red, what a reviewer is waiting on, and which finished work can *prove* it is
-done.
-
-A session ends; the work does not. When a check goes red two hours after the agent stopped there is
-no session left to show it, and that is the gap this fills. Devplane's unit is a **Work**: the
-branch, the project's own checks, the pull request, the cost. It **watches** the sessions already
-running on your machine — terminal, VS Code, desktop — and **drives** any agent that speaks the
-[Agent Client Protocol](https://agentclientprotocol.com): Claude Code, Codex, Copilot, OpenCode and
-Gemini out of the box.
+**Devplane records who decided, when nobody asked you** — a person, a rule, a classifier, a timer, or
+nobody — across every project and every coding agent on your machine.
 
 **Devplane never approves a tool call.** Your agent's own permission system does that, in its own
 settings, where it is authoritative. Devplane can *prohibit* and *defer*, because being stricter than
-your agent is free — and it shows you the request and who needs to answer it.
+your agent is free — and it shows you the request and who needs to answer it. There is no way to
+express an approval: the type does not exist.
+
+Your agents now run in modes that decide for you. A classifier reviews the call, a timer answers the
+plan, a question gets dropped when the agent moves on — each one a deliberate trade of your attention
+for throughput, and none of them leaves you a list. This is that list: one page, every project, what
+was decided in your name and on whose authority, plus the questions nobody ever put in front of you,
+answerable once from one place.
+
+It **watches** the sessions already running on your machine — terminal, VS Code, desktop — and
+**drives** any agent that speaks the
+[Agent Client Protocol](https://agentclientprotocol.com).
+
+Those are two different lists:
+
+| | Watched — you started it | Driven — Devplane started it |
+|---|---|---|
+| **Claude Code** | yes: hooks, telemetry, roster, status line | yes |
+| **GitHub Copilot** | hooks and telemetry, **not yet proved end to end** | yes |
+| **Codex · OpenCode · Gemini** | not yet | yes |
+
+Driving is the easy half — an agent Devplane started reports through the protocol by construction.
+Watching a session you opened yourself is fully demonstrated for Claude Code only. `devplane doctor`
+says what is watched here, per vendor and per channel.
+
+And a session ends while the work does not. When a check goes red two hours after the agent stopped
+there is no session left to show it, so the unit here is a **Work**: the branch, the project's own
+checks, the pull request, the cost — and a finished one leaves a certificate whose commands a reviewer
+can re-run without trusting this tool.
+
+One binary. Local-first, loopback only, no account and no cloud relay.
+
+|  | |
+|---|---|
+| 📋 | **One page, every project** — what needs you, ordered by what is waiting rather than by repository |
+| ⚖️ | **Every decision on the record** — a person, a rule, a classifier, a timer, or nobody |
+| 🙋 | **Questions nobody put in front of you** — including the ones an agent asked and walked away from |
+| 🚫 | **Never approves a tool call** — it can prohibit and defer, and the type cannot express an allow |
+| ✅ | **Verified done** — the project's own checks, with a certificate a reviewer can re-run |
+| 🔌 | **Any ACP agent** — Claude Code, Codex, Copilot, OpenCode, Gemini |
+| 🔒 | **Nothing leaves the machine** — no CDN, no web font, no analytics, no telemetry |
 
 **[Documentation → hupe1980.github.io/devplane](https://hupe1980.github.io/devplane)**
 
@@ -43,8 +75,8 @@ joins the working set immediately. The numbers add up — every session is in ex
 
 **GitHub is on the same board.** Half of what is waiting on you is not a session — it is the issues
 and pull requests on your repositories. Devplane reads them through your own `gh` for every
-registered project: the heading carries the counts, `g` on the board opens every issue and pull
-request across every project, `devplane issues` and `devplane prs` print the same two lists, and an
+registered project: the heading carries the counts, the board's **issues and pull requests** surface
+lists them across every project, `devplane issues` and `devplane prs` print the same two lists, and an
 issue assigned to you or a review requested from you is an inbox item. A draft of your own is not —
 you already said it is unfinished. Nothing is ever written to GitHub from a list; every action is a
 link.
@@ -110,12 +142,49 @@ devplane rewind <run>       # files a shell command wrote past Claude Code's che
 devplane audit              # what Devplane decided, and on whose authority
 devplane attention          # whether the inbox is worth reading, per kind
 devplane explain --replay   # which rule to write so it stops asking
+devplane rules 'Bash(curl:*)'  # which of your repositories is missing that rule
 devplane library diff       # which of your six copies of a skill drifted
 devplane dispatch --to a,b,c "bump deps"   # one prompt, three repositories
 ```
 
 `devplane ls` works before you connect anything: sessions are discovered from Claude Code's own
 roster. Connecting is what adds cost, context usage, blocking and the permission gate.
+
+**`devplane --help` sorts those thirty-five commands into the five errands people arrive with** —
+see what is happening · what needs you and what happened without you · start and steer work · set up
+a project · the daemon.
+
+**And when nothing needs you, the inbox says what the day came to** rather than rendering an empty
+box. How many decisions were taken in your name and by what authority, how many questions waited and
+for how long, what will want you next — and a last line that says the daemon keeps watching, so
+closing the tab costs nothing. Where something *would* stop without you, it says that instead.
+
+```console
+$ devplane inbox
+since you last looked · 16h
+
+Clear.
+
+  14 decisions taken in your name today — 2 by you, 9 by a rule, 3 by nobody.
+  2 questions waited for you, the longest for 4h.
+
+The daemon keeps watching and the pipelines keep running. Nothing repeats if it
+restarts, so closing this costs nothing.
+```
+
+The hairline is how long since you **read** it — a poll is not a look — and items raised inside that
+gap are marked `new`, as a word rather than a colour.
+
+**And a long inbox folds rather than scrolls.** Above twelve rows, kinds whose members are
+interchangeable — issues assigned, stalled sessions, context warnings — collapse into one row naming
+the kind, the project and the count; and where one item is a *named* consequence of another, the
+consequence is counted on the cause's row. **Nothing is ever hidden without a count**: rendered plus
+summarised plus counted-on-a-cause equals raised, asserted over every kind. A question, an abandoned
+question, a permission and a human step are **never** folded — each needs an answer only you can
+give, and a summary row is a question nobody saw with a number beside it.
+
+There is no rate in it and there never will be: *you answered 4 of 17* is one word away from a
+performance metric about you.
 
 **One gate, two vendors.** The same `devplane.toml` rules govern Claude Code and GitHub Copilot,
 evaluated in Devplane's own process and never translated into either vendor's configuration — so
@@ -264,7 +333,7 @@ so *gates green* beside *eleven boxes still open* is a sentence neither the exit
 can produce alone. No methodology is learned: the outline is the Markdown headings, the progress is
 the `- [ ]` boxes, and nothing here knows what a requirement is.
 
-### The done certificate
+### 🧾 The done certificate
 
 `done` is a claim, and a claim only you can check is one everybody else takes on trust. So it ships
 as a portable artifact instead:
@@ -272,6 +341,7 @@ as a portable artifact instead:
 ```sh
 devplane work export <id> > cert.md     # paste into the pull request
 devplane --json work export <id>        # an in-toto statement, for another tool
+#                                       # or open the work on the board: one button, same markdown
 ```
 
 It names the repository, the commit, the gate commands, each command's outcome, and the digest and
@@ -314,37 +384,25 @@ Three empty states, because they are three different facts: *nothing needs you* 
 *Devplane has not answered recently* means what is on screen is not current, and *some projects could
 not be read* means the list is narrower than it looks.
 
-Sessions are still there, below it and behind a rail click. Every watcher in this category can show
+Sessions are still there, under **what is happening** in the sidebar. Every watcher in this category can show
 you those — Claude Code ships `claude agents` itself and does it better — so no effort goes into
 making them prettier than a terminal table.
 
 **It works on a phone**, over Tailscale or any private network, because *what needs me* is a question
-people ask away from their desk. One HTML file, no CDN and no web font, so nothing has to load — and
-where there is no keyboard the key legend is not shown, because it would be describing keys nobody
-can press.
+people ask away from their desk. Everything is served from the one binary — no CDN, no web font, no
+analytics — so nothing has to load, and the layout at phone width is a different arrangement rather
+than the same one shrunk.
 
-<img src="https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/narrow.png" alt="The same page at phone width: the rail laid out horizontally, each item wrapping, no keyboard legend, and the five tools as tappable buttons" width="330">
+<img src="https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/narrow.png" alt="The same page at phone width: the sidebar laid out as a scrolling strip across the top, and each item wrapping" width="330">
 
-Keyboard-first:
-
-| Key | What |
-|---|---|
-| `j` `k` · `enter` | move · open what a session is saying |
-| `tab` · `enter` on a work row | what it changed — diff, gate commands, the agent's account |
-| `1`–`9` | pick one of the answers the agent offered |
-| `y` `n` · `r` | allow · deny · reply |
-| `?` | why is this here — the decision log for that row |
-| `,` | what is configured — this machine, and every repository's `devplane.toml` read back |
-| `g` | every open issue and pull request, across every project |
-| `⌘N` | dispatch: prompt, project, kind, and this project's own prompts |
-| `⌘K` | jump to any project, session or piece of work by name |
+**Every action is a button**, and there are no keyboard shortcuts.
 
 A permission also carries the rule that stops it being asked again — the narrowest one covering the
 calls this machine has seen, and the file to paste it into, which is your agent's own
 `settings.json`. Nothing writes it for you.
 
-`⌘N` tells you what it will do before it does it, and refuses an untrusted repository with the
-command that fixes it. `⌘K` matches by subsequence, so `crlb` finds `core-lib`.
+**Start work** tells you what it will do before it does it, and refuses an untrusted repository with
+the command that fixes it.
 
 Items that name work you were about to do anyway — a red pull request, a reviewer asking for changes,
 a spent feedback budget — carry a `claude-cli://` link that opens an agent in the right repository
@@ -426,6 +484,19 @@ deadline = "4h"   # never (the default) | 90s | 30m | 4h
 When it fires the agent is told *no*, and the audit row names **a clock** with the duration and the
 file that set it.
 
+**And a question the agent gave up on is on the record.** When a session Devplane watches asks you
+something and then moves on without an answer, that is a row — the question as it was written, what
+it was choosing between, and what the agent did instead — rather than a row that quietly disappears.
+It offers no answer, because the call is over; it offers the session.
+
+**And Devplane reports the clocks it did not set.** `devplane modes` names your agent's own question
+timer per session — the duration, where it came from, and whether you chose it — including the
+`CLAUDE_AFK_TIMEOUT_MS` environment variable, which overrides the setting and turns auto-continue on
+even where your own settings say `never`. A session whose questions close immediately says so in
+words and sorts to the top. **The clock only runs while Devplane is up**: a question that waited overnight with
+the daemon stopped comes back with its whole window ahead of it, because a deadline bounds how long a
+question waits for somebody who could have answered it.
+
 What became of an ask is a sentence rather than a status — *delivered to the waiting agent*,
 *delivered into a resumed session*, *a clock refused it after 4h — set in devplane.toml*, *nobody
 answered*. No two read alike, because telling them apart without opening a transcript is the point.
@@ -457,11 +528,28 @@ anything is **refused** rather than carried, because a deny rule that silently m
 as protection and is none.
 
 Commands are matched **per subcommand**, not against the whole line, so `never_auto = ["Bash(rm
--rf *)"]` stops `ls && rm -rf /`. A path rule also reaches **the files a command names** — the
+-rf *)"]` stops `ls && rm -rf /`. It also looks **through the wrappers that run something else** —
+`sudo`, `doas`, `exec`, `env`, `watch` — and matches a program's **name as well as its path**, so
+`sudo rm -rf /` and `/bin/rm -rf /` meet a rule naming `rm`. Claude Code does neither; being stricter
+is free when you cannot approve.
+
+**And when it cannot read the line, it asks you.** `rm$IFS-rf x`, `$(echo rm) -rf x`,
+`eval "rm -rf x"`, `sh -c "…"` and `curl … | sh` hide what runs behind something no matcher can
+resolve. They are put in front of you with the reason, on Devplane's own authority rather than
+credited to a rule that did not decide them — and only in a project whose rules could have applied,
+so an inbox does not fill with questions nobody asked for.
+
+A path rule also reaches **the files a command names** — the
 operands of `grep`, `awk`, `jq`, `git diff` and twenty more, a path hidden in an option value like
 `grep -f.env x`, everything under a directory a `grep -r` walks, and the target of a redirection.
-That list is measured against a running Claude Code rather than transcribed: `xxd`, `zcat`, `less`
-and `truncate` are **not** recognised by it and so are not in it.
+That list is measured against a running Claude Code rather than transcribed: `xxd`, `zcat` and `less`
+are **not** recognised by it and so are not in it.
+
+**And a prohibition carries five more writers the vendor does not.** `cp`'s and `install`'s and
+`rsync`'s and `ln`'s destination, every operand of `truncate`, and `dd`'s `of=` reach a protected file
+through a command a keyword filter did not think of. Mirroring the vendor here meant
+`never_auto = ["Edit(secrets/**)"]` refused `tee secrets/k` and `echo x > secrets/k` and allowed
+`cp /tmp/a secrets/k` — so on the deny side, where the worst case is a prompt, it does not mirror.
 
 **`Read` and `Edit` are two halves and you want both.** `Read(.env)` stops `cat .env` and
 `echo x | tee .env`; it does *not* stop `echo x > .env` or `touch .env`, which are `Edit` business.
@@ -621,7 +709,8 @@ One crate.
 | Path | What |
 |---|---|
 | `src/core/` | Types, the reducer, the attention engine, the permission policy, `devplane.toml`. **May not reach the outside world** — no `async fn`, no `.await`, no runtime, no database, no HTTP |
-| `src/` | Everything that does: daemon, receivers, HTTP API, protocol client, gates, git, GitHub, SQLite, CLI, and the board (`ui/legacy.html`) |
+| `src/` | Everything that does: daemon, receivers, HTTP API, protocol client, gates, git, GitHub, SQLite, CLI |
+| `ui/` | The interface — Svelte, built to a bundle the binary embeds. A surface is a directory under `ui/src/surfaces/` |
 | `tests/purity.rs` | Fails the build if `src/core/` ever breaks that rule |
 | `site/` | The documentation site (Zola) |
 | `scripts/` | Fetching the third-party reference docs, and the checks that keep the claims honest |
@@ -640,7 +729,7 @@ just check                   # what CI runs: fmt, clippy, build, test
 just verify                  # that, plus the claim and dependency ledgers and the site
 just open                    # the board in a browser
 just site                    # the documentation site, at http://127.0.0.1:1111
-just ui                      # the board served from ui/legacy.html — edit, reload, no rebuild
+just ui                      # the interface from ui/dist on disk — rebuild the bundle, reload
 
 DEVPLANE_HOME=/tmp/vp just vp ls    # an isolated instance, touching nothing of yours
 ```
@@ -667,21 +756,22 @@ another port rather than refusing to start.
 `DEVPLANE_CLAUDE_BIN` points at a `claude` binary if yours is not on `PATH` — which is common, since
 the VS Code extension ships its own copy and installs nothing.
 
-`DEVPLANE_UI` points the daemon at `ui/legacy.html` on disk, so editing the board is a browser reload
-rather than a rebuild and a restart — `just ui` is that with the path filled in. The copy compiled
-into the binary is what ships.
+`DEVPLANE_UI` points the daemon at a built `ui/dist` on disk, so an interface change is
+`npm run build` and a reload rather than a rebuild and a restart — `just ui` is that with the path
+filled in. The bundle compiled into the binary is what ships.
 
-`tests/ui_contract.rs` holds the page: that it serves every field it reads, escapes every value it
-prints, keeps its overlays dialogs that give focus back, and renders at all. That last one runs the
-page's script against a stub DOM with an `<img onerror=...>` in every readable field and checks what
-lands in the document; it needs `node`, and skips where there is none.
+`tests/ui_bundle.rs` holds the interface: that every route a surface calls is one the daemon serves,
+every token it uses is one the bundle defines, and nothing is fetched from outside the machine.
+`ui/tests/render.ts` renders each surface with Svelte's server renderer and asserts on the result —
+no test runner, because the alternative was three dependencies to check strings `render()` already
+returns.
 
 ## 📓 Changes
 
 [CHANGELOG.md](CHANGELOG.md) — breaking changes are called out at the top of each entry.
 
 **Coming from Vibeplane**: the binary, `devplane.toml`, `~/.devplane/`, the `DEVPLANE_*` variables
-and the `devplane:ready` label all renamed, and nothing migrates itself. The unreleased entry has the
+and the `devplane:ready` label all renamed, and nothing migrates itself. The 0.6.0 entry has the
 three commands.
 
 ## ⚖️ License

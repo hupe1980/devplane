@@ -276,6 +276,31 @@ devplane work export <id> > cert.md          # for a pull request body
 devplane --json work export <id>             # for another tool
 ```
 
+**And it is on the page.** Opening a piece of work on the board
+shows the basis, the commands with their outcomes, where the evidence came from, and one button that
+puts the whole certificate on the clipboard as markdown — the same bytes `work export` writes. Two
+clicks from a finished Work to a pull request body.
+
+Every sentence there is composed by the daemon. The page renders and words nothing, because a
+certificate described twice is a certificate that can disagree with itself, and nothing would notice.
+
+**Where the predicate came from is named**, under the vocabulary the OpenTelemetry GenAI conventions
+have open for it:
+
+| Value | What carries it |
+|---|---|
+| `externally_observed` | the gate transcript — commands this tool ran, and the codes they ended on |
+| `self_reported` | the agent's own account, carried as a claim and never as the predicate |
+| *absent* | not known — **never defaulted**, because the only value anybody would default to is the flattering one |
+
+The attribute is `gen_ai.evidence.origin`. The proposal is open rather than published, so the name is
+adopted and nothing here claims it is a standard yet.
+
+**All four ways a Work reaches done render as a sentence**, and *no gate was declared* is one of
+them rather than an empty block — a blank reads as *nothing to show* where it means *this project
+never said what done means, and nothing was checked*. A Work that finished before Devplane kept a
+record says **that**, which is neither *unfinished* nor an empty certificate.
+
 The certificate carries the gate commands as they were run, each one's outcome, the commit they ran
 against, a digest of each command's output, and the fingerprint of the specification the work names.
 Then it carries the part that makes it worth reading:

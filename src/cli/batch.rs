@@ -230,7 +230,11 @@ pub async fn cmd_fan_out(
                 println!();
                 for (name, link) in &links {
                     match link {
-                        Some(l) => println!("  {:<14}{}", paint(BOLD, name), paint(DIM, l)),
+                        Some(l) => println!(
+                            "  {}{}",
+                            crate::render::pad(&paint(BOLD, name), 14),
+                            paint(DIM, l)
+                        ),
                         // A link the vendor's handler would refuse is reported
                         // rather than printed dead.
                         None => println!(
@@ -300,7 +304,11 @@ pub async fn cmd_fan_out(
                     }
                     Err(e) => {
                         if !json {
-                            println!("  {:<10}{:<14}{e}", paint(BOLD, "failed"), t.name);
+                            println!(
+                                "  {}{}{e}",
+                                crate::render::pad(&paint(BOLD, "failed"), 10),
+                                crate::render::pad(&t.name, 14)
+                            );
                         }
                     }
                 }

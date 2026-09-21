@@ -1,4 +1,5 @@
-//! Devplane — the local-first control plane for AI coding agents.
+//! Devplane — records who decided, when nobody asked you, across every project
+//! and every coding agent on your machine.
 //!
 //! One crate. [`core`] is the half that may not reach the outside world — the
 //! types, the reducer, the attention engine, the permission policy — and

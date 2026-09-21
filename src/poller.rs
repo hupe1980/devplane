@@ -169,7 +169,10 @@ pub async fn expiry_sweeper(state: Shared) {
 
         let now = jiff::Timestamp::now();
         let overdue: Vec<crate::core::ask::Ask> = match state.store.open_asks().await {
-            Ok(a) => a.into_iter().filter(|a| a.is_overdue(now)).collect(),
+            Ok(a) => a
+                .into_iter()
+                .filter(|a| a.is_overdue(now, state.started_at))
+                .collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "could not read the open asks");
                 continue;

@@ -37,6 +37,31 @@ its short name.
 
 Work ids resolve by prefix the same way.
 
+## Finding a command
+
+`devplane --help` lists the commands under the five errands people arrive with, rather than in
+declaration order:
+
+| Group | Commands |
+|---|---|
+| **See what is happening** | `ls` `show` `tail` `watch` `search` `open` |
+| **What needs you, and what happened without you** | `inbox` `asks` `answer` `attention` `audit` `modes` `issues` `prs` `snooze` |
+| **Start and steer work** | `work` `dispatch` `batch` `say` `attach` `focus` `gate` `rewind` `library` |
+| **Set up a project** | `connect` `disconnect` `trust` `check` `explain` `rules` `speckit` `agents` `doctor` |
+| **The daemon** | `serve` `stop` |
+
+The list is long because the product does a lot. The five *seat* surfaces — `inbox`, `asks`,
+`attention`, `audit`, `modes` — each answer a question the others cannot, so none of them is a
+duplicate of another.
+
+Three commands are surfaces for a machine and stay out of the listing: `devplane mcp`,
+`devplane hook` and `devplane statusline`. They are documented below, because hiding a command from
+`--help` is not a reason to stop documenting it.
+
+**Colour** follows `NO_COLOR` and turns itself off when output is not a terminal, so
+`devplane ls > file` is readable. `CLICOLOR_FORCE=1` asks for it anyway — for a pager, or a CI log
+that renders escapes.
+
 ## Asking
 
 ### `devplane connect copilot`
@@ -54,23 +79,37 @@ See [Observing sessions](/docs/observe/#github-copilot).
 What the gate would decide about one call, and which rule says so. Offline: no daemon, no agent, no
 bill — which is what you want while you are still writing the rule.
 
-```console
-$ devplane explain 'pnpm test --run'
-allow      Bash
-        by Bash(pnpm test *)
+There are four answers and no `allow`: [`Verdict`](../permissions/) cannot express one.
 
+```console
 $ devplane explain 'pnpm test && rm -rf /'
-deny       Bash
+deny  Bash
         by Bash(rm -rf *)
 
-$ devplane explain 'echo x | tee /etc/hosts'
+$ devplane explain 'sudo rm -rf /'
+deny  Bash
+        by Bash(rm -rf *)
+
+$ devplane explain 'rm$IFS-rf node_modules'
+ask — unreadable  Bash
+        because the program in `rm$IFS-rf` is produced by the shell, so no rule can name it
+
+$ devplane explain 'pnpm test --run'
 undecided  Bash
-        no rule answers this one, so the provider's own dialog decides and it reaches your inbox
+        its rules loaded and none answers this one, so the provider's own dialog decides and it reaches your inbox
 ```
 
-The third answer is the interesting one. A rule *did* match — `Bash(echo *)` — and still did not
-speak for the call, because an allow rule covers the command and not the file it writes. Those cases
-are invisible from reading a rule list, and they are where a permission layer is usually wrong.
+The third answer is the interesting one, and it is the one worth checking a rule against. A
+prohibition is only worth writing if it fires, and some lines hide what runs behind something no
+matcher can resolve without running it. Rather than report *no rule answers this* — which would be
+true and misleading — Devplane says it could not tell, and the call goes to you.
+[Permissions →](../permissions/#when-devplane-cannot-read-the-command-it-asks)
+
+The fourth is the other one to read carefully: `undecided` is three different situations in one word
+— no rules here, rules that would not load, and rules that loaded and did not match — and only the
+last is a fact about the call. `explain` names which, because a `devplane.toml` with a typo in it has
+*no* rules in force, and reporting that as *no rule answers this one* is a broken deny rule reading as
+permission.
 
 | Flag | What |
 |---|---|
@@ -79,7 +118,7 @@ are invisible from reading a rule list, and they are where a permission layer is
 | `--dir <path>` | the directory the agent would be working in, which decides whose rules apply. Default `.` |
 | `--replay` | ask the same question of every call already observed, and name the rule that would answer the ones that reached you |
 | `--limit <n>` | how many of the most recent calls `--replay` reads. Default 5000 |
-| `--json` | the verdict, the rule, and what a `PreToolUse` hook would answer — which is a different question, and the one that holds in auto mode |
+| `--json` | the verdict, the rule that produced it, `why` for an `unresolved` one, and where the rules came from |
 
 ### `devplane explain --replay`
 
@@ -105,6 +144,8 @@ one rule each, most interruptions first
 1104 of the 1239 calls Devplane leaves to your agent · paste into permissions.allow in your agent's settings
 ```
 
+`--replay` uses the rules this machine actually enforces, `~/.devplane/policy.toml` included.
+
 Each suggestion is in the vocabulary that tool's rules use: a command prefix with the `*` after the
 subcommand, a directory glob for a path rule, a domain for `WebFetch`.
 
@@ -114,6 +155,76 @@ subcommand, a directory glob for a path rule, a domain for `WebFetch`.
   **three times** — which is what keeps `Bash(rm -rf node_modules)` off the list.
 
 `--dir` scopes it to one project; the default is the repository you are standing in.
+
+### `devplane rules`
+
+Which of your repositories is missing a rule.
+
+`devplane explain` answers for one call on one machine. This asks the same question across every
+registered project — the half a person with six repositories actually has.
+
+```console
+$ devplane rules 'Bash(curl:*)'
+Bash(curl:*)
+
+  saas      devplane  missing     /Users/you/saas/devplane.toml
+  saas      agent     has it      /Users/you/saas/.claude/settings.json
+  core-lib  devplane  covered     by `Bash(*)`
+  core-lib  agent     missing     /Users/you/core-lib/.claude/settings.json
+  ai-tool   devplane  unreadable  expected `=` at line 4 — run `devplane check`
+  ai-tool   agent     missing     /Users/you/ai-tool/.claude/settings.json
+
+Paste this:
+  Bash(curl:*)
+
+into:
+  policy.never_auto   /Users/you/saas/devplane.toml
+  permissions.deny    /Users/you/core-lib/.claude/settings.json
+  permissions.deny    /Users/you/ai-tool/.claude/settings.json
+```
+
+**Two files per project, never conflated.** A `devplane.toml` prohibition is what *Devplane* will
+refuse; a `permissions.deny` entry is what the *agent* will refuse. They answer different questions
+and every row says which one it is about.
+
+`covered` means a wider rule already speaks for every call yours names — `Bash(*)` covers
+`Bash(curl:*)` — which is a different fact from having the rule. `unreadable` means the file does not
+parse, so [none of its settings are in effect](../permissions/); its fix is `devplane check`, not a
+paste.
+
+Coverage uses the same containment procedure `devplane check` uses to find redundant rules. A pair it
+cannot decide is reported as missing rather than guessed at.
+
+With no argument, the reverse question:
+
+```console
+$ devplane rules
+Rules some projects have and others do not
+
+  Read(./.env)  agent
+     5 have  ai-tool, core-lib, infra, mobile, saas
+     1 do not  docs-site
+```
+
+A rule held by exactly one project is shown too: it is either the project that learned something or
+the one that is over-restricted.
+
+#### There is no apply-to-all
+
+Devplane writes nothing here, and there is no flag that does.
+
+Across **15 549 agentic pull requests in 148 projects**, adding instruction files raised the merge
+rate by ≥20% in **27.7%** of them and lowered it in **26.35%** — what separated the two was what the
+rules said, not that they were there. Pasting one rule into six repositories is a coin flip.
+
+An agent here also runs as your user and can read the daemon's token, so a route that edited a
+permission file would be reachable by the party the file exists to bound.
+
+| Flag | What |
+|---|---|
+| `--ask` | the rule belongs in the *ask* list rather than the deny list, which changes the key the paste names |
+| `--json` | the same four states per project, which is what the board reads |
+
 
 ## Looking
 
@@ -132,6 +243,103 @@ plain `devplane` does.
 
 What needs a human, most urgent first. Derived from state rather than stored, so it is correct after
 a restart. Ranked by level, then age, oldest first.
+
+**And when nothing needs you, it says what the day came to.** Every board in this category is built to
+be full; an empty list rendered as an absence is the surface failing at the moment it has the best
+thing it will ever have to say.
+
+```console
+$ devplane inbox
+since you last looked · 16h
+
+Clear.
+
+  14 decisions taken in your name today — 2 by you, 9 by a rule, 3 by nobody.
+  2 questions waited for you, the longest for 4h.
+  6 things Devplane ran for you — gates, pipelines, pull requests.
+
+  next · a question in 7c has a deadline of 40m
+
+The daemon keeps watching and the pipelines keep running. Nothing repeats if it
+restarts, so closing this costs nothing.
+```
+
+Four things about it, and each is a decision rather than a layout:
+
+- **What the tool did is counted apart from what was decided for you.** Gates and pipelines are
+  Devplane doing the job it was configured to do; folding them into the headline would make it a
+  measure of how much the tool did.
+- **There is no rate anywhere in it.** *You answered 4 of 17* is one word from a performance metric
+  about you. This names what happened, never how well.
+- **The last line checks before it reassures.** Where a question has a deadline and will end without
+  you, it says that instead — a close that is false is worse than none.
+- **A day with nothing in it gets a sentence**, not a table of zeroes.
+
+The hairline above the list is how long it has been since you **read** the inbox, which is not the
+same as how long since a page fetched it: the board polls every couple of seconds and a poll is not a
+look. There is no line at all before your first look, or for a gap under a minute.
+
+**And the items raised inside that gap are marked `new`.** The word, not a colour — nothing here is
+distinguishable by colour alone, because red and amber cannot be separated under deuteranopia at any
+usable lightness. The daemon decides which rows are new, so `devplane inbox` and the board cannot
+disagree about where the boundary falls, and nothing is marked before your first look: there is no
+boundary yet to be on the far side of.
+
+```console
+$ devplane inbox
+since you last looked · 16h
+
+ ! Keep the legacy /v1/login route?   [question] new
+   saas · 3m
+   Gate failed after the agent claimed completion   [gate_failed]
+   core-lib · 5h
+```
+
+### A list that can be read
+
+**A long inbox is a list that stops being read exactly when it matters.** Oversight modelled as a
+finite attention budget is an inverted U: at a reviewer capacity of 50, escalating 72 % of actions
+lets 22 % of danger through and escalating **100 %** lets **39 %** through. So above twelve rows the
+inbox summarises — and **nothing is ever hidden without a count**.
+
+Two things happen, both of them reversible by reading the row:
+
+**Folding.** Items of a kind whose members are interchangeable to you — issues assigned, reviews
+requested, stalled sessions, context warnings — collapse into one row naming the kind, the project
+and how many. The foldable kinds are enumerated in the code, and **a kind not on that list is always
+listed in full**, so a kind added later is unfoldable until somebody decides otherwise.
+
+**Four kinds are never folded**: a question, an abandoned question, a permission, and a human step in
+a pipeline. Each needs an answer only you can give, and a summary row is a question nobody saw with a
+number beside it.
+
+**Inhibition.** Where one raised item is a *named consequence* of another — a project whose
+configuration will not parse explains the refusals in it; a gate that is not answering explains calls
+with no verdict; a leaked agent explains the sessions it is holding — the consequence is counted on
+the cause's row instead of listed. The pairs are enumerated. Nothing is inferred from two things
+going wrong in one project at the same time, because that is a correlation and this is a claim.
+
+```console
+$ devplane inbox
+ ! Keep the legacy /v1/login route?   [question] new
+   saas · 3m
+
+   7 × issue_assigned  in saas
+   4 × stalled  across projects
+     folded because the list is long — `devplane inbox --json` has every id
+
+     3 more items — the gate is not answering, so these calls got no verdict
+```
+
+**The arithmetic is the guarantee**: rendered + summarised + counted-on-a-cause equals raised, over
+every input, asserted across every kind. An inbox short enough to read renders exactly as it did
+before any of this existed, with no summary rows at all. And a suppressed consequence returns the
+moment its cause resolves — nothing is stored, so a cause that is gone explains nothing.
+
+**Whether folding was right is measured.** `devplane attention` reports, per kind, how often it was
+folded and how often it was folded **and then acted on once opened** — a kind always folded and never
+acted on is one nobody needed as a row, and a kind folded and then acted on is one the summary was
+standing in front of.
 
 A permission item also names **the rule to paste so it is never asked again**, and where it goes:
 
@@ -250,8 +458,8 @@ printing nothing for ever.
 Full-text search over tool commands, questions and errors across every session. What you type is a
 phrase, not a query language.
 
-The board has the same search — press <kbd>/</kbd>, or click the box in the header. A match names the
-session it came from and opens it.
+The board has the same search — its own surface in the sidebar. A match names the session it
+came from and opens it.
 
 ### `devplane work start --spec <path>`
 
@@ -299,6 +507,40 @@ What Devplane decided, and on whose authority. Narrow to a run or a piece of wor
 | Flag | What |
 |---|---|
 | `--limit <n>` | how many rows (default 50) |
+
+**A row for an MCP tool call also says where that server came from**, which is the adjacent question
+to *on whose authority*: `authority` answers who decided, and this answers what was acting and who
+put it there.
+
+```console
+$ devplane audit
+2026-09-20T14:02:11 rule    agent:tool.use   mcp__github__create_issue
+                             ↳ mcp__github__create_issue was defined by: project
+```
+
+`project` means the server's definition came from a file in the repository — one a clone brought with
+it — rather than from your own configuration. The other values Claude Code reports are `user`,
+`plugin` and `sdk`, and **a value this build has never seen is printed as received** rather than
+mapped to a guess.
+
+**Nothing is derived from it.** Devplane reports where a tool came from; it does not decide that one
+provenance is safer than another, and no rule may read the field. That judgement is yours, in your own
+settings.
+
+**Three states, and the middle one is the honest one:**
+
+| The call | What the row says |
+|---|---|
+| `Bash(ls)` — cannot have a server | nothing, because there is no source to have |
+| `mcp__github__create_issue`, source reported | `↳ … was defined by: project` |
+| `mcp__github__create_issue`, nothing sent | `↳ …: where it was defined was not reported here` |
+
+The third is a fact about the vendor and the version, not about the call: an MCP call whose origin is
+unknowable must not read like an ordinary tool. That is the distinction the capability table draws
+between *not probed* and *not supported*.
+
+Requires Claude Code v2.1.274 or later; older versions send no such field, and **absent reads
+differently from unknown**.
 
 ### `devplane attention`
 
@@ -368,6 +610,26 @@ Aliased as `devplane diagnostics`.
 Whether the tool itself is telling you the truth: hook latency, when telemetry was last seen, the
 roster, each channel's last error **with the date it happened**, and any project whose
 `devplane.toml` will not parse — whose permission rules are therefore not in force.
+
+**It says what is watched here, per vendor and per channel**, because *watched* and *driven* are two
+different lists:
+
+```console
+watched
+  a session you started yourself. Anything Devplane starts is driven over the protocol and reports in full. Checked 2026-09-21
+  Claude Code     hooks       read           lifecycle, tool calls and the permission gate, all documented
+  Claude Code     roster      read           the background roster names what the vendor's own daemon supervises
+  GitHub Copilot  hooks       unproved       fourteen documented events; twelve are mapped and two are silent by decision
+  GitHub Copilot  roster      not published  ~/.copilot holds flat process logs and no session roster
+  Codex           hooks       not published  driven over the protocol only; no observation channel has been built
+```
+
+`read` means demonstrated end to end. `unproved` means the channels are read and that path has never
+been run. `not published` means the vendor offers nothing to read — so an empty list for that vendor
+means *Devplane cannot see it*, not *nothing is happening*.
+
+`devplane ls` and the board read the same table, and both name the agents that appear only when
+Devplane starts them.
 
 **It also names the release this build's rule syntax was modelled on**, so a rule you write here and
 a rule you write in Claude Code mean the same thing:
@@ -462,14 +724,53 @@ Devplane reads the mode and never sets it: change it where the session runs.
 ```
 
 **And what can answer without any of them.** `askUserQuestionTimeout` auto-continues an unanswered
-question, *submitting whatever options you had already selected*. It is off by default and permission
-prompts are exempt, so the line appears only when something set it — and in **yellow when somebody
-else did**, because its scope is user *or managed* and the vendor's own settings UI hides that row
-while managed settings are in force.
+question, *submitting whatever options you had already selected*. Permission prompts are exempt, and
+the setting takes one of four values — `60s`, `5m`, `10m` or `never`, which is its default.
+
+The line appears whenever the setting has a value, and **the value decides how it reads**:
+
+- a duration you set is **dim** — your own choice, reported back to you;
+- a duration **somebody else** set is **yellow**, because the scope is user *or managed* and the
+  vendor's own settings UI hides that row while managed settings are in force;
+- **`never` is dim and says your questions wait until you answer them.** It is not a finding and not
+  an alarm: somebody wrote down that nothing may answer for you, and an administrator deploying it is
+  hardening the machine rather than taking your attention.
+
+Nothing at all means nothing was set — which behaves like `never`, and is a different fact from
+somebody having chosen it.
 
 Devplane reads it and never writes it. Managed settings also compose from drop-ins, a policy helper
 and a Windows registry chain, so an absent line means *nothing in the two files I read*, never
 *there is no timer*.
+
+**And one source outranks both files, reported per session.** The `CLAUDE_AFK_TIMEOUT_MS`
+environment variable takes precedence over the setting and turns auto-continue on **even where the
+setting is unset or `never`**; setting it to `0` closes each question immediately rather than turning
+the timeout off. Devplane reads it from the environment the session was started in — its `SessionStart`
+hook runs as a child of that session — and prints it under the session it belongs to:
+
+```
+  a1b2c3                default (asks you)
+                        this session was started with a 60s timer on its questions, from its
+                        environment — it overrides your settings, including `never`
+                        set in CLAUDE_AFK_TIMEOUT_MS
+```
+
+**Zero is a sentence rather than a duration**, because *after 0s* is arithmetic where an explanation
+is owed:
+
+```
+                        questions in this session are closed immediately — nobody is asked, and
+                        whatever happens to be selected is submitted
+```
+
+A session with such a clock sorts to the top, and the summary says how many have one — because
+*every session that has reported asks you* is about the permission mode, and a timer answers
+whatever the mode says.
+
+**A session Devplane did not see start has no reading, and that is a third state.** Sessions older
+than `devplane connect` are counted separately and named, because *not read* must never print as
+*nothing is set*. They fill in when they restart.
 
 **Why this exists.** Claude Code's `auto` mode reviews actions with a classifier rather than a
 person, and it is the built-in starting mode on Pro, Max and Team. With six repositories open there
@@ -628,6 +929,30 @@ Settled ones follow with the sentence that ended them: **you answered it**, **a 
 after 4h — set in devplane.toml**, or **nobody answered**. No two of those read alike, because
 telling them apart without opening a transcript is the whole point.
 
+**And below them, the questions the agent asked and moved past.** A session Devplane only watches can
+ask you something and then start another tool call without an answer. Answered and abandoned produce
+identical state, so this is its own row: the question as the agent wrote it, what it was choosing
+between, and what it did instead:
+
+```
+Questions the agent asked and moved past
+  Keep the legacy /v1/login route?
+    nobody answered — it did `Bash: cargo test` instead
+```
+
+They carry **no answer action**: the tool call is over, and a button there would offer something
+nothing can deliver. They appear in `devplane inbox` as `question_abandoned`, at normal level, and
+offer the session instead.
+
+**An empty list says which vendors it cannot speak for.** The derivation is Claude Code's own hook
+events and no other vendor documents an equivalent, so *no question was abandoned* and *Devplane
+cannot see abandoned questions for copilot* are two different sentences.
+
+**One case it does not claim.** A question your agent's own auto-continue timer closed *submits* the
+options that were selected, so the tool succeeds and from outside it is indistinguishable from an
+answer. `devplane modes` is the surface for that half — it names which sessions have such a clock,
+how long it is, and who set it.
+
 ### `devplane snooze <id>`
 
 Hide a run's — or a piece of work's — inbox items for a while. Takes either id; the inbox prints
@@ -642,6 +967,10 @@ pull request that goes red hours later has no run left to quieten.
 | Flag | What |
 |---|---|
 | `--minutes <n>` | default 60; `0` un-snoozes |
+
+On the board a snooze offers to put it back. Answering does not: a permission or a question reaches
+the agent and nothing recalls it, so the page says so rather than offering a control that cannot
+deliver.
 
 ## Work
 
@@ -681,8 +1010,25 @@ to be read by something other than a person — a Spec Kit hook invokes it and r
 | `failed` | 1 | one did not, and it is named |
 | `no_gates` | 1 | this repository declares no checks |
 | `config_unreadable` | 1 | `devplane.toml` would not parse, so nothing ran |
+| `unknown_gate` | 1 | `--name` asked for a gate nothing declares |
 
-`--cwd <path>` picks the repository; `--json` gives `state`, `passed`, `summary` and `commands[]`.
+`--cwd <path>` picks the repository; `--json` gives `gate`, `state`, `passed`, `summary` and
+`commands[]`.
+
+**`--name <gate>` runs one gate from `[gates.named]` instead of `check`.** That is how you try a gate
+before a pipeline depends on it — until now the only thing that could run one was a pipeline step, so
+a gate you had written down could be validated and listed and never executed.
+
+```console
+$ devplane gate run --name notes
+ok        bash scripts/concepts-check.sh exit 0
+
+notes passed
+```
+
+`expect = "fail"` is honoured, so a gate that did exactly what it was asked to do is not reported as a
+failure. A name nothing declares prints the names that are declared and exits 1, because a missing
+gate that reads as success is the failure that layer exists to prevent.
 
 **Only `verified` exits 0.** A workflow reading the exit code alone would otherwise treat an empty
 `devplane.toml` as a green build. It decides on exit codes: no specification is read and no prose is
@@ -698,10 +1044,17 @@ commands only report gets a verdict from outside the agent.
 |---|---|
 | `--event <hook>` | which of the twenty hook points; default `after_implement` |
 | `--dry-run` | print the entry and write nothing |
+| `--anyway` | write the hook even where the repository declares no gate to run |
 
 It writes the file only when there is none, and otherwise prints the entry and the key to add it
 under. That file is committed, may carry other people's hooks, and round-tripping it through a YAML
 parser would keep the entries and lose the comments.
+
+`--anyway` exists because the default is to refuse: a hook that calls a gate nothing declares fails
+every time it fires.
+
+The entry carries no `condition` and no `priority`. A hook with a non-empty condition is skipped
+unless the running Spec Kit evaluates it, and `priority` is documented upstream as not sorted on.
 
 ### `devplane work approve <id>`
 
@@ -851,7 +1204,11 @@ the date measured. An agent never started has no such line.
 ### `devplane mcp`
 
 Serve Devplane's read-only surface to an agent over MCP, on stdio. Register it with your agent as a
-command MCP server:
+command MCP server.
+
+*Not listed in `devplane --help`*, along with `devplane statusline` and `devplane hook`: all three
+are surfaces for a machine rather than commands anybody types, and a help listing is for a person
+working out what the tool does. They work exactly as documented here.
 
 ```json
 { "mcpServers": { "devplane": { "command": "devplane", "args": ["mcp"] } } }

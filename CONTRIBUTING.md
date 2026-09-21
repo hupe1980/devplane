@@ -57,16 +57,20 @@ an opaque bundle would make the accountability tool the least accountable thing 
 **Nothing is fetched from outside the machine, in any build, for any asset — including a font.** A
 control plane whose own interface phones somewhere is not one.
 
-`tests/ui_contract.rs` holds the interface to the API, to escaping every value it prints, and to
-rendering at all. That last one needs `node` and **skips silently without it**, so install node
-before trusting a green run of the interface tests.
+`tests/ui_bundle.rs` holds the interface to the API and to the bundle it ships;
+`ui/tests/render.ts` renders every surface and asserts on the result. The second needs `node`, so
+install it before trusting a green run of the interface tests.
+
+**`cargo package` shares the target directory**, and its verification build embeds the interface
+from the packaged copy. A `cargo build` afterwards can reuse that build-script output and produce a
+binary carrying the *packaged* bundle rather than `ui/dist` — a stale interface, silently. `rm -rf
+target/package` after packaging, or package with `CARGO_TARGET_DIR` set elsewhere.
 
 **Versions are pinned on purpose**, including the toolchain. TypeScript is held at 5.9 because
 `svelte-check` does not accept 7 yet; the registry's `latest` is not usable here.
 
-`ui/legacy.html` is the page being replaced. It is still what the binary serves, and it goes in the
-same change that serves the bundle — one switch, revertible in one move. Serving both at once is
-refused: two interfaces that must not diverge is a worse problem than one.
+A surface is a directory under `ui/src/surfaces/`: an `index.ts` that registers itself and a
+component. Nothing else names it, so adding one is not a merge conflict.
 
 ## Scope
 

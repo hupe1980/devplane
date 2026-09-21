@@ -15,10 +15,24 @@ pub const YELLOW: &str = "\x1b[33m";
 pub const BLUE: &str = "\x1b[34m";
 pub const MAGENTA: &str = "\x1b[35m";
 
-/// Whether to emit escape codes at all. Honours `NO_COLOR`, and turns itself
-/// off when stdout is not a terminal so that `devplane ls > file` is readable.
+/// Whether to emit escape codes at all.
+///
+/// Honours `NO_COLOR`, turns itself off when stdout is not a terminal so that
+/// `devplane ls > file` is readable, and honours `CLICOLOR_FORCE` so that a
+/// person piping into `less -R` — and a test — can ask for colour anyway.
+///
+/// **`CLICOLOR_FORCE` is why the alignment is testable at all.** Every test in
+/// this repository captures stdout, which is not a terminal, so every test has
+/// only ever seen the uncoloured output. The columns collapsed the moment colour
+/// was on and nothing could see it — every test here captures stdout, which is not a terminal.
 pub fn colour() -> bool {
-    std::env::var_os("NO_COLOR").is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout())
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| v != "0") {
+        return true;
+    }
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 
 pub fn paint(code: &str, s: &str) -> String {
@@ -27,6 +41,66 @@ pub fn paint(code: &str, s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// How wide a string is on screen: its characters, not its bytes, and not the
+/// escape codes that carry no width.
+#[must_use]
+pub fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // A CSI sequence runs to a letter. Anything else beginning `ESC` is
+            // not something this module emits, and skipping one character of it
+            // is closer than counting the escape as a column.
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += 1;
+    }
+    width
+}
+
+/// Left-aligns `s` in a column `width` wide, measured by what is **visible**.
+///
+/// **`format!("{:<10}", paint(…))` does not do this**, and the difference is
+/// invisible in every test this repository has. Rust pads to the string's
+/// character count, and a painted string carries nine characters of escape code
+/// that occupy no columns — so a ten-wide column holding a coloured `failed`
+/// measures sixteen, pads to nothing, and the next field begins immediately
+/// after it: `failedcargo clippy …`. Uncoloured, the same code is correct, and
+/// tests capture stdout, which is not a terminal — every test here captures stdout, which is not a terminal.
+///
+/// **Always at least one space**, so a field wider than its column separates
+/// from the next one instead of running into it. A column is a minimum, not a
+/// promise that everything fits.
+#[must_use]
+pub fn pad(s: &str, width: usize) -> String {
+    let visible = visible_width(s);
+    let spaces = width.saturating_sub(visible).max(1);
+    format!("{s}{}", " ".repeat(spaces))
+}
+
+/// Right-aligns `s` in a column `width` wide, measured by what is **visible**.
+///
+/// The mirror of [`pad`], and it exists for the same reason: `format!("{:>8}",
+/// paint(…))` pads to the string's character count, and a painted string
+/// carries escape codes that occupy no columns — so a right-aligned coloured
+/// number lands eight characters left of where it belongs and every test sees
+/// the uncoloured rendering that worked.
+///
+/// **Always at least one space**, so a number wider than its column still
+/// separates from the field before it.
+#[must_use]
+pub fn pad_left(s: &str, width: usize) -> String {
+    let visible = visible_width(s);
+    let spaces = width.saturating_sub(visible).max(1);
+    format!("{}{s}", " ".repeat(spaces))
 }
 
 /// The API responses, mirrored for the terminal.
@@ -118,10 +192,47 @@ pub struct RunView {
     pub idle_seconds: i64,
 }
 
+/// A group of items shown as one row.
+///
+/// **Counted, never hidden.** The row names the kind, the project and how
+/// many, and the ids are here so it can be opened — a summary that could not
+/// be expanded would be a cap wearing a feature's clothes.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxSummary {
+    pub kind: String,
+    pub project: Option<String>,
+    pub count: usize,
+    pub level: String,
+    pub ids: Vec<String>,
+}
+
+/// Consequences counted on the row that explains them.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxInhibited {
+    pub cause: String,
+    pub count: usize,
+    pub because: String,
+    pub ids: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct InboxItem {
     pub kind: String,
     pub level: String,
+    /// **Raised since this person last read the inbox.**
+    ///
+    /// Decided by the daemon, never here: two surfaces each comparing an item's
+    /// timestamp to the mark is the second place a boundary gets drawn, and the
+    /// two would disagree the first time one of them rounded.
+    ///
+    /// `#[serde(default)]` because a machine with no previous look sends
+    /// nothing to be new to, and a missing field must read as *not new* rather
+    /// than fail the decode — the defect this struct's `run_id` field already
+    /// records.
+    #[serde(default)]
+    pub new_to_you: bool,
     /// `None` for an item that is not about a session: a piece of work whose
     /// runs have all ended, or the `gate_down` item, which is about the
     /// machine.
@@ -544,4 +655,85 @@ pub struct DecisionRow {
     pub action: String,
     pub outcome: String,
     pub reason: Option<String>,
+}
+
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    #[test]
+    fn escape_codes_occupy_no_columns() {
+        assert_eq!(visible_width("failed"), 6);
+        assert_eq!(visible_width(&format!("{RED}failed{RESET}")), 6);
+        assert_eq!(visible_width(&format!("{DIM}{BOLD}a{RESET}")), 1);
+        // A character is a column, not a byte.
+        assert_eq!(visible_width("✓"), 1);
+    }
+
+    #[test]
+    fn a_painted_field_pads_to_the_same_width_as_a_bare_one() {
+        // This is the whole bug. `format!("{:<10}", paint(RED, "failed"))` pads
+        // to nothing, because the string it measures is sixteen characters of
+        // which ten are invisible — and every test in this repository captures
+        // stdout, which is not a terminal, so every test saw the six-character
+        // version and passed.
+        let bare = pad("failed", 10);
+        let painted = pad(&format!("{RED}failed{RESET}"), 10);
+        assert_eq!(visible_width(&bare), visible_width(&painted));
+        assert_eq!(visible_width(&bare), 10);
+    }
+
+    #[test]
+    fn a_field_wider_than_its_column_still_separates() {
+        // `cargo fmt --all --check` is 23 characters in a 22-wide column, and
+        // the field after it used to begin immediately: `…--checkexit 1`.
+        let over = pad("cargo fmt --all --check", 22);
+        assert!(over.ends_with(' '), "{over:?}");
+        assert_eq!(visible_width(&over), 24);
+    }
+
+    #[test]
+    fn a_column_is_a_minimum_and_never_a_truncation() {
+        // A field that does not fit is still printed in full. Truncating here
+        // would hide the end of a command, which is the one part that says what
+        // it actually ran.
+        let long = "cargo clippy --all-targets --all-features -- -D warnings";
+        assert!(pad(long, 10).starts_with(long));
+    }
+}
+
+#[cfg(test)]
+mod pad_left_tests {
+    use super::*;
+
+    /// The same defect `pad` was written for, on the other side of the column.
+    ///
+    /// Every test in this repository captures stdout, which is not a terminal,
+    /// so every test sees the uncoloured rendering — which is correct. The
+    /// coloured one is the only one anybody looks at.
+    #[test]
+    fn a_painted_number_is_right_aligned_by_what_is_visible() {
+        unsafe { std::env::set_var("CLICOLOR_FORCE", "1") };
+        let painted = paint(YELLOW, "3");
+        assert!(painted.len() > 1, "the fixture is not actually coloured");
+
+        let padded = pad_left(&painted, 8);
+        assert_eq!(
+            visible_width(&padded),
+            8,
+            "a coloured cell is not eight columns wide: {padded:?}"
+        );
+        // `format!` is what this replaces, and it is wrong here.
+        assert_ne!(
+            visible_width(&format!("{painted:>8}")),
+            8,
+            "format! aligned a painted string correctly, so this helper is unnecessary"
+        );
+        unsafe { std::env::remove_var("CLICOLOR_FORCE") };
+    }
+
+    #[test]
+    fn a_field_wider_than_its_column_still_separates() {
+        assert_eq!(pad_left("1234567890", 4), " 1234567890");
+    }
 }

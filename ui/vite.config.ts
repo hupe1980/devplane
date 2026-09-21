@@ -1,6 +1,11 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 
+// The one thing this config needs from Node, declared rather than depended on.
+// `@types/node` is 2 MB of ambient declarations to type a single environment
+// read, in a repository that counts its dependencies and publishes the number.
+declare const process: { env: Record<string, string | undefined> };
+
 // Devplane's interface, built to a bundle the Rust binary embeds at compile
 // time. Three settings here are not preferences — each is a property the
 // product argues for elsewhere, enforced at the one place that can enforce it.
@@ -59,7 +64,31 @@ export default defineConfig({
   server: {
     // Dev only: the daemon is on loopback and serves the API the app reads.
     proxy: {
-      "/api": "http://127.0.0.1:47831",
+      "/api": daemon(),
+    },
+  },
+
+  // **`preview` exists so the rebuild can be photographed before it is
+  // served.** The screenshot script drives the page compiled into the binary,
+  // which is the interface being replaced — so until the switch there was no
+  // way to look at the rebuilt one with real data, and the three tasks gating
+  // the switch are all *somebody looks at it*.
+  //
+  // This is not a second served interface, which the switch refuses. Nothing
+  // ships it and the daemon does not know it exists; it is a static server over
+  // `dist/` with the API proxied at a port the script passes in.
+  preview: {
+    proxy: {
+      "/api": daemon(),
     },
   },
 });
+
+/// Where the daemon is, for the two dev servers that proxy to it.
+///
+/// A throwaway daemon picks a free port and writes it to `daemon.json`, so the
+/// screenshot script reads it there and passes it in. The fallback is the
+/// default port, which is what `npm run dev` against your own daemon wants.
+function daemon(): string {
+  return `http://127.0.0.1:${process.env.DEVPLANE_PORT ?? 47831}`;
+}

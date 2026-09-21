@@ -144,14 +144,17 @@ pub enum AcpEvent {
     QuestionUnrenderable { what: String },
     /// A question was cancelled without being answered — the session ended, or
     /// somebody stopped the run. Reported so the inbox stops offering an answer
-    /// that can no longer be delivered, for the same reason as
-    /// [`AcpEvent::PermissionExpired`].
+    /// that can no longer be delivered.
+    ///
+    /// **There was a `PermissionExpired` beside this one and it is gone.** It
+    /// was emitted by the six-hundred-second `PERMISSION_TIMEOUT` deleted above,
+    /// and deleting the clock left the variant declared, matched in `driven.rs`,
+    /// and constructed by nothing — a handler that could never run, writing a
+    /// decision row reading *"nobody answered within ten minutes"* about a rule
+    /// this product no longer has. An expiry now comes from the project's own
+    /// deadline and is swept against the durable `asks` row, which is a
+    /// different path entirely.
     QuestionCancelled { request_id: String },
-    /// A permission request expired unanswered and was refused on the agent's
-    /// behalf. Reported so the inbox stops offering a decision that can no
-    /// longer be taken: a request that has timed out cannot be answered, and an
-    /// item still holding a button for it is an item that lies.
-    PermissionExpired { request_id: String },
     /// Usage the agent reported for the session. Unlike the Claude-specific
     /// channels, the protocol reports the window size too, so the context
     /// gauge needs no table of model names.

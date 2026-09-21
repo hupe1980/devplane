@@ -144,6 +144,20 @@ pub struct Decision {
     /// tool.
     #[serde(default)]
     pub tool: Option<String>,
+    /// Where the MCP server behind `tool` came from, as the vendor reported it.
+    ///
+    /// **The adjacent question to `authority`, and the reason this field is
+    /// here rather than on the event alone.** `authority` answers *on whose
+    /// authority was this decided*; this answers *what was acting, and who put
+    /// it there*. A call into a server a cloned repository defined and one into
+    /// a server the person installed themselves are different facts, and until
+    /// this field existed they produced identical rows.
+    ///
+    /// `None` for a tool that is not an MCP tool, for a vendor that reports no
+    /// such thing, and for an agent older than the release that began sending
+    /// it. Absent is not unknown.
+    #[serde(default)]
+    pub server_source: Option<String>,
     #[serde(default)]
     pub project_id: Option<ProjectId>,
     #[serde(default)]
@@ -168,6 +182,7 @@ impl Decision {
             outcome: outcome.to_string(),
             reason: None,
             tool: None,
+            server_source: None,
             project_id: None,
             run_id: None,
             work_id: None,
@@ -178,6 +193,16 @@ impl Decision {
     /// taken — the spool the `command` hook writes when no daemon is running.
     pub fn at(mut self, at: Timestamp) -> Self {
         self.at = at;
+        self
+    }
+
+    /// Records where the MCP server behind this call came from.
+    ///
+    /// Transcribed from the vendor, never derived, and never mapped: a value
+    /// this build does not recognise is stored as received.
+    #[must_use]
+    pub fn from_server(mut self, source: Option<String>) -> Self {
+        self.server_source = source.filter(|s| !s.is_empty());
         self
     }
 
@@ -317,12 +342,26 @@ mod tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecidedEnvelope {
     pub session: String,
-    /// `allow`, `deny`, `ask` or `undecided`.
+    /// `deny`, `ask`, `unresolved` or `undecided`.
+    ///
+    /// There is no `allow`: [`crate::core::Verdict`] cannot express one.
     pub verdict: String,
-    /// The rule that produced it. `None` means no rule did — which is not a
-    /// decision and is therefore not recorded, only observed.
+    /// The rule that produced it. `None` means no rule did — which for
+    /// `undecided` is not a decision and is therefore only observed, and for
+    /// `unresolved` is a decision with no rule to name: see [`Self::why`].
     #[serde(default)]
     pub rule: Option<String>,
+    /// Where the MCP server behind the call came from, as the vendor reported
+    /// it. Carried so a decision spooled with no daemon running arrives whole.
+    #[serde(default)]
+    pub server_source: Option<String>,
+    /// Why the matcher could not decide, for an `unresolved` verdict.
+    ///
+    /// **The one decision Devplane takes with no rule behind it**, so the
+    /// sentence is the whole of the accounting: without it the audit row would
+    /// say a person was asked and be unable to say what for.
+    #[serde(default)]
+    pub why: Option<String>,
     /// What was asked for, in the words the audit log prints.
     #[serde(default)]
     pub subject: String,
@@ -455,5 +494,101 @@ mod rewind_tests {
             call("Bash", "echo b >> notes.md", "allow"),
         ];
         assert_eq!(files_a_shell_call_named_for_writing(&rows).len(), 1);
+    }
+}
+
+/// Whether a tool call could have carried server provenance at all.
+///
+/// **Three states, and the middle one is the honest gap.** The
+/// vendor's `mcp_server.source` rides five hook events and only from Claude
+/// Code v2.1.274 — so for an MCP tool call three things are true at different
+/// times and a surface that prints nothing cannot tell them apart:
+///
+/// | The call | What is known |
+/// |---|---|
+/// | `Bash(ls)` | **absent** — not an MCP tool; there is no source to have |
+/// | `mcp__linear__create`, source `project` | **reported** |
+/// | `mcp__linear__create`, nothing carried | **not reported here** — an older build, or a vendor whose channel has no such field |
+///
+/// Printing nothing for the second and third alike teaches a reader that a
+/// blank means *ordinary tool*, which is the same defect as the capability
+/// table conflating *not probed* with *not supported*.
+#[must_use]
+pub fn could_carry_provenance(tool: &str) -> bool {
+    tool.starts_with("mcp__")
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    /// **Three states, and the middle one had no representation.**
+    ///
+    /// `Bash(ls)` cannot have a source. `mcp__linear__create` can, and either
+    /// carried one or did not — and *did not* is a fact about the vendor and
+    /// the version, not about the call. A surface printing nothing for the
+    /// second and third alike teaches a reader that a blank means *ordinary
+    /// tool*, which is the capability table's *not probed* / *not supported*
+    /// defect one field over.
+    #[test]
+    fn a_call_that_cannot_have_a_source_reads_differently_from_one_that_lost_it() {
+        assert!(could_carry_provenance("mcp__linear__create_issue"));
+        assert!(could_carry_provenance("mcp__github"));
+
+        for ordinary in ["Bash", "Read", "Edit", "WebFetch", "Agent", ""] {
+            assert!(
+                !could_carry_provenance(ordinary),
+                "{ordinary} has no server to come from"
+            );
+        }
+
+        // The prefix is the vendor's own, and a tool merely *containing* it is
+        // not one: `mcp__` anchors at the start or it names nothing.
+        assert!(!could_carry_provenance("Bash(mcp__x)"));
+        assert!(!could_carry_provenance("not_mcp__linear"));
+    }
+
+    #[test]
+    fn a_source_this_build_has_never_seen_is_kept_as_received() {
+        // The SDK enumerates the values it knows and says how to treat one you
+        // do not. Mapping an unknown to `unknown` would replace a fact with a
+        // guess — the same rule the authority column follows one field over,
+        // where an unrecognised value drops the row rather than defaulting.
+        let d = Decision::new(Authority::Rule, "agent:tool.use", "x", "deny")
+            .from_server(Some("something-nobody-has-shipped-yet".into()));
+        assert_eq!(
+            d.server_source.as_deref(),
+            Some("something-nobody-has-shipped-yet")
+        );
+    }
+
+    #[test]
+    fn absent_is_not_unknown() {
+        // A tool that is not an MCP tool, a vendor that reports no such thing,
+        // and an agent older than the release that began sending it all produce
+        // *nothing said* — which reads differently from *said, and not
+        // understood*, and must keep doing so.
+        let d = Decision::new(Authority::Rule, "agent:tool.use", "x", "deny");
+        assert_eq!(d.server_source, None);
+        // An empty string is an absence, not a value.
+        let empty = d.clone().from_server(Some(String::new()));
+        assert_eq!(empty.server_source, None);
+    }
+
+    #[test]
+    fn two_servers_sharing_a_name_are_two_things() {
+        // A count that aggregated these would be answering "how much did github
+        // do" with a number about two different pieces of software.
+        let from_project = Decision::new(Authority::Rule, "agent:tool.use", "x", "deny")
+            .by_tool("mcp__github__create_issue")
+            .from_server(Some("project".into()));
+        let from_user = Decision::new(Authority::Rule, "agent:tool.use", "x", "deny")
+            .by_tool("mcp__github__create_issue")
+            .from_server(Some("user".into()));
+        assert_eq!(from_project.tool, from_user.tool);
+        assert_ne!(
+            from_project.server_source, from_user.server_source,
+            "same name, different software"
+        );
     }
 }

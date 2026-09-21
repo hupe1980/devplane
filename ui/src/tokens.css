@@ -1,10 +1,19 @@
-/* Devplane's design tokens — carried from the hand-written page **unchanged**.
+/* Devplane's colour palette, and nothing else.
  *
- * Every value here is computed, contrast-checked and colour-blindness-validated,
- * and two real defects were found by that validator on its first run. It is the
- * best asset this project has and **none of it is re-litigated by a rebuild**:
- * a port is exactly when somebody re-picks a palette by eye, so `tests/tokens.rs`
- * asserts these values against the legacy page's for as long as both exist.
+ * **Only colours live here**, because `tests/tokens.rs` reads every token in
+ * this file and computes a contrast ratio from it — a `--space-3: 12px` in here
+ * would be a length handed to a luminance function. The scales, the reset and
+ * the base element styles are in `base.css`.
+ *
+ * Every value is computed, contrast-checked and colour-blindness-validated, and
+ * two real defects were found by that validator on its first run.
+ *
+ * **The check computes rather than compares.** It held these values against the
+ * hand-written page's until that page was deleted at the switch; what it never
+ * did was compare them to a *reference*, which is why it survived the page and
+ * why the palette can be improved. Every colour, in both themes, is held to its
+ * floor against every surface it sits on — a new colour to the same standard as
+ * an old one. What is gone is only the requirement that it be the same colour.
  *
  * The three blocks repeat rather than share, which is explained where it happens.
  */
@@ -49,7 +58,11 @@
 
      `:root[data-theme="dark"]` repeats the block rather than sharing it,
      because a media query and an attribute cannot be one selector. The check
-     in `tests/tokens.rs` reads both and fails when they drift. */
+     in `tests/tokens.rs` reads both and fails when they drift.
+
+     `lib/theme.svelte.ts` is what sets the attribute, and it removes it rather
+     than writing `system` — the media query is what answers then, and a third
+     value would be one every selector has to know to ignore. */
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
       --bg: #16161a;      /* surface */

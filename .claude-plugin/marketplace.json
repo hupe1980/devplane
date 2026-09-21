@@ -1,6 +1,6 @@
 {
   "name": "devplane",
-  "description": "Devplane: the control plane for AI coding agents.",
+  "description": "Devplane: records who decided, when nobody asked you — across every project and every agent on your machine.",
   "owner": { "name": "hupe1980", "url": "https://github.com/hupe1980" },
   "plugins": [
     {

@@ -29,4 +29,19 @@ reason: string | null,
  * pipeline advancing, which are decisions about something other than a
  * tool.
  */
-tool: string | null, project_id: ProjectId | null, run_id: RunId | null, work_id: WorkId | null, };
+tool: string | null, 
+/**
+ * Where the MCP server behind `tool` came from, as the vendor reported it.
+ *
+ * **The adjacent question to `authority`, and the reason this field is
+ * here rather than on the event alone.** `authority` answers *on whose
+ * authority was this decided*; this answers *what was acting, and who put
+ * it there*. A call into a server a cloned repository defined and one into
+ * a server the person installed themselves are different facts, and until
+ * this field existed they produced identical rows.
+ *
+ * `None` for a tool that is not an MCP tool, for a vendor that reports no
+ * such thing, and for an agent older than the release that began sending
+ * it. Absent is not unknown.
+ */
+server_source: string | null, project_id: ProjectId | null, run_id: RunId | null, work_id: WorkId | null, };

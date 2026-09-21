@@ -175,11 +175,38 @@ CREATE TABLE IF NOT EXISTS decisions (
     -- these wrote a file through a *shell* -- is answerable exactly from the
     -- tool name and only guessable from the text.
     tool         TEXT,
+    -- Where the MCP server behind `tool` came from, as the vendor reported it:
+    -- `plugin`, `sdk`, `user`, `project`, or a value this build has never seen,
+    -- stored as received.
+    --
+    -- **The adjacent column to `authority`.** That one says on whose authority
+    -- a call was decided; this says what was acting and who put it there. A
+    -- call into a server a cloned repository defined and one into a server the
+    -- person installed themselves produced identical rows until this existed.
+    --
+    -- NULL for a tool that is not an MCP tool, for a vendor that reports no
+    -- such thing, and for an agent older than the release that began sending
+    -- it. Absent is not unknown, and no value here means unknown.
+    server_source TEXT,
     project_id   TEXT,
     run_id       TEXT,
     work_id      TEXT
 );
 
+-- **Ordered by time and then by insertion**, because `at` ties.
+--
+-- Two decisions taken in the same second — a gate finishing and the run it was
+-- about ending, which is the common case rather than a corner — sort
+-- arbitrarily under `at` alone, and SQLite is free to return them in either
+-- order. That surfaced as a test that passed alone and failed under parallel
+-- load, which is the mild version; the real one is an audit page showing two
+-- decisions in the wrong sequence, in the table whose whole purpose is saying
+-- what happened in what order.
+--
+-- `rowid` is the append order of an append-only log, so it is the exact
+-- tie-break. The row id cannot serve: it is a uuid v7, whose head is a
+-- millisecond timestamp and whose tail is random, so two rows written in the
+-- same millisecond sort by the random part.
 CREATE INDEX IF NOT EXISTS decisions_by_time ON decisions(at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_run ON decisions(run_id, at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_work ON decisions(work_id, at DESC);
@@ -226,7 +253,18 @@ CREATE TABLE IF NOT EXISTS attention_log (
     work_id      TEXT,
     raised_at    TEXT NOT NULL,
     resolved_at  TEXT,
-    resolution   TEXT
+    resolution   TEXT,
+    -- When this item was first **folded** into a summary rather than listed.
+    --
+    -- Per item, not per render: the board polls every couple of seconds, so
+    -- counting folds per render would measure polling. Stamped only when
+    -- somebody actually reads the inbox, exactly like the `looks` mark.
+    --
+    -- What it is for: a kind that is always folded is one nobody needed, and a
+    -- kind that is folded and then **acted on** once opened is one that is
+    -- being folded wrongly. The second is the interesting number and it is only
+    -- answerable with this column beside `resolution`.
+    folded_at    TEXT
 );
 
 -- The open set, which the sweeper reads on every tick.
@@ -300,4 +338,21 @@ CREATE TABLE IF NOT EXISTS agent_capabilities (
     declares_modes INTEGER NOT NULL,
     needs_auth     INTEGER NOT NULL,
     measured_at    TEXT NOT NULL
+);
+
+-- When somebody last **read** the inbox on this machine. One row, overwritten.
+--
+-- **Read, not rendered**, and the distinction is the whole of why this table
+-- exists rather than a timestamp on a request. The board repaints every couple
+-- of seconds; advancing the mark on every paint would erase the boundary it is
+-- drawn to show, and the failure would be invisible — the hairline would simply
+-- always say `0m`. The daemon advances it only after a render has been asked
+-- for and then left alone long enough to have been read.
+--
+-- Per machine, because a person has one attention span: reading the board and
+-- then the CLI is one look, not two. Not synchronised anywhere, so somebody
+-- with two laptops has two boundaries and each is honest about its own.
+CREATE TABLE IF NOT EXISTS looks (
+    id        INTEGER PRIMARY KEY CHECK (id = 1),
+    at        TEXT NOT NULL
 );

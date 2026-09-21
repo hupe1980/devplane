@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/devplane"
 title = "Devplane"
-description = "The local-first control plane for AI coding agents. One binary, one page for every project on your machine: what needs you, what went red after the agent stopped, and which finished work can prove its checks passed."
+description = "Devplane records who decided, when nobody asked you — a person, a rule, a classifier, a timer, or nobody — across every project and every agent on your machine. One binary, one page: what needs you, what went red after the agent stopped, and which finished work can prove its checks passed. Local-first, and it never approves a tool call."
 default_language = "en"
 author = "hupe1980"
 
@@ -44,7 +44,7 @@ include_content = true
 tagline = "Where work that outlives a session lives."
 repo = "https://github.com/hupe1980/devplane"
 acp = "https://agentclientprotocol.com"
-version = "0.6.0"
+version = "0.7.0"
 og_image = "/og.png"
 
 [[extra.nav]]

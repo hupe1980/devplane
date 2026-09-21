@@ -47,13 +47,26 @@ impl Level {
 
 /// What kind of decision is being asked for. The kinds are deliberately about
 /// *what the human must do*, not about which subsystem produced them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Copy` and `Ord` so folding can group by kind without cloning a string and
+/// without the grouping order depending on a hash seed — a summary list whose
+/// rows move between renders is one a person cannot learn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttentionKind {
     /// A tool wants permission and no policy rule matched.
     Permission,
     /// The agent asked a question.
     Question,
+    /// The agent asked a question and moved on without an answer.
+    ///
+    /// **Normal, not critical, and deliberately.** The question is already
+    /// over: nothing is blocked, no agent is waiting, and nothing the person
+    /// does now changes what happened. A `Critical` row is for something that
+    /// stops if you do not act, and ranking this above a live permission
+    /// request would be the inverted-U failure — escalating everything lets
+    /// more through than escalating most things.
+    QuestionAbandoned,
     /// A run ended with an error.
     RunFailed,
     /// A live run has produced no activity for longer than the stall timeout.
@@ -173,6 +186,7 @@ impl AttentionKind {
         match self {
             AttentionKind::Permission => "permission",
             AttentionKind::Question => "question",
+            AttentionKind::QuestionAbandoned => "question_abandoned",
             AttentionKind::RunFailed => "run_failed",
             AttentionKind::Stalled => "stalled",
             AttentionKind::Lost => "lost",
@@ -226,6 +240,13 @@ impl AttentionKind {
             // Normal, not high: the pipeline stopped exactly where the project
             // asked it to. An expected pause is not an alarm.
             AttentionKind::HumanStep => Level::Normal,
+            // **Normal, and the reasoning is the opposite of an alarm's.** The
+            // question is already over: nothing is blocked, no agent is
+            // waiting, and nothing the person does now changes what happened.
+            // Ranking it above a live permission request would be escalating
+            // everything, which measurably lets *more* through than escalating
+            // most things.
+            AttentionKind::QuestionAbandoned => Level::Normal,
             AttentionKind::CostSpike
             | AttentionKind::Refused
             | AttentionKind::Stalled
@@ -499,6 +520,19 @@ pub struct KindStats {
     pub dismissed: i64,
     pub elsewhere: i64,
     pub open: i64,
+    /// How many of these were **folded** into a summary rather than listed.
+    ///
+    /// A kind that is always folded is one nobody needed as a row.
+    #[serde(default)]
+    pub folded: i64,
+    /// How many were folded **and then acted on** once opened.
+    ///
+    /// **The interesting number.** A kind that is folded and then acted on is
+    /// one being folded wrongly — the summary was in the way of something
+    /// somebody wanted. A kind folded and never acted on is one the fold was
+    /// right about.
+    #[serde(default)]
+    pub folded_then_acted: i64,
 }
 
 impl KindStats {
@@ -890,6 +924,44 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
             since,
         });
     };
+
+    // **Outside the state match, because it is not a state.** An abandoned
+    // question is a thing that already happened; the run has moved on and is
+    // working, failed or gone. Every other item here describes what the session
+    // *is*, and this one describes what it did while nobody was looking — which
+    // is the obligation the seat is named for.
+    //
+    // **One row per run, not one per question**, because an item's id is
+    // `run:kind` — which is what makes a snooze per kind work — and five items
+    // sharing an id is five rows a person cannot act on separately. The newest
+    // is the row and the rest are a count, which also keeps a session in a loop
+    // from turning the inbox into a transcript.
+    if let Some(q) = run.abandoned_questions.last() {
+        let older = run.abandoned_questions.len() - 1 + run.abandoned_dropped as usize;
+        let what_next = match &q.moved_on_to {
+            Some(next) => format!(" \u{2014} it did `{next}` instead"),
+            None => ", and the session ended".to_string(),
+        };
+        let and_more = match older {
+            0 => String::new(),
+            1 => " One other question went the same way.".to_string(),
+            n => format!(" {n} other questions went the same way."),
+        };
+        // **No answer action, and that is the feature.** The tool call is over;
+        // a button here would be offering something no route can deliver, which
+        // is the exact defect the driven ask exists to avoid.
+        push(
+            AttentionKind::QuestionAbandoned,
+            q.question.clone(),
+            Some(format!(
+                "The agent asked this and moved on without an answer{what_next}.{and_more} \
+                 Open the session to raise it again."
+            )),
+            q.options.clone(),
+            reach(run, &[Action::Open, Action::Snooze]),
+            q.abandoned_at,
+        );
+    }
 
     match &run.state {
         RunState::Waiting(WaitingFor::Permission) => {
@@ -1433,10 +1505,413 @@ fn reach(run: &Run, then: &[Action]) -> Vec<Action> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Folding: a list that can be read
+// ---------------------------------------------------------------------------
+
+/// How many rows a person reads before they start scanning.
+///
+/// **Below this nothing is folded at all**, which is the property that protects
+/// every ordinary day: an inbox small enough to read renders exactly as it did
+/// before this existed.
+///
+/// The number is a judgement and is written down as one. What it is not is a
+/// cap — truncating a ranked list hides its tail, which is the failure the
+/// whole feature is arranged against. Oversight modelled as a finite attention
+/// budget is an **inverted U**: at a reviewer capacity of 50, escalating 72 %
+/// of actions lets 22 % of danger through and escalating 100 % lets **39 %**
+/// through. A list that grows without bound stops being read exactly when it
+/// matters.
+pub const READABLE: usize = 12;
+
+/// Kinds whose members are interchangeable to a person.
+///
+/// **Enumerated, never inferred.** A kind that is not in this list is listed in
+/// full, so a kind added later is unfoldable until somebody decides otherwise —
+/// which is the safe direction: the cost of listing something foldable is a
+/// longer list, and the cost of folding something unfoldable is a decision
+/// nobody was shown.
+///
+/// The test is *would this person act the same way on any one of these?* Five
+/// issues assigned across four projects are a queue. Five questions are five
+/// questions.
+/// Every kind, so a sweep over them is a list rather than a hand-written one
+/// that drifts.
+///
+/// **The guards read this**, and a kind added to the enum without being added
+/// here fails `every_kind_is_in_all_kinds` — which is what makes
+/// *every kind has been decided about* a real check rather than a check over
+/// whichever kinds somebody remembered.
+pub const ALL_KINDS: &[AttentionKind] = &[
+    AttentionKind::Permission,
+    AttentionKind::Question,
+    AttentionKind::QuestionAbandoned,
+    AttentionKind::RunFailed,
+    AttentionKind::Stalled,
+    AttentionKind::Lost,
+    AttentionKind::ContextHigh,
+    AttentionKind::RateLimit,
+    AttentionKind::CostSpike,
+    AttentionKind::GateFailed,
+    AttentionKind::CiRed,
+    AttentionKind::ChangesRequested,
+    AttentionKind::PrReady,
+    AttentionKind::IssueAssigned,
+    AttentionKind::ReviewRequested,
+    AttentionKind::Conflict,
+    AttentionKind::Interrupted,
+    AttentionKind::HumanStep,
+    AttentionKind::ReviewExhausted,
+    AttentionKind::PipelineBroken,
+    AttentionKind::Refused,
+    AttentionKind::GateDown,
+    AttentionKind::ConfigBroken,
+    AttentionKind::RecordIncomplete,
+    AttentionKind::AgentLeaked,
+];
+
+pub const FOLDABLE: &[AttentionKind] = &[
+    // Resource warnings. The row says a number is high; which session it is
+    // about changes nothing a person does next.
+    AttentionKind::ContextHigh,
+    AttentionKind::RateLimit,
+    AttentionKind::CostSpike,
+    // Forge queues. Genuinely a list, and the one that grows without bound on a
+    // machine with eight projects.
+    AttentionKind::IssueAssigned,
+    AttentionKind::ReviewRequested,
+    AttentionKind::PrReady,
+    AttentionKind::CiRed,
+    // Session health. A stalled session and another stalled session are the
+    // same errand.
+    AttentionKind::Stalled,
+    AttentionKind::Lost,
+    AttentionKind::Interrupted,
+    AttentionKind::RunFailed,
+    AttentionKind::Conflict,
+    AttentionKind::RecordIncomplete,
+];
+
+/// Kinds that may **never** be folded, whatever else is true.
+///
+/// **Each one needs an answer only this person can give.** Folding a question
+/// into *3 questions in saas* is the product failing at the only thing it
+/// claims: the whole argument is that a question nobody saw is the defect, and
+/// a summary row is a question nobody saw with a number next to it.
+///
+/// Kept as its own list rather than as the complement of [`FOLDABLE`], because
+/// the two say different things. A kind absent from `FOLDABLE` is one nobody
+/// has considered; a kind here is one somebody decided about.
+pub const NEVER_FOLDED: &[AttentionKind] = &[
+    AttentionKind::Permission,
+    AttentionKind::Question,
+    AttentionKind::QuestionAbandoned,
+    AttentionKind::HumanStep,
+];
+
+impl AttentionKind {
+    /// Whether members of this kind are interchangeable enough to summarise.
+    #[must_use]
+    pub fn foldable(self) -> bool {
+        !NEVER_FOLDED.contains(&self) && FOLDABLE.contains(&self)
+    }
+}
+
+/// A group of items shown as one row, with everything needed to open them.
+///
+/// **Nothing is hidden: it is counted, and the ids are here.** A summary that
+/// could not be expanded would be a cap wearing a feature's clothes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Not a generated wire type: `AttentionItem` is not one either, so exporting
+// its summary would export half a shape. The board reads these as plain JSON,
+// exactly as it reads the items they stand for.
+pub struct Summary {
+    pub kind: AttentionKind,
+    /// `None` where the items belong to no project, or to several.
+    pub project: Option<ProjectId>,
+    pub count: usize,
+    /// The highest level among the items behind this row, so a summary can
+    /// never be quieter than its loudest member.
+    pub level: Level,
+    /// Every item this row stands for. A reader can open them; a test can
+    /// prove nothing was lost.
+    pub ids: Vec<AttentionId>,
+}
+
+/// Folds a ranked inbox into what a person can read, plus what was summarised.
+///
+/// **Never drops.** `rendered + summarised == raised`, over every input — which
+/// is the assertion that makes this safe to turn on, because the failure mode
+/// of every other approach to a long list is that something stops being
+/// reachable.
+///
+/// Below [`READABLE`] nothing is folded and the output is the input.
+#[must_use]
+pub fn fold(items: Vec<AttentionItem>) -> (Vec<AttentionItem>, Vec<Summary>) {
+    if items.len() <= READABLE {
+        return (items, Vec::new());
+    }
+
+    // Group candidates by kind and project. A group of one is not a summary:
+    // *1 issue assigned in saas* is longer than the row it replaces.
+    let mut groups: std::collections::BTreeMap<(AttentionKind, Option<ProjectId>), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        if it.kind.foldable() {
+            groups
+                .entry((it.kind, it.project_id.clone()))
+                .or_default()
+                .push(i);
+        }
+    }
+    let folded: std::collections::BTreeSet<usize> = groups
+        .values()
+        .filter(|g| g.len() > 1)
+        .flatten()
+        .copied()
+        .collect();
+
+    let summaries: Vec<Summary> = groups
+        .into_iter()
+        .filter(|(_, g)| g.len() > 1)
+        .map(|((kind, project), g)| Summary {
+            kind,
+            project,
+            count: g.len(),
+            // The loudest member decides, so folding cannot quieten anything.
+            level: g
+                .iter()
+                .map(|&i| items[i].level)
+                .max()
+                .unwrap_or(Level::Normal),
+            ids: g.iter().map(|&i| items[i].id.clone()).collect(),
+        })
+        .collect();
+
+    let rendered = items
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !folded.contains(i))
+        .map(|(_, it)| it)
+        .collect();
+
+    (rendered, summaries)
+}
+
+// ---------------------------------------------------------------------------
+// Inhibition: a symptom counted on its cause
+// ---------------------------------------------------------------------------
+
+/// How far a cause reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Only items in the same project. A configuration that will not parse
+    /// breaks that repository and says nothing about any other.
+    Project,
+    /// Every item on the machine. The permission hook being down is not a fact
+    /// about one repository.
+    Machine,
+}
+
+/// A named cause, a kind it explains, and why.
+///
+/// **Enumerated, never inferred.** Deriving this from project or time
+/// proximity would be a correlation engine — two things went wrong in one
+/// repository within a minute is not evidence that one caused the other, and a
+/// surface that suppressed a real problem on that reasoning would be hiding
+/// exactly the row somebody needed.
+#[derive(Debug, Clone, Copy)]
+pub struct Cause {
+    pub cause: AttentionKind,
+    pub consequence: AttentionKind,
+    pub reach: Reach,
+    /// The sentence shown on the cause's row, so a person can see what the
+    /// count is *of* without opening it.
+    pub because: &'static str,
+}
+
+/// The pairs that are certain. Three, and each one is mechanical rather than
+/// probable.
+pub const CAUSES: &[Cause] = &[
+    Cause {
+        cause: AttentionKind::ConfigBroken,
+        consequence: AttentionKind::Refused,
+        reach: Reach::Project,
+        because: "the project's configuration will not parse, so no rule in it could be read",
+    },
+    Cause {
+        cause: AttentionKind::ConfigBroken,
+        consequence: AttentionKind::GateFailed,
+        reach: Reach::Project,
+        because: "the project's configuration will not parse, so its gates could not run",
+    },
+    Cause {
+        cause: AttentionKind::GateDown,
+        consequence: AttentionKind::Refused,
+        reach: Reach::Machine,
+        because: "the gate is not answering, so these calls got no verdict",
+    },
+    Cause {
+        cause: AttentionKind::AgentLeaked,
+        consequence: AttentionKind::Stalled,
+        reach: Reach::Project,
+        because: "a leaked agent is holding this project's worktree",
+    },
+    Cause {
+        cause: AttentionKind::AgentLeaked,
+        consequence: AttentionKind::Lost,
+        reach: Reach::Project,
+        because: "a leaked agent is holding this project's worktree",
+    },
+];
+
+/// Consequences counted on one cause's row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Not a generated wire type: `AttentionItem` is not one either, so exporting
+// its summary would export half a shape. The board reads these as plain JSON,
+// exactly as it reads the items they stand for.
+pub struct Inhibited {
+    /// The item that explains them, so a surface can attach the count to it.
+    pub cause: AttentionId,
+    pub count: usize,
+    pub because: String,
+    pub ids: Vec<AttentionId>,
+}
+
+/// Moves named consequences onto the rows that explain them.
+///
+/// **Never drops; moves and counts.** A suppressed item returns the moment its
+/// cause resolves, because nothing is stored — the cause is either in this
+/// render's list or it is not.
+///
+/// Two refusals, and both are the exemption rather than the mechanism:
+/// a kind in [`NEVER_FOLDED`] is listed however well explained it is, and a
+/// symptom claimed by two causes is counted **once**, under the louder one.
+#[must_use]
+pub fn inhibit(items: Vec<AttentionItem>) -> (Vec<AttentionItem>, Vec<Inhibited>) {
+    // Causes present in *this* list. A cause that has resolved is simply not
+    // here, which is what makes a resolved cause free rather than a subscription.
+    let causes: Vec<&AttentionItem> = items
+        .iter()
+        .filter(|i| CAUSES.iter().any(|c| c.cause == i.kind))
+        .collect();
+    if causes.is_empty() {
+        return (items, Vec::new());
+    }
+
+    // For each item, the best cause that explains it: louder first, so a
+    // symptom two causes claim is counted once and under the higher level.
+    let mut claim: std::collections::BTreeMap<usize, (AttentionId, &'static str, Level)> =
+        std::collections::BTreeMap::new();
+    for (i, it) in items.iter().enumerate() {
+        // **The exemption wins over every cause.** An abandoned question in a
+        // project whose configuration is broken is still a question nobody
+        // answered, and explaining it away is the product failing at its
+        // subject.
+        if NEVER_FOLDED.contains(&it.kind) {
+            continue;
+        }
+        for c in CAUSES {
+            if c.consequence != it.kind {
+                continue;
+            }
+            let Some(cause) = causes.iter().find(|x| {
+                x.kind == c.cause
+                    && match c.reach {
+                        Reach::Machine => true,
+                        Reach::Project => x.project_id == it.project_id,
+                    }
+            }) else {
+                continue;
+            };
+            let better = claim.get(&i).is_none_or(|(_, _, lvl)| cause.level > *lvl);
+            if better {
+                claim.insert(i, (cause.id.clone(), c.because, cause.level));
+            }
+        }
+    }
+
+    let mut by_cause: std::collections::BTreeMap<AttentionId, (String, Vec<AttentionId>)> =
+        std::collections::BTreeMap::new();
+    for (i, (cause, because, _)) in &claim {
+        let e = by_cause
+            .entry(cause.clone())
+            .or_insert_with(|| ((*because).to_string(), Vec::new()));
+        e.1.push(items[*i].id.clone());
+    }
+
+    let suppressed: Vec<Inhibited> = by_cause
+        .into_iter()
+        .map(|(cause, (because, ids))| Inhibited {
+            cause,
+            count: ids.len(),
+            because,
+            ids,
+        })
+        .collect();
+
+    let kept = items
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !claim.contains_key(i))
+        .map(|(_, it)| it)
+        .collect();
+
+    (kept, suppressed)
+}
+
 /// Builds and ranks the whole inbox.
 pub fn rank(mut items: Vec<AttentionItem>) -> Vec<AttentionItem> {
     items.sort_by_key(|i| std::cmp::Reverse(i.rank()));
-    items
+    decorrelate(items)
+}
+
+/// Spreads runs of items that came from the same place, **within a level**.
+///
+/// Twelve rows from one project read as one problem, and the eye stops at the
+/// third. The thirteenth row — the one from somewhere else — is the one worth
+/// seeing, and sorting by level then age buries it behind its own neighbours.
+///
+/// **Level always outranks this**, which is the property that keeps it safe: a
+/// critical row never moves below a normal one to break up a cluster. Inside a
+/// level the order is age, and this only ever reorders among items that are
+/// already interchangeable by both.
+///
+/// Correlated means *the same project*, which is what this product can observe
+/// — a run belongs to a project and a project is the file cluster. It is a
+/// fact on the item, never a similarity score: ordering by what a model thinks
+/// is related is the one change that would make this surface unexplainable.
+fn decorrelate(items: Vec<AttentionItem>) -> Vec<AttentionItem> {
+    let mut out: Vec<AttentionItem> = Vec::with_capacity(items.len());
+    // One band per level, preserving the age order inside it.
+    let mut band: Vec<AttentionItem> = Vec::new();
+    let mut level: Option<Level> = None;
+
+    let flush = |band: &mut Vec<AttentionItem>, out: &mut Vec<AttentionItem>| {
+        // Greedy: take the oldest item whose project differs from the one just
+        // emitted; if every remaining item shares it, take the oldest. That
+        // second clause is why this cannot starve — there is always a move.
+        let mut last: Option<Option<ProjectId>> = None;
+        while !band.is_empty() {
+            let pick = band
+                .iter()
+                .position(|i| last.as_ref() != Some(&i.project_id))
+                .unwrap_or(0);
+            let it = band.remove(pick);
+            last = Some(it.project_id.clone());
+            out.push(it);
+        }
+    };
+
+    for it in items {
+        if level != Some(it.level) {
+            flush(&mut band, &mut out);
+            level = Some(it.level);
+        }
+        band.push(it);
+    }
+    flush(&mut band, &mut out);
+    out
 }
 
 fn summarise_input(v: &serde_json::Value) -> String {
@@ -1453,6 +1928,420 @@ fn summarise_input(v: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// One item of a kind, in a project, for the folding tests.
+    fn it_of(kind: AttentionKind, project: Option<&str>, n: usize) -> AttentionItem {
+        AttentionItem {
+            id: AttentionId::from(format!("{}-{n}", kind.as_str())),
+            kind,
+            level: Level::Normal,
+            run_id: None,
+            project_id: project.map(ProjectId::new),
+            title: format!("{} {n}", kind.as_str()),
+            detail: None,
+            options: Vec::new(),
+            actions: Vec::new(),
+            request_id: None,
+            ask: None,
+            form: None,
+            url: None,
+            launch: None,
+            work_id: None,
+            offer: None,
+            no_offer: None,
+            since: jiff::Timestamp::now(),
+        }
+    }
+
+    /// **Exhaustive by compilation.** Adding a variant to `AttentionKind`
+    /// makes this match non-exhaustive, and the compiler names the variant
+    /// that is missing from [`ALL_KINDS`].
+    ///
+    /// A hand-written list checked against another hand-written list proves
+    /// only that somebody wrote the same thing twice; this cannot pass with a
+    /// variant missing.
+    fn is_listed(k: AttentionKind) -> bool {
+        use AttentionKind::*;
+        match k {
+            Permission | Question | QuestionAbandoned | RunFailed | Stalled | Lost
+            | ContextHigh | RateLimit | CostSpike | GateFailed | CiRed | ChangesRequested
+            | PrReady | IssueAssigned | ReviewRequested | Conflict | Interrupted | HumanStep
+            | ReviewExhausted | PipelineBroken | Refused | GateDown | ConfigBroken
+            | RecordIncomplete | AgentLeaked => ALL_KINDS.contains(&k),
+        }
+    }
+
+    /// The enum and the list cannot drift: a kind added to one and not the
+    /// other makes every sweep below a sweep over the wrong set.
+    #[test]
+    fn every_kind_is_in_all_kinds() {
+        for k in ALL_KINDS {
+            assert!(is_listed(*k), "{} is not in ALL_KINDS", k.as_str());
+        }
+        let listed: std::collections::BTreeSet<&str> =
+            ALL_KINDS.iter().map(|k| k.as_str()).collect();
+        assert_eq!(listed.len(), ALL_KINDS.len(), "ALL_KINDS has a duplicate");
+        // Round-trips through the serialisation, which is the enum's own
+        // spelling — so a new variant with a new name is absent from the set
+        // and this fails.
+        for name in listed.iter() {
+            let k: AttentionKind =
+                serde_json::from_value(serde_json::Value::String((*name).to_string()))
+                    .unwrap_or_else(|_| panic!("{name} is not a kind"));
+            assert_eq!(k.as_str(), *name);
+        }
+    }
+
+    /// **The arithmetic, as an assertion: nothing is dropped.**
+    ///
+    /// `rendered + summarised == raised`, over a set spanning every kind. This
+    /// is the property that makes folding safe to turn on at all — the failure
+    /// mode of every other approach to a long list is that something stops
+    /// being reachable, and a cap on a ranked list hides exactly the tail the
+    /// inverted-U result is about.
+    #[test]
+    fn folding_never_loses_an_item() {
+        let mut raised = Vec::new();
+        for (n, kind) in ALL_KINDS.iter().enumerate() {
+            // Several of each, across two projects, so every foldable kind has
+            // a group to fold and every unfoldable one has a reason not to.
+            for k in 0..3 {
+                raised.push(it_of(
+                    *kind,
+                    Some(if k % 2 == 0 { "p1" } else { "p2" }),
+                    n * 10 + k,
+                ));
+            }
+        }
+        let total = raised.len();
+        let ids: std::collections::BTreeSet<AttentionId> =
+            raised.iter().map(|i| i.id.clone()).collect();
+
+        let (rendered, summaries) = fold(raised);
+
+        let summarised: usize = summaries.iter().map(|s| s.count).sum();
+        assert_eq!(
+            rendered.len() + summarised,
+            total,
+            "an item was dropped: {} rendered + {summarised} summarised != {total}",
+            rendered.len()
+        );
+
+        // Reachability, not just arithmetic: every id is either on screen or
+        // behind a summary that names it.
+        let mut reachable: std::collections::BTreeSet<AttentionId> =
+            rendered.iter().map(|i| i.id.clone()).collect();
+        for s in &summaries {
+            reachable.extend(s.ids.iter().cloned());
+        }
+        assert_eq!(reachable, ids, "an item is counted but not reachable");
+    }
+
+    /// **The four kinds only this person can answer are never folded.**
+    ///
+    /// Folding a question into *3 questions in saas* is the product failing at
+    /// the one thing it claims: a summary row is a question nobody saw with a
+    /// number beside it.
+    #[test]
+    fn a_question_is_never_a_number() {
+        let mut raised = Vec::new();
+        for (n, kind) in ALL_KINDS.iter().enumerate() {
+            for k in 0..4 {
+                raised.push(it_of(*kind, Some("p1"), n * 10 + k));
+            }
+        }
+        let (rendered, summaries) = fold(raised);
+
+        for kind in NEVER_FOLDED {
+            assert!(
+                !summaries.iter().any(|s| s.kind == *kind),
+                "{} was folded, and it is one only this person can answer",
+                kind.as_str()
+            );
+            assert_eq!(
+                rendered.iter().filter(|i| i.kind == *kind).count(),
+                4,
+                "{} lost a row to folding",
+                kind.as_str()
+            );
+            assert!(
+                !kind.foldable(),
+                "{} reports itself foldable",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// **Every kind is foldable on purpose or unfoldable on purpose.**
+    ///
+    /// A kind added later is unfoldable until somebody puts it in the list,
+    /// which is the safe direction — the cost of listing something foldable is
+    /// a longer list, and the cost of folding something unfoldable is a
+    /// decision nobody was shown. This fails when a new kind appears so that
+    /// the choice is made deliberately rather than by default.
+    #[test]
+    fn every_kind_has_been_decided_about() {
+        for kind in ALL_KINDS {
+            let in_foldable = FOLDABLE.contains(kind);
+            let in_never = NEVER_FOLDED.contains(kind);
+            assert!(
+                !(in_foldable && in_never),
+                "{} is in both lists",
+                kind.as_str()
+            );
+            assert_eq!(
+                kind.foldable(),
+                in_foldable,
+                "{} folds differently from how it is listed",
+                kind.as_str()
+            );
+        }
+        // The four exemptions are mandatory, so they are named rather than
+        // counted: a list that merely has four entries can have the wrong four.
+        for kind in [
+            AttentionKind::Permission,
+            AttentionKind::Question,
+            AttentionKind::QuestionAbandoned,
+            AttentionKind::HumanStep,
+        ] {
+            assert!(
+                NEVER_FOLDED.contains(&kind),
+                "{} lost its exemption",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// **A list short enough to read renders exactly as it did before this
+    /// existed.** The regression that protects every ordinary day.
+    #[test]
+    fn a_short_list_is_not_folded_at_all() {
+        let raised: Vec<AttentionItem> = (0..READABLE)
+            .map(|n| it_of(AttentionKind::IssueAssigned, Some("p1"), n))
+            .collect();
+        let before = raised.clone();
+
+        let (rendered, summaries) = fold(raised);
+        assert!(summaries.is_empty(), "a readable list grew summary rows");
+        assert_eq!(rendered, before, "a readable list was reordered or changed");
+    }
+
+    /// A group of one is not a summary: *1 issue assigned in saas* is longer
+    /// than the row it would replace.
+    #[test]
+    fn a_group_of_one_stays_a_row() {
+        let mut raised: Vec<AttentionItem> = (0..READABLE + 4)
+            .map(|n| it_of(AttentionKind::Stalled, Some("p1"), n))
+            .collect();
+        raised.push(it_of(AttentionKind::CiRed, Some("p9"), 99));
+
+        let (rendered, summaries) = fold(raised);
+        assert!(
+            rendered.iter().any(|i| i.kind == AttentionKind::CiRed),
+            "the only ci_red was folded into a summary of one"
+        );
+        assert!(summaries.iter().all(|s| s.count > 1));
+    }
+
+    /// A summary is never quieter than its loudest member.
+    #[test]
+    fn a_summary_carries_the_highest_level_behind_it() {
+        let mut raised: Vec<AttentionItem> = (0..READABLE + 3)
+            .map(|n| it_of(AttentionKind::CiRed, Some("p1"), n))
+            .collect();
+        raised[2].level = Level::Critical;
+
+        let (_, summaries) = fold(raised);
+        let s = summaries
+            .iter()
+            .find(|s| s.kind == AttentionKind::CiRed)
+            .expect("a ci_red summary");
+        assert_eq!(
+            s.level,
+            Level::Critical,
+            "folding quietened a critical item"
+        );
+    }
+
+    /// **Inhibition never drops, and the exemption outranks every cause.**
+    #[test]
+    fn a_symptom_is_counted_on_its_cause_and_a_question_never_is() {
+        let mut broken = it_of(AttentionKind::ConfigBroken, Some("p1"), 0);
+        broken.level = Level::Critical;
+
+        let raised = vec![
+            broken,
+            it_of(AttentionKind::Refused, Some("p1"), 1),
+            it_of(AttentionKind::Refused, Some("p1"), 2),
+            // A different project: nothing explains it.
+            it_of(AttentionKind::Refused, Some("p2"), 3),
+            // **The exemption.** An abandoned question inside a broken-config
+            // project is still a question nobody answered.
+            it_of(AttentionKind::QuestionAbandoned, Some("p1"), 4),
+        ];
+        let total = raised.len();
+
+        let (kept, suppressed) = inhibit(raised);
+
+        let moved: usize = suppressed.iter().map(|s| s.count).sum();
+        assert_eq!(kept.len() + moved, total, "inhibition dropped an item");
+        assert_eq!(moved, 2, "only p1's refusals are explained by p1's config");
+
+        assert!(
+            kept.iter()
+                .any(|i| i.kind == AttentionKind::QuestionAbandoned),
+            "an abandoned question was explained away by a broken config"
+        );
+        assert!(
+            kept.iter()
+                .any(|i| i.project_id.as_ref().is_some_and(|p| p.to_string() == "p2")),
+            "a project's refusal was suppressed by another project's cause"
+        );
+        assert!(
+            suppressed[0].because.contains("will not parse"),
+            "the row does not say why: {}",
+            suppressed[0].because
+        );
+    }
+
+    /// **A symptom two causes claim is counted once, under the louder one.**
+    #[test]
+    fn two_causes_claiming_one_symptom_count_it_once() {
+        let mut down = it_of(AttentionKind::GateDown, None, 0);
+        down.level = Level::Critical;
+        let mut broken = it_of(AttentionKind::ConfigBroken, Some("p1"), 1);
+        broken.level = Level::High;
+
+        let raised = vec![down, broken, it_of(AttentionKind::Refused, Some("p1"), 2)];
+        let total = raised.len();
+
+        let (kept, suppressed) = inhibit(raised);
+        let moved: usize = suppressed.iter().map(|s| s.count).sum();
+
+        assert_eq!(moved, 1, "one refusal was counted twice");
+        assert_eq!(kept.len() + moved, total);
+        assert_eq!(
+            suppressed.len(),
+            1,
+            "the symptom appears under two causes at once"
+        );
+    }
+
+    /// **When a cause resolves, its consequences come back** — free, because
+    /// nothing is stored: a resolved cause is simply not in the next list.
+    #[test]
+    fn a_consequence_returns_when_its_cause_is_gone() {
+        let with_cause = vec![
+            it_of(AttentionKind::ConfigBroken, Some("p1"), 0),
+            it_of(AttentionKind::Refused, Some("p1"), 1),
+        ];
+        let (kept, suppressed) = inhibit(with_cause);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(suppressed.iter().map(|s| s.count).sum::<usize>(), 1);
+
+        // The same symptom, with the cause resolved.
+        let without = vec![it_of(AttentionKind::Refused, Some("p1"), 1)];
+        let (kept, suppressed) = inhibit(without);
+        assert_eq!(kept.len(), 1, "the consequence did not come back");
+        assert!(suppressed.is_empty());
+    }
+
+    /// Every pair names a cause and a consequence that exist, and no pair
+    /// explains a kind that may never be folded — which would be a rule the
+    /// exemption then has to override at run time.
+    #[test]
+    fn every_cause_pair_is_about_real_kinds() {
+        for c in CAUSES {
+            assert!(ALL_KINDS.contains(&c.cause), "{:?}", c.cause);
+            assert!(ALL_KINDS.contains(&c.consequence), "{:?}", c.consequence);
+            assert!(
+                !NEVER_FOLDED.contains(&c.consequence),
+                "{} is exempt from folding, so a cause for it is a rule that can never fire",
+                c.consequence.as_str()
+            );
+            assert!(!c.because.is_empty());
+        }
+    }
+
+    /// **Level always outranks decorrelation**, and a cluster is broken up
+    /// only among items that are already interchangeable by level and age.
+    #[test]
+    fn spreading_a_cluster_never_moves_a_row_past_a_louder_one() {
+        let mut raised = vec![
+            it_of(AttentionKind::CiRed, Some("p1"), 0),
+            it_of(AttentionKind::CiRed, Some("p1"), 1),
+            it_of(AttentionKind::CiRed, Some("p1"), 2),
+            it_of(AttentionKind::CiRed, Some("p2"), 3),
+        ];
+        // One critical, at the back of the input.
+        raised[3].level = Level::Critical;
+
+        let ranked = rank(raised);
+
+        assert_eq!(
+            ranked[0].level,
+            Level::Critical,
+            "a critical row was moved below a normal one to break up a cluster"
+        );
+        // Levels stay monotonically non-increasing: decorrelation reorders
+        // inside a band and never across one.
+        for w in ranked.windows(2) {
+            assert!(w[0].level >= w[1].level, "the level order was broken");
+        }
+    }
+
+    /// Where an alternative of the same level exists, two adjacent rows do not
+    /// share a project.
+    #[test]
+    fn a_cluster_is_interleaved_with_what_else_is_waiting() {
+        let raised = vec![
+            it_of(AttentionKind::CiRed, Some("p1"), 0),
+            it_of(AttentionKind::CiRed, Some("p1"), 1),
+            it_of(AttentionKind::CiRed, Some("p1"), 2),
+            it_of(AttentionKind::CiRed, Some("p2"), 3),
+            it_of(AttentionKind::CiRed, Some("p3"), 4),
+        ];
+        let ranked = rank(raised);
+
+        // p2 and p3 exist, so the first three rows cannot all be p1.
+        let first_three: Vec<String> = ranked
+            .iter()
+            .take(3)
+            .map(|i| {
+                i.project_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(
+            first_three
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1,
+            "three rows from one project in a row while others were waiting: {first_three:?}"
+        );
+
+        // Nothing is lost or duplicated.
+        assert_eq!(ranked.len(), 5);
+    }
+
+    /// **It cannot starve.** Where every remaining row shares a project there
+    /// is no alternative, and the oldest is taken — the list still drains in
+    /// age order.
+    #[test]
+    fn one_project_alone_keeps_its_age_order() {
+        let raised: Vec<AttentionItem> = (0..5)
+            .map(|n| it_of(AttentionKind::CiRed, Some("p1"), n))
+            .collect();
+        let before: Vec<AttentionId> = raised.iter().map(|i| i.id.clone()).collect();
+        let after: Vec<AttentionId> = rank(raised).iter().map(|i| i.id.clone()).collect();
+        assert_eq!(
+            before, after,
+            "a single-project list was reordered for no reason"
+        );
+    }
+
     #[test]
     fn a_level_is_stored_as_serde_spells_it() {
         // The rule that exists because reconstructing a wire value from `Debug`

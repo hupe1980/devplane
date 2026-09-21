@@ -13,8 +13,8 @@ something an agent wrote for itself.
 A repository with no `devplane.toml` still works — the gates are empty, no rule prohibits anything,
 and nothing changes.
 
-**Devplane reads this file and never writes it.** `devplane check` prints it back in a terminal;
-<kbd>,</kbd> on the board does the same for every registered repository at once, including the one
+**Devplane reads this file and never writes it.** `devplane check` prints it back in a terminal; the
+board's **setup** surface does the same for every registered repository at once, including the one
 whose file stopped parsing. There is no settings form on purpose: an agent here runs as you, so a
 write path to `[policy]` would be reachable by the thing those rules govern.
 
@@ -42,13 +42,13 @@ timeout = "10m"           # for the whole gate, not per command
 on_fail = "feedback"      # feedback | escalate | ignore
 max_feedback_rounds = 2
 
-[gates.named.repro]       # asked for by name from a pipeline step
+[gates.named.repro]       # asked for by name — from a pipeline step, or `gate run --name repro`
 run     = ["pnpm test -- --run tests/repro"]
 expect  = "fail"          # one that passes proved nothing
 timeout = "2m"            # optional; the project's otherwise
 
 [questions]
-deadline = "never"        # never | 90s | 30m | 4h — how long an ask waits
+deadline = "never"        # never | 90s | 30m | 4h — how long an ask waits (while Devplane is up)
 
 [policy]                  # prohibit and defer; Devplane never approves
 never_auto = ["Bash(rm -rf *)", "Read(.env)"]
@@ -149,6 +149,11 @@ Durations are written the way people say them: `30s`, `10m`, `1h30m`. A bare num
 `check` always resolves by that name. Anything else has to be declared, and asking for a gate nobody
 wrote is an error rather than a silent pass.
 
+**Run one by hand with `devplane gate run --name <gate>`**, which is how you try a gate before a
+pipeline depends on it. With no `--name` it runs `check`. An `expect = "fail"` gate passes when its
+command fails, here exactly as in a pipeline, and a name nothing declares exits non-zero and prints
+the names that are declared.
+
 See [Verified done](/docs/verified-done/) for how gates run.
 
 ## `[policy]`
@@ -225,7 +230,7 @@ anything. Sessions Devplane merely watches are unaffected either way.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `deadline` | duration or `never` | `never` | how long an unanswered question or permission waits in this repository |
+| `deadline` | duration or `never` | `never` | how long an unanswered question or permission waits in this repository, counted only while Devplane is running |
 
 **The default is that it waits.** Devplane will not pick an answer for you, and it will not let a
 clock pick one unless you write the clock down here. Your agent's own vendor makes the same choice:
@@ -241,6 +246,12 @@ deadline = "4h"    # never | 90s | 30m | 4h
 
 When it fires the agent is told **no**, and `devplane audit` names **a clock** as the authority, with
 the duration and this file.
+
+**The clock runs only while Devplane is up.** A deadline bounds how long a question waits for
+somebody who *could* have answered it — and while the daemon is stopped there is no board, no inbox
+and no notification, so the question is in front of nobody. Close your laptop at 17:00 with a
+question waiting and a `10m` deadline, and at 09:00 the next morning it is still there, with the full
+ten minutes ahead of it. A restart can only ever lengthen a wait.
 
 A value that will not parse fails `devplane check` and the wait stays unbounded — ending a question
 early on the strength of a typo is the one outcome that must not happen.

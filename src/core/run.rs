@@ -397,6 +397,34 @@ pub struct Run {
     /// claim about a moment nothing here witnessed.
     pub permission_mode: Option<PermissionMode>,
     pub permission_mode_seen: Option<Timestamp>,
+    /// A clock this session's own environment put on its questions.
+    ///
+    /// Per session, because `CLAUDE_AFK_TIMEOUT_MS` is per session: it
+    /// overrides the settings files and turns auto-continue on even where they
+    /// say `never`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_clock: Option<crate::core::clock::QuestionClock>,
+    /// Questions this session asked that nobody answered.
+    ///
+    /// **The agent moving on used to erase the row.** A watched session's
+    /// question puts the run in `Waiting(Question)` with a `blocked_on`; the
+    /// next tool call clears both, because the agent is working again. So the
+    /// question left the inbox, and *the person answered it* and *the agent
+    /// gave up on it* produced byte-identical state — the product's second
+    /// obligation failing silently, in the one place it is derivable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abandoned_questions: Vec<AbandonedQuestion>,
+    /// How many fell off the end of that bounded list.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub abandoned_dropped: u32,
+    /// When the environment was read, and **`None` means it never was**.
+    ///
+    /// *Not read* and *read, nothing set* are different facts and must never
+    /// share a sentence — the distinction the roster already makes between
+    /// *not probed* and *not supported*. A date because a fact about a machine
+    /// with no date on it is the row this project has been wrong about most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_clock_read: Option<Timestamp>,
     /// The mode an **ACP agent** declared for this session, in the agent's own
     /// spelling.
     ///
@@ -494,6 +522,34 @@ pub struct Run {
     pub snoozed: crate::core::attention::Snoozed,
 }
 
+/// A question an agent asked and then moved past.
+///
+/// **Not answerable, and the type says so by having nowhere to put an answer.**
+/// The tool call is over; offering a button would be offering something no
+/// route can deliver, which is the defect the driven ask was built to avoid and
+/// would be a worse version of here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub struct AbandonedQuestion {
+    /// As the agent wrote it. Rendered, never summarised.
+    pub question: String,
+    /// The options it offered, so a person can see what it chose between.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<crate::core::event::Choice>,
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub asked_at: Timestamp,
+    #[cfg_attr(feature = "typescript", ts(type = "string"))]
+    pub abandoned_at: Timestamp,
+    /// What the agent did instead, where that is the next thing it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_on_to: Option<String>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 /// What a blocked run is waiting for, with enough detail to decide.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlockedOn {
@@ -540,6 +596,10 @@ impl Run {
             // not one of them, whatever it feels like it should be.
             permission_mode: None,
             permission_mode_seen: None,
+            question_clock: None,
+            question_clock_read: None,
+            abandoned_questions: Vec::new(),
+            abandoned_dropped: 0,
             agent_mode: None,
             agent_mode_seen: None,
             cwd,

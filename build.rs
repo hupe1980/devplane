@@ -15,11 +15,11 @@
 //!
 //! What that must never become is a silent downgrade: a release binary that
 //! quietly shipped without an interface because somebody forgot to build it.
-//! The switch commit makes the bundle load-bearing, and
-//! `tests/ui_contract.rs` fails when it is missing from then on. Until then the
-//! binary serves `ui/legacy.html` and this is mechanism without a consumer,
-//! which is deliberate: the interface is switched in **one** change, and
-//! serving both at once is the risk this feature already refused.
+//! **Since the switch on 2026-09-21 the bundle is load-bearing**: a binary
+//! built without it serves a page that says so, in words, on the address a
+//! person would open — rather than a blank one, or the API's JSON 404, either
+//! of which would send them debugging the daemon. `tests/ui_bundle.rs` holds
+//! the release pipeline to building it.
 
 use std::path::Path;
 

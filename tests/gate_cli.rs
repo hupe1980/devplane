@@ -165,3 +165,68 @@ fn a_configuration_that_will_not_parse_reports_the_parsers_error_and_runs_nothin
     // when in fact it declared some that could not be read.
     assert_ne!(v["summary"], gate_json(&scratch("cmp", None)).0["summary"]);
 }
+
+/// **A named gate could be declared, validated and listed — and only a pipeline
+/// step could run one.**
+///
+/// `[gates.named.x]` is checked by `devplane check`, printed by it, and
+/// reachable from a pipeline. Nothing on the CLI could ask for it, so a person
+/// who wrote one down had no way to try it before wiring a pipeline around it.
+/// That is a configuration key with no reader for its commonest use, which is
+/// the defect `devplane check` exists to complain about, pointed inward.
+#[test]
+fn a_named_gate_can_be_run_by_name() {
+    let dir = scratch(
+        "named",
+        Some(
+            r#"
+[project]
+name = "named-gate"
+
+[gates]
+check = ["true"]
+
+[gates.named.docs]
+run = ["true"]
+
+[gates.named.mustfail]
+run = ["false"]
+expect = "fail"
+"#,
+        ),
+    );
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_devplane"))
+            .args(args)
+            .arg("--cwd")
+            .arg(&dir)
+            .output()
+            .expect("devplane")
+    };
+
+    // The default is still `check`, and naming a declared gate runs that one.
+    assert!(run(&["gate", "run"]).status.success(), "check");
+    assert!(
+        run(&["gate", "run", "--name", "docs"]).status.success(),
+        "a declared named gate runs"
+    );
+
+    // **`expect = "fail"` is honoured**, so a gate that did exactly what it was
+    // asked to do is not reported as a failure.
+    assert!(
+        run(&["gate", "run", "--name", "mustfail"]).status.success(),
+        "a gate declared `expect = \"fail\"` passes when its command fails"
+    );
+
+    // **An undeclared gate is an error, never a silent pass.** An empty gate
+    // that reads as success is the failure this layer exists to prevent.
+    let out = run(&["gate", "run", "--name", "nope"]);
+    assert!(!out.status.success(), "an unknown gate must not pass");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("no such gate"), "{said}");
+    assert!(
+        said.contains("docs") && said.contains("mustfail"),
+        "it names what is declared, so the person can see the spelling: {said}"
+    );
+}

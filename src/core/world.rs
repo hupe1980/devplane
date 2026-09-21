@@ -82,6 +82,19 @@ pub struct SessionMode {
     /// vocabulary, and **no `asks_a_person` can be derived from it at all**.
     pub agent_mode: Option<String>,
     pub agent_mode_seen: Option<String>,
+    /// A clock this session's own **environment** put on its questions.
+    ///
+    /// `CLAUDE_AFK_TIMEOUT_MS` overrides the settings files and turns
+    /// auto-continue on even where they say `never`, so this is the one fact
+    /// that can make the machine-wide line wrong for a single session.
+    pub question_clock: Option<crate::core::clock::ClockLine>,
+    /// Whether the environment was read for this session at all.
+    ///
+    /// **`false` is not *nothing is set*.** A session that started before
+    /// `devplane connect`, or on a channel that carries no environment, has no
+    /// reading — and rendering that as *your questions wait for you* is the
+    /// reassuring wrong answer this whole feature exists to stop.
+    pub clock_read: bool,
 }
 
 /// Everything the daemon knows right now.
@@ -328,6 +341,8 @@ impl World {
                         seen: r.permission_mode_seen.map(|t| t.to_string()),
                         agent_mode: r.agent_mode.clone(),
                         agent_mode_seen: r.agent_mode_seen.map(|t| t.to_string()),
+                        question_clock: r.question_clock.as_ref().map(Into::into),
+                        clock_read: r.question_clock_read.is_some(),
                     })
                     .collect();
                 // Least supervised first: the row worth reading is the one
@@ -337,11 +352,30 @@ impl World {
                 // watching is the row worth reading and a list sorted by name
                 // buries it.
                 modes.sort_by_key(|m| {
-                    let rank = match (m.mode.is_some(), m.asks_a_person) {
-                        (true, Some(false)) => 0,
-                        (true, None) => 1,
-                        (true, Some(true)) => 2,
-                        (false, _) => 3,
+                    // **A session closing its questions immediately sorts above
+                    // everything**, including an unsupervised one. An
+                    // unsupervised session is a mode somebody chose; this is a
+                    // session in which *a question waits for you* — the
+                    // product's own promise — is untrue right now.
+                    //
+                    // **Then a clock the person did not choose**, which is the
+                    // row this surface exists for and which used to sort with
+                    // the quiet ones because only `immediate` was read.
+                    //
+                    // **`never` is not either of those**, and until 2026-09-21
+                    // it could not be told apart from a timer at all: every
+                    // string in the settings file became a duration, so the
+                    // setting's own default read as a clock answering in
+                    // somebody's name.
+                    let rank = match m.question_clock.as_ref() {
+                        Some(c) if c.immediate => -2,
+                        Some(c) if c.answers_for_you && !c.chosen_by_the_person => -1,
+                        _ => match (m.mode.is_some(), m.asks_a_person) {
+                            (true, Some(false)) => 0,
+                            (true, None) => 1,
+                            (true, Some(true)) => 2,
+                            (false, _) => 3,
+                        },
                     };
                     (rank, m.run.clone())
                 });
@@ -767,6 +801,52 @@ pub struct BoardSummary {
 }
 
 #[cfg(test)]
+mod clock_ranking_tests {
+    use crate::core::clock::{After, ClockLine, QuestionClock, Source};
+
+    fn line(after: After) -> ClockLine {
+        (&QuestionClock {
+            after,
+            source: Source::Environment,
+            where_set: crate::core::clock::ENV_KEY.into(),
+        })
+            .into()
+    }
+
+    /// **A session closing its questions immediately outranks an unsupervised
+    /// one.** An unsupervised session is a mode somebody chose; this is a
+    /// session in which *a question waits for you* is untrue right now, and a
+    /// list that buries it under an alphabetical neighbour has hidden the one
+    /// row it exists to show.
+    #[test]
+    fn a_session_that_answers_instantly_sorts_above_everything() {
+        let immediate = line(After::Immediately);
+        let idle = line(After::Idle("60s".into()));
+        assert!(immediate.immediate);
+        assert!(!idle.immediate, "a timer is not the same as no wait at all");
+
+        // The sentences are different facts and are worded as such.
+        assert_ne!(immediate.says, idle.says);
+        assert!(!immediate.says.contains("0s"), "{}", immediate.says);
+    }
+
+    /// The rendered line carries the words, so three surfaces cannot word one
+    /// fact differently.
+    #[test]
+    fn the_rendered_line_carries_the_sentence_rather_than_the_ingredients() {
+        let l = line(After::Idle("5m".into()));
+        assert_eq!(l.after, "5m");
+        assert_eq!(l.where_set, crate::core::clock::ENV_KEY);
+        assert!(
+            !l.chosen_by_the_person,
+            "an env var is not the person's own"
+        );
+        assert!(l.says.contains("5m"), "{}", l.says);
+        assert!(l.says.contains("overrides"), "{}", l.says);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::event::WaitingFor;
@@ -789,6 +869,8 @@ mod tests {
                     source: None,
                     model: None,
                     entrypoint: None,
+                    question_clock: None,
+                    clock_read: false,
                 },
             ),
             RunHint {
@@ -887,6 +969,8 @@ mod tests {
                     source: Some("startup".into()),
                     model: Some("claude-opus-5".into()),
                     entrypoint: Some("cli".into()),
+                    question_clock: None,
+                    clock_read: false,
                 },
             ),
             RunHint {
@@ -925,6 +1009,8 @@ mod tests {
                         source: None,
                         model: None,
                         entrypoint: None,
+                        question_clock: None,
+                        clock_read: false,
                     },
                 ),
                 RunHint {
@@ -982,14 +1068,13 @@ mod tests {
                     source: None,
                     model: Some("claude-opus-5".into()),
                     entrypoint: None,
+                    question_clock: None,
+                    clock_read: false,
                 },
             ),
             env(
                 "s1",
-                Event::ToolStarted {
-                    tool: "Bash".into(),
-                    input: serde_json::json!({"command": "cargo test"}),
-                },
+                Event::tool_started("Bash", serde_json::json!({"command": "cargo test"})),
             ),
             env(
                 "s1",
@@ -1083,13 +1168,7 @@ mod tests {
         assert!(w.working_set().is_empty());
 
         w.apply(
-            env(
-                "s1",
-                Event::ToolStarted {
-                    tool: "Bash".into(),
-                    input: serde_json::json!({}),
-                },
-            ),
+            env("s1", Event::tool_started("Bash", serde_json::json!({}))),
             RunHint::default(),
         );
         assert_eq!(w.working_set().len(), 1, "a hook makes it real");
@@ -1124,13 +1203,7 @@ mod tests {
     fn reconciliation_marks_dead_runs_lost() {
         let mut w = World::new();
         w.apply(
-            env(
-                "s1",
-                Event::ToolStarted {
-                    tool: "Bash".into(),
-                    input: serde_json::json!({}),
-                },
-            ),
+            env("s1", Event::tool_started("Bash", serde_json::json!({}))),
             RunHint::default(),
         );
         let lost = w.reconcile(&|_| false);
@@ -1155,10 +1228,7 @@ mod tests {
         w.apply(
             env(
                 "busy-one",
-                Event::ToolStarted {
-                    tool: "Bash".into(),
-                    input: serde_json::json!({"command": "cargo test"}),
-                },
+                Event::tool_started("Bash", serde_json::json!({"command": "cargo test"})),
             ),
             RunHint::default(),
         );

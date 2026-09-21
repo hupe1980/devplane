@@ -100,6 +100,12 @@ export DEVPLANE_CLAUDE_BIN=/path/to/claude
 > Devplane runs perfectly well with no Claude Code at all — it drives any agent that speaks the
 > Agent Client Protocol. The binary is only needed for *watching* Claude Code sessions and for
 > `devplane attach`.
+>
+> **Watching and driving are different lists.** Driving works for Claude Code, Codex, Copilot,
+> OpenCode and Gemini: an agent Devplane started reports through the protocol by construction.
+> Watching a session **you** started is fully demonstrated for Claude Code; Copilot publishes the
+> channels and Devplane reads them, but that path has not yet been proved end to end. The other three
+> are not watched at all.
 
 ## Where it keeps things
 

@@ -1,7 +1,7 @@
 [package]
 name = "devplane"
-description = "The local-first control plane for AI coding agents: one page for every project on your machine — what needs you, what is red, and which finished work can prove its checks passed."
-version = "0.6.0"
+description = "Records who decided, when nobody asked you — a person, a rule, a classifier, a timer, or nobody — across every project and every coding agent on your machine. Local-first, one binary, and it never approves a tool call."
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -18,10 +18,15 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
   "/src",
   "/build.rs",
-  "/ui/legacy.html",
-  "/ui/src",
-  # The built interface, without its source map: four times the bundle, and
-  # nothing loads it. `build.rs` excludes maps from the embed for the same reason.
+  # **The built interface, and not its sources.** `build.rs` embeds `ui/dist`
+  # and reads nothing else, so `ui/src` was 324 KB the package could not use —
+  # and could not have used, because `package.json`, `vite.config.ts`,
+  # `tsconfig.json` and `index.html` were never included, so nothing in the
+  # package could rebuild the bundle from them. Sources are in the repository
+  # this manifest already names.
+  #
+  # The source map is excluded too: four times the bundle, and nothing loads it.
+  # `build.rs` leaves maps out of the embed for the same reason.
   "/ui/dist/*.html",
   "/ui/dist/*.js",
   "/ui/dist/*.css",
@@ -63,7 +68,7 @@ typescript = ["dep:ts-rs"]
 
 [dependencies]
 ts-rs = { version = "12", optional = true, features = ["no-serde-warnings"] }
-agent-client-protocol = "2.1"
+agent-client-protocol = "2.2"
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
 clap = { version = "4", features = ["derive", "env"] }

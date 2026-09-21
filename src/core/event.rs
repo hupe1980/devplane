@@ -142,6 +142,13 @@ impl ApiUsage {
 /// works against a fixture that happens to name its option that and against no
 /// real agent at all — ACP option ids are the agent's to choose.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Exported because `AbandonedQuestion` carries a `Vec<Choice>` and the interface
+// renders the options an agent chose between. A type reachable from an exported
+// one has to be exported too, or the feature does not compile — which is how
+// this was found: `cargo build --features typescript` failed on a tree where
+// everything else was green, because nothing in CI builds that feature.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Choice {
     /// The protocol's id for this option. Absent for an observed session,
     /// whose dialog belongs to the provider and cannot be answered from here.
@@ -242,6 +249,23 @@ pub enum Event {
         source: Option<String>,
         model: Option<String>,
         entrypoint: Option<String>,
+        /// A clock this session's **environment** put on its questions.
+        ///
+        /// `CLAUDE_AFK_TIMEOUT_MS` overrides the settings files and turns
+        /// auto-continue on even where they say `never`, so a session can be
+        /// answering for somebody while every file on the machine says nothing
+        /// is set. It is per session because the override is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        question_clock: Option<crate::core::clock::QuestionClock>,
+        /// Whether the environment was **read at all** for this session.
+        ///
+        /// Kept apart from `question_clock: None`, which means *read, and
+        /// nothing was set*. A session that started before `devplane connect`,
+        /// or on a channel that carries no environment, has neither — and
+        /// *not read* must never render as *nothing is set*, which is the
+        /// distinction the roster already makes for observation channels.
+        #[serde(default)]
+        clock_read: bool,
     },
     /// A driven agent finished its handshake and named its own session.
     ///
@@ -279,6 +303,15 @@ pub enum Event {
         /// The tool input, kept for the permission card. Treated as untrusted
         /// text everywhere it is rendered.
         input: serde_json::Value,
+        /// Where the MCP server behind this call came from, as the vendor
+        /// reported it: `plugin`, `sdk`, `user`, `project`, or a value this
+        /// build has never seen, carried through as received.
+        ///
+        /// `None` for a tool that is not an MCP tool, and for an agent older
+        /// than the release that began reporting it — **which reads differently
+        /// from a source nobody understood**, and must keep doing so.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_source: Option<String>,
     },
     /// A tool call finished.
     ToolFinished {
@@ -599,6 +632,22 @@ pub struct EventEnvelope {
     pub project_id: Option<ProjectId>,
     pub source: Source,
     pub event: Event,
+}
+
+impl Event {
+    /// A tool call from a source that reports no server provenance.
+    ///
+    /// Most callers are tests and the two vendors that have no such field, and
+    /// spelling `server_source: None` at each of them buries the one place that
+    /// does carry it.
+    #[must_use]
+    pub fn tool_started(tool: impl Into<String>, input: serde_json::Value) -> Self {
+        Event::ToolStarted {
+            tool: tool.into(),
+            input,
+            server_source: None,
+        }
+    }
 }
 
 impl EventEnvelope {

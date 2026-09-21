@@ -44,9 +44,17 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             cwd,
             model,
             entrypoint,
+            question_clock,
+            clock_read,
             ..
         } => {
             run.cwd = cwd.clone();
+            // **Only where it was read**, so a later event on a channel that
+            // carries no environment cannot erase what the first one found.
+            if *clock_read {
+                run.question_clock = question_clock.clone();
+                run.question_clock_read = Some(env.at);
+            }
             if model.is_some() {
                 run.model = model.clone();
             }
@@ -89,7 +97,14 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             run.summary = Some("thinking".into());
         }
 
-        Event::ToolStarted { tool, input } => {
+        Event::ToolStarted { tool, input, .. } => {
+            // **The agent moving on is the only evidence there is that nobody
+            // answered**, and clearing the block used to be all that happened.
+            // A question that left the inbox because the person answered it and
+            // one that left because the agent gave up produced byte-identical
+            // state, which is this product's second obligation failing in the
+            // one place it is derivable.
+            abandon_open_question(run, env.at, Some(summarise_tool(tool, input)));
             run.state = RunState::Working;
             run.blocked_on = None;
             run.totals.tool_calls += 1;
@@ -277,6 +292,15 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                 run.state = RunState::Working;
                 run.blocked_on = None;
             }
+        }
+
+        // A watched session that ends with a question still open ended it with
+        // nobody having answered. Recorded for the same reason as above: the
+        // alternative is a question that was simply never seen again.
+        Event::SessionEnded { .. }
+            if matches!(run.state, RunState::Waiting(WaitingFor::Question)) =>
+        {
+            abandon_open_question(run, env.at, None);
         }
 
         Event::TurnEnded => {
@@ -671,6 +695,63 @@ fn summarise_tool(tool: &str, input: &serde_json::Value) -> String {
     }
 }
 
+/// Records that a question left the inbox without an answer.
+///
+/// **Only for a question nobody could have answered from here.** A driven ask
+/// carries a `request_id` and a durable `asks` row: it is answerable, it is
+/// ended deliberately with an authority, and recording it here as well would be
+/// two rows for one fact, disagreeing the moment either changes.
+///
+/// `PostToolUse` for the question's own call arrives as `ToolFinished` and is
+/// *not* an abandonment — the tool completed, which is what the vendor's
+/// `PostToolUse` means. The reference is explicit that it runs *"after a tool
+/// call succeeds"*.
+///
+/// **One thing it cannot see, stated rather than implied**: a question the
+/// vendor's own auto-continue timer closed. That *submits*, so the tool
+/// succeeds and `PostToolUse` fires — it looks exactly like an answer from
+/// here, and the elapsed time cannot separate them because the timer restarts
+/// on a keypress. `devplane modes` is the surface that covers that half.
+fn abandon_open_question(
+    run: &mut crate::core::Run,
+    at: jiff::Timestamp,
+    moved_on_to: Option<String>,
+) {
+    if !matches!(run.state, RunState::Waiting(WaitingFor::Question)) {
+        return;
+    }
+    let Some(b) = run.blocked_on.as_ref() else {
+        return;
+    };
+    // Answerable means driven, and a driven question is the `asks` row's.
+    if b.request_id.is_some() || b.ask.is_some() {
+        return;
+    }
+    let Some(question) = b.message.clone() else {
+        return;
+    };
+    run.abandoned_questions
+        .push(crate::core::run::AbandonedQuestion {
+            question,
+            options: b.options.clone(),
+            asked_at: b.since,
+            abandoned_at: at,
+            moved_on_to,
+        });
+    // A record, not a log. The oldest go and the count of what went is kept, so
+    // no surface can imply it is showing all of them.
+    while run.abandoned_questions.len() > ABANDONED_KEPT {
+        run.abandoned_questions.remove(0);
+        run.abandoned_dropped = run.abandoned_dropped.saturating_add(1);
+    }
+}
+
+/// How many abandoned questions one run keeps.
+///
+/// Enough that a day of ordinary work fits, small enough that a session in a
+/// loop cannot turn a run row into a transcript.
+const ABANDONED_KEPT: usize = 20;
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -823,6 +904,139 @@ mod tests {
         EventEnvelope::new(crate::core::ids::RunId::new("s1"), source, e)
     }
 
+    fn asked(q: &str) -> Event {
+        Event::QuestionAsked {
+            question: q.into(),
+            options: vec!["Keep".into(), "Remove".into()],
+            ask: None,
+            request_id: None,
+            form: None,
+        }
+    }
+
+    /// **The obligation, and the defect it was failing at.**
+    ///
+    /// A watched session's question puts the run in `Waiting(Question)`. The
+    /// next tool call cleared the block and the state, because the agent is
+    /// working again — so *the person answered it* and *the agent gave up on
+    /// it* produced byte-identical runs, and the question left the inbox with
+    /// nothing anywhere recording that nobody had answered.
+    #[test]
+    fn a_question_the_agent_moved_past_is_recorded_as_abandoned() {
+        let mut r = run();
+        apply(&mut r, &ev(asked("Keep the legacy /v1/login route?")));
+        assert!(r.abandoned_questions.is_empty(), "still waiting");
+
+        apply(
+            &mut r,
+            &ev(Event::tool_started(
+                "Bash",
+                serde_json::json!({"command": "cargo test"}),
+            )),
+        );
+        assert_eq!(r.abandoned_questions.len(), 1, "nobody answered it");
+        let q = &r.abandoned_questions[0];
+        assert_eq!(q.question, "Keep the legacy /v1/login route?");
+        assert_eq!(q.options.len(), 2, "what it was choosing between is kept");
+        assert!(
+            q.moved_on_to
+                .as_deref()
+                .is_some_and(|w| w.contains("cargo")),
+            "what it did instead: {:?}",
+            q.moved_on_to
+        );
+        assert!(!r.state.needs_human(), "the run moved on");
+    }
+
+    /// A question that **completed** is not abandoned. `PostToolUse` arrives as
+    /// `ToolFinished` and the vendor documents it as running *"after a tool call
+    /// succeeds"* — so the tool ran, and whatever it returned is an answer.
+    #[test]
+    fn a_question_that_finished_is_not_abandoned() {
+        let mut r = run();
+        apply(&mut r, &ev(asked("Which framework?")));
+        apply(
+            &mut r,
+            &ev(Event::ToolFinished {
+                tool: "AskUserQuestion".into(),
+                ok: true,
+                duration_ms: None,
+            }),
+        );
+        assert!(r.abandoned_questions.is_empty(), "it completed");
+    }
+
+    /// A question that is merely **waiting** is not abandoned, and no amount of
+    /// time makes it so. Nothing here ends a question on a duration; it
+    /// takes a later event.
+    #[test]
+    fn an_outstanding_question_is_never_abandoned_by_time_alone() {
+        let mut r = run();
+        apply(&mut r, &ev(asked("Which framework?")));
+        let mut later = ev(Event::StatusSample(crate::core::event::StatusSample {
+            context_used_percent: Some(10.0),
+            ..Default::default()
+        }));
+        later.at = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(48);
+        apply(&mut r, &later);
+        assert!(r.abandoned_questions.is_empty(), "no clock ends a question");
+        assert!(r.state.needs_human(), "it is still waiting");
+    }
+
+    /// **A driven question is the `asks` row's and is not recorded twice.** It
+    /// is answerable, it ends deliberately with an authority on it, and a second
+    /// record of the same fact is two rows that disagree the moment either
+    /// changes.
+    #[test]
+    fn a_driven_question_is_not_recorded_here() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::QuestionAsked {
+                question: "Which framework?".into(),
+                options: vec![],
+                ask: Some("a-1".into()),
+                request_id: Some("req-1".into()),
+                form: None,
+            }),
+        );
+        apply(
+            &mut r,
+            &ev(Event::tool_started(
+                "Bash",
+                serde_json::json!({"command": "ls"}),
+            )),
+        );
+        assert!(
+            r.abandoned_questions.is_empty(),
+            "the durable ask owns this one"
+        );
+    }
+
+    /// The list is a record, not a log: the oldest go and the count of what
+    /// went is kept, so no surface can imply it is showing all of them.
+    #[test]
+    fn the_record_is_bounded_and_says_how_much_it_dropped() {
+        let mut r = run();
+        for i in 0..ABANDONED_KEPT + 3 {
+            apply(&mut r, &ev(asked(&format!("question {i}"))));
+            apply(
+                &mut r,
+                &ev(Event::tool_started(
+                    "Bash",
+                    serde_json::json!({"command": "ls"}),
+                )),
+            );
+        }
+        assert_eq!(r.abandoned_questions.len(), ABANDONED_KEPT);
+        assert_eq!(r.abandoned_dropped, 3);
+        assert_eq!(
+            r.abandoned_questions.last().map(|q| q.question.as_str()),
+            Some(format!("question {}", ABANDONED_KEPT + 2).as_str()),
+            "the newest is kept"
+        );
+    }
+
     /// **Only a change moves the clock, because the clock is the whole point.**
     ///
     /// This event arrives on every prompt and every finished tool call, so
@@ -896,10 +1110,10 @@ mod tests {
         let mut r = run();
         apply(
             &mut r,
-            &ev(Event::ToolStarted {
-                tool: "Bash".into(),
-                input: json!({"command": "cargo test"}),
-            }),
+            &ev(Event::tool_started(
+                "Bash",
+                json!({"command": "cargo test"}),
+            )),
         );
         apply(&mut r, &ev(Event::PromptSubmitted { chars: 12 }));
         assert_eq!(r.summary.as_deref(), Some("thinking"));
@@ -910,10 +1124,10 @@ mod tests {
         let mut r = run();
         apply(
             &mut r,
-            &ev(Event::ToolStarted {
-                tool: "Bash".into(),
-                input: json!({"command": "cargo test"}),
-            }),
+            &ev(Event::tool_started(
+                "Bash",
+                json!({"command": "cargo test"}),
+            )),
         );
         assert_eq!(r.state, RunState::Working);
         assert_eq!(r.summary.as_deref(), Some("Bash: cargo test"));
@@ -1383,13 +1597,7 @@ mod tests {
         apply(&mut r, &ev(Event::Stalled { idle_seconds: 900 }));
         assert!(r.stall_noticed);
         // Anything the session does starts a new period.
-        apply(
-            &mut r,
-            &ev(Event::ToolStarted {
-                tool: "Bash".into(),
-                input: json!({}),
-            }),
-        );
+        apply(&mut r, &ev(Event::tool_started("Bash", json!({}))));
         assert!(!r.stall_noticed);
     }
 

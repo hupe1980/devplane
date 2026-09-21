@@ -16,6 +16,7 @@ mod batch;
 mod board;
 mod inbox;
 mod library;
+mod rules;
 mod work;
 
 use admin::{
@@ -25,16 +26,90 @@ use board::{cmd_attach, cmd_focus, cmd_ls, cmd_open, cmd_show, cmd_tail, cmd_wat
 use inbox::{cmd_answer, cmd_asks, cmd_attention, cmd_inbox, cmd_say, cmd_snooze};
 use work::{cmd_check, cmd_dispatch, cmd_gate_run, cmd_speckit_install, cmd_trust, cmd_work};
 
+/// The five errands, and every non-hidden subcommand assigned to exactly one.
+///
+/// **Errands rather than categories.** A stranger arriving at a thirty-six-row
+/// flat list is reading an inventory; these are the five reasons somebody opens
+/// this binary at all, and the command they want is under one of them.
+///
+/// This is the one place the grouping is decided. `site/content/docs/cli.md`
+/// carries a copy for people who never run `--help`, and a test holds the two
+/// together — they were two hand-maintained lists once and nothing compared
+/// them.
+pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "See what is happening",
+        &["ls", "show", "tail", "watch", "search", "open"],
+    ),
+    (
+        "What needs you, and what happened without you",
+        &[
+            "inbox",
+            "asks",
+            "answer",
+            "attention",
+            "audit",
+            "modes",
+            "issues",
+            "prs",
+            "snooze",
+        ],
+    ),
+    (
+        "Start and steer work",
+        &[
+            "work", "dispatch", "batch", "say", "attach", "focus", "gate", "rewind", "library",
+        ],
+    ),
+    (
+        "Set up a project",
+        &[
+            "connect",
+            "disconnect",
+            "trust",
+            "check",
+            "explain",
+            "rules",
+            "speckit",
+            "agents",
+            "doctor",
+        ],
+    ),
+    ("The daemon", &["serve", "stop"]),
+];
+
+/// The groups, as the block printed above clap's own listing.
+///
+/// Plain text with no colour: this is the surface most likely to be piped into
+/// a file or a pager, and colour may never be the only thing that carries a
+/// distinction.
+///
+/// `after_help` rather than clap's `help_heading`, which compiles and changes
+/// nothing for a flat subcommand list.
+#[must_use]
+pub fn groups_block() -> String {
+    let mut out = String::from("\nWhat you came here to do:\n");
+    for (name, commands) in COMMAND_GROUPS {
+        out.push_str(&format!("\n  {name}\n    {}\n", commands.join("  ")));
+    }
+    out.push_str("\nRun `devplane help <command>` for one of them.");
+    out
+}
+
 #[derive(Parser)]
 #[command(
     name = "devplane",
     version,
-    about = "The control plane for AI coding agents",
-    long_about = "Devplane is one page for every project on this machine: what needs you, what \
-                  went red after the agent stopped, and which finished work can prove its checks \
-                  passed. It watches the sessions already running and drives any agent that \
-                  speaks the Agent Client Protocol.\n\n\
-                  Start with `devplane connect claude`, then `devplane ls`."
+    about = "Records who decided, when nobody asked you",
+    long_about = "Devplane records who decided, when nobody asked you — a person, a rule, a \
+                  classifier, a timer, or nobody — across every project and every coding agent on \
+                  this machine. One page for what needs you, what went red after the agent \
+                  stopped, and which finished work can prove its checks passed.\n\n\
+                  It watches the sessions already running, drives any agent that speaks the Agent \
+                  Client Protocol, and never approves a tool call.\n\n\
+                  Start with `devplane connect claude`, then `devplane ls`.",
+    after_help = groups_block(),
+    after_long_help = groups_block()
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -134,6 +209,28 @@ pub enum Command {
         without_me: bool,
         #[arg(long, default_value_t = 50)]
         limit: i64,
+    },
+    /// Which of your repositories is missing a rule.
+    ///
+    /// The fleet half of *answer once*: `devplane explain` composes a rule for
+    /// one call on one machine, and this asks the same question across every
+    /// registered project. Both files are read and never conflated — a
+    /// `devplane.toml` prohibition is what this product refuses, a
+    /// `permissions.deny` entry is what the agent refuses, and a person with six
+    /// repositories needs the second at least as much.
+    ///
+    /// **It writes nothing, and there is no apply-to-all.** Across 15 549
+    /// agentic pull requests in 148 projects, adding instruction files helped in
+    /// 27.7% and hurt in 26.35% — what separated them was what the rules said,
+    /// not that they were there.
+    ///
+    /// With no rule, it reports what the projects disagree about.
+    Rules {
+        /// The rule, as you would write it: `Bash(curl:*)`, `Read(./.env)`.
+        rule: Option<String>,
+        /// Ask rather than deny, which changes the key the paste names.
+        #[arg(long)]
+        ask: bool,
     },
     /// Which projects are deciding without you, and what mode each is in.
     ///
@@ -391,6 +488,11 @@ pub enum Command {
     ///
     /// Register it with your agent as a `command` MCP server running
     /// `devplane mcp`.
+    ///
+    /// **Hidden**: an agent runs this, not a person, and a listing a person
+    /// reads is shorter and truer without it. It is documented on the site and
+    /// in `llms.txt`, where whoever is wiring it up will be looking.
+    #[command(hide = true)]
     Mcp,
     /// Read a hook payload on stdin and forward it to the daemon.
     ///
@@ -410,6 +512,10 @@ pub enum Command {
     },
     /// Read a status-line payload on stdin and forward it, then run the
     /// command that was there before. Used by the optional status-line shim.
+    ///
+    /// **Hidden**, for the reason `mcp` is: `devplane connect claude` writes
+    /// the shim that calls this, and nobody types it.
+    #[command(hide = true)]
     Statusline {
         /// The user's original status-line command, run after forwarding.
         #[arg(long)]
@@ -428,6 +534,13 @@ pub enum SpeckitCmd {
         /// Print and write nothing.
         #[arg(long = "dry-run")]
         dry_run: bool,
+        /// Write the hook even where the repository has no gate to run.
+        ///
+        /// A hook that calls a gate nothing declares fails every time it fires,
+        /// which teaches people to ignore it. So this refuses by default and
+        /// says what to declare first.
+        #[arg(long)]
+        anyway: bool,
     },
 }
 
@@ -438,6 +551,14 @@ pub enum GateCmd {
         /// Which repository. Defaults to the working directory.
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// One named gate from `devplane.toml`, rather than the whole check.
+        ///
+        /// Without it the repository's `check` runs, which is the definition of
+        /// done here. A named gate is a different question — *does this one
+        /// suite pass* — and some are declared `expect = "fail"`, so the two
+        /// cannot share a verdict.
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -602,6 +723,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             without_me,
             limit,
         }) => cmd_audit(about.as_deref(), without_me, limit, cli.json).await,
+        Some(Command::Rules { rule, ask }) => {
+            crate::cli::rules::cmd_rules(rule, ask, cli.json).await
+        }
         Some(Command::Modes) => crate::cli::inbox::cmd_modes(cli.json).await,
         Some(Command::Library { what }) => match what {
             LibraryCmd::List => crate::cli::library::cmd_list(cli.json).await,
@@ -660,11 +784,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         }) => cmd_answer(&ask, allow, deny, option, custom, field).await,
         Some(Command::Asks) => cmd_asks(cli.json).await,
         Some(Command::Gate {
-            what: GateCmd::Run { cwd },
-        }) => cmd_gate_run(cwd, cli.json).await,
+            what: GateCmd::Run { cwd, name },
+        }) => cmd_gate_run(cwd, name, cli.json).await,
         Some(Command::Speckit {
-            what: SpeckitCmd::Install { event, dry_run },
-        }) => cmd_speckit_install(event, dry_run),
+            what:
+                SpeckitCmd::Install {
+                    event,
+                    dry_run,
+                    anyway,
+                },
+        }) => cmd_speckit_install(event, dry_run, anyway),
         Some(Command::Agents) => cmd_agents(cli.json).await,
         Some(Command::Check { path }) => cmd_check(path, cli.json),
         Some(Command::Explain {
@@ -925,12 +1054,12 @@ async fn decide_claude(body: &str) -> Result<()> {
     // asked, so the full verdict applies.
     let verdict = match (&payload.cwd, pre) {
         (Some(dir), true) => cache.restrictive(std::path::Path::new(dir), &tool, &input),
-        (Some(dir), false) => cache.evaluate(std::path::Path::new(dir), &tool, &input),
+        (Some(dir), false) => cache.restrictive(std::path::Path::new(dir), &tool, &input),
         // No directory means no honest project answer, so the machine-wide
         // rules decide alone. Falling back to this process's own directory
         // would let one repository's rules answer another's session.
         (None, true) => cache.restrictive_global_only(&tool, &input),
-        (None, false) => cache.evaluate_global_only(&tool, &input),
+        (None, false) => cache.restrictive_global_only(&tool, &input),
     };
 
     // Answer first. Everything below is bookkeeping the session is not waiting
@@ -1029,6 +1158,8 @@ async fn report(
         session: session.to_string(),
         verdict: verdict.as_str().to_string(),
         rule: verdict.rule().map(str::to_string),
+        server_source: None,
+        why: verdict.why().map(str::to_string),
         subject,
         tool: tool.to_string(),
         at: Some(jiff::Timestamp::now()),

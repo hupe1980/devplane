@@ -37,11 +37,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # **Node is declared rather than assumed.** It was present on both runner
-      # images by accident and `tests/ui_contract.rs` skips silently without it,
-      # so 56 of the interface's checks were conditional on something nothing
-      # stated. The interface is a node project now; this makes the dependency a
-      # fact of the workflow instead of a property of the image.
+      # **Node is declared rather than assumed.** The interface is a node
+      # project, and its checks skip silently where node is absent — so the
+      # dependency is a fact of the workflow rather than a property of the
+      # runner image.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

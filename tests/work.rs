@@ -690,6 +690,9 @@ async fn a_spent_feedback_budget_actually_asks_somebody() {
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
     let item = inbox
         .as_array()
         .unwrap()
@@ -888,6 +891,9 @@ steps = [
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
     let item = inbox
         .as_array()
         .unwrap()
@@ -1206,6 +1212,9 @@ async fn snoozing_work_actually_quietens_it() {
             .json()
             .await
             .unwrap();
+        // `/api/inbox` answers { items, close }: the list, and what the day
+        // came to for a list that is empty.
+        let v = v["items"].clone();
         v.as_array()
             .unwrap()
             .iter()
@@ -1281,6 +1290,9 @@ async fn a_red_pull_request_reaches_the_inbox_after_the_agent_is_gone() {
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
 
     let item = inbox
         .as_array()
@@ -1339,6 +1351,9 @@ async fn an_approved_and_green_pull_request_asks_for_nothing() {
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
     assert!(
         inbox.as_array().unwrap().is_empty(),
         "nothing to decide: {inbox}"
@@ -1481,6 +1496,9 @@ async fn work_stranded_by_a_restart_says_so() {
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
 
     let item = inbox
         .as_array()
@@ -1629,6 +1647,9 @@ async fn a_restart_does_not_lose_the_conversation_the_work_was_having() {
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
     let item = inbox
         .as_array()
         .unwrap()
@@ -1811,6 +1832,9 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
     let items = inbox.as_array().unwrap();
     assert!(
         items
@@ -1891,6 +1915,9 @@ steps = [
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
     let item = inbox
         .as_array()
         .unwrap()
@@ -2049,6 +2076,9 @@ steps = [
         .json()
         .await
         .unwrap();
+    // `/api/inbox` answers { items, close }: the list, and what the day
+    // came to for a list that is empty.
+    let inbox = inbox["items"].clone();
     let kinds: Vec<&str> = inbox
         .as_array()
         .unwrap()
@@ -2277,16 +2307,24 @@ async fn the_change_set_tells_its_four_answers_apart() {
         }
     };
 
-    // 2. A branch that changed nothing is a *finding*, and the rendered form
-    //    says so in words rather than showing a blank.
+    // 2. A branch that changed nothing is a *finding*. The route reports the
+    //    fact; the sentence is the interface's, and `ui/tests/render.ts`
+    //    asserts a branch with no changes renders as a finding rather than as
+    //    an empty state.
     let (status, body) = get(format!("/api/work/{id}/changes")).await;
     assert_eq!(status, 200, "{body}");
-    if body["changes"]["files"].as_array().unwrap().is_empty() {
-        assert!(
-            body["html"].as_str().unwrap().contains("verified nothing"),
-            "an empty change set is a sentence, not a blank: {body}"
-        );
-    }
+    assert!(
+        body["changes"]["base"].is_string(),
+        "an empty change set still says what it was compared against, or the finding \
+         cannot be stated: {body}"
+    );
+    // **And no rendered HTML rides along.** It did, for a page that is deleted;
+    // a diff is the worst place in the product for a surface to insert markup a
+    // server composed.
+    assert!(
+        body["html"].is_null(),
+        "the changes route is sending rendered HTML again: {body}"
+    );
 
     // 1. A real change is read back, with the file that carries it.
     std::fs::write(worktree.join("reviewed.txt"), "one\ntwo\n").unwrap();
@@ -2297,16 +2335,22 @@ async fn the_change_set_tells_its_four_answers_apart() {
         files.iter().any(|f| f["path"] == "reviewed.txt"),
         "uncommitted work counts — a reviewer approves the checkout as it stands: {body}"
     );
-    assert!(body["html"].as_str().unwrap().contains("reviewed.txt"));
 
     // A binary file has no lines to show, so its size is the only thing the
     // view can say about it — and `git diff` never prints one, so this is the
     // stat in `git::change_set` rather than anything the parser could know.
     std::fs::write(worktree.join("logo.bin"), [0u8, 1, 2, 255, 0, b'x']).unwrap();
     let (_, body) = get(format!("/api/work/{id}/changes")).await;
-    assert!(
-        body["html"].as_str().unwrap().contains("binary, 6 bytes"),
-        "a binary file is named with its size, not rendered as broken text: {body}"
+    let logo = body["changes"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == "logo.bin")
+        .unwrap_or_else(|| panic!("the binary file is not in the set: {body}"));
+    assert_eq!(
+        logo["body"]["binary"]["bytes"], 6,
+        "a binary file carries its size, so the surface can name it rather than \
+         rendering broken text: {body}"
     );
 
     // 3. The checkout being gone is not the same as nothing having changed.
