@@ -2,6 +2,299 @@
 
 Notable changes per release. Dates are UTC.
 
+## 0.8.0 — 2026-09-23
+
+### Breaking
+
+- **A command the command analysis cannot read now asks instead of denying.**
+  Under a restrictive path rule such as `Read(.env)`, a call past the analysis
+  length or the operand and nesting caps was refused, naming a rule the command
+  never met. It reaches `Unresolved` — a prompt — and every prohibition that can
+  be read is unchanged.
+
+- **Every surface in the interface was renamed**, and two left the sidebar.
+  `Inbox`, `Decisions`, `Finished work`, `Sessions`, `Start an agent`,
+  `Issues and PRs`, `Setup`, `Library`; **Search** is a field in the sidebar and
+  **Changes** is reached from the Work it belongs to. Each page keeps its question
+  as its own heading. A bookmarked `#changes` or `#search` still resolves.
+
+- **`POST /api/asks/{id}/answer` rejects unknown fields**, and a permission
+  answer naming neither a decision nor an option is a bad request rather than a
+  deny.
+
+- **`GET /api/decisions/pane` is gone**, with the HTML machinery under it.
+
+### Fixed
+
+- **A session that ended while an agent was asking you something stayed
+  "waiting for you" for ever.** `SessionEnded` had two match arms — a guarded
+  one that recorded the abandoned question and set no state, and a general one
+  that set the state. A `match` does not fall through, so on the one path this
+  product is named for the guarded arm won: the run kept `Waiting(Question)` and
+  its block on a session that was gone, never reached a terminal state, stayed
+  in the working set, and was raised twice — once as a live question nobody
+  could answer, once as an abandonment.
+
+- **A session you simply quit was recorded as `completed`.** The vendor
+  documents five reasons a session ends — `clear`, `resume`, `logout`,
+  `prompt_input_exit`, `other` — and **not one of them means the work
+  finished**. Four of the five fell through a catch-all to `Completed`, the
+  flattering value, written over a session somebody exited or moved elsewhere.
+  They record `stopped` now, and so does an unrecognised reason on a session
+  Devplane did not start. A run Devplane **drives** still completes when its
+  agent's own process ends, which is the one case where the connection closing
+  does mean the work ended.
+
+- **A late end-of-turn revived a run that was over.** `Stop` fires at the end of
+  every turn and arrives on a different channel from `SessionEnd`, so a late one
+  lands after a session has ended — and it moved *every* state to `idle`, which
+  counts as in play. A **failed** session came back to the board as *waiting for
+  a prompt*, with the failure gone from the inbox. Bookkeeping no longer raises
+  the dead; a tool call or a question still does, because that is a session
+  genuinely resuming.
+
+- **`devplane modes` could print "Every session that has reported asks you" when
+  nothing had reported.** The CLI read `unreported` from a key `/api/modes` has
+  never sent, so it was zero for ever: the sentence explaining that a busy
+  session can genuinely not have spoken never printed, and the guard on the
+  reassuring line — `unreported < total` — was `0 < total`, true whenever
+  anything was live. The surface now deserialises the type the API serialises,
+  so a key that is not on the type is a compile error.
+
+- **Three surfaces in the interface were wired to nothing** and rendered their
+  components' defaults for ever, with every test green — the tests hand props to
+  a component directly, so they proved the component and never the wiring.
+  *What is configured* told every reader "Nothing is configured for this project
+  yet" on machines with hooks installed and gates declared; *Issues and pull
+  requests* rendered two empty tabs; and *Start work* had no control that
+  started work. A surface now takes props from the poll feed or names the route
+  it reads, and a test fails when it does neither.
+
+- **The certificate had no way off the page.** `/api/work/{id}/certificate` has
+  served the bytes `devplane work export` writes since the certificate shipped,
+  the quickstart promised a button, and no file in the interface mentioned the
+  clipboard. There is a **copy this certificate** control, and it copies those
+  bytes rather than a second rendering of them.
+
+- **A vendor was an `if`.** Which sessions could show an abandoned question was
+  decided by comparing an agent id to the string `"claude"` inside an API
+  handler — a vendor identity hard-coded into a surface, in the product whose
+  argument is that a vendor is a row in a table with a date on it. It is a
+  function over `core::vendors` now, and an absence check keeps it there.
+
+- **The documentation described the interface Devplane had two releases ago** —
+  *one embedded HTML file, no build step*, a 100 KB ceiling, and
+  `DEVPLANE_UI=/path/to/index.html`. All false since 0.7.0. The architecture page
+  now says what is true, and a test fails when a published page describes a
+  change rather than a state.
+
+- **A prohibition refused every long Bash command, naming a rule the command
+  never met.** `never_auto = ["Read(.env)"]` denied any Bash call past the
+  analysis length — which for an agent means *writing a document* — and reported
+  `Read(.env)` on a line containing no `.env`. A truncated parse was being read
+  as *the path rule matches*, which for a prohibition is a refusal, not the
+  prompt its own comment claimed. The vendor documents an over-length command as
+  one that "always prompts", and Devplane may prohibit **or defer**.
+
+  Three fixes. A truncated parse no longer forges a match, so an unreadable
+  command reaches `Unresolved` — *nobody looked*, answered as **ask**. The
+  parser learned about heredocs, which it had no notion of at all, so every `|`
+  and `;` inside one had been counting as a shell operator. And the length is
+  measured with **data heredoc bodies removed**: a document written through
+  `cat > x.md <<EOF` is now `undecided` like any other write.
+
+- **Every checkbox in the interface was styled as a text input.** A global
+  `input { padding; border; background }` rule applied to checkboxes too, which
+  squashes or erases the native glyph — so *Start work*'s project picker was a
+  run of bare project names with blank boxes and no way to tell a chosen project
+  from an unchosen one. Checkboxes get a size and the accent colour; the picker
+  is a wrapped set of labelled targets whose chosen state is carried by ground,
+  weight and border as well as the tick.
+
+- **Two sidebar entries were not places.** **Search** made looking something up
+  a destination you leave your work for; it is a field at the top of the sidebar
+  now, always available, with its results as their own page. **Changes** — a
+  Work's diff — was a picker with nothing in it until you had started a Work,
+  and a second picker beside the one *Finished work* already has; it is reached
+  from the Work it belongs to. A surface can declare itself off the nav, and a
+  guard fails when an unlisted one is unreachable.
+
+- **The nav advertised capability and said nothing about content.** Six projects
+  and no Work meant two entries were empty with no way to know without visiting
+  each, which reads as a broken product rather than an empty one. Each item now
+  carries a count from the feed the shell already polls, and a zero is shown
+  rather than hidden.
+
+- **Eight of the daemon's thirteen actions had no control on the board.**
+  `focus`, `open`, `open_pr`, `open_issue`, `approve`, `retry` and `resume` were
+  offered by the inbox and implemented by nothing, while every route behind them
+  already existed. So a permission on a session Devplane only *watches* — the
+  commonest kind — arrived at level `high` offering `focus`, `attach` and `open`,
+  and the row rendered with **no buttons at all**. All seven are wired; `attach`
+  names the command instead, because a browser cannot attach a terminal.
+
+- **A permission with no yes-or-no never said why.** A watched session has no
+  protocol request behind it, so no surface can grant or refuse it — the agent's
+  own dialog is the only thing that can. The row now says so, in one line
+  composed by the daemon so the terminal and the board cannot explain it
+  differently.
+
+- **Pressing *allow* on the board denied the call.** Every control on the inbox
+  surface posted `{ "choice": … }` and `/api/asks/{id}/answer` reads `decision`,
+  `option`, `custom` and `field` — there is no `choice`. The body was valid JSON
+  in which no field was set, nothing objected, and `Decision::parse(None, None)`
+  answers `Deny`. So **allow refused the call**, under the person's name, on the
+  product whose whole claim is recording who decided what, while the surface
+  reported *"answered — on the record and on its way to the agent"*. `deny` was
+  correct by accident; choosing an agent's own option denied a permission and
+  400'd a question; a free-text reply did the same.
+
+  Two fixes, and the second is the one that matters. Each control now sends what
+  it means. And the route **refuses a permission answer that names neither a
+  decision nor an option** instead of reading it as a refusal: *fail closed* is
+  the right rule for a gate deciding with nobody present and the wrong one for a
+  person's answer, where nothing was said. `AnswerBody` also denies unknown
+  fields, so the same mistake is a 422 at the boundary rather than a decision
+  nobody made. The CLI had always refused this case before sending.
+
+  Three guards, each mutation-verified against the original bug: the fields a
+  surface posts must be fields the route reads; the route must deny unknown
+  fields; the permission arm must refuse before it parses.
+
+- **Four of the ten sidebar items began with the word *What*.** *What is
+  happening*, *What is configured*, *What is installed where* — three of them
+  sharing their first two words — so the first thing a reader's eye landed on
+  discriminated nothing on almost half the list, and the distinguishing noun
+  arrived at word three or four. Meanwhile the bands those items are grouped
+  into **rendered as nothing**: a list per band with a one-pixel gap, no
+  heading, no accessible name. The errand had been pushed into every item and
+  the grouping meant to carry it was invisible.
+
+  The band is the errand now and the item is the noun, which is the shape
+  `devplane --help` has always had. The four band headings **are** four of the
+  five command-group headings, read out of the Rust by a test, so one product
+  cannot name its own errands two ways depending on which surface you are on.
+  `Inbox`, `Decisions`, `Finished work` · `Sessions` · `Start an agent`,
+  `Issues and PRs` · `Setup`, `Library`.
+
+- **A stalled command was cut at eighty characters and the rest existed
+  nowhere.** The clip ran in the **reducer**, so the shortened string was the
+  only string there had ever been: `run.summary` was eighty characters, the
+  `stalled` inbox item copies it, and a row ending in an ellipsis could not be
+  expanded on the board, in the terminal, or in `--json`. The characters were
+  gone before any surface was reached. The reducer keeps the command now,
+  bounded generously so a heredoc cannot grow a record without limit; the
+  terminal shows what fits and names the command that has the whole of it, and
+  the board carries the whole string on the row. The work view had this right
+  from the start — *a reformatted command is one a reviewer cannot paste*.
+
+- **`devplane doctor` told readers OpenCode publishes nothing watchable.** Its
+  row read `not published` — defined in the same file as *the vendor publishes
+  nothing Devplane could read here* — with the reason *"no observation channel
+  has been built"*, which is a fact about **this project's backlog** wearing a
+  verdict about the **vendor**. OpenCode documents `GET /session` and a
+  `GET /event` stream naming `question.rejected` outright, which is more than
+  the one vendor Devplane does read, where the same fact has to be derived by
+  subtracting two hooks.
+
+  One value had been doing three jobs. There are now `unbuilt` (*the vendor
+  publishes it and we do not read it yet*) and `not checked` (*nobody has read
+  this vendor's documentation*) beside it, a `Channel::EventFeed` — the table
+  previously could not name what OpenCode publishes, which is how `Hooks` came
+  to be the nearest fit — and three guards, including one that fails when a
+  `not published` reason talks about building.
+
+- **The channel table's columns stopped lining up** the first time a status word
+  ran past sixteen characters. Two of its three widths were literals beside one
+  that was measured; all three are measured now.
+
+- **A gate-latency test measured the machine as much as the gate.** It asserted
+  a 250ms median on a path that spawns the binary per run, so sustained load
+  taxed every run and it failed at 315ms while the same test alone passed three
+  times. The budget is a difference now: the gate against `--version`, same
+  spawn, none of the path under test. Verified to fail on a planted 120ms
+  regression and to pass with six cores busy.
+
+- **The help screen printed its thirty-five commands twice.** The grouped
+  listing shipped as the fix for a flat wall of names, and clap's own
+  `{subcommands}` was still in the template below it — so the screen that
+  existed to make the command set readable rendered the readable form *and* the
+  form it replaced, one after the other. The template no longer emits either
+  `{subcommands}` or `{all-args}`, and the groups read their descriptions from
+  clap rather than from a second copy kept by hand.
+
+- **The inbox row said nothing about where an item came from or how long it had
+  waited.** It printed the level, the title and the kind, so a list across five
+  projects named no project, and a list whose stated order is *level, then age*
+  showed no age: a question waiting nineteen hours and one raised eight minutes
+  ago were the same row. Both figures were already on the wire and the board was
+  already reading them.
+
+- **`devplane answer <typo>` printed a serde error, an internal route and the
+  loopback port.** The 404 body was the daemon's own JSON, rendered into a
+  parse failure a person could do nothing with — on the command this product is
+  named for, at the moment somebody mistyped an id. It now says which ask is not
+  waiting and names the command that lists the ones that are. `dispatch --to`
+  with an unknown project does the same. A guard fails when a failure a person
+  meets mentions a port, a route or a type name.
+
+- A policy-cache test asserted microseconds of wall-clock in a threaded suite
+  and failed under load for reasons that had nothing to do with caching. It
+  counts config parses now, which is what its own first comment always said it
+  was about.
+
+### Added
+
+- **`devplane dispatch --template <name>`** — a library artefact a fan-out starts
+  from. It is recorded on the batch and read for the one thing a fan-out can say
+  that a single dispatch cannot: **which of the artefact's frontmatter fields the
+  documented distribution paths reject**. A warning and never a refusal.
+
+  The field it fills, `would_lose_fields`, was on the wire from the day the
+  fan-out shipped and was set to an empty vector unconditionally — so the
+  requirement it exists for had no producer at all, and the page that was meant
+  to render it was reading a field nothing filled.
+
+- **`session/list` enriches a driven run**, where the agent advertises it. Asked
+  once after the handshake, applied through the reducer as an event so a replay
+  reproduces it, and held to one rule: it may fill a gap — a title where Devplane
+  has none — and may never move a state. `SessionInfo` carries no state field in
+  v1 or in v2's draft, so there is nothing there to take.
+
+- **`devplane doctor` says `started from …`** when the running daemon is not the
+  binary you just typed. Silent otherwise: a person who tried `npx` and then
+  installed properly has two copies and one daemon, and *which one is running*
+  matters at exactly one moment.
+
+- **Every Work is reachable from the work surface.** The registry computed the
+  list and the surface never read it, so it showed the one named in the address
+  or the most recent — any other needed the URL edited by hand. The picker is
+  anchors, so it works from the keyboard and survives a reload.
+
+- **`What is installed where`** — the library matrix as a surface: one row per
+  prompt or skill, one column per repository, and a **word** in every cell
+  rather than a tick. `copy_moved` and `library_moved` are the same boolean and
+  opposite instructions, so no rendering may reduce the six drift values to two.
+
+- **`POST /api/dispatch/preflight`** — what a fan-out would do, before anything
+  is written: the refusals with their fixes, the position and whether the count
+  chose it, and a draft link per accepted target. The rule lived only in the
+  CLI, so the composer had a panel it could not fill.
+
+- `/api/forge` rows carry `needs_you`, decided by the same predicate the
+  headings count with, so a list and the number above it cannot disagree.
+
+- `/api/modes` returns a typed payload (`core::world::Modes`) rather than an
+  ad-hoc object, and now includes `unreported`.
+
+### Removed
+
+- **`GET /api/decisions/pane`**, and the HTML machinery under it. It returned
+  markup the daemon rendered for the page that was deleted in 0.7.0; the *why*
+  surface reads `/api/decisions` and builds its own. With it go `render::Html`,
+  the `markup!` macro and `render::reason_pane` — about 220 lines whose only
+  consumer was that route.
+
 ## 0.7.0 — 2026-09-21
 
 ### Breaking

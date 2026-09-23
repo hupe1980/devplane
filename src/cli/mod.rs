@@ -78,19 +78,56 @@ pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
     ("The daemon", &["serve", "stop"]),
 ];
 
-/// The groups, as the block printed above clap's own listing.
+/// The grouped listing — **the only listing**.
+///
+/// **It printed under clap's flat one for the life of the feature.** The
+/// specification asks that the commands be *presented* under five names; what
+/// shipped was thirty-five in a flat list and then the same thirty-five in
+/// groups, which is the problem this feature exists to fix, twice, on one
+/// screen. The doc comment here even said *"printed above clap's own listing"*
+/// while `after_help` prints below it. Nothing caught it, because the test
+/// asserts the groups are present and a screen nobody reads can carry both.
+///
+/// `help_template` now drops `{subcommands}`, so this is what a reader sees.
+///
+/// **The descriptions come from clap and are not a second copy.** Each line is
+/// the command's own `about`, read back out of the augmented command tree, so
+/// `devplane --help` and `devplane help <command>` cannot disagree. Built with
+/// `augment_subcommands` on a bare command rather than `Cli::command()`, which
+/// would recurse through this function.
 ///
 /// Plain text with no colour: this is the surface most likely to be piped into
 /// a file or a pager, and colour may never be the only thing that carries a
 /// distinction.
-///
-/// `after_help` rather than clap's `help_heading`, which compiles and changes
-/// nothing for a flat subcommand list.
 #[must_use]
 pub fn groups_block() -> String {
-    let mut out = String::from("\nWhat you came here to do:\n");
+    use clap::Subcommand;
+    let tree = Command::augment_subcommands(clap::Command::new("devplane"));
+    let about = |name: &str| -> String {
+        tree.get_subcommands()
+            .find(|c| c.get_name() == name)
+            .and_then(|c| c.get_about().map(ToString::to_string))
+            .unwrap_or_default()
+    };
+
+    // One column width across every group, so the descriptions line up down the
+    // whole screen rather than per block.
+    let widest = COMMAND_GROUPS
+        .iter()
+        .flat_map(|(_, cs)| cs.iter())
+        .map(|c| c.len())
+        .max()
+        .unwrap_or(0);
+
+    let mut out = String::from("What you came here to do:\n");
     for (name, commands) in COMMAND_GROUPS {
-        out.push_str(&format!("\n  {name}\n    {}\n", commands.join("  ")));
+        out.push_str(&format!("\n  {name}\n"));
+        for c in *commands {
+            match about(c) {
+                d if d.is_empty() => out.push_str(&format!("    {c}\n")),
+                d => out.push_str(&format!("    {c:<widest$}  {d}\n")),
+            }
+        }
     }
     out.push_str("\nRun `devplane help <command>` for one of them.");
     out
@@ -109,7 +146,22 @@ pub fn groups_block() -> String {
                   Client Protocol, and never approves a tool call.\n\n\
                   Start with `devplane connect claude`, then `devplane ls`.",
     after_help = groups_block(),
-    after_long_help = groups_block()
+    after_long_help = groups_block(),
+    // **`{subcommands}` is deliberately absent, and `{all-args}` with it.**
+    // Clap's flat list of thirty-five is the thing the grouped block replaces,
+    // and printing both put the problem on the screen twice — which is what
+    // shipped, because `after_help` renders *below* the listing it was written
+    // to replace.
+    //
+    // `{options}` rather than `{all-args}`: the latter carries the subcommands
+    // back in. And `{after-help}` is placed by hand so the grouped list sits
+    // where the flat one used to, above the options, rather than after them.
+    help_template = "\
+{before-help}{about-with-newline}
+{usage-heading} {usage}{after-help}
+
+Options:
+{options}"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -278,6 +330,15 @@ pub enum Command {
         /// version than six running agents.
         #[arg(long)]
         mode: Option<String>,
+        /// A library artefact this fan-out starts from, by name.
+        ///
+        /// Recorded on the batch, and read for the one thing a fan-out can say
+        /// about it that a single dispatch cannot: **which of its frontmatter
+        /// fields the documented distribution paths reject**. A warning and
+        /// never a refusal — the artefact still works in the tool that wrote
+        /// it, and the documented error is about leaving it.
+        #[arg(long)]
+        template: Option<String>,
         /// Without this, the preflight prints and nothing is sent or opened.
         #[arg(long)]
         apply: bool,
@@ -756,6 +817,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             cwd,
             to,
             mode,
+            template,
             apply,
         }) => {
             if to.is_empty() {
@@ -766,6 +828,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     to,
                     prompt.join(" "),
                     mode.as_deref(),
+                    template.as_deref(),
                     apply,
                     cli.json,
                 )

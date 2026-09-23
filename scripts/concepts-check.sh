@@ -204,6 +204,58 @@ if [ -d ../specs ]; then
   done
 fi
 
+# The Spec Kit release this integration was read against, against the copy
+# installed here.
+#
+# Everything Devplane knows about the extension shape — the file, the hook
+# points, what `optional: false` obliges an agent to do, that a `condition` is
+# skipped silently — was read from an installed copy, and none of it is
+# announced in a changelog this product watches. The constant lives in
+# `core::spec`; the comparison lives here because `.specify/` is gitignored and
+# the published tree may not point at it.
+#
+# Reports rather than fails, on the npm-pin precedent: the version does not move
+# on its own, so a difference produces a decision rather than a broken build.
+read_against=$(grep -oE 'SPEC_KIT_READ_AGAINST: &str = "[0-9.]+"' ../src/core/spec.rs \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+if expect "spec kit constant" "$read_against" && [ -f ../.specify/init-options.json ]; then
+  installed=$(grep -oE '"speckit_version"[[:space:]]*:[[:space:]]*"[0-9.]+"' ../.specify/init-options.json \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+  if [ -n "$installed" ] && [ "$installed" != "$read_against" ]; then
+    echo "note: the Spec Kit integration was read against $read_against; this checkout has $installed (re-read the extension shape, then move the constant)"
+  fi
+fi
+
+# A specification whose roadmap item has been **retired** is scaffolding for work
+# that shipped, and D262's convention is that it is deleted. The guard above
+# cannot see it: it asks whether ROADMAP.md *mentions* the folder, and §6 keeps
+# every shipped item's anchor for ever so six documents' citations still resolve.
+# So a spec named only from Retired reads as live for ever.
+#
+# It reports rather than fails, on the copilot-pin precedent. The leftovers are
+# real — they are the tasks no test can close, *read it on a phone*, *show it to
+# somebody who has not read these notes* — and the established repair is to
+# rescue them into the roadmap item and then delete the folder, which is a
+# judgement rather than a defect.
+# **And this guard skipped silently on its first run**, because `retired_line` is
+# computed two hundred lines further down and was empty here — the same shape as
+# the page guard that skipped on a deleted file, in the guard written to report
+# that class, within the hour. It is computed locally now, and `expect` makes an
+# unfindable heading loud.
+spec_retired_line=$(grep -nE '^## .*Retired' ROADMAP.md | head -1 | cut -d: -f1)
+if [ -d ../specs ] && expect "retired section" "$spec_retired_line"; then
+  for feature in ../specs/*/; do
+    [ -d "$feature" ] || continue
+    name=$(basename "$feature")
+    total=$(grep -c -- "$name" ROADMAP.md 2>/dev/null || true); total=${total:-0}
+    [ "$total" -gt 0 ] || continue
+    live=$(awk -v r="$spec_retired_line" 'NR < r' ROADMAP.md | grep -c -- "$name" || true); live=${live:-0}
+    if [ "$live" -eq 0 ]; then
+      echo "note: specs/$name is named only from Retired — its item shipped (D262: rescue what is left, then delete the folder)"
+    fi
+  done
+fi
+
 # And the machinery beside them. Unlike a feature name this string is fixed, so
 # it is checked whether or not the directory is here.
 #
@@ -407,6 +459,16 @@ done
 # the served size — and pointing this at it turned a guard over the thing being
 # replaced into a guard over a stub. The figure it protects is the one the
 # rebuild is measured against, so it follows the artefact rather than the name.
+#
+# **And a guard wrapped in a file test is disarmed by the work succeeding**, which
+# is what happened here on 2026-09-21. `#shell-2` deleted `ui/legacy.html`; this
+# block has skipped in silence ever since, while STATE.md went on calling the
+# deleted page "the served interface until the port lands". D331's `expect`
+# cannot see this: it guards an *extraction*, and this never reaches one. So an
+# absent subject is a failure with a name on it, and the repair is to delete the
+# figure with the artefact rather than to re-point the guard at a successor —
+# there is no successor, because the rebuilt interface is measured in gzipped
+# bytes by a test rather than in lines by a grep (D348, R69).
 page="../ui/legacy.html"
 if [ -f "$page" ]; then
   page_lines=$(wc -l < "$page" | tr -d ' ')
@@ -429,6 +491,17 @@ $bare"
   if [ -n "$bad" ]; then
     echo "the page figures have drifted; it is $page_lines lines and $page_kb KB, these notes say:"
     echo "$bad" | sed 's/^/  /'
+    fail=1
+  fi
+else
+  stale=$( { grep -rhoE '[0-9][0-9 ]* lines(,| and) [0-9]+ KB' *.md
+             grep -rhoE '[0-9]+ KB(,| and) [0-9][0-9 ]* lines' *.md
+             grep -rhoE '\b[0-9]{4} lines\b' *.md
+           } | sort -u)
+  if [ -n "$stale" ]; then
+    echo "the page these figures measure is deleted and they are still stated (D348):"
+    echo "$stale" | sed 's/^/  /'
+    echo "  delete the figure with the artefact; there is no successor to re-point at"
     fail=1
   fi
 fi
@@ -513,6 +586,49 @@ if grep -rnE '§[0-9]+ item [0-9]+' *.md | grep -v '"§'; then
   echo "a roadmap item is cited by position; cite its \`#anchor\` instead"; fail=1
 fi
 
+# Two rows in STATE.md with the same subject are two homes for one figure,
+# which is the rule this file exists to enforce, broken in the file that states
+# it. On 2026-09-21 `**Where an MCP tool call came from**` appeared twice — once
+# saying "Not read" and once saying "Recorded and shown" — seven rows apart, the
+# stale one left behind when the feature shipped. Nothing compared them, because
+# every figure guard reads a *value* and this is a collision of *subjects*.
+#
+# Scoped to bold subjects, because the plain ones are section-local labels like
+# "Tests" or "Schema" that a reader disambiguates by table, while a bold subject
+# is a claim with a name.
+dupe_rows=$(grep -ohE '^\| \*\*[^|]+\*\* \|' STATE.md | sed 's/ *|$//' | sort | uniq -d)
+if [ -n "$dupe_rows" ]; then
+  echo "STATE.md states one subject twice (two homes for one figure):"
+  echo "$dupe_rows" | sed 's/^/  /'
+  fail=1
+fi
+
+# ROADMAP.md §2 is a summary of §3, and on 2026-09-21 the two disagreed about
+# which item to do first — in the file whose only job is answering that. The
+# board carried six rows, `#copilot` was not one of them, and the prose under it
+# said the top item was "alone at the top" on the same day a decision put a
+# different item above it. Every other guard here compares a document to the
+# tree or to another document; this one compares a file to itself, which is the
+# comparison nothing was making (D349).
+#
+# The rule is exact so it cannot rot into advice: the anchors in the board, in
+# order, are the anchors of the `## 3. Now` headings, in order. A reorder of Now
+# is free and a reorder of the board alone fails. Next and Later are deliberately
+# out of scope — the board says what to do now, and a table of twenty items is
+# not a board.
+board_anchors=$(awk '/^## 2\. The board/{b=1} /^## 3\. Now/{b=0} b' ROADMAP.md \
+  | grep -oE '^\| \*\*[0-9]+\*\* \| `#[a-z0-9-]+`' | grep -oE '#[a-z0-9-]+')
+now_anchors=$(awk '/^## 3\. Now/{n=1;next} /^## 4\./{n=0} n' ROADMAP.md \
+  | grep -oE '^### `#[a-z0-9-]+`' | grep -oE '#[a-z0-9-]+')
+if expect "roadmap board" "$board_anchors" && expect "roadmap now" "$now_anchors"; then
+  if [ "$board_anchors" != "$now_anchors" ]; then
+    echo "ROADMAP.md: the board and Now disagree (D349)"
+    echo "  board: $(echo $board_anchors)"
+    echo "  now:   $(echo $now_anchors)"
+    fail=1
+  fi
+fi
+
 # ROADMAP.md's own scope line says it records unfinished work and nothing else,
 # and for six passes it recorded mostly finished work: five items headed
 # "Shipped" with their post-mortems attached, at about 350 lines. Three separate
@@ -563,7 +679,7 @@ awk -v retired="$retired_line" '
     }
     anchor = ""; next
   }
-  anchor != "" && /\*\((hours|an afternoon|days|a week|weeks|~?[0-9]+ ?(days|weeks))\)?/ { sized = 1 }
+  anchor != "" && /\*\((an hour|hours|an afternoon|days|a week|weeks|~?[0-9]+ ?(days|weeks))\)?/ { sized = 1 }
   anchor != "" && /\*Settled when/ { exited = 1 }
   END {
     if (anchor != "" && !(sized && exited)) {
@@ -687,6 +803,26 @@ case "$top" in
   *"($newest_claim pass)"*) : ;;
   *) echo "PASSES.md's newest heading does not carry the ordinal '$newest_claim': ${top:0:80}"; fail=1 ;;
 esac
+
+# **And the cap itself, which is the thing that actually drifts.** This file
+# keeps the last five passes in full and compresses everything older; the rule
+# is stated in its header, cited by D321, and has now been broken twice — once
+# to seventeen entries, and then, three passes after the first correction, back
+# to eight. A rule nobody counts is a rule that comes back.
+#
+# An uncompressed entry is a `##` heading that starts with a date. A compressed
+# block's heading is prose ("Passes six to seventeen, compressed") and its
+# entries are `###`, so neither is counted — which is what makes this countable
+# at all, and is the distinction the earlier attempt at a count missed.
+#
+# It fails only when there are *too many*. Fewer than five is a young file, not
+# a defect.
+in_full=$(grep -cE '^## [0-9]{4}-[0-9]{2}-[0-9]{2} \(' PASSES.md)
+if [ "$in_full" -gt 5 ]; then
+  echo "PASSES.md keeps $in_full passes in full; its own cap is five"
+  echo "  compress the oldest to what it found, what it got wrong, and the rule it bought"
+  fail=1
+fi
 
 # The widening count (R24) and the provider release behaviour was verified
 # against. Both are counted rather than compared to a constant, because the

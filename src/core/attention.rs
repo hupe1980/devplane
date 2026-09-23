@@ -403,6 +403,18 @@ pub struct AttentionItem {
     /// The detail a human needs to decide: the tool input, the question, the
     /// error. Rendered as untrusted text.
     pub detail: Option<String>,
+    /// Why there is no yes-or-no here, when there is not.
+    ///
+    /// A permission on a session Devplane **watches** has no protocol request
+    /// behind it, so no surface can grant or refuse it — the agent's own dialog
+    /// is the only thing that can. The actions said so (`focus` and nothing
+    /// else) and no surface said it in words, which reads as a high-level item
+    /// that is simply broken.
+    ///
+    /// Composed here so the terminal and the board cannot explain it
+    /// differently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_in: Option<String>,
     /// The answers on offer. An option with an `id` can be chosen from here; one
     /// without can only be read, and the actions say so.
     pub options: Vec<Choice>,
@@ -655,6 +667,7 @@ pub fn gate_down_item(why: &str) -> AttentionItem {
              Run `devplane doctor` for the command it tried, then \
              `devplane connect claude` to reinstall it."
         )),
+        answer_in: None,
         ask: None,
         options: Vec::new(),
         actions: Vec::new(),
@@ -706,6 +719,7 @@ pub fn record_incomplete_item(events: u64, decisions: u64, last: &str) -> Attent
              Check the disk and the permissions on the store, then restart \
              the daemon. The gap does not fill in afterwards."
         )),
+        answer_in: None,
         ask: None,
         options: Vec::new(),
         actions: Vec::new(),
@@ -762,6 +776,7 @@ pub fn agent_leaked_item(pid: u32, command: &str, worktree: Option<&str>) -> Att
             }
         )),
         ask: None,
+        answer_in: None,
         options: Vec::new(),
         actions: Vec::new(),
         request_id: None,
@@ -816,6 +831,8 @@ pub fn stranded_ask_item(ask: &crate::core::ask::Ask) -> AttentionItem {
             ask.deadline.says()
         )),
         ask: Some(ask.id.clone()),
+        // Answerable, so there is nothing to explain away.
+        answer_in: None,
         options,
         // Answerable, which is the whole claim. Nothing else is offered: there
         // is no run to focus and no window to raise.
@@ -858,6 +875,7 @@ pub fn config_broken_item(root: &Path, why: &str) -> AttentionItem {
              Run `devplane check {where_}` for the line, and the gates and \
              prohibitions come back as soon as the file parses."
         )),
+        answer_in: None,
         ask: None,
         options: Vec::new(),
         actions: Vec::new(),
@@ -889,6 +907,24 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
                     options: Vec<Choice>,
                     actions: Vec<Action>,
                     since: Timestamp| {
+        // Set wherever the actions say a person cannot answer from any surface:
+        // the only ways in are to reach the session, which is what `Focus` and
+        // `Attach` are.
+        let answer_in = match actions.iter().any(|a| {
+            matches!(
+                a,
+                Action::Allow | Action::Deny | Action::Choose | Action::Reply
+            )
+        }) {
+            true => None,
+            false if matches!(kind, AttentionKind::Permission | AttentionKind::Question) => {
+                Some(match crate::core::vendors::vendor_of(&run.agent) {
+                    Some(v) => format!("{v} owns this dialog — answer it in its own window"),
+                    None => "the agent's own window owns this dialog — answer it there".to_string(),
+                })
+            }
+            false => None,
+        };
         // Snoozed per kind: a run stays on the board, and a kind the human has
         // not dismissed is never hidden by a dismissal of another one.
         if run.snoozed.hides(&kind) {
@@ -902,6 +938,7 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
             project_id: run.project_id.clone(),
             title,
             detail,
+            answer_in,
             options,
             actions,
             // The token, where the run is holding one. Every surface answers by
@@ -1218,6 +1255,7 @@ pub fn items_for_work_in(
             title,
             detail,
             ask: None,
+            answer_in: None,
             options: Vec::new(),
             actions,
             form: None,
@@ -1938,6 +1976,7 @@ mod tests {
             project_id: project.map(ProjectId::new),
             title: format!("{} {n}", kind.as_str()),
             detail: None,
+            answer_in: None,
             options: Vec::new(),
             actions: Vec::new(),
             request_id: None,

@@ -95,7 +95,7 @@ and slug-shaped, `description` at most 1024 and non-empty, `compatibility` at mo
 and nothing here can see it. An empty finding list is not a clean bill of health. If the frontmatter
 could not be read at all, the report says `unread` rather than showing you nothing.
 
-## `devplane library report` — what it will be allowed to do
+## `devplane library report` — what a skill will be allowed to do
 
 ```console
 $ devplane library report review-findings
@@ -185,6 +185,19 @@ of what a target will reject instead: a converter guesses, a report tells you wh
 Spec Kit ships its commands **as Agent Skills** — `.claude/skills/speckit-*/SKILL.md`. So the library
 installs them, drift-checks them and reports their provenance with no code in Devplane that knows
 what a specification is.
+
+## On the board
+
+**Library** — the page headed *what is installed where* — is the same answer as
+`devplane library list`, laid out as a matrix: one row per artefact, one column per repository, and a
+**word** in every cell.
+
+The word matters more than it looks. `edited here` and `library moved on` are the same yes-or-no and
+opposite instructions — one says this repository has a change the library does not, the other says
+the library moved on without it — so a tick and a cross cannot carry the difference. All six drift
+outcomes render as their own sentence, and a test fails if any two read alike.
+
+Nothing on that page writes. `devplane library sync` is the only thing that does.
 
 ## The API
 

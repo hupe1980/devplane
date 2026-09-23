@@ -375,8 +375,9 @@ $ devplane audit
 ask   Bash   daemon   `sh -c` runs a program given on its own command line
 ```
 
-Before this, those calls produced no answer and no row: `never_auto = ["Bash(rm *)"]` was set,
-`$(echo rm) -rf /` ran, and nothing anywhere said the prohibition had not been consulted.
+Without it, a command that hides what it runs — `$(echo rm) -rf /` under
+`never_auto = ["Bash(rm *)"]` — would produce no answer and no row, and nothing anywhere would say the
+prohibition had not been consulted.
 
 ## One thing rules cannot see
 
@@ -482,17 +483,23 @@ that is only chosen when the shell runs, and nothing here guesses what it will b
 Every analysis has a bound: the number of files one command may name, how deep a substitution is
 followed, and Claude Code's own limit of 10,000 characters past which it *"always prompts"*.
 
-Reaching a bound is reported rather than ignored. A deny rule treats the part nobody read as though
-it could be anything, so a protected file cannot be hidden behind a long enough command line:
+Reaching a bound is reported rather than ignored. The operands past it were never read, so no rule can
+speak for them and the call goes to you with the reason:
 
 ```console
 $ devplane explain 'cat f1 f2 … f600 .env'   # never_auto = ["Read(.env)"]
-deny  Bash
-        by Read(.env)
+ask — unreadable  Bash
+        because it names more files than the command analysis reads, so the rest were not looked at
 ```
 
-It costs a prompt on a command nobody writes by hand, and it closes the alternative — a prohibition
-that silently stops applying once the command is long enough.
+That is an escalation, not a refusal: nobody looked, so nothing was decided. It closes the
+alternative — a prohibition that silently stops applying once the command is long enough — and it
+costs a prompt on a command nobody writes by hand.
+
+**A heredoc's payload is not counted.** `cat > notes.md <<EOF` followed by fifteen kilobytes of
+Markdown is a two-word command with a large payload, not a long command; bytes on another program's
+standard input are not shell. A body fed to a **shell** — `bash <<EOF`, or `cat <<EOF | sh` — is a
+script, and every rule still reads it.
 
 ## Auto mode
 

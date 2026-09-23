@@ -22,7 +22,7 @@ group = "reference"
 │ observe  hooks (HTTP), OTLP/HTTP, the session roster         │
 │ work     worktrees, gates, declared chains, findings         │
 │ git/gh   the git CLI, the gh CLI                             │
-│ web      one embedded HTML file on loopback                  │
+│ web      the built interface, embedded, on loopback          │
 │ store    SQLite (WAL, FTS5): observations + decisions        │
 └──────────────────────────────────────────────────────────────┘
    ▲ hooks / telemetry from any session   ▲ stdio to agents
@@ -86,7 +86,7 @@ a URL, and SSE is one line in a browser and needs no client library.
 
 | | |
 |---|---|
-| **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/asks`, `/api/runs/{id}`, `/api/runs/{id}/{events,messages,rewind-gap}`, `/api/agents`, `/api/work`, `/api/work/{id}/{changes,certificate}`, `/api/batch`, `/api/library`, `/api/modes`, `/api/decisions`, `/api/explain`, `/api/search`, `/api/forge`, `/api/diagnostics`, `/api/setup`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz` |
+| **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/asks`, `/api/runs/{id}`, `/api/runs/{id}/{events,messages,rewind-gap}`, `/api/agents`, `/api/work`, `/api/work/{id}/{changes,certificate}`, `/api/batch`, `/api/library`, `/api/modes`, `/api/decisions`, `/api/explain`, `/api/search`, `/api/forge`, `/api/diagnostics`, `/api/setup`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz`, and `POST /api/dispatch/preflight`, which takes a body and writes nothing |
 | **Write** | `/api/dispatch`, `/api/asks/{id}/answer`, `/api/work`, `/api/work/{id}/{verify,finish,approve,retry,resume}`, `/api/issues`, `/api/projects/trust`, `/api/runs/{id}/{prompt,stop,snooze,focus}`, `/api/shutdown` |
 | **Receivers** | `/devplane/hook`, `/devplane/policy`, `/devplane/statusline`, `/devplane/otel/v1/{logs,metrics}` |
 
@@ -135,21 +135,19 @@ attached, running, with nothing left on the machine that knows it is there.
 | Store | SQLite via `sqlx`, WAL, FTS5 |
 | Telemetry ingest | a hand-written OTLP/HTTP **JSON** reader behind `axum` — the exporter is configured for JSON, so the four record shapes are about sixty lines of serde rather than a protobuf toolchain |
 | Git / GitHub | the `git` and `gh` CLIs, for parity with what agents and people run by hand |
-| UI | one embedded HTML file, no build step — a thousand lines of plain HTML, CSS and JavaScript against the same JSON the CLI reads |
+| UI | Svelte 5 and Vite, built to a bundle the binary embeds, against the same JSON the CLI reads |
 | Notifications | the platform's own notifier: `osascript`, `notify-send`, PowerShell toast |
 
-The UI has no build step on purpose. A dashboard that cannot be opened without `npm install` rots the
-first time the toolchain moves, and a Rust build that depends on a JavaScript build is a Rust build
-that breaks for everyone. The two things that usually demand a bundler need none here: the daemon
-renders the diff it already computes, and `devplane attach` hands your terminal to `claude --resume`
-rather than owning one.
+**A surface is a directory.** `ui/src/surfaces/*/index.ts` is resolved at build time, so adding one
+touches no other file — no import to add, no list to edit. A test fails when any shared file names a
+surface, because a central list is the merge conflict the arrangement exists to remove.
 
-A test holds the page under 100 KB and three thousand lines, and requires that it fetch nothing — no
-CDN, no font, no second file. A page that reaches the network breaks the board over Tailscale on a
-phone, and `curl` when you are debugging it, on someone else's network where you will not see it.
+**The bundle fetches nothing.** No CDN, no web font, no second origin — a page that reaches the
+network breaks the board over Tailscale on a phone, and `curl` when you are debugging it. A test holds
+the served artefact under 250 KB gzipped and requires the refusal.
 
-`DEVPLANE_UI=/path/to/index.html devplane serve` reads the page from disk instead of the binary,
-which makes the edit loop a browser reload.
+`DEVPLANE_UI=/path/to/dist devplane serve` serves a built directory from disk instead of the embedded
+copy, which makes the edit loop a rebuild and a browser reload.
 
 ## Performance
 

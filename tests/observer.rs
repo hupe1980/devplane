@@ -312,7 +312,37 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
     // a 40 MB debug binary off a cold disk.
     gate(&home, rules, body);
 
+    // **A control, because the thing being measured is not the expensive part.**
+    //
+    // Each run spawns the binary, so most of the elapsed time is process start
+    // and has nothing to do with policy. On an idle machine that is invisible;
+    // under sustained load it taxes **every** run, which is why the median — the
+    // statistic chosen precisely to be immune to tail noise — still failed at
+    // 315ms against a 250ms budget while a release build was competing for the
+    // machine. The same test alone measured well inside it, three times.
+    //
+    // The control is `--version`: the same binary, the same spawn, and **none of
+    // the path under test**. The difference is reading the hook and deciding it.
+    //
+    // **The first control was the same hook with no policy declared, and it was
+    // wrong in a way that passed.** Sharing the spawn was the point, but it also
+    // shared the evaluation — so a deliberate 120ms sleep planted inside the rule
+    // evaluator lengthened the measurement *and the control* and cancelled out,
+    // and the test reported a pass. A control has to share the noise and none of
+    // the subject.
+    let control_run = || {
+        let t = std::time::Instant::now();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+            .arg("--version")
+            .output()
+            .expect("the binary runs");
+        assert!(out.status.success(), "the control must succeed");
+        t.elapsed()
+    };
+    control_run();
+
     let mut runs: Vec<std::time::Duration> = Vec::new();
+    let mut controls: Vec<std::time::Duration> = Vec::new();
     for _ in 0..20 {
         let t = std::time::Instant::now();
         let reply = gate(&home, rules, body);
@@ -320,10 +350,27 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
         // The latency that matters is a *prohibition's*: that is the only
         // answer Devplane gives, and it is the one that must not be felt.
         assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "deny");
+
+        controls.push(control_run());
     }
     runs.sort();
+    controls.sort();
     let median = runs[runs.len() / 2];
+    let control = controls[controls.len() / 2];
     let worst = *runs.last().expect("twenty runs");
+
+    // **The budget, and it is a difference.** Deciding a prohibition costs
+    // almost nothing over starting the process at all; anything that made rule
+    // evaluation expensive would show up here whatever else the machine is
+    // doing.
+    let own_cost = median.saturating_sub(control);
+    assert!(
+        own_cost < std::time::Duration::from_millis(60),
+        "deciding a prohibition cost {own_cost:?} more than the same binary answering \
+         --version (gate {median:?}, control {control:?}, {} runs each). The spawn is shared and \
+         the policy path is not, so this difference is reading the hook and deciding it.",
+        runs.len()
+    );
 
     // **The median carries the budget, and it did not always.**
     //
@@ -338,10 +385,16 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
     // until it stops failing, and then it is not a budget. So the median
     // carries it: a real regression in the gate moves every run, and scheduler
     // noise moves the tail.
+    // **And a loose absolute ceiling, which catches catastrophe and nothing
+    // else.** A budget that fails for reasons unrelated to what it measures gets
+    // raised until it stops failing, and then it is not a budget — so the real
+    // budget is the difference above and this is only here to notice a gate that
+    // has become unusable in absolute terms. It is deliberately far above any
+    // load this has been seen under.
     assert!(
-        median < std::time::Duration::from_millis(250),
-        "median gate answer was {median:?} over {} runs; the budget is 250ms for an \
-         unoptimised build. This is the statistic a regression moves.",
+        median < std::time::Duration::from_millis(1_500),
+        "median gate answer was {median:?} over {} runs, which is unusable whatever the machine \
+         is doing. The statistic that carries the budget is the difference from the control.",
         runs.len()
     );
 

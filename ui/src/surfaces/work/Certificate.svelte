@@ -40,7 +40,16 @@
   };
 
 
-  let { page }: { page: Page } = $props();
+  let {
+    page,
+    /// The bytes `devplane work export` writes. **The daemon serves these
+    /// beside the page and nothing read them** until 2026-09-21: the
+    /// quickstart promised a button, the roadmap counted the item as done, and
+    /// the one sentence this feature is sold on — *the others hand you a
+    /// verdict and this one hands you the commands* — had no way off the page.
+    markdown = "",
+    oncopy,
+  }: { page: Page; markdown?: string; oncopy?: () => void } = $props();
 </script>
 
   {#if !page.finished}
@@ -110,6 +119,16 @@
       {/if}
     </dl>
   {/if}
+
+<!-- **The way off the page.** A certificate a reviewer cannot be handed is a
+     verdict, which is what every other entrant in this category already is. It
+     copies what the command writes rather than a rendering of the above: a
+     second composition of the same completion is a second thing that can drift
+     from the one a reviewer re-runs. -->
+{#if markdown && oncopy}
+  <button class="copy" onclick={oncopy}>copy this certificate</button>
+{/if}
+
 <style>
   .cert {
     display: grid;
@@ -121,6 +140,7 @@
     border-radius: var(--radius);
     background: var(--panel);
   }
+  .copy { margin-top: var(--s-3); }
   dt { color: var(--dim); font-size: var(--t-sm); }
   dd { margin: 0; min-width: 0; }
   ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }

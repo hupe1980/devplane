@@ -6,7 +6,7 @@
 //! envelope already carries.
 
 use crate::core::event::{Event, EventEnvelope, WaitingFor};
-use crate::core::run::{BlockedOn, Run, RunState, ToolCall};
+use crate::core::run::{BlockedOn, Run, RunMode, RunState, ToolCall};
 
 /// How many recent tool calls a run keeps for its preview. Bounded because an
 /// unbounded vector on a long session is a slow memory leak with a UI in front
@@ -294,17 +294,41 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             }
         }
 
-        // A watched session that ends with a question still open ended it with
-        // nobody having answered. Recorded for the same reason as above: the
-        // alternative is a question that was simply never seen again.
-        Event::SessionEnded { .. }
-            if matches!(run.state, RunState::Waiting(WaitingFor::Question)) =>
-        {
-            abandon_open_question(run, env.at, None);
+        // **A listing fills gaps and may not contradict an observation.** The
+        // rule is `Run::enrich_from_listing`, which refuses anything that is
+        // not a gap — a title where there is none, and nothing else. There is
+        // no state to take: `SessionInfo` carries none.
+        Event::SessionListed {
+            agent_session,
+            title,
+        } => {
+            run.enrich_from_listing(&crate::core::run::ListedSession {
+                agent_session: agent_session.clone(),
+                title: title.clone(),
+            });
         }
 
         Event::TurnEnded => {
+            // The turn happened and it cost what it cost, whatever state the
+            // run is in now.
             run.totals.turns += 1;
+            // **A turn ending is bookkeeping, and bookkeeping may not raise the
+            // dead.** `Stop` fires at the end of every turn and arrives on a
+            // different channel from `SessionEnd`, so a late one lands after a
+            // session has ended — and this arm moved *every* state to `Idle`,
+            // which `is_live()` counts as in-play. A **failed** session came
+            // back to the board as *waiting for a prompt*: the failure gone
+            // from the inbox, the row alive again, and nothing anywhere saying
+            // so. It is the same class as writing `completed` over interrupted
+            // work — a state this product distrusts, put over one it should
+            // keep — reached from the other side.
+            //
+            // A run that has genuinely resumed says so with *work*: a tool
+            // call, a question, a roster sighting. Those arms revive it on
+            // purpose, and this one does not.
+            if !run.state.is_live() {
+                return;
+            }
             // Stop fires at the end of every turn, including the turn that
             // ends by asking a question. Keeping the block is the difference
             // between an inbox that works and one that empties itself.
@@ -369,24 +393,53 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         }
 
         Event::SessionEnded { reason } => {
-            // A session that failed and then ended is still a failure. The end
-            // of a session says nothing about whether its work succeeded, so it
-            // must not promote a failed run to completed and quietly drop it
-            // out of the inbox.
-            run.state = match (reason.as_deref(), &run.state) {
-                (_, RunState::Failed) => RunState::Failed,
-                (Some("error") | Some("failed"), _) => RunState::Failed,
-                (Some("clear") | Some("logout"), _) => RunState::Stopped,
-                // **The daemon stopping is not the work finishing.** Without
-                // this arm the catch-all below promoted every run the shutdown
-                // tore down to `Completed`, so interrupted work came back from
-                // a restart wearing the one word this product distrusts — and
-                // `blocked_on` was cleared with it, so the question it was
-                // holding vanished from the run even though the ask row
-                // survived.
-                (Some("interrupted"), _) => RunState::Interrupted,
-                _ => RunState::Completed,
+            // **One arm, because a `match` does not fall through.** There were
+            // two: this one, and a guarded one above it that recorded an
+            // abandoned question and set no state. The guarded arm won whenever
+            // a session ended while asking — so the run stayed
+            // `Waiting(Question)` for ever on a session that was gone, kept its
+            // `blocked_on`, and was raised twice: once as a live question
+            // nobody could answer, once as an abandonment. The one case this
+            // product is named for was the one case the state machine dropped.
+            //
+            // **And the reasons are an enumerated set, so each is a case.** The
+            // vendor documents `clear`, `resume`, `logout`, `prompt_input_exit`
+            // and `other`, and **not one of them means the work finished** —
+            // every one is how a *person* ended the session. The catch-all read
+            // all of them as `Completed`, which is the flattering value and the
+            // word this product exists to distrust, written over a session
+            // somebody simply quit (`prompt_input_exit`) or moved elsewhere
+            // (`resume`).
+            let next = match (reason.as_deref(), &run.state, run.mode) {
+                (_, RunState::Failed, _) => RunState::Failed,
+                (Some("error") | Some("failed"), _, _) => RunState::Failed,
+                // **The daemon stopping is not the work finishing.** Only
+                // `driven.rs` sends this, and only while tearing down.
+                (Some("interrupted"), _, _) => RunState::Interrupted,
+                // Every documented reason is a person ending a session.
+                (Some("clear" | "resume" | "logout" | "prompt_input_exit" | "other"), _, _) => {
+                    RunState::Stopped
+                }
+                // **No reason, and the answer depends on who was driving.** A
+                // run Devplane owns reaches here when the agent's own process
+                // ends without a teardown, which is a driven run finishing. A
+                // session somebody else started reaching here means the vendor
+                // sent `SessionEnd` with a reason this build does not know —
+                // and an unknown member of somebody else's enumeration is not
+                // grounds to claim the work completed.
+                (_, _, RunMode::Driven) => RunState::Completed,
+                _ => RunState::Stopped,
             };
+
+            // **A session that ends while a question is open ended it with
+            // nobody having answered** — unless Devplane ended it, in which
+            // case the question is still answerable and the `asks` row is what
+            // carries it.
+            if !matches!(next, RunState::Interrupted) {
+                abandon_open_question(run, env.at, None);
+            }
+
+            run.state = next;
             // **A run that was interrupted keeps what it was blocked on.** That
             // is the difference between *this ended* and *this was cut off
             // while waiting for you*: the second is answerable after a restart
@@ -687,10 +740,26 @@ fn last_pending_tool(run: &Run) -> Option<&ToolCall> {
     run.recent_tools.iter().rev().find(|c| c.ok.is_none())
 }
 
-/// A one-line description of what a tool call is doing, for the board.
+/// How much of a tool call's content is kept in state.
+///
+/// **Not a display width.** It bounds what the reducer stores, so one heredoc
+/// cannot grow a run's record without limit. Shortening for a screen belongs to
+/// the surface, which is the only place that knows how wide the screen is.
+pub const TOOL_CONTENT_KEPT: usize = 2_000;
+
+/// A description of what a tool call is doing, kept whole.
+///
+/// **This clipped to eighty characters here**, in the reducer — so the shortened
+/// string was the only one that ever existed and no surface could recover the
+/// rest. A command is evidence: the certificate carries `command`, `shown` and
+/// `truncated` for the same reason, because *a reformatted command is one a
+/// reviewer cannot paste*.
+///
+/// The only thing that can be long is a shell command with a heredoc in it,
+/// which [`TOOL_CONTENT_KEPT`] bounds.
 fn summarise_tool(tool: &str, input: &serde_json::Value) -> String {
     match crate::core::policy::rule_content(tool, input) {
-        Some(d) => format!("{tool}: {}", crate::core::text::clip(&d, 80)),
+        Some(d) => format!("{tool}: {}", crate::core::text::clip(&d, TOOL_CONTENT_KEPT)),
         None => tool.to_string(),
     }
 }
@@ -751,6 +820,72 @@ fn abandon_open_question(
 /// Enough that a day of ordinary work fits, small enough that a session in a
 /// loop cannot turn a run row into a transcript.
 const ABANDONED_KEPT: usize = 20;
+
+#[cfg(test)]
+mod clipping {
+    use super::*;
+
+    fn bash(command: &str) -> serde_json::Value {
+        serde_json::json!({ "command": command })
+    }
+
+    /// **The reducer keeps the command; a surface shortens it.**
+    ///
+    /// This clipped to eighty characters *in the reducer*, so the shortened form
+    /// was the only form that ever existed. `run.summary` was eighty characters,
+    /// the `stalled` inbox item copies `run.summary`, and a person looking at a
+    /// row that ended in an ellipsis had no way to read the rest — not on the
+    /// board, not in the terminal, not in `--json`. The characters were gone
+    /// before any surface was reached.
+    ///
+    /// A command is evidence, and the work view already knew it: *a reformatted
+    /// command is one a reviewer cannot paste.*
+    #[test]
+    fn a_tool_call_keeps_the_whole_command_and_not_a_screens_worth() {
+        // Long enough that every plausible display width has cut it.
+        let command = format!("cargo test {} --quiet", "-".repeat(300));
+        let summary = summarise_tool("Bash", &bash(&command));
+        assert!(
+            summary.contains(&command),
+            "the command was shortened before any surface saw it: {summary}"
+        );
+        assert!(
+            !summary.contains('…'),
+            "the reducer put an ellipsis in state, so the rest of the command exists nowhere"
+        );
+        assert!(
+            summary.chars().count() > 200,
+            "a summary of {} characters is a display width in the wrong layer",
+            summary.chars().count()
+        );
+    }
+
+    /// **And it is still bounded**, because a heredoc is a command too and state
+    /// that grows with one is state nobody can reason about. The bound is
+    /// generous rather than a screen: the point is that no single call can grow
+    /// a run's record without limit, not that eighty characters is enough of a
+    /// command to keep.
+    #[test]
+    fn a_heredoc_cannot_grow_a_runs_record_without_limit() {
+        let huge = format!("bash -c 'cat <<EOF\n{}\nEOF'", "x".repeat(50_000));
+        let summary = summarise_tool("Bash", &bash(&huge));
+        assert!(
+            summary.chars().count() <= TOOL_CONTENT_KEPT + 16,
+            "{} characters went into state",
+            summary.chars().count()
+        );
+        assert!(
+            summary.ends_with('…'),
+            "a bounded summary says it was bounded"
+        );
+    }
+
+    /// A tool whose content the policy cannot name is still named itself.
+    #[test]
+    fn a_tool_with_no_readable_content_is_still_named() {
+        assert_eq!(summarise_tool("Task", &serde_json::json!({})), "Task");
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -946,6 +1081,217 @@ mod tests {
             q.moved_on_to
         );
         assert!(!r.state.needs_human(), "the run moved on");
+    }
+
+    /// **A session that ends while a question is open, which is the case the
+    /// two arms disagreed about.**
+    ///
+    /// There were two `SessionEnded` arms: a guarded one that recorded the
+    /// abandonment and set no state, and a general one that set the state. A
+    /// `match` does not fall through, so the guarded arm won and the run stayed
+    /// `Waiting(Question)` for ever on a session that had ended — raised once
+    /// as a live question nobody could answer and once as an abandonment.
+    #[test]
+    fn a_session_that_ends_while_asking_ends_and_records_it_once() {
+        let mut r = run();
+        apply(&mut r, &ev(asked("Keep the legacy route?")));
+        apply(
+            &mut r,
+            &ev(Event::SessionEnded {
+                reason: Some("clear".into()),
+            }),
+        );
+
+        assert_eq!(r.state, RunState::Stopped, "the session ended");
+        assert!(
+            !r.state.needs_human(),
+            "a dead session may not go on saying a person is owed something"
+        );
+        assert!(
+            r.blocked_on.is_none(),
+            "the block did not survive the session"
+        );
+        assert_eq!(
+            r.abandoned_questions.len(),
+            1,
+            "and it is on the record exactly once"
+        );
+        assert_eq!(r.abandoned_questions[0].question, "Keep the legacy route?");
+    }
+
+    /// **Every documented `SessionEnd` reason, and not one of them means the
+    /// work finished.**
+    ///
+    /// The vendor enumerates `clear`, `resume`, `logout`, `prompt_input_exit`
+    /// and `other`; every one is how a *person* ended a session. The reducer
+    /// read four of them through a catch-all as `Completed` — the flattering
+    /// value, and the word this product exists to distrust, written over a
+    /// session somebody quit or moved elsewhere.
+    #[test]
+    fn no_documented_reason_for_a_session_ending_claims_the_work_finished() {
+        for reason in ["clear", "resume", "logout", "prompt_input_exit", "other"] {
+            let mut r = run();
+            apply(
+                &mut r,
+                &ev(Event::tool_started("Bash", json!({"command": "ls"}))),
+            );
+            apply(
+                &mut r,
+                &ev(Event::SessionEnded {
+                    reason: Some(reason.into()),
+                }),
+            );
+            assert_eq!(
+                r.state,
+                RunState::Stopped,
+                "`{reason}` is a person ending a session, never a claim about the work"
+            );
+        }
+    }
+
+    /// A reason this build has never seen is not grounds to claim completion
+    /// either — for a session somebody else started. An unknown member of
+    /// another product's enumeration is unknown, and the safe reading of it is
+    /// the one that claims least.
+    #[test]
+    fn an_unknown_reason_does_not_become_completed_for_a_watched_session() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::SessionEnded {
+                reason: Some("teleported".into()),
+            }),
+        );
+        assert_eq!(r.state, RunState::Stopped);
+
+        let mut none = run();
+        apply(&mut none, &ev(Event::SessionEnded { reason: None }));
+        assert_eq!(none.state, RunState::Stopped, "and neither does no reason");
+    }
+
+    /// **A run Devplane drives is the one case where the connection closing
+    /// does mean the work ended.** The agent's own process reaching the end of
+    /// its turn is what produces this, and `driven.rs` sends `interrupted`
+    /// whenever the ending is Devplane's doing instead.
+    #[test]
+    fn a_driven_run_whose_agent_finished_is_completed() {
+        let mut r = Run::new(
+            SessionId::new("d1"),
+            PathBuf::from("/repo"),
+            RunMode::Driven,
+            "claude",
+        );
+        apply(&mut r, &ev(Event::SessionEnded { reason: None }));
+        assert_eq!(r.state, RunState::Completed);
+    }
+
+    /// **A turn ending is bookkeeping, and bookkeeping may not raise the
+    /// dead.**
+    ///
+    /// `Stop` fires at the end of every turn and arrives on a different channel
+    /// from `SessionEnd`, so a late one lands after a session has ended. This
+    /// arm moved *every* state to `Idle` — which `is_live()` counts as in-play
+    /// — so a **failed** session came back to the board as *waiting for a
+    /// prompt*: the failure gone from the inbox, the row alive again, and
+    /// nothing anywhere saying so.
+    #[test]
+    fn a_turn_ending_late_does_not_revive_a_run_that_is_over() {
+        for over in [
+            RunState::Completed,
+            RunState::Stopped,
+            RunState::Failed,
+            RunState::Interrupted,
+            RunState::Lost,
+        ] {
+            let mut r = run();
+            r.state = over.clone();
+            apply(&mut r, &ev(Event::TurnEnded));
+            assert_eq!(
+                r.state, over,
+                "a late turn ending moved a run that was over"
+            );
+            assert!(!r.state.is_live(), "and put it back in the working set");
+            assert_eq!(r.totals.turns, 1, "the turn still happened and still cost");
+        }
+    }
+
+    /// **And a run that genuinely resumes says so with work.** `/resume` ends a
+    /// session and continues it under the same id, so the arms that see a tool
+    /// call or a question revive it on purpose. Asserted beside the rule above,
+    /// because the two together are the decision: evidence revives a run, and
+    /// bookkeeping does not.
+    #[test]
+    fn work_arriving_after_a_session_ended_revives_the_run() {
+        let mut r = run();
+        r.state = RunState::Stopped;
+        apply(
+            &mut r,
+            &ev(Event::tool_started("Bash", json!({"command": "ls"}))),
+        );
+        assert_eq!(r.state, RunState::Working, "the session came back");
+    }
+
+    /// **A `session/list` result cannot contradict an observed roster into a
+    /// wrong state.**
+    ///
+    /// A listing is the agent's catalogue of its own history; a run is what
+    /// Devplane has observed. An observation outranks a catalogue, so the
+    /// enrichment may only fill gaps — and there is no state to take even if it
+    /// wanted one, because `SessionInfo` carries none in v1 or in v2's draft.
+    #[test]
+    fn a_session_listing_fills_gaps_and_never_moves_a_run() {
+        use crate::core::run::ListedSession;
+
+        let listed = |title: &str| Event::SessionListed {
+            agent_session: "agent-1".into(),
+            title: Some(title.into()),
+        };
+
+        // Across every state, the listing leaves it exactly where it was.
+        for state in [
+            RunState::Starting,
+            RunState::Working,
+            RunState::Waiting(WaitingFor::Question),
+            RunState::Idle,
+            RunState::Completed,
+            RunState::Failed,
+            RunState::Stopped,
+            RunState::Interrupted,
+            RunState::Lost,
+        ] {
+            let mut r = run();
+            r.agent_session = Some("agent-1".into());
+            r.state = state.clone();
+            apply(&mut r, &ev(listed("a name")));
+            assert_eq!(r.state, state, "a catalogue moved an observed run");
+        }
+
+        // A gap is filled…
+        let mut r = run();
+        r.agent_session = Some("agent-1".into());
+        apply(&mut r, &ev(listed("fix the flaky login test")));
+        assert_eq!(r.name.as_deref(), Some("fix the flaky login test"));
+
+        // …and a name that is already there is never overwritten, because the
+        // one Devplane observed is the one the person has been reading.
+        apply(&mut r, &ev(listed("something else")));
+        assert_eq!(r.name.as_deref(), Some("fix the flaky login test"));
+
+        // A listing about a different session says nothing about this one.
+        let mut other = run();
+        other.agent_session = Some("agent-2".into());
+        apply(&mut other, &ev(listed("not yours")));
+        assert_eq!(other.name, None);
+
+        // Whitespace is refused rather than stored: a name of three spaces
+        // renders as a name that is not there, which is worse than the id.
+        let mut blank = run();
+        blank.agent_session = Some("agent-1".into());
+        assert!(!blank.enrich_from_listing(&ListedSession {
+            agent_session: "agent-1".into(),
+            title: Some("   ".into()),
+        }));
+        assert_eq!(blank.name, None);
     }
 
     /// A question that **completed** is not abandoned. `PostToolUse` arrives as
@@ -1621,12 +1967,17 @@ mod tests {
         assert_eq!(r.state, RunState::Failed);
     }
 
+    /// **What this test is named for is that the run leaves the working set**,
+    /// and it asserted the *word* instead. It pinned `Completed` for a watched
+    /// session with no reason — which is how the catch-all's flattering default
+    /// survived every run of this suite. A test that asserts a value where it
+    /// means a property is a test that defends whatever the code happens to do.
     #[test]
     fn session_end_is_terminal() {
         let mut r = run();
         apply(&mut r, &ev(Event::SessionEnded { reason: None }));
-        assert_eq!(r.state, RunState::Completed);
-        assert!(!r.state.is_live());
+        assert!(!r.state.is_live(), "the session is over");
+        assert!(!r.state.needs_human(), "and nobody is owed anything by it");
     }
 
     #[test]

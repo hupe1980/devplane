@@ -124,6 +124,17 @@ pub enum AcpEvent {
         list_sessions: bool,
         needs_auth: bool,
     },
+    /// What the agent says its own sessions are.
+    ///
+    /// **Only where the agent advertises `session/list`**, and only as a
+    /// roster: v1's `SessionInfo` carries no state field, so this can fill a
+    /// gap — a title where Devplane has none — and can never say that a session
+    /// is waiting for somebody. Asked once, after the handshake, because it is
+    /// a catalogue rather than a signal and polling it would be the second
+    /// roster on a machine that already has one.
+    SessionsListed {
+        sessions: Vec<crate::core::run::ListedSession>,
+    },
     /// The agent says which mode it is now in.
     ///
     /// **The agent's own string, and never one of the vendor's four.** An ACP
@@ -582,6 +593,40 @@ async fn run(
             needs_auth: !init.auth_methods.is_empty(),
         })
         .await;
+
+    // **The roster, where the agent has one.** Asked once, after the handshake
+    // and before anything is asked of the agent, under the rule the capability
+    // record already states: a runtime fact about *that* agent at *that*
+    // version, never a property of this product.
+    //
+    // Errors are dropped on purpose. A listing is enrichment — an agent that
+    // advertises the method and then refuses it leaves the run exactly as
+    // observation found it, which is the correct outcome and not a failure
+    // worth ending a session over.
+    if init.agent_capabilities.session_capabilities.list.is_some() {
+        let listed = connection
+            .send_request(agent_client_protocol::schema::v1::ListSessionsRequest::default())
+            .block_task()
+            .await;
+        if let Ok(page) = listed {
+            let sessions: Vec<crate::core::run::ListedSession> = page
+                .sessions
+                .into_iter()
+                .map(|s| crate::core::run::ListedSession {
+                    agent_session: s.session_id.to_string(),
+                    title: s.title,
+                })
+                .collect();
+            if !sessions.is_empty() {
+                let _ = events.send(AcpEvent::SessionsListed { sessions }).await;
+            }
+        }
+        // **One page, deliberately.** The response is cursor-paged, and the
+        // question this answers — *does the agent know a name for the session
+        // in front of me* — is answered by the page the session is on or not at
+        // all. Walking every page of somebody's history to fill a title is a
+        // cost with no reader.
+    }
 
     let mut initial_mode: Option<String> = None;
     let session_id = match resuming {

@@ -190,7 +190,31 @@ impl Client {
             .send()
             .await
             .with_context(|| format!("POST {path}"))?;
-        res.json().await.with_context(|| format!("decoding {path}"))
+        let status = res.status();
+        let text = res
+            .text()
+            .await
+            .with_context(|| format!("reading the answer to {path}"))?;
+        match serde_json::from_str::<T>(&text) {
+            Ok(v) => Ok(v),
+            // **A refusal the daemon explained in JSON has already returned
+            // above.** What reaches here is a body that is not JSON at all —
+            // and on a failed request that is a plain-text reason, which is the
+            // most useful thing there is to say.
+            //
+            // It used to be decoded anyway, so `devplane answer <typo>` met a
+            // 404 whose body was `no such ask`, failed to parse it, and printed
+            // a serde error, an internal route and the loopback port. A person
+            // who mistyped an id got the plumbing.
+            Err(_) if !status.is_success() => {
+                let said = text.trim();
+                match said.is_empty() {
+                    true => bail!("{}", explain_status(path, status)),
+                    false => bail!("{said}"),
+                }
+            }
+            Err(e) => Err(e).with_context(|| format!("decoding {path}")),
+        }
     }
 
     pub fn base_url(&self) -> &str {

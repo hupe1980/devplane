@@ -3,9 +3,14 @@ import Work from "./Work.svelte";
 
 register({
   id: "work",
-  title: "Is this actually done",
+  title: "Finished work",
+  heading: "Finished work",
   band: "attention",
   order: 2,
+  count: (feed) => {
+    const b = feed.board as { work?: unknown[] } | null;
+    return b?.work?.length ?? null;
+  },
   ports: ["approve", "resume", "retry"],
   select: (feed, focus) => {
     // The Work named in the address, or the most recent — the board's list is

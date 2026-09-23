@@ -383,6 +383,56 @@ fn every_refusal_is_reachable_and_carries_a_command() {
 
 /// A drafted batch records the composition and **nothing about what happened
 /// next**.
+/// **The portability finding is computed, and it is a warning.**
+///
+/// `preflight_all` set `would_lose_fields` to an empty vector unconditionally
+/// for the life of the feature, so the requirement it exists for — *report, per
+/// target, which fields of a chosen artefact the documented distribution paths
+/// reject* — had no producer at all. The page that was supposed to render it
+/// was reading a field nothing filled, which is why deleting that page lost
+/// nothing and why nobody noticed.
+///
+/// Two halves, and the second is the one that matters: it is reported, **and it
+/// never refuses**. The artefact still works in the tool that wrote it, and the
+/// documented error is about leaving it.
+#[test]
+fn a_field_a_target_would_drop_is_a_warning_and_never_a_refusal() {
+    use devplane::core::library::{Why, portability};
+
+    // The library's own rule, so this test cannot drift from it: a key outside
+    // the portable core is a documented failure.
+    let report = portability(
+        &[
+            ("name".into(), "review-findings".into()),
+            ("argument-hint".into(), "<file>".into()),
+        ],
+        false,
+    );
+    let lost: Vec<String> = report.findings.iter().map(|f| f.field.clone()).collect();
+    assert_eq!(
+        lost,
+        vec!["argument-hint"],
+        "the portable core is six fields"
+    );
+    assert!(
+        report.findings.iter().all(|f| f.why == Why::UnexpectedKey),
+        "an extra key is an unexpected key, not a malformed one"
+    );
+
+    // And the shape the composer carries it in: beside the refusal, never in
+    // it. A target that would drop a field is still an accepted target.
+    let f = core_batch::Finding {
+        project: devplane::core::ProjectId::new("/p"),
+        refusal: None,
+        would_lose_fields: lost,
+        at: jiff::Timestamp::now(),
+    };
+    assert!(
+        f.accepted(),
+        "a field the target would drop may not turn the target down"
+    );
+}
+
 #[test]
 fn nothing_infers_that_a_draft_was_sent() {
     let b = batch::drafted("p", "me", None, vec![finding("a", None)]);

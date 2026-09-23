@@ -36,6 +36,17 @@ pub struct DaemonInfo {
     pub port: u16,
     pub version: String,
     pub started_at: String,
+    /// The binary this daemon was started from.
+    ///
+    /// **For one question, asked at one moment**: a person who tried `npx` and
+    /// then installed properly has two copies and one daemon, and *which one is
+    /// running* matters exactly when they wonder why a change did nothing.
+    ///
+    /// `None` when the process could not name its own executable, which is a
+    /// real state on some platforms — reported as unknown rather than guessed
+    /// at from `argv[0]`, which a caller controls.
+    #[serde(default)]
+    pub exe: Option<String>,
 }
 
 impl DaemonInfo {

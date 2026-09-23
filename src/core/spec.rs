@@ -526,6 +526,21 @@ mod dogfood {
 // ---------------------------------------------------------------------------
 
 /// Where Spec Kit looks for extension hooks, relative to the repository root.
+/// The Spec Kit release this integration was read against.
+///
+/// **A dated fact about somebody else's tool, in the tree rather than in a
+/// memory.** Everything below — the extensions file, the hook points, the
+/// `optional: false` contract, the silent `condition` skip — was read from an
+/// installed copy at this version. None of it is announced in a changelog this
+/// product watches, so the only honest form of the claim is a version with a
+/// mechanism that notices when the copy on this machine has moved.
+///
+/// It is the same shape as `policy::SYNTAX_MODELLED_ON`: not a compatibility
+/// floor and not a supported-versions list, because nothing here agrees to
+/// anything. It is the answer to *what was this read against*, which is the
+/// question a person asks when the shape upstream changes.
+pub const SPEC_KIT_READ_AGAINST: &str = "1.0.7";
+
 pub const EXTENSIONS_FILE: &str = ".specify/extensions.yml";
 
 /// The hook points Spec Kit defines — `before_` and `after_` for each of its

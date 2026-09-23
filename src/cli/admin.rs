@@ -339,6 +339,21 @@ fn gate_section(diag: &Option<serde_json::Value>) {
 /// Deliberately offline and daemon-free: the answer is a function of one file,
 /// so it should be available in a repository you have not connected anything to
 /// yet — and in CI, where the point is to fail the commit that broke it.
+/// The `started from …` line, or nothing.
+///
+/// **A line printed always is a line nobody reads**, so this is silent in the
+/// common case — one binary on the machine, running the daemon it started. It
+/// speaks at the one moment the answer matters: two copies, one daemon, and
+/// somebody wondering why a change did nothing.
+///
+/// Silent when either side is unknown. *We could not tell which binary* is not
+/// the same claim as *they differ*, and printing a path beside a question mark
+/// would be the second one.
+fn started_from(daemon_exe: Option<&str>, mine: Option<&str>) -> Option<String> {
+    let (theirs, mine) = (daemon_exe?, mine?);
+    (theirs != mine).then(|| format!("started from {theirs}"))
+}
+
 pub async fn cmd_diagnostics(json: bool) -> Result<()> {
     let settings_path = crate::observe::connect::settings_path()?;
     let settings = crate::observe::connect::read_settings(&settings_path).unwrap_or_default();
@@ -396,10 +411,25 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
 
     println!("{}", paint(BOLD, "daemon"));
     match &daemon {
-        Some(d) if poller::process_alive(d.pid) => println!(
-            "  running   pid {} · port {} · v{}",
-            d.pid, d.port, d.version
-        ),
+        Some(d) if poller::process_alive(d.pid) => {
+            println!(
+                "  running   pid {} · port {} · v{}",
+                d.pid, d.port, d.version
+            );
+            // **Said only when the running daemon is not the binary you just
+            // typed.** A person who tried `npx` and then installed properly has
+            // two copies and one daemon, and *which one is running* matters at
+            // exactly one moment: when they wonder why a change did nothing.
+            //
+            // A line printed always is a line nobody reads, so the common case
+            // — one binary, one daemon — says nothing at all.
+            let mine = std::env::current_exe()
+                .ok()
+                .map(|p| p.display().to_string());
+            if let Some(line) = started_from(d.exe.as_deref(), mine.as_deref()) {
+                println!("            {}", paint(DIM, &line));
+            }
+        }
         Some(d) => println!(
             "  {} (stale record, pid {} is gone)",
             paint(render::RED, "not running"),
@@ -429,14 +459,34 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
         )
     );
     let rows = crate::core::vendors::watched();
+    // **Every column is measured, and two of them used not to be.** The vendor
+    // column was computed and the channel and reach columns were the literals
+    // 14 and 16 — so the first reach word longer than sixteen characters ran
+    // into the reason beside it and the table stopped lining up. A width taken
+    // from a constant is a width that is right until the data moves.
     let width = rows.iter().map(|r| r.vendor.len()).max().unwrap_or(0);
+    let chan_width = rows
+        .iter()
+        .map(|r| r.channel.as_str().len())
+        .max()
+        .unwrap_or(0);
+    let reach_width = rows
+        .iter()
+        .map(|r| r.reach.as_str().len())
+        .max()
+        .unwrap_or(0);
     for vendor in crate::core::vendors::vendors() {
         for r in rows.iter().filter(|r| r.vendor == vendor) {
             use crate::core::vendors::Reach;
+            // **The word carries it and the colour only helps**, which is why
+            // `unbuilt` and `not published` may share a treatment: they are two
+            // different facts and `as_str` spells them differently. What they
+            // must not share is the *reason* column, because that is where the
+            // one used to claim the other.
             let colour = match r.reach {
                 Reach::Read => render::GREEN,
                 Reach::Unproved => render::YELLOW,
-                Reach::NotPublished => DIM,
+                Reach::Unbuilt | Reach::NotPublished | Reach::Unchecked => DIM,
             };
             // **`pad` guarantees at least one space**, so a string exactly
             // `width` long comes back one column wider — which is right for a
@@ -445,8 +495,8 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             println!(
                 "  {}{}{}{}",
                 render::pad(r.vendor, width + 2),
-                render::pad(r.channel.as_str(), 14),
-                render::pad(&paint(colour, r.reach.as_str()), 16),
+                render::pad(r.channel.as_str(), chan_width + 2),
+                render::pad(&paint(colour, r.reach.as_str()), reach_width + 2),
                 paint(DIM, r.because)
             );
         }
@@ -1081,4 +1131,38 @@ pub async fn cmd_rewind(run: &str, json: bool) -> Result<()> {
         paint(DIM, "Claude Code's own editing tools touched")
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::started_from;
+
+    /// **Both directions, because the condition is the feature.** The line
+    /// exists to answer *which binary is running* at the one moment it matters;
+    /// printed always it is noise, and printed never it is a missing answer.
+    #[test]
+    fn the_started_from_line_speaks_only_when_the_binaries_differ() {
+        assert_eq!(
+            started_from(Some("/a/devplane"), Some("/a/devplane")),
+            None,
+            "one binary and one daemon needs no line at all"
+        );
+        assert_eq!(
+            started_from(Some("/npx/devplane"), Some("/usr/local/bin/devplane")),
+            Some("started from /npx/devplane".into()),
+            "two copies and one daemon is the whole reason this exists, and it names the \
+             daemon's binary rather than the one that was typed"
+        );
+    }
+
+    /// Unknown is not different. A daemon that could not name its own
+    /// executable, or a client that cannot name its own, says nothing — because
+    /// *we could not tell* and *they differ* are different claims and only one
+    /// of them is worth a line.
+    #[test]
+    fn an_unknown_binary_is_never_reported_as_a_different_one() {
+        assert_eq!(started_from(None, Some("/usr/local/bin/devplane")), None);
+        assert_eq!(started_from(Some("/npx/devplane"), None), None);
+        assert_eq!(started_from(None, None), None);
+    }
 }

@@ -1,25 +1,20 @@
 # Devplane's own gates, so this repository is governed by the thing it ships.
-#
-# It declared none until 2026-09-20, which was found by registering its own Spec
-# Kit hook and watching the gate report "this repository declares no checks".
-# A project that ships a definition-of-done and has none of its own is the same
-# defect as a documented trigger with no code, pointed inward.
 
 [project]
 name        = "devplane"
 base_branch = "main"
 
 [gates]
-# The four an agent can break and a person would otherwise find out about later.
-# `cargo build --examples` first, because `cargo test` never rebuilds them and
+# What an agent can break and a person would otherwise find out about later.
+# `cargo build --examples` before `cargo test`, which never rebuilds them, and
 # the conformance suite needs the ACP fixture agent.
 check = [
   "cargo fmt --all --check",
   "cargo clippy --all-targets --all-features -- -D warnings",
   "cargo build --examples --locked",
   "cargo test --locked",
-  # The interface, which CI checks too. It is half this product, and a gate that
-  # skips it says done while the build is about to fail.
+  # The interface. It is half this product, so a gate that skips it says done
+  # while the build is about to fail.
   "cd ui && npm run build",
   "cd ui && npm run check",
   "cd ui && npm run render",

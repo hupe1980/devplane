@@ -1237,6 +1237,20 @@ async fn handle(
             ingest(Event::AgentModeSeen { mode }).await;
         }
 
+        // **A roster fills gaps and may not contradict what was observed.**
+        // `SessionInfo` carries no state, so there is nothing here that could
+        // move a run's state even if this wanted to — the enrichment is the
+        // pure rule's, and it refuses anything that is not a gap.
+        AcpEvent::SessionsListed { sessions } => {
+            for listed in sessions {
+                ingest(Event::SessionListed {
+                    agent_session: listed.agent_session,
+                    title: listed.title,
+                })
+                .await;
+            }
+        }
+
         AcpEvent::Capabilities {
             agent_name,
             resume,

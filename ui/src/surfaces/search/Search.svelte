@@ -10,10 +10,22 @@
 
   type Hit = { run_id: string; at: string; text: string };
 
+  /// The query arrives in the address, because the field that starts a search
+  /// is in the chrome and this surface is where its results land.
+  let { q = "" }: { q?: string } = $props();
+
   let query = $state("");
   let hits = $state<Hit[]>([]);
   let ran = $state(false);
   let said = $state("");
+
+  // Follows the address: a link to a search is a link somebody can send.
+  $effect(() => {
+    if (q && q !== query) {
+      query = q;
+      void run();
+    }
+  });
 
   async function run() {
     const q = query.trim();
@@ -30,7 +42,7 @@
 </script>
 
 <section aria-labelledby="search-head">
-  <h2 id="search-head">Search</h2>
+  <h2 id="search-head">Search every session</h2>
 
   <form onsubmit={(e) => { e.preventDefault(); void run(); }}>
     <input type="search" bind:value={query} aria-label="search" placeholder="a command, a question, an error" />

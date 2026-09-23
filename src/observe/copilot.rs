@@ -423,6 +423,60 @@ mod tests {
         }
     }
 
+    /// **A field Copilot does not report is absent, never zero and never Claude
+    /// Code's meaning.**
+    ///
+    /// This is the shape of every cross-vendor mistake available here: a
+    /// missing figure rendered as `0` reads as *measured, and it was none*,
+    /// which is the reassuring answer over no evidence. Three fields, three
+    /// reasons, and all three are `None` rather than a default.
+    #[test]
+    fn a_field_copilot_does_not_report_is_absent_rather_than_zero() {
+        let payload: HookPayload = serde_json::from_value(serde_json::json!({
+            "event": "sessionStart",
+            "cwd": "/repo",
+        }))
+        .expect("a session start with nothing else in it");
+
+        let events = to_events(&payload);
+        let [
+            Event::SessionStarted {
+                model,
+                question_clock,
+                clock_read,
+                entrypoint,
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected one session start, got {events:?}");
+        };
+
+        // **The model.** Copilot's hook payload carries none, and a blank model
+        // is not the same claim as a model nobody asked about.
+        assert_eq!(
+            *model, None,
+            "a model Copilot did not report must be absent"
+        );
+
+        // **The question clock.** There is no environment to read: the payload
+        // arrives over HTTP from a process Devplane did not spawn. `None` with
+        // `clock_read: false` is *not read*; `None` with `clock_read: true`
+        // would be *nothing is set*, which is the sentence meaning **your
+        // questions wait for you** — and it would be false here.
+        assert_eq!(*question_clock, None);
+        assert!(
+            !*clock_read,
+            "an unread environment may never render as one that was read and found empty"
+        );
+
+        // **The entrypoint**, by contrast, is genuinely known — from the
+        // channel the payload arrived on — so it is present. Absent and known
+        // are different answers and this asserts the difference rather than
+        // that everything is missing.
+        assert_eq!(entrypoint.as_deref(), Some("copilot"));
+    }
+
     #[test]
     fn an_event_this_map_does_not_know_costs_one_event() {
         let p = HookPayload {

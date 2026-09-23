@@ -144,6 +144,7 @@ mod tests {
             project_id: None,
             title: "Keep the legacy route?".into(),
             detail: None,
+            answer_in: None,
             options: vec![],
             actions: vec![Action::Focus],
             ask: None,

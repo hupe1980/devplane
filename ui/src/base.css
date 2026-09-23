@@ -150,11 +150,27 @@ button:disabled {
   background: transparent;
 }
 
-input, select, textarea {
+/* **Text-shaped controls only.** This applied to every `input`, checkboxes
+   included — so a checkbox got a text field's padding, border and panel
+   background, which squashes or erases the native glyph. The project picker on
+   *Start work* rendered as a run of bare project names with blank boxes beside
+   them, and there was no way to tell a chosen project from an unchosen one. */
+input:not([type="checkbox"]):not([type="radio"]), select, textarea {
   padding: 0.35rem 0.55rem;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);
+}
+
+/* A checkbox is a glyph the platform draws. Give it a size and the accent, and
+   otherwise stay out of its way — a hand-drawn one loses the indeterminate
+   state, the focus ring and every assistive-technology affordance with it. */
+input[type="checkbox"], input[type="radio"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0;
+  accent-color: var(--accent);
+  flex: none;
 }
 
 input::placeholder { color: var(--faint); }

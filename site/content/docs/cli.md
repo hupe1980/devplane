@@ -50,6 +50,8 @@ declaration order:
 | **Set up a project** | `connect` `disconnect` `trust` `check` `explain` `rules` `speckit` `agents` `doctor` |
 | **The daemon** | `serve` `stop` |
 
+Each command appears once, and its description comes from the command's own definition.
+
 The list is long because the product does a lot. The five *seat* surfaces — `inbox`, `asks`,
 `attention`, `audit`, `modes` — each answer a question the others cannot, so none of them is a
 duplicate of another.
@@ -289,11 +291,16 @@ boundary yet to be on the far side of.
 $ devplane inbox
 since you last looked · 16h
 
- ! Keep the legacy /v1/login route?   [question] new
-   saas · 3m
-   Gate failed after the agent claimed completion   [gate_failed]
-   core-lib · 5h
+ ! Keep the legacy /v1/login route? [question] saas 3m new
+   Gate failed after the agent claimed completion [gate_failed] core-lib 5h
 ```
+
+A row names its project and how long it has waited, dim and after the kind. Both are absent where
+there is nothing to say — `gate_down` is about the machine and belongs to no project.
+
+Where a detail is too wide for the terminal, the row shows what fits and a last line names the command
+that has the whole of it: `devplane show <run>`, or `devplane inbox --json`. On the board the row
+carries the whole string, so hovering or long-pressing gives you something you can paste.
 
 ### A list that can be read
 
@@ -321,8 +328,7 @@ going wrong in one project at the same time, because that is a correlation and t
 
 ```console
 $ devplane inbox
- ! Keep the legacy /v1/login route?   [question] new
-   saas · 3m
+ ! Keep the legacy /v1/login route? [question] saas 3m new
 
    7 × issue_assigned  in saas
    4 × stalled  across projects
@@ -621,12 +627,20 @@ watched
   Claude Code     roster      read           the background roster names what the vendor's own daemon supervises
   GitHub Copilot  hooks       unproved       fourteen documented events; twelve are mapped and two are silent by decision
   GitHub Copilot  roster      not published  ~/.copilot holds flat process logs and no session roster
-  Codex           hooks       not published  driven over the protocol only; no observation channel has been built
+  Codex           hooks       not published  its documented surface is an app-server protocol a client drives
+  OpenCode        event feed  unbuilt        GET /event carries question.asked, question.replied and question.rejected
+  Gemini CLI      hooks       not checked    no fetched reference for this vendor exists here
 ```
 
-`read` means demonstrated end to end. `unproved` means the channels are read and that path has never
-been run. `not published` means the vendor offers nothing to read — so an empty list for that vendor
-means *Devplane cannot see it*, not *nothing is happening*.
+| Word | What it means |
+|---|---|
+| `read` | demonstrated end to end |
+| `unproved` | the channel is read and that path has never been run |
+| `unbuilt` | the vendor publishes it and Devplane does not read it yet |
+| `not published` | the vendor offers nothing here |
+| `not checked` | nobody has read this vendor's documentation for this channel |
+
+An empty list for a vendor means *Devplane cannot see it*, never *nothing is happening*.
 
 `devplane ls` and the board read the same table, and both name the agents that appear only when
 Devplane starts them.
@@ -820,7 +834,13 @@ Start an agent and give it something to do.
 | `--cwd <path>` | where it runs (default: here) |
 | `--to <projects>` | comma-separated project names. **Turns this into a fan-out** |
 | `--mode <draft\|gate\|pr>` | how far it may go without you (default `draft`) |
+| `--template <name>` | a library artefact this fan-out starts from, by name |
 | `--apply` | without it, the preflight prints and nothing is sent or opened |
+
+`--template` is recorded on the batch, and read for the one thing a fan-out can say about an artefact
+that a single dispatch cannot: **which of its frontmatter fields the documented distribution paths
+reject**. That is a warning and never a refusal — the artefact still works in the tool that wrote it,
+and the documented error is about leaving it.
 
 #### One prompt, several repositories
 
@@ -919,6 +939,8 @@ which is the failure this exists to prevent.
 
 **It answers exactly once.** Two surfaces, two devices, one agent: the first answer wins and the
 second is told who gave it, rather than the agent hearing two different things.
+
+An id that is not waiting says so, and names the command that lists the ones that are.
 
 ### `devplane asks`
 

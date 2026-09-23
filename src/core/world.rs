@@ -45,8 +45,47 @@ pub struct Health<'a> {
     pub leaked_agents: &'a [(u32, String, Option<String>)],
 }
 
+/// Everything `devplane modes` and `/api/modes` say: which projects decide
+/// without you, and what can answer in your name.
+///
+/// **One type, because the reader deserialises the writer's shape.** This was a
+/// `json!` on one side and thirty-one `.get("key")` lookups on the other, and
+/// the two disagreed once already: a field renamed `file` → `where_set` left a
+/// reader untouched, `unwrap_or("")` turned the break into a blank line, and
+/// `devplane modes` went on telling people a clock was answering their
+/// questions without saying where to change it. Every test passed. A rename is
+/// a compile error now.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Modes {
+    pub projects: Vec<ProjectModes>,
+    pub sessions: usize,
+    pub unsupervised: usize,
+    pub unknown: usize,
+    /// Sessions that have reported no mode at all.
+    ///
+    /// **The CLI read this key for the life of the feature and nothing served
+    /// it.** `.get("unreported")` against a payload with no such field is
+    /// `unwrap_or(0)` — so the sentence explaining that a busy session can
+    /// genuinely not have spoken never printed, and the guard on the reassuring
+    /// line, `unreported < total`, was `0 < total`: always true. On a machine
+    /// where **nothing** had reported, `devplane modes` printed *"Every session
+    /// that has reported asks you"* in green, which is the reassuring answer
+    /// over no evidence — the one direction of error this product calls
+    /// expensive: guessing that nobody is needed, when somebody is, is the
+    /// mistake this product cannot afford.
+    pub unreported: usize,
+    /// What can answer a question in your name on this machine, if anything.
+    pub question_clock: Option<crate::core::clock::ClockLine>,
+    /// How many live sessions this surface can actually speak for. A session
+    /// that started before `devplane connect` has no environment reading, and
+    /// the coverage of a surface is a fact about it rather than something a
+    /// reader should assume.
+    pub clock_read: usize,
+    pub clock_unread: usize,
+}
+
 /// One project's live sessions and what is supervising them.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProjectModes {
     pub project: Option<String>,
     pub name: Option<String>,
@@ -64,7 +103,7 @@ pub struct ProjectModes {
 }
 
 /// One session's permission mode, as its vendor reported it.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionMode {
     pub run: String,
     pub name: Option<String>,

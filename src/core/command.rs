@@ -540,7 +540,15 @@ pub fn nested_commands(text: &str) -> Vec<String> {
 /// cannot, because there the unread remainder is the difference between "names
 /// no protected file" and "nobody looked".
 pub fn nested_commands_bounded(text: &str) -> (Vec<String>, bool) {
-    memo(&SPLITS, text, nested_commands_bounded_uncached)
+    // **Data heredoc bodies are removed once, here, before anything reads the
+    // text.** `split_top_level` skipped them and `nested_spans` did not, so a
+    // document written through `cat <<EOF` that merely *quoted* a prohibited
+    // command had that quotation extracted and matched. One place to strip them
+    // is the only way the two paths can agree; a body a shell will run is kept
+    // by `line_touches_shell`, so nothing executable is dropped.
+    memo(&SPLITS, &without_data_heredocs(text), |t| {
+        nested_commands_bounded_uncached(t)
+    })
 }
 
 fn nested_commands_bounded_uncached(text: &str) -> (Vec<String>, bool) {
@@ -714,8 +722,176 @@ fn until(b: &[char], from: usize, close: char) -> Option<(String, usize)> {
     None
 }
 
+/// Shells whose **heredoc body is a script**, so its contents must keep being
+/// read as commands.
+///
+/// `bash <<EOF … EOF` runs what it is fed, and skipping that body would hide a
+/// real command from every rule. Everything else — `cat`, `python`, `tee` — gets
+/// the body as **data** on stdin, where no shell operator in it means anything.
+const HEREDOC_RUNS_AS_SHELL: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"];
+
+/// Where a heredoc body starts and ends, given the `<<` at `i`.
+///
+/// Returns the index just past the terminator line, or past the end when the
+/// terminator never arrives — which is what the shell does with an unterminated
+/// heredoc.
+///
+/// `None` when this is not a heredoc: `<<<` is a herestring, which takes a word
+/// rather than a block, and a `<<` with no plausible delimiter after it is left
+/// alone. **Erring towards `None` is the safe direction** — it keeps the body
+/// being parsed, which is what happened before this existed.
+fn heredoc_body(b: &[char], i: usize) -> Option<usize> {
+    if b.get(i) != Some(&'<') || b.get(i + 1) != Some(&'<') {
+        return None;
+    }
+    // `<<<` is bash's herestring: one word, no body.
+    if b.get(i + 2) == Some(&'<') {
+        return None;
+    }
+    let mut j = i + 2;
+    if b.get(j) == Some(&'-') {
+        j += 1;
+    }
+    while matches!(b.get(j), Some(' ' | '\t')) {
+        j += 1;
+    }
+    let quote = match b.get(j) {
+        Some(&q @ ('\'' | '"')) => {
+            j += 1;
+            Some(q)
+        }
+        _ => None,
+    };
+    let mut word = String::new();
+    while let Some(&c) = b.get(j) {
+        match quote {
+            Some(q) if c == q => break,
+            Some(_) => {}
+            None if !(c.is_alphanumeric() || c == '_') => break,
+            None => {}
+        }
+        word.push(c);
+        j += 1;
+    }
+    if quote.is_some() {
+        if b.get(j) != quote.as_ref() {
+            // An unclosed delimiter quote is not a shape to guess at.
+            return None;
+        }
+        j += 1;
+    }
+    if word.is_empty() {
+        return None;
+    }
+    // The body runs from the next newline to a line that is exactly the
+    // delimiter, with leading tabs allowed because `<<-` strips them.
+    let rest: String = b[j..].iter().collect();
+    let Some(nl) = rest.find('\n') else {
+        return Some(b.len());
+    };
+    let after = j + rest[..nl].chars().count() + 1;
+    let mut k = after;
+    loop {
+        let line_start = k;
+        let mut line_end = k;
+        while let Some(&c) = b.get(line_end) {
+            if c == '\n' {
+                break;
+            }
+            line_end += 1;
+        }
+        let line: String = b[line_start..line_end].iter().collect();
+        if line.trim_start_matches('\t').trim_end() == word {
+            return Some((line_end + 1).min(b.len()));
+        }
+        if line_end >= b.len() {
+            // No terminator: the shell reads to the end, and so do we.
+            return Some(b.len());
+        }
+        k = line_end + 1;
+    }
+}
+
+/// The command with its **data** heredoc bodies removed.
+///
+/// **A short command with a large payload is not a complex command.** Every
+/// bound here measured the whole string, so a Markdown document written through
+/// `cat > notes.md <<EOF` was a fifteen-kilobyte *command*. A payload is bytes
+/// on another program's stdin, not shell.
+///
+/// Bodies fed to a **shell** are kept — see [`line_touches_shell`]. The redirect
+/// and the operands stay: `cat <<EOF > .env` still names `.env`.
+#[must_use]
+pub fn without_data_heredocs(text: &str) -> String {
+    let b: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    let mut line_start = 0usize;
+    while i < b.len() {
+        if b[i] == '\n' {
+            line_start = i + 1;
+        }
+        if b[i] == '<'
+            && let Some(end) = heredoc_body(&b, i)
+        {
+            // **The whole line, both sides of the `<<`.** `cat <<EOF | bash`
+            // feeds `cat` and runs the body, so asking only what the heredoc
+            // itself feeds reads an executed script as data.
+            let mut line_end = i;
+            while line_end < b.len() && b[line_end] != '\n' {
+                line_end += 1;
+            }
+            let line: String = b[line_start..line_end].iter().collect();
+            let runs_as_shell = line_touches_shell(&line);
+            if !runs_as_shell {
+                // Keep the `<<WORD` itself: it is syntax on the command line,
+                // and dropping it would change what the line looks like.
+                let mut j = i;
+                while j < end && b[j] != '\n' {
+                    out.push(b[j]);
+                    j += 1;
+                }
+                out.push('\n');
+                i = end;
+                line_start = i;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Whether a shell appears anywhere on this line, so a heredoc body on it may be
+/// a script rather than data.
+///
+/// **Conservative on purpose, and it is a hole that was opened and closed.** The
+/// first rule asked only what program the heredoc itself feeds, which reads
+/// `cat <<EOF | bash` as data — and that body *runs*, so a prohibited command
+/// inside it stopped being seen. Anything a pipeline on the line can reach counts
+/// now. Keeping a body that turns out to be data costs a false positive at worst;
+/// skipping one that turns out to be a script is a prohibition that did not fire.
+fn line_touches_shell(line: &str) -> bool {
+    line.split([';', '|', '&', '(', ')'])
+        .filter_map(segment_program)
+        .any(|p| HEREDOC_RUNS_AS_SHELL.contains(&p.as_str()))
+}
+
+/// The program a segment starts with, path and wrappers stripped.
+fn segment_program(segment: &str) -> Option<String> {
+    let first = segment.split_whitespace().next()?;
+    let base = first.rsplit('/').next().unwrap_or(first);
+    Some(base.to_ascii_lowercase())
+}
+
 /// Splits on shell operators at the top level, ignoring anything quoted or
 /// nested. The nested text is reached by [`nested_spans`] instead.
+///
+/// **A heredoc body is data.** This knew about quotes and parentheses and
+/// nothing about `<<`, so every `|` and `;` inside one counted as a shell
+/// operator. The exception is the one that matters: a body fed to a **shell** is
+/// a script, and skipping it would hide a real command.
 fn split_top_level(text: &str) -> Vec<String> {
     let b: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
@@ -758,6 +934,28 @@ fn split_top_level(text: &str) -> Vec<String> {
                 continue;
             }
             _ => {}
+        }
+        // A heredoc body, skipped unless a shell is being fed a script.
+        if depth == 0
+            && let Some(end) = heredoc_body(&b, i)
+        {
+            // The whole line, both sides of the `<<`: `cat <<EOF | bash` runs
+            // its body, so the program the heredoc feeds is not the only one
+            // that can reach it.
+            let from = b[..i]
+                .iter()
+                .rposition(|&c| c == '\n')
+                .map_or(0, |n| n + 1)
+                .max(start.min(i));
+            let mut line_end = i;
+            while line_end < b.len() && b[line_end] != '\n' {
+                line_end += 1;
+            }
+            let line: String = b[from..line_end].iter().collect();
+            if !line_touches_shell(&line) {
+                i = end;
+                continue;
+            }
         }
         if depth == 0
             && let Some(sep) = SEPARATORS
@@ -1027,6 +1225,8 @@ pub fn basename_program(command: &str) -> Option<String> {
 /// verdict — in the one direction that is free, which is towards a
 /// person.
 pub fn undecidable(text: &str) -> Option<String> {
+    // Without the data heredoc bodies: a payload is not command complexity.
+    let text = &without_data_heredocs(text);
     if text.chars().count() > MAX_ANALYSED {
         return Some(format!(
             "it is over {MAX_ANALYSED} characters, past what the command analysis reads"
@@ -1034,6 +1234,16 @@ pub fn undecidable(text: &str) -> Option<String> {
     }
     if unbalanced_quote(text) {
         return Some("it has an unbalanced quote, so the shell reads it differently".to_string());
+    }
+    // **A parse that hit its own bounds is a parse nobody finished.** This is
+    // what keeps `cat f0 … f79 .env` in front of a person now that a truncated
+    // parse no longer forges a path-rule match: the operands past the bound were
+    // never read, so no rule can speak for them.
+    if file_targets(text).truncated {
+        return Some(
+            "it names more files than the command analysis reads, so the rest were not looked at"
+                .to_string(),
+        );
     }
     if subcommands(text).is_none() {
         return Some("it ends in an operator, so what follows is not on this line".to_string());
@@ -1167,6 +1377,123 @@ mod tests {
     /// `never_auto = ["Read(.env)"]` that read as protection and stopped
     /// nothing, and every one was found by reading the changelog rather than
     /// by the differential harness.
+    /// **A document's payload is not command complexity.**
+    ///
+    /// Every length and complexity bound here read the whole command string, so
+    /// `cat > notes.md <<EOF` plus fifteen kilobytes of Markdown counted as a
+    /// fifteen-kilobyte command: past [`MAX_ANALYSED`], reported as unreadable,
+    /// and — before that was corrected — refused by whatever restrictive path
+    /// rule existed, naming a file the command never mentions.
+    #[test]
+    fn a_documents_payload_is_not_command_complexity() {
+        let doc = (0..5_000)
+            .map(|_| "| a | b | c |")
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cmd = format!("cat > notes.md <<EOF\n{doc}\nEOF");
+        assert!(
+            cmd.chars().count() > MAX_ANALYSED,
+            "the fixture must be long enough to have tripped the bound"
+        );
+        assert!(
+            without_data_heredocs(&cmd).chars().count() < MAX_ANALYSED,
+            "the payload is still being measured as command"
+        );
+        assert!(
+            undecidable(&cmd).is_none(),
+            "a write of a long document is readable: {:?}",
+            undecidable(&cmd)
+        );
+        assert!(
+            !file_targets(&cmd).truncated,
+            "the parse reported itself truncated on a two-word command"
+        );
+    }
+
+    /// **A body a shell will run is kept, whatever feeds it.**
+    ///
+    /// The first version of this rule asked only what program the heredoc feeds,
+    /// which reads `cat <<EOF | bash` as data — and that body runs, so a
+    /// prohibited command inside it stopped being seen. Keeping a body that
+    /// turns out to be data costs a false positive; skipping one that turns out
+    /// to be a script is a prohibition that did not fire.
+    #[test]
+    fn a_heredoc_a_shell_will_run_is_still_read_as_commands() {
+        for cmd in [
+            "bash <<EOF\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | bash\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | sh\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF|/bin/bash\nrm -rf /tmp/x\nEOF",
+            "cat <<'EOF' | zsh\nrm -rf /tmp/x\nEOF",
+        ] {
+            let first = cmd.lines().next().unwrap_or(cmd);
+            assert!(
+                without_data_heredocs(cmd).contains("rm -rf"),
+                "the body of `{first}` was dropped, and a shell runs it"
+            );
+            assert!(
+                nested_commands(cmd).iter().any(|c| c.contains("rm -rf")),
+                "`{first}` did not reach the splitter, so no rule can see it"
+            );
+        }
+    }
+
+    /// **A body nothing executes is data, in every path that reads the command.**
+    ///
+    /// `split_top_level` skipped these and `nested_spans` did not, so a document
+    /// that merely *quoted* a prohibited command had the quotation extracted and
+    /// matched. Stripping in one place is the only way the two agree.
+    #[test]
+    fn a_document_that_mentions_a_command_is_not_one() {
+        for cmd in [
+            "cat > d.md <<EOF\nrun rm -rf /tmp/x to clean up\nEOF",
+            "cat > d.md <<EOF\ntext \"rm -rf /tmp/x\" more\nEOF",
+            "cat > t.rs <<EOF\nlet a = \"rm -rf /tmp/x\";\nEOF",
+        ] {
+            assert!(
+                !without_data_heredocs(cmd).contains("rm -rf"),
+                "a document that mentions a command was read as one: {cmd:?}"
+            );
+            assert!(
+                !nested_commands(cmd).iter().any(|c| c.contains("rm -rf")),
+                "the quoted-span path still reached into the body: {cmd:?}"
+            );
+        }
+    }
+
+    /// `<<<` is a herestring: one word, no body. Reading it as a heredoc would
+    /// swallow the rest of the line.
+    #[test]
+    fn a_herestring_is_not_a_heredoc() {
+        let cmd = "grep x <<< \"some text\" && rm -rf /tmp/x";
+        assert!(
+            without_data_heredocs(cmd).contains("rm -rf"),
+            "a herestring swallowed the command after it"
+        );
+    }
+
+    /// An unterminated heredoc runs to the end, which is what the shell does —
+    /// and the `<<WORD` stays, because it is syntax on the command line.
+    #[test]
+    fn an_unterminated_heredoc_body_ends_at_the_end() {
+        let cmd = "cat > d.md <<EOF\nline one\nline two";
+        let out = without_data_heredocs(cmd);
+        assert!(out.contains("<<EOF"), "the syntax is on the command line");
+        assert!(!out.contains("line two"), "the body was kept");
+    }
+
+    /// The redirect and the operands are on the command line, so they survive.
+    #[test]
+    fn a_heredocs_own_line_survives_its_body() {
+        let cmd = "cat <<EOF > secrets.env\nS=1\nEOF";
+        let out = without_data_heredocs(cmd);
+        assert!(
+            out.contains("secrets.env"),
+            "the redirect target was dropped"
+        );
+        assert!(!out.contains("S=1"), "the body was kept");
+    }
+
     #[test]
     fn a_suggested_rule_is_the_narrowest_one_that_covers_the_set() {
         let v = |xs: &[&str]| suggest_rule(&xs.iter().map(|s| s.to_string()).collect::<Vec<_>>());
@@ -2104,6 +2431,11 @@ fn file_targets_uncached(text: &str) -> Targets {
     // rule may not speak for it, and a restrictive one may not conclude it
     // names nothing. Answering before parsing also keeps a 10 KB line from
     // costing 60 ms on the hook.
+    //
+    // **Measured without data heredoc bodies**, because a short command with a
+    // large payload is not a complex command. `cat > notes.md <<EOF` and fifteen
+    // kilobytes of Markdown used to count as a fifteen-kilobyte command.
+    let text = &without_data_heredocs(text);
     if text.len() > MAX_ANALYSED {
         return Targets {
             list: Vec::new(),

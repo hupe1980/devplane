@@ -484,6 +484,21 @@ pub enum Event {
     AgentModeSeen {
         mode: String,
     },
+    /// What the agent's own `session/list` says about this session.
+    ///
+    /// **An event rather than a direct edit, because state here is a reduction
+    /// over events.** A listing that mutated the world in place would vanish on
+    /// the next replay, which is the one property the whole core is arranged
+    /// around.
+    ///
+    /// It carries only what `SessionInfo` has that a run can be missing.
+    /// v1 — and v2's draft — carry **no state field**, so there is nothing here
+    /// that could move a run's state, and the reducer's rule refuses anything
+    /// that is not a gap.
+    SessionListed {
+        agent_session: String,
+        title: Option<String>,
+    },
     /// A row of `claude agents --json`.
     ///
     /// The roster lists **every** live session, interactive ones included — it
@@ -601,6 +616,7 @@ impl Event {
             Event::ModelChanged { .. } => "model_changed",
             Event::SessionEnded { .. } => "session_ended",
             Event::AgentModeSeen { .. } => "agent_mode_seen",
+            Event::SessionListed { .. } => "session_listed",
             Event::RosterSeen { .. } => "roster_seen",
             Event::StatusSample(_) => "status_sample",
             Event::Stalled { .. } => "stalled",

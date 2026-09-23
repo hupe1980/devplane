@@ -48,6 +48,7 @@ pub async fn cmd_fan_out(
     to: Vec<String>,
     prompt: String,
     mode: Option<&str>,
+    template: Option<&str>,
     apply: bool,
     json: bool,
 ) -> Result<()> {
@@ -62,7 +63,15 @@ pub async fn cmd_fan_out(
         .filter_map(|t| all.iter().find(|p| &p.name == t || p.root.ends_with(t)))
         .collect();
     if chosen.is_empty() {
-        anyhow::bail!("no registered project matches {}", to.join(", "));
+        // **The reason and the way out.** It named the problem and stopped,
+        // which leaves somebody who mistyped a project guessing at what the
+        // names are — `devplane show` has said *here is the command that lists
+        // them* since it shipped, and this did not.
+        anyhow::bail!(
+            "no registered project matches {}.\n\n  devplane ls groups by project, and \
+             devplane trust <path> adds one.",
+            to.join(", ")
+        );
     }
     // **A name that matches nothing stops the whole dispatch.**
     //
@@ -124,7 +133,8 @@ pub async fn cmd_fan_out(
             .unwrap_or_default()
     };
 
-    let findings = crate::batch::preflight_all(&targets, position, &agents, agent, None, 0).await;
+    let findings =
+        crate::batch::preflight_all(&targets, position, &agents, agent, None, 0, template).await;
     let accepted = findings.iter().filter(|f| f.refusal.is_none()).count();
 
     if json {
@@ -224,7 +234,7 @@ pub async fn cmd_fan_out(
     let by = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
     match position {
         Position::Draft => {
-            let b = crate::batch::drafted(&prompt, &by, None, findings.clone());
+            let b = crate::batch::drafted(&prompt, &by, template, findings.clone());
             let links = crate::batch::draft_links(&b, &targets);
             if !json {
                 println!();
@@ -253,7 +263,7 @@ pub async fn cmd_fan_out(
             post_batch(&c, &b).await?;
         }
         Position::ToGate | Position::ToPullRequest => {
-            let b = crate::batch::dispatched(&prompt, &by, None, position, findings.clone());
+            let b = crate::batch::dispatched(&prompt, &by, template, position, findings.clone());
             // Recorded **before** anything starts, so a daemon that dies
             // between the first member and the last leaves a batch that reads
             // as interrupted rather than leaving orphaned work with nothing

@@ -44,7 +44,7 @@ include_content = true
 tagline = "Where work that outlives a session lives."
 repo = "https://github.com/hupe1980/devplane"
 acp = "https://agentclientprotocol.com"
-version = "0.7.0"
+version = "0.8.0"
 og_image = "/og.png"
 
 [[extra.nav]]

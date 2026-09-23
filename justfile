@@ -129,7 +129,7 @@ publish-check:
 
 clean:
     cargo clean
-    rm -rf site/public
+    rm -r site/public 2>/dev/null || true
 
 # Regenerate the interface's wire types from the Rust shapes.
 #

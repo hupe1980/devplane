@@ -96,9 +96,16 @@ pub async fn preflight_all(
     agent: &str,
     ceiling: Option<usize>,
     running_now: usize,
+    template: Option<&str>,
 ) -> Vec<Finding> {
     let at = jiff::Timestamp::now();
     let agent_available = agents.iter().any(|a| a == agent);
+    // **Computed once, carried per target.** The finding is a property of the
+    // artefact against the portable core, and this product reports portability
+    // against the three distribution paths rather than against a vendor — so
+    // every target loses the same fields, and the surface still shows it per
+    // target because that is where a person is choosing.
+    let would_lose = lost_fields(template);
     let mut out = Vec::new();
     let mut accepted_so_far = 0usize;
     for t in targets {
@@ -115,11 +122,41 @@ pub async fn preflight_all(
         out.push(Finding {
             project: t.project.clone(),
             refusal,
-            would_lose_fields: Vec::new(),
+            would_lose_fields: would_lose.clone(),
             at,
         });
     }
     out
+}
+
+/// The fields a chosen artefact would lose on the way out, by name.
+///
+/// **A warning and never a refusal.** The artefact still works in the tool that
+/// wrote it; the documented error is about *leaving* it, which is why this
+/// cannot turn a target down and is carried beside the refusal rather than in
+/// it.
+///
+/// Empty for a fan-out that starts from a typed prompt rather than from the
+/// library, and empty for an artefact whose frontmatter could not be read —
+/// `unread` is the library's own distinction between *nothing will be lost* and
+/// *nothing was checked*, and a fan-out may not report the second as the first.
+/// It is reported as empty here because the composer's claim is about fields it
+/// **found**; `devplane library report` is the surface that carries coverage.
+fn lost_fields(template: Option<&str>) -> Vec<String> {
+    let Some(name) = template else {
+        return Vec::new();
+    };
+    let Ok(all) = crate::library::list() else {
+        return Vec::new();
+    };
+    let Some(artefact) = all.iter().find(|a| a.name == name) else {
+        return Vec::new();
+    };
+    let report = crate::library::portability_of(artefact);
+    if report.unread {
+        return Vec::new();
+    }
+    report.findings.into_iter().map(|f| f.field).collect()
 }
 
 /// Records a drafted fan-out.

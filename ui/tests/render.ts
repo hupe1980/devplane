@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 // Renders every surface with Svelte's server renderer and asserts what came
 // out.
 //
@@ -19,9 +19,11 @@ import Changes from "../src/surfaces/changes/Changes.svelte";
 import Dispatch from "../src/surfaces/dispatch/Dispatch.svelte";
 import Work from "../src/surfaces/work/Work.svelte";
 import Certificate from "../src/surfaces/work/Certificate.svelte";
+import WorkSurface from "../src/surfaces/work/Work.svelte";
 import Inbox from "../src/surfaces/inbox/Inbox.svelte";
-import Github from "../src/surfaces/github/Github.svelte";
-import { surfaces, landing, BANDS } from "../src/lib/surfaces";
+import GithubList from "../src/surfaces/github/GithubList.svelte";
+import LibraryTable from "../src/surfaces/library/LibraryTable.svelte";
+import { surfaces, landing, BANDS, BAND_LABELS } from "../src/lib/surfaces";
 import { loadSurfaces } from "../src/lib/load";
 
 let failures = 0;
@@ -274,9 +276,9 @@ function source(rel: string): string {
 // ── The forge list ───────────────────────────────────────────────────────
 {
   const gh = (over: Record<string, unknown>) =>
-    html(Github, {
-      issues: [{ title: "a bug", url: "https://x/1", project: "saas", needs_you: true }],
-      pulls: [{ title: "a change", url: "https://x/2", project: "core", needs_you: false }],
+    html(GithubList, {
+      issues: [{ title: "a bug", url: "https://x/1", project_name: "saas", needs_you: true }],
+      pulls: [{ title: "a change", url: "https://x/2", project_name: "core", needs_you: false }],
       ...over,
     });
 
@@ -286,7 +288,7 @@ function source(rel: string): string {
   if (!issues.includes("https://x/1")) fail("an issue row is not a link to the issue");
 
   const hostile = gh({
-    issues: [{ title: "<script>x</script>", url: "https://x/1", project: "p", needs_you: false }],
+    issues: [{ title: "<script>x</script>", url: "https://x/1", project_name: "p", needs_you: false }],
   });
   if (hostile.includes("<script>x</script>"))
     fail("github issues: untrusted text reached the document as markup");
@@ -625,9 +627,9 @@ function source(rel: string): string {
 // yourself is a thing you already said was unfinished. Counting it is how a
 // list of nine becomes a list of four things and five reminders.
 {
-  const out = html(Github, {
+  const out = html(GithubList, {
     issues: [],
-    pulls: [{ title: "wip: the thing", url: "https://x/9", project: "p", needs_you: false }],
+    pulls: [{ title: "wip: the thing", url: "https://x/9", project_name: "p", needs_you: false }],
     tab: "pulls",
   });
   if (!out.includes("wip: the thing")) fail("a draft PR is not listed at all");
@@ -673,6 +675,29 @@ function source(rel: string): string {
     fail("the outcome glyph is announced, so a screen reader reads a tick as a character");
   if (!done.includes(">met<"))
     fail("the glyph carries the outcome alone — there is no word beside it");
+
+  // **The way off the page, which the docs promised and nothing built.** The
+  // daemon has served the certificate's markdown beside its page since the
+  // feature shipped; no surface read it, so the one sentence this is sold on —
+  // *the others hand you a verdict and this one hands you the commands* — ended
+  // at the screen. A test that asserts what a surface *says* cannot see a
+  // missing control, which is why this asserts what it can *do*.
+  const exportable = html(Certificate, {
+    page: { finished: true, basis: "gates passed", checked: true, evidence: {
+      "gen_ai.evidence.origin": "externally_observed", commit: null, no_commit: null, commands: [] } },
+    markdown: "# done\n\n    cargo test  exit 0\n",
+    oncopy: () => {},
+  });
+  if (!/<button[^>]*>copy this certificate<\/button>/.test(exportable))
+    fail("a finished certificate offers no way to get it off the page");
+
+  // And it is not offered where there is nothing to copy: a button that cannot
+  // keep its promise is the one failure a control plane cannot afford.
+  const nothing = html(Certificate, {
+    page: { finished: false, unfinished: "it is still working" },
+  });
+  if (nothing.includes("copy this certificate"))
+    fail("unfinished work offers a certificate to copy");
 
   // A live region exists where the page reports something changing under the
   // person, and it is polite rather than assertive: none of this interrupts.
@@ -798,6 +823,508 @@ function source(rel: string): string {
   });
   if (allFolded.includes("Clear.")) fail("the close appeared over nine folded items");
   if (!allFolded.includes("9 × ci_red")) fail("the folded rows are not rendered");
+}
+
+// ── Every Work is reachable, so "two clicks" is true of more than one ───────
+//
+// The registry computed the list of Works and the surface never read it, so it
+// showed the one named in the address or the most recent — and any other was
+// reachable only by editing the URL. The claim this feature is measured on is
+// *two clicks from a finished Work to the clipboard*, and it was true of
+// exactly one Work.
+{
+  const works = [
+    { id: "w-1", title: "fix the flaky login test", phase: "done" },
+    { id: "w-2", title: "bump deps", phase: "working" },
+  ];
+  const out = html(WorkSurface, { id: "w-2", title: "bump deps", phase: "working", all: works });
+
+  for (const w of works) {
+    if (!out.includes(`#work/${w.id}`))
+      fail(`the work surface offers no way to reach ${w.id} — only the address bar does`);
+  }
+  // An anchor rather than a handler: it has to work from the keyboard, open in
+  // a new tab and survive a reload.
+  if (!/<a[^>]+href="#work\/w-1"/.test(out))
+    fail("a work is reached by a click handler rather than a link");
+  if (!/aria-current="page"/.test(out))
+    fail("nothing says which work is on screen");
+
+  // One Work is not a choice, and a picker over it is noise.
+  const single = html(WorkSurface, {
+    id: "w-1",
+    title: "only one",
+    phase: "done",
+    all: [works[0]],
+  });
+  if (single.includes('aria-label="which work"'))
+    fail("a picker was rendered where there is nothing to pick");
+}
+
+// ── The library matrix: a word per cell, never a tick ───────────────────────
+//
+// **`copy_moved` and `library_moved` are the same boolean and opposite
+// instructions** — one says this repository has an edit the library does not,
+// the other says the library moved on without it. Any rendering that reduces
+// the six values to two has lost the only fact a person acts on.
+{
+  const drifts = [
+    "unchanged",
+    "copy_moved",
+    "library_moved",
+    "both_moved",
+    "missing",
+    "unrecorded",
+  ] as const;
+
+  const out = html(LibraryTable, {
+    artefacts: [
+      {
+        name: "review",
+        digest: "abc",
+        origin: "anthropics/skills",
+        copies: drifts.map((d, i) => ({ project: `p${i}`, drift: d, present: d !== "missing" })),
+      },
+    ],
+  });
+
+  const said = new Set<string>();
+  for (const d of drifts) {
+    // Every value renders as its own sentence, and no two are the same one.
+    // Svelte appends a scoped class to every styled element, so the attribute
+    // is never the single word this was first written against.
+    const words = out.match(/<td[^>]*>([^<]*)<\/td>/g) ?? [];
+    if (words.length !== drifts.length) {
+      fail(`the library matrix rendered ${words.length} cells for ${drifts.length} copies`);
+      break;
+    }
+    for (const w of words) said.add(w);
+  }
+  if (said.size !== drifts.length) {
+    fail(
+      `the library matrix renders ${said.size} distinct cells for six drift values — ` +
+        `two of them read alike, and the pair that does is the one a person acts on differently`,
+    );
+  }
+  if (out.includes("origin") && !out.includes("anthropics/skills"))
+    fail("an artefact's provenance is not shown");
+
+  const empty = html(LibraryTable, { artefacts: [] });
+  if (!empty.includes("Nothing in the library yet"))
+    fail("an empty library is a blank rather than an answer");
+}
+
+// ── Every surface gets its data from somewhere, and something checks which ──
+//
+// **Three surfaces shipped wired to nothing.** `select: () => ({})` and no
+// fetch means the component renders its own defaults for ever — *what is
+// configured* said "nothing is configured yet" on a machine with hooks
+// installed and gates declared, *issues and pull requests* rendered two empty
+// tabs, and *start work* had no control that started work. Every test passed
+// throughout, because the tests above hand props to a component directly: they
+// prove the component and never the wiring.
+//
+// The two checks below are the wiring. A surface takes props from the feed, or
+// it names what it reads, and a route it names is one the daemon serves.
+{
+  // A feed with something in every bucket a `select` could reach for. It does
+  // not have to be realistic — it has to be non-empty, because the question is
+  // whether `select` reaches into it at all.
+  const populated = {
+    board: {
+      runs: [{ id: "r1" }],
+      work: [{ id: "w1", title: "t", phase: "working" }],
+      projects: [{ id: "p1", name: "saas" }],
+      summary: {},
+      forge: {},
+    },
+    inbox: { items: [{ id: "i1" }], folded: [], inhibited: [], close: {} },
+  };
+
+  for (const s of surfaces()) {
+    const picked = s.select(populated, "focus");
+    const takesProps = Object.keys(picked).length > 0;
+    const declaresReads = (s.reads ?? []).length > 0;
+    if (!takesProps && !declaresReads) {
+      fail(
+        `surface "${s.id}" selects nothing from the feed and reads nothing, so it renders its ` +
+          `component's defaults for ever. Give it a select, or name the route it fetches in "reads".`,
+      );
+    }
+  }
+
+  // **A route a surface names must be one the daemon serves.** The failure this
+  // catches is a rename: the handler moves, the surface goes on fetching the
+  // old path, and the only symptom is a surface that is empty in production and
+  // green in every test.
+  const api = source("../../src/api.rs");
+  const served = new Set([...api.matchAll(/\.route\("([^"]+)"/g)].map((m) => m[1]));
+  if (served.size === 0) fail("no routes were extracted from src/api.rs — this check is inert");
+  for (const s of surfaces()) {
+    for (const route of s.reads ?? []) {
+      // `{id}` segments are axum's; compare on the shape rather than the value.
+      const shape = route.replace(/\/[^/]*\$\{[^}]*\}/g, "/{id}");
+      if (!served.has(shape) && !served.has(route)) {
+        fail(`surface "${s.id}" reads ${route}, which src/api.rs does not serve`);
+      }
+    }
+  }
+
+  // And the other direction, for the surfaces that were found broken: a
+  // surface that names a route has to actually call it, or the declaration is
+  // the same empty promise `ports` turned out to be.
+  for (const s of surfaces()) {
+    for (const route of s.reads ?? []) {
+      const dir = `../src/surfaces/${s.id}/`;
+      const files = ["index.ts"];
+      let found = false;
+      for (const f of [...files, `${s.id[0].toUpperCase()}${s.id.slice(1)}.svelte`]) {
+        try {
+          if (source(dir + f).includes(route)) found = true;
+        } catch {
+          /* a surface need not have every file */
+        }
+      }
+      if (!found) {
+        fail(`surface "${s.id}" declares it reads ${route} and no file in its directory names it`);
+      }
+    }
+  }
+}
+
+// ── The nav is scanned, and four of ten items began with the same word ────
+//
+// **This whole block exists because the harness watched every surface get
+// retitled and said nothing.** The only check on a title was that it was not
+// empty — so *What is happening*, *What is configured* and *What is installed
+// where* sat in one column, three items whose first two words were identical and
+// whose distinguishing noun arrived at word three or four. Scanning is a
+// left-to-right operation on the first word; a shared prefix spends the one
+// fixation that was going to do the work.
+//
+// The errand belongs to the band heading, which is read once, and the noun
+// belongs to the item. That is `devplane --help`'s shape, and the board had it
+// exactly backwards: the errand in every item, and the band rendered as nothing
+// at all.
+{
+  const titles = surfaces().map((s) => s.title);
+  const firstWord = (s: string) => s.trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g, "");
+
+  // **A shared first word.** Case-insensitive, because the defect is what the
+  // eye lands on and not what the source says.
+  const seen = new Map<string, string>();
+  for (const s of surfaces()) {
+    const w = firstWord(s.title);
+    const taken = seen.get(w);
+    if (taken) {
+      fail(
+        `"${s.title}" and "${taken}" both begin with "${w}", so the nav's first word ` +
+          `discriminates nothing between them — the errand belongs to the band heading`,
+      );
+    }
+    seen.set(w, s.title);
+  }
+
+  // **An interrogative opening.** A nav label is a noun; a question is what the
+  // band above it asks. These four words are how the defect looked.
+  for (const s of surfaces()) {
+    if (/^(what|why|is|how|which|where|who)\b/i.test(s.title.trim())) {
+      fail(`"${s.title}" opens as a question, which is the band heading's job, not a nav item's`);
+    }
+  }
+
+  // **And a nav label stays short enough to scan**, which is the reason the
+  // question could not stay. Three words is the ceiling; a sidebar is 15rem.
+  for (const s of surfaces()) {
+    const words = s.title.trim().split(/\s+/).length;
+    if (words > 3) fail(`"${s.title}" is ${words} words; a nav label is at most three`);
+  }
+
+  if (titles.length < 5) fail("too few surfaces to compare titles — this check is inert");
+}
+
+// ── Every band is named, and the names are the CLI's errands ──────────────
+//
+// **The bands rendered as a one-pixel gap.** No heading, no label, no accessible
+// name: a sighted reader saw an unexplained break and a screen reader heard
+// anonymous lists. The names existed in the published documentation — the
+// quickstart describes the bands in prose — so the one place they were missing
+// was the product.
+//
+// They are the CLI's own group headings, read out of the Rust rather than
+// copied, because two hand-kept vocabularies for one product's errands is the
+// drift this corpus keeps recording.
+{
+  const cli = source("../../src/cli/mod.rs");
+  const block = (cli.split("COMMAND_GROUPS")[1] ?? "").split("\n];")[0];
+  // **Uppercase-initial literals only, and not anchored to a line.** A group
+  // name starts with a capital and every command name is lowercase, so the case
+  // does the separating. The first version anchored on `^\s*"` and therefore
+  // missed `("The daemon", &["serve", "stop"])`, which `rustfmt` keeps on one
+  // line — an extraction that depended on how the formatter had broken the
+  // literal, and which would have silently stopped seeing any group the next
+  // `cargo fmt` decided to inline.
+  const groups = new Set([...block.matchAll(/"([A-Z][^"]+)"/g)].map((m) => m[1]));
+  if (groups.size < 5) {
+    fail(
+      `only ${groups.size} command groups were extracted from src/cli/mod.rs — ` +
+        `this check is inert or the grouping has shrunk`,
+    );
+  }
+  for (const band of BANDS) {
+    const label = BAND_LABELS[band];
+    if (!label?.trim()) fail(`band "${band}" has no label, so the nav cannot name its group`);
+    // **Or that group cut at its first comma.** Eighty columns against fifteen
+    // rems: the longest group wraps to three lines in a sidebar. A clause
+    // boundary keeps it the same sentence; anything looser would let a
+    // paraphrase through, which is the drift this checks for.
+    else if (!groups.has(label) && ![...groups].some((g) => g.startsWith(label + ","))) {
+      fail(
+        `band "${band}" is called "${label}", which is neither one of the CLI's command groups ` +
+          `nor one cut at its first comma — the two surfaces would be naming one product's ` +
+          `errands two different ways`,
+      );
+    }
+  }
+  // Every band must hold something. An empty band is a heading over nothing,
+  // which is worse than no heading.
+  for (const band of BANDS) {
+    if (!surfaces().some((s) => s.band === band)) fail(`band "${band}" holds no surface`);
+  }
+}
+
+// ── The page heading is declared and the page renders that string ─────────
+//
+// **It was written twice per surface with nothing comparing them**: once in the
+// registry and once as a hard-coded `<h2>` inside the component. So the nav
+// could be retitled end to end and every page keep its old wording, which is
+// exactly what happened on the first attempt at this change.
+//
+// The two are allowed to differ — a nav label is scanned in a column and a page
+// heading is read once with the surface under it — but both are declared, and
+// the one the page shows has to be the one the registry claims.
+//
+// **The first version of this guard was vacuous and passed its own mutation.**
+// It searched the surface's whole directory, `index.ts` included — and
+// `index.ts` is where the heading is *declared*, so every surface satisfied it
+// by the declaration alone. Changing a registry heading to a string no page
+// rendered came back green. It searches the **components only**, with comments
+// stripped, because a guard that finds its subject in the sentence explaining
+// its subject is the failure this file has recorded six times.
+{
+  for (const s of surfaces()) {
+    if (!s.heading?.trim()) {
+      fail(`${s.id} declares no heading, so nothing holds its <h2> to anything`);
+      continue;
+    }
+    const dir = `../src/surfaces/${s.id}/`;
+    let components = 0;
+    let found = false;
+    for (const f of readdirSync(new URL(dir, import.meta.url))) {
+      if (!f.endsWith(".svelte")) continue;
+      components += 1;
+      if (source(dir + f).includes(s.heading)) found = true;
+    }
+    if (components === 0) {
+      fail(`surface "${s.id}" has no component, so this check is inert for it`);
+    } else if (!found) {
+      fail(
+        `surface "${s.id}" declares the heading "${s.heading}" and no component in its ` +
+          `directory renders that string`,
+      );
+    }
+  }
+}
+
+// ── A shortened command says where the whole of it is ────────────────────
+//
+// **Reported from a real inbox row on 2026-09-22**: a stalled shell command cut
+// mid-word with a horizontal ellipsis and no way to read the rest. The cause was
+// a clip in the **reducer** — eighty characters, applied before any surface
+// existed — so the remainder was not hidden, it was gone.
+//
+// The whole string reaches the surface now, which makes shortening this layer's
+// job and therefore makes a route to the rest this layer's debt. The
+// certificate's commands have always done it this way: show what fits, carry the
+// verbatim text in the title.
+{
+  const long = "Bash: " + "cargo test --quiet ".repeat(40);
+  const out = html(Inbox, {
+    items: [
+      {
+        id: "s1",
+        kind: "stalled",
+        level: "normal",
+        title: "No activity for 65 min",
+        detail: long,
+      },
+    ],
+  });
+  // **Matched on the detail paragraph, with the scoped class allowed for.**
+  // Svelte appends its own class — `class="d svelte-ytvk4v"` — so the first
+  // version of this read `class="d"` exactly, matched nothing, and took its
+  // `title=` from some other element in the document. It reported a pass while
+  // checking nothing, and the mutation that put a title on every detail went
+  // green. This repository has been caught by that exact scoped class before.
+  const para = (markup: string) =>
+    /<p class="d(?: [^"]*)?"([^>]*)>([\s\S]*?)<\/p>/.exec(markup);
+
+  const hit = para(out);
+  if (!hit) {
+    fail("no detail paragraph was rendered at all, so this check is inert");
+  } else {
+    const attrs = hit[1];
+    const shown = hit[2].trim();
+    const inTitle = /title="([^"]*)"/.exec(attrs)?.[1] ?? "";
+    if (!inTitle) {
+      fail("a shortened detail carries no title, so the rest of the command is unreachable");
+    } else if (inTitle.length <= shown.length) {
+      // The title has to hold **more** than the row shows, or it is decoration.
+      fail(
+        `the detail's title (${inTitle.length} chars) is no longer than what the row shows ` +
+          `(${shown.length}) — a shortened command must carry its whole self somewhere`,
+      );
+    }
+  }
+
+  // And a detail short enough to render whole gets no title, because a tooltip
+  // repeating what is already on screen is noise.
+  const brief = para(
+    html(Inbox, {
+      items: [
+        { id: "s2", kind: "stalled", level: "normal", title: "No activity", detail: "Bash: ls" },
+      ],
+    }),
+  );
+  if (!brief) fail("the short-detail case rendered no paragraph, so this check is inert");
+  else if (/title="/.test(brief[1])) {
+    fail("a detail that fits is also being put in a title, which is a tooltip saying nothing");
+  }
+}
+
+// ── Every field a surface posts is a field the route reads ───────────────
+//
+// **Pressing *allow* on the board denied the call.** Every control on the inbox
+// posted `{ choice }` and `/api/asks/{id}/answer` reads `decision`, `option`,
+// `custom` and `field` — there is no `choice`. So the body was valid JSON in
+// which nobody had said anything, `Decision::parse(None, None)` answered `Deny`,
+// and the surface reported *"answered — on the record and on its way to the
+// agent"*. A wrong decision, under the person's name, on the product whose whole
+// claim is recording who decided what.
+//
+// **The mirror image of a CLI reading a key the API never sent**, which this
+// repository also shipped. One direction leaves a surface blank; this one
+// records the opposite of what somebody chose, which is why it is worse. Both
+// are invisible to a test that hands a component its props.
+{
+  const api = source("../../src/api.rs");
+  // Each `#[derive(Deserialize)] struct XBody { … }` and the keys it accepts.
+  const bodies = new Map<string, Set<string>>();
+  for (const m of api.matchAll(/struct (\w*Body)\s*\{([\s\S]*?)\n\}/g)) {
+    const keys = new Set(
+      [...m[2].matchAll(/^\s*(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:/gm)].map((k) => k[1]),
+    );
+    bodies.set(m[1], keys);
+  }
+  if (!bodies.has("AnswerBody")) {
+    fail("no AnswerBody was extracted from src/api.rs — this check is inert");
+  } else {
+    const accepted = bodies.get("AnswerBody")!;
+    // What the inbox surface posts to the answer route: the object literals
+    // handed to `answer(...)`, plus anything merged in alongside them.
+    const inbox = source("../src/surfaces/inbox/Inbox.svelte");
+    const posted = new Set<string>();
+    for (const m of inbox.matchAll(/answer\(\s*\w+\s*,\s*\{([^}]*)\}/g)) {
+      for (const k of m[1].matchAll(/([a-z_][a-z0-9_]*)\s*:/g)) posted.add(k[1]);
+    }
+    // `{ ...what, from: "board" }` — the keys spread in are the ones above; the
+    // literal ones beside it are read here.
+    for (const m of inbox.matchAll(/body: JSON\.stringify\(\{([^}]*)\}/g)) {
+      for (const k of m[1].matchAll(/([a-z_][a-z0-9_]*)\s*:/g)) posted.add(k[1]);
+    }
+    if (posted.size === 0) {
+      fail("no answer body fields were extracted from the inbox surface — this check is inert");
+    }
+    for (const key of posted) {
+      if (!accepted.has(key)) {
+        fail(
+          `the inbox posts "${key}" to /api/asks/{id}/answer and AnswerBody has no such field — ` +
+            `the route would ignore it, and an ignored permission answer used to mean deny`,
+        );
+      }
+    }
+    // And the route must refuse what it cannot act on, which is the half that
+    // turned this from a broken button into a wrong decision.
+    if (!/deny_unknown_fields/.test(api.slice(0, api.indexOf("struct AnswerBody")).slice(-400))) {
+      fail(
+        "AnswerBody does not deny unknown fields, so a surface can post a key nobody reads and " +
+          "the route will answer as though nothing was said",
+      );
+    }
+  }
+}
+
+// ── The sidebar says what the product says ───────────────────────────────
+//
+// Ten places carry this sentence; the sidebar was the one that dropped its verb,
+// and without it the fragment reads as a riddle. One figure, one home.
+{
+  const app = source("../src/App.svelte");
+  const about = /about = "([^"]+)"/.exec(source("../../src/cli/mod.rs"))?.[1] ?? "";
+  if (!about) fail("no `about` was read from src/cli/mod.rs — this check is inert");
+  else {
+    const claim = about.replace(/^Records/, "records");
+    if (!app.includes(claim)) {
+      fail(`the sidebar does not say "${claim}", which is what the CLI's --help says it does`);
+    }
+  }
+}
+
+// ── Every action the daemon can offer has a home ──────────────────────────
+//
+// **The daemon offered thirteen and the inbox rendered five.** `focus`, `open`,
+// `open_pr`, `open_issue`, `approve`, `retry` and `resume` had no control, while
+// every route behind them already existed — so a permission on a session
+// Devplane only *watches* arrived at level `high` offering `focus`, `attach` and
+// `open`, and the row showed no buttons at all. Reported from a real inbox on
+// 2026-09-22.
+//
+// The variants are read out of the Rust, so an action added there without a home
+// here fails rather than going quietly missing.
+{
+  const att = source("../../src/core/attention.rs");
+  const arms = att.split("impl Action")[1]?.split("}")[0] ?? "";
+  const actions = [...arms.matchAll(/Action::\w+ => "([a-z_]+)"/g)].map((m) => m[1]);
+  if (actions.length < 10) {
+    fail(`only ${actions.length} actions were read from core::attention — this check is inert`);
+  }
+  const inbox = source("../src/surfaces/inbox/Inbox.svelte");
+  // **What gates a control is the surface branching on the action**, not the
+  // name appearing somewhere in the file. The first version of this searched the
+  // whole source, and `path: "focus"` in the route table satisfied it — so
+  // deleting the button left the check green. A route table is a declaration;
+  // `includes("focus")` is what decides whether anything renders.
+  const branched = new Set(
+    [...inbox.matchAll(/includes\("([a-z_]+)"\)/g)].map((m) => m[1]),
+  );
+  if (branched.size === 0) {
+    fail("no action branches were found in the inbox surface — this check is inert");
+  }
+  // A browser cannot attach a terminal to a process. Named rather than offered,
+  // which the surface does with the command itself.
+  const terminalOnly = new Set(["attach"]);
+  for (const a of actions) {
+    if (!branched.has(a)) {
+      fail(
+        `the daemon can offer "${a}" and the inbox surface never branches on it — ` +
+          `an item whose only actions are unhandled ones renders with nothing to act on`,
+      );
+      continue;
+    }
+    if (terminalOnly.has(a) && !inbox.includes(`devplane ${a}`)) {
+      fail(`"${a}" cannot be done from a browser and the surface does not name the command`);
+    }
+  }
 }
 
 if (failures > 0) {

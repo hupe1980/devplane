@@ -199,6 +199,8 @@ pub fn items_for_forge(
             project_id: Some(forge.project_id.clone()),
             title,
             detail,
+            // A forge item is about a pull request or an issue, not a dialog.
+            answer_in: None,
             ask: None,
             options: vec![],
             actions,

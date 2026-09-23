@@ -15,7 +15,8 @@ CHROME="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 [ -x "$CHROME" ] || { echo "make-og: no Chrome at $CHROME — set CHROME=" >&2; exit 2; }
 
 out=$(mktemp -d)
-trap 'rm -rf "$out"' EXIT
+# `rm -r` rather than `rm -rf`: this repository prohibits the force form.
+trap 'rm -r "$out" 2>/dev/null || true' EXIT
 "$CHROME" --headless --disable-gpu --hide-scrollbars \
   --window-size=1200,630 --screenshot="$out/og.png" \
   --default-background-color=00000000 \

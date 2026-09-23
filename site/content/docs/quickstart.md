@@ -63,25 +63,32 @@ See [Watching sessions](/docs/observe/) for what each channel provides.
 devplane open
 ```
 
-One page served from the daemon on loopback — no build step, no CDN, no account. It updates live,
+One page served from the daemon on loopback — no CDN, no account, nothing fetched. It updates live,
 groups by project, and puts what needs you at the top. It is a document rather than a canvas: every
 state has a word as well as a colour, the sections are lists, and one polite live region says how
 many things need you — so it reads aloud, and it survives being screenshotted in greyscale.
 
-It opens on **what needs you**. The sidebar holds the rest, in three bands: what is asking for you,
-what you are doing, and how the machine is set up.
+It opens on **Inbox**. The sidebar holds the rest, under the same four errands `devplane --help`
+sorts its commands into — so a heading names the errand and each item under it names the thing.
 
-| Surface | What |
-|---|---|
-| **What needs you** | one list across every project, ordered by what is waiting |
-| **What is happening** | every session, grouped by project, with cost and context |
-| **Is this actually done** | a finished Work's certificate, and one button that copies it |
-| **Why this is here** | the decision log for one session or Work |
-| **What changed** | a Work's diff against its base branch |
-| **Start work** | a prompt, a project, a kind, and the project's own templates |
-| **Issues and pull requests** | every open one, across every registered project |
-| **What is configured** | this machine, and every repository's `devplane.toml` read back |
-| **Search** | tool commands, questions and errors across every session |
+| Errand | Surface | What |
+|---|---|---|
+| **What needs you** | **Inbox** | one list across every project, ordered by what is waiting |
+| | **Decisions** | what was decided for you, on whose authority, for one session or Work |
+| | **Finished work** | a finished Work's certificate, and one button that copies it |
+| **See what is happening** | **Sessions** | every session, grouped by project, with cost and context |
+| **Start and steer work** | **Start an agent** | a prompt, the projects to send it to, and what would happen in each before anything is written |
+| | **Issues and PRs** | every open one, across every registered project |
+| **Set up a project** | **Setup** | this machine, and every repository's `devplane.toml` read back |
+| | **Library** | one row per prompt or skill, one column per repository, and which copy drifted |
+
+Each item is a noun; the heading above it is the question. The page it opens carries that question as
+its own heading. **A number beside an item says what is in it**, so an empty one reads as empty rather
+than broken.
+
+**Two surfaces are not in the sidebar, because neither is a place.** **Search** is the field at the top
+of it: a command, a question or an error across every session, with its results as their own page. And
+**Changes** — a Work's diff against its base branch — is reached from that Work, under *Finished work*.
 
 **Every action is a button, and there are no keyboard shortcuts.** A session row opens its decision
 log; the counts in a project heading open the lists behind them. A count you cannot open is a number
@@ -99,7 +106,14 @@ devplane inbox
 The inbox is derived from state, never stored, so it is correct after a restart. Every item carries
 at least one action, and every action is one the surface can actually perform — a permission on a
 session Devplane only *watches* offers **Focus**, because the dialog belongs to Claude Code and the
-honest thing to do is raise the window that has it.
+honest thing to do is raise the window that has it. **Allow** and **deny** appear only on a session
+Devplane drives, which is the only kind it can answer for.
+
+A permission answer must name a decision or one of the agent's own options. One that names neither is
+refused as a bad request — it is never read as a deny.
+
+Where there is no yes-or-no, the row says why: a watched session has no request behind it that any
+surface could answer, so the only way in is the agent's own window.
 
 ## 5. Make “done” mean something
 

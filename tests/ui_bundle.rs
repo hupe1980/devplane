@@ -538,8 +538,66 @@ fn adding_a_surface_touches_no_file_belonging_to_another() {
         }
     }
 
+    // **HTML attribute values are not surface references.** `search` is a
+    // surface id *and* a standard `type=` and `role=` value, so the quoted-id
+    // matcher below read `<input type="search">` as a central list. Attribute
+    // values from a fixed set of markup attributes are removed before matching:
+    // they are the platform's vocabulary, and no surface id can be added to it.
+    let strip_markup_attrs = |text: &str| -> String {
+        let mut out = text.to_string();
+        for attr in [
+            "type",
+            "role",
+            "inputmode",
+            "autocomplete",
+            "rel",
+            "enterkeyhint",
+            "aria-label",
+        ] {
+            for id in &ids {
+                out = out.replace(&format!("{attr}=\"{id}\""), &format!("{attr}=\"\""));
+            }
+        }
+        out
+    };
+
+    // **Comments are stripped, because a check that greps for what it forbids
+    // finds the sentence explaining why it is forbidden.** `ui/tests/render.ts`
+    // learned this and has a `source()` helper for it; this guard read raw text,
+    // so a doc comment quoting `current = "search"` — written to record that the
+    // shell must not do that — tripped the rule it was describing.
+    let strip_comments = |text: &str| -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        loop {
+            let block = rest.find("/*");
+            let line = rest.find("//");
+            let (cut, end_pat, keep_newline) = match (block, line) {
+                (Some(b), Some(l)) if b < l => (b, "*/", false),
+                (Some(b), None) => (b, "*/", false),
+                (_, Some(l)) => (l, "\n", true),
+                (None, None) => {
+                    out.push_str(rest);
+                    return out;
+                }
+            };
+            out.push_str(&rest[..cut]);
+            let after = &rest[cut..];
+            match after.find(end_pat) {
+                Some(e) => {
+                    if keep_newline {
+                        out.push('\n');
+                    }
+                    rest = &after[e + end_pat.len()..];
+                }
+                None => return out,
+            }
+        }
+    };
+
     for f in &shared {
-        let text = std::fs::read_to_string(f).unwrap_or_default();
+        let raw = std::fs::read_to_string(f).unwrap_or_default();
+        let text = strip_markup_attrs(&strip_comments(&raw));
         for id in &ids {
             // A shared file naming a surface is the list this design removes.
             // `"board"` as a quoted id is the shape; the word in prose is not.
@@ -1254,23 +1312,28 @@ fn every_route_a_surface_calls_is_one_the_daemon_serves() {
     }
     assert!(!called.is_empty(), "no surface calls the daemon at all");
 
+    // **One normaliser, both sides.** It ran on the served side only, so a
+    // surface that wrote the route exactly as the daemon declares it —
+    // `/api/runs/{id}/focus` — failed against `/api/runs/{}/focus`, with the
+    // route it was asking for sitting in the list printed beside the failure.
+    // Spelling a route the way its owner spells it is the one form this had to
+    // accept and the one it did not.
+    let shape_of = |s: &str| -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(i) = rest.find('{') {
+            out.push_str(&rest[..i]);
+            out.push_str("{}");
+            rest = &rest[rest[i..].find('}').map_or(rest.len(), |j| i + j + 1)..];
+        }
+        out.push_str(rest);
+        out
+    };
+
     for (file, route) in &called {
         // `/api/work/{}/approve` against the daemon's `/api/work/{id}/approve`.
-        let shape = route.clone();
-        let matches = served.iter().any(|s| {
-            let s_shape: String = {
-                let mut out = String::new();
-                let mut rest = s.as_str();
-                while let Some(i) = rest.find('{') {
-                    out.push_str(&rest[..i]);
-                    out.push_str("{}");
-                    rest = &rest[rest[i..].find('}').map_or(rest.len(), |j| i + j + 1)..];
-                }
-                out.push_str(rest);
-                out
-            };
-            s_shape == shape
-        });
+        let shape = shape_of(route);
+        let matches = served.iter().any(|s| shape_of(s) == shape);
         assert!(
             matches,
             "{file} calls `{route}`, which the daemon does not serve. A surface reaching a route \

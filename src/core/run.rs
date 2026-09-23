@@ -150,6 +150,20 @@ pub enum RunState {
     Lost,
 }
 
+/// What an agent's own session listing says about one session.
+///
+/// **A roster, never an attention signal.** ACP v1's `SessionInfo` carries
+/// `sessionId`, `cwd`, `additionalDirectories`, `title` and `updatedAt` — and
+/// **no state field**, in v1 or in v2's draft. So a listing can fill a gap and
+/// can never say that a session is waiting for somebody; the cross-vendor
+/// *blocked on a human* signal is still only v2's `requires_action`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedSession {
+    /// The id the agent knows this conversation by.
+    pub agent_session: String,
+    pub title: Option<String>,
+}
+
 /// How long after its last activity a session is still part of the working set.
 ///
 /// A working day, near enough: a session you touched this morning is still
@@ -580,6 +594,32 @@ pub struct BlockedOn {
 }
 
 impl Run {
+    /// Fills what an agent's own session listing knows and this run does not.
+    ///
+    /// **It may only fill gaps, and the precedence rule is the whole of it.**
+    /// A listing is the agent's view of its own history; the run is what
+    /// Devplane has *observed*, and an observation outranks a catalogue. So a
+    /// title arrives only where there is none, and **no state is touched at
+    /// all** — `SessionInfo` carries none, so there is nothing to take, and a
+    /// listing that appeared to say a session was idle would be inventing it.
+    ///
+    /// Whitespace is refused rather than stored: a title of three spaces
+    /// renders as a name that is not there, which is worse than the id.
+    pub fn enrich_from_listing(&mut self, listed: &ListedSession) -> bool {
+        if self.agent_session.as_deref() != Some(listed.agent_session.as_str()) {
+            return false;
+        }
+        let Some(title) = listed.title.as_deref() else {
+            return false;
+        };
+        let title = title.trim();
+        if title.is_empty() || self.name.is_some() {
+            return false;
+        }
+        self.name = Some(title.to_string());
+        true
+    }
+
     pub fn new(session_id: SessionId, cwd: PathBuf, mode: RunMode, agent: &str) -> Self {
         let now = Timestamp::now();
         Self {

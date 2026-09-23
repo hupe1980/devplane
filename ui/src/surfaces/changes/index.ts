@@ -6,9 +6,15 @@ import Changes from "./Changes.svelte";
 
 register({
   id: "changes",
-  title: "What changed",
-  band: "doing",
-  order: 0,
+  title: "Changes",
+  heading: "What changed",
+  band: "happening",
+  order: 1,
+  // **Not in the nav.** A diff is a detail of a Work, not a destination: top
+  // level it was a picker with nothing in it on any machine that has never run
+  // `devplane work start`, and a second picker beside the one *Finished work*
+  // already has. It is reached from the Work it is about.
+  nav: false,
   ports: [],
   select: (feed, focus) => {
     const b = feed.board as { work?: unknown[] } | null;

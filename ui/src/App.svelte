@@ -6,7 +6,7 @@
   //
   // Its whole job is the frame: which surface is showing, whether the daemon is
   // answering, and the theme. Everything else belongs to a surface.
-  import { surfaces, landing, BANDS } from "./lib/surfaces";
+  import { surfaces, listed, landing, BANDS, BAND_LABELS } from "./lib/surfaces";
   import { loadSurfaces } from "./lib/load";
   import { live } from "./lib/live.svelte";
   import { theme } from "./lib/theme.svelte";
@@ -77,12 +77,45 @@
     return { update: show };
   }
 
-  /// The nav, grouped into its bands. A flat list of nine is a menu.
+  /// The nav: the listed surfaces, grouped into bands, each with its count.
+  ///
+  /// **Each band carries its label into the markup**, which it did not: a `<ul>`
+  /// with a one-pixel gap, no heading and no accessible name, while the errand
+  /// was pushed into every item's title instead.
+  ///
+  /// **And the count says what is in each place.** The nav advertised capability
+  /// and said nothing about content, so on a machine with six projects and no
+  /// Work two entries were empty with no way to know without visiting each.
   const banded = $derived(
-    BANDS.map((band) => ({ band, items: surfaces().filter((s) => s.band === band) })).filter(
-      (g) => g.items.length > 0,
-    ),
+    BANDS.map((band) => ({
+      band,
+      label: BAND_LABELS[band],
+      items: listed()
+        .filter((s) => s.band === band)
+        .map((s) => ({ ...s, n: s.count?.(feed) ?? null })),
+    })).filter((g) => g.items.length > 0),
   );
+
+  /// Finding something is not a place you go.
+  ///
+  /// It was a nav entry, so looking something up meant leaving whatever you were
+  /// doing — the shape every comparable tool abandoned. The field lives here;
+  /// the results still need somewhere to render, so that surface stayed routable
+  /// and left the nav.
+  ///
+  /// The surface is found by the capability it declares, because the shell may
+  /// not name one.
+  let query = $state("");
+  const searcher = $derived(surfaces().find((s) => s.takesQuery));
+  function find(e: Event) {
+    e.preventDefault();
+    const q = query.trim();
+    const to = searcher;
+    if (!q || !to) return;
+    current = to.id;
+    focus = q;
+    history.replaceState({}, "", `#${to.id}/${encodeURIComponent(q)}`);
+  }
 
   const themeLabel = $derived(
     themeState.choice === "system" ? "following your system" : `${themeState.choice} theme`,
@@ -95,22 +128,40 @@
   <aside>
     <div class="mark">
       <b>Devplane</b>
-      <!-- **What this page is, where somebody looks when they do not know.**
-           The first-run problem is not that the board is hard to read; it is
-           that nothing on it says what it is for. -->
-      <span class="what">who decided, when nobody asked you</span>
+      <!-- What this page is, for somebody who does not know. The verb matters:
+           without it the fragment reads as a riddle, and `Devplane` above makes
+           it a sentence — the same one the CLI's `about` and the site say. -->
+      <span class="what">records who decided, when nobody asked you</span>
     </div>
+
+    <!-- Always available, and it is a control rather than a shortcut: this
+         interface has no keyboard model to hang a palette on. -->
+    {#if searcher}
+      <form class="find" onsubmit={find} role="search">
+        <input
+          type="search"
+          bind:value={query}
+          placeholder="find a command or error"
+          aria-label="search every session"
+        />
+      </form>
+    {/if}
 
     <nav aria-label="surfaces">
       {#each banded as g (g.band)}
-        <ul role="list">
+        <!-- The heading names the errand, the list names the things — the CLI's
+             own shape, held to it by a guard that reads `COMMAND_GROUPS`. -->
+        <h2 id="band-{g.band}">{g.label}</h2>
+        <ul role="list" aria-labelledby="band-{g.band}">
           {#each g.items as s (s.id)}
             <li>
               <button
                 class="tab"
                 use:keepInView={s.id === current}
                 onclick={() => go(s.id)}
-                aria-current={s.id === current ? "page" : undefined}>{s.title}</button
+                aria-current={s.id === current ? "page" : undefined}
+                >{s.title}{#if s.n !== null}<span class="n" class:zero={s.n === 0}>{s.n}</span
+                  >{/if}</button
               >
             </li>
           {/each}
@@ -166,11 +217,10 @@
   }
   .skip:focus { left: var(--s-4); }
 
-  /* **A sidebar, not a strip of tabs.** Nine surfaces whose names are
-     sentences — *what needs you*, *is this actually done* — do not fit across
-     the top without becoming a menu bar you read left to right. Down the side
-     they are a list you scan, and the sentences stay, because they are what
-     tells a first-time reader what the thing is for. */
+  /* **A sidebar, not a strip of tabs.** The surfaces under four errand headings
+     do not fit across the top without becoming a menu bar you read left to
+     right. Down the side they are a list you scan. The errand is the heading,
+     read once; each item is the noun it shows. */
   .app {
     display: grid;
     grid-template-columns: 15rem 1fr;
@@ -197,8 +247,23 @@
   .mark b { font-size: var(--t-md); letter-spacing: -0.02em; }
   .what { color: var(--dim); font-size: var(--t-xs); line-height: 1.35; }
 
+  .find { display: flex; }
+  .find input { width: 100%; min-width: 0; font-size: var(--t-sm); }
+
   nav { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
   nav ul { list-style: none; display: flex; flex-direction: column; gap: 1px; }
+
+  /* **Quiet, and above the group it names.** It has to be readable and it must
+     not compete with the items — a band heading somebody reads before every
+     item is a heading that has become part of each label again. */
+  nav h2 {
+    font-size: var(--t-xs);
+    font-weight: 600;
+    color: var(--dim);
+    letter-spacing: 0.01em;
+    line-height: 1.3;
+    margin: 0 0 var(--s-2) var(--s-3);
+  }
 
   /* The current surface is marked by weight, a ground and a bar — so it
      survives being read in greyscale, which colour alone would not. */
@@ -214,6 +279,16 @@
     color: var(--dim);
     line-height: 1.3;
   }
+  /* **The count, so an empty place looks empty before you go there.** A zero is
+     shown rather than hidden: *nothing here yet* is the fact, and an absent
+     number reads as one nobody measured. */
+  .tab .n {
+    margin-left: auto;
+    color: var(--dim);
+    font-size: var(--t-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .tab .n.zero { opacity: 0.55; }
   .tab:hover:not([aria-current]) { color: var(--ink); background: var(--panel); }
   .tab[aria-current="page"] {
     color: var(--ink);
@@ -267,13 +342,35 @@
     }
     .what { display: none; }
     .mark { flex: none; }
+    /* **After the nav, and narrow.** At the head of the strip it took a fifth of
+       a phone's width and pushed the nav off — the first screenshot showed
+       `Inbox` and half of `Decisions`. The queue is the phone's errand, so it
+       comes first; the field is still reachable by scrolling, which is where a
+       desktop-shaped affordance belongs on a 500-pixel screen. */
+    .find { flex: none; width: 6rem; order: 3; }
+    nav { order: 2; }
+    .foot { order: 4; }
     /* The nav is the only thing that scrolls sideways; the mark and the
        status sit outside it, or a scrolled tab slides under them. */
     nav { flex-direction: row; gap: var(--s-2); min-width: 0; overflow-x: auto; scrollbar-width: none; }
     nav::-webkit-scrollbar { display: none; }
     nav ul { flex-direction: row; gap: var(--s-1); }
+    /* **Off-screen here, and still in the accessibility tree.** Four errand
+       sentences sideways would be most of a phone's width. Short nouns scan in
+       a row without them, and the lists keep their names. */
+    nav h2 {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
     .tab { white-space: nowrap; border-left: 0; border-bottom: 2px solid transparent; border-radius: 0; }
     .tab[aria-current="page"] { border-left-color: transparent; border-bottom-color: var(--accent); }
+    .tab .n { margin-left: var(--s-2); }
     /* **A ground of its own.** The nav scrolls sideways underneath it, and
        without a background a scrolled tab reads as text printed through the
        status. */

@@ -5,6 +5,13 @@ use crate::render::{BOLD, DIM, clip, level_marker, paint};
 use crate::{client, render};
 use anyhow::Result;
 
+/// How wide a detail line is printed.
+///
+/// **A display width, and the only one.** It used to be a second clip on top of
+/// one the reducer had already applied at eighty characters — so the number here
+/// never fired and the number that did was in the wrong layer entirely.
+const DETAIL_WIDTH: usize = 100;
+
 pub async fn cmd_inbox(json: bool) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
     // **Running the command is reading it.** The output goes to somebody's
@@ -58,11 +65,39 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
             true => format!(" {}", paint(render::GREEN, "new")),
             false => String::new(),
         };
+        // **Where it came from and how long it has waited.**
+        //
+        // This row printed the level, the title and the kind — so a flat list
+        // across every project named no project, and a list whose stated order
+        // is *level, then age* showed no age. A question waiting nineteen hours
+        // and one raised eight minutes ago were the same row. The board carried
+        // both all along, which is the tell: two surfaces over one payload, and
+        // only one of them reading it.
+        //
+        // Dim and after the kind, because they are what a reader scans *by*
+        // rather than what they read first — and absent rather than blank where
+        // there is nothing to say: `gate_down` is about the machine and belongs
+        // to no project.
+        let where_from = match &i.project_name {
+            Some(p) if !p.is_empty() => format!(" {}", paint(DIM, p)),
+            _ => String::new(),
+        };
+        let waited = i
+            .since
+            .as_deref()
+            .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+            .map(|t| {
+                let secs = (jiff::Timestamp::now() - t).get_seconds().max(0);
+                format!(" {}", paint(DIM, &render::ago(secs)))
+            })
+            .unwrap_or_default();
         println!(
-            "{} {} {}{}",
+            "{} {} {}{}{}{}",
             level_marker(&i.level),
             paint(BOLD, &i.title),
             paint(DIM, &format!("[{}]", i.kind)),
+            where_from,
+            waited,
             fresh
         );
         if let Some(d) = &i.detail {
@@ -72,15 +107,44 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
             // `gate_down` row mid-path on its second line and left the third
             // hard against the margin, so the most alarming item in the inbox
             // was also the least readable one.
+            // **A clipped line says where the rest of it is.** The reducer used
+            // to shorten a tool call to eighty characters before any surface saw
+            // it, so a stalled command ended in an ellipsis and the remainder
+            // existed nowhere. The whole string reaches here now, and this is
+            // the layer that shortens — which means this is also the layer that
+            // owes the reader a way to the rest of it.
+            let mut clipped = false;
             for line in d.lines() {
                 // A blank line in the middle keeps its blank; five spaces
                 // followed by nothing is trailing whitespace somebody's diff
                 // will complain about and nobody can see.
                 match line.trim().is_empty() {
                     true => println!(),
-                    false => println!("     {}", clip(line, 100)),
+                    false => {
+                        let shown = clip(line, DETAIL_WIDTH);
+                        clipped |= shown != line;
+                        println!("     {shown}");
+                    }
                 }
             }
+            if clipped {
+                // Naming the command rather than the flag: `--json` is the
+                // machine's answer and `devplane show` is the person's.
+                let whole = match (i.run_id.as_deref(), i.work_id.as_deref()) {
+                    (Some(r), _) if !r.is_empty() => format!("devplane show {r}"),
+                    (_, Some(w)) if !w.is_empty() => format!("devplane work show {w}"),
+                    _ => "devplane inbox --json".to_string(),
+                };
+                println!(
+                    "     {}",
+                    paint(DIM, &format!("…  {whole} has the whole of it"))
+                );
+            }
+        }
+        // Why there is no yes-or-no, where there is not — the same sentence the
+        // board shows, from the same field.
+        if let Some(where_to) = &i.answer_in {
+            println!("     {}", paint(DIM, where_to));
         }
         for (n, o) in i.options.iter().enumerate() {
             println!("     {}. {}", n + 1, o.label);
@@ -613,11 +677,17 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    let empty = Vec::new();
-    let projects = v
-        .get("projects")
-        .and_then(|p| p.as_array())
-        .unwrap_or(&empty);
+    // **Deserialised into the type the API serialises, never read key by key.**
+    // This block took the answer apart with thirty-one `.get("key")` lookups,
+    // and one of them asked for `unreported` — a field no version of this
+    // endpoint has ever served. `unwrap_or(0)` made it zero, which killed one
+    // of the three sentences outright and turned the guard on the reassuring
+    // one into `0 < total`: always true. A key that is not in the type is a
+    // compile error now.
+    let m: crate::core::world::Modes = serde_json::from_value(v).map_err(|e| {
+        anyhow::anyhow!("the daemon's answer did not match what this build expects: {e}")
+    })?;
+    let projects = &m.projects;
     // **Before the sessions, because it is true of all of them.** A timer that
     // answers a question in somebody's name is the same kind of fact as a
     // session running unsupervised, and it is the one this machine cannot
@@ -628,11 +698,7 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
     // `where_set` three passes earlier — and `unwrap_or("")` printed a blank
     // line where the path belongs, so a person was told a clock was set and
     // never told where to change it. A rename is a compile error now.
-    if let Some(c) = v
-        .get("question_clock")
-        .filter(|c| !c.is_null())
-        .and_then(|c| serde_json::from_value::<crate::core::clock::ClockLine>(c.clone()).ok())
-    {
+    if let Some(c) = m.question_clock.as_ref() {
         println!(
             "{}",
             match (c.answers_for_you, c.chosen_by_the_person) {
@@ -654,23 +720,13 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
         return Ok(());
     }
     for p in projects {
-        let name = p
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("(no project)");
+        let name = p.name.as_deref().unwrap_or("(no project)");
         println!("\n{}", paint(BOLD, name));
-        for s in p
-            .get("sessions")
-            .and_then(|s| s.as_array())
-            .unwrap_or(&empty)
-        {
+        for s in &p.sessions {
             // Three outcomes, three colours, and the third is not the second.
             // A mode nobody here recognises is not "supervised" and it is not
             // "unsupervised" either — it is a question, and it prints as one.
-            let (label, colour) = match (
-                s.get("label").and_then(|l| l.as_str()),
-                s.get("asks_a_person").and_then(|a| a.as_bool()),
-            ) {
+            let (label, colour) = match (s.label.as_deref(), s.asks_a_person) {
                 (Some(l), Some(false)) => (l.to_string(), render::RED),
                 (Some(l), Some(true)) => (l.to_string(), render::GREEN),
                 (Some(l), None) => (format!("{l} (unknown to this build)"), render::YELLOW),
@@ -683,34 +739,24 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
                 //
                 // Not coloured as an alarm: a mode this build cannot classify
                 // is a fact about the protocol, not a finding about the person.
-                (None, _)
-                    if s.get("agent_mode")
-                        .and_then(|m| m.as_str())
-                        .is_some_and(|m| !m.is_empty()) =>
-                {
-                    (
-                        format!(
-                            "{} (the agent's own mode)",
-                            s.get("agent_mode").and_then(|m| m.as_str()).unwrap_or("")
-                        ),
-                        DIM,
-                    )
-                }
+                (None, _) if s.agent_mode.as_deref().is_some_and(|m| !m.is_empty()) => (
+                    format!(
+                        "{} (the agent's own mode)",
+                        s.agent_mode.as_deref().unwrap_or("")
+                    ),
+                    DIM,
+                ),
                 // Not a gap: the hook that fires on every tool call carries no
                 // mode, so a session can be busy and genuinely not have said.
                 (None, _) => ("not reported yet".to_string(), DIM),
             };
-            let who = s
-                .get("name")
-                .and_then(|n| n.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| clip(s.get("run").and_then(|r| r.as_str()).unwrap_or("?"), 8));
+            let who = s.name.clone().unwrap_or_else(|| clip(&s.run, 8));
             // "seen", never "since": nothing announces a mode change, so this
             // is when Devplane first heard it at this value.
             let seen = s
-                .get("seen")
-                .and_then(|t| t.as_str())
-                .or_else(|| s.get("agent_mode_seen").and_then(|t| t.as_str()))
+                .seen
+                .as_deref()
+                .or(s.agent_mode_seen.as_deref())
                 .map(|t| format!("  {}", paint(DIM, &format!("seen {}", clip(t, 19)))))
                 .unwrap_or_default();
             println!(
@@ -727,13 +773,7 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
             //
             // Silence where nothing is set, deliberately: a caveat printed on
             // every row is a caveat nobody reads.
-            if let Some(c) = s
-                .get("question_clock")
-                .filter(|c| !c.is_null())
-                .and_then(|c| {
-                    serde_json::from_value::<crate::core::clock::ClockLine>(c.clone()).ok()
-                })
-            {
+            if let Some(c) = s.question_clock.as_ref() {
                 println!(
                     "  {:<22}{}",
                     "",
@@ -760,14 +800,8 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
             }
         }
     }
-    let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-    let (total, unsup, unknown, unreported) = (
-        n("sessions"),
-        n("unsupervised"),
-        n("unknown"),
-        n("unreported"),
-    );
-    let unread = n("clock_unread");
+    let (total, unsup, unknown, unreported) = (m.sessions, m.unsupervised, m.unknown, m.unreported);
+    let unread = m.clock_unread;
     println!();
     // **Three sentences, because there are three facts.** Counting a session
     // that has not spoken as one running an exotic mode made sixteen idle
@@ -816,9 +850,8 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
     // right to stop believing the rest of it.
     let clocked = projects
         .iter()
-        .filter_map(|p| p.get("sessions").and_then(|s| s.as_array()))
-        .flatten()
-        .filter(|s| s.get("question_clock").is_some_and(|c| !c.is_null()))
+        .flat_map(|p| p.sessions.iter())
+        .filter(|s| s.question_clock.is_some())
         .count();
     if unsup == 0 && unknown == 0 && unreported < total && clocked == 0 {
         println!(

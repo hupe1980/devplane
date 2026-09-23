@@ -318,6 +318,64 @@ fn the_question_path_writes_no_settings() {
     }
 }
 
+/// **A permission answer nobody made may not become a refusal.**
+///
+/// `Decision::parse(None, None)` answers `Deny` — *fail closed*, which is the
+/// right rule for a **gate** deciding with no person present and the wrong one
+/// for a **person's answer**, where the honest reading is that nothing was said.
+///
+/// The difference was not academic. The board posted `{"choice":"allow"}`;
+/// `AnswerBody` has no `choice` field and rejected nothing it did not
+/// understand, so **pressing *allow* recorded a deny** — under the person's
+/// name, on the product whose entire claim is recording who decided what, while
+/// the surface said *"answered — on the record and on its way to the agent"*.
+///
+/// The CLI had always refused this before sending. Refusing it at the route as
+/// well is what turns the next wiring mistake into a 400 instead of a wrong
+/// decision, and `deny_unknown_fields` is what makes the mistake itself
+/// impossible to post.
+#[test]
+fn a_permission_answer_that_says_nothing_is_refused_rather_than_read_as_deny() {
+    let api = std::fs::read_to_string("src/api.rs").expect("api.rs");
+
+    let body = api
+        .split("struct AnswerBody")
+        .next()
+        .expect("AnswerBody is declared in api.rs");
+    assert!(
+        body.rsplit("#[derive")
+            .next()
+            .is_some_and(|d| d.contains("deny_unknown_fields")),
+        "`AnswerBody` does not deny unknown fields. A surface posting a key this route never \
+         reads then answers as though nobody said anything — which is how pressing `allow` on \
+         the board came to record a deny"
+    );
+
+    let handler = api
+        .split("async fn answer_ask")
+        .nth(1)
+        .and_then(|s| s.split("\nasync fn ").next())
+        .expect("answer_ask");
+    let permission = handler
+        .split("Kind::Permission")
+        .nth(1)
+        .and_then(|s| s.split("Kind::Question").next())
+        .expect("the permission arm");
+    assert!(
+        permission.contains("BAD_REQUEST"),
+        "the permission arm of `answer_ask` reaches `Decision::parse` without first refusing an \
+         answer that named neither a decision nor an option. `parse` maps nothing to `Deny`, so \
+         that path records a refusal nobody chose"
+    );
+
+    // And the sentence a person meets says what to send, because this is the
+    // failure a mis-wired surface produces.
+    assert!(
+        permission.contains("say what the answer is"),
+        "the refusal does not tell the caller what to send"
+    );
+}
+
 /// **Every way a question can end reads differently, and none of them reads as
 /// nothing having happened.**
 ///
@@ -941,11 +999,143 @@ fn the_clock_is_never_read_out_of_json_by_hand() {
         );
     }
 
-    // And the positive half: it does deserialise the type. An absence check
-    // alone passes on a file that dropped the feature entirely.
+    // And the positive half: it does deserialise a type. An absence check alone
+    // passes on a file that dropped the feature entirely.
+    //
+    // **The clock arrives inside the envelope now**, so naming `ClockLine` here
+    // is no longer the evidence — `core::world::Modes` holds it, and that is
+    // the one type this surface deserialises. Asserting the old name would fail
+    // on the fix that made it unnecessary.
     assert!(
-        text.contains("clock::ClockLine"),
-        "the clock rendering must go through the shared type"
+        text.contains("world::Modes"),
+        "the modes rendering must go through the shared type, which carries the clock"
+    );
+
+    // **The whole answer, not only the clock inside it.** The clock was typed
+    // and the envelope around it was not, so thirty-one lookups remained — and
+    // one of them asked for `unreported`, a field no version of this endpoint
+    // has ever served. It read zero for ever: one of the three sentences never
+    // printed, and the guard on the reassuring one became `0 < total`.
+    for field in [
+        "projects",
+        "sessions",
+        "unsupervised",
+        "unknown",
+        "unreported",
+        "clock_read",
+        "clock_unread",
+        "asks_a_person",
+        "agent_mode",
+        "question_clock",
+    ] {
+        let by_hand = format!(".get(\"{field}\")");
+        assert!(
+            !text.contains(&by_hand),
+            "src/cli/inbox.rs reads `{field}` out of JSON by hand ({by_hand}).\n\
+             Deserialise `core::world::Modes` — a key the type does not have is a compile \
+             error, and a key the API does not send is `unwrap_or(0)` for ever."
+        );
+    }
+}
+
+/// **A vendor is a row, not an `if`.**
+///
+/// The whole cross-vendor claim is that support is a table with a date on each
+/// row, re-read against the vendor's own documentation — and `devplane doctor`
+/// prints exactly that. A handler that compares an agent id to a string literal
+/// is the same fact in a second place, where nothing dates it and nothing
+/// reports it: `agent != "claude"` decided which sessions could show an
+/// abandoned question, inside an API handler, for the life of the feature.
+///
+/// So the vendor names live in `core::vendors` and nowhere else. This is an
+/// absence check because that is the only way an absence stays true, and it
+/// fails the moment somebody adds the *reasonable* convenience — one
+/// comparison, to special-case the vendor they happen to be testing.
+#[test]
+fn no_surface_branches_on_which_vendor_it_is() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // Every file that renders or serves, and none of the observation adapters:
+    // `observe/copilot.rs` and `observe/hook.rs` are a vendor's own channel by
+    // definition, and naming it there is what an adapter is.
+    let surfaces = [
+        "src/api.rs",
+        "src/cli/board.rs",
+        "src/cli/inbox.rs",
+        "src/cli/work.rs",
+        "src/cli/admin.rs",
+        "src/render.rs",
+    ];
+
+    // The spellings that would be a branch on identity. `"claude"` as a *value*
+    // — an agent to launch, a registry id — is not one, so this looks for the
+    // shape of a comparison rather than for the word.
+    let branches = [
+        r#"== "claude""#,
+        r#"!= "claude""#,
+        r#"eq_ignore_ascii_case("claude")"#,
+        r#"== "copilot""#,
+        r#"!= "copilot""#,
+        r#"eq_ignore_ascii_case("copilot")"#,
+        r#"contains("claude")"#,
+        r#"starts_with("claude")"#,
+    ];
+
+    for rel in surfaces {
+        let whole =
+            std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
+        // Comments may discuss the rule; code may not be the rule.
+        let text: String = whole
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for bad in branches {
+            assert!(
+                !text.contains(bad),
+                "{rel} branches on which vendor it is ({bad}).\n\
+                 A vendor is a row in `core::vendors`, with a date and a reason a person can read. \
+                 Add the question to that table — `can_show_an_abandoned_question` is the shape — \
+                 so `devplane doctor` reports the answer instead of a handler deciding it silently."
+            );
+        }
+    }
+
+    // And the positive half: the table is what answers it.
+    let vendors = std::fs::read_to_string(root.join("src/core/vendors.rs")).expect("vendors");
+    assert!(
+        vendors.contains("fn can_show_an_abandoned_question"),
+        "the capability must be a function over the table, or the absence check above is \
+         protecting nothing"
+    );
+}
+
+/// **A reassuring sentence may not be printed over no evidence.**
+///
+/// *Every session that has reported asks you* is guarded by `unreported <
+/// total`, so that a machine where nothing has reported does not get the green
+/// line. The CLI read `unreported` from a key the API never sent, so the guard
+/// was `0 < total` — true whenever anything is live — and the green line was
+/// reachable with zero sessions having said anything at all.
+///
+/// This asserts the field exists on both sides, which is what makes the guard
+/// mean what it says.
+#[test]
+fn every_figure_the_modes_surface_guards_on_is_one_the_api_sends() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let world = std::fs::read_to_string(root.join("src/core/world.rs")).expect("world");
+    let api = std::fs::read_to_string(root.join("src/api.rs")).expect("api");
+
+    // The type carries it…
+    assert!(
+        world.contains("pub unreported: usize"),
+        "core::world::Modes has no `unreported`, which the CLI guards the reassuring line on"
+    );
+    // …and the handler fills it. A field on the type that the handler never
+    // sets is `Default` on the wire, which is the same zero by another route.
+    assert!(
+        api.contains("unreported: projects.iter().map(|p| p.unreported).sum()"),
+        "/api/modes does not sum `unreported`, so the guard on the reassuring line reads zero"
     );
 }
 

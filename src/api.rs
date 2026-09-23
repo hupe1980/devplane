@@ -63,6 +63,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/runs/{id}/snooze", post(snooze))
         .route("/api/runs/{id}/focus", post(focus_run))
         .route("/api/dispatch", post(dispatch))
+        .route("/api/dispatch/preflight", post(dispatch_preflight))
         .route("/api/runs/{id}/prompt", post(prompt_run))
         // **One route, and it is addressed by the ask rather than by the run.**
         // There were two — `/runs/{id}/decide` and `/runs/{id}/answer` — and a
@@ -99,7 +100,6 @@ pub fn router(state: Shared) -> Router {
         .route("/api/issues", post(list_issues))
         .route("/api/forge", get(forge))
         .route("/api/decisions", get(decisions))
-        .route("/api/decisions/pane", get(decisions_pane))
         .route("/api/explain", get(explain))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
@@ -1287,10 +1287,19 @@ struct Unreadable {
 }
 
 /// One row of the cross-project issue or pull-request list.
+///
+/// **`needs_you` is the daemon's answer and never the page's.** The heading's
+/// count and this list are the same question, so they are the same function:
+/// [`crate::core::ForgeIssue::assigned_to_me`] and
+/// [`crate::core::ForgePullRequest::needs_me`] decide both. A surface
+/// re-deriving *does this want me* from the fields beside it is a second place
+/// that rule lives, and the two disagree on the day somebody changes one —
+/// which is exactly the failure `needs_me`'s own doc comment is written about.
 #[derive(Serialize)]
 struct ForgeRow<T: Serialize> {
     project: String,
     project_name: String,
+    needs_you: bool,
     #[serde(flatten)]
     item: T,
 }
@@ -1328,6 +1337,7 @@ async fn forge(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
             pf.issues.iter().cloned().map(move |item| ForgeRow {
                 project: project.clone(),
                 project_name: project_name.clone(),
+                needs_you: item.assigned_to_me,
                 item,
             })
         })
@@ -1348,6 +1358,7 @@ async fn forge(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
             pf.pull_requests.iter().cloned().map(move |item| ForgeRow {
                 project: project.clone(),
                 project_name: project_name.clone(),
+                needs_you: item.needs_me(),
                 item,
             })
         })
@@ -1638,6 +1649,108 @@ struct DispatchBody {
     prompt: Option<String>,
 }
 
+/// What a fan-out would do, **before anything is written**.
+///
+/// The preflight has lived in the CLI since it shipped, so the composer could
+/// show a panel it had no way to fill: the surface declared the port, rendered
+/// an `aria-live` region and left `preflight` on its default, which is empty.
+/// The rule belongs here for the reason the composer's own comment gives — *the
+/// daemon decides the position, not this page* — and a second implementation of
+/// *draft above three* is the second place that number would live.
+///
+/// **Read-only by construction.** It resolves nothing, starts nothing and
+/// writes nothing; the caller then makes one ordinary call to `/api/dispatch`
+/// per accepted target, which is the same path a single dispatch takes.
+#[derive(Deserialize)]
+struct PreflightBody {
+    /// Project ids, as `/api/projects` reports them.
+    projects: Vec<String>,
+    /// An agent id. An unknown one is a refusal per target, never an error.
+    agent: String,
+    /// What the agent would be asked, so the draft link can carry it.
+    #[serde(default)]
+    prompt: String,
+    /// A library artefact this fan-out starts from, by name. Read for the
+    /// fields the documented distribution paths would reject.
+    #[serde(default)]
+    template: Option<String>,
+}
+
+async fn dispatch_preflight(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<PreflightBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+
+    let targets: Vec<crate::batch::Target> = {
+        let w = state.world.lock().await;
+        body.projects
+            .iter()
+            .filter_map(|id| {
+                w.projects()
+                    .find(|p| p.id.as_str() == id)
+                    .map(|p| crate::batch::Target {
+                        project: p.id.clone(),
+                        name: p.name.clone(),
+                        root: p.root.clone(),
+                        trusted: p.trusted,
+                    })
+            })
+            .collect()
+    };
+
+    let chosen = crate::core::batch::default_position(targets.len());
+    let agents: Vec<String> = state.agents.iter().map(|a| a.id.clone()).collect();
+    let findings = crate::batch::preflight_all(
+        &targets,
+        chosen.position,
+        &agents,
+        &body.agent,
+        None,
+        0,
+        body.template.as_deref(),
+    )
+    .await;
+    let accepted = findings.iter().filter(|f| f.refusal.is_none()).count();
+
+    // **Every sentence a person reads here is composed on this side.** The
+    // refusal line names the fix — `devplane trust <path>` — and the draft link
+    // is the vendor's own deep link with the prompt typed and not sent. A page
+    // that built either would be a second place that vocabulary lives, and the
+    // link in particular is refused for some paths, which a page cannot know.
+    let rows: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            let t = targets.iter().find(|t| t.project == f.project);
+            let name = t.map(|t| t.name.clone()).unwrap_or_default();
+            json!({
+                "project": f.project.to_string(),
+                "name": name,
+                "refusal": f.refusal.map(|r| r.as_str()),
+                "says": f.refusal.map(|r| crate::batch::refusal_line(&name, r, t.map(|t| t.root.as_path()).unwrap_or_else(|| std::path::Path::new("")))),
+                "link": match (f.refusal, t) {
+                    (None, Some(t)) => crate::batch::draft_link(t, &body.prompt),
+                    _ => None,
+                },
+                // **A warning and never a refusal.** It sits beside the
+                // refusal rather than in it, because the artefact still works
+                // in the tool that wrote it.
+                "would_lose_fields": f.would_lose_fields,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "position": chosen.position.as_str(),
+        "forced": chosen.forced,
+        "says": chosen.position.says(),
+        "targets": rows,
+        "cost_in_runs": accepted,
+    }))
+    .into_response()
+}
+
 async fn dispatch(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -1691,7 +1804,14 @@ async fn prompt_run(
 /// answered with an option per field or with the person's own words. A caller
 /// sends what the person did and the route validates it against the row, rather
 /// than every surface having to work out which route to post to first.
+/// **Unknown fields are refused.**
+///
+/// Every field is `#[serde(default)]`, which is right — a permission needs no
+/// `field`. What that also did was accept `{"choice":"allow"}` as a valid body
+/// in which nobody had said anything. `deny_unknown_fields` makes that a 422 at
+/// the boundary rather than a decision nobody made.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnswerBody {
     /// `allow` or `deny`, for a permission.
     #[serde(default)]
@@ -1760,7 +1880,14 @@ async fn asks_index(State(state): State<Shared>, headers: HeaderMap) -> impl Int
         .runs()
         .filter(|r| r.state.is_live())
         .map(|r| r.agent.clone())
-        .filter(|a| !a.eq_ignore_ascii_case("claude"))
+        // **A row, not an `if`.** This compared the agent id to a string
+        // literal, which is a vendor identity hard-coded into a handler in the
+        // one product whose argument is that a vendor is a row with a date on
+        // it.
+        .filter(|a| {
+            crate::core::vendors::agent_can_show_an_abandoned_question(a)
+                != crate::core::vendors::Reach::Read
+        })
         .collect();
     blind.sort();
     blind.dedup();
@@ -1817,13 +1944,44 @@ async fn answer_ask(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let Ok(Some(ask)) = state.store.ask(&id).await else {
-        return (StatusCode::NOT_FOUND, "no such ask").into_response();
+        // **The reason and the way out**, because this is what a mistyped id
+        // meets. It said `no such ask`, which the client then failed to decode
+        // as JSON and reported as a serde error beside an internal route.
+        return (
+            StatusCode::NOT_FOUND,
+            format!(
+                "no ask `{id}` is waiting.\n\n  devplane asks lists every question and what \
+                 became of it."
+            ),
+        )
+            .into_response();
     };
 
     let answer = match ask.kind {
-        crate::core::ask::Kind::Permission => crate::driven::Answer::Permission(
-            crate::driven::Decision::parse(body.decision.as_deref(), body.option.clone()),
-        ),
+        // **A permission with nothing said is malformed, not a deny.**
+        //
+        // `Decision::parse(None, None)` answers `Deny` — *fail closed*, right
+        // for a **gate** deciding with nobody present and wrong for a
+        // **person's answer**, where nothing was said. Pressing *allow* on the
+        // board produced a deny under the person's name for exactly this reason.
+        // The CLI had always refused it before sending.
+        crate::core::ask::Kind::Permission => {
+            let said_something = body.decision.is_some() || body.option.is_some();
+            if !said_something {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "say what the answer is: `decision` of \"allow\" or \"deny\", or \
+                                  `option` naming one the agent offered"
+                    })),
+                )
+                    .into_response();
+            }
+            crate::driven::Answer::Permission(crate::driven::Decision::parse(
+                body.decision.as_deref(),
+                body.option.clone(),
+            ))
+        }
         crate::core::ask::Kind::Question => {
             let field = body.field.clone().unwrap_or_else(|| "question_0".into());
             let chosen = match (body.custom.clone(), body.option.clone()) {
@@ -2942,15 +3100,20 @@ async fn modes(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
                 true => (r + 1, u),
                 false => (r, u + 1),
             });
-    Json(json!({
-        "projects": projects,
-        "sessions": sessions,
-        "unsupervised": projects.iter().map(|p| p.unsupervised).sum::<usize>(),
-        "unknown": projects.iter().map(|p| p.unknown).sum::<usize>(),
-        "question_clock": clock.as_ref().map(crate::core::clock::ClockLine::from),
-        "clock_read": read,
-        "clock_unread": unread,
-    }))
+    // **A type, not a `json!`.** The reader on the other side of this route
+    // used to take it apart with thirty-one `.get("key")` lookups, and the two
+    // disagreed once already: a field renamed on one side went on being read
+    // by name on the other, and the break rendered as a blank line.
+    Json(crate::core::world::Modes {
+        unsupervised: projects.iter().map(|p| p.unsupervised).sum(),
+        unknown: projects.iter().map(|p| p.unknown).sum(),
+        unreported: projects.iter().map(|p| p.unreported).sum(),
+        projects,
+        sessions,
+        question_clock: clock.as_ref().map(crate::core::clock::ClockLine::from),
+        clock_read: read,
+        clock_unread: unread,
+    })
     .into_response()
 }
 
@@ -3130,25 +3293,16 @@ struct AuditQuery {
     about: Option<String>,
     #[serde(default = "default_limit")]
     limit: i64,
-    /// The heading the pane carries, when it has one. Read from the item the
-    /// reader is looking at — so it is somebody else's text, and is escaped on
-    /// the way back out like everything else.
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    sub: Option<String>,
     /// Only what was decided **instead of** you.
     ///
     /// The seat's own filter, and the one question the log exists to answer:
     /// a rule, a clock or nobody deciding in your name. `person` rows are the
     /// ones you remember and `daemon` rows are the tool doing what it was told,
-    /// so both are out — which is `Authority::was_taken_for_you`, a predicate
-    /// a predicate that had been described as *the filter the seat's surfaces
-    /// default to* while no surface offered it.
+    /// so both are out — which is `Authority::was_taken_for_you`, a predicate that
+    /// had been described as *the filter the seat's surfaces default to* while no
+    /// surface offered it.
     #[serde(default)]
     without_me: bool,
-    #[serde(default)]
-    detail: Option<String>,
 }
 
 /// What Devplane decided, newest first.
@@ -3168,58 +3322,6 @@ async fn decisions(
                 false => d,
             };
             Json(rows).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-/// The reason pane, rendered.
-///
-/// **The first route that serves markup rather than JSON**, and the shape the
-/// rest of the move takes. The page asks a question and gets an answer it can
-/// insert; it does not receive a list and a set of instructions for turning one
-/// into the other.
-///
-/// What that buys is not bytes. It is that `reason`, `actor` and `action` —
-/// a rule somebody wrote, possibly a model, and a command an agent composed —
-/// are escaped by a type on the way out, rather than by a discipline held at
-/// every interpolation site in a script.
-async fn decisions_pane(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Query(q): Query<AuditQuery>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let head = q.title.as_deref().map(|t| {
-        (
-            t,
-            q.sub.as_deref().unwrap_or(""),
-            q.detail.as_deref().filter(|d| !d.is_empty()),
-        )
-    });
-    match state.store.decisions(q.about.as_deref(), q.limit).await {
-        Ok(d) => {
-            let rows: Vec<crate::render::DecisionRow> = d
-                .iter()
-                .map(|x| crate::render::DecisionRow {
-                    // The pane shows a time, not a timestamp — narrowed here so
-                    // the page does not slice a string it did not produce.
-                    at: x.at.to_string().chars().skip(11).take(5).collect(),
-                    authority: x.authority.as_str().to_string(),
-                    action: x.action.clone(),
-                    outcome: x.outcome.clone(),
-                    reason: x.reason.clone(),
-                })
-                .collect();
-            (
-                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                crate::render::reason_pane(head, &rows).as_str().to_string(),
-            )
-                .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

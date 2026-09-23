@@ -1,7 +1,7 @@
 [package]
 name = "devplane"
 description = "Records who decided, when nobody asked you — a person, a rule, a classifier, a timer, or nobody — across every project and every coding agent on your machine. Local-first, one binary, and it never approves a tool call."
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"

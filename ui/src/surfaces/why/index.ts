@@ -3,9 +3,10 @@ import Why from "./Why.svelte";
 
 register({
   id: "why",
-  title: "Why this is here",
+  title: "Decisions",
+  heading: "Why this was decided",
   band: "attention",
-  order: 3,
+  order: 1,
   ports: ["why"],
   // **Opened about something, or it has nothing to say.** It rendered "open a
   // row and this shows what was decided" on every visit, with no row to open

@@ -384,16 +384,19 @@ Three empty states, because they are three different facts: *nothing needs you* 
 *Devplane has not answered recently* means what is on screen is not current, and *some projects could
 not be read* means the list is narrower than it looks.
 
-Sessions are still there, under **what is happening** in the sidebar. Every watcher in this category can show
-you those — Claude Code ships `claude agents` itself and does it better — so no effort goes into
-making them prettier than a terminal table.
+Sessions are still there — **Sessions**, under *see what is happening* in the sidebar. Every watcher in
+this category can show you those — Claude Code ships `claude agents` itself and does it better — so no
+effort goes into making them prettier than a terminal table.
+
+The sidebar is grouped under the same four errands `devplane --help` uses: the errand is the heading,
+and each item under it is a noun.
 
 **It works on a phone**, over Tailscale or any private network, because *what needs me* is a question
 people ask away from their desk. Everything is served from the one binary — no CDN, no web font, no
 analytics — so nothing has to load, and the layout at phone width is a different arrangement rather
 than the same one shrunk.
 
-<img src="https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/narrow.png" alt="The same page at phone width: the sidebar laid out as a scrolling strip across the top, and each item wrapping" width="330">
+<img src="https://raw.githubusercontent.com/hupe1980/devplane/main/site/static/narrow.png" alt="The same page at phone width: the sidebar laid out as a scrolling strip of short labels across the top" width="330">
 
 **Every action is a button**, and there are no keyboard shortcuts.
 
@@ -402,7 +405,14 @@ calls this machine has seen, and the file to paste it into, which is your agent'
 `settings.json`. Nothing writes it for you.
 
 **Start work** tells you what it will do before it does it, and refuses an untrusted repository with
-the command that fixes it.
+the command that fixes it. It produces a **draft per project** — the vendor's own window, opened with
+the prompt typed and not sent — because a fan-out that half fires is the one failure a control plane
+cannot take back. Starting agents outright is `devplane dispatch --to a,b,c --apply`, in a terminal
+that can show you what happened.
+
+**Library** on the board is the same thing as a matrix — *what is installed where*: one row per prompt
+or skill, one column per repository, and a word in every cell. *Edited here* and *library moved on* are the same yes-or-no and
+opposite instructions, so nothing here is a tick.
 
 Items that name work you were about to do anyway — a red pull request, a reviewer asking for changes,
 a spent feedback budget — carry a `claude-cli://` link that opens an agent in the right repository

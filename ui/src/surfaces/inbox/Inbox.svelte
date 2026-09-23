@@ -8,6 +8,10 @@
   import { api } from "../../lib/api";
   import { ago, clip, plural } from "../../lib/text";
 
+  /// How much of a detail the row shows. The rest is in the `title`, which is
+  /// the same arrangement the certificate's commands use.
+  const DETAIL_CHARS = 400;
+
   type Choice = { id: string | null; label: string };
   type Item = {
     id: string;
@@ -30,6 +34,10 @@
     offer?: { rule: string; file: string; section: string; covers: number; more?: boolean } | null;
     work_id?: string | null;
     project_id?: string | null;
+    /// Where `open_pr` and `open_issue` go.
+    url?: string | null;
+    /// Why there is no yes-or-no, when there is not.
+    answer_in?: string | null;
     new_to_you?: boolean;
     since?: string;
   };
@@ -69,10 +77,75 @@
   /// permanent button that hopes there is something behind it.
   let undo = $state<{ says: string; where: string } | null>(null);
 
+  /// What the route accepts. **Named, because one of them used not to exist.**
+  ///
+  /// Every control posted `{ choice }` and the route reads `decision`, `option`,
+  /// `custom` and `field` — so *allow* arrived with nothing said and was recorded
+  /// as a **deny**. The body was valid JSON in which no field was set, which is
+  /// the sort of wiring a test that hands a component its props cannot see.
+  type Answer =
+    | { decision: "allow" | "deny" }
+    | { option: string }
+    | { custom: string; field?: string };
+
+  /// The routes behind the actions that are not answers.
+  ///
+  /// **The daemon offers thirteen actions and this surface rendered five**, while
+  /// every route behind the missing ones already existed — so a permission on a
+  /// watched session showed no buttons at all. The fourth principle in reverse:
+  /// an action nothing implements.
+  ///
+  /// `attach` is absent on purpose — a browser cannot attach a terminal, so the
+  /// command is named rather than dressed up as a button.
+  /// **The whole route, written out.** Assembling it from parts put
+  /// `/api/{}/{}/{}` in the bundle, which the guard that checks every route a
+  /// surface calls against the ones the daemon serves cannot read — and that
+  /// guard is the only thing standing between a control and a 404 nobody finds
+  /// until they press it.
+  const ROUTES: Record<string, { of: "run" | "work"; route: string; says: string }> = {
+    focus: { of: "run", route: "/api/runs/{id}/focus", says: "raised the window that owns it" },
+    approve: {
+      of: "work",
+      route: "/api/work/{id}/approve",
+      says: "approved — the pipeline continues",
+    },
+    retry: { of: "work", route: "/api/work/{id}/retry", says: "retrying" },
+    resume: { of: "work", route: "/api/work/{id}/resume", says: "resumed" },
+  };
+
+  async function act(item: Item, action: string) {
+    const r = ROUTES[action];
+    const id = r?.of === "work" ? item.work_id : item.run_id;
+    if (!r || !id) {
+      said = `${action} cannot be done from here`;
+      return;
+    }
+    try {
+      await api(r.route.replace("{id}", encodeURIComponent(id)), {
+        method: "POST",
+      });
+      undo = null;
+      said = r.says;
+    } catch (e) {
+      said = `${action} did not land: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  /// A free-text reply. **Empty is refused here rather than sent**, because the
+  /// guess the route used to make about an empty body was *deny*.
+  async function reply(item: Item) {
+    const words = (typed[item.id] ?? "").trim();
+    if (!words) {
+      said = "type your answer first — an empty reply is not an answer";
+      return;
+    }
+    await answer(item, { custom: words });
+  }
+
   // **Answering is a POST to the ask, and the page composes no verdict.**
   // There is no allow rule here and no policy route — the button carries the
   // person's decision and the daemon records who made it.
-  async function answer(item: Item, choice: string) {
+  async function answer(item: Item, what: Answer) {
     const ask = item.ask ?? item.request_id;
     if (!ask) {
       said = "this one cannot be answered from here";
@@ -82,7 +155,7 @@
       await api(`/api/asks/${encodeURIComponent(ask)}/answer`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ choice }),
+        body: JSON.stringify({ ...what, from: "board" }),
       });
       // **No undo, and the sentence says why rather than staying quiet about
       // it.** The answer has left: it is on the record and in the agent's
@@ -214,7 +287,14 @@
             {#if i.project_name}<span>{i.project_name}</span>{/if}
             {#if i.since}<span>{ago(Math.max(0, (Date.now() - Date.parse(i.since)) / 1000))}</span>{/if}
           </div>
-          {#if i.detail}<p class="d">{clip(i.detail, 400)}</p>{/if}
+          <!-- The whole of it travels in the title and the row shows what fits,
+               the same rule the certificate's commands follow: a reformatted
+               command is one a reviewer cannot paste. -->
+          {#if i.detail}
+            <p class="d" title={i.detail.length > DETAIL_CHARS ? i.detail : undefined}>
+              {clip(i.detail, DETAIL_CHARS)}
+            </p>
+          {/if}
 
           <!-- **The answer path.** The agent named what it will take, so those
                are the buttons.
@@ -228,7 +308,7 @@
             <div class="opts">
               {#each i.options ?? [] as o (o.label)}
                 {#if o.id}
-                  <button class="choice" onclick={() => answer(i, o.id!)}>{o.label}</button>
+                  <button class="choice" onclick={() => answer(i, { option: o.id! })}>{o.label}</button>
                 {:else}
                   <!-- No id: the provider owns this dialog and only its own
                        window can answer. Shown, because reading them is still
@@ -249,7 +329,7 @@
                 placeholder="your answer"
                 aria-label="your answer to: {i.title}"
               />
-              <button onclick={() => answer(i, typed[i.id] ?? "")}>reply</button>
+              <button onclick={() => reply(i)}>reply</button>
             </div>
           {/if}
 
@@ -269,15 +349,46 @@
             </p>
           {/if}
 
+          <!-- Why there is no yes-or-no: a watched session has no protocol
+               request behind it, so nothing here can grant or refuse it. -->
+          {#if i.answer_in}<p class="elsewhere">{i.answer_in}</p>{/if}
+
           <div class="acts">
             {#if (i.actions ?? []).includes("allow")}
-              <button onclick={() => answer(i, "allow")}>allow</button>
+              <button onclick={() => answer(i, { decision: "allow" })}>allow</button>
             {/if}
             {#if (i.actions ?? []).includes("deny")}
-              <button onclick={() => answer(i, "deny")}>deny</button>
+              <button onclick={() => answer(i, { decision: "deny" })}>deny</button>
+            {/if}
+            {#if (i.actions ?? []).includes("approve")}
+              <button onclick={() => act(i, "approve")}>approve</button>
+            {/if}
+            {#if (i.actions ?? []).includes("retry")}
+              <button onclick={() => act(i, "retry")}>retry</button>
+            {/if}
+            {#if (i.actions ?? []).includes("resume")}
+              <button onclick={() => act(i, "resume")}>resume</button>
+            {/if}
+            <!-- The only way to answer a session Devplane watches rather than
+                 drives, and named honestly for that. -->
+            {#if (i.actions ?? []).includes("focus")}
+              <button onclick={() => act(i, "focus")}>raise its window</button>
+            {/if}
+            {#if (i.actions ?? []).includes("open") && (i.run_id || i.work_id)}
+              <a class="act" href={i.work_id ? `#work/${i.work_id}` : `#why/${i.run_id}`}>open</a>
+            {/if}
+            {#if ((i.actions ?? []).includes("open_pr") || (i.actions ?? []).includes("open_issue")) && i.url}
+              <a class="act" href={i.url} target="_blank" rel="noreferrer noopener">
+                {(i.actions ?? []).includes("open_pr") ? "open pull request" : "open issue"}
+              </a>
             {/if}
             {#if (i.actions ?? []).includes("snooze")}
               <button onclick={() => snooze(i)}>snooze 1h</button>
+            {/if}
+            <!-- A terminal attaches; a browser cannot. The command, not a
+                 control that could not keep its promise. -->
+            {#if (i.actions ?? []).includes("attach") && i.run_id}
+              <code class="cmd">devplane attach {i.run_id}</code>
             {/if}
           </div>
         </li>
@@ -359,6 +470,27 @@
      filled button. Everything else stays quiet so this does not have to shout. */
   .choice { border-color: var(--edge); font-weight: 500; }
   .dead { color: var(--dim); font-size: var(--t-sm); align-self: center; }
+
+  /* A link that does the same job as a button beside it looks like one. */
+  .act {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--s-1) var(--s-3);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    color: var(--ink);
+    text-decoration: none;
+    font-size: var(--t-sm);
+  }
+  .act:hover { background: var(--panel); }
+  .elsewhere { color: var(--dim); font-size: var(--t-sm); margin-top: var(--s-2); }
+  /* A command to type, not a control. It must not look pressable. */
+  .cmd {
+    align-self: center;
+    color: var(--dim);
+    font-size: var(--t-sm);
+    user-select: all;
+  }
 
   .reply { display: flex; gap: var(--s-2); margin-top: var(--s-3); }
   .reply input { flex: 1; max-width: 28rem; }

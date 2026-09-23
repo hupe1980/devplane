@@ -1121,15 +1121,28 @@ impl Rule {
         let named = self.tool.as_str();
         let restrictive = self.class.is_restrictive();
         let targets = crate::core::command::file_targets(&command);
-        // The parse gave up before the command ran out, so there are operands
-        // nothing has looked at. A restrictive rule may not read that as "this
-        // line names no protected file" — that is how `cat f0 … f79 .env`
-        // reached `Undecided` under `Read(.env)`. The unread remainder is
-        // treated as though it could be anything, which costs a prompt on a
-        // command nobody writes by hand and closes a prohibition that silently
-        // did not fire.
+        // **An unread remainder is not a match, and it used to be one.**
+        //
+        // A restrictive rule may not read a truncated parse as *this line names
+        // no protected file* — that is how `cat f0 … f79 .env` reached
+        // `Undecided`. But returning `true` made the rule **match**, and for a
+        // `never_auto` path rule that is `Deny { rule: "Read(.env)" }` on a
+        // command that never mentions `.env`.
+        //
+        // Two things were wrong. The old comment justified the cost as *a
+        // prompt* — that is what `always_ask` does; a prohibition refuses, and
+        // refusing on *nobody looked* is the one direction the vendor does not
+        // take: it documents a long command as one that **"always prompts"**.
+        // And the reason named a rule that did not apply, which is the most
+        // misleading thing a gate can say.
+        //
+        // The protection is unchanged: `restrictive` reaches
+        // `Verdict::Unresolved` instead — *nobody looked*, answered to the
+        // provider as **ask** — because `command::undecidable` reports a parse
+        // that hit its bounds. Nothing gets through unnoticed; what stops
+        // happening is a refusal nobody can act on.
         if restrictive && targets.truncated {
-            return true;
+            return false;
         }
         // **Writers the vendor's table does not carry.** `cp`'s destination,
         // `truncate`, `dd of=`, `install`, `rsync` and `ln` reach a protected
@@ -3016,10 +3029,29 @@ mod tests {
     /// Each of these put a protected file past one of the analysis bounds and
     /// reached `Undecided` under `never_auto = ["Read(.env)"]` — a dropped
     /// target, and a dropped target is the silent half of every way this layer
-    /// has been found too generous. A bound
-    /// still exists, because the input is chosen by the thing being governed;
-    /// what changed is that hitting one is reported, and a restrictive rule
-    /// reads the unread remainder as "could be anything".
+    /// has been found too generous. A bound still exists, because the input is
+    /// chosen by the thing being governed; what changed is that hitting one is
+    /// **reported**.
+    ///
+    /// **Relaxed from `Deny` to "a person is involved" on 2026-09-22, and the
+    /// reason matters more than the change.** This asserted `Deny` for all four,
+    /// which was implemented by making a truncated parse *match the path rule* —
+    /// so `never_auto = ["Read(.env)"]` refused any Bash command over ten
+    /// thousand characters, naming `Read(.env)` on a line that never mentions
+    /// `.env`. A heredoc writing a Markdown document hit it, twice, while this
+    /// repository's own specifications were being written.
+    ///
+    /// The property this test exists for is in its own first paragraph: the
+    /// failure was **`Undecided`**, silence. `Unresolved` is not silence — it is
+    /// documented here as *nobody looked*, answered to the provider as **ask**,
+    /// and it carries a sentence instead of a rule that does not apply. So the
+    /// assertion is now the property rather than one implementation of it: the
+    /// bare case denies, and a bound the parser hits reaches a person.
+    ///
+    /// It also stops diverging from the thing this mirrors. The vendor documents
+    /// a command past its analysis length as one that **"always prompts"**, and
+    /// the constitution's second principle is that Devplane may prohibit and may
+    /// **defer**. Refusing on *nobody looked* was neither.
     #[test]
     fn a_protected_file_cannot_be_pushed_past_the_analysis_bounds() {
         let p = Policy::rules(&["Read(.env)".into()], &[]);
@@ -3038,19 +3070,37 @@ mod tests {
                 .join(" ")
         );
         let over_long = format!("{} ; cat .env", "echo ".to_string() + &"x".repeat(10_050));
+        // The file is named and readable: this one refuses, and must.
+        assert!(
+            matches!(
+                p.restrictive(&ctx(), "Bash", &bash("cat .env")),
+                Verdict::Deny { rule } if rule == "Read(.env)"
+            ),
+            "the bare case: the deny did not fire"
+        );
+
+        // Past a bound, nobody read the operands — so a person is asked, with a
+        // sentence saying why. What must never happen is `Undecided`, which is
+        // the silence this test was written against.
         for (what, cmd) in [
-            ("the bare case", "cat .env".to_string()),
             ("past the operand cap", many_operands),
             ("past the nesting cap", deep),
             ("past the length the analysis reads", over_long),
         ] {
+            let v = p.restrictive(&ctx(), "Bash", &bash(&cmd));
             assert!(
-                matches!(
-                    p.restrictive(&ctx(), "Bash", &bash(&cmd)),
-                    Verdict::Deny { .. }
-                ),
-                "{what}: the deny did not fire"
+                matches!(v, Verdict::Unresolved { .. } | Verdict::Deny { .. }),
+                "{what}: reached {v:?}, so a call this rule set was written to catch went unnoticed"
             );
+            // And where it is `Unresolved`, the reason is a sentence rather than
+            // a rule that does not apply to the command.
+            if let Verdict::Unresolved { why } = &v {
+                assert!(
+                    !why.contains("Read(.env)"),
+                    "{what}: the reason names a rule the command never meets: {why}"
+                );
+                assert!(!why.trim().is_empty(), "{what}: no reason given");
+            }
         }
     }
 
@@ -4735,22 +4785,54 @@ mod tests {
         assert!(!wildcard("git push *", "git pushx"));
     }
 
+    /// **A comparison, because that is what the name claims.**
+    ///
+    /// Read and Edit rules run on the same synchronous hook a session is
+    /// blocked on, and gitignore matching does more work than one glob —
+    /// splitting, normalising and walking segments. The question is whether
+    /// that extra work is a different *order* of cost, and a comparison answers
+    /// it on a loaded machine where an absolute figure cannot.
+    ///
+    /// It asserted `each < 200µs` and failed at 205µs inside the full suite
+    /// while passing alone: a stopwatch in a parallel suite measures the suite.
+    /// **The ratio survives that**, because a load spike slows both halves, and
+    /// the absolute bound that remains is deliberately two orders of magnitude
+    /// loose — it is there to catch *catastrophically* wrong, not to price
+    /// anything.
     #[test]
     fn a_path_rule_is_as_cheap_as_a_command_rule() {
-        // Read and Edit rules run on the same synchronous hook a session is
-        // blocked on, and gitignore matching does more work than one glob —
-        // splitting, normalising and walking segments. The budget does not
-        // move because the shape of the rule did.
-        let p = Policy::rules(&["Read(.env)".into(), "Read(//**/.ssh/**)".into()], &[]);
-        let input = json!({"file_path": "/repo/src/deeply/nested/module/file.rs"});
-        let started = std::time::Instant::now();
-        for _ in 0..10_000 {
-            p.restrictive(&ctx(), "Edit", &input);
-        }
-        let each = started.elapsed() / 10_000;
+        const RUNS: u32 = 10_000;
+        let path = Policy::rules(&["Read(.env)".into(), "Read(//**/.ssh/**)".into()], &[]);
+        let command = Policy::rules(&["Bash(rm *)".into(), "Bash(curl:*)".into()], &[]);
+        let path_input = json!({"file_path": "/repo/src/deeply/nested/module/file.rs"});
+        let command_input = json!({"command": "cargo test --workspace"});
+
+        let time = |p: &Policy, tool: &str, input: &serde_json::Value| {
+            let started = std::time::Instant::now();
+            for _ in 0..RUNS {
+                p.restrictive(&ctx(), tool, input);
+            }
+            started.elapsed() / RUNS
+        };
+
+        // Interleaved, so a spike that hits one half is likely to hit both.
+        let c1 = time(&command, "Bash", &command_input);
+        let p1 = time(&path, "Edit", &path_input);
+        let c2 = time(&command, "Bash", &command_input);
+        let p2 = time(&path, "Edit", &path_input);
+        let command_each = c1.min(c2);
+        let path_each = p1.min(p2);
+
         assert!(
-            each < std::time::Duration::from_micros(200),
-            "a path check took {each:?}; the budget is microseconds"
+            path_each <= command_each * 10,
+            "a path check took {path_each:?} against {command_each:?} for a command check —              gitignore matching has stopped being the same order of cost"
+        );
+        // The floor under both: this runs on a hook a session waits on, and
+        // ten thousand of them finishing inside a second means nothing here has
+        // become accidentally quadratic.
+        assert!(
+            path_each < std::time::Duration::from_micros(100),
+            "a path check took {path_each:?}, which is not a slow machine"
         );
     }
 

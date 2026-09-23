@@ -245,11 +245,27 @@ button:disabled {
   background: transparent;
 }
 
-input, select, textarea {
+/* **Text-shaped controls only.** This applied to every `input`, checkboxes
+   included — so a checkbox got a text field's padding, border and panel
+   background, which squashes or erases the native glyph. The project picker on
+   *Start work* rendered as a run of bare project names with blank boxes beside
+   them, and there was no way to tell a chosen project from an unchosen one. */
+input:not([type="checkbox"]):not([type="radio"]), select, textarea {
   padding: 0.35rem 0.55rem;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);
+}
+
+/* A checkbox is a glyph the platform draws. Give it a size and the accent, and
+   otherwise stay out of its way — a hand-drawn one loses the indeterminate
+   state, the focus ring and every assistive-technology affordance with it. */
+input[type="checkbox"], input[type="radio"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0;
+  accent-color: var(--accent);
+  flex: none;
 }
 
 input::placeholder { color: var(--faint); }
@@ -499,22 +515,50 @@ ul, ol { margin: 0; padding: 0; }
   h2.svelte-7irco5 { font-size: 1rem; margin: 0 0 .5rem; }
   textarea.svelte-7irco5 { width: 100%; max-width: 44rem; font: inherit; padding: .4rem;
              background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
-  fieldset.svelte-7irco5 { border: 1px solid var(--line); margin: .5rem 0; padding: .4rem .6rem; }
-  legend.svelte-7irco5 { color: var(--dim); font-size: .8rem; }
-  label.svelte-7irco5 { margin-right: .8rem; }
+  fieldset.svelte-7irco5 {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin: var(--s-3) 0;
+    padding: var(--s-2) var(--s-3) var(--s-3);
+  }
+  legend.svelte-7irco5 { color: var(--dim); font-size: var(--t-xs); padding: 0 var(--s-1); }
+
+  /* Wrapped rather than inline: a project is a target somebody points at, and
+     six of them in a sentence is a sentence. */
+  .where.svelte-7irco5 { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+  .where.svelte-7irco5 label:where(.svelte-7irco5) {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    padding: var(--s-1) var(--s-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    cursor: pointer;
+    line-height: 1.4;
+  }
+  .where.svelte-7irco5 label:where(.svelte-7irco5):hover { background: var(--panel); }
+  /* Chosen is carried by the ground and the weight as well as the tick, so it
+     survives greyscale — nothing here may be distinguishable by colour alone. */
+  .where.svelte-7irco5 label.on:where(.svelte-7irco5) {
+    background: var(--panel);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  .picked.svelte-7irco5 { font-size: var(--t-xs); margin: var(--s-2) 0 0; }
   .will.svelte-7irco5 { margin-top: .6rem; }
   .will.svelte-7irco5 ul:where(.svelte-7irco5) { list-style: none; margin: .2rem 0; padding: 0; }
+  .will.svelte-7irco5 li:where(.svelte-7irco5) { padding: .1rem 0; display: flex; gap: .6rem; align-items: baseline; }
   .refused.svelte-7irco5 { color: var(--fail); }
   .warn.svelte-7irco5 { color: var(--wait); }
   .dim.svelte-7irco5 { color: var(--dim); }
 
-  h2.svelte-1n13jp3 { font-size: 1rem; margin: 0 0 .3rem; }
-  [role="tablist"].svelte-1n13jp3 { display: flex; gap: .3rem; margin-bottom: .3rem; }
-  ul.svelte-1n13jp3 { list-style: none; margin: 0; padding: 0; }
-  li.svelte-1n13jp3 { display: flex; gap: .6rem; padding: .1rem 0; align-items: baseline; }
-  .where.svelte-1n13jp3 { color: var(--dim); font-weight: 600; }
-  .wait.svelte-1n13jp3 { color: var(--wait); }
-  .empty.svelte-1n13jp3 { color: var(--dim); max-width: 60ch; }
+  h2.svelte-sff017 { font-size: 1rem; margin: 0 0 .3rem; }
+  [role="tablist"].svelte-sff017 { display: flex; gap: .3rem; margin-bottom: .3rem; }
+  ul.svelte-sff017 { list-style: none; margin: 0; padding: 0; }
+  li.svelte-sff017 { display: flex; gap: .6rem; padding: .1rem 0; align-items: baseline; }
+  .where.svelte-sff017 { color: var(--dim); font-weight: 600; }
+  .wait.svelte-sff017 { color: var(--wait); }
+  .empty.svelte-sff017 { color: var(--dim); max-width: 60ch; }
 
   h2.svelte-ytvk4v { font-size: var(--t-lg); margin: 0 0 var(--s-1); }
   .hairline.svelte-ytvk4v, .said.svelte-ytvk4v { color: var(--dim); font-size: var(--t-xs); margin: 0; }
@@ -575,6 +619,27 @@ ul, ol { margin: 0; padding: 0; }
   .choice.svelte-ytvk4v { border-color: var(--edge); font-weight: 500; }
   .dead.svelte-ytvk4v { color: var(--dim); font-size: var(--t-sm); align-self: center; }
 
+  /* A link that does the same job as a button beside it looks like one. */
+  .act.svelte-ytvk4v {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--s-1) var(--s-3);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    color: var(--ink);
+    text-decoration: none;
+    font-size: var(--t-sm);
+  }
+  .act.svelte-ytvk4v:hover { background: var(--panel); }
+  .elsewhere.svelte-ytvk4v { color: var(--dim); font-size: var(--t-sm); margin-top: var(--s-2); }
+  /* A command to type, not a control. It must not look pressable. */
+  .cmd.svelte-ytvk4v {
+    align-self: center;
+    color: var(--dim);
+    font-size: var(--t-sm);
+    user-select: all;
+  }
+
   .reply.svelte-ytvk4v { display: flex; gap: var(--s-2); margin-top: var(--s-3); }
   .reply.svelte-ytvk4v input:where(.svelte-ytvk4v) { flex: 1; max-width: 28rem; }
 
@@ -613,6 +678,18 @@ ul, ol { margin: 0; padding: 0; }
     overflow: hidden; clip-path: inset(50%); white-space: nowrap;
   }
 
+  h2.svelte-1gnuxub { font-size: 1rem; margin: 0 0 .4rem; }
+  table.svelte-1gnuxub { border-collapse: collapse; font-size: .86rem; }
+  th.svelte-1gnuxub, td.svelte-1gnuxub { text-align: left; padding: .2rem .6rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  thead.svelte-1gnuxub th:where(.svelte-1gnuxub) { color: var(--dim); font-weight: 600; }
+  tbody.svelte-1gnuxub th:where(.svelte-1gnuxub) { font-weight: 600; }
+  .origin.svelte-1gnuxub { color: var(--dim); font-weight: 400; margin-left: .4rem; font-size: .8rem; }
+  .ok.svelte-1gnuxub { color: var(--done); }
+  .warn.svelte-1gnuxub { color: var(--wait); }
+  .dim.svelte-1gnuxub, .empty.svelte-1gnuxub, .foot.svelte-1gnuxub { color: var(--dim); }
+  .foot.svelte-1gnuxub { font-size: .82rem; margin-top: .6rem; }
+  .empty.svelte-1gnuxub { max-width: 70ch; }
+
   h2.svelte-1acjvix { font-size: 1rem; margin: 0 0 .3rem; }
   form.svelte-1acjvix { display: flex; gap: .3rem; }
   input.svelte-1acjvix { flex: 1; max-width: 30rem; font: inherit; padding: .25rem .35rem;
@@ -623,12 +700,18 @@ ul, ol { margin: 0; padding: 0; }
   .empty.svelte-1acjvix { max-width: 60ch; }
 
   h2.svelte-1y95tkv { font-size: 1rem; margin: 0 0 .3rem; }
+  h3.svelte-1y95tkv { font-size: .85rem; color: var(--dim); margin: .9rem 0 .2rem; font-weight: 600; }
   dl.svelte-1y95tkv { display: grid; grid-template-columns: max-content 1fr; gap: .15rem .8rem; margin: .3rem 0; }
   dt.svelte-1y95tkv { color: var(--dim); font-size: .82rem; }
-  dd.svelte-1y95tkv { margin: 0; }
+  dd.svelte-1y95tkv { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  ul.svelte-1y95tkv { list-style: none; margin: .2rem 0; padding: 0; }
+  li.svelte-1y95tkv { display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; padding: .1rem 0; }
+  .path.svelte-1y95tkv { color: var(--dim); font-size: .82rem; overflow-wrap: anywhere; }
   .dim.svelte-1y95tkv, .empty.svelte-1y95tkv, .foot.svelte-1y95tkv { color: var(--dim); }
-  .foot.svelte-1y95tkv { font-size: .82rem; margin-top: .6rem; max-width: 70ch; }
-  .empty.svelte-1y95tkv { max-width: 60ch; }
+  .warn.svelte-1y95tkv { color: var(--wait); }
+  .ok.svelte-1y95tkv { color: var(--done); }
+  .foot.svelte-1y95tkv { font-size: .82rem; margin-top: .9rem; max-width: 70ch; }
+  .empty.svelte-1y95tkv { max-width: 70ch; }
 
   h2.svelte-1r7h8sn { font-size: 1rem; margin: 0 0 .3rem; }
   ul.svelte-1r7h8sn { list-style: none; margin: 0; padding: 0; }
@@ -649,6 +732,7 @@ ul, ol { margin: 0; padding: 0; }
     border-radius: var(--radius);
     background: var(--panel);
   }
+  .copy.svelte-17rlgir { margin-top: var(--s-3); }
   dt.svelte-17rlgir { color: var(--dim); font-size: var(--t-sm); }
   dd.svelte-17rlgir { margin: 0; min-width: 0; }
   ul.svelte-17rlgir { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
@@ -663,12 +747,17 @@ ul, ol { margin: 0; padding: 0; }
     overflow: hidden; clip-path: inset(50%); white-space: nowrap;
   }
 
+  .also.svelte-17kmig3 { margin: 0 0 var(--s-3); font-size: var(--t-sm); }
   h2.svelte-17kmig3 { font-size: var(--t-lg); margin: 0 0 var(--s-3); }
   .said.svelte-17kmig3 { color: var(--dim); font-size: var(--t-xs); margin: var(--s-1) 0; }
   .said.svelte-17kmig3:empty { display: none; }
   .acts.svelte-17kmig3 { display: flex; gap: var(--s-2); margin-bottom: var(--s-3); }
   .acts.svelte-17kmig3:empty { display: none; }
   .dim.svelte-17kmig3 { color: var(--dim); max-width: 70ch; }
+  .picker.svelte-17kmig3 { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-bottom: var(--s-3); }
+  .picker.svelte-17kmig3 a:where(.svelte-17kmig3) { color: var(--dim); font-size: var(--t-sm); text-decoration: none; }
+  .picker.svelte-17kmig3 a:where(.svelte-17kmig3):hover { color: var(--ink); }
+  .picker.svelte-17kmig3 a[aria-current="page"]:where(.svelte-17kmig3) { color: var(--ink); font-weight: 600; }
 
   /* **First in the tab order and invisible until focused.** With no keyboard
      shortcuts, tabbing is the entire keyboard story here, and without this
@@ -685,11 +774,10 @@ ul, ol { margin: 0; padding: 0; }
   }
   .skip.svelte-1n46o8q:focus { left: var(--s-4); }
 
-  /* **A sidebar, not a strip of tabs.** Nine surfaces whose names are
-     sentences — *what needs you*, *is this actually done* — do not fit across
-     the top without becoming a menu bar you read left to right. Down the side
-     they are a list you scan, and the sentences stay, because they are what
-     tells a first-time reader what the thing is for. */
+  /* **A sidebar, not a strip of tabs.** The surfaces under four errand headings
+     do not fit across the top without becoming a menu bar you read left to
+     right. Down the side they are a list you scan. The errand is the heading,
+     read once; each item is the noun it shows. */
   .app.svelte-1n46o8q {
     display: grid;
     grid-template-columns: 15rem 1fr;
@@ -716,8 +804,23 @@ ul, ol { margin: 0; padding: 0; }
   .mark.svelte-1n46o8q b:where(.svelte-1n46o8q) { font-size: var(--t-md); letter-spacing: -0.02em; }
   .what.svelte-1n46o8q { color: var(--dim); font-size: var(--t-xs); line-height: 1.35; }
 
+  .find.svelte-1n46o8q { display: flex; }
+  .find.svelte-1n46o8q input:where(.svelte-1n46o8q) { width: 100%; min-width: 0; font-size: var(--t-sm); }
+
   nav.svelte-1n46o8q { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
   nav.svelte-1n46o8q ul:where(.svelte-1n46o8q) { list-style: none; display: flex; flex-direction: column; gap: 1px; }
+
+  /* **Quiet, and above the group it names.** It has to be readable and it must
+     not compete with the items — a band heading somebody reads before every
+     item is a heading that has become part of each label again. */
+  nav.svelte-1n46o8q h2:where(.svelte-1n46o8q) {
+    font-size: var(--t-xs);
+    font-weight: 600;
+    color: var(--dim);
+    letter-spacing: 0.01em;
+    line-height: 1.3;
+    margin: 0 0 var(--s-2) var(--s-3);
+  }
 
   /* The current surface is marked by weight, a ground and a bar — so it
      survives being read in greyscale, which colour alone would not. */
@@ -733,6 +836,16 @@ ul, ol { margin: 0; padding: 0; }
     color: var(--dim);
     line-height: 1.3;
   }
+  /* **The count, so an empty place looks empty before you go there.** A zero is
+     shown rather than hidden: *nothing here yet* is the fact, and an absent
+     number reads as one nobody measured. */
+  .tab.svelte-1n46o8q .n:where(.svelte-1n46o8q) {
+    margin-left: auto;
+    color: var(--dim);
+    font-size: var(--t-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .tab.svelte-1n46o8q .n.zero:where(.svelte-1n46o8q) { opacity: 0.55; }
   .tab.svelte-1n46o8q:hover:not([aria-current]) { color: var(--ink); background: var(--panel); }
   .tab[aria-current="page"].svelte-1n46o8q {
     color: var(--ink);
@@ -786,13 +899,35 @@ ul, ol { margin: 0; padding: 0; }
     }
     .what.svelte-1n46o8q { display: none; }
     .mark.svelte-1n46o8q { flex: none; }
+    /* **After the nav, and narrow.** At the head of the strip it took a fifth of
+       a phone's width and pushed the nav off — the first screenshot showed
+       `Inbox` and half of `Decisions`. The queue is the phone's errand, so it
+       comes first; the field is still reachable by scrolling, which is where a
+       desktop-shaped affordance belongs on a 500-pixel screen. */
+    .find.svelte-1n46o8q { flex: none; width: 6rem; order: 3; }
+    nav.svelte-1n46o8q { order: 2; }
+    .foot.svelte-1n46o8q { order: 4; }
     /* The nav is the only thing that scrolls sideways; the mark and the
        status sit outside it, or a scrolled tab slides under them. */
     nav.svelte-1n46o8q { flex-direction: row; gap: var(--s-2); min-width: 0; overflow-x: auto; scrollbar-width: none; }
     nav.svelte-1n46o8q::-webkit-scrollbar { display: none; }
     nav.svelte-1n46o8q ul:where(.svelte-1n46o8q) { flex-direction: row; gap: var(--s-1); }
+    /* **Off-screen here, and still in the accessibility tree.** Four errand
+       sentences sideways would be most of a phone's width. Short nouns scan in
+       a row without them, and the lists keep their names. */
+    nav.svelte-1n46o8q h2:where(.svelte-1n46o8q) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
     .tab.svelte-1n46o8q { white-space: nowrap; border-left: 0; border-bottom: 2px solid transparent; border-radius: 0; }
     .tab[aria-current="page"].svelte-1n46o8q { border-left-color: transparent; border-bottom-color: var(--accent); }
+    .tab.svelte-1n46o8q .n:where(.svelte-1n46o8q) { margin-left: var(--s-2); }
     /* **A ground of its own.** The nav scrolls sideways underneath it, and
        without a background a scrolled tab reads as text printed through the
        status. */

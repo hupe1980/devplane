@@ -5,9 +5,14 @@ import Board from "./Board.svelte";
 
 register({
   id: "board",
-  title: "What is happening",
-  band: "attention",
-  order: 1,
+  title: "Sessions",
+  heading: "What is happening",
+  band: "happening",
+  order: 0,
+  count: (feed) => {
+    const b = feed.board as { runs?: unknown[] } | null;
+    return b?.runs?.length ?? null;
+  },
   ports: ["attach", "focus"],
   select: (feed) => {
     const b = feed.board as {

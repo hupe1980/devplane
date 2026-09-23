@@ -819,6 +819,10 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
         port: bound.port(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         started_at: jiff::Timestamp::now().to_string(),
+        // Resolved rather than taken from `argv[0]`, which the caller chooses.
+        exe: std::env::current_exe()
+            .ok()
+            .map(|p| p.display().to_string()),
     })?;
 
     tracing::info!(%bound, "devplane daemon listening");

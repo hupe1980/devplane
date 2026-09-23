@@ -33,7 +33,7 @@
 </script>
 
 <section aria-labelledby="why-head">
-  <h2 id="why-head">Why this is here</h2>
+  <h2 id="why-head">Why this was decided</h2>
   {#if title}<p class="dim">{title}</p>{/if}
   <p class="said" role="status" aria-live="polite">{said}</p>
 

@@ -90,6 +90,28 @@ fn forget_resolved() {
 #[cfg(test)]
 pub(crate) static RESOLVED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Serialises the tests that read the counters below.
+///
+/// **A process-global counter in a threaded suite measures the suite.** Both
+/// counters here are `static`, `cargo test` runs this binary's tests in
+/// parallel, and any other test that evaluates a policy moves them — so a test
+/// that passes alone fails in the run, which is the same flakiness the
+/// stopwatch had, one level down. Every test that reads a counter takes this
+/// first.
+#[cfg(test)]
+pub(crate) static COUNTED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// How many times a project's `devplane.toml` has actually been parsed.
+///
+/// The same argument as [`RESOLVED`], applied to the other thing this cache
+/// exists to avoid. *Ten thousand lookups must not become ten thousand file
+/// reads* was asserted with a stopwatch — `each < 200µs` — which measures the
+/// machine: it passed alone and failed inside the full suite at 205µs, for a
+/// reason that has nothing to do with caching. The lesson was already written
+/// four lines above this one and had been applied to one of the two tests.
+#[cfg(test)]
+pub(crate) static PARSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// How often the file is re-checked for edits. Short enough that a rule takes
 /// effect while you are still looking at the terminal.
 const RECHECK: Duration = Duration::from_secs(1);
@@ -393,6 +415,8 @@ impl PolicyCache {
             tracing::info!(project = %root.display(), "policy reloaded");
         }
 
+        #[cfg(test)]
+        PARSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (rules, error) = match ProjectConfig::load(&root) {
             Ok(c) => (
                 Rules {
@@ -738,20 +762,36 @@ mod tests {
         ));
     }
 
+    /// **Ten thousand lookups must not become ten thousand file reads**, which
+    /// is what this test has always said in its first comment and did not
+    /// assert. It measured `elapsed / 10_000 < 200µs` — a stopwatch, on a
+    /// threaded suite — so it passed alone and failed at 205µs under load, for
+    /// a reason that has nothing to do with caching.
+    ///
+    /// The counter beside it already carried the argument: *a counter rather
+    /// than a stopwatch… a wall-clock assertion would be flaky on a loaded
+    /// machine and fail for reasons that have nothing to do with the property*.
+    /// That reasoning was written for `RESOLVED` and applied to one of the two
+    /// tests in this module.
     #[test]
     fn repeated_checks_are_cheap() {
-        // This runs on the hook Claude Code blocks on. Ten thousand lookups
-        // must not become ten thousand file reads.
+        use std::sync::atomic::Ordering;
+        let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
+        // This runs on the hook Claude Code blocks on.
         let dir = repo("fast", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
         let cache = PolicyCache::for_projects_only();
-        let started = Instant::now();
+
+        cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"}));
+        PARSED.store(0, Ordering::Relaxed);
         for _ in 0..10_000 {
             cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"}));
         }
-        let each = started.elapsed() / 10_000;
+        // **`RECHECK` is a second**, so a slow run may legitimately re-stat and
+        // re-read once or twice. What must not happen is a read per lookup.
+        let parsed = PARSED.load(Ordering::Relaxed);
         assert!(
-            each < Duration::from_micros(200),
-            "a policy check took {each:?}; the budget is microseconds"
+            parsed <= 4,
+            "ten thousand lookups parsed the config {parsed} times; the cache is not caching"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -771,6 +811,7 @@ mod tests {
         // different paths cost eleven questions. What the memo buys is that
         // **the same path is never asked about twice in one call**.
         use std::sync::atomic::Ordering;
+        let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
         let distinct: String = (0..10)
             .map(|i| format!("  \"Read(never-matches-{i}/deep/**)\",\n"))
             .collect();
@@ -816,16 +857,26 @@ mod tests {
             "ten rules under one prefix must not cost more than ten questions"
         );
 
-        // And the cost stays in the budget this whole module exists for: the
-        // hook a session waits on. A counter cannot say that, so the one
-        // wall-clock assertion here is a ceiling, not a measurement.
+        // And the cost stays inside the thing this module exists for: the hook a
+        // session waits on. A counter cannot say that, so this is the one
+        // wall-clock assertion here — **and it is a ceiling, which means it is
+        // set where only a regression trips it.**
+        //
+        // It was 250ms and it flaked: a hundred evaluations inside a parallel
+        // suite on a loaded machine is not a measurement of this code, which is
+        // the argument `RESOLVED`'s own doc comment makes four hundred lines
+        // up. A budget wearing a ceiling's clothes fails for reasons that have
+        // nothing to do with the property, and the cost of that is the next
+        // person reaching for `--no-fail-fast` instead of reading it.
         let started = std::time::Instant::now();
         for _ in 0..100 {
             cache.restrictive(&dir, "Read", &call);
         }
         assert!(
-            started.elapsed().as_millis() < 250,
-            "a hundred evaluations over ten path rules must stay far inside one hook timeout"
+            started.elapsed() < Duration::from_secs(2),
+            "a hundred evaluations over ten path rules took {:?} — something here has become \
+             accidentally quadratic, which is the only thing this bound is for",
+            started.elapsed()
         );
         std::fs::remove_dir_all(&dir).ok();
     }
