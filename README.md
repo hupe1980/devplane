@@ -150,7 +150,7 @@ devplane dispatch --to a,b,c "bump deps"   # one prompt, three repositories
 `devplane ls` works before you connect anything: sessions are discovered from Claude Code's own
 roster. Connecting is what adds cost, context usage, blocking and the permission gate.
 
-**`devplane --help` sorts those thirty-five commands into the five errands people arrive with** —
+**`devplane --help` sorts those thirty-six commands into the five errands people arrive with** —
 see what is happening · what needs you and what happened without you · start and steer work · set up
 a project · the daemon.
 
@@ -296,7 +296,7 @@ mean mirroring your agent's semantics for ever, which this project tried and sto
 [Verified done →](https://hupe1980.github.io/devplane/docs/verified-done/) ·
 [Configuration →](https://hupe1980.github.io/devplane/docs/configuration/)
 
-## 📐 Spec-driven, with no format to adopt
+## 📋 Spec-driven, with no format to adopt
 
 **Spec-driven development gets the one thing the category leaves out.** Every spec tool ships a
 consistency checker and none of them decides: Spec Kit's `/speckit.analyze` is *"STRICTLY
@@ -388,6 +388,20 @@ Sessions are still there — **Sessions**, under *see what is happening* in the 
 this category can show you those — Claude Code ships `claude agents` itself and does it better — so no
 effort goes into making them prettier than a terminal table.
 
+**Plans** is under the same heading, and it is the one thing an editor cannot do. If your repositories
+use Spec Kit, OpenSpec, Kiro or a folder of Markdown you wrote yourself, it shows what each project is
+working to: the specification its in-flight work names, how many boxes are still open, and which carry
+a line nobody has answered — for six repositories at once. A VS Code extension can render the
+specification of the repository you have open; only something watching the sessions *and* the files
+can say **done, and the plan it answers has eleven boxes unticked** — which is a sentence no exit code
+and no agent's self-report can produce alone, and which now arrives on the surface where you approve
+rather than inside a certificate afterwards.
+
+Nothing is interpreted. The outline is the Markdown headings, the progress is the `- [ ]` boxes in
+`tasks.md`, and a line counts as an unanswered question only if your `devplane.toml` said which words
+mark one. A repository that declares none sees none of this, and a specification with no task list
+reports *no task list* rather than complete.
+
 The sidebar is grouped under the same four errands `devplane --help` uses: the errand is the heading,
 and each item under it is a noun.
 
@@ -465,7 +479,7 @@ tries something else — so a rule that is too tight and a rule that is working 
 board, and the difference only shows up on the bill. Five refusals in one run says which rule keeps
 stopping it.
 
-## ⏳ A question outlives the agent that asked it
+## ⏱️ A question outlives the agent that asked it
 
 An agent asks you something. You are not at the desk; the machine reboots; the daemon stops. **The
 question is still there** — still in the inbox, still answerable — and answering it resumes the

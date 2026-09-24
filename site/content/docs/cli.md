@@ -47,7 +47,7 @@ declaration order:
 | **See what is happening** | `ls` `show` `tail` `watch` `search` `open` |
 | **What needs you, and what happened without you** | `inbox` `asks` `answer` `attention` `audit` `modes` `issues` `prs` `snooze` |
 | **Start and steer work** | `work` `dispatch` `batch` `say` `attach` `focus` `gate` `rewind` `library` |
-| **Set up a project** | `connect` `disconnect` `trust` `check` `explain` `rules` `speckit` `agents` `doctor` |
+| **Set up a project** | `connect` `disconnect` `trust` `check` `explain` `rules` `speckit` `agents` `doctor` `completions` |
 | **The daemon** | `serve` `stop` |
 
 Each command appears once, and its description comes from the command's own definition.
@@ -241,10 +241,40 @@ plain `devplane` does.
 | `--project <name>`, `-p` | one project; matches any part of the name, so `mat` finds `matter-kit` |
 | `--needs-you` | only what is waiting on a human |
 
+### `devplane completions`
+
+```sh
+devplane completions zsh   # or bash, or fish
+```
+
+Generated from the command tree, so it cannot fall behind it. **Needs no daemon.** Completing an id
+does need one and is silent without it — see [Shell completion](/devplane/docs/install/#shell-completion).
+
 ### `devplane inbox`
 
 What needs a human, most urgent first. Derived from state rather than stored, so it is correct after
 a restart. Ranked by level, then age, oldest first.
+
+```console
+$ devplane inbox --project saas       # one project, matched like `ls --project`
+$ devplane inbox --needs-you          # only what can be answered from here
+```
+
+`--needs-you` means **has an answer path**, not *a person is required*. A red gate needs somebody and
+cannot be answered from a list; a question with a reply can. It is derived from the controls a row
+actually offers, so it cannot disagree with them.
+
+**A narrowing is a view, not a preference.** Nothing is remembered between runs: a filter that
+persists is one you forget you set, and the next morning you are reading a subset of what needs you
+and do not know it. **A narrowed list always says how many it is not showing** — this tool is sold on
+one page for everything, and a page that quietly became a filter has broken that promise.
+
+Three empty answers, because they are three different facts: a name that matches no project says so
+and names the ones that do, *nothing needs you here* is not *nothing needs you*, and only the
+unnarrowed list gets the close — a day is not one project.
+
+The board narrows the same way, at `#inbox/<project>`, from the **same computation**. Two surfaces
+each deciding what `--project pay` means agree until one of them changes.
 
 **And when nothing needs you, it says what the day came to.** Every board in this category is built to
 be full; an empty list rendered as an absence is the surface failing at the moment it has the best

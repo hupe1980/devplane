@@ -1183,9 +1183,12 @@ fn the_inbox_does_not_re_sort_what_the_daemon_ranked() {
         );
     }
     // The positive half: an absence check passes on a surface that renders
-    // nothing at all.
+    // nothing at all. `shown` is the ranked list — `items`, or the daemon's
+    // reply to a narrowing, which `core::attention::narrow` ranked the same
+    // way. `the_waiting_list_is_one_list_and_not_a_list_per_project` holds it
+    // to being a bare alias.
     assert!(
-        text.contains("{#each items"),
+        text.contains("{#each shown"),
         "the inbox does not render the ranked list, so this guards nothing"
     );
 }
@@ -1371,10 +1374,32 @@ fn the_waiting_list_is_one_list_and_not_a_list_per_project() {
     }
     // The positive half: it renders the items it was given, in the order it
     // was given them.
+    //
+    // **It iterates `shown`, which is `items` or the daemon's narrowed reply**
+    // — never a locally filtered copy. Narrowing to one project happens in
+    // `core::attention::narrow`, beside the fold, for the reason the fold is
+    // there: the board and the terminal must narrow identically, and two
+    // surfaces each implementing *contains, case-insensitive* agree until one
+    // of them is changed. So the check is that the iterated source is a bare
+    // alias of what came in, and that nothing here re-derives the set.
     assert!(
-        text.contains("{#each items as i"),
+        text.contains("{#each shown as i"),
         "the inbox does not iterate the ranked list it was handed"
     );
+    assert!(
+        text.contains("const shown = $derived(narrowedFeed?.items ?? items)"),
+        "`shown` is no longer a bare alias of the ranked list the daemon sent — \
+         if the inbox has started deriving its own set, the order and the \
+         narrowing both have two authorities again"
+    );
+    for banned in [".filter((i)", "items.filter("] {
+        assert!(
+            !text.contains(banned),
+            "the inbox filters the ranked list locally ({banned}). Narrowing is \
+             `core::attention::narrow`, so that the terminal and the board \
+             cannot disagree about what `--project pay` means."
+        );
+    }
 }
 
 // **Dropped, each with the reason.** These assert something about the

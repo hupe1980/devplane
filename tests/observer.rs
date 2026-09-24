@@ -424,6 +424,11 @@ async fn telemetry_gives_the_run_its_cost_and_context() {
     // strings.
     c.post(format!("http://{addr}/devplane/otel/v1/logs"))
         .header("content-type", "application/json")
+        // The bearer the exporter now carries. `observe::connect` writes it as
+        // `OTEL_EXPORTER_OTLP_HEADERS` beside the endpoint, and it does so only
+        // when no foreign collector is configured — so it reaches this daemon
+        // and nothing else.
+        .header("authorization", format!("Bearer {token}"))
         .body(
             r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{
                 "body":{"stringValue":"claude_code.api_request"},
@@ -2531,4 +2536,538 @@ fn core_vendors_driven_only() -> Vec<String> {
         .iter()
         .map(|v| (*v).to_string())
         .collect()
+}
+
+/// **The telemetry endpoints are not open, and they were.**
+///
+/// They took OTLP records with no credential at all, on the stated grounds that
+/// an exporter could not carry one. The vendor documents
+/// `OTEL_EXPORTER_OTLP_HEADERS` on the same reference page as the endpoint
+/// variable, and `observe::connect` only ever writes the telemetry block when
+/// there is no other collector to leak it to.
+///
+/// The consequence was the one that matters for this product specifically: any
+/// process on the machine — and any page the browser happened to load — could
+/// post fabricated cost, context and session records into the ledger whose
+/// entire claim is a record of what happened and who decided it. A forged
+/// observation is not a lesser problem than a forged command here; the
+/// observations are the product.
+#[tokio::test]
+async fn telemetry_without_the_token_is_refused_on_every_signal() {
+    let (addr, token, c) = boot(Policy::default()).await;
+    for signal in ["logs", "traces", "metrics"] {
+        let url = format!("http://{addr}/devplane/otel/v1/{signal}");
+        let anonymous = c
+            .post(&url)
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            anonymous.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "/devplane/otel/v1/{signal} accepted a record from nobody"
+        );
+
+        let wrong = c
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer not-the-token")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            wrong.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "/devplane/otel/v1/{signal} accepted a wrong bearer"
+        );
+
+        let ours = c
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            ours.status().is_success(),
+            "/devplane/otel/v1/{signal} refused the real exporter"
+        );
+    }
+}
+
+/// **The board and the terminal narrow identically, because they narrow once.**
+///
+/// The property the fold already has and the reason it was built that way:
+/// `core::attention::narrow` is a pure function the daemon applies, and both
+/// surfaces ask the daemon. Two surfaces each implementing *contains,
+/// case-insensitive* agree until one of them is changed — and the one that
+/// changes is never the one somebody is looking at.
+///
+/// Driven through the API rather than through the pure function, because the
+/// claim is about the two callers rather than about the narrowing.
+#[tokio::test]
+async fn both_surfaces_narrow_from_one_computation() {
+    let (addr, token, c) = boot(Policy::default()).await;
+
+    // Two projects, each with a session that asked a question and stopped —
+    // the ordinary shape, and one that survives the turn ending.
+    for (n, dir) in [("alpha", "/tmp/alpha"), ("beta", "/tmp/beta")] {
+        post(
+            &c,
+            &addr,
+            "/devplane/hook",
+            &token,
+            &format!(
+                r#"{{"hook_event_name":"PreToolUse","session_id":"s-{n}","cwd":"{dir}",
+                    "tool_name":"AskUserQuestion",
+                    "tool_input":{{"questions":[{{"question":"Keep it in {n}?",
+                      "options":[{{"label":"Keep"}},{{"label":"Remove"}}]}}]}}}}"#
+            ),
+        )
+        .await;
+        post(
+            &c,
+            &addr,
+            "/devplane/hook",
+            &token,
+            &format!(r#"{{"hook_event_name":"Stop","session_id":"s-{n}","cwd":"{dir}"}}"#),
+        )
+        .await;
+    }
+
+    let whole = get_json(&c, &addr, "/api/inbox", &token).await;
+    let all = whole["items"].as_array().map(Vec::len).unwrap_or(0);
+    assert!(all >= 2, "expected both sessions to be waiting, got {all}");
+
+    // The narrowed reply is the same computation both surfaces read: the board
+    // fetches this URL for `#inbox/<project>`, the CLI for `--project`.
+    // The project's name is the last segment of its root, which is how the
+    // daemon names a directory it discovered.
+    let narrowed = get_json(&c, &addr, "/api/inbox?project=alpha", &token).await;
+    let listed = narrowed["items"].as_array().map(Vec::len).unwrap_or(0);
+    let left_out = narrowed["narrowed"]["count"].as_u64().unwrap_or(0) as usize;
+
+    assert!(listed < all, "narrowing to one project showed everything");
+    assert_eq!(
+        listed + left_out,
+        all,
+        "listed + narrowed away must equal what was raised — a row that is in \
+         neither has vanished, and this list is sold on being complete"
+    );
+    assert_eq!(
+        narrowed["narrowed"]["no_such_project"], false,
+        "a project that exists was reported as a typo"
+    );
+
+    // **The close does not render over a narrowed list.** It answers *how was
+    // the day*, and a day is not one project.
+    assert!(
+        narrowed["close"].is_null(),
+        "the close was composed for a narrowed list"
+    );
+    assert!(
+        !whole["close"].is_null(),
+        "the unnarrowed list lost its close"
+    );
+
+    // A name nobody has is its own answer, not an empty project.
+    let typo = get_json(&c, &addr, "/api/inbox?project=zzzz", &token).await;
+    assert_eq!(typo["narrowed"]["no_such_project"], true);
+    assert_eq!(typo["items"].as_array().map(Vec::len).unwrap_or(9), 0);
+}
+
+/// **Narrowing is a view of the inbox and changes nothing about what was
+/// raised.**
+///
+/// `devplane attention` reports the record — how often a kind was raised and
+/// what came of it — and a filter somebody typed this morning must not move
+/// those numbers. They are two different questions and the second one is how
+/// this product measures whether its own inbox is any good.
+#[tokio::test]
+async fn a_narrowing_does_not_change_what_was_raised() {
+    let (addr, token, c) = boot(Policy::default()).await;
+    post(
+        &c,
+        &addr,
+        "/devplane/hook",
+        &token,
+        r#"{"hook_event_name":"PreToolUse","session_id":"s-a","cwd":"/tmp/alpha",
+            "tool_name":"AskUserQuestion",
+            "tool_input":{"questions":[{"question":"Keep it?",
+              "options":[{"label":"Keep"},{"label":"Remove"}]}]}}"#,
+    )
+    .await;
+
+    let _ = get_json(&c, &addr, "/api/inbox?read=true", &token).await;
+
+    // **The structural half, which is the one that can be asserted here.** The
+    // record is written by the daemon's own loop rather than by a read, so a
+    // test that waits for a row would be timing the notifier. What this holds
+    // is that the narrowing cannot reach this route at all: the same window
+    // answers the same way whether or not somebody appends a filter to it.
+    let plain = get_json(&c, &addr, "/api/attention?days=7", &token).await;
+    let with_filter = get_json(
+        &c,
+        &addr,
+        "/api/attention?days=7&project=alpha&needs_you=true",
+        &token,
+    )
+    .await;
+
+    // Everything but `since`, which is `now` minus the window and moves on its
+    // own between two calls — comparing it would make this a clock test.
+    for field in ["kinds", "oversight", "agents", "days"] {
+        assert_eq!(
+            plain[field], with_filter[field],
+            "a narrowing changed `{field}` in the attention record, which is about \
+             what was raised rather than about what somebody chose to look at"
+        );
+    }
+
+    // And narrowing the inbox does not write to it either.
+    let before = get_json(&c, &addr, "/api/attention?days=7", &token).await;
+    let _ = get_json(&c, &addr, "/api/inbox?project=nothing-like-this", &token).await;
+    let _ = get_json(&c, &addr, "/api/inbox?needs_you=true", &token).await;
+    let after = get_json(&c, &addr, "/api/attention?days=7", &token).await;
+    for field in ["kinds", "oversight", "agents", "days"] {
+        assert_eq!(
+            before[field], after[field],
+            "reading a narrowed inbox moved `{field}`"
+        );
+    }
+}
+
+/// **A hold nobody answers is indistinguishable from today.**
+///
+/// The feature's whole safety argument. A `command` hook that reaches its
+/// timeout is cancelled and its output discarded, so it renders no decision and
+/// Claude Code shows its own dialog — `PreToolUse` and `PreModelSwitch` are the
+/// documented exceptions and `PermissionRequest` is not one. So the failure
+/// mode of a hold is *exactly* the behaviour with no hold configured.
+///
+/// This is the objection the feature was rejected on, turned into the reason to
+/// bound it: holding stalls the session before the vendor's dialog appears, and
+/// a bounded hold lets that dialog arrive a few seconds later instead.
+#[tokio::test]
+async fn a_hold_nobody_answers_lapses_and_decides_nothing() {
+    let (addr, token, c) = boot(Policy::default()).await;
+
+    let before = get_json(&c, &addr, "/api/decisions", &token).await;
+    let before = before.as_array().map(Vec::len).unwrap_or(0);
+
+    let started = std::time::Instant::now();
+    let said = post(
+        &c,
+        &addr,
+        "/devplane/hold",
+        &token,
+        r#"{"session":"s-hold","cwd":"/tmp/alpha","tool":"Bash",
+            "call":"git push origin main","message":"Bash · git push","wait_ms":400}"#,
+    )
+    .await;
+    let took = started.elapsed();
+
+    let v: serde_json::Value = serde_json::from_str(&said).expect("the hold answers JSON");
+    assert!(
+        v["behavior"].is_null(),
+        "an unanswered hold produced a decision: {said}"
+    );
+    assert!(
+        took >= std::time::Duration::from_millis(300),
+        "the hold returned in {took:?} without waiting for anybody"
+    );
+
+    // **Nothing was decided, so nothing is recorded.** A row here would be this
+    // product claiming an authority for a call it handed straight back.
+    let after = get_json(&c, &addr, "/api/decisions", &token).await;
+    assert_eq!(
+        after.as_array().map(Vec::len).unwrap_or(0),
+        before,
+        "a lapsed hold wrote to the decision log"
+    );
+}
+
+/// **A person's selection is carried, and recorded as theirs.**
+///
+/// The decision is in transit, not a verdict: the policy engine never sees it,
+/// and it is unconstructible without the selection having been written down
+/// first.
+#[tokio::test]
+async fn a_person_can_answer_a_watched_permission_from_anywhere() {
+    let (addr, token, c) = boot(Policy::default()).await;
+
+    // The hook holds. Answered from another surface while it waits.
+    let held = tokio::spawn({
+        let (c, addr, token) = (c.clone(), addr, token.clone());
+        async move {
+            post(
+                &c,
+                &addr,
+                "/devplane/hold",
+                &token,
+                r#"{"session":"s-ans","cwd":"/tmp/alpha","tool":"Bash",
+                    "call":"git push origin main","message":"Bash · git push","wait_ms":8000}"#,
+            )
+            .await
+        }
+    });
+
+    // Find the ask the hold raised, the way a surface would.
+    let mut id = String::new();
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let asks = get_json(&c, &addr, "/api/asks", &token).await;
+        if let Some(a) = asks["open"].as_array().and_then(|a| a.first())
+            && let Some(s) = a["id"].as_str()
+        {
+            id = s.to_string();
+            break;
+        }
+    }
+    assert!(
+        !id.is_empty(),
+        "the hold raised nothing a surface could answer"
+    );
+
+    let answered = post(
+        &c,
+        &addr,
+        &format!("/api/asks/{id}/answer"),
+        &token,
+        r#"{"option":"allow"}"#,
+    )
+    .await;
+    assert!(
+        !answered.contains("error"),
+        "answering the held permission failed: {answered}"
+    );
+
+    let said = held.await.expect("the hold returns");
+    let v: serde_json::Value = serde_json::from_str(&said).expect("JSON");
+    assert_eq!(
+        v["behavior"], "allow",
+        "the person's selection was not carried: {said}"
+    );
+}
+
+/// **Nothing but a recorded human selection can produce an `allow` here.**
+///
+/// Asserted as an absence over the values that are not one. This path carries a
+/// decision; it may never make one, and there is no `Verdict::Allow` in this
+/// product for it to have returned.
+#[tokio::test]
+async fn no_rule_clock_or_default_can_allow_through_a_hold() {
+    let (addr, token, c) = boot(Policy::default()).await;
+
+    for answer in [
+        r#"{"option":"maybe"}"#,
+        r#"{"option":""}"#,
+        r#"{"text":"allow"}"#,
+    ] {
+        let held = tokio::spawn({
+            let (c, addr, token) = (c.clone(), addr, token.clone());
+            async move {
+                post(
+                    &c,
+                    &addr,
+                    "/devplane/hold",
+                    &token,
+                    r#"{"session":"s-x","cwd":"/tmp/alpha","tool":"Bash","call":"rm x",
+                        "message":"Bash · rm x","wait_ms":700}"#,
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let asks = get_json(&c, &addr, "/api/asks", &token).await;
+        if let Some(a) = asks["open"].as_array().and_then(|a| a.first())
+            && let Some(id) = a["id"].as_str()
+        {
+            let _ = post(&c, &addr, &format!("/api/asks/{id}/answer"), &token, answer).await;
+        }
+        let said = held.await.expect("the hold returns");
+        let v: serde_json::Value = serde_json::from_str(&said).expect("JSON");
+        assert!(
+            v["behavior"].is_null(),
+            "`{answer}` produced a behavior this product cannot stand behind: {said}"
+        );
+    }
+}
+
+/// **An answer has to name something that was asked.**
+///
+/// `Decision::Option(id)` labels as `allow` for any id that is not literally
+/// `Deny`, on the supposition that the id is one the agent published and that
+/// the agent's own protocol decides what it means. **Nothing checked that
+/// supposition.** A caller passing an id nobody offered — a typo, an id read
+/// off a stale row, a client guessing — had an `allow` written to the decision
+/// log under their name, for a call no person approved.
+///
+/// Found by an absence check on a neighbouring feature rather than by an audit
+/// of this one: the neighbouring feature asserted that nothing but a recorded
+/// human selection can produce an approval, and this path could.
+///
+/// Refused **before** the answer is written, because the write happens before
+/// anything is delivered — that ordering is what makes a crash between the two
+/// replay as answered, and validating after it would be validating a fact
+/// already recorded.
+#[tokio::test]
+async fn an_option_nobody_offered_is_refused_rather_than_recorded_as_an_allow() {
+    let (addr, token, c) = boot(Policy::default()).await;
+
+    let held = tokio::spawn({
+        let (c, addr, token) = (c.clone(), addr, token.clone());
+        async move {
+            post(
+                &c,
+                &addr,
+                "/devplane/hold",
+                &token,
+                r#"{"session":"s-opt","cwd":"/tmp/alpha","tool":"Bash","call":"rm -rf x",
+                    "message":"Bash · rm -rf x","wait_ms":1500}"#,
+            )
+            .await
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let asks = get_json(&c, &addr, "/api/asks", &token).await;
+    let id = asks["open"][0]["id"]
+        .as_str()
+        .expect("the hold raised an ask")
+        .to_string();
+
+    let said = post(
+        &c,
+        &addr,
+        &format!("/api/asks/{id}/answer"),
+        &token,
+        r#"{"option":"maybe"}"#,
+    )
+    .await;
+    assert!(
+        said.contains("not one of the answers"),
+        "an option nobody offered was accepted: {said}"
+    );
+    // And it names what *was* offered, so the refusal is actionable.
+    assert!(said.contains("allow") && said.contains("deny"), "{said}");
+
+    // The hold lapses, because nothing was answered.
+    let v: serde_json::Value = serde_json::from_str(&held.await.unwrap()).unwrap();
+    assert!(v["behavior"].is_null(), "a refused option still decided");
+
+    // And an option that *was* offered still works, or this is a mute button.
+    let held = tokio::spawn({
+        let (c, addr, token) = (c.clone(), addr, token.clone());
+        async move {
+            post(
+                &c,
+                &addr,
+                "/devplane/hold",
+                &token,
+                r#"{"session":"s-opt2","cwd":"/tmp/alpha","tool":"Bash","call":"rm -rf x",
+                    "message":"Bash · rm -rf x","wait_ms":4000}"#,
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let asks = get_json(&c, &addr, "/api/asks", &token).await;
+    let id = asks["open"][0]["id"]
+        .as_str()
+        .expect("a second ask")
+        .to_string();
+    let _ = post(
+        &c,
+        &addr,
+        &format!("/api/asks/{id}/answer"),
+        &token,
+        r#"{"option":"deny"}"#,
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&held.await.unwrap()).unwrap();
+    assert_eq!(v["behavior"], "deny", "an offered option stopped working");
+}
+
+/// **A held permission says an agent is waiting, and does not offer to take you
+/// to the editor.**
+///
+/// The point of a hold is to *not* go there. An item that offered `focus` while
+/// the agent sat waiting would be the surface undoing the feature — and the
+/// sentence a stranded ask carries, *the agent that asked is no longer
+/// running*, is confidently wrong about the one fact that decides whether to
+/// hurry.
+#[tokio::test]
+async fn a_held_permission_says_somebody_is_waiting_and_offers_no_editor() {
+    let (addr, token, c) = boot(Policy::default()).await;
+
+    let held = tokio::spawn({
+        let (c, addr, token) = (c.clone(), addr, token.clone());
+        async move {
+            post(
+                &c,
+                &addr,
+                "/devplane/hold",
+                &token,
+                r#"{"session":"s-wait","cwd":"/tmp/alpha","tool":"Bash","call":"git push",
+                    "message":"Bash · git push","wait_ms":3000}"#,
+            )
+            .await
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    let row = inbox["items"]
+        .as_array()
+        .and_then(|a| a.iter().find(|i| i["kind"] == "permission"))
+        .expect("the hold reached the inbox");
+
+    let detail = row["detail"].as_str().unwrap_or("");
+    assert!(
+        detail.contains("waiting for you right now"),
+        "a held permission does not say somebody is waiting: {detail}"
+    );
+    assert!(
+        detail.contains("left"),
+        "a held permission does not say how long remains: {detail}"
+    );
+    assert!(
+        !detail.contains("no longer running"),
+        "a held permission claims its agent is gone while it sits there waiting"
+    );
+
+    let actions: Vec<&str> = row["actions"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        !actions.contains(&"focus"),
+        "answering here offers to take you to the editor, which is the thing a \
+         hold exists to avoid: {actions:?}"
+    );
+    assert!(
+        actions.contains(&"choose") || actions.contains(&"reply"),
+        "a held permission cannot be answered: {actions:?}"
+    );
+
+    // And once it lapses, the vendor's own dialog is the only thing that can
+    // answer — so raising the window becomes the honest offer rather than the
+    // only one left.
+    let _ = held.await;
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    if let Some(row) = inbox["items"]
+        .as_array()
+        .and_then(|a| a.iter().find(|i| i["kind"] == "permission"))
+    {
+        let detail = row["detail"].as_str().unwrap_or("");
+        assert!(
+            detail.contains("hold ran out"),
+            "a lapsed hold does not say so: {detail}"
+        );
+    }
 }

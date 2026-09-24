@@ -287,7 +287,21 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         // The question stopped being answerable. Clearing the block is what
         // takes the row out of the inbox; leaving it would keep a button whose
         // request no longer exists.
+        // **A question that ended without an answer, and for once it is not a
+        // subtraction.**
+        //
+        // Claude Code publishes no ending, so an abandonment there is derived:
+        // the agent asked, then started another tool call, so nobody answered.
+        // OpenCode **sends** this — `question.rejected`, on a session Devplane
+        // never started, with nothing installed into the agent — and the
+        // derivation and the statement must produce the same record or the
+        // product is saying two different things about one fact.
+        //
+        // The authority is not on this event and none is invented. The vendor's
+        // schema is closed over `sessionID` and `requestID`, which is a
+        // statement that there is no cause here rather than an omission of one.
         Event::QuestionEnded { .. } => {
+            abandon_open_question(run, env.at, None);
             if matches!(run.state, RunState::Waiting(WaitingFor::Question)) {
                 run.state = RunState::Working;
                 run.blocked_on = None;
@@ -2011,5 +2025,122 @@ mod tests {
         // happen, not whether the last one got through.
         apply(&mut r, &ev(refuse("policy:Read", "allow")));
         assert_eq!(r.refusals, 4);
+    }
+}
+
+#[cfg(test)]
+mod published_endings {
+    use super::*;
+    use crate::core::event::{EventEnvelope, Source};
+    use crate::core::ids::RunId;
+
+    fn hint() -> crate::core::world::RunHint {
+        crate::core::world::RunHint::default()
+    }
+
+    fn ask(run: &str) -> EventEnvelope {
+        EventEnvelope::new(
+            RunId::new(run),
+            Source::Hook,
+            Event::QuestionAsked {
+                question: "Keep the legacy route?".into(),
+                options: Vec::new(),
+                request_id: None,
+                ask: None,
+                form: None,
+            },
+        )
+    }
+
+    /// **An ending the vendor publishes records the same thing a derived one
+    /// does.**
+    ///
+    /// Claude Code publishes no ending, so an abandonment there is a
+    /// subtraction: the agent asked, then started another tool call. OpenCode
+    /// *sends* it. If the statement and the derivation produced different
+    /// records, this product would be saying two things about one fact — and
+    /// the surface that is sold on *a question nobody answered* would show a
+    /// vendor's own event as though nothing had happened.
+    #[test]
+    fn a_published_ending_records_an_abandonment_like_a_derived_one() {
+        let mut w = crate::core::World::default();
+        w.apply(ask("ses_a"), hint());
+        let r = w.run(&RunId::new("ses_a")).expect("the ask made a run");
+        assert!(r.state.needs_human(), "the ask did not block the run");
+        assert!(r.abandoned_questions.is_empty(), "still waiting");
+
+        w.apply(
+            EventEnvelope::new(
+                RunId::new("ses_a"),
+                Source::Hook,
+                Event::QuestionEnded {
+                    request_id: "que_7".into(),
+                },
+            ),
+            hint(),
+        );
+        let r = w.run(&RunId::new("ses_a")).expect("the run is still there");
+        assert_eq!(
+            r.abandoned_questions.len(),
+            1,
+            "a question the vendor said was rejected left no record"
+        );
+        assert_eq!(
+            r.abandoned_questions[0].question, "Keep the legacy route?",
+            "the record lost the question"
+        );
+        assert!(
+            !r.state.needs_human(),
+            "the run is still waiting on a person"
+        );
+    }
+
+    /// **An answer is not an abandonment**, asserted beside it so neither can
+    /// drift into the other.
+    #[test]
+    fn an_answered_question_leaves_no_abandonment() {
+        let mut w = crate::core::World::default();
+        w.apply(ask("ses_b"), hint());
+        w.apply(
+            EventEnvelope::new(
+                RunId::new("ses_b"),
+                Source::Hook,
+                Event::QuestionAnswered {
+                    action: "accept".into(),
+                },
+            ),
+            hint(),
+        );
+        let r = w.run(&RunId::new("ses_b")).expect("the run is there");
+        assert!(
+            r.abandoned_questions.is_empty(),
+            "a question somebody answered was recorded as abandoned"
+        );
+        assert!(!r.state.needs_human());
+    }
+
+    /// **An ending for a question this daemon never saw invents nothing.**
+    ///
+    /// Devplane started after the ask, so there is no question text. Recording
+    /// the ending with a made-up question would be worse than recording
+    /// nothing: the surface exists to show what an agent actually asked.
+    #[test]
+    fn an_ending_with_no_question_behind_it_invents_no_text() {
+        let mut w = crate::core::World::default();
+        w.apply(
+            EventEnvelope::new(
+                RunId::new("ses_c"),
+                Source::Hook,
+                Event::QuestionEnded {
+                    request_id: "que_9".into(),
+                },
+            ),
+            hint(),
+        );
+        let r = w.run(&RunId::new("ses_c")).expect("the run is there");
+        assert!(
+            r.abandoned_questions.is_empty(),
+            "a question nobody saw was given text"
+        );
     }
 }

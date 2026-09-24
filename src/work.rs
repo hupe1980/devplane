@@ -142,6 +142,13 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<WorkId> {
         req.prompt.clone(),
     );
     work.spec = req.spec.clone();
+    // **What the plan was when this started**, so *it changed underneath* is a
+    // comparison rather than a suspicion. Read from the repository root rather
+    // than the worktree: the worktree does not exist yet, and the plan the
+    // agent will be working to is the one in the project now.
+    work.spec_at_start = req.spec.as_deref().and_then(|spec| {
+        crate::core::spec::Spec::read(&root, spec, &config.spec.open_questions).fingerprint()
+    });
     work.batch_id = req.batch_id.clone();
 
     // The isolated checkout, named the way Claude Code names its own so the two

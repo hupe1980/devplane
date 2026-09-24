@@ -876,6 +876,33 @@ pub fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         println!("  questions {}", crate::core::ask::Deadline::says(d));
     }
 
+    // **The words this repository uses for a question its plan has not
+    // answered**, read back for the same reason the deadline is: it decides
+    // whether an inbox item ever appears, and a key that is silently empty is
+    // indistinguishable from a specification with nothing outstanding.
+    //
+    // Printed only where the repository set some. Saying "none" to every
+    // project that does not work this way would be noise in the one command
+    // people run to find out what a file actually does.
+    // **Where this repository keeps its plans**, read back beside the words.
+    // Both decide whether a surface shows anything, and `plans` decides it
+    // hardest: without it the Plans page says nothing about this project at
+    // all, which is indistinguishable from a repository that has no plans.
+    if let Some(dir) = config.spec.plans.as_deref() {
+        let n = config.spec.plan_paths(&root).len();
+        println!("  {:<9} plans in {dir} ({n} found)", "spec");
+    }
+    if !config.spec.open_questions.is_empty() {
+        // The label is padded by a width rather than by spaces in the literal:
+        // a run of spaces inside a string is what a dropped `\` continuation
+        // looks like, and `purity` refuses them for that reason.
+        println!(
+            "  {:<9} unresolved when a line says: {}",
+            "spec",
+            config.spec.open_questions.join(", ")
+        );
+    }
+
     // What the rules actually do, which is the half of "is this file right"
     // that the problem list cannot answer. A rule that parses, is legal and
     // still covers nothing anybody expected is only visible by reading it back.
@@ -1344,6 +1371,56 @@ pub async fn cmd_work(what: WorkCmd, json: bool) -> Result<()> {
                     phase,
                     gate
                 );
+                // **The plan, beside the verdict.** *Done, and the specification
+                // it answers has eleven boxes unticked* is a sentence no exit
+                // code and no self-report can produce alone — and until this
+                // line it could only be reached by exporting a certificate,
+                // after the approval it would have changed.
+                //
+                // The daemon composes the judgement; this renders it. A second
+                // copy of *what counts as a contradiction* in the terminal is
+                // the shape that got the reproduction gate backwards.
+                if let Some(plan) = w["plan"].as_object() {
+                    let contradicts = w["plan_contradicts_done"].as_bool().unwrap_or(false);
+                    let path = plan["path"].as_str().unwrap_or("");
+                    let mut parts: Vec<String> = Vec::new();
+                    if plan["present"].as_bool() == Some(false) {
+                        parts.push(paint(render::RED, "no such specification"));
+                    } else if let Some(p) = plan["progress"].as_object() {
+                        let done = p["done"].as_u64().unwrap_or(0);
+                        let total = p["total"].as_u64().unwrap_or(0);
+                        let open = total.saturating_sub(done);
+                        parts.push(if open > 0 {
+                            paint(render::YELLOW, &format!("{open} of {total} open"))
+                        } else {
+                            paint(DIM, &format!("all {total} done"))
+                        });
+                    } else {
+                        // Absent is absent. Never `0 of 0`, never a full bar.
+                        parts.push(paint(DIM, "no task list"));
+                    }
+                    let q = plan["open_questions"].as_u64().unwrap_or(0);
+                    if q > 0 {
+                        parts.push(paint(
+                            render::YELLOW,
+                            &format!(
+                                "{q} question{} nobody answered",
+                                if q == 1 { "" } else { "s" }
+                            ),
+                        ));
+                    }
+                    println!(
+                        "    {} {}",
+                        paint(DIM, path),
+                        parts.join(paint(DIM, " · ").as_str())
+                    );
+                    if contradicts {
+                        println!(
+                            "    {}",
+                            paint(render::RED, "done, and the plan it answers is not")
+                        );
+                    }
+                }
                 // The stepper is the whole story of a pipeline in one line:
                 // what it has done, where it is, what is left.
                 if let Some(p) = w["pipeline"].as_object() {

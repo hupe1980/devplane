@@ -256,22 +256,81 @@ ten minutes ahead of it. A restart can only ever lengthen a wait.
 A value that will not parse fails `devplane check` and the wait stays unbounded — ending a question
 early on the strength of a typo is the one outcome that must not happen.
 
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `hold` | `true`, or a duration | none | how long a permission on a **watched** session waits for you before the agent's own dialog appears |
+
+**Off unless you set it, and then it is seconds.** `hold = true` means **30 s**; a duration names its
+own, up to **120 s**. A permission on a session you started yourself has no protocol request behind
+it, so without a hold the only thing Devplane can offer is *raise its window* — which is the inbox
+telling you to go and find the editor, once per permission, across every project in flight.
+
+With a hold, a permission your own `always_ask` rules matched waits that long for an answer from the
+inbox, the board or your phone. **Nobody answers and nothing changes**: the hook lapses, Claude Code
+shows its own dialog, and no decision is recorded. That is exactly the behaviour with no hold set.
+
+**Only what `always_ask` matched is held.** A call your rules never asked about is not held at all —
+an unattended agent must not freeze on routine work, and a second selector beside `always_ask` would
+be a second thing to keep in step.
+
+**A prohibition is applied first and is never held.** `never_auto` refuses without anybody being
+asked, and a hold cannot turn a refusal into a question.
+
+**It does not fire in the vendor's auto mode.** `PermissionRequest` only fires when Claude Code was
+about to ask a person, and in auto mode a classifier approves silently — so there is nothing to hold.
+Your `never_auto` prohibitions still apply there, through `PreToolUse`.
+
+A held permission raises a desktop notification **whatever its level**: a wait measured in seconds is
+only reachable by somebody who has been told about it.
+
 ## `[spec]`
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
+| `plans` | path | none | where this repository keeps its specifications |
 | `open_questions` | list of strings | empty | words that mark a question the specification has not answered |
 
-Counted per gate for the specification a piece of work names with
-[`--spec`](/devplane/docs/pipelines/#spec-driven-development), alongside its `- [ ]` task list, and
-shown on the board beside the verdict.
+### `plans`
 
-The words are yours. `NEEDS CLARIFICATION` is Spec Kit's spelling, `TBD` is everybody's, and the
-next tool will have a third — so the list is empty unless your repository writes one. Matched per
-line and case-insensitively.
+```toml
+[spec]
+plans = "specs"     # Spec Kit. Kiro writes `.kiro/specs`, OpenSpec `openspec/changes`.
+```
+
+**No default, and that is the same rule as `open_questions` one field over.** Guessing at a directory
+would be modelling a methodology; guessing at the *newest* folder inside it would be worse, because it
+is wrong the moment you work on an older feature.
+
+Set it and the **Plans** page lists this repository's specifications with their outline, their
+unticked boxes and their unanswered questions. A plan that a piece of work names is marked as being
+worked on; the rest are listed as plans the repository has. **Devplane never guesses which one is
+current** — only a `devplane work start --spec` says that.
+
+Leave it out and the page says *not looked for* rather than *none*: a repository nobody asked has not
+reported having no plans.
+
+Counted for the specification a piece of work names with
+[`--spec`](/devplane/docs/pipelines/#spec-driven-development), alongside its `- [ ]` task list.
+
+**Three places read it.** The **Plans** page shows what every project is working to; the work view and
+`devplane work list` show it beside the gate's verdict, so *done, and the plan it answers has eleven
+boxes unticked* arrives before you approve rather than inside a certificate afterwards; and the
+**inbox** carries one item per project whose in-flight specifications hold a line nobody has answered
+— one item naming the count, never one per marker, and ranked below anything an agent is blocked on.
+
+**Set no words and none of that happens.** The list is empty unless your repository writes one, and a
+project that declares none raises nothing, ever. The vocabulary is yours: `NEEDS CLARIFICATION` is
+Spec Kit's spelling, `TBD` is everybody's, and the next tool will have a third. Matched per line and
+case-insensitively.
+
+**A mention is not a marker.** A line inside a fenced block or backticks is documentation — a
+specification is allowed to describe this mechanism — and `checklists/` is skipped entirely, for the
+same reason its boxes are not progress: a folder that grades the plan is not the plan.
 
 Nothing else about the specification is interpreted: the outline is the Markdown headings and the
-progress is the boxes, because those are the only things the frameworks in this category agree on.
+progress is the boxes from `tasks.md`, because those are the only things the frameworks in this
+category agree on. A specification with **no** task list reports no progress rather than complete —
+there is no `0 of 0`.
 
 ## `[github]`
 

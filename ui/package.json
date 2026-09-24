@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "description": "Devplane's interface. Built to a bundle that the Rust binary embeds at compile time \u2014 there is no second thing to run, and nothing is fetched from the network at any point.",
+  "description": "Devplane's interface. Built to a bundle that the Rust binary embeds at compile time — there is no second thing to run, and nothing is fetched from the network at any point.",
   "scripts": {
     "build": "vite build",
     "dev": "vite",

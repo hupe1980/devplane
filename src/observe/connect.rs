@@ -34,6 +34,10 @@ const OTEL_VARS: &[&str] = &[
     "OTEL_METRICS_EXPORTER",
     "OTEL_EXPORTER_OTLP_PROTOCOL",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
+    // Set since the telemetry endpoints stopped being open. `disconnect` must
+    // take it with the endpoint: a stale bearer for a daemon that is gone is a
+    // credential left in a settings file for no reason.
+    "OTEL_EXPORTER_OTLP_HEADERS",
     "OTEL_LOGS_EXPORT_INTERVAL",
     "OTEL_METRIC_EXPORT_INTERVAL",
     "OTEL_METRICS_INCLUDE_ENTRYPOINT",
@@ -360,6 +364,29 @@ pub fn connect(
         env.insert(
             "OTEL_EXPORTER_OTLP_ENDPOINT".into(),
             json!(format!("{base_url}/devplane/otel")),
+        );
+        // **The telemetry endpoints are authenticated, and they were not.**
+        //
+        // They were left open on the stated grounds that "the OTLP exporter
+        // cannot be given a bearer token per signal without also sending it to
+        // every other collector the user configures" — and the vendor's own
+        // reference, in this repository's `concepts/reference/`, documents
+        // `OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer …"` on the page that
+        // documents the endpoint variable beside it.
+        //
+        // The premise was false in the only configuration this function
+        // creates. This branch runs **only** when no foreign collector is
+        // configured — that is what `foreign` above decides — so there is
+        // exactly one collector and the header reaches exactly it. When a
+        // foreign collector *is* configured, this branch does not run, Devplane
+        // receives no telemetry, and the endpoint has nothing to be open for.
+        //
+        // What it cost while it was open: a decision log whose entire claim is
+        // *who decided* accepting unauthenticated records from any process on
+        // the machine, and from any page the browser happened to load.
+        env.insert(
+            "OTEL_EXPORTER_OTLP_HEADERS".into(),
+            json!(format!("Authorization=Bearer {token}")),
         );
         report.telemetry = TelemetryStatus::Configured;
     }
@@ -1079,6 +1106,37 @@ mod tests {
         .unwrap();
         disconnect(&mut s);
         assert_eq!(s["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"], json!("1"));
+    }
+
+    /// **The exporter carries the bearer, because the endpoint stopped being
+    /// open.**
+    ///
+    /// The telemetry routes took records from anybody on the stated grounds
+    /// that an exporter could not be given a credential. The vendor documents
+    /// `OTEL_EXPORTER_OTLP_HEADERS` on the same page as the endpoint variable,
+    /// and this branch only runs when there is no foreign collector — so there
+    /// is exactly one place the header can go.
+    #[test]
+    fn telemetry_is_configured_with_the_bearer_and_disconnect_takes_it_back() {
+        let mut settings = Map::new();
+        let report = connect(
+            &mut settings,
+            "http://127.0.0.1:7777",
+            "tok-abc",
+            Path::new("/usr/local/bin/devplane"),
+        );
+        assert_eq!(report.telemetry, TelemetryStatus::Configured);
+        assert_eq!(
+            settings["env"]["OTEL_EXPORTER_OTLP_HEADERS"], "Authorization=Bearer tok-abc",
+            "the exporter was pointed at an authenticated endpoint with no credential"
+        );
+
+        disconnect(&mut settings);
+        let env = settings.get("env").and_then(|v| v.as_object());
+        assert!(
+            env.is_none_or(|e| !e.contains_key("OTEL_EXPORTER_OTLP_HEADERS")),
+            "a bearer for a daemon that is gone was left in the settings file"
+        );
     }
 
     #[test]

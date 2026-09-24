@@ -10,7 +10,7 @@ register({
   ports: ["dispatch"],
   // The project list comes from the feed; what *would happen* is a preflight
   // the daemon computes on request, because it shells out to git per target.
-  reads: ["/api/dispatch/preflight"],
+  reads: ["/api/dispatch/preflight", "/api/projects"],
   select: (feed) => {
     const b = feed.board as { projects?: Array<{ id: string; name: string }> } | null;
     return { projects: b?.projects ?? [] };

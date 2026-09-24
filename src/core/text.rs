@@ -111,6 +111,29 @@ pub fn split_frontmatter(src: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// Percent-encodes a query value.
+///
+/// Hand-rolled rather than a dependency: the alternative is a crate for one
+/// function, and the set that must be escaped in a query value is small and
+/// closed. Everything outside the unreserved set goes out as `%XX`, which is
+/// always correct if occasionally more than necessary.
+///
+/// **Here rather than beside its first caller**, because a second caller
+/// arrived and copying it would have made percent-encoding a thing this
+/// repository does two ways.
+pub fn url_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

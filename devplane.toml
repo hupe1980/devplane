@@ -31,6 +31,13 @@ max_feedback_rounds = 2
 run     = ["bash scripts/concepts-check.sh"]
 timeout = "10m"
 
+# Where the plans are and what marks an unanswered question in one. Both have
+# no default: the layouts and the vocabulary are the repository's, and guessing
+# either would be modelling somebody else's methodology.
+[spec]
+plans          = "specs"
+open_questions = ["NEEDS CLARIFICATION"]
+
 [policy]
 # Devplane only ever refuses or defers. Grants belong in the agent's own
 # settings.json, which is the file that enforces them.

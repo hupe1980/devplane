@@ -14,6 +14,15 @@ use std::path::PathBuf;
 mod admin;
 mod batch;
 mod board;
+pub mod completions;
+
+/// The argument the completion scripts call back with.
+///
+/// **Not a clap subcommand**, deliberately: `hide = true` keeps a command off
+/// the help screen and not out of `clap_complete`'s output, so a hidden one was
+/// offered in every generated script. `main` answers this before clap parses,
+/// and a command clap does not know about cannot leak into what clap generates.
+pub const COMPLETE_ARG: &str = "__complete";
 mod inbox;
 mod library;
 mod rules;
@@ -73,6 +82,7 @@ pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "speckit",
             "agents",
             "doctor",
+            "completions",
         ],
     ),
     ("The daemon", &["serve", "stop"]),
@@ -195,7 +205,24 @@ pub enum Command {
         needs_you: bool,
     },
     /// Show what needs a human, most urgent first.
-    Inbox,
+    ///
+    /// **A narrowing is a view, not a preference.** Nothing is remembered
+    /// between runs: a filter that persists is one somebody forgets they set,
+    /// and the next morning they are reading a subset of what needs them and do
+    /// not know it. A narrowed list always says how many it is not showing.
+    Inbox {
+        /// Only this project. Matches on any part of the name, so `mat` finds
+        /// `matter-kit` — the same rule `devplane ls --project` uses.
+        #[arg(long, short)]
+        project: Option<String>,
+        /// Only what can be answered from here.
+        ///
+        /// *Has an answer path*, as `ls --needs-you` has it — not *a person is
+        /// required*. A red gate needs somebody and cannot be answered from a
+        /// list; a question with a reply can.
+        #[arg(long = "needs-you")]
+        needs_you: bool,
+    },
     /// Every open GitHub issue across every registered project, what needs you first.
     ///
     /// `--ready` narrows it to one repository's issues that are *offered as
@@ -261,6 +288,41 @@ pub enum Command {
         without_me: bool,
         #[arg(long, default_value_t = 50)]
         limit: i64,
+        /// Write the rows as OpenTelemetry GenAI log records instead.
+        ///
+        /// `gen_ai.tool.call.decision`, the event
+        /// `open-telemetry/semantic-conventions-genai` #535 proposes — **plus
+        /// the attribute it leaves out**. That proposal's own note says the
+        /// event is recorded when *"a framework, harness, application policy,
+        /// or human approval flow"* decides, and none of its three attributes
+        /// says which of the four it was.
+        ///
+        /// The authority rides under an application-specific prefix, because a
+        /// producer may not mint a normative `gen_ai.*` name. An authority
+        /// nobody can establish is **absent**, never defaulted.
+        ///
+        /// OTLP/JSON on standard output. Nothing is sent anywhere: Devplane
+        /// receives telemetry and exports none of its own.
+        #[arg(long)]
+        otel: bool,
+    },
+    /// Write a shell completion script.
+    ///
+    /// Generated from this command tree, so a command that exists completes and
+    /// a hidden one is not offered. **Needs no daemon**: it writes a script and
+    /// talks to nothing.
+    ///
+    ///   devplane completions zsh  > ~/.zsh/completions/_devplane
+    ///   devplane completions bash > /etc/bash_completion.d/devplane
+    ///   devplane completions fish > ~/.config/fish/completions/devplane.fish
+    ///
+    /// Completing an id — a waiting question, a session, a project — asks the
+    /// daemon and **is silent when there is none**, because pressing Tab must
+    /// not start one. zsh and fish show the sentence beside each id; bash
+    /// completes the id alone, which is all bash reads.
+    Completions {
+        /// bash, zsh or fish.
+        shell: String,
     },
     /// Which of your repositories is missing a rule.
     ///
@@ -762,7 +824,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             needs_you,
         }) => cmd_ls(all, project.as_deref(), needs_you, cli.json).await,
         None => cmd_ls(false, None, false, cli.json).await,
-        Some(Command::Inbox) => cmd_inbox(cli.json).await,
+        Some(Command::Inbox { project, needs_you }) => {
+            cmd_inbox(cli.json, project.as_deref(), needs_you).await
+        }
         Some(Command::Issues { ready, cwd, label }) => {
             if ready || cwd.is_some() || label.is_some() {
                 crate::cli::work::cmd_ready_issues(cwd, label, cli.json).await
@@ -783,7 +847,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             about,
             without_me,
             limit,
-        }) => cmd_audit(about.as_deref(), without_me, limit, cli.json).await,
+            otel,
+        }) => cmd_audit(about.as_deref(), without_me, limit, cli.json, otel).await,
+        Some(Command::Completions { shell }) => crate::cli::completions::cmd_completions(&shell),
         Some(Command::Rules { rule, ask }) => {
             crate::cli::rules::cmd_rules(rule, ask, cli.json).await
         }
@@ -1133,10 +1199,35 @@ async fn decide_claude(body: &str) -> Result<()> {
             serde_json::to_string(&crate::observe::hook::pre_tool_use_reply(&verdict))?
         );
     } else {
-        println!(
-            "{}",
-            serde_json::to_string(&crate::observe::hook::permission_reply(&verdict))?
-        );
+        // **A permission a person could answer from anywhere, if this project
+        // asked for it.**
+        //
+        // Ordered deliberately: a prohibition is already decided above and
+        // never reaches here, so a hold can never turn a refusal into a
+        // question. Only a verdict of `ask` is held — a call the project's own
+        // `always_ask` rules matched — because a second selector beside
+        // `always_ask` would be a second thing to keep in step, and because
+        // holding every routine call would freeze an unattended agent.
+        let held = match (&verdict, &payload.cwd) {
+            (crate::core::Verdict::Ask { .. }, Some(dir)) => {
+                hold_for_a_person(&payload, dir, &tool, &input).await
+            }
+            _ => None,
+        };
+        let reply = match held.as_deref() {
+            // The person's own selection, carried. Not a verdict: the policy
+            // engine never saw this and there is no `Verdict::Allow` for it to
+            // have returned.
+            Some("allow") => crate::observe::hook::PermissionResponse::allow(),
+            Some("deny") => crate::observe::hook::PermissionResponse::deny(
+                "denied by the person, from Devplane",
+            ),
+            // **Lapsed, or never held.** Identical to the behaviour with no
+            // hold configured: the vendor shows its own dialog and answers it
+            // where the person already is.
+            _ => crate::observe::hook::permission_reply(&verdict),
+        };
+        println!("{}", serde_json::to_string(&reply)?);
     }
     report(
         body,
@@ -1151,6 +1242,57 @@ async fn decide_claude(body: &str) -> Result<()> {
     )
     .await;
     Ok(())
+}
+
+/// Waits, for as long as this project said, for somebody to answer.
+///
+/// **Returns `None` for every reason except an answer**, and that is the whole
+/// safety argument. No hold configured, no daemon, a daemon that does not
+/// answer, a value that will not parse, a hold that ran out — all of them lapse
+/// into the vendor's own dialog, which is exactly what happens today.
+///
+/// **It connects, and never starts.** A hook that launched a daemon would turn
+/// a permission prompt into a several-second pause on a machine where Devplane
+/// was deliberately not running.
+async fn hold_for_a_person(
+    payload: &crate::observe::hook::HookPayload,
+    dir: &std::path::Path,
+    tool: &str,
+    input: &serde_json::Value,
+) -> Option<String> {
+    let cfg = crate::core::ProjectConfig::load(dir).ok()?;
+    // A value that will not parse is a problem `devplane check` reports, and
+    // **not a hold**: guessing what somebody meant by a typo is how an agent
+    // ends up frozen for a duration nobody wrote.
+    let hold = cfg.questions.hold().ok().flatten()?;
+
+    let c = crate::client::Client::connect().ok()?;
+    let call = crate::observe::hook::describe_call(tool, input);
+    let body = serde_json::json!({
+        "session": payload.session_id,
+        "cwd": dir.display().to_string(),
+        "tool": tool,
+        "call": call,
+        "message": format!("{tool} · {call}"),
+        "wait_ms": hold.0.as_millis() as u64,
+    });
+
+    // **The client's own timeout must outlast the hold**, or the hook gives up
+    // on a daemon that is still waiting for the person and the answer arrives
+    // nowhere. A little longer, so the daemon is always the thing that decides
+    // the hold is over.
+    let reply: serde_json::Value = c
+        .post_json_within(
+            "/devplane/hold",
+            &body,
+            hold.0 + std::time::Duration::from_secs(5),
+        )
+        .await
+        .ok()?;
+    reply
+        .get("behavior")
+        .and_then(|b| b.as_str())
+        .map(str::to_string)
 }
 
 /// GitHub Copilot's `preToolUse`, answered here. Its hook vocabulary differs;

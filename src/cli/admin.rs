@@ -37,6 +37,7 @@ pub async fn cmd_audit(
     without_me: bool,
     limit: i64,
     json: bool,
+    otel: bool,
 ) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
     let filter = match without_me {
@@ -51,6 +52,23 @@ pub async fn cmd_audit(
         None => format!("/api/decisions?limit={limit}{filter}"),
     };
     let v = raw(&c, &path).await?;
+
+    // **The conventions' own shape, with the attribute they leave out.**
+    //
+    // Rendered rather than exported: Devplane receives OTLP and sends none of
+    // its own, so this writes to standard output when somebody asks and runs
+    // nothing in the background. A producer in the only sense the argument
+    // needs — real records, from a real machine, in the proposed shape.
+    if otel {
+        let rows: Vec<crate::core::Decision> =
+            serde_json::from_value(v.clone()).unwrap_or_default();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::core::genai::payload(&rows))?
+        );
+        return Ok(());
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
@@ -677,6 +695,21 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
         }
 
         println!("\n{}", paint(BOLD, "channels"));
+        // **The subscription, before the counts.** The OpenCode feed does not
+        // replay, so a drop is a silent gap: an empty board and a dead
+        // subscription look identical from the event counts alone, and only one
+        // of them means the machine is quiet.
+        if let Some(oc) = d["opencode"].as_object() {
+            let live = oc.get("live").and_then(|v| v.as_bool()).unwrap_or(false);
+            println!(
+                "  {:<14} {}",
+                "opencode",
+                match live {
+                    true => paint(render::GREEN, oc["says"].as_str().unwrap_or("")),
+                    false => paint(render::RED, oc["says"].as_str().unwrap_or("")),
+                }
+            );
+        }
         let empty = vec![];
         let channels = d["channels"].as_array().unwrap_or(&empty);
         if channels.is_empty() {
@@ -969,7 +1002,9 @@ pub async fn cmd_connect(what: ConnectTarget, statusline: bool, json: bool) -> R
 /// organisation rather than to this tool. Editing somebody's shell profile is
 /// not a thing a supervisor should do quietly, and writing a managed policy is
 /// the same refusal that keeps Devplane out of the auto-mode classifier's
-/// configuration. So the two lines are printed and the person runs them.
+/// configuration. So the lines are printed and the person runs them — three of
+/// them, because the telemetry endpoint takes the same bearer as every other
+/// route and an exporter without one is refused.
 async fn connect_copilot(json: bool) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
     let token = config::load_or_create_token()?;
@@ -982,11 +1017,19 @@ async fn connect_copilot(json: bool) -> Result<()> {
     std::fs::write(&file, serde_json::to_string_pretty(&contents)?)
         .with_context(|| format!("writing {}", file.display()))?;
 
+    // **Three lines, not two: the endpoint is authenticated.** The telemetry
+    // routes take the same bearer as everything else, so an exporter pointed at
+    // them without one is refused — which for a path the person runs by hand
+    // would look like telemetry silently not arriving.
     let env = [
         ("COPILOT_OTEL_ENABLED", "true".to_string()),
         (
             "OTEL_EXPORTER_OTLP_ENDPOINT",
             format!("{}/devplane/otel", c.base_url()),
+        ),
+        (
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            format!("Authorization=Bearer {token}"),
         ),
     ];
     if json {

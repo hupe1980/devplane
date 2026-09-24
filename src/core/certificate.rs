@@ -447,6 +447,19 @@ impl Certificate<'_> {
                     code(&spec.path)
                 )),
             }
+            // **The plan changed under the work**, which a reviewer re-deriving
+            // this verdict needs before anything else on this page: they would
+            // otherwise re-derive it against a document the work never saw, and
+            // get a different answer for a reason nothing here explains.
+            if self.work.plan_drifted(spec.fingerprint.as_deref()) == Some(true) {
+                o.push_str(&format!(
+                    "> **The specification changed while this work was running.** It was `{}` when \
+                     the work started and `{}` when the gate ran. The agent read one document and \
+                     you are reading another; both may be correct.\n\n",
+                    self.work.spec_at_start.as_deref().unwrap_or("unknown"),
+                    spec.fingerprint.as_deref().unwrap_or("unknown"),
+                ));
+            }
             match spec.tasks() {
                 Some((done, total)) => {
                     o.push_str(&format!("Task list: **{done} of {total} ticked**"));

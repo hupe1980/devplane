@@ -26,6 +26,14 @@ pub enum Source {
     AgentsJson,
     /// The status-line shim.
     StatusLine,
+    /// A vendor's own event stream, connected out to.
+    ///
+    /// **Every other source is the vendor's process telling Devplane
+    /// something; this one is a server the person already runs.** Nothing is
+    /// installed into the agent, and a session Devplane never started is
+    /// visible — which is why an ending it carries is a fact the vendor
+    /// published rather than one this product derived.
+    Feed,
     /// Devplane itself (reconciliation, timers).
     Daemon,
 }
@@ -37,6 +45,7 @@ impl Source {
             Source::Otel => "otel",
             Source::AgentsJson => "agents_json",
             Source::StatusLine => "statusline",
+            Source::Feed => "feed",
             Source::Daemon => "daemon",
         }
     }

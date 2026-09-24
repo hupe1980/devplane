@@ -496,7 +496,16 @@ impl Decision {
     /// request becomes when it times out.
     pub fn parse(decision: Option<&str>, option_id: Option<String>) -> Self {
         if let Some(id) = option_id {
-            return Decision::Option(id);
+            // **The two ids this product publishes itself mean what they say.**
+            // A held permission offers `allow` and `deny`; leaving them as an
+            // opaque `Option` sent them through [`Self::label`], which answers
+            // `allow` for anything that is not literally `Deny` — so pressing
+            // *Deny* recorded an allow.
+            return match id.as_str() {
+                "allow" => Decision::Allow,
+                "deny" => Decision::Deny,
+                _ => Decision::Option(id),
+            };
         }
         match decision {
             Some("allow") => Decision::Allow,
@@ -504,10 +513,27 @@ impl Decision {
         }
     }
 
-    fn label(&self) -> &'static str {
+    /// The option id, where this decision is one.
+    fn option_id(&self) -> Option<&str> {
         match self {
-            Decision::Deny => "deny",
-            _ => "allow",
+            Decision::Option(id) => Some(id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// What this decision is called in the record.
+    ///
+    /// **`Option` has no answer here and must not be given a flattering one.**
+    /// It used to fall through to `allow`, so an option the caller named by id
+    /// was recorded as an approval whatever it meant — including an option the
+    /// agent published as a refusal. What an agent's own option means is a
+    /// property of the option, not of this enum, so the caller that holds the
+    /// offered list resolves it and this returns `None`.
+    fn label(&self) -> Option<&'static str> {
+        match self {
+            Decision::Deny => Some("deny"),
+            Decision::Allow => Some("allow"),
+            Decision::Option(_) => None,
         }
     }
 }
@@ -648,7 +674,12 @@ pub async fn answer_ask(
     // idempotency check so that a second answer is refused having been fully
     // understood rather than half-parsed.
     let recorded = match &answer {
-        Answer::Permission(d) => serde_json::json!({ "permission": d.label() }),
+        // `allow` or `deny` where the caller said one; the option's own id
+        // otherwise, so the held-permission path reads a value it published.
+        Answer::Permission(d) => match d.label() {
+            Some(l) => serde_json::json!({ "permission": l }),
+            None => serde_json::json!({ "permission": d.option_id() }),
+        },
         Answer::Question(choices) => serde_json::json!({
             "question": choices
                 .iter()
@@ -835,7 +866,34 @@ async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -
     };
 
     let option = match &want {
-        Decision::Option(id) => Some(id.clone()),
+        // **An id the agent never offered is refused, not recorded as an
+        // allow.**
+        //
+        // `Decision::Option(id)` labels as `allow` for any id that is not
+        // literally `Deny`, because for a driven run the id is supposed to be
+        // one the agent published and the agent's own protocol decides what it
+        // means. Nothing checked that supposition: a caller passing
+        // `{"option":"maybe"}` — a typo, an id read off a stale row, a client
+        // guessing — had **an allow written to the decision log under their
+        // name**, for a call nobody approved.
+        //
+        // Found by an absence check on a neighbouring feature, asserting that
+        // nothing but a recorded human selection can produce an approval.
+        Decision::Option(id) => {
+            if !offered.is_empty() && !offered.iter().any(|o| o.id.as_deref() == Some(id.as_str()))
+            {
+                let names: Vec<&str> = offered.iter().filter_map(|o| o.id.as_deref()).collect();
+                anyhow::bail!(
+                    "`{id}` is not one of the answers this request offers ({}). \
+                     An answer has to name something that was asked.",
+                    match names.is_empty() {
+                        true => "none have ids".to_string(),
+                        false => names.join(", "),
+                    }
+                );
+            }
+            Some(id.clone())
+        }
         Decision::Allow => match choose(true) {
             Some(id) => Some(id),
             // The agent offered no way to say yes. Refusing is the only honest
@@ -855,13 +913,23 @@ async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -
             .and_then(|o| o.kind.clone())
     });
     let is_standing = standing(chosen_kind.as_deref());
-    let decision = if is_standing {
-        match want {
-            Decision::Deny => "reject_always",
-            _ => "allow_always",
-        }
-    } else {
-        want.label()
+    // **The option's own meaning decides, and `allow` is never the fallback.**
+    //
+    // A caller naming an offered option by id reaches here with
+    // `Decision::Option`, which cannot say what it meant. The agent published
+    // the meaning as the option's `kind`; reading it is the only honest answer,
+    // and defaulting to `allow` when it cannot be read is how a refusal got
+    // written down as an approval.
+    let decision = match (is_standing, want.label(), chosen_kind.as_deref()) {
+        (true, Some("deny"), _) | (true, _, Some("reject_always")) => "reject_always",
+        (true, _, _) => "allow_always",
+        (false, Some(l), _) => l,
+        (false, None, Some(k)) if k.starts_with("reject") => "deny",
+        (false, None, Some(_)) => "allow",
+        // An offered option with no kind at all. The agent said nothing about
+        // what it means, so neither does the record: `chosen` names the option
+        // and claims nothing about whether it was a yes.
+        (false, None, None) => "chosen",
     };
     session.decide(request_id, option).await?;
 

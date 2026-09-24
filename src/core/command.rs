@@ -545,7 +545,7 @@ pub fn nested_commands_bounded(text: &str) -> (Vec<String>, bool) {
     // document written through `cat <<EOF` that merely *quoted* a prohibited
     // command had that quotation extracted and matched. One place to strip them
     // is the only way the two paths can agree; a body a shell will run is kept
-    // by `line_touches_shell`, so nothing executable is dropped.
+    // by `line_is_data_only`, so nothing executable is dropped.
     memo(&SPLITS, &without_data_heredocs(text), |t| {
         nested_commands_bounded_uncached(t)
     })
@@ -728,7 +728,80 @@ fn until(b: &[char], from: usize, close: char) -> Option<(String, usize)> {
 /// `bash <<EOF … EOF` runs what it is fed, and skipping that body would hide a
 /// real command from every rule. Everything else — `cat`, `python`, `tee` — gets
 /// the body as **data** on stdin, where no shell operator in it means anything.
-const HEREDOC_RUNS_AS_SHELL: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"];
+/// Programs that consume a heredoc body as **data** and cannot execute it.
+///
+/// **This is an allowlist, and it used to be a blocklist of shells.** The old
+/// rule asked *does a shell appear on this line?* and answered `false` for
+/// `sudo bash`, `env bash`, `timeout 5 sh`, `xargs sh -c`, `python3` and
+/// `node` — every one of which runs the body. A `never_auto` prohibition
+/// therefore stopped firing on `cat <<EOF | sudo bash`, and the verdict was
+/// `Undecided`: not a refusal, not a prompt, **silence**.
+///
+/// A blocklist here is unsound by construction, because it has to enumerate
+/// every way to reach an interpreter — through a wrapper, through an absolute
+/// path, through a language runtime that reads stdin — and the list is open.
+/// The set of programs that read stdin and *cannot* run it is closed enough to
+/// write down, and getting it wrong costs a parse rather than a bypass.
+///
+/// That asymmetry is the module's own stated safe direction: *keeping a body
+/// that turns out to be data costs a false positive at worst; skipping one that
+/// turns out to be a script is a prohibition that did not fire.*
+///
+/// Members are programs whose **stdin is data** in every documented mode.
+/// Anything that takes a program on stdin is absent: a shell, a language
+/// runtime, and `xargs`, which builds a command line out of what it reads.
+///
+/// `sed` and `awk` are absent too, and they are the interesting exclusion —
+/// their stdin genuinely is data, but `sed -f -` and `awk -f -` take the
+/// *script* from stdin, so membership would depend on a flag rather than on the
+/// program. **A member has to be safe in every mode, not in its usual one**, and
+/// a list that needs the arguments read is the parser this function exists to
+/// run before.
+const HEREDOC_DATA_SINKS: &[&str] = &[
+    "cat",
+    "tee",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "nl",
+    "rev",
+    "fold",
+    "column",
+    "base64",
+    "xxd",
+    "od",
+    "hexdump",
+    "strings",
+    "iconv",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "shasum",
+    "cksum",
+    "gzip",
+    "gunzip",
+    "zcat",
+    "bzip2",
+    "xz",
+    "diff",
+    "comm",
+    "join",
+    "paste",
+    "split",
+    "csplit",
+    "expand",
+    "unexpand",
+    "jq",
+    "yq",
+];
 
 /// Where a heredoc body starts and ends, given the `<<` at `i`.
 ///
@@ -842,8 +915,7 @@ pub fn without_data_heredocs(text: &str) -> String {
                 line_end += 1;
             }
             let line: String = b[line_start..line_end].iter().collect();
-            let runs_as_shell = line_touches_shell(&line);
-            if !runs_as_shell {
+            if line_is_data_only(&line) {
                 // Keep the `<<WORD` itself: it is syntax on the command line,
                 // and dropping it would change what the line looks like.
                 let mut j = i;
@@ -863,19 +935,19 @@ pub fn without_data_heredocs(text: &str) -> String {
     out
 }
 
-/// Whether a shell appears anywhere on this line, so a heredoc body on it may be
-/// a script rather than data.
+/// Whether every program on this line is a known data sink, so the heredoc body
+/// on it is certainly data and may be dropped before anything is measured.
 ///
-/// **Conservative on purpose, and it is a hole that was opened and closed.** The
-/// first rule asked only what program the heredoc itself feeds, which reads
-/// `cat <<EOF | bash` as data — and that body *runs*, so a prohibited command
-/// inside it stopped being seen. Anything a pipeline on the line can reach counts
-/// now. Keeping a body that turns out to be data costs a false positive at worst;
-/// skipping one that turns out to be a script is a prohibition that did not fire.
-fn line_touches_shell(line: &str) -> bool {
+/// **Answers `false` whenever it is not sure**, which keeps the body and costs a
+/// parse. The inverse — answering `false` only for a recognised shell — is what
+/// shipped, and it let six spellings of *run this body* through as data.
+///
+/// A segment with no program is a bare redirect (`> out.txt <<EOF`) and does not
+/// disqualify the line.
+fn line_is_data_only(line: &str) -> bool {
     line.split([';', '|', '&', '(', ')'])
         .filter_map(segment_program)
-        .any(|p| HEREDOC_RUNS_AS_SHELL.contains(&p.as_str()))
+        .all(|p| HEREDOC_DATA_SINKS.contains(&p.as_str()))
 }
 
 /// The program a segment starts with, path and wrappers stripped.
@@ -952,7 +1024,7 @@ fn split_top_level(text: &str) -> Vec<String> {
                 line_end += 1;
             }
             let line: String = b[from..line_end].iter().collect();
-            if !line_touches_shell(&line) {
+            if line_is_data_only(&line) {
                 i = end;
                 continue;
             }
@@ -1410,21 +1482,45 @@ mod tests {
         );
     }
 
-    /// **A body a shell will run is kept, whatever feeds it.**
+    /// **A body anything will run is kept, whatever feeds it.**
     ///
-    /// The first version of this rule asked only what program the heredoc feeds,
-    /// which reads `cat <<EOF | bash` as data — and that body runs, so a
-    /// prohibited command inside it stopped being seen. Keeping a body that
-    /// turns out to be data costs a false positive; skipping one that turns out
-    /// to be a script is a prohibition that did not fire.
+    /// Two versions of this rule were wrong in the same direction. The first
+    /// asked only what program the heredoc *itself* feeds, which reads
+    /// `cat <<EOF | bash` as data. The second asked whether a **shell name**
+    /// appeared anywhere on the line — and answered *no* for `sudo bash`,
+    /// `env bash`, `timeout 5 sh`, `xargs sh -c`, `python3` and `node`, every
+    /// one of which runs the body. A `never_auto` prohibition returned
+    /// `Undecided` for all six: not a refusal, not a prompt, **silence**.
+    ///
+    /// **The test is the reason the rule is now an allowlist.** The previous
+    /// version of this loop held only bare shell names, so it passed against a
+    /// predicate that could not see a wrapper — a test that proves the cases its
+    /// implementation already handles. The wrapper and interpreter rows below
+    /// are the ones that fail against a blocklist of any length.
     #[test]
-    fn a_heredoc_a_shell_will_run_is_still_read_as_commands() {
+    fn a_heredoc_anything_will_run_is_still_read_as_commands() {
         for cmd in [
+            // A shell, named directly.
             "bash <<EOF\nrm -rf /tmp/x\nEOF",
             "cat <<EOF | bash\nrm -rf /tmp/x\nEOF",
             "cat <<EOF | sh\nrm -rf /tmp/x\nEOF",
             "cat <<EOF|/bin/bash\nrm -rf /tmp/x\nEOF",
             "cat <<'EOF' | zsh\nrm -rf /tmp/x\nEOF",
+            // A shell behind a wrapper: the six that were silent.
+            "cat <<EOF | sudo bash\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | sudo -u root bash\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | env bash\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | timeout 5 sh\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | xargs sh -c\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | nohup bash\nrm -rf /tmp/x\nEOF",
+            // An interpreter, which is not a shell and runs its stdin all the same.
+            "cat <<EOF | python3\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | node\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | ruby\nrm -rf /tmp/x\nEOF",
+            "cat <<EOF | perl\nrm -rf /tmp/x\nEOF",
+            // Something nobody wrote down, which is the case an allowlist gets
+            // right by construction and a blocklist never can.
+            "cat <<EOF | some-future-runtime\nrm -rf /tmp/x\nEOF",
         ] {
             let first = cmd.lines().next().unwrap_or(cmd);
             assert!(

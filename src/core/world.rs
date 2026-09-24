@@ -257,6 +257,7 @@ impl World {
             &|_| None,
             &Health::default(),
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -274,6 +275,12 @@ impl World {
         stall_for: &dyn Fn(&Path) -> Option<i64>,
         health: &Health<'_>,
         forge: Vec<AttentionItem>,
+        // Items derived from files on disk, threaded in for the same reason
+        // `forge` is: this module may not touch the outside world, and a
+        // specification is a folder the caller has to walk. Ranked here so
+        // there is one list and one order — the alternative is a second inbox
+        // nobody reads.
+        from_disk: Vec<AttentionItem>,
     ) -> Vec<AttentionItem> {
         // The same runs the board shows, for the reason the notifier reads
         // this list rather than deriving its own: two surfaces disagreeing
@@ -328,6 +335,7 @@ impl World {
                 .chain(record)
                 .chain(leaked)
                 .chain(forge)
+                .chain(from_disk)
                 .collect(),
         )
     }
@@ -1317,6 +1325,7 @@ mod tests {
                 ..Default::default()
             },
             Vec::new(),
+            Vec::new(),
         );
         assert_eq!(inbox.len(), 1, "nothing else is wrong and this still shows");
         let item = &inbox[0];
@@ -1352,6 +1361,7 @@ mod tests {
                 ..Default::default()
             },
             Vec::new(),
+            Vec::new(),
         );
         assert_eq!(inbox.len(), 2);
         let again = w.inbox_with_health(
@@ -1362,6 +1372,7 @@ mod tests {
                 broken_configs: &both,
                 ..Default::default()
             },
+            Vec::new(),
             Vec::new(),
         );
         let ids: Vec<_> = inbox.iter().map(|i| i.id.clone()).collect();
@@ -1387,6 +1398,7 @@ mod tests {
             &|_| None,
             &Health::default(),
             Vec::new(),
+            Vec::new(),
         );
         assert!(
             quiet.is_empty(),
@@ -1401,6 +1413,7 @@ mod tests {
                 unwritten: (3, 1, Some("database or disk is full")),
                 ..Default::default()
             },
+            Vec::new(),
             Vec::new(),
         );
         assert_eq!(inbox.len(), 1);
@@ -1433,6 +1446,7 @@ mod tests {
                 ..Default::default()
             },
             Vec::new(),
+            Vec::new(),
         );
         assert_eq!(again[0].id, item.id, "one open row, whatever the count");
         assert!(again[0].title.contains("9001"), "{}", again[0].title);
@@ -1447,6 +1461,7 @@ mod tests {
                 unwritten: (1, 0, None),
                 ..Default::default()
             },
+            Vec::new(),
             Vec::new(),
         );
         assert!(one[0].title.starts_with("1 event "), "{}", one[0].title);

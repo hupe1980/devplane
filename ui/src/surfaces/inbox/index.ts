@@ -30,7 +30,9 @@ register({
     "open_pr",
     "open_issue",
   ],
-  select: (feed) => {
+  // `#inbox/<project>` narrows to one project. The shell does not know what the
+  // second half means and must not: it reads the address and hands it over.
+  select: (feed, focus) => {
     const b = feed.inbox as
       | { items?: unknown[]; folded?: unknown[]; inhibited?: unknown[]; close?: unknown }
       | null;
@@ -39,6 +41,7 @@ register({
       folded: b?.folded ?? [],
       inhibited: b?.inhibited ?? [],
       close: b?.close ?? null,
+      project: focus ?? "",
     };
   },
   component: Inbox,

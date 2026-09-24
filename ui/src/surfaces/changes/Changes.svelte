@@ -126,7 +126,7 @@
                to know which one they are reading. -->
           <p class="dim">not shown — {f.body.skipped.why}</p>
         {:else}
-          {#each hunks(f.body) as h (h.header)}
+          {#each hunks(f.body) as h, hi (hi)}
             <pre class="hunk"><code><span class="hdr">{h.header}</span>
 {#each h.lines as [kind, text], i (i)}<span class={kind}>{kind === "added" ? "+" : kind === "removed" ? "−" : " "}{text}</span>
 {/each}</code></pre>

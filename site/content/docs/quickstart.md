@@ -77,6 +77,7 @@ sorts its commands into — so a heading names the errand and each item under it
 | | **Decisions** | what was decided for you, on whose authority, for one session or Work |
 | | **Finished work** | a finished Work's certificate, and one button that copies it |
 | **See what is happening** | **Sessions** | every session, grouped by project, with cost and context |
+| | **Plans** | what each project is working to: the specification its in-flight work names, how many boxes are still open, and which carry a question nobody answered |
 | **Start and steer work** | **Start an agent** | a prompt, the projects to send it to, and what would happen in each before anything is written |
 | | **Issues and PRs** | every open one, across every registered project |
 | **Set up a project** | **Setup** | this machine, and every repository's `devplane.toml` read back |

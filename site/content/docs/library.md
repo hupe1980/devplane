@@ -208,3 +208,45 @@ Nothing on that page writes. `devplane library sync` is the only thing that does
 
 **Read-only. There is no write route**, because an agent on this machine runs as the same user and
 can read the token that page uses.
+
+## What a prompt may say about the project
+
+A prompt in `.devplane/prompts/` can name a fact about the project it is going to. **The launcher
+resolves it per target and shows you the text before the button is live.**
+
+```markdown
+The checks in {project} failed on:
+
+{gate.failures}
+
+Fix the cause rather than the check.
+```
+
+| Name | What it says |
+|---|---|
+| `{project}` | the project's name |
+| `{branch}` · `{base_branch}` | the branch the worktree is on, and what it branches from |
+| `{dirty}` | whether the worktree has uncommitted changes |
+| `{plan.path}` · `{plan.open}` · `{plan.questions}` | the specification the work in flight names, how many boxes are still unticked, how many lines it marks unresolved |
+| `{gate.failures}` | what the last gate failed on |
+| `{decision.last}` · `{decision.authority}` | the last decision recorded here, and on whose authority |
+| `{question.unanswered}` | a question an agent asked and nobody answered |
+
+**The set is closed.** No loops, no conditionals, no expressions — a name resolves to a string or it
+is an error. A name outside the list is refused and the list is printed.
+
+**A placeholder with nothing behind it refuses**, naming which and why, per target. Never an empty
+string, never the literal text: a confidently wrong prompt sent to an agent is worse than one that was
+not sent, and that is the direction every templating system defaults to.
+
+**Values are substituted once.** A gate failure whose text happens to contain `{project}` is a failure
+message, not an instruction. A placeholder inside a fenced block is left alone, so a prompt can
+document this mechanism without rewriting its own example.
+
+**Only `.devplane/prompts/` carries these.** A `SKILL.md` is the vendor's file: it is passed through
+byte for byte and takes values as **arguments**, which is what its `argument-hint` is for. Nothing on
+this path writes to a file, so an artefact's digest is unchanged by dispatching it — templating
+somebody else's format is the one thing this library exists not to do.
+
+The resolved text is shown to you and sent to the agent. It is never exported as telemetry and never
+written to a log.

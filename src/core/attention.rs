@@ -58,6 +58,24 @@ pub enum AttentionKind {
     Permission,
     /// The agent asked a question.
     Question,
+    /// A specification an in-flight piece of work names carries a line the
+    /// **project's own words** mark unresolved.
+    ///
+    /// **The same object as [`Self::QuestionAbandoned`], one step quieter.** A
+    /// `[NEEDS CLARIFICATION]` in a committed file is a question nobody
+    /// answered — it differs from an agent's only in that nothing is blocked on
+    /// it right now, which makes it quieter and not different in kind. Putting
+    /// it in a second question model beside the one this product is sold on
+    /// would be two lists to read.
+    ///
+    /// **One item per project, never one per marker.** Forty lines in one
+    /// folder is one fact about one folder, and the surface this is sold on is
+    /// the one that must stay readable.
+    ///
+    /// Raised only where the project declared the words. A project that named
+    /// none gets none, for ever: the vocabulary is the repository's and this
+    /// tool has no default list.
+    PlanQuestion,
     /// The agent asked a question and moved on without an answer.
     ///
     /// **Normal, not critical, and deliberately.** The question is already
@@ -187,6 +205,7 @@ impl AttentionKind {
             AttentionKind::Permission => "permission",
             AttentionKind::Question => "question",
             AttentionKind::QuestionAbandoned => "question_abandoned",
+            AttentionKind::PlanQuestion => "plan_question",
             AttentionKind::RunFailed => "run_failed",
             AttentionKind::Stalled => "stalled",
             AttentionKind::Lost => "lost",
@@ -247,6 +266,11 @@ impl AttentionKind {
             // everything, which measurably lets *more* through than escalating
             // most things.
             AttentionKind::QuestionAbandoned => Level::Normal,
+            // **Normal, and below every live block by construction.** Nothing
+            // is waiting on this: a marker in a committed file has been
+            // unanswered since somebody wrote it and will still be unanswered
+            // in an hour. It is worth seeing and never worth interrupting for.
+            AttentionKind::PlanQuestion => Level::Normal,
             AttentionKind::CostSpike
             | AttentionKind::Refused
             | AttentionKind::Stalled
@@ -488,6 +512,28 @@ impl AttentionItem {
     /// oldest is first.
     pub fn rank(&self) -> (Level, i64) {
         (self.level, -self.since.as_second())
+    }
+
+    /// **Whether this row can be answered from here.**
+    ///
+    /// `--needs-you` means *has an answer path*, not *a person is required* —
+    /// the two are different and the flag's name promises one of them. A red
+    /// gate and a leaked agent both require a person and neither is answerable
+    /// from a list; a permission and a question are, and those are the rows
+    /// somebody typing this at nine in the morning is looking for.
+    ///
+    /// Derived from what is **offered**, never from the kind: an offered action
+    /// is an implemented action, so the actions are already the honest
+    /// statement of what this row can do. A second list of "answerable kinds"
+    /// beside them is the thing that goes stale the first time a kind gains or
+    /// loses a control.
+    pub fn has_answer_path(&self) -> bool {
+        self.ask.is_some()
+            || !self.options.is_empty()
+            || self
+                .actions
+                .iter()
+                .any(|a| !matches!(a, Action::Open | Action::Snooze))
     }
 }
 
@@ -814,6 +860,24 @@ pub fn stranded_ask_item(ask: &crate::core::ask::Ask) -> AttentionItem {
         .get("options")
         .and_then(|o| serde_json::from_value(o.clone()).ok())
         .unwrap_or_default();
+    // **A held permission is a different sentence from a stranded question, and
+    // the difference is whether anybody is still waiting.**
+    //
+    // A stranded ask is one whose agent has gone: answering it records the
+    // answer and delivers it by resuming the session. A **held** one is an
+    // agent blocked right now, for a few more seconds, on a session Devplane
+    // only watches — and telling somebody the agent is no longer running while
+    // it sits there waiting is the surface being confidently wrong about the
+    // one fact that decides whether to hurry.
+    let held_until: Option<Timestamp> = ask
+        .payload
+        .get("held_until")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok());
+    let now = Timestamp::now();
+    let holding = held_until.is_some_and(|t| t > now);
+    let lapsed = held_until.is_some_and(|t| t <= now);
+
     AttentionItem {
         // Keyed on the ask, so one waiting question is one row however many
         // times the daemon has restarted under it.
@@ -823,20 +887,40 @@ pub fn stranded_ask_item(ask: &crate::core::ask::Ask) -> AttentionItem {
         run_id: Some(ask.run.clone()),
         project_id: ask.project.clone(),
         title: ask.message.clone(),
-        detail: Some(format!(
-            "Asked {} and still unanswered. The agent that asked is no longer \
-             running, so answering this records your answer and delivers it by \
-             resuming that session — {}",
-            ask.asked_at,
-            ask.deadline.says()
-        )),
+        detail: Some(match (holding, lapsed, held_until) {
+            (true, _, Some(until)) => format!(
+                "An agent is waiting for you right now — about {}s left. Answer it \
+                 here and it carries straight back; the editor it runs in stays \
+                 where it is.",
+                until.duration_since(now).as_secs().max(0)
+            ),
+            // **The hold ran out and nothing was decided.** The agent's own
+            // dialog is up, which is the one case where *raise its window* is
+            // the honest offer rather than the only one left.
+            (_, true, _) => "The hold ran out, so the agent is asking in its own window now. \
+                 Nothing was decided here."
+                .to_string(),
+            _ => format!(
+                "Asked {} and still unanswered. The agent that asked is no longer \
+                 running, so answering this records your answer and delivers it by \
+                 resuming that session — {}",
+                ask.asked_at,
+                ask.deadline.says()
+            ),
+        }),
         ask: Some(ask.id.clone()),
         // Answerable, so there is nothing to explain away.
         answer_in: None,
         options,
-        // Answerable, which is the whole claim. Nothing else is offered: there
-        // is no run to focus and no window to raise.
-        actions: vec![Action::Choose, Action::Reply],
+        // **Answering must not take you to the editor**, which is the whole
+        // point of a hold: `focus` is absent while one is running. Once it has
+        // lapsed the vendor's own dialog is the only thing that can answer, so
+        // raising the window becomes the honest offer.
+        actions: match (holding, lapsed) {
+            (true, _) => vec![Action::Choose, Action::Reply],
+            (_, true) => vec![Action::Focus],
+            _ => vec![Action::Choose, Action::Reply],
+        },
         request_id: Some(ask.request_id.clone()),
         form: ask.payload.get("form").cloned(),
         url: None,
@@ -1189,6 +1273,71 @@ pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Ve
 /// `can_drive` says whether Devplane still holds a session it could prompt —
 /// not whether a run row looks alive. Only the first is a reason to offer
 /// anything that talks to an agent.
+/// **A specification an in-flight work names, carrying lines the project's own
+/// words mark unresolved.**
+///
+/// One item per project, naming the count — never one per marker. Forty
+/// clarification lines in one folder is one fact about one folder, and the
+/// surface this product is sold on is the one that must stay readable.
+///
+/// Composed here so the sentence has one home, and called from the daemon
+/// because reading a specification touches a disk.
+pub fn plan_question_item(
+    project: &str,
+    project_id: &crate::core::ProjectId,
+    plans: &[(String, crate::core::spec::Plan)],
+) -> Option<AttentionItem> {
+    let total: u32 = plans.iter().map(|(_, p)| p.open_questions).sum();
+    if total == 0 {
+        return None;
+    }
+    let where_ = match plans.iter().filter(|(_, p)| p.open_questions > 0).count() {
+        1 => {
+            let (_, p) = plans.iter().find(|(_, p)| p.open_questions > 0)?;
+            p.path.clone()
+        }
+        n => format!("{n} specifications"),
+    };
+    let first = plans
+        .iter()
+        .flat_map(|(_, p)| p.questions.iter())
+        .next()
+        .map(|q| crate::core::text::clip(q.text.trim(), 160));
+    Some(AttentionItem {
+        // Stable per project, so a marker that stays unanswered is one open
+        // item rather than one per poll — and so it clears by disappearing
+        // when the line goes, with nobody dismissing it.
+        id: AttentionId::from(format!("plan-question:{}", project_id.as_str())),
+        kind: AttentionKind::PlanQuestion,
+        level: AttentionKind::PlanQuestion.default_level(),
+        run_id: None,
+        project_id: Some(project_id.clone()),
+        title: match total {
+            1 => format!("{project}: one question in {where_} nobody has answered"),
+            n => format!("{project}: {n} questions in {where_} nobody has answered"),
+        },
+        // The line, in the project's own words. Rendered as untrusted text like
+        // every other detail here: it came out of a file in a repository.
+        detail: first,
+        answer_in: Some(
+            "These are lines in committed files. Answer one by editing the \
+             specification it is in."
+                .into(),
+        ),
+        ask: None,
+        options: Vec::new(),
+        actions: Vec::new(),
+        form: None,
+        request_id: None,
+        url: None,
+        launch: None,
+        work_id: None,
+        offer: None,
+        no_offer: None,
+        since: jiff::Timestamp::now(),
+    })
+}
+
 pub fn items_for_work(
     work: &crate::core::work::Work,
     can_drive: bool,
@@ -1584,6 +1733,7 @@ pub const ALL_KINDS: &[AttentionKind] = &[
     AttentionKind::Permission,
     AttentionKind::Question,
     AttentionKind::QuestionAbandoned,
+    AttentionKind::PlanQuestion,
     AttentionKind::RunFailed,
     AttentionKind::Stalled,
     AttentionKind::Lost,
@@ -1816,6 +1966,120 @@ pub struct Inhibited {
     pub ids: Vec<AttentionId>,
 }
 
+/// What a narrowing left out.
+///
+/// **Counted rather than implied.** A list that silently shows a subset of what
+/// needs you is the one failure this surface cannot take: the product is sold
+/// on *one page for everything*, and a page that quietly became a filter has
+/// broken that promise without saying so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub struct Narrowed {
+    /// How many items the narrowing removed.
+    pub count: usize,
+    /// The projects those items belonged to, named, so the sentence can be
+    /// *4 elsewhere, in saas and payments-api* rather than a bare number.
+    pub projects: Vec<String>,
+    /// Whether a project was asked for and matched nothing — which is a
+    /// different fact from *that project has nothing waiting*, and the two read
+    /// identically unless something says so.
+    pub no_such_project: bool,
+}
+
+/// How to narrow the inbox.
+///
+/// **A view, never a preference.** Nothing is remembered between runs: a filter
+/// that persists is a filter somebody forgets they set, and the next morning
+/// they are reading a subset of what needs them and do not know it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Narrowing<'a> {
+    /// Matched the way `devplane ls --project` matches: case-insensitive
+    /// substring against the project name. **The same rule, deliberately** —
+    /// two commands on one machine that disagree about what `--project pay`
+    /// means is worse than either rule on its own.
+    pub project: Option<&'a str>,
+    /// What has an answer path, as `ls --needs-you` has it.
+    ///
+    /// **The flag's name promises one of two things and they are different.**
+    /// *A person is required* would include a red gate and a leaked agent;
+    /// *has an answer path* is what `ls` means by it and what somebody typing
+    /// it at 9am wants — the rows they can do something about **from here**.
+    /// This is the second.
+    pub needs_you: bool,
+}
+
+impl Narrowing<'_> {
+    pub fn is_none(&self) -> bool {
+        self.project.is_none() && !self.needs_you
+    }
+}
+
+/// Narrows a ranked list, and says what it left out.
+///
+/// **Pure, and beside `fold` for the reason `fold` is here**: the two surfaces
+/// must narrow identically, and the only way that stays true is one
+/// computation. A board and a terminal each implementing *contains,
+/// case-insensitive* agree until one of them is changed.
+///
+/// **Applied before folding**, so the counts do not overlap: an item this
+/// removes is never also an item the fold hid, and `listed + narrowed_away +
+/// folded == raised` holds over any input.
+pub fn narrow(
+    items: Vec<AttentionItem>,
+    by: &Narrowing<'_>,
+    project_name: &dyn Fn(&ProjectId) -> Option<String>,
+    known_projects: &[String],
+) -> (Vec<AttentionItem>, Option<Narrowed>) {
+    if by.is_none() {
+        return (items, None);
+    }
+
+    let needle = by.project.map(str::to_lowercase);
+    let no_such_project = needle.as_ref().is_some_and(|n| {
+        !known_projects
+            .iter()
+            .any(|p| p.to_lowercase().contains(n.as_str()))
+    });
+
+    let mut kept = Vec::with_capacity(items.len());
+    let mut dropped: Vec<AttentionItem> = Vec::new();
+    for item in items {
+        let name = item.project_id.as_ref().and_then(project_name);
+        let project_ok = match (&needle, &name) {
+            (None, _) => true,
+            // **An item belonging to no project is not in any project.** A
+            // machine-wide row — the gate being down, the record incomplete —
+            // is about every repository at once, and showing it under one
+            // project's name would be claiming something untrue about it.
+            (Some(_), None) => false,
+            (Some(n), Some(p)) => p.to_lowercase().contains(n.as_str()),
+        };
+        let answerable = !by.needs_you || item.has_answer_path();
+        if project_ok && answerable {
+            kept.push(item);
+        } else {
+            dropped.push(item);
+        }
+    }
+
+    let mut projects: Vec<String> = dropped
+        .iter()
+        .filter_map(|i| i.project_id.as_ref().and_then(project_name))
+        .collect();
+    projects.sort();
+    projects.dedup();
+
+    (
+        kept,
+        Some(Narrowed {
+            count: dropped.len(),
+            projects,
+            no_such_project,
+        }),
+    )
+}
+
 /// Moves named consequences onto the rows that explain them.
 ///
 /// **Never drops; moves and counts.** A suppressed item returns the moment its
@@ -1991,6 +2255,158 @@ mod tests {
         }
     }
 
+    /// **The counting property: nothing vanishes and nothing is counted twice.**
+    ///
+    /// `listed + narrowed away + folded == raised`, over a set spanning every
+    /// kind. This is the whole safety argument for narrowing a list the product
+    /// is sold on being complete: a page that quietly became a filter has
+    /// broken its promise without saying so, and the only defence is that every
+    /// item is in exactly one of three places and the two that are not on
+    /// screen are counted out loud.
+    #[test]
+    fn narrowing_and_folding_account_for_every_item_exactly_once() {
+        let names = |id: &ProjectId| Some(id.as_str().to_string());
+        let known = vec!["alpha".to_string(), "beta".to_string()];
+
+        // One item per kind, alternating between two projects, so the set spans
+        // every kind and both sides of the narrowing.
+        let raised: Vec<AttentionItem> = ALL_KINDS
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let mut it = config_broken_item(Path::new("/tmp/x"), "why");
+                it.id = AttentionId::from(format!("i{i}"));
+                it.kind = *k;
+                it.level = k.default_level();
+                it.project_id = Some(ProjectId::from(if i % 2 == 0 { "alpha" } else { "beta" }));
+                if i % 3 == 0 {
+                    it.actions = vec![Action::Reply];
+                }
+                it
+            })
+            .collect();
+        let total = raised.len();
+
+        for by in [
+            Narrowing {
+                project: Some("alpha"),
+                needs_you: false,
+            },
+            Narrowing {
+                project: None,
+                needs_you: true,
+            },
+            Narrowing {
+                project: Some("beta"),
+                needs_you: true,
+            },
+            Narrowing {
+                project: Some("nothing-like-this"),
+                needs_you: false,
+            },
+        ] {
+            let (kept, narrowed) = narrow(raised.clone(), &by, &names, &known);
+            let away = narrowed.as_ref().map_or(0, |n| n.count);
+            let (listed, summaries) = fold(kept);
+            let folded: usize = summaries.iter().map(|s| s.ids.len()).sum();
+            assert_eq!(
+                listed.len() + folded + away,
+                total,
+                "narrowing {by:?} lost or double-counted an item"
+            );
+
+            // And no item is in two places at once.
+            let mut seen: std::collections::BTreeSet<&str> = Default::default();
+            for i in &listed {
+                assert!(seen.insert(i.id.as_str()), "{} listed twice", i.id.as_str());
+            }
+            for su in &summaries {
+                for id in &su.ids {
+                    assert!(
+                        seen.insert(id.as_str()),
+                        "{} folded and listed",
+                        id.as_str()
+                    );
+                }
+            }
+        }
+    }
+
+    /// A narrowing that matches no project is a different fact from a project
+    /// with nothing waiting, and the two read identically unless something says
+    /// so.
+    #[test]
+    fn a_name_matching_no_project_is_its_own_answer() {
+        let names = |id: &ProjectId| Some(id.as_str().to_string());
+        let known = vec!["alpha".to_string()];
+        let mut it = config_broken_item(Path::new("/tmp/x"), "why");
+        it.project_id = Some(ProjectId::from("alpha"));
+
+        let (kept, n) = narrow(
+            vec![it.clone()],
+            &Narrowing {
+                project: Some("zzz"),
+                needs_you: false,
+            },
+            &names,
+            &known,
+        );
+        assert!(kept.is_empty());
+        assert!(
+            n.as_ref().unwrap().no_such_project,
+            "a typo reads as an empty project"
+        );
+
+        let (kept, n) = narrow(
+            vec![it],
+            &Narrowing {
+                project: Some("alpha"),
+                needs_you: false,
+            },
+            &names,
+            &known,
+        );
+        assert_eq!(kept.len(), 1);
+        assert!(!n.unwrap().no_such_project);
+    }
+
+    /// `--needs-you` is *has an answer path*, not *a person is required*.
+    ///
+    /// A red gate needs a person and cannot be answered from a list; a question
+    /// with a reply can. Derived from what is offered, so it cannot disagree
+    /// with the controls the row actually shows.
+    #[test]
+    fn needs_you_means_answerable_here_rather_than_important() {
+        let mut gate = config_broken_item(Path::new("/tmp/x"), "why");
+        gate.actions = vec![Action::Open, Action::Snooze];
+        assert!(
+            !gate.has_answer_path(),
+            "a row offering only open and snooze cannot be answered from here"
+        );
+
+        let mut question = config_broken_item(Path::new("/tmp/x"), "why");
+        question.actions = vec![Action::Open, Action::Reply];
+        assert!(question.has_answer_path());
+
+        let mut choosable = config_broken_item(Path::new("/tmp/x"), "why");
+        choosable.actions = vec![Action::Open];
+        choosable.ask = Some(crate::core::AskId::from("a1"));
+        assert!(choosable.has_answer_path(), "a durable ask is answerable");
+    }
+
+    /// **A narrowing is a view, and no narrowing is the identity.**
+    #[test]
+    fn no_narrowing_changes_nothing_and_reports_nothing() {
+        let names = |id: &ProjectId| Some(id.as_str().to_string());
+        let it = config_broken_item(Path::new("/tmp/x"), "why");
+        let (kept, n) = narrow(vec![it], &Narrowing::default(), &names, &[]);
+        assert_eq!(kept.len(), 1);
+        assert!(
+            n.is_none(),
+            "an unnarrowed list has nothing to report leaving out"
+        );
+    }
+
     /// **Exhaustive by compilation.** Adding a variant to `AttentionKind`
     /// makes this match non-exhaustive, and the compiler names the variant
     /// that is missing from [`ALL_KINDS`].
@@ -2001,11 +2417,11 @@ mod tests {
     fn is_listed(k: AttentionKind) -> bool {
         use AttentionKind::*;
         match k {
-            Permission | Question | QuestionAbandoned | RunFailed | Stalled | Lost
-            | ContextHigh | RateLimit | CostSpike | GateFailed | CiRed | ChangesRequested
-            | PrReady | IssueAssigned | ReviewRequested | Conflict | Interrupted | HumanStep
-            | ReviewExhausted | PipelineBroken | Refused | GateDown | ConfigBroken
-            | RecordIncomplete | AgentLeaked => ALL_KINDS.contains(&k),
+            Permission | Question | QuestionAbandoned | PlanQuestion | RunFailed | Stalled
+            | Lost | ContextHigh | RateLimit | CostSpike | GateFailed | CiRed
+            | ChangesRequested | PrReady | IssueAssigned | ReviewRequested | Conflict
+            | Interrupted | HumanStep | ReviewExhausted | PipelineBroken | Refused | GateDown
+            | ConfigBroken | RecordIncomplete | AgentLeaked => ALL_KINDS.contains(&k),
         }
     }
 

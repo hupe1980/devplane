@@ -194,7 +194,8 @@
 
     {#if showing}
       <!-- The surface renders itself; the shell passes nothing it knows about. -->
-      <showing.component {...showing.select(feed, focus)} />
+      {@const Surface = showing.component}
+      <Surface {...showing.select(feed, focus)} />
     {:else}
       <p>No surface is registered.</p>
     {/if}

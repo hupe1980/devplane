@@ -2,6 +2,142 @@
 
 Notable changes per release. Dates are UTC.
 
+## Unreleased
+
+### Breaking
+
+- **The telemetry endpoints require the bearer token.** `devplane connect` now
+  writes `OTEL_EXPORTER_OTLP_HEADERS` beside the endpoint, and `disconnect`
+  removes it. A session configured by an older build exports to an endpoint that
+  refuses it — re-run `devplane connect`. Pointing Claude Code at Devplane by
+  hand needs both variables; `connect copilot` prints three export lines instead
+  of two.
+
+- **`GET /api/library/{name}` is gone.** It served per-artefact drift,
+  provenance and portability to nothing.
+
+### Security
+
+- **A prohibition stopped applying to a heredoc fed to anything the parser did
+  not recognise as a shell.** `never_auto = ["Bash(rm -rf *)"]` returned
+  `Undecided` — not a refusal, not a prompt — for `cat <<EOF | sudo bash`,
+  `| env bash`, `| timeout 5 sh`, `| xargs sh -c`, `| python3` and `| node`.
+
+  The body is now dropped only when **every** program on the line provably
+  cannot execute it. An unrecognised program keeps the body, which costs a parse
+  and never a missed rule.
+
+- **The telemetry endpoints accepted OTLP records from anything that could reach
+  the port** — every process running as you, and any page your browser loaded —
+  writing session, cost and context rows into the decision log.
+
+- **An answer could name an option nobody offered, and it was recorded as an
+  `allow`.** `POST /api/asks/{id}/answer` with an unrecognised `option` put an
+  approval in the decision log under the answerer's name. Choosing an option the
+  agent published as a *refusal* did the same. An option must now name something
+  that request offered, checked before the answer is written.
+
+### Added
+
+- **Plans** — a surface, and `GET /api/specs` behind it. What each project is
+  working to, across every repository: the specification its work names, its
+  outline, how many boxes are still open, and which carry a line nobody has
+  answered.
+
+- **`[spec] plans`** — where a repository keeps its specifications. No default:
+  Spec Kit writes `specs/`, Kiro `.kiro/specs/`, OpenSpec `openspec/changes/`.
+  Set it and the Plans page lists them; leave it out and the page says *not
+  looked for* rather than *none*. Which plan somebody is working to is still
+  never guessed — only `devplane work start --spec` says that.
+
+- **`done`, beside the plan it answers.** Finished work whose specification has
+  unticked boxes, unanswered questions, or no specification at all says so where
+  it is approved and in `devplane work list`. It informs an approval and cannot
+  block one.
+
+- **The plan changed under the run.** Work records its specification's
+  fingerprint at start; drift appears on the work and on the certificate, above
+  the task counts. Three answers: drift, no drift, and unknown for work that
+  recorded nothing.
+
+- **A question in a committed file reaches the inbox.** A line matching
+  `[spec] open_questions` in a specification an in-flight work names is raised
+  as one item per project, ranked below anything an agent is blocked on. Nothing
+  is raised for a project that declares no words.
+
+- **`[questions] hold`** — answer a watched session's permission from anywhere.
+  `true` for 30 s, or a duration up to 120 s. Only calls your `always_ask` rules
+  matched are held; a prohibition is applied first and is never held. Nobody
+  answers and nothing changes: the hook lapses and the vendor's own dialog
+  appears. Off by default, and it does not fire in auto mode.
+
+- **A prompt can say what is actually wrong.** A portable prompt in
+  `.devplane/prompts/` may name a closed set of facts — `{project}`,
+  `{plan.open}`, `{gate.failures}`, `{decision.authority}` and the rest —
+  resolved per target, shown before the button is live. No loops, no
+  conditionals. A placeholder with nothing behind it refuses, naming which.
+  A `SKILL.md` is never scanned and takes values as arguments.
+
+- **The launcher offers the prompts your project already has**, with
+  `argument-hint` as a field.
+
+- **OpenCode, read over its own event feed.** Set `DEVPLANE_OPENCODE_URL` to a
+  running `opencode serve`. It is the one vendor that publishes the *ending* of
+  a question: `question.rejected` records an abandonment with **nobody** as the
+  authority, because its schema says nothing about who ended it. Read-only — an
+  OpenCode option carries no protocol id, so there is no handle an answer could
+  name.
+
+- **`devplane inbox --project <name>` and `--needs-you`**, and the same
+  narrowing on the board at `#inbox/<project>`. `--needs-you` means *has an
+  answer path*. A narrowed list always says how many it is not showing, and the
+  close does not render over one.
+
+- **`devplane completions <bash|zsh|fish>`**, generated from the command tree.
+  Writing a script needs no daemon; completing an id asks the daemon and is
+  silent without one. zsh and fish complete ids with a description; bash
+  completes commands only.
+
+- **`devplane audit --otel`** writes the decision log as OpenTelemetry GenAI
+  `gen_ai.tool.call.decision` records, carrying the authority under an
+  application-specific prefix. Nothing is sent anywhere.
+
+- **`devplane check` reads `[spec]` back**, both keys, with a count of plans
+  found.
+
+### Changed
+
+- **Hidden commands are no longer offered by the completions.** `hide = true`
+  keeps a command off the help screen and not out of `clap_complete`'s output.
+
+- **`SpecStamp` is composed from the same reader a surface is served**, so the
+  certificate and the page cannot disagree about a plan's counts.
+
+- **A specification with no task list cannot render as complete.** The counts
+  travel as a type that only exists where boxes do, so `0 of 0` is
+  unrepresentable.
+
+### Fixed
+
+- **The Plans page never finished loading.** Rows were keyed on a work id that
+  is null for any plan no work names, so a repository with several plans gave
+  every row the same key; Svelte threw `each_key_duplicate` mid-render and the
+  surface stopped updating where it stood. Five other lists keyed on
+  content Devplane does not control — an agent's option labels, a gate's
+  repeated commands, a diff's hunk headers — are keyed by position now.
+
+- **A request that never came back left the page on its loading state for
+  ever.** Every request is bounded at ten seconds and a failure names the likely
+  cause: the daemon restarting on another port. The Plans page has a retry
+  control, because reloading a tab loses its token.
+
+- **The specification reader counted its own documentation as an open
+  question.** A marker inside backticks is a mention, and `checklists/` is
+  excluded from questions for the reason it is already excluded from progress.
+
+- **`Spec::questions` and the question lines come from one place**, so a surface
+  cannot show questions under a heading that says none.
+
 ## 0.8.0 — 2026-09-23
 
 ### Breaking

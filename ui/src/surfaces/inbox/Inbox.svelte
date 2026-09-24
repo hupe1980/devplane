@@ -57,12 +57,71 @@
     folded = [],
     inhibited = [],
     close = null,
+    project = "",
   }: {
     items?: Item[];
     folded?: Summary[];
     inhibited?: Inhibited[];
     close?: Close | null;
+    /// The project this list is narrowed to, out of `#inbox/<project>`.
+    project?: string;
   } = $props();
+
+  /// **The narrowed list comes from the daemon, not from filtering the feed.**
+  ///
+  /// The board and the terminal must narrow identically, and the only way that
+  /// stays true is one computation — the property the fold already has and the
+  /// reason it was built that way. Filtering the polled list here would be a
+  /// second implementation of *contains, case-insensitive*, agreeing until one
+  /// of them changed.
+  let narrowedFeed = $state<{
+    items: Item[];
+    folded: Summary[];
+    inhibited: Inhibited[];
+    narrowed: { count: number; projects: string[]; no_such_project: boolean } | null;
+  } | null>(null);
+
+  $effect(() => {
+    const want = project.trim();
+    if (!want) {
+      narrowedFeed = null;
+      return;
+    }
+    let live = true;
+    // `read=false`: a narrowed view is somebody looking at one repository, not
+    // at the day, so it must not advance the boundary the close is drawn from.
+    api<typeof narrowedFeed & object>(`/api/inbox?project=${encodeURIComponent(want)}`)
+      .then((r) => {
+        if (live) narrowedFeed = r;
+      })
+      .catch(() => {
+        if (live) narrowedFeed = null;
+      });
+    return () => {
+      live = false;
+    };
+  });
+
+  const shown = $derived(narrowedFeed?.items ?? items);
+  const shownFolded = $derived(narrowedFeed?.folded ?? folded);
+  const shownInhibited = $derived(narrowedFeed?.inhibited ?? inhibited);
+  const leftOut = $derived(narrowedFeed?.narrowed?.count ?? 0);
+  const noSuchProject = $derived(narrowedFeed?.narrowed?.no_such_project ?? false);
+  /// **The close does not render over a narrowed list.** It answers *how was
+  /// the day*, and a day is not one project. The daemon already withholds it;
+  /// this is the surface agreeing rather than deciding.
+  const shownClose = $derived(project.trim() ? null : close);
+
+  /// Every project with something waiting, for the control. Derived from the
+  /// **unnarrowed** feed, so narrowing to one does not remove the way back.
+  ///
+  /// **In the ranked list's own order, not alphabetical.** Sorting these would
+  /// put a second opinion about ordering on this surface, next to a list whose
+  /// whole point is that the daemon decided the order — and the project with
+  /// the critical row would sit wherever its name happened to fall.
+  const projects = $derived([
+    ...new Set(items.map((i) => i.project_name).filter((p): p is string => !!p)),
+  ]);
 
   /// What the last answer did, so a refusal is never silent.
   let said = $state("");
@@ -235,15 +294,32 @@
   }
 
   const nothingRaised = $derived(
-    items.length === 0 && folded.length === 0 && inhibited.length === 0,
+    shown.length === 0 && shownFolded.length === 0 && shownInhibited.length === 0,
   );
+
+  function narrowTo(p: string) {
+    // A narrowing is a **view**: it lives in the address and nowhere else, so
+    // nothing is remembered between visits. A filter that persists is one
+    // somebody forgets they set, and the next morning they are reading a subset
+    // of what needs them and do not know it.
+    location.hash = p ? `#inbox/${encodeURIComponent(p)}` : "#inbox";
+  }
 </script>
 
 <section aria-labelledby="inbox-head">
   <h2 id="inbox-head">What needs you</h2>
 
-  {#if close?.since_last_look}
-    <p class="hairline">since you last looked · {close.since_last_look}</p>
+  {#if shownClose?.since_last_look}
+    <p class="hairline">since you last looked · {shownClose.since_last_look}</p>
+  {/if}
+
+  {#if projects.length > 1 || project}
+    <div class="narrow" role="group" aria-label="narrow to one project">
+      <button class:on={!project} onclick={() => narrowTo("")}>everything</button>
+      {#each projects as p (p)}
+        <button class:on={project === p} onclick={() => narrowTo(p)}>{p}</button>
+      {/each}
+    </div>
   {/if}
 
   <p class="said" role="status" aria-live="polite">
@@ -253,23 +329,38 @@
     {/if}
   </p>
 
-  {#if nothingRaised}
+  {#if nothingRaised && noSuchProject}
+    <!-- **Three empty states, because they are three different facts.** Told
+         the same way, a typo reads as good news. -->
+    <p class="dim">
+      No project matches <b>{project}</b>.
+      <button class="undo" onclick={() => narrowTo("")}>show everything</button>
+    </p>
+  {:else if nothingRaised && project}
+    <p class="dim">
+      Nothing needs you here.
+      {#if leftOut > 0}
+        <button class="undo" onclick={() => narrowTo("")}
+          >{leftOut} elsewhere</button>
+      {/if}
+    </p>
+  {:else if nothingRaised}
     <!-- **The close.** Every board in this category renders an empty list as
          an absence; this is the moment it has the best thing it will ever have
          to say. -->
     <div class="close">
       <p><b>Clear.</b></p>
-      {#if close?.quiet}
+      {#if shownClose?.quiet}
         <p class="dim">Nothing needed you, and nothing was decided for you.</p>
       {:else}
-        {#each close?.sentences ?? [] as s (s)}<p class="dim">{s}</p>{/each}
+        {#each shownClose?.sentences ?? [] as s, si (si)}<p class="dim">{s}</p>{/each}
       {/if}
-      {#if close?.next}<p class="dim">next · {close.next}</p>{/if}
-      {#if close?.keeps_running}<p class="dim">{close.keeps_running}</p>{/if}
+      {#if shownClose?.next}<p class="dim">next · {shownClose.next}</p>{/if}
+      {#if shownClose?.keeps_running}<p class="dim">{shownClose.keeps_running}</p>{/if}
     </div>
   {:else}
     <ul role="list">
-      {#each items as i (i.id)}
+      {#each shown as i (i.id)}
         <li class="item {i.level}">
           <div class="t">
             {#if i.level === "critical" || i.level === "high"}
@@ -306,7 +397,13 @@
                because somebody will try it. -->
           {#if (i.options ?? []).length > 0 && (i.actions ?? []).includes("choose")}
             <div class="opts">
-              {#each i.options ?? [] as o (o.label)}
+              <!-- **Keyed by position, because the content is somebody else's.** An
+           agent may offer two options with the same label, a gate may run the
+           same command twice, a diff may repeat a hunk header — and a duplicate
+           key is not a cosmetic problem: Svelte throws mid-render and the
+           surface stops updating where it stands. Position is unique by
+           construction and these lists are replaced wholesale anyway. -->
+      {#each i.options ?? [] as o, oi (oi)}
                 {#if o.id}
                   <button class="choice" onclick={() => answer(i, { option: o.id! })}>{o.label}</button>
                 {:else}
@@ -395,13 +492,13 @@
       {/each}
 
       <!-- Counted, never hidden. -->
-      {#each folded as f (f.kind + (f.project ?? ""))}
+      {#each shownFolded as f (f.kind + (f.project ?? ""))}
         <li class="item folded">
           <div class="t"><b>{f.count} × {f.kind}</b></div>
           <div class="meta"><span>{f.project ?? "across projects"}</span><span>folded — the list is long</span></div>
         </li>
       {/each}
-      {#each inhibited as s (s.cause)}
+      {#each shownInhibited as s (s.cause)}
         <li class="item inhibited">
           <div class="t">{s.count} more {plural(s.count, "item", "items")} counted here</div>
           <div class="meta"><span>{s.because}</span></div>
@@ -412,6 +509,25 @@
 </section>
 
 <style>
+  .narrow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 0.6rem;
+  }
+  .narrow button {
+    padding: 0.2rem 0.5rem;
+    font-size: 0.8rem;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .narrow button.on {
+    border-color: var(--accent);
+    color: var(--ink);
+  }
+
   h2 { font-size: var(--t-lg); margin: 0 0 var(--s-1); }
   .hairline, .said { color: var(--dim); font-size: var(--t-xs); margin: 0; }
   .said { display: flex; align-items: center; gap: var(--s-2); min-height: 1.6em; }

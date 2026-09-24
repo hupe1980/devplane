@@ -182,14 +182,40 @@ impl Client {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<T> {
-        let res = self
+        self.post_json_inner(path, body, None).await
+    }
+
+    /// The same, with a deadline of its own.
+    ///
+    /// **For the one call that is meant to take a while**: a held permission,
+    /// where the daemon is waiting for a person and the hook is waiting for the
+    /// daemon. The client's own timeout has to outlast the hold, or the hook
+    /// gives up on a daemon that is still waiting and the person's answer
+    /// arrives nowhere.
+    pub async fn post_json_within<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        within: std::time::Duration,
+    ) -> Result<T> {
+        self.post_json_inner(path, body, Some(within)).await
+    }
+
+    async fn post_json_inner<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        within: Option<std::time::Duration>,
+    ) -> Result<T> {
+        let mut req = self
             .http
             .post(format!("{}{path}", self.base))
             .bearer_auth(&self.token)
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("POST {path}"))?;
+            .json(body);
+        if let Some(d) = within {
+            req = req.timeout(d);
+        }
+        let res = req.send().await.with_context(|| format!("POST {path}"))?;
         let status = res.status();
         let text = res
             .text()

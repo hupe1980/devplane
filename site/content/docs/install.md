@@ -107,6 +107,31 @@ export DEVPLANE_CLAUDE_BIN=/path/to/claude
 > channels and Devplane reads them, but that path has not yet been proved end to end. The other three
 > are not watched at all.
 
+## Shell completion
+
+One command per shell, generated from the command tree rather than written by hand — so a command
+that exists completes, and a hidden one is not offered.
+
+```sh
+devplane completions zsh  > ~/.zsh/completions/_devplane
+devplane completions bash > /usr/local/etc/bash_completion.d/devplane
+devplane completions fish > ~/.config/fish/completions/devplane.fish
+```
+
+**Two guarantees, and they are different.**
+
+Writing the script **needs no daemon**. It is a pure function of the binary: setting up a shell
+should not require having started anything.
+
+Completing an **id** — a waiting question, a session, a project — asks the running daemon, and is
+**silent when there is none**. Pressing Tab must not start a daemon, and it gives up after 150 ms,
+because a shell that hangs on Tab is worse than one that completes nothing.
+
+**zsh and fish complete the ids; bash completes the commands only.** Both of the first two show a
+description beside each value, which is the whole point of completing an opaque id — the id tells you
+nothing and the question beside it tells you everything. Bash has no descriptions, so the same list
+there would be a column of ULIDs to choose between.
+
 ## Where it keeps things
 
 Everything lives in one directory, `~/.devplane`:

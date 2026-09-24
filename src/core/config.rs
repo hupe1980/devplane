@@ -378,9 +378,90 @@ pub struct Questions {
     /// author meant is how a supervision tool ends a question nobody meant it
     /// to end.
     pub deadline: Option<String>,
+    /// How long a permission on a **watched** session may be held for you.
+    ///
+    /// **Absent means no hold at all**, which is the behaviour this product
+    /// shipped with: the vendor's own dialog appears at once and the only offer
+    /// Devplane can make is *raise its window*. Set it and a permission your
+    /// own `always_ask` rules matched waits this long for an answer from the
+    /// inbox, the board or your phone before the dialog appears.
+    ///
+    /// `true` means [`Hold::DEFAULT`]. A duration — `10s`, `45s` — names its
+    /// own, up to [`Hold::CEILING`].
+    ///
+    /// An unparseable or over-long value is a configuration error rather than a
+    /// silent fallback, for the reason `deadline` is: the difference between
+    /// `30s` and a typo is the difference between a bounded hold and an agent
+    /// frozen for as long as the vendor will wait.
+    pub hold: Option<toml::Value>,
 }
 
+/// A bounded wait on one permission, so somebody can answer it from wherever
+/// they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hold(pub Duration);
+
+impl Hold {
+    /// What `hold = true` means.
+    ///
+    /// **Thirty seconds.** The vendor allows 600, and a bound that long would
+    /// leave an agent frozen for ten minutes because somebody's phone was in a
+    /// pocket. Thirty is enough to unlock a phone once a notification has
+    /// arrived and cheap enough to lose on an unattended run.
+    pub const DEFAULT: Duration = Duration::from_secs(30);
+
+    /// The most a project may ask for.
+    ///
+    /// **Under the vendor's own 600 s**, because a hold that outlives the
+    /// hook's timeout is a hold whose lapse is the vendor cancelling the
+    /// process rather than this product standing down — and the two look
+    /// different from inside the session.
+    pub const CEILING: Duration = Duration::from_secs(120);
+}
+
+/// [`Hold::CEILING`] in milliseconds, for the wire.
+///
+/// **Clamped on both sides.** The hook applies the project's value and the
+/// daemon applies this, because a bound enforced in one process is a bound an
+/// older binary walks past — and the failure is an agent frozen for as long as
+/// whoever wrote the payload asked for.
+pub const HOLD_CEILING_MS: u64 = Hold::CEILING.as_millis() as u64;
+
 impl Questions {
+    /// The hold this project declares, and nothing where it declares none.
+    ///
+    /// `Ok(None)` is *no hold*, which is the default and is not an error.
+    /// `Err` carries the sentence `devplane check` prints.
+    pub fn hold(&self) -> Result<Option<Hold>, String> {
+        let Some(v) = self.hold.as_ref() else {
+            return Ok(None);
+        };
+        match v {
+            toml::Value::Boolean(false) => Ok(None),
+            toml::Value::Boolean(true) => Ok(Some(Hold(Hold::DEFAULT))),
+            toml::Value::String(s) => {
+                let d = humantime::parse(s).ok_or_else(|| {
+                    format!("`questions.hold = \"{s}\"` is not a duration like \"30s\" or \"2m\"")
+                })?;
+                if d > Hold::CEILING {
+                    return Err(format!(
+                        "`questions.hold = \"{s}\"` is longer than {:?}, which is as long as an \
+                         agent may be held for a person. A hold is seconds for somebody already \
+                         looking at a phone, not a way to pause a session.",
+                        Hold::CEILING
+                    ));
+                }
+                if d.is_zero() {
+                    return Err("`questions.hold` of zero is not a hold; remove it instead".into());
+                }
+                Ok(Some(Hold(d)))
+            }
+            other => Err(format!(
+                "`questions.hold` takes `true` or a duration like \"30s\", not {other}"
+            )),
+        }
+    }
+
     /// The deadline this project sets, and nothing where it sets none.
     ///
     /// Returns `None` for an unparseable value so the caller can report it as a
@@ -505,6 +586,52 @@ pub struct SpecSection {
     /// default and the repository writes what it means. Matched
     /// case-insensitively, per line, exactly as a reviewer's findings are.
     pub open_questions: Vec<String>,
+    /// Where this repository keeps its plans, relative to the project root.
+    ///
+    /// **The same rule as `open_questions`, one field over: the project says,
+    /// and this tool has no default.** Spec Kit writes `specs/`, Kiro writes
+    /// `.kiro/specs/`, OpenSpec writes `openspec/changes/`, and plenty of
+    /// repositories write a folder somebody named themselves. Guessing at one
+    /// would be modelling a methodology, which the reader opens by refusing to
+    /// do; guessing at the *newest* one inside it would be worse, because it is
+    /// wrong the moment somebody works on an older feature.
+    ///
+    /// **Absent means the Plans page lists nothing for this project**, and says
+    /// *not configured* rather than *nothing* — which is the distinction the
+    /// page was missing: it was correct and empty on every real machine,
+    /// because it could only ever show a plan a piece of Devplane Work already
+    /// named.
+    pub plans: Option<String>,
+}
+
+impl SpecSection {
+    /// The immediate children of the plans directory, in path order.
+    ///
+    /// **A listing, not a guess.** Each is a plan this repository has; which
+    /// one anybody is working to is a separate question, answered only by a
+    /// piece of Work naming it.
+    pub fn plan_paths(&self, root: &std::path::Path) -> Vec<String> {
+        let Some(dir) = self.plans.as_deref() else {
+            return Vec::new();
+        };
+        let joined = root.join(dir);
+        if !crate::core::policy::within(root, &joined) {
+            return Vec::new();
+        }
+        let Ok(entries) = std::fs::read_dir(&joined) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                (!name.starts_with('.')).then(|| format!("{}/{name}", dir.trim_end_matches('/')))
+            })
+            .collect();
+        out.sort();
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1484,5 +1611,98 @@ ready_label = "devplane:ready"
         let d = std::env::temp_dir().join(format!("vp-cfg-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+}
+
+#[cfg(test)]
+mod hold_tests {
+    use super::*;
+
+    fn cfg(toml_src: &str) -> ProjectConfig {
+        toml::from_str(toml_src).expect("a fixture parses")
+    }
+
+    /// **Off by default, and that is the shipped behaviour.**
+    ///
+    /// A project that says nothing gets no hold, which means the vendor's own
+    /// dialog appears at once — exactly as it did before this existed.
+    #[test]
+    fn a_project_that_says_nothing_holds_nothing() {
+        assert_eq!(cfg("").questions.hold(), Ok(None));
+        assert_eq!(cfg("[questions]\nhold = false").questions.hold(), Ok(None));
+    }
+
+    /// `true` means thirty seconds.
+    ///
+    /// The vendor allows 600, and a bound that long would leave an agent frozen
+    /// for ten minutes because somebody's phone was in a pocket. Thirty is
+    /// enough to unlock a phone once a notification has arrived and cheap
+    /// enough to lose on an unattended run.
+    #[test]
+    fn turning_it_on_without_a_duration_is_thirty_seconds() {
+        assert_eq!(
+            cfg("[questions]\nhold = true").questions.hold(),
+            Ok(Some(Hold(Duration::from_secs(30))))
+        );
+        assert_eq!(Hold::DEFAULT, Duration::from_secs(30));
+    }
+
+    /// A named duration is taken, up to the ceiling.
+    #[test]
+    fn a_named_duration_is_taken() {
+        for (src, secs) in [("10s", 10u64), ("45s", 45), ("2m", 120)] {
+            assert_eq!(
+                cfg(&format!("[questions]\nhold = \"{src}\""))
+                    .questions
+                    .hold(),
+                Ok(Some(Hold(Duration::from_secs(secs)))),
+                "`{src}`"
+            );
+        }
+    }
+
+    /// **A value that will not parse is a problem, never a default.**
+    ///
+    /// The difference between `30s` and a typo is the difference between a
+    /// bounded hold and an agent frozen for as long as the vendor will wait,
+    /// and guessing which the author meant is how a supervision tool stalls a
+    /// session for reasons nobody remembers. The same rule the question
+    /// deadline already follows.
+    #[test]
+    fn a_value_that_will_not_parse_is_refused_and_leaves_no_hold() {
+        // `"30"` is **not** here: this file's own duration parser reads a bare
+        // number as seconds, and every other duration key in it does the same.
+        // Refusing it only here would make one key stricter than the rest for
+        // no reason a reader could guess.
+        for bad in ["\"soon\"", "\"0s\"", "12", "[]"] {
+            let r = cfg(&format!("[questions]\nhold = {bad}")).questions.hold();
+            assert!(r.is_err(), "`hold = {bad}` was accepted: {r:?}");
+            let says = r.unwrap_err();
+            assert!(
+                says.contains("hold"),
+                "the refusal does not name the key: {says}"
+            );
+        }
+    }
+
+    /// **The ceiling is under the vendor's own.**
+    ///
+    /// A hold that outlives the hook's 600 s timeout is a hold whose lapse is
+    /// the vendor cancelling the process rather than this product standing
+    /// down, and the two look different from inside the session.
+    #[test]
+    fn a_hold_may_not_outlast_what_the_vendor_will_wait() {
+        assert!(
+            Hold::CEILING < Duration::from_secs(600),
+            "the ceiling is at or past the vendor's own hook timeout"
+        );
+        let r = cfg("[questions]\nhold = \"10m\"").questions.hold();
+        assert!(r.is_err(), "a ten-minute hold was accepted");
+        assert!(
+            r.unwrap_err().contains("as long as an agent may be held"),
+            "the refusal does not say why"
+        );
+        // And the wire bound agrees with the type's.
+        assert_eq!(HOLD_CEILING_MS, Hold::CEILING.as_millis() as u64);
     }
 }

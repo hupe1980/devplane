@@ -115,6 +115,13 @@ pub struct AppState {
     /// the answer here, and the inbox raises it — because `devplane doctor`
     /// only ever helps the person who thinks to run it.
     pub gate_down: Mutex<Option<String>>,
+    /// How the OpenCode subscription is going, when one was asked for.
+    ///
+    /// **Held so quiet is never mistaken for nothing.** The feed does not
+    /// replay, so a drop is a silent gap — and a surface that inferred health
+    /// from an absence of events would report a dead subscription as a quiet
+    /// machine, which is the reassuring failure this product refuses.
+    pub opencode: Mutex<crate::observe::opencode::Health>,
     /// What the store would not take, and why it last said no.
     ///
     /// A failed write is logged and dropped, and that trade is deliberate:
@@ -296,6 +303,7 @@ impl AppState {
             store,
             agents,
             gate_down: Mutex::new(None),
+            opencode: Mutex::new(crate::observe::opencode::Health::Live { last_event: None }),
             unwritten: Unwritten::default(),
             leaked_agents: Mutex::new(Vec::new()),
             forge: Mutex::new(ForgeState::default()),
@@ -571,6 +579,49 @@ impl AppState {
         let (lost_events, lost_decisions, last_loss) = self.unwritten.counts();
         let forge = self.forge.lock().await.items(&works);
         let leaked_agents = self.leaked_agents.lock().await.clone();
+
+        // **A question in a committed file is a question nobody answered**, and
+        // it goes in the same ranked list as an agent's — one step quieter,
+        // because nothing is blocked on it.
+        //
+        // Derived here rather than in `World` for the reason `forge` is: reading
+        // a specification walks a folder, and that module may not touch the
+        // outside world. One item per project, and **none at all** for a project
+        // that has not said which words mark an unresolved question — the
+        // vocabulary is the repository's and this tool has no default list.
+        let from_disk = {
+            let world = self.world.lock().await;
+            let mut out = Vec::new();
+            let projects: Vec<_> = world
+                .projects()
+                .map(|p| (p.id.clone(), p.name.clone(), p.root.clone()))
+                .collect();
+            drop(world);
+            for (id, name, root) in projects {
+                let markers = crate::core::ProjectConfig::load(&root)
+                    .map(|c| c.spec.open_questions)
+                    .unwrap_or_default();
+                if markers.is_empty() {
+                    continue;
+                }
+                let plans: Vec<(String, crate::core::spec::Plan)> = works
+                    .iter()
+                    .filter(|w| w.project_id == id && !w.phase.is_finished())
+                    .filter_map(|w| {
+                        let spec = w.spec.as_deref()?;
+                        Some((
+                            w.id.as_str().to_string(),
+                            crate::core::spec::Plan::read(&root, spec, &markers),
+                        ))
+                    })
+                    .collect();
+                out.extend(crate::core::attention::plan_question_item(
+                    &name, &id, &plans,
+                ));
+            }
+            out
+        };
+
         let mut items = {
             let w = self.world.lock().await;
             w.inbox_with_health(
@@ -584,6 +635,7 @@ impl AppState {
                     leaked_agents: &leaked_agents,
                 },
                 forge,
+                from_disk,
             )
         };
         // **Asks that outlived the process that asked them.** Every item above
@@ -833,6 +885,10 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     let retention = tokio::spawn(crate::poller::retention(state.clone(), 30, 7));
     let expiry = tokio::spawn(crate::poller::expiry_sweeper(state.clone()));
     let prs = tokio::spawn(crate::poller::pull_requests(state.clone()));
+    // **Opt-in, and it returns immediately when nobody asked.** `opencode serve`
+    // is a server the person chose to run; connecting out to a port this product
+    // guessed at would be scanning the machine.
+    let opencode = tokio::spawn(crate::observe::opencode::watch(state.clone()));
     // Nothing else can notice a gate that has stopped deciding: a broken one
     // and a quiet machine look identical from the event log.
     let gate = tokio::spawn(crate::poller::gate_watch(state.clone()));
@@ -856,6 +912,7 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     expiry.abort();
     gate.abort();
     prs.abort();
+    opencode.abort();
     forge.abort();
     state.shutdown().await;
     crate::config::clear_daemon_info().ok();

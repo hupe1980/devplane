@@ -12,11 +12,22 @@ use anyhow::Result;
 /// never fired and the number that did was in the wrong layer entirely.
 const DETAIL_WIDTH: usize = 100;
 
-pub async fn cmd_inbox(json: bool) -> Result<()> {
+pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Result<()> {
     let c = client::Client::connect_or_start().await?;
+    // **The narrowing goes to the daemon**, which is what makes the board and
+    // this command narrow identically: one computation, beside the fold, for
+    // the reason the fold is there. Two surfaces each implementing *contains,
+    // case-insensitive* agree until one of them is changed.
+    let mut path = String::from("/api/inbox?read=true");
+    if let Some(p) = project {
+        path.push_str(&format!("&project={}", crate::core::text::url_escape(p)));
+    }
+    if needs_you {
+        path.push_str("&needs_you=true");
+    }
     // **Running the command is reading it.** The output goes to somebody's
     // screen, which is the whole of what the boundary measures.
-    let body = raw(&c, "/api/inbox?read=true").await?;
+    let body = raw(&c, &path).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
@@ -31,6 +42,8 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
     // **The boundary, above everything.** One hairline saying how long it has
     // been, and nothing at all where there is no previous look — there is no
     // *last* to be since, and a line reading `0m` would be inventing one.
+    // The boundary belongs to the whole machine, so it does not render over a
+    // narrowed list either — the close it belongs to is already absent there.
     if let Some(since) = close.get("since_last_look").and_then(|v| v.as_str()) {
         println!(
             "{}",
@@ -45,10 +58,50 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
         serde_json::from_value(body.get("inhibited").cloned().unwrap_or_default())
             .unwrap_or_default();
 
-    // **Empty means nothing was raised**, not merely that nothing is listed.
-    // Printing the close under a screen of summary rows would be telling
-    // somebody the day was quiet because the surface tidied it.
+    // **Deserialised, not read key by key.** A field the type does not have is
+    // a compile error; a field the API stops sending is `unwrap_or(0)` for
+    // ever, and the one time this repository read an envelope by hand it asked
+    // for a key no version of the endpoint had ever served.
+    let narrowed: Option<crate::core::attention::Narrowed> =
+        serde_json::from_value(body.get("narrowed").cloned().unwrap_or_default()).unwrap_or(None);
+    let left_out = narrowed.as_ref().map_or(0, |n| n.count);
+    let no_such = narrowed.as_ref().is_some_and(|n| n.no_such_project);
+
+    // **Three empty states, because they are three different facts.** A
+    // narrowing that matched no project, a project with nothing waiting, and a
+    // machine with nothing waiting are not the same answer — and told the same
+    // way, a typo reads as good news.
     if items.is_empty() && folded.is_empty() && inhibited.is_empty() {
+        if no_such {
+            let known: Vec<String> = narrowed
+                .as_ref()
+                .map(|n| n.projects.clone())
+                .unwrap_or_default();
+            println!("No project matches {}.", paint(BOLD, project.unwrap_or("")));
+            if !known.is_empty() {
+                println!(
+                    "{}",
+                    paint(DIM, &format!("Waiting in: {}", known.join(", ")))
+                );
+            }
+            println!("{}", paint(DIM, "devplane inbox lists every project."));
+            return Ok(());
+        }
+        if project.is_some() || needs_you {
+            // *Nothing needs you here* is not *nothing needs you*, and the
+            // count is what makes the difference sayable.
+            println!("Nothing needs you here.");
+            if left_out > 0 {
+                println!(
+                    "{}",
+                    paint(
+                        DIM,
+                        &format!("{left_out} elsewhere. `devplane inbox` shows everything.")
+                    )
+                );
+            }
+            return Ok(());
+        }
         render_close(&close);
         return Ok(());
     }
@@ -273,6 +326,29 @@ pub async fn cmd_inbox(json: bool) -> Result<()> {
                 )
             );
         }
+    }
+
+    // **A narrowed list says how many it is not showing.** This product is sold
+    // on one page for everything; a page that quietly became a filter has
+    // broken that promise, and the only defence is saying so every time.
+    if left_out > 0 {
+        let where_: Vec<String> = narrowed
+            .as_ref()
+            .map(|n| n.projects.clone())
+            .unwrap_or_default();
+        println!();
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &match (left_out, where_.is_empty()) {
+                    (1, true) => "1 more elsewhere. `devplane inbox` shows everything.".to_string(),
+                    (n, true) => format!("{n} more elsewhere. `devplane inbox` shows everything."),
+                    (1, false) => format!("1 more in {}.", where_.join(", ")),
+                    (n, false) => format!("{n} more in {}.", where_.join(", ")),
+                }
+            )
+        );
     }
 
     Ok(())

@@ -1195,3 +1195,272 @@ fn a_work_finished_before_the_record_existed_says_the_evidence_was_not_recorded(
         "an absent record must not read as a failed check: {unchecked}"
     );
 }
+
+/// **The plan a surface is served and the plan a certificate stamps are the
+/// same figures, for one folder at one commit.**
+///
+/// This is the assertion everything in `#the-plan` rests on, and it is phase one
+/// of that feature for a reason: every surface after it is a renderer over these
+/// numbers, and a second reader that re-derived them would agree until one of
+/// them gained a filter. The filters are the subtle part — `checklists/` is
+/// excluded from progress *and* from questions, `tasks.md` is the only file
+/// counted, a box inside a fenced block is an example, and a marker inside
+/// backticks is a mention.
+///
+/// `SpecStamp::from_plan` makes them one producer by construction. This test is
+/// what stops that being undone.
+#[test]
+fn the_surface_and_the_certificate_count_one_plan_the_same_way() {
+    let root = std::env::temp_dir().join(format!("dp-plan-{}", uuid::Uuid::new_v4().simple()));
+    let dir = root.join("specs/001-feature");
+    std::fs::create_dir_all(dir.join("checklists")).unwrap();
+    std::fs::write(
+        dir.join("spec.md"),
+        "# Feature\n\n## Why\n\nIt collects `[NEEDS CLARIFICATION]` lines.\n\n\
+         ```\n- [x] a fenced example box\n```\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tasks.md"),
+        "# Tasks\n\n- [x] T001 done\n- [x] T002 done\n- [ ] T003 open\n- [ ] T004 open\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("plan.md"),
+        "# Plan\n\nHow long may it wait? [NEEDS CLARIFICATION]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("checklists/requirements.md"),
+        "# Checklist\n\n- [x] No [NEEDS CLARIFICATION] markers remain\n- [ ] unticked row\n",
+    )
+    .unwrap();
+
+    let markers = vec!["NEEDS CLARIFICATION".to_string()];
+    let plan = devplane::core::spec::Plan::read(&root, "specs/001-feature", &markers);
+    let stamp = devplane::core::work::SpecStamp::of("specs/001-feature", &root, &markers);
+
+    // The figures agree.
+    assert_eq!(
+        plan.progress.map(|p| (p.done, p.total)),
+        stamp.tasks(),
+        "the surface and the certificate disagree about the boxes"
+    );
+    assert_eq!(plan.open_questions, stamp.open_questions);
+    assert_eq!(plan.files, stamp.files);
+    assert_eq!(plan.fingerprint, stamp.fingerprint);
+
+    // And they are the *right* figures, or agreeing is worth nothing.
+    assert_eq!(
+        plan.progress.map(|p| (p.done, p.total)),
+        Some((2, 4)),
+        "`tasks.md` only: the checklist's boxes and the fenced example are not progress"
+    );
+    assert_eq!(
+        plan.open_questions, 1,
+        "one real marker; the checklist row and the backticked mention are not questions"
+    );
+    assert!(plan.present);
+    assert!(
+        plan.contradicts_done(),
+        "two boxes open and a question unanswered is a contradiction with done"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A specification with no task list cannot render as complete**, and that is
+/// enforced by the type rather than by a component.
+///
+/// `0 of 0` is a full bar over a plan that has no boxes — the most confident
+/// wrong thing this surface could say. `Progress::of` returns `None`, so there
+/// is nothing to divide.
+#[test]
+fn a_plan_with_no_boxes_has_no_progress_to_render() {
+    assert_eq!(devplane::core::spec::Progress::of(0, 0), None);
+    let p = devplane::core::spec::Progress::of(2, 4).expect("boxes exist");
+    assert_eq!(p.open(), 2);
+    assert!(!p.complete());
+    assert!(devplane::core::spec::Progress::of(4, 4).unwrap().complete());
+}
+
+/// A work naming a specification that is not there says so.
+///
+/// The certificate has recorded this since it shipped and nothing has ever
+/// shown it: *the work says it answers `specs/reset/` and there was no such
+/// folder* is exactly what a done verdict should be read beside.
+#[test]
+fn a_plan_that_is_not_there_is_a_finding_rather_than_a_blank() {
+    let root = std::env::temp_dir().join(format!("dp-noplan-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    let plan = devplane::core::spec::Plan::read(&root, "specs/never-written", &[]);
+    assert!(!plan.present);
+    assert_eq!(plan.files, 0);
+    assert_eq!(plan.progress, None);
+    assert!(
+        plan.contradicts_done(),
+        "done against a specification that does not exist is the clearest contradiction there is"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A project that named no words gets no questions, ever.**
+///
+/// The vocabulary is the repository's: `[NEEDS CLARIFICATION]` is Spec Kit's
+/// spelling and the next tool will have another. A default list here would be
+/// this product deciding what an unresolved question looks like in somebody
+/// else's methodology, which is the thing the reader opens by refusing to do.
+///
+/// Asserted as an absence rather than reviewed, because the failure is silent:
+/// a default that reads well on the day it ships raises an item in every
+/// repository that happens to use the phrase in prose.
+#[test]
+fn a_project_that_declares_no_markers_has_no_questions() {
+    let root = std::env::temp_dir().join(format!("dp-nomark-{}", uuid::Uuid::new_v4().simple()));
+    let dir = root.join("specs/001-x");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("spec.md"),
+        "# X\n\nSomething [NEEDS CLARIFICATION] here, and TODO and ??? too.\n",
+    )
+    .unwrap();
+
+    let plan = devplane::core::spec::Plan::read(&root, "specs/001-x", &[]);
+    assert_eq!(
+        plan.open_questions, 0,
+        "a word nobody declared was collected"
+    );
+    assert!(plan.questions.is_empty());
+
+    // And the item follows the count rather than deciding for itself.
+    let id = devplane::core::ProjectId::from("p1");
+    assert!(
+        devplane::core::attention::plan_question_item("proj", &id, &[("w1".into(), plan)])
+            .is_none(),
+        "an item was raised for a project that declared no words"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **One item per project, naming the count — never one per marker.**
+///
+/// Forty clarification lines in one folder is one fact about one folder. The
+/// surface this product is sold on is the one that has to stay readable, and a
+/// kind that can produce forty rows from one repository is the failure the
+/// inbox budget exists to prevent.
+#[test]
+fn many_markers_in_one_project_are_one_item() {
+    let root = std::env::temp_dir().join(format!("dp-manymark-{}", uuid::Uuid::new_v4().simple()));
+    let dir = root.join("specs/001-x");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body: String = (0..40)
+        .map(|i| format!("- question {i} [NEEDS CLARIFICATION]\n"))
+        .collect();
+    std::fs::write(dir.join("spec.md"), format!("# X\n\n{body}")).unwrap();
+
+    let markers = vec!["NEEDS CLARIFICATION".to_string()];
+    let plan = devplane::core::spec::Plan::read(&root, "specs/001-x", &markers);
+    assert_eq!(plan.open_questions, 40, "the count is the whole folder's");
+    assert!(
+        plan.questions.len() <= 20,
+        "the lines handed to a surface are bounded; the count is not"
+    );
+
+    let id = devplane::core::ProjectId::from("p1");
+    let item = devplane::core::attention::plan_question_item("proj", &id, &[("w1".into(), plan)])
+        .expect("forty markers is a fact worth one item");
+    assert!(
+        item.title.contains("40 questions"),
+        "the item names the count: {}",
+        item.title
+    );
+    assert_eq!(item.level, devplane::core::attention::Level::Normal);
+    assert!(
+        item.actions.is_empty(),
+        "nothing here can be answered from the inbox: the answer is an edit to a committed file"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **The plan changed under the run, and the certificate says so.**
+///
+/// The fingerprint has been computed since the certificate shipped and stamped
+/// onto every gate report — and never once compared with itself. This is the
+/// failure that is invisible by construction: the agent read one document, the
+/// reviewer reads another, and both are correct.
+///
+/// A reviewer re-deriving the verdict against a changed plan is re-deriving a
+/// different claim, which is why it goes above the task counts rather than
+/// beside them.
+#[test]
+fn a_plan_that_changed_under_the_work_is_on_the_certificate() {
+    let root = std::env::temp_dir().join(format!("dp-drift-{}", uuid::Uuid::new_v4().simple()));
+    let dir = root.join("specs/001-x");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("spec.md"), "# X\n\n## Why\n").unwrap();
+    std::fs::write(dir.join("tasks.md"), "# Tasks\n\n- [x] T001 done\n").unwrap();
+
+    let before = devplane::core::spec::Spec::read(&root, "specs/001-x", &[])
+        .fingerprint()
+        .expect("a plan has a fingerprint");
+
+    let mut work = devplane::core::Work::new(
+        devplane::core::ProjectId::from("p1"),
+        devplane::core::WorkKind::Quick,
+        "fix it".into(),
+        "do the thing".into(),
+    );
+    work.spec = Some("specs/001-x".into());
+    work.spec_at_start = Some(before.clone());
+
+    // Unchanged: the comparison says so, and says it as `false` rather than
+    // as silence.
+    assert_eq!(work.plan_drifted(Some(&before)), Some(false));
+
+    // The plan moves under the work.
+    std::fs::write(
+        dir.join("spec.md"),
+        "# X\n\n## Why\n\n## And another thing\n",
+    )
+    .unwrap();
+    let after = devplane::core::spec::Spec::read(&root, "specs/001-x", &[])
+        .fingerprint()
+        .expect("still has one");
+    assert_ne!(
+        before, after,
+        "the fixture did not actually change the plan"
+    );
+    assert_eq!(work.plan_drifted(Some(&after)), Some(true));
+
+    // **Any document under the folder is the plan**, not only `tasks.md`: a
+    // specification whose acceptance criteria were rewritten mid-run has moved
+    // further than one whose box was ticked.
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **Unknown is not unchanged.**
+///
+/// Work started before the starting fingerprint was recorded has no answer
+/// here, and answering `false` would be claiming the plan held still when
+/// nobody looked.
+#[test]
+fn a_work_with_no_starting_fingerprint_reports_unknown_rather_than_unchanged() {
+    let mut work = devplane::core::Work::new(
+        devplane::core::ProjectId::from("p1"),
+        devplane::core::WorkKind::Quick,
+        "t".into(),
+        "p".into(),
+    );
+    work.spec = Some("specs/001-x".into());
+    assert_eq!(
+        work.spec_at_start, None,
+        "a work created today should record one when it names a spec"
+    );
+    assert_eq!(
+        work.plan_drifted(Some("anything")),
+        None,
+        "a work with nothing recorded claimed its plan had held still"
+    );
+    // And a work that names no plan has nothing to say either way.
+    assert_eq!(work.plan_drifted(None), None);
+}

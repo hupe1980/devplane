@@ -61,7 +61,7 @@
     </p>
   {:else if hits.length > 0}
     <ul role="list">
-      {#each hits as h (h.run_id + h.at)}
+      {#each hits as h, hi (hi)}
         <li><code>{clip(h.run_id, 8)}</code> <span>{clip(h.text, 120)}</span></li>
       {/each}
     </ul>

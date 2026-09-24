@@ -33,6 +33,7 @@ pub fn router(state: Shared) -> Router {
         // could disagree with it — writing down a rule other than the one that
         // fired is the same failure as naming no rule at all.
         .route("/devplane/decided", post(decided))
+        .route("/devplane/hold", post(hold))
         .route("/devplane/statusline", post(statusline))
         .route("/devplane/otel/v1/logs", post(otel_logs))
         .route("/devplane/otel/v1/metrics", post(otel_metrics))
@@ -85,6 +86,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/work/{id}/certificate", get(work_certificate))
         .route("/api/work/{id}/resume", post(resume_work))
         .route("/api/projects", get(projects))
+        .route("/api/specs", get(specs))
         // Read-only, and there is no write route. Adding one is a deliberate
         // act with an argument attached — the same argument that keeps the
         // permission composer a paste rather than a button: an agent on this
@@ -94,7 +96,6 @@ pub fn router(state: Shared) -> Router {
         .route("/api/batch", get(batch_index).post(batch_record))
         .route("/api/batch/{id}", get(batch_one))
         .route("/api/library", get(library_index))
-        .route("/api/library/{name}", get(library_one))
         .route("/api/projects/trust", post(trust_project))
         .route("/api/projects/{id}/snooze", post(snooze_project))
         .route("/api/issues", post(list_issues))
@@ -521,6 +522,171 @@ async fn focus_run(
 // Receivers
 // ---------------------------------------------------------------------------
 
+/// **Holds one watched session's permission, so it can be answered from
+/// anywhere.**
+///
+/// The third obligation this product claims — *answer once, from one page* —
+/// was false for the commonest thing it sees. A permission on a session
+/// Devplane merely watches has no protocol request behind it, so the only offer
+/// any surface could make was *raise its window*: the inbox's answer to *what
+/// needs you* was **go and find the editor it is in**, once per permission,
+/// across however many projects are in flight. On a phone it was not even that.
+///
+/// # Why a hold is safe, and why it is bounded
+///
+/// The hook process waits here; the daemon does not block on anything. Read
+/// against the vendor's own reference on 2026-09-22: a `command` hook that
+/// reaches its timeout is **cancelled and its output discarded**, so it renders
+/// no decision and the vendor's own dialog appears — `PreToolUse` and
+/// `PreModelSwitch` are the documented exceptions and `PermissionRequest` is
+/// not one. So an unanswered hold degrades into exactly today's behaviour.
+///
+/// That turns the objection this was rejected on — *holding stalls the session
+/// before the vendor's dialog appears* — from a reason not to build it into a
+/// reason to **bound** it.
+///
+/// # What this may never do
+///
+/// It carries a person's recorded selection. It does not decide: the policy
+/// engine is never consulted here, there is no `Verdict::Allow` for it to
+/// return, and an `allow` is unconstructible without a human answer having been
+/// written down first. **A hold may not turn a refusal into a question** — a
+/// prohibition is applied in the hook, before this is ever called.
+async fn hold(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<HoldBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+
+    let run = RunId::new(body.session.clone());
+    let id = crate::core::AskId::new(crate::core::ids::new_event_id());
+    let wait =
+        std::time::Duration::from_millis(body.wait_ms.min(crate::core::config::HOLD_CEILING_MS));
+
+    let asked = crate::core::ask::Asked {
+        kind: crate::core::ask::Kind::Permission,
+        // **Empty, and that is the honest value.** There is no protocol request
+        // behind a watched session's permission; the hook process is the only
+        // thing that can carry an answer back, and it is waiting on this call.
+        request_id: String::new(),
+        message: body.message.clone(),
+        payload: json!({
+            "tool": body.tool,
+            "call": body.call,
+            // **When the agent stops waiting**, as an instant rather than a
+            // duration: a surface rendering *how long is left* needs to compute
+            // it at the moment somebody looks, not at the moment it was raised.
+            "held_until": (jiff::Timestamp::now()
+                + jiff::SignedDuration::from_millis(wait.as_millis() as i64))
+            .to_string(),
+            // The two answers a permission can take. Named here so every
+            // surface offers what this path can actually deliver.
+            "options": [
+                {"id": "allow", "label": "Allow"},
+                {"id": "deny", "label": "Deny"},
+            ],
+        }),
+        at: jiff::Timestamp::now(),
+        // **A hold is not a deadline.** A deadline ends a question in somebody's
+        // name and writes a `timer` authority; this simply stops waiting and
+        // lets the vendor ask. Nothing is decided when it lapses.
+        deadline: crate::core::ask::Deadline::Never,
+    };
+    let project = {
+        let mut w = state.world.lock().await;
+        w.resolve_project(std::path::Path::new(&body.cwd))
+            .map(|(id, _)| id)
+    };
+    let ask = crate::core::ask::Ask::new(id.clone(), run.clone(), asked).in_project(project);
+    if state.store.save_ask(&ask).await.is_err() {
+        // A hold that cannot be recorded is a hold nobody can answer. Lapse.
+        return Json(json!({"behavior": null, "why": "not recorded"})).into_response();
+    }
+
+    // **Notify whatever its level.** A hold measured in seconds is only
+    // reachable by somebody who has been told about it; without the notice the
+    // feature works exclusively for a person already watching the board, which
+    // is the case it was not built for. This is the one item that bypasses the
+    // attention budget, and the reason is the clock rather than the severity.
+    crate::notify::send(
+        "A permission is waiting for you",
+        &format!(
+            "{} · {}",
+            body.tool,
+            crate::core::text::clip(&body.call, 80)
+        ),
+    );
+    // And wake every surface at once, so the row is on screen inside the hold
+    // rather than on the next poll.
+    state.notify_changed();
+
+    // Poll the row rather than hold a channel: the answer is written to the
+    // store **before** anything is delivered, so the store is the one place
+    // that knows, and a daemon restart mid-hold loses a hold rather than an
+    // answer.
+    let deadline = Instant::now() + wait;
+    let answer = loop {
+        if Instant::now() >= deadline {
+            break None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        match state.store.ask(id.as_str()).await {
+            Ok(Some(a)) if a.answer.is_some() => break a.answer,
+            _ => continue,
+        }
+    };
+
+    // **The shape this product already writes for a permission answer**, so
+    // there is one vocabulary rather than a second one invented here:
+    // `driven::answer_ask` records `{"permission": "allow" | "deny"}`.
+    //
+    // Anything else is **not** an answer this path may carry. A value nobody
+    // recognises becomes a lapse, never an allow — the whole feature is that a
+    // person decided, and a shape this cannot read is not evidence that
+    // anybody did.
+    let behavior = answer.as_ref().and_then(|a| {
+        a.get("permission")
+            .and_then(|v| v.as_str())
+            .filter(|v| *v == "allow" || *v == "deny")
+            .map(str::to_string)
+    });
+
+    if behavior.is_none() {
+        // **Lapsed.** Nothing was decided, so nothing is recorded — the vendor
+        // asks exactly as it does with no hold configured. The row is closed so
+        // the inbox stops offering an answer nobody can deliver, and it closes
+        // as `nobody` rather than as a timer: a timer ends a question *in
+        // somebody's name*, and this one simply stopped waiting.
+        if let Ok(Some(mut a)) = state.store.ask(id.as_str()).await
+            && a.is_open()
+        {
+            a.ended = Some(crate::core::ask::Ended::Nobody {
+                because: "the hold ran out and the agent's own dialog took over".into(),
+            });
+            a.ended_at = Some(jiff::Timestamp::now());
+            let _ = state.store.save_ask(&a).await;
+            state.notify_changed();
+        }
+    }
+    Json(json!({ "behavior": behavior })).into_response()
+}
+
+/// What the hook asks for when it holds a permission.
+#[derive(Deserialize)]
+struct HoldBody {
+    session: String,
+    cwd: String,
+    tool: String,
+    /// The call, as the surfaces render it.
+    call: String,
+    message: String,
+    /// How long the project said to wait. Clamped here as well as in the hook,
+    /// because a bound enforced in one process is a bound an older binary can
+    /// walk past.
+    wait_ms: u64,
+}
+
 /// Records a decision the `command` hook has already enforced, and ingests the
 /// observation that came with it.
 ///
@@ -819,16 +985,37 @@ struct CopilotEvent {
 
 /// OTLP/HTTP logs. Claude Code appends `/v1/logs` to the configured endpoint.
 ///
-/// The OTLP exporter cannot be given a bearer token per signal without also
-/// sending it to every other collector the user configures, so the telemetry
-/// endpoints are authorised by being on loopback alone. They accept only
-/// observations, never commands.
-async fn otel_logs(State(state): State<Shared>, body: axum::body::Bytes) -> impl IntoResponse {
+/// **These were unauthenticated and the reason given for it was false.** The
+/// comment here said an OTLP exporter "cannot be given a bearer token per
+/// signal without also sending it to every other collector the user
+/// configures" — while the vendor's own monitoring reference, sitting in this
+/// repository, documents `OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer …"`
+/// on the same page as the endpoint variable. And `observe::connect` writes the
+/// telemetry block **only** when no other collector is configured, so in the
+/// one configuration Devplane creates there is exactly one collector to send it
+/// to.
+///
+/// What being open cost: any process on this machine, and any page the
+/// browser loaded, could post fabricated records into a ledger whose whole
+/// claim is *who decided*. "They accept only observations, never commands" was
+/// the rest of the argument, and it mistakes what this product is — the
+/// observations **are** the product.
+async fn otel_logs(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    guard!(state, headers);
     ingest_otel(state, &body, crate::observe::otel::parse_logs).await
 }
 
 /// OTLP/HTTP traces, written to the GenAI semantic conventions.
-async fn otel_traces(State(state): State<Shared>, body: axum::body::Bytes) -> impl IntoResponse {
+async fn otel_traces(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    guard!(state, headers);
     ingest_otel(state, &body, crate::observe::otel::parse_traces).await
 }
 
@@ -877,14 +1064,19 @@ async fn ingest_otel(
     (StatusCode::OK, Json(json!({"partialSuccess": {}}))).into_response()
 }
 
-async fn otel_metrics(State(state): State<Shared>, body: axum::body::Bytes) -> impl IntoResponse {
+async fn otel_metrics(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    guard!(state, headers);
     let n = crate::observe::otel::parse_metrics_sessions(&body).len();
     state
         .store
         .record_channel("otel_metrics", n as u64, None)
         .await
         .ok();
-    (StatusCode::OK, Json(json!({"partialSuccess": {}})))
+    (StatusCode::OK, Json(json!({"partialSuccess": {}}))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1376,15 @@ struct InboxQuery {
     /// surface becomes visible after being away.
     #[serde(default)]
     read: bool,
+    /// Narrow to one project, matched as `devplane ls --project` matches.
+    ///
+    /// **A view, never a preference**: nothing here is remembered, so a caller
+    /// that stops sending it gets the whole list back.
+    #[serde(default)]
+    project: Option<String>,
+    /// Narrow to what can be answered from here.
+    #[serde(default)]
+    needs_you: bool,
 }
 
 async fn inbox(
@@ -1210,7 +1411,24 @@ async fn inbox(
     //
     // Both are pure functions over the ranked list, so the CLI and the board
     // receive the same three collections and cannot fold differently.
-    let (kept, inhibited) = crate::core::attention::inhibit(state.current_inbox().await);
+    // **Narrow first, then inhibit, then fold**, so the three counts never
+    // overlap: an item the narrowing removed is not also one the fold hid, and
+    // `listed + narrowed away + inhibited + folded == raised` holds over any
+    // input. Narrowing is a pure function beside the other two for the reason
+    // they are pure — the board and the terminal must narrow identically, and
+    // the only way that stays true is one computation.
+    let known: Vec<String> = names.values().cloned().collect();
+    let narrowing = crate::core::attention::Narrowing {
+        project: q.project.as_deref(),
+        needs_you: q.needs_you,
+    };
+    let (in_scope, narrowed) = crate::core::attention::narrow(
+        state.current_inbox().await,
+        &narrowing,
+        &|id| names.get(id).cloned(),
+        &known,
+    );
+    let (kept, inhibited) = crate::core::attention::inhibit(in_scope);
     let (listed, folded) = crate::core::attention::fold(kept);
 
     let rows: Vec<WaitingRow> = listed
@@ -1235,8 +1453,16 @@ async fn inbox(
     // listed. A list whose every row was folded or counted on a cause still has
     // things in it, and answering *Clear* there would be the close telling
     // somebody the day was quiet because the surface tidied it.
+    // **The close does not render over a narrowed list.** It is the answer to
+    // *how was the day* and a day is not one project: a tally of what a
+    // repository decided, headed with the sentence for the whole machine, would
+    // be the close saying something true about a set nobody asked about.
     let nothing_raised = rows.is_empty() && folded.is_empty() && inhibited.is_empty();
-    let close = state.close(nothing_raised).await;
+    let close = if narrowing.is_none() {
+        state.close(nothing_raised).await
+    } else {
+        serde_json::Value::Null
+    };
 
     // Recorded **after** the close is composed, so the boundary this response
     // reports is the one that was true when somebody opened it — not zero.
@@ -1261,6 +1487,10 @@ async fn inbox(
         "folded": folded,
         // Symptoms counted on the row that explains them, keyed by that row.
         "inhibited": inhibited,
+        // **What the narrowing left out**, or null where there was none. A list
+        // that silently shows a subset of what needs you is the one failure
+        // this surface cannot take.
+        "narrowed": narrowed,
         "close": close,
     }))
     .into_response()
@@ -1493,17 +1723,19 @@ async fn run_events(
     }
 }
 
-/// What the gate would decide about one call, and which rule decides it.
+/// What this machine's rules say about one call, without running it.
 ///
-/// The same evaluation `devplane explain` does, with one difference that is
-/// the whole reason this endpoint exists: **it leaves a row.** A read-only
-/// interrogation is also a way to probe for a command the rules happen to
-/// allow, and a gate that answers questions should be able to say it was asked.
+/// **Reachable only through the MCP server** (`src/mcp.rs`), which is the
+/// read-only surface the plugin ships. The CLI's `devplane explain` computes the
+/// same verdict **in process** — no daemon, no agent, no bill — so it does not
+/// come here, and no page does either.
 ///
-/// The CLI's `explain` stays offline and unrecorded, and the asymmetry is
-/// deliberate: a person at a terminal asking *what would this do* is not the
-/// party the rules govern. An agent asking through MCP is.
-#[derive(Deserialize)]
+/// That made it look unreferenced to a sweep that searched the interface and the
+/// CLI and forgot the one caller that builds its path as a string. It is
+/// recorded here so the next sweep does not delete it again: **`src/mcp.rs`
+/// composes every route with `format!`, so removing one the server names is not
+/// a compile error.**
+#[derive(serde::Deserialize)]
 struct ExplainQuery {
     call: String,
     #[serde(default = "default_tool")]
@@ -1544,8 +1776,7 @@ async fn explain(
     let input = json!({ field: q.call });
 
     // The gate this machine enforces, machine-wide rules included — not a
-    // project-only imitation that would answer `allow` for a call the machine
-    // denies.
+    // project-only imitation that would answer differently from the real one.
     let (cache, _) = crate::core::PolicyCache::from_disk();
     let verdict = cache.restrictive(&dir, &q.tool, &input);
 
@@ -1574,10 +1805,6 @@ async fn explain(
         // Set only for `unresolved`, where there is no rule to name and this
         // sentence is the whole of the answer.
         "why": verdict.why(),
-        // `before_the_tool_runs` was here too, and it was the same value under a
-        // second name — a leftover from when this table could also grant, with a
-        // comment explaining a difference that had stopped existing. A reader
-        // comparing the two fields was comparing a value with itself.
         "nothing_ran": true,
     }))
     .into_response()
@@ -1647,6 +1874,132 @@ struct DispatchBody {
     cwd: String,
     #[serde(default)]
     prompt: Option<String>,
+}
+
+/// What one project can answer, read off disk and the world.
+///
+/// **Here rather than in `core::context`**, which may not touch the outside
+/// world: that module resolves and this one reads. A member with nothing behind
+/// it is simply **absent**, and the resolver refuses on it — never an empty
+/// string standing in for a fact nobody has.
+async fn context_for(
+    state: &Shared,
+    project: &crate::core::ProjectId,
+    root: &std::path::Path,
+) -> crate::core::context::Context {
+    use crate::core::context::{Context, Field, Value};
+    let now = jiff::Timestamp::now();
+    let mut ctx = Context::default();
+
+    {
+        let w = state.world.lock().await;
+        if let Some(p) = w.project(project) {
+            ctx = ctx.with(Field::Project, Value::new(p.name.clone(), now));
+        }
+    }
+
+    if let Ok(st) = crate::git::status(root).await {
+        // Absent where the repository has no branch yet, which is a state
+        // rather than a blank — and the resolver refuses on it.
+        if let Some(b) = st.branch.clone() {
+            ctx = ctx.with(Field::Branch, Value::new(b, now));
+        }
+        // **A word, not a boolean.** A prompt saying `dirty = true` is a prompt
+        // telling an agent about a field; one saying *the worktree has
+        // uncommitted changes* is telling it a fact.
+        ctx = ctx.with(
+            Field::Dirty,
+            Value::new(
+                match st.changed_files + st.untracked_files > 0 {
+                    true => "the worktree has uncommitted changes",
+                    false => "the worktree is clean",
+                },
+                now,
+            ),
+        );
+    }
+    ctx = ctx.with(
+        Field::BaseBranch,
+        Value::new(crate::git::base_branch(root).await, now),
+    );
+    if let Ok(cfg) = crate::core::ProjectConfig::load(root) {
+        // **The plan, from the same reader a surface is served**, so a prompt
+        // and the page cannot disagree about how many boxes are open.
+        let works = state.works.lock().await;
+        let in_flight = works
+            .values()
+            .filter(|w| w.project_id == *project && !w.phase.is_finished())
+            .find_map(|w| w.spec.as_deref());
+        if let Some(spec) = in_flight {
+            let plan = crate::core::spec::Plan::read(root, spec, &cfg.spec.open_questions);
+            ctx = ctx.with(Field::PlanPath, Value::new(plan.path.clone(), now));
+            if let Some(p) = plan.progress {
+                ctx = ctx.with(Field::PlanOpen, Value::new(p.open().to_string(), now));
+            }
+            if plan.open_questions > 0 {
+                ctx = ctx.with(
+                    Field::PlanQuestions,
+                    Value::new(plan.open_questions.to_string(), now),
+                );
+            }
+        }
+    }
+
+    // **The last gate's failures, already reduced to the lines that matter** by
+    // the extractor the gate report itself uses — one producer, so a prompt and
+    // a report cannot disagree about what failed.
+    {
+        let works = state.works.lock().await;
+        if let Some((failures, at)) = works
+            .values()
+            .filter(|w| w.project_id == *project)
+            .filter_map(|w| w.last_gate().map(|g| (g, w.updated_at)))
+            .filter(|(g, _)| !g.passed())
+            .max_by_key(|(_, at)| *at)
+            .map(|(g, at)| {
+                // The extractor the gate report already ran, read off the
+                // commands rather than re-derived: a second reduction of one
+                // output is a second place to disagree about what failed.
+                let f: Vec<String> = g
+                    .commands
+                    .iter()
+                    .flat_map(|c| c.failures.iter().cloned())
+                    .collect();
+                (f, at)
+            })
+            && !failures.is_empty()
+        {
+            ctx = ctx.with(Field::GateFailures, Value::new(failures.join("\n"), at));
+        }
+    }
+
+    if let Ok(rows) = state.store.decisions(None, 1).await
+        && let Some(d) = rows.first()
+    {
+        ctx = ctx.with(
+            Field::LastDecision,
+            Value::new(format!("{} {}", d.outcome, d.subject), d.at),
+        );
+        ctx = ctx.with(Field::LastAuthority, Value::new(d.authority.as_str(), d.at));
+    }
+
+    // A question an agent asked that nobody answered.
+    {
+        let w = state.world.lock().await;
+        if let Some(q) = w
+            .runs()
+            .filter(|r| r.project_id.as_ref() == Some(project))
+            .flat_map(|r| r.abandoned_questions.iter())
+            .max_by_key(|q| q.abandoned_at)
+        {
+            ctx = ctx.with(
+                Field::UnansweredQuestion,
+                Value::new(q.question.clone(), q.abandoned_at),
+            );
+        }
+    }
+
+    ctx
 }
 
 /// What a fan-out would do, **before anything is written**.
@@ -1741,11 +2094,40 @@ async fn dispatch_preflight(
         })
         .collect();
 
+    // **The resolved prompt, per target, before the button is live.**
+    //
+    // Six projects have six sets of facts; that is the point of the feature and
+    // the reason resolution cannot be hoisted out of the loop. A target that
+    // cannot resolve is **named individually** — never five successes and a
+    // failure — and a refusal here is a refusal, not a blank.
+    let mut resolved: Vec<serde_json::Value> = Vec::new();
+    if body.prompt.contains('{') {
+        for t in &targets {
+            let ctx = context_for(&state, &t.project, &t.root).await;
+            let (text, refusals) = match crate::core::context::resolve(&body.prompt, &ctx) {
+                Ok(text) => (Some(text), Vec::new()),
+                Err(why) => (
+                    None,
+                    why.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                ),
+            };
+            resolved.push(json!({
+                "project": t.project.to_string(),
+                "name": t.name,
+                "text": text,
+                "cannot": refusals,
+            }));
+        }
+    }
+
     Json(json!({
         "position": chosen.position.as_str(),
         "forced": chosen.forced,
         "says": chosen.position.says(),
         "targets": rows,
+        // Empty where the prompt names nothing. A page that rendered a panel
+        // for every plain prompt would be showing the same text twice.
+        "resolved": resolved,
         "cost_in_runs": accepted,
     }))
     .into_response()
@@ -1976,6 +2358,43 @@ async fn answer_ask(
                     })),
                 )
                     .into_response();
+            }
+            // **An option has to name something that was offered.**
+            //
+            // `Decision::Option(id)` labels as `allow` for any id that is not
+            // literally `Deny` — so `{"option":"maybe"}` wrote **an allow under
+            // the answerer's name** for a call nobody approved. A typo, a stale
+            // row, a client guessing: all of them an approval.
+            //
+            // Checked here because the answer is written to the store **before**
+            // anything is delivered, which is what makes a crash between the two
+            // replay as answered. Validating after that write would be
+            // validating a fact already recorded.
+            if let Some(id) = body.option.as_deref() {
+                let offered: Vec<String> = ask
+                    .payload
+                    .get("options")
+                    .and_then(|o| o.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| o.get("id").and_then(|i| i.as_str()))
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !offered.is_empty() && !offered.iter().any(|o| o == id) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!(
+                                "`{id}` is not one of the answers this request offers ({}). \
+                                 An answer has to name something that was asked.",
+                                offered.join(", ")
+                            )
+                        })),
+                    )
+                        .into_response();
+                }
             }
             crate::driven::Answer::Permission(crate::driven::Decision::parse(
                 body.decision.as_deref(),
@@ -2247,6 +2666,34 @@ struct WorkView<'a> {
     /// explain.
     #[serde(skip_serializing_if = "Option::is_none")]
     claim_absent: Option<&'static str>,
+    /// The specification this work answers, read as it is on disk now.
+    ///
+    /// **Served on the surface where approving happens**, which is the whole
+    /// point: it was stamped onto the done certificate from the day the
+    /// certificate shipped and reachable only by asking for one — after the
+    /// decision it would have changed. Present only where the work names a
+    /// specification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<crate::core::spec::Plan>,
+    /// **Done, and the plan it answers is not.** Unticked boxes, unanswered
+    /// questions, or a specification that is not there.
+    ///
+    /// A sentence, never a verdict: it informs an approval and may not block
+    /// one. `false` on anything that is not at `Done`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    plan_contradicts_done: bool,
+    /// **The plan changed under this work.**
+    ///
+    /// The fingerprint has been computed since the certificate shipped and
+    /// never once compared with itself. This is the failure that is invisible
+    /// by construction: the agent read one document, the reviewer reads
+    /// another, and both are correct.
+    ///
+    /// Absent where it cannot be known — work that names no specification, and
+    /// work started before the starting fingerprint was recorded. **Unknown is
+    /// not unchanged**, so it is `None` rather than `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan_drifted: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -2298,8 +2745,24 @@ impl<'a> WorkView<'a> {
                 .stopped
                 .as_ref()
                 .map(crate::core::work::Stopped::headline),
+            plan: None,
+            plan_contradicts_done: false,
+            plan_drifted: None,
             work,
         }
+    }
+
+    /// Attaches the specification this work answers.
+    ///
+    /// Separate from [`Self::of`] because reading it touches a disk, and the
+    /// caller is the one that knows the project root and the words the project
+    /// chose for an unresolved question.
+    fn with_plan(mut self, plan: crate::core::spec::Plan) -> Self {
+        self.plan_contradicts_done =
+            self.work.phase == crate::core::Phase::Done && plan.contradicts_done();
+        self.plan_drifted = self.work.plan_drifted(plan.fingerprint.as_deref());
+        self.plan = Some(plan);
+        self
     }
 }
 
@@ -2317,11 +2780,32 @@ async fn list_work(State(state): State<Shared>, headers: HeaderMap) -> impl Into
     let works = state.works.lock().await;
     let mut all: Vec<_> = works.values().collect();
     all.sort_by_key(|w| std::cmp::Reverse(w.updated_at));
+    // The project roots, read once: both the plan and the claim need them.
+    let all_roots: std::collections::BTreeMap<crate::core::ProjectId, std::path::PathBuf> = {
+        let world = state.world.lock().await;
+        world
+            .projects()
+            .map(|p| (p.id.clone(), p.root.clone()))
+            .collect()
+    };
+
     let mut views: Vec<WorkView> = all
         .iter()
         .map(|w| {
             let can_retry = w.retryable(w.current_run().is_some_and(|r| live.contains(r)));
-            WorkView::of(w, can_retry)
+            let view = WorkView::of(w, can_retry);
+            // **The plan, on the surface where approving happens.** Read only
+            // where the work names one, so a project that does not work this
+            // way costs nothing.
+            match (w.spec.as_deref(), all_roots.get(&w.project_id)) {
+                (Some(spec), Some(root)) => {
+                    let markers = crate::core::ProjectConfig::load(root)
+                        .map(|c| c.spec.open_questions)
+                        .unwrap_or_default();
+                    view.with_plan(crate::core::spec::Plan::read(root, spec, &markers))
+                }
+                _ => view,
+            }
         })
         .collect();
 
@@ -2970,45 +3454,157 @@ async fn library_index(State(state): State<Shared>, headers: HeaderMap) -> impl 
     Json(json!(out)).into_response()
 }
 
-/// One artefact: its drift outcomes, its provenance, its portability findings.
-async fn library_one(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    axum::extract::Path(name): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let Ok(all) = crate::library::list() else {
-        return (StatusCode::NOT_FOUND, "no library").into_response();
-    };
-    let Some(a) = all.iter().find(|a| a.name == name) else {
-        return (StatusCode::NOT_FOUND, "no such artefact").into_response();
-    };
-    let projects = library_projects(&state).await;
-    let cov = crate::library::coverage(a, &projects);
-    Json(json!({
-        "name": a.name,
-        "digest": a.digest.digest,
-        "provenance": a.sidecar,
-        "copies": cov.iter().map(|c| json!({
-            "project": c.project,
-            "path": c.path.display().to_string(),
-            "drift": c.drift,
-            "present": c.present,
-            "ignored": c.ignored,
-        })).collect::<Vec<_>>(),
-        "portability": crate::library::portability_of(a),
-        "also_from_this_origin": a.sidecar.as_ref()
-            .map(|s| crate::library::from_origin(&s.origin, &all))
-            .unwrap_or_default(),
-    }))
-    .into_response()
-}
-
 async fn library_projects(state: &Shared) -> Vec<(String, std::path::PathBuf)> {
     let w = state.world.lock().await;
     w.projects()
         .map(|p| (p.name.clone(), p.root.clone()))
         .collect()
+}
+
+/// **The plan each project is working to.** One row per in-flight Work, with the
+/// specification it names read as it is on disk now.
+///
+/// This route exists because everything behind it already did. `core::spec`
+/// reads the outline, counts the boxes from `tasks.md`, collects the lines the
+/// *project's own words* mark unresolved, and fingerprints every document;
+/// `SpecStamp` stamps all six onto a done certificate. **Nothing served any of
+/// it**, so the one sentence the reader was written for — *the gate passed and
+/// the specification it answers has eleven boxes unticked* — could only be
+/// reached by asking for a certificate, after the approval it would have
+/// changed.
+///
+/// **A plan belongs to a Work, not to a project.** A project with nothing in
+/// flight has no current plan and gets a row saying so — never the
+/// highest-numbered folder under `specs/`, which is a methodology assumption
+/// wearing a heuristic's clothes and is wrong the moment somebody works on an
+/// older feature.
+///
+/// Read from disk on every request, for the same reason `/api/projects` reads
+/// the configuration: these are files a person edits while the page is open.
+async fn specs(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+
+    let roots: std::collections::BTreeMap<crate::core::ProjectId, (String, std::path::PathBuf)> = {
+        let w = state.world.lock().await;
+        w.projects()
+            .map(|p| (p.id.clone(), (p.name.clone(), p.root.clone())))
+            .collect()
+    };
+
+    // The words are the project's, and a project that names none gets none —
+    // which must read as *not configured* rather than as *no questions*.
+    let markers: std::collections::BTreeMap<crate::core::ProjectId, Vec<String>> = roots
+        .iter()
+        .map(|(id, (_, root))| {
+            let m = crate::core::ProjectConfig::load(root)
+                .map(|c| c.spec.open_questions)
+                .unwrap_or_default();
+            (id.clone(), m)
+        })
+        .collect();
+
+    let works = state.works.lock().await;
+    let mut in_flight: Vec<&crate::core::Work> = works
+        .values()
+        // **In flight, plus `Done` that nobody has approved yet.** A done
+        // verdict beside an incomplete plan is the sentence this exists for,
+        // and it is only useful before the approval, not after it.
+        .filter(|w| !w.phase.is_finished() || w.phase == crate::core::Phase::Done)
+        .collect();
+    in_flight.sort_by_key(|w| std::cmp::Reverse(w.updated_at));
+
+    // **What each project's Work names**, keyed by the plan it names — so a
+    // listed plan can say *this is being worked on* without the listing being a
+    // guess at which one is current.
+    let mut worked: std::collections::BTreeMap<
+        (crate::core::ProjectId, String),
+        &crate::core::Work,
+    > = Default::default();
+    for w in in_flight {
+        if let Some(spec) = w.spec.as_deref() {
+            worked
+                .entry((w.project_id.clone(), spec.to_string()))
+                .or_insert(w);
+        }
+    }
+
+    let mut by_project: std::collections::BTreeMap<crate::core::ProjectId, Vec<serde_json::Value>> =
+        Default::default();
+    for (id, (_, root)) in &roots {
+        let empty = Vec::new();
+        let m = markers.get(id).unwrap_or(&empty);
+        // **Every plan this repository has**, where it said where they are —
+        // plus any a Work names that is not in that directory, because a Work's
+        // path is what somebody actually typed and outranks a listing.
+        let mut paths: Vec<String> = crate::core::ProjectConfig::load(root)
+            .map(|c| c.spec.plan_paths(root))
+            .unwrap_or_default();
+        for (pid, spec) in worked.keys() {
+            if pid == id && !paths.contains(spec) {
+                paths.push(spec.clone());
+            }
+        }
+        paths.sort();
+        paths.dedup();
+
+        for spec in paths.into_iter().take(MOST_PLANS) {
+            let plan = crate::core::spec::Plan::read(root, &spec, m);
+            let w = worked.get(&(id.clone(), spec.clone()));
+            by_project.entry(id.clone()).or_default().push(json!({
+                // **Present only where a Work names it.** A plan with no work_id
+                // is a plan this repository has; one with a work_id is a plan
+                // somebody is working to, and the page must not blur them.
+                "work_id": w.map(|w| w.id.as_str()),
+                "title": w.map(|w| w.title.clone()),
+                "phase": w.map(|w| w.phase),
+                "contradicts_done": w.is_some_and(|w| {
+                    w.phase == crate::core::Phase::Done && plan.contradicts_done()
+                }),
+                "drifted": w.and_then(|w| w.plan_drifted(plan.fingerprint.as_deref())),
+                "plan": plan,
+            }));
+        }
+    }
+
+    // **Bounded, and it says what it left out.**
+    //
+    // Right for six projects and wrong for sixty: a page that silently lists
+    // the first forty is a page whose completeness nobody can check, and this
+    // product is sold on one page for everything.
+    const MOST_PROJECTS: usize = 40;
+    /// And a bound per project, for a repository with a hundred features.
+    const MOST_PLANS: usize = 25;
+    let omitted = roots.len().saturating_sub(MOST_PROJECTS);
+    let out: Vec<_> = roots
+        .iter()
+        .take(MOST_PROJECTS)
+        .map(|(id, (name, root))| {
+            json!({
+                "project_id": id.as_str(),
+                "project": name,
+                "root": root.display().to_string(),
+                // **Absent and empty are different facts.** A project with no
+                // markers declared has not reported zero questions; it has not
+                // been asked. The surface says *not configured* for one and
+                // *none* for the other, and cannot without this.
+                "declares_markers": !markers.get(id).map(|m| m.is_empty()).unwrap_or(true),
+                // **Not configured is not empty.** A project that has not said
+                // where its plans live has not reported having none, and the
+                // page must not render the two the same way.
+                "declares_plans": crate::core::ProjectConfig::load(root)
+                    .map(|c| c.spec.plans.is_some())
+                    .unwrap_or(false),
+                "plans": by_project.get(id).cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+    Json(json!({
+        "projects": out,
+        // Zero where nothing was left out. A surface that renders this at all
+        // is a surface that cannot imply it is showing everything.
+        "omitted": omitted,
+    }))
+    .into_response()
 }
 
 async fn projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
@@ -3473,6 +4069,16 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
 async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let channels = state.store.channel_health().await.unwrap_or_default();
+    let opencode = match std::env::var(crate::observe::opencode::ENV_SERVER) {
+        Ok(url) => {
+            let h = state.opencode.lock().await.clone();
+            json!({"server": url, "says": h.says(), "live": matches!(
+                h, crate::observe::opencode::Health::Live { .. }
+            )})
+        }
+        // Not configured is not unhealthy, and the two must not render the same.
+        Err(_) => serde_json::Value::Null,
+    };
     // A `devplane.toml` that will not load keeps whatever rules were already
     // cached, which is the safe half of the answer. The unsafe half is that a
     // daemon restarted against a broken file has nothing cached, so that
@@ -3569,6 +4175,11 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
         "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
         "summary": w.summary(),
         "channels": channels,
+        // **The OpenCode subscription, said out loud.** The feed does not
+        // replay, so a drop is a silent gap: an empty board and a dead
+        // subscription look identical, and only one of them means the machine
+        // is quiet. Absent where nobody asked for one.
+        "opencode": opencode,
         "forge": forge,
         "stall_seconds": w.attention.stall_seconds,
         "unreadable_configs": broken,

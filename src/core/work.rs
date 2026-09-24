@@ -547,6 +547,21 @@ pub struct SpecStamp {
     pub open_questions: u32,
 }
 
+impl Work {
+    /// Whether the plan changed under this work, where that is knowable.
+    ///
+    /// **Three answers, not two.** `Some(true)` is drift, `Some(false)` is a
+    /// plan that has held still, and `None` is *nobody recorded what it was* —
+    /// which is what a work started before this field existed has, and which
+    /// must not read as *unchanged*.
+    #[must_use]
+    pub fn plan_drifted(&self, now: Option<&str>) -> Option<bool> {
+        let then = self.spec_at_start.as_deref()?;
+        let now = now?;
+        Some(then != now)
+    }
+}
+
 impl SpecStamp {
     /// Reads and fingerprints the specification a work names.
     ///
@@ -554,16 +569,26 @@ impl SpecStamp {
     /// present-but-unfingerprinted rather than dropped: *the work says it
     /// answers `specs/reset/` and there was no such folder* is exactly the kind
     /// of thing a done certificate exists to say out loud.
+    /// **Composed from the same [`Plan`] a surface is served**, so the two
+    /// cannot disagree by construction rather than by assertion. They were two
+    /// call sites folding over one reader, which agrees until one of them gains
+    /// a filter — and the filters here are the subtle part: `checklists/` is
+    /// excluded from progress *and* from questions, `tasks.md` is the only file
+    /// counted, and a box inside a fenced block is an example.
+    ///
+    /// [`Plan`]: crate::core::spec::Plan
     pub fn of(path: &str, root: &std::path::Path, markers: &[String]) -> Self {
-        let spec = crate::core::spec::Spec::read(root, path, markers);
-        let (tasks_done, tasks_total) = spec.tasks();
+        Self::from_plan(&crate::core::spec::Plan::read(root, path, markers))
+    }
+
+    pub fn from_plan(plan: &crate::core::spec::Plan) -> Self {
         Self {
-            path: path.to_string(),
-            fingerprint: spec.fingerprint(),
-            files: spec.docs.len() as u32,
-            tasks_done,
-            tasks_total,
-            open_questions: spec.questions() as u32,
+            path: plan.path.clone(),
+            fingerprint: plan.fingerprint.clone(),
+            files: plan.files,
+            tasks_done: plan.progress.map_or(0, |p| p.done),
+            tasks_total: plan.progress.map_or(0, |p| p.total),
+            open_questions: plan.open_questions,
         }
     }
 
@@ -900,6 +925,20 @@ pub struct Work {
     /// meaning. It is what the gate stamps onto the done certificate.
     #[serde(default)]
     pub spec: Option<String>,
+    /// The specification's fingerprint **when this work started**.
+    ///
+    /// **The one comparison nobody was making.** The fingerprint has been
+    /// computed since the certificate shipped and stamped onto every gate
+    /// report — and never once compared with itself. *The plan changed under a
+    /// run that was already working to it* is the failure that is invisible by
+    /// construction: the agent read one document, the reviewer reads another,
+    /// and both are correct.
+    ///
+    /// `None` for work that names no specification, and for work started before
+    /// this field existed — which is *unknown*, not *unchanged*, and
+    /// [`Work::plan_drifted`] answers `None` for it rather than `false`.
+    #[serde(default)]
+    pub spec_at_start: Option<String>,
     pub worktree: Option<PathBuf>,
     pub branch: Option<String>,
     /// The fan-out this work is a member of, when it is one.
@@ -986,6 +1025,7 @@ impl Work {
             title,
             prompt,
             spec: None,
+            spec_at_start: None,
             worktree: None,
             branch: None,
             batch_id: None,

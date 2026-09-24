@@ -62,6 +62,8 @@ pub struct Doc {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Heading {
     pub level: u8,
     pub text: String,
@@ -133,8 +135,49 @@ impl Spec {
             })
     }
 
+    /// Lines the project's own words mark as an unresolved question — and
+    /// **never from `checklists/`, for the same reason progress is not counted
+    /// there.**
+    ///
+    /// A checklist validates the *specification's* quality, so its rows are
+    /// assertions **about** markers rather than markers: Spec Kit's own row is
+    /// "No [NEEDS CLARIFICATION] markers remain". A ticked box of that shape was
+    /// already skipped; the prose beside it was not, and running this reader
+    /// over this repository's thirteen specifications reported an unanswered
+    /// question in two of them — both a checklist discussing the marker, neither
+    /// a question anybody has.
+    ///
+    /// The same argument decides both counts, so it is applied in both places:
+    /// a folder that grades the plan is not the plan.
     pub fn questions(&self) -> usize {
-        self.docs.iter().map(|d| d.questions.len()).sum()
+        self.question_lines().count()
+    }
+
+    /// Every heading under the folder, in path order.
+    ///
+    /// The outline and nothing else: no tool's section names are recognised,
+    /// because the three documented layouts disagree about all of them.
+    pub fn outline(&self) -> Vec<Heading> {
+        self.docs.iter().flat_map(|d| d.headings.clone()).collect()
+    }
+
+    /// Every unresolved question, with the document it is in.
+    ///
+    /// **The count and the list come from one place on purpose.** `questions`
+    /// used to fold over `docs` itself, which left any surface wanting the lines
+    /// to fold over `docs` too — and a surface that re-derived the filter would
+    /// show two questions under a heading that said none. One producer, one
+    /// filter, and a caller that cannot reach the unfiltered field without
+    /// meaning to.
+    pub fn question_lines(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.docs
+            .iter()
+            .filter(|d| !is_checklist(&d.path))
+            .flat_map(|d| {
+                d.questions
+                    .iter()
+                    .map(move |q| (d.path.as_str(), q.as_str()))
+            })
     }
 
     /// One fingerprint over every document, in path order.
@@ -256,10 +299,19 @@ impl Doc {
             // [NEEDS CLARIFICATION] markers remain" — asserting the absence of
             // the very thing the marker names — and counting it reported one
             // unanswered question about a specification that had none.
+            //
+            // **And a marker inside backticks is a mention, not a marker.** A
+            // specification that documents this very mechanism writes
+            // `` `[NEEDS CLARIFICATION]` `` in a sentence about it, and the
+            // reader counted its own documentation as an open question. The
+            // fence rule above says the same thing about a block; a span is the
+            // same argument one delimiter smaller.
             if task_box(t) != Some(true)
-                && markers
-                    .iter()
-                    .any(|m| line.to_lowercase().contains(&m.to_lowercase()))
+                && markers.iter().any(|m| {
+                    outside_code_spans(line)
+                        .to_lowercase()
+                        .contains(&m.to_lowercase())
+                })
             {
                 questions.push(line.trim().to_string());
             }
@@ -278,6 +330,198 @@ impl Doc {
             questions,
         })
     }
+}
+
+/// How far a task list has moved, when there **is** one.
+///
+/// **`0 of 0` is unrepresentable, and that is the whole reason this is a type.**
+/// A specification with no task list is not a specification with no progress: a
+/// full bar over a plan that has no boxes is the most confident wrong thing a
+/// surface can say, and rendering it was one component away for as long as the
+/// counts travelled as two bare integers. A caller receives `None` and has
+/// nothing to divide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub struct Progress {
+    pub done: u32,
+    /// Always greater than zero. A [`Progress`] only exists where boxes do.
+    pub total: u32,
+}
+
+impl Progress {
+    /// `None` where the specification has no boxes at all.
+    pub fn of(done: u32, total: u32) -> Option<Self> {
+        (total > 0).then_some(Self { done, total })
+    }
+
+    pub fn open(&self) -> u32 {
+        self.total.saturating_sub(self.done)
+    }
+
+    pub fn complete(&self) -> bool {
+        self.done >= self.total
+    }
+}
+
+/// One unresolved question, with the document it is in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub struct Question {
+    /// Relative to the project root.
+    pub path: String,
+    /// The line, in the project's own words.
+    pub text: String,
+}
+
+/// A specification as a surface needs it: the outline, how far it has moved,
+/// and what it says it has not answered.
+///
+/// **Composed here rather than by each caller**, because the two counts on it
+/// are also the two the done certificate stamps, and a second place deriving
+/// them is a second place to get the `checklists/` rule or the `tasks.md` rule
+/// wrong. `SpecStamp` and this both read one [`Spec`]; a test asserts they
+/// agree for one folder at one commit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub struct Plan {
+    /// As the work named it, relative to the project root.
+    pub path: String,
+    /// **False when the work names a specification that is not there**, which
+    /// is a finding rather than a blank — the certificate has recorded it since
+    /// the certificate shipped, and nothing has ever shown it.
+    pub present: bool,
+    /// How many markdown documents it covers.
+    pub files: u32,
+    /// `None` where there is no task list. See [`Progress`].
+    pub progress: Option<Progress>,
+    /// **Which bound this reading hit**, where it hit one.
+    ///
+    /// The walk stops at three levels and the question lines are capped. A
+    /// caller that reaches either gets a shorter answer, and a shorter answer
+    /// that does not say it is short is a figure nobody can check. `None` means
+    /// the whole specification was read.
+    pub truncated: Option<String>,
+    /// Bounded, because a folder can carry any number and a ranked inbox may
+    /// not be flooded by one project. The count is on [`Self::open_questions`].
+    pub questions: Vec<Question>,
+    pub open_questions: u32,
+    /// The headings, in path order. No tool's section names are recognised.
+    pub outline: Vec<Heading>,
+    /// Of every document under the folder. `None` when there is nothing to
+    /// fingerprint.
+    pub fingerprint: Option<String>,
+}
+
+/// The most question lines one plan hands to a surface.
+///
+/// A project gets **one** attention item naming its count, so this bound is
+/// about the detail view rather than about the inbox. Forty markers in one
+/// folder is a fact about that folder; four hundred lines on the wire is a
+/// surface nobody can read.
+const MAX_QUESTIONS: usize = 20;
+
+impl Plan {
+    /// Reads the specification a work names.
+    pub fn read(root: &Path, named: &str, markers: &[String]) -> Self {
+        let spec = Spec::read(root, named, markers);
+        let (done, total) = spec.tasks();
+        let questions: Vec<Question> = spec
+            .question_lines()
+            .take(MAX_QUESTIONS)
+            .map(|(path, text)| Question {
+                path: path.to_string(),
+                text: text.to_string(),
+            })
+            .collect();
+        let all_questions = spec.questions();
+        Self {
+            path: named.to_string(),
+            present: !spec.docs.is_empty(),
+            files: spec.docs.len() as u32,
+            progress: Progress::of(done, total),
+            // **Which bound this reading hit**, where it hit one. A shorter
+            // answer that does not say it is short is a figure nobody can
+            // check.
+            truncated: (all_questions > MAX_QUESTIONS).then(|| {
+                format!(
+                    "{all_questions} lines are marked unresolved; the first \
+                     {MAX_QUESTIONS} are here"
+                )
+            }),
+            open_questions: all_questions as u32,
+            questions,
+            outline: spec.outline(),
+            fingerprint: spec.fingerprint(),
+        }
+    }
+
+    /// Whether a *done* verdict against this plan is worth a second look.
+    ///
+    /// **The sentence this feature exists for**, and it is a sentence rather
+    /// than a verdict: an incomplete plan beside a passing gate informs an
+    /// approval and may never block one.
+    pub fn contradicts_done(&self) -> bool {
+        !self.present || self.open_questions > 0 || self.progress.is_some_and(|p| !p.complete())
+    }
+}
+
+/// Whether this document is a checklist rather than the plan.
+/// Whether this document is a checklist rather than the plan.
+///
+/// `checklists/` is Spec Kit's folder for validating the specification itself.
+/// Its boxes are not progress and its markers are not questions; both
+/// exclusions rest on one sentence — **a folder that grades the plan is not the
+/// plan** — and so both read it here.
+fn is_checklist(path: &str) -> bool {
+    path.split('/').any(|seg| seg == "checklists")
+}
+
+/// The line with everything inside backtick spans removed.
+///
+/// Markdown's rule is that a run of N backticks opens a span that the next run
+/// of exactly N closes. That is enough for the case this exists for — prose
+/// quoting a marker — and deliberately no more: an unclosed backtick leaves the
+/// rest of the line **kept**, because dropping it would hide a real marker
+/// behind a typo.
+fn outside_code_spans(line: &str) -> String {
+    let b: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != '`' {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let ticks = b[i..].iter().take_while(|&&c| c == '`').count();
+        let body = i + ticks;
+        let mut j = body;
+        let close = loop {
+            while j < b.len() && b[j] != '`' {
+                j += 1;
+            }
+            if j >= b.len() {
+                break None;
+            }
+            let run = b[j..].iter().take_while(|&&c| c == '`').count();
+            if run == ticks {
+                break Some(j);
+            }
+            j += run;
+        };
+        match close {
+            Some(c) => i = c + ticks,
+            // Unclosed: keep the rest verbatim rather than swallowing it.
+            None => {
+                out.extend(&b[i..]);
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// `- [ ]` / `- [x]`, in the spellings GitHub renders.
@@ -437,6 +681,66 @@ mod tests {
         assert_eq!(spec.docs.len(), 1);
         assert_eq!(spec.tasks(), (1, 2));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A mention of a marker is not a marker, in three shapes.**
+    ///
+    /// Found by pointing this reader at this repository's own thirteen
+    /// specifications, which is a thing nothing had done: it reported an
+    /// unanswered question in **three** of them and every one was prose about
+    /// the mechanism. The reader already skipped a *ticked* checklist box —
+    /// Spec Kit's "No [NEEDS CLARIFICATION] markers remain" — and that was the
+    /// narrowest possible version of the rule.
+    #[test]
+    fn a_document_that_mentions_a_marker_has_no_question() {
+        let root = tmp();
+        let dir = root.join("specs/001-x");
+        std::fs::create_dir_all(dir.join("checklists")).unwrap();
+        std::fs::write(
+            dir.join("spec.md"),
+            // A specification documenting this very mechanism.
+            "# X\n\nIt collects `[NEEDS CLARIFICATION]` lines by the project's own words.\n\n             ```\nA fenced [NEEDS CLARIFICATION] example.\n```\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("checklists/requirements.md"),
+            // A checklist asserting the absence, in prose rather than a box.
+            "# Checklist\n\n**\"No [NEEDS CLARIFICATION] markers\" — passes.**\n             - [x] No [NEEDS CLARIFICATION] markers remain\n",
+        )
+        .unwrap();
+
+        let markers = vec!["NEEDS CLARIFICATION".to_string()];
+        let spec = Spec::read(&root, "specs/001-x", &markers);
+        assert_eq!(
+            spec.questions(),
+            0,
+            "a mention was counted as a question: {:?}",
+            spec.question_lines().collect::<Vec<_>>()
+        );
+
+        // And a real one still counts, or the fix is a mute button.
+        std::fs::write(
+            dir.join("plan.md"),
+            "# Plan\n\nHow long may a hold last? [NEEDS CLARIFICATION]\n",
+        )
+        .unwrap();
+        let spec = Spec::read(&root, "specs/001-x", &markers);
+        assert_eq!(spec.questions(), 1, "a real marker stopped being seen");
+        assert_eq!(
+            spec.question_lines().next().unwrap().0,
+            "specs/001-x/plan.md"
+        );
+    }
+
+    /// An unclosed backtick keeps the rest of the line, because dropping it
+    /// would hide a real marker behind a typo.
+    #[test]
+    fn an_unclosed_code_span_does_not_swallow_a_marker() {
+        assert!(outside_code_spans("a `b [NEEDS CLARIFICATION]").contains("NEEDS CLARIFICATION"));
+        assert!(!outside_code_spans("a `[NEEDS CLARIFICATION]` b").contains("NEEDS CLARIFICATION"));
+        assert!(
+            outside_code_spans("``a`b`` [NEEDS CLARIFICATION]").contains("NEEDS CLARIFICATION")
+        );
     }
 }
 

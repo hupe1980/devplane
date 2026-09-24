@@ -24,6 +24,7 @@ pub mod connect;
 pub mod copilot;
 pub mod hook;
 pub mod locate;
+pub mod opencode;
 pub mod otel;
 pub mod procs;
 pub mod registry;

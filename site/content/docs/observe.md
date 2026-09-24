@@ -153,11 +153,15 @@ Three things differ from Claude Code, and each is Copilot's rather than a prefer
   fail-*closed* on an error, so erroring would deny every tool call on your machine the moment
   Devplane is stopped. An observer that is absent must not become one that breaks your agent.
 - **Telemetry is not installed for you.** Copilot reads it from the environment, and its settings
-  equivalent is a managed (organisation) key. `connect` prints the two lines instead:
+  equivalent is a managed (organisation) key. Editing your shell profile is not something a supervisor
+  should do quietly, so `connect` prints the three lines instead and you run them. The third is the
+  bearer: the telemetry endpoint takes the same token as every other route, and an exporter without
+  one is refused.
 
 ```sh
 export COPILOT_OTEL_ENABLED=true
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:47831/devplane/otel
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/token)"
 ```
 
 > [!NOTE]
@@ -167,6 +171,34 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:47831/devplane/otel
 >
 > These channels are implemented and **not yet verified against a live Copilot account** — the same
 > state `devplane agents` reports for it.
+
+## OpenCode, over its own event feed
+
+**The one vendor that publishes the ending of a question.** Claude Code does not, so an abandoned
+question there is a **subtraction** — the agent asked, then started another tool call, so nobody
+answered. OpenCode *sends* it, on a session Devplane never started, with nothing installed into the
+agent.
+
+```sh
+opencode serve --port 4096
+export DEVPLANE_OPENCODE_URL=http://127.0.0.1:4096
+```
+
+**Opt-in, never discovered.** `opencode serve` is a server you chose to run; connecting out to a port
+Devplane guessed at would be scanning your machine.
+
+Measured against `opencode serve` 1.18.30: **89 event variants**, and `question.rejected` carries
+`sessionID` and `requestID` with `additionalProperties: false`. That closed schema is why an ending
+here records **nobody** as the authority — the vendor is not omitting a cause, it is saying there is
+none on this event. *Rejected* may not be read as a person declining, however it sounds.
+
+**The feed does not replay.** Each subscription opens with a fresh `server.connected` and no history,
+so a reconnect cannot duplicate — and a drop is a **silent gap**, which is why Devplane reports
+whether it is connected rather than letting an empty board imply a quiet machine.
+
+**Devplane only reads it.** An OpenCode question is shown and cannot be answered from here: its
+options carry no protocol id, so there is no handle an answer could name. Nothing offers a control it
+cannot deliver.
 
 Your `devplane.toml` rules govern it unchanged. Copilot's own tool names are mapped to the ones the
 rules use — `view` is `Read`, `create` is `Write`, `bash` is `Bash` — so `never_auto = ["Read(.env)"]`

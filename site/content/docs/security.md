@@ -24,11 +24,23 @@ Every listener binds `127.0.0.1`. That is necessary and not sufficient: **any pr
 can reach the port.** What actually separates Devplane from everything else on the machine is the
 bearer token in `~/.devplane/token`, mode `0600`, required on every request.
 
-Two deliberate exceptions:
+One deliberate exception:
 
 - `/healthz` — proves the port is ours without revealing what is on it.
-- the telemetry endpoints — the exporter cannot be given a per-signal credential without sending it
-  to every other collector you configure. They accept **observations only, never commands**.
+
+**The telemetry endpoints are not an exception.** `devplane connect` writes the telemetry block only
+when you have no other collector configured, so there is exactly one place a credential can go: it
+sets `OTEL_EXPORTER_OTLP_HEADERS` to `Authorization=Bearer …` beside the endpoint, and
+`devplane disconnect` removes both. An open ingest would let any process running as you — and any
+page your browser loads — write session, cost and context records into the ledger this product keeps.
+The observations **are** the product, so a forged one is not a lesser problem than a forged command.
+
+If you point Claude Code at Devplane by hand, set both:
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:7777/devplane/otel"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/token)"
+```
 
 The board is served unauthenticated because it is a static page containing no data; it cannot fetch
 any without the token your browser holds. `devplane open` hands that token over once in the URL and

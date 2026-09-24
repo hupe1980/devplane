@@ -88,12 +88,15 @@ a URL, and SSE is one line in a browser and needs no client library.
 |---|---|
 | **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/asks`, `/api/runs/{id}`, `/api/runs/{id}/{events,messages,rewind-gap}`, `/api/agents`, `/api/work`, `/api/work/{id}/{changes,certificate}`, `/api/batch`, `/api/library`, `/api/modes`, `/api/decisions`, `/api/explain`, `/api/search`, `/api/forge`, `/api/diagnostics`, `/api/setup`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz`, and `POST /api/dispatch/preflight`, which takes a body and writes nothing |
 | **Write** | `/api/dispatch`, `/api/asks/{id}/answer`, `/api/work`, `/api/work/{id}/{verify,finish,approve,retry,resume}`, `/api/issues`, `/api/projects/trust`, `/api/runs/{id}/{prompt,stop,snooze,focus}`, `/api/shutdown` |
-| **Receivers** | `/devplane/hook`, `/devplane/policy`, `/devplane/statusline`, `/devplane/otel/v1/{logs,metrics}` |
+| **Receivers** | `/devplane/hook`, `/devplane/decided`, `/devplane/statusline`, `/devplane/copilot/hook`, `/devplane/otel/v1/{logs,metrics,traces}` |
 
 Everything under `/api` and `/devplane` requires the token, except `/healthz` — which proves the port
-is ours without revealing what is on it — and the telemetry endpoints, because the exporter cannot be
-given a per-signal credential without sending it to every other collector you configure. Those accept
-observations only, never commands.
+is ours without revealing what is on it.
+
+**The telemetry endpoints are not an exception.** `connect` writes the telemetry block only where no
+other collector is configured, so a bearer set in `OTEL_EXPORTER_OTLP_HEADERS` reaches this daemon and
+nothing else. An open ingest into a ledger whose claim is *who decided* would let any process running
+as the user write records into it; the observations **are** the product.
 
 `/api/work` serves each item with its last gate **already judged** (`gate.passed`, `gate.summary`).
 There is one definition of a passing gate, it lives in the domain, and it is the one on the wire — so

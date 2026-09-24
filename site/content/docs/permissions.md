@@ -498,8 +498,51 @@ costs a prompt on a command nobody writes by hand.
 
 **A heredoc's payload is not counted.** `cat > notes.md <<EOF` followed by fifteen kilobytes of
 Markdown is a two-word command with a large payload, not a long command; bytes on another program's
-standard input are not shell. A body fed to a **shell** — `bash <<EOF`, or `cat <<EOF | sh` — is a
-script, and every rule still reads it.
+standard input are not shell.
+
+**A body anything on the line can run is still read, and the test is an allowlist.** The body is
+dropped only when every program on the line is one that provably cannot execute it — `cat`, `tee`,
+`grep`, `jq`, `sort` and the rest of a written-down set. Anything else keeps it: `bash <<EOF`,
+`cat <<EOF | sh`, and equally `cat <<EOF | sudo bash`, `| env bash`, `| timeout 5 sh`,
+`| xargs sh -c`, `| python3`, `| node` — and anything nobody has thought of yet.
+
+**The direction of the test is the point.** A list of ways to reach an interpreter is open — through a
+wrapper, an absolute path, a language runtime, something nobody has published yet — and a list of
+programs that cannot be one is closed. So the check asks the closed question: an unrecognised program
+keeps the body, which costs a parse and never a missed rule.
+
+## Answering a watched session's permission
+
+A permission on a session **you** started has no protocol request behind it, so nothing outside the
+agent can answer it. Without a hold the only thing Devplane can offer is *raise its window* — which
+is the inbox telling you to go and find the editor, once per permission, across every project in
+flight. On a phone it is not even that.
+
+```toml
+[questions]
+hold = true        # or "45s"
+```
+
+With a hold, a permission your own `always_ask` rules matched waits that long for an answer from the
+inbox, the board or your phone. Answering it there returns your selection to the agent and records
+**you** as the authority.
+
+**Nobody answers and nothing changes.** The hook lapses, Claude Code shows its own dialog, and no
+decision is recorded — exactly the behaviour with no hold set. That is the whole safety argument: a
+`command` hook that reaches its timeout is cancelled and its output discarded, so it renders no
+decision, and `PermissionRequest` is not one of the two hooks documented as exceptions.
+
+**Only what `always_ask` matched is held**, so an unattended agent does not freeze on routine work.
+**A prohibition is applied first and is never held**, so a hold cannot turn a refusal into a question.
+**It does not fire in auto mode**, where a classifier approves silently and no prompt was going to be
+shown — your `never_auto` prohibitions still apply there, through `PreToolUse`.
+
+A held permission raises a desktop notification whatever its level: a wait measured in seconds is only
+reachable by somebody who has been told about it.
+
+**Devplane still never approves.** What travels here is a person's recorded selection, in transit —
+not a verdict. The policy engine never sees it, there is no `Verdict::Allow` for it to have returned,
+and an allow is unconstructible without a human answer having been written down first.
 
 ## Auto mode
 

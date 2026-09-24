@@ -285,10 +285,12 @@ pub fn watched() -> Vec<Row> {
         Row {
             vendor: "OpenCode",
             channel: EventFeed,
-            reach: Unbuilt,
-            because: "GET /event is a documented text/event-stream carrying question.asked, \
-                      question.replied and question.rejected — a question nobody answered, named \
-                      by the vendor rather than derived",
+            reach: Unproved,
+            because: "GET /event carries question.asked, question.replied and question.rejected — \
+                      a question nobody answered, named by the vendor rather than derived. \
+                      Measured against opencode serve 1.18.30 on 2026-09-23: 89 event variants, \
+                      and question.rejected is closed over sessionID and requestID, so the \
+                      authority on an ending is nobody and the vendor says so",
         },
         Row {
             vendor: "OpenCode",
@@ -425,12 +427,26 @@ mod tests {
             "unproved is not watched and not absent"
         );
         assert!(!w.watched.contains(&"GitHub Copilot"));
-        for v in ["Codex", "OpenCode", "Gemini CLI"] {
+        for v in ["Codex", "Gemini CLI"] {
             assert!(
                 w.driven_only.contains(&v),
                 "`{v}` can only be seen when Devplane starts it, and no list says so"
             );
         }
+        // **OpenCode left `driven_only` on 2026-09-23** and is on the unproved
+        // list, not the watched one: its event feed is read and nobody has run
+        // it against a live session. Pinned by name because the move is the
+        // thing this table exists to record — a vendor changing list is the
+        // only event here that matters to a reader.
+        assert!(
+            w.unproved.contains(&"OpenCode"),
+            "OpenCode's feed is read and unproved, and no list says so"
+        );
+        assert!(
+            !w.watched.contains(&"OpenCode"),
+            "a channel nobody has run is being promised as watched"
+        );
+        assert!(!w.driven_only.contains(&"OpenCode"));
         // Every vendor is on exactly one list, or a surface can print the same
         // one twice and say two different things about it.
         let total = w.watched.len() + w.unproved.len() + w.driven_only.len();
@@ -499,22 +515,45 @@ mod tests {
         assert!(!Reach::Unchecked.may_render());
         assert!(Reach::Unproved.may_render(), "unproved still renders");
 
-        let unbuilt: Vec<&str> = watched()
+        // **A vendor whose channels are *all* unbuilt must appear on no
+        // optimistic list.**
+        //
+        // It used to be *any* unbuilt channel, which stopped being right the
+        // moment one vendor had a channel built and another not: OpenCode's
+        // event feed is read and its roster is not, and calling that vendor
+        // unwatched would be as false as calling it watched. The claim the
+        // check is actually about is a vendor with **nothing** built.
+        let all_rows = watched();
+        let nothing_built: Vec<&str> = all_rows
             .iter()
-            .filter(|r| r.reach == Reach::Unbuilt)
             .map(|r| r.vendor)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|v| {
+                all_rows
+                    .iter()
+                    .filter(|r| r.vendor == *v)
+                    .all(|r| !r.reach.may_render())
+            })
             .collect();
         assert!(
-            !unbuilt.is_empty(),
-            "no row is `unbuilt`, so this check is inert — the state exists because OpenCode is in it"
+            !nothing_built.is_empty(),
+            "every vendor has something built, so this check is inert"
         );
         let w = watching();
-        for v in unbuilt {
+        for v in nothing_built {
             assert!(
                 !w.watched.contains(&v) && !w.unproved.contains(&v),
-                "`{v}` has a published channel nobody built and is being reported as watched"
+                "`{v}` has nothing built at all and is being reported as watched"
             );
         }
+        // And `unbuilt` still exists as a state, or the distinction it was
+        // added for has quietly gone.
+        assert!(
+            all_rows.iter().any(|r| r.reach == Reach::Unbuilt),
+            "no row is `unbuilt`, so the state that separates *nobody can* from \
+             *nobody has yet* is carrying nothing"
+        );
     }
 
     /// **The four reaches read as four different things.**

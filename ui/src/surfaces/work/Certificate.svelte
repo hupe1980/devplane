@@ -80,7 +80,7 @@
         <dt>what was checked</dt>
         <dd>
           <ul>
-            {#each page.evidence.commands as c (c.command)}
+            {#each page.evidence.commands as c, ci (ci)}
               <li>
                 <span class="mark {c.passed ? 'ok' : 'bad'}" aria-hidden="true"
                   >{c.passed ? "✓" : "✗"}</span

@@ -223,26 +223,7 @@ impl ServerHandler for Server {
 }
 
 fn enc(s: &str) -> String {
-    url_escape(s)
-}
-
-/// Percent-encodes a query value.
-///
-/// Hand-rolled rather than a dependency: the alternative is a crate for one
-/// function, and the set that must be escaped in a query value is small and
-/// closed. Everything outside the unreserved set goes out as `%XX`, which is
-/// always correct if occasionally more than necessary.
-fn url_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    crate::core::text::url_escape(s)
 }
 
 fn tool_of(q: &Question) -> Tool {
@@ -314,11 +295,14 @@ mod tests {
     #[test]
     fn a_query_value_cannot_escape_its_parameter() {
         // The call being asked about is a command somebody's model wrote.
-        assert_eq!(url_escape("rm -rf /"), "rm%20-rf%20%2F");
-        assert_eq!(url_escape("a&b=c#d"), "a%26b%3Dc%23d");
-        assert_eq!(url_escape("plain.name-1_2~3"), "plain.name-1_2~3");
+        assert_eq!(crate::core::text::url_escape("rm -rf /"), "rm%20-rf%20%2F");
+        assert_eq!(crate::core::text::url_escape("a&b=c#d"), "a%26b%3Dc%23d");
+        assert_eq!(
+            crate::core::text::url_escape("plain.name-1_2~3"),
+            "plain.name-1_2~3"
+        );
         // Multi-byte input is encoded per byte rather than per character, and
         // never panics on a boundary.
-        assert_eq!(url_escape("café"), "caf%C3%A9");
+        assert_eq!(crate::core::text::url_escape("café"), "caf%C3%A9");
     }
 }

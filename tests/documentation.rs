@@ -1623,3 +1623,156 @@ fn the_published_docs_are_not_a_changelog() {
         found.join("\n  ")
     );
 }
+
+/// **Every route the MCP server names is a route the daemon serves.**
+///
+/// `src/mcp.rs` composes each path with `format!`, so a route it asks for is a
+/// **string**, not a symbol: deleting the handler is not a compile error and no
+/// test that drives the CLI or the interface touches it.
+///
+/// This was not hypothetical. A sweep for unreachable routes searched `ui/src`
+/// and `src/cli`, found `/api/explain` referenced by neither, and deleted it —
+/// while the MCP server's `explain` tool, which is the whole read-only surface
+/// the plugin ships, called it. The build stayed green and 920 tests passed.
+///
+/// The inventory has to be asked in both directions, and one of the directions
+/// has no compiler behind it.
+#[test]
+fn every_route_the_mcp_server_asks_for_is_one_the_daemon_serves() {
+    let mcp = std::fs::read_to_string("src/mcp.rs").expect("src/mcp.rs");
+    let api = std::fs::read_to_string("src/api.rs").expect("src/api.rs");
+
+    let mut asked: Vec<String> = Vec::new();
+    for (i, _) in mcp.match_indices("\"/api/") {
+        let rest = &mcp[i + 1..];
+        let end = rest.find('"').expect("unterminated string literal");
+        let path = &rest[..end];
+        // Stop at the query string: the router only knows the path.
+        let path = path.split('?').next().unwrap_or(path);
+        if !asked.iter().any(|a| a == path) {
+            asked.push(path.to_string());
+        }
+    }
+    assert!(
+        !asked.is_empty(),
+        "no routes found in src/mcp.rs — this test has stopped reading anything"
+    );
+
+    let mut missing = Vec::new();
+    for path in &asked {
+        // A route is served either literally, or with a `{id}` where this path
+        // carries a value. Literal is all the MCP server uses today.
+        if !api.contains(&format!("\"{path}\"")) {
+            missing.push(path.clone());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "the MCP server asks for {} the daemon does not serve: {missing:?}\n\
+         These are composed with `format!`, so nothing else will tell you.",
+        if missing.len() == 1 {
+            "a route"
+        } else {
+            "routes"
+        }
+    );
+}
+
+/// **Every command a person can run is in a group, or it is in no listing at
+/// all.**
+///
+/// `help_template` drops clap's own `{subcommands}`, so `COMMAND_GROUPS` is the
+/// only listing a reader sees. A command missing from it exists, runs, and is
+/// documented on the site — and is invisible from the terminal.
+///
+/// `the_help_screen_lists_every_command_exactly_once` asks the question one
+/// way: is everything in the groups on the screen? This asks the other: is
+/// everything on the screen in the groups? `completions` shipped, was
+/// documented in two places, and appeared in neither listing, because only the
+/// first direction was ever checked.
+#[test]
+fn every_command_the_binary_offers_is_in_a_group() {
+    use clap::CommandFactory;
+    let cmd = devplane::cli::Cli::command();
+    let grouped: std::collections::BTreeSet<&str> = devplane::cli::COMMAND_GROUPS
+        .iter()
+        .flat_map(|(_, cs)| cs.iter().copied())
+        .collect();
+
+    let missing: Vec<&str> = cmd
+        .get_subcommands()
+        // Hidden commands are hidden from every listing on purpose: `mcp` is
+        // run by an agent, not a person.
+        .filter(|c| !c.is_hide_set())
+        .map(|c| c.get_name())
+        .filter(|n| *n != "help" && !grouped.contains(n))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "these commands exist and are in no group, so `devplane --help` does not \
+         list them: {missing:?}"
+    );
+    assert!(
+        grouped.len() > 20,
+        "only {} commands are grouped; this guard has stopped reading the tree",
+        grouped.len()
+    );
+}
+
+/// The other direction: a key the reference still names that the code dropped.
+///
+/// `every_key_a_project_can_set_is_in_the_reference` walks the struct fields and
+/// asks whether each is written down. It cannot catch the opposite failure — a
+/// key that was renamed or removed while its row stayed on the page — and that
+/// is the one a person actually meets, because `deny_unknown_fields` means a
+/// line copied from the documentation fails the *whole file*. Following a stale
+/// reference costs them every other setting too.
+///
+/// The reference's tables are the subject: a key is defined by a row whose first
+/// cell is the key in backticks, which is a shape prose does not take.
+#[test]
+fn every_key_the_reference_documents_is_one_a_project_can_set() {
+    let doc = std::fs::read_to_string(repo_root().join("site/content/docs/configuration.md"))
+        .expect("the configuration reference");
+    let src =
+        std::fs::read_to_string(repo_root().join("src/core/config.rs")).expect("the config module");
+
+    let mut documented: Vec<&str> = Vec::new();
+    for line in doc.lines() {
+        let Some(rest) = line.strip_prefix("| `") else {
+            continue;
+        };
+        let Some((cell, _)) = rest.split_once('`') else {
+            continue;
+        };
+        // A nested key is written by its path; the field is the last segment.
+        let key = cell.rsplit('.').next().unwrap_or(cell);
+        if !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+            documented.push(key);
+        }
+    }
+    documented.sort_unstable();
+    documented.dedup();
+    assert!(
+        documented.len() > 20,
+        "the reference's tables stopped parsing as tables: {documented:?}"
+    );
+
+    // A field, or a field under a different name. `serde` renames are the only
+    // other way a key reaches the parser.
+    let settable = |k: &str| {
+        src.lines().any(|l| {
+            let l = l.trim();
+            l.strip_prefix("pub ")
+                .and_then(|r| r.split_once(':'))
+                .is_some_and(|(f, _)| f == k)
+        }) || src.contains(&format!("rename = \"{k}\""))
+    };
+    let gone: Vec<&&str> = documented.iter().filter(|k| !settable(k)).collect();
+    assert!(
+        gone.is_empty(),
+        "the reference documents these and the parser rejects them, \
+         which fails the whole file for anyone who copies a line: {gone:?}"
+    );
+}
