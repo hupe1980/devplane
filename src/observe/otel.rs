@@ -1,33 +1,15 @@
 //! OpenTelemetry — the cost, token and latency channel.
 //!
-//! Claude Code exports OTLP from every entrypoint: the CLI, the VS Code
-//! extension, the desktop app and the SDK. It is the only documented channel
-//! with per-request cost, and `app.entrypoint` on every record is what tells
-//! the board which surface a session belongs to.
+//! OTLP/HTTP with the JSON encoding: no collector, no protobuf. Two dialects
+//! arrive here and map onto one event model: Claude Code's `claude_code.*` log
+//! records (with `app.entrypoint` naming the surface) and GenAI-convention
+//! traces from Copilot. The conventions are pre-stable, so they stay an ingest
+//! dialect, never the internal type. Parsing is tolerant: an unknown record or
+//! span costs itself, not the batch.
 //!
-//! The receiver speaks OTLP/HTTP with the JSON encoding, so there is no
-//! collector to install and no protobuf dependency. The parser is deliberately
-//! tolerant: unknown records are skipped, and a field that changes shape costs
-//! one event rather than the batch.
-//!
-//! **Two dialects arrive on this one transport**, which is the shape the whole
-//! observe layer is growing into. Claude Code exports *log records* named
-//! `claude_code.*`; GitHub Copilot exports *traces* whose *"signal names and
-//! attributes follow the OTel GenAI Semantic Conventions"*, as does Codex. So
-//! the receiver reads both and maps them onto the same event model — the
-//! conventions are an ingest dialect here and never the internal type, because
-//! they are explicitly pre-stable and the reducer the whole board is a pure
-//! function of is the wrong place to inherit somebody else's version churn.
-//!
-//! One asymmetry is worth knowing before reading a board: **`cost_usd` is
-//! Claude Code's own extension.** The GenAI conventions carry tokens, models,
-//! tool names and durations and have no notion of money, so a Copilot run shows
-//! tokens and no dollars, and a spending ceiling cannot bind it.
-//!
-//! Prompt and response text never appear here. Claude Code redacts them unless
-//! `OTEL_LOG_USER_PROMPTS` is set, and Copilot unless
-//! `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` is set. Devplane sets
-//! neither.
+//! `cost_usd` is Claude Code's own extension, so a Copilot run shows tokens
+//! and no dollars. Prompt and response text never appear: both vendors redact
+//! them unless a capture variable is set, and Devplane sets neither.
 
 use crate::core::event::{ApiUsage, Event};
 use serde::Deserialize;
@@ -39,9 +21,8 @@ use std::collections::BTreeMap;
 pub struct OtelRecord {
     pub session_id: String,
     pub entrypoint: Option<String>,
-    /// The repository the session is in, from `vcs.repository.url.full`
-    /// (Claude Code v2.1.269+). Correlates a session to a project without a
-    /// filesystem lookup.
+    /// The repository, from `vcs.repository.url.full` (Claude Code v2.1.269+):
+    /// correlates a session to a project without a filesystem lookup.
     pub repo_url: Option<String>,
     pub event: Event,
 }
@@ -166,17 +147,15 @@ pub fn parse_logs(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
                     .and_then(|b| b.as_string())
                     .unwrap_or_default();
                 let attrs = collect(rec.attributes);
-                // The event name lives in the body on some versions and in an
-                // `event.name` attribute on others. Reading both costs nothing
-                // and survives the change either way.
+                // The event name is in the body on some versions and an
+                // `event.name` attribute on others; read both.
                 let name = s(&attrs, "event.name").unwrap_or(name);
 
                 let session_id =
                     match s(&attrs, "session.id").or_else(|| s(&resource, "session.id")) {
                         Some(id) => id,
-                        // A record with no session cannot be attributed to a run,
-                        // and guessing would put another session's cost on the
-                        // wrong row.
+                        // No session means no run to attribute to; guessing
+                        // would put another session's cost on the wrong row.
                         None => continue,
                     };
                 let entrypoint =
@@ -209,8 +188,8 @@ fn log_to_event(name: &str, a: &Attrs) -> Option<Event> {
                 output_tokens: u(a, "output_tokens"),
                 cache_read_tokens: u(a, "cache_read_tokens"),
                 cache_creation_tokens: u(a, "cache_creation_tokens"),
-                // Telemetry reports one request, not a window level; the level
-                // is derived from the three token counts above.
+                // One request, not a window level: the level is derived from
+                // the three token counts above.
                 context_level: None,
             },
         }),
@@ -225,13 +204,17 @@ fn log_to_event(name: &str, a: &Attrs) -> Option<Event> {
             tool: s(a, "tool_name").unwrap_or_default(),
             decision: s(a, "decision").unwrap_or_default(),
             by: s(a, "source").unwrap_or_else(|| "unknown".into()),
+            reason: None,
+            context: None,
         }),
-        // Everything else here is something the hook channel already reports,
-        // and reports sooner. Prompts and responses carry only their length.
-        // `tool_result` is the one that was being taken as well as
-        // `PostToolUse`/`PostToolUseFailure` — so a failing tool call counted
-        // as two errors on the board, telemetry flushing seconds after the hook
-        // that had already said it. One channel per fact.
+        // The mode changing (`Shift+Tab`, leaving plan mode, an auto-mode
+        // gate), which no hook announces; a repeated mode is a no-op.
+        "claude_code.permission_mode_changed" => s(a, "to_mode")
+            .filter(|m| !m.is_empty())
+            .map(|mode| Event::PermissionModeSeen { mode }),
+        // Everything else the hook channel already reports, sooner — including
+        // `tool_result`, which would double-count failures. One channel per
+        // fact.
         _ => None,
     }
 }
@@ -287,14 +270,9 @@ fn nanos(v: &Option<Value>) -> Option<u64> {
 /// Parses an OTLP/HTTP traces payload written to the GenAI semantic
 /// conventions.
 ///
-/// The conventions nest a run as one `invoke_agent` span with `chat` and
-/// `execute_tool` spans beneath it. Only the leaves say anything the board does
-/// not already know, so the parent is read for identity and skipped otherwise.
-///
-/// Tolerant in the same way `parse_logs` is: a span that names no session, or
-/// no operation this maps, costs one span rather than the batch. That is the
-/// rule that lets a pre-stable convention change under us without taking the
-/// channel down.
+/// A run is one `invoke_agent` span with `chat` and `execute_tool` leaves;
+/// only the leaves carry anything new. As tolerant as `parse_logs`: an
+/// unmapped span costs itself, not the channel.
 pub fn parse_traces(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
     let payload: TracesPayload = serde_json::from_slice(body)?;
     let mut out = Vec::new();
@@ -307,10 +285,8 @@ pub fn parse_traces(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
         for ss in rs.scope_spans {
             for span in ss.spans {
                 let attrs = collect(span.attributes);
-                // `gen_ai.conversation.id` is the conventions' name for what
-                // this product calls a session. `session.id` is read first
-                // anyway, because an exporter that already sets it is telling
-                // us the answer in the vocabulary the rest of this file uses.
+                // `gen_ai.conversation.id` is the conventions' session;
+                // `session.id` wins when an exporter sets it.
                 let Some(session_id) = s(&attrs, "session.id")
                     .or_else(|| s(&attrs, "gen_ai.conversation.id"))
                     .or_else(|| s(&resource, "session.id"))
@@ -318,20 +294,16 @@ pub fn parse_traces(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
                 else {
                     continue;
                 };
-                // The vendor, from the service name the exporter sets —
-                // `github-copilot` by default. It is the entrypoint's job here:
-                // the board has to be able to say which agent a row belongs to,
-                // and on this dialect nothing else says.
+                // The vendor, from the service name (`github-copilot` by
+                // default): nothing else in this dialect says which agent.
                 let entrypoint = s(&attrs, "app.entrypoint")
                     .or_else(|| s(&resource, "app.entrypoint"))
                     .or_else(|| s(&resource, "service.name"));
                 let repo_url = s(&attrs, "vcs.repository.url.full")
                     .or_else(|| s(&resource, "vcs.repository.url.full"));
 
-                // The operation, from the attribute if it is there and from the
-                // span name otherwise — the conventions name a span
-                // `chat <model>` or `execute_tool <tool>`, so the first word is
-                // the operation whenever the attribute is missing.
+                // The operation, from the attribute or else the span name's
+                // first word (`chat <model>`, `execute_tool <tool>`).
                 let op = s(&attrs, "gen_ai.operation.name")
                     .or_else(|| span.name.split_whitespace().next().map(str::to_string))
                     .unwrap_or_default();
@@ -346,10 +318,8 @@ pub fn parse_traces(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
                         usage: ApiUsage {
                             model: s(&attrs, "gen_ai.response.model")
                                 .or_else(|| s(&attrs, "gen_ai.request.model")),
-                            // Not a field these conventions have. Reporting a
-                            // zero is honest — it is what was observed — and
-                            // `work show` already says when a bound cannot see
-                            // what something cost.
+                            // Not in these conventions; zero is what was
+                            // observed, and `change show` flags unseen cost.
                             cost_usd: 0.0,
                             input_tokens: u(&attrs, "gen_ai.usage.input_tokens"),
                             output_tokens: u(&attrs, "gen_ai.usage.output_tokens"),
@@ -362,14 +332,14 @@ pub fn parse_traces(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
                         tool: s(&attrs, "gen_ai.tool.name")
                             .or_else(|| span.name.split_whitespace().nth(1).map(str::to_string))
                             .unwrap_or_else(|| "tool".into()),
-                        // Status code 2 is `STATUS_CODE_ERROR`; anything else,
-                        // including an unset status, is not a failure.
+                        // Status code 2 is `STATUS_CODE_ERROR`; unset is not
+                        // a failure.
                         ok: span.status.as_ref().and_then(|s| s.code) != Some(2),
                         duration_ms,
+                        call_id: None,
                     },
-                    // `invoke_agent` is the parent of everything above and adds
-                    // nothing the children do not carry; the rest is a shape
-                    // this map does not know, which costs one span.
+                    // `invoke_agent` adds nothing its children lack; anything
+                    // else is an unknown shape and costs one span.
                     _ => continue,
                 };
 
@@ -385,9 +355,9 @@ pub fn parse_traces(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
     Ok(out)
 }
 
-/// Parses an OTLP/HTTP metrics payload. Metrics duplicate what the log records
-/// already say per request, so only the session ids are extracted — enough to
-/// prove the channel is alive in diagnostics.
+/// Parses an OTLP/HTTP metrics payload, for session ids only: metrics
+/// duplicate the log records, and `connect` does not enable the exporter, so
+/// this reads what a hand-written configuration sends.
 pub fn parse_metrics_sessions(body: &[u8]) -> Vec<String> {
     let Ok(v) = serde_json::from_slice::<Value>(body) else {
         return Vec::new();
@@ -423,9 +393,7 @@ fn collect_session_ids(v: &Value, out: &mut Vec<String>) {
 mod tests {
     #[test]
     fn a_genai_trace_becomes_the_same_events_a_claude_log_does() {
-        // The second dialect: GitHub Copilot and Codex export traces on the
-        // GenAI semantic conventions where Claude Code exports `claude_code.*`
-        // log records. One event model on the far side of both.
+        // The second dialect: GenAI-convention traces, one event model.
         let body = serde_json::json!({
             "resourceSpans": [{
                 "resource": {"attributes": [
@@ -472,9 +440,7 @@ mod tests {
                 assert_eq!(usage.input_tokens, 1200);
                 assert_eq!(usage.output_tokens, 340);
                 assert_eq!(usage.model.as_deref(), Some("gpt-5"));
-                // These conventions have no notion of money: `cost_usd` is
-                // Claude Code's own extension, so a Copilot row shows tokens
-                // and no dollars rather than a number nobody measured.
+                // No `cost_usd` in these conventions: tokens, no dollars.
                 assert_eq!(usage.cost_usd, 0.0);
             }
             other => panic!("expected an api request, got {other:?}"),
@@ -484,6 +450,7 @@ mod tests {
                 tool,
                 ok,
                 duration_ms,
+                ..
             } => {
                 assert_eq!(tool, "shell");
                 assert!(!ok, "status code 2 is an error");
@@ -515,8 +482,7 @@ mod tests {
 
     #[test]
     fn a_fact_the_hook_channel_already_reports_is_not_taken_twice() {
-        // `tool_result` and `PostToolUseFailure` describe the same tool call.
-        // Taking both counted every failure as two errors, seconds apart.
+        // `tool_result` and `PostToolUseFailure` describe the same call.
         let body = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{
             "body": {"stringValue": "claude_code.tool_result"},
             "attributes": [
@@ -585,6 +551,27 @@ mod tests {
         }
     }
 
+    /// The mode change the vendor logs, read as the event the hooks only
+    /// carry incidentally.
+    #[test]
+    fn a_permission_mode_change_is_the_mode_being_seen() {
+        let body = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{
+            "body": {"stringValue": "claude_code.permission_mode_changed"},
+            "attributes": [
+                attr("session.id", json!({"stringValue": "s1"})),
+                attr("from_mode", json!({"stringValue": "default"})),
+                attr("to_mode", json!({"stringValue": "auto"})),
+                attr("trigger", json!({"stringValue": "auto_opt_in"}))
+            ]
+        }]}]}]});
+        let recs = parse_logs(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(
+            matches!(&recs[0].event, Event::PermissionModeSeen { mode } if mode == "auto"),
+            "{:?}",
+            recs
+        );
+    }
+
     #[test]
     fn a_record_without_a_session_is_dropped() {
         // Attributing cost to the wrong run is worse than losing the record.
@@ -617,8 +604,7 @@ mod tests {
 
     #[test]
     fn prompt_records_are_not_turned_into_events() {
-        // The hook channel already reports prompts, and sooner. Counting them
-        // twice would double every figure on the board.
+        // The hook channel already reports prompts; counting twice doubles.
         let body = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{
             "body": {"stringValue": "claude_code.user_prompt"},
             "attributes": [attr("session.id", json!({"stringValue": "s1"}))]

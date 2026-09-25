@@ -1,18 +1,15 @@
-//! `devplane rules` — which repository is missing the rule.
+//! `devplane rules` — which registered repository is missing a rule.
 //!
-//! The fleet half of *answer once*. `devplane` composes a rule for one call on
-//! one machine; this asks the same question across every registered project.
-//!
-//! **It writes nothing, and says so.** See `core::rules` for why that is a
-//! threat model rather than a limitation, and why there is no apply-to-all.
+//! It writes nothing, and says so; `core::rules` explains why there is no
+//! apply-to-all.
 
 use super::raw;
+use crate::render;
 use crate::render::{BOLD, DIM, paint};
-use crate::{client, render};
 use anyhow::Result;
 
 pub async fn cmd_rules(rule: Option<String>, ask: bool, json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+    let c = crate::local::Reader::open().await?;
     let mut path = "/api/rules".to_string();
     if let Some(r) = rule.as_deref() {
         path.push_str(&format!("?rule={}", query_escape(r)));
@@ -34,12 +31,8 @@ pub async fn cmd_rules(rule: Option<String>, ask: bool, json: bool) -> Result<()
 
 /// Percent-escapes a rule for a query value.
 ///
-/// **Not a general encoder.** A rule is ASCII by construction — the syntax has
-/// no room for anything else — so this escapes the characters that would
-/// otherwise end the value or be read as a separator, and passes the rest
-/// through so `Bash(curl:*)` stays legible in a log. Pulling in a crate to
-/// encode one field in one command is a dependency this repository would have
-/// to explain.
+/// Not a general encoder: it escapes separators and leaves rule syntax such as
+/// `Bash(curl:*)` legible in a log.
 fn query_escape(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -93,9 +86,7 @@ fn one_rule(v: &serde_json::Value, asked: &str) {
     let mut missing: Vec<&crate::core::rules::Row> = Vec::new();
     for r in &rows {
         use crate::core::rules::Coverage::*;
-        // **The word carries the state, and colour only repeats it.** This is
-        // the surface most likely to be piped into a file, and a distinction
-        // that lives in an escape sequence is one a pager loses.
+        // The word carries the state; colour only repeats it for a pipe's sake.
         let (word, colour) = match &r.coverage {
             Has => ("has it", render::GREEN),
             Covered { .. } => ("covered", render::GREEN),
@@ -127,9 +118,7 @@ fn one_rule(v: &serde_json::Value, asked: &str) {
             paint(DIM, "Every project already covers this call.")
         );
     } else {
-        // **The text once, and the destinations listed under it.** Printing the
-        // rule once per project would be six identical lines somebody has to
-        // read six times to be sure they are identical.
+        // The rule once, with every destination listed under it.
         println!("\n{}", paint(BOLD, "Paste this:"));
         println!("  {asked}");
         println!("\n{}", paint(DIM, "into:"));
@@ -211,13 +200,8 @@ fn disagreements(v: &serde_json::Value) {
     footer(v);
 }
 
-/// The two sentences every rendering of this ends with.
-///
-/// **Both are load-bearing.** One says nothing was written, because a tool that
-/// reads six permission files and prints a diff is exactly the shape of a tool
-/// that would apply it. The other says why there is no button, and it is about
-/// the measured evidence rather than about the architecture — an architectural
-/// reason reads as something to route around.
+/// The two sentences every rendering ends with: that nothing was written, and
+/// why there is no apply-to-all.
 fn footer(v: &serde_json::Value) {
     for key in ["wrote_nothing", "why_no_apply_to_all"] {
         if let Some(line) = v.get(key).and_then(|s| s.as_str()) {
@@ -227,17 +211,12 @@ fn footer(v: &serde_json::Value) {
 }
 
 /// Wraps a sentence at a column, on word boundaries.
-///
-/// Local rather than in `render`, which pads and paints for tables: this is the
-/// only surface here that prints a paragraph, and a shared wrapper would have to
-/// answer questions about indentation and hyphenation that nothing is asking.
 fn wrapped(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut line = 0usize;
     for word in text.split_whitespace() {
-        // `+ 1` for the space that would precede it. A word longer than the
-        // width goes on its own line and overruns, which is right: breaking a
-        // URL or a rule to fit a column makes it uncopyable.
+        // `+ 1` for the preceding space. An over-long word overruns rather than
+        // breaking, so a URL or rule stays copyable.
         if line > 0 && line + 1 + word.len() > width {
             out.push('\n');
             line = 0;

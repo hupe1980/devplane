@@ -1,48 +1,34 @@
 +++
 title = "Install"
-description = "Install Devplane, and check it found the agent binaries on your machine."
+description = "Install Devplane — installer, npx, cargo or the window — check it works, and know where it keeps its files."
 weight = 1
 [extra]
 group = "start"
 +++
 
-Devplane is a single static binary. It contains the daemon, the CLI, the hook shims and the web
-board — there is no service to run and nothing to configure before it is useful.
+Devplane is one binary: the host, the CLI, the hooks and the workbench. Nothing runs until you start
+it, and nothing starts at login.
 
-## The path that is meant for you
+## The installer
 
 ```sh
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 ```
 
-Fetches a prebuilt binary for macOS (Apple Silicon and Intel), Linux and Windows. No Rust
-toolchain.
+A prebuilt binary for macOS (Apple Silicon and Intel), Linux and Windows. No Rust toolchain.
 
 > [!IMPORTANT]
-> **On macOS, use this rather than downloading from the releases page.**
-> The binaries are not notarised — the release tooling signs Windows artifacts and has no macOS
-> signing support at all — and macOS applies `com.apple.quarantine` based on *what downloaded the
-> file*. A browser sets it, so a `.tar.gz` you click will be refused by Gatekeeper. `curl` does not
-> set it, so a binary that arrives that way just runs.
->
-> The artifacts on the releases page are what this command fetches. They are not a second install
-> path, and saying so is more useful than letting you find out.
+> **On macOS, use this rather than the releases page.** The binaries are not notarised, and macOS
+> quarantines a file a browser downloaded, so Gatekeeper refuses it. `curl` sets no quarantine flag.
 
-## Without installing anything
+## Without installing
 
-If you have Node, you can run Devplane without putting it on your PATH:
-
-```console
+```sh
 npx devplane ls
 ```
 
-It fetches the same prebuilt binary the installer above would, for your platform, and runs it. The
-daemon, the database and the token live in the same `~/.devplane/` either way — an `npx` run and an
-installed binary are the **same** Devplane, not two of them.
-
-The package is published by this repository's release workflow through npm **trusted publishing**, so
-it carries a provenance attestation: npm can show which workflow run and which commit built the
-binary you are running.
+Fetches the same prebuilt binary and runs it, against the same `~/.devplane/`. The npm package carries
+a provenance attestation naming the workflow run and commit that built it.
 
 ## From source
 
@@ -50,8 +36,34 @@ binary you are running.
 cargo install devplane
 ```
 
-Requires Rust 1.90 or later, and builds from source — a few minutes the first time. This is the
-path for contributors and for platforms the release matrix does not cover, not the front door.
+Rust 1.90 or later.
+
+## The window
+
+```sh
+cargo install devplane --features app
+devplane app
+```
+
+The same host as `devplane serve`, with a native window, a tray item, notifications, one global
+shortcut and `devplane://` links. Closing the window keeps hosting. See
+[`devplane app`](@/docs/cli.md#devplane-app).
+
+- On Linux the build needs `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+  librsvg2-dev`.
+- Not built: a signed app bundle, installer or updater. The `devplane://` scheme is registered by a
+  bundle, so on macOS those links do not open the app.
+- Without the window, `devplane open` shows the same workbench in your browser.
+
+The window's settings live in `~/.devplane/app.toml`:
+
+```toml
+# ~/.devplane/app.toml
+[app]
+port = 47900
+```
+
+`port = 0` (the default) picks a free one; `devplane app --port` overrides the file.
 
 ## Inside Claude Code, as a plugin
 
@@ -60,57 +72,36 @@ claude plugin marketplace add hupe1980/devplane
 /plugin install devplane@devplane
 ```
 
-**The plugin is read-only.** It adds Devplane's MCP surface — so an agent can ask what is running,
-what needs a person, what was decided and on whose authority, and whether work is verifiably done —
-plus a skill explaining those answers. Nothing in it changes a file, answers a permission, starts an
-agent or merges anything.
-
-**It installs no hooks.** They carry this machine's loopback port and bearer token, which no file in
-a public repository can know, so `devplane connect claude` writes them into your own settings.
-
-Install the binary first: the plugin runs it, and a plugin whose server cannot start does nothing.
+The plugin adds Devplane's read-only MCP server (what is running, what needs a person, what was
+decided and by whom, whether a change is verified) and the `devplane-gate` skill, which runs the
+repository's gates and reports what they exited with. It installs no hooks (run `devplane connect
+claude` for those) and needs the binary installed first.
 
 ## Check it works
 
 ```sh
+devplane doctor
 devplane ls
 ```
 
-If Claude Code sessions are running, you will see them immediately — discovery needs no
-configuration at all. If nothing appears, Devplane will tell you which of the two reasons it is.
+`doctor` says whether a host answers, which channels are arriving, and whether the permission gate is
+installed **and answering**. `ls` lists running Claude Code sessions with no host and no
+configuration. Next: [the quickstart](@/docs/quickstart.md).
 
 ## Finding the `claude` binary
 
-Session discovery runs `claude agents --json`, and `claude` is routinely **not** on your `PATH`: the
-VS&nbsp;Code extension ships its own copy and installs nothing globally. Devplane looks in four
-places, in order:
+Watching Claude Code and `devplane attach` need `claude`, which is often not on `PATH` (the VS Code
+extension ships its own copy). Devplane looks, in order, at:
 
 1. `$DEVPLANE_CLAUDE_BIN`
 2. `PATH`
 3. `~/.claude/local/claude`
-4. the newest `anthropic.claude-code-*` extension in VS&nbsp;Code, VS&nbsp;Code Insiders or Cursor
+4. the newest `anthropic.claude-code-*` extension in VS Code, VS Code Insiders or Cursor
 
-If yours lives somewhere else:
-
-```sh
-export DEVPLANE_CLAUDE_BIN=/path/to/claude
-```
-
-> [!NOTE]
-> Devplane runs perfectly well with no Claude Code at all — it drives any agent that speaks the
-> Agent Client Protocol. The binary is only needed for *watching* Claude Code sessions and for
-> `devplane attach`.
->
-> **Watching and driving are different lists.** Driving works for Claude Code, Codex, Copilot,
-> OpenCode and Gemini: an agent Devplane started reports through the protocol by construction.
-> Watching a session **you** started is fully demonstrated for Claude Code; Copilot publishes the
-> channels and Devplane reads them, but that path has not yet been proved end to end. The other three
-> are not watched at all.
+Devplane runs without Claude Code: it drives any ACP agent. Which vendors can also be *watched* is on
+[Watching sessions](@/docs/observe.md).
 
 ## Shell completion
-
-One command per shell, generated from the command tree rather than written by hand — so a command
-that exists completes, and a hidden one is not offered.
 
 ```sh
 devplane completions zsh  > ~/.zsh/completions/_devplane
@@ -118,54 +109,44 @@ devplane completions bash > /usr/local/etc/bash_completion.d/devplane
 devplane completions fish > ~/.config/fish/completions/devplane.fish
 ```
 
-**Two guarantees, and they are different.**
-
-Writing the script **needs no daemon**. It is a pure function of the binary: setting up a shell
-should not require having started anything.
-
-Completing an **id** — a waiting question, a session, a project — asks the running daemon, and is
-**silent when there is none**. Pressing Tab must not start a daemon, and it gives up after 150 ms,
-because a shell that hangs on Tab is worse than one that completes nothing.
-
-**zsh and fish complete the ids; bash completes the commands only.** Both of the first two show a
-description beside each value, which is the whole point of completing an opaque id — the id tells you
-nothing and the question beside it tells you everything. Bash has no descriptions, so the same list
-there would be a column of ULIDs to choose between.
+Needs no host. Completing an id (a waiting question, a session, a project) asks the running host,
+gives up after 150 ms, and is silent when none runs. zsh and fish show a sentence beside each id;
+bash completes the id alone.
 
 ## Where it keeps things
 
-Everything lives in one directory, `~/.devplane`:
+Everything lives in `~/.devplane`:
 
 | File | What |
 |---|---|
-| `devplane.db` | SQLite: events, runs, work, transcripts, the decision log |
-| `devplane.v<n>.bak` | a database written by an older schema, moved aside rather than migrated. Everything in it except the decision log is re-derivable, so once you have what you need from it, delete it — it is as large as the database was |
+| `devplane.db` | SQLite: events, runs, changes, transcripts, asks, reports, the decision log. Hooks write it directly; the host tails it |
+| `devplane.v<n>.bak` | a database from another schema, moved aside rather than migrated. Delete it once you have what you need |
 | `token` | the bearer token for the local API, mode `0600` |
-| `daemon.json` | the running daemon's pid and the port it actually bound |
-| `policy.toml` | optional machine-wide permission rules |
-| `agents.toml` | optional extra agents, by name |
+| `host.json` | the running host: port, version, start time, binary and pid |
+| `pending-decisions.jsonl` | decisions a hook took while the store would not open; the next host files them |
+| `policy.toml` | optional machine-wide `[policy]` rules |
+| `agents.toml` | optional extra agents; see [Driving agents](@/docs/agents.md#adding-an-agent) |
+| `app.toml` | optional settings for the window |
 
-`DEVPLANE_HOME` moves all of it, which is how you run a throwaway instance beside your real one:
+`DEVPLANE_HOME` moves all of it, for a throwaway instance beside your real one. Each home has at most
+one host, and a second home needs its own port:
 
 ```sh
-DEVPLANE_HOME=/tmp/vp devplane ls
+DEVPLANE_HOME=/tmp/vp devplane serve --port 47832
 ```
 
-A second instance takes another port rather than refusing to start, so it never interferes with the
-daemon you are actually using.
+The default port is 47831 (`--port` or `DEVPLANE_PORT`).
 
 ## Uninstall
 
 ```sh
-devplane disconnect claude    # removes the hooks and telemetry it installed
+devplane disconnect claude    # removes exactly the hooks and telemetry connect added
+devplane disconnect codex
 devplane disconnect copilot   # deletes the one file it wrote
-devplane stop                 # stops the daemon, and the agents it started
+devplane quit                 # stops the host and the agents it started
 rm -rf ~/.devplane
 ```
 
-Then remove the binary the way you installed it — `cargo uninstall devplane`, or deleting it from
-`~/.local/bin`.
-
-`disconnect claude` removes exactly the entries `connect` added, leaving the hooks you configured
-yourself alone. `disconnect copilot` deletes `~/.copilot/hooks/devplane.json`, which is the whole
-of what it wrote — any OpenTelemetry variables you exported are yours to remove.
+Then remove the binary the way you installed it: `cargo uninstall devplane`, or delete it from
+`~/.local/bin`. Each `disconnect` shows the diff first unless you pass `--yes`, and leaves hooks you
+configured yourself alone. OpenTelemetry variables you exported for Copilot are yours to remove.

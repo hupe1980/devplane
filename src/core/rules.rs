@@ -1,40 +1,14 @@
-//! Which repository is missing the rule.
+//! Which registered project is missing a rule, across both rule files.
 //!
-//! **The fleet half of *answer once*.** `core::offer` composes the exact rule
-//! text for a single call on a single machine. This asks the same question
-//! across every registered project: *which of my six repositories is missing
-//! this?*
-//!
-//! # Why this reports and does not apply
-//!
-//! Over **15 549 agentic pull requests across 148 projects**, adding
-//! instruction files raised the merge rate by ≥20 % in **27.7 %** of projects
-//! and **lowered** it in **26.35 %**. What separated the two was length and
-//! structure, not presence. So *which repositories are missing this rule* is a
-//! question worth answering, and *therefore put it in all six* is the failure
-//! that result measures — a coin flip with a progress bar.
-//!
-//! The refusal is structural rather than a default, and for a second reason
-//! that stands on its own: **an agent on this machine runs as the same user as
-//! the daemon and can read the bearer token**, so a route that edits a
-//! permission file is reachable by the party the file exists to bound. Writing
-//! into the *vendor's* settings would be strictly worse — that is the file the
-//! vendor's own enforcement reads.
-//!
-//! This module therefore has no write path, and `tests/purity.rs` proves the
-//! absence over the source rather than trusting this paragraph.
-//!
-//! # Why the two rule sets are never conflated
-//!
-//! A `devplane.toml` prohibition is what **this product** will refuse. A
-//! `permissions.deny` entry is what the **agent** will refuse. They answer
-//! different questions and a person with six projects needs the second at
-//! least as much, so every row names the file it is about.
+//! Reports and never applies: an agent runs as the same user as the host and
+//! can reach its token, so a route that edited a permission file would be
+//! reachable by the party the file bounds. `devplane.toml` (what Devplane
+//! refuses) and `.claude/settings.json` (what the agent refuses) are never
+//! conflated; every row names its file.
 
 use crate::core::policy::{Class, Rule};
 use serde::{Deserialize, Serialize};
 
-/// Which file a rule set came from, and therefore which question it answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -45,11 +19,8 @@ pub enum Source {
 }
 
 impl Source {
-    /// The key a rule of this class belongs under, for the paste.
-    ///
-    /// Two files, two spellings of the same idea, and getting it wrong hands
-    /// somebody text that lands in a key nothing reads. `offer.rs` had exactly
-    /// that failure with an allow list that had stopped being evaluated.
+    /// The key a pasted rule of this class belongs under — the one each file
+    /// actually reads.
     #[must_use]
     pub fn section(self, class: Class) -> &'static str {
         match (self, class) {
@@ -70,32 +41,20 @@ impl Source {
     }
 }
 
-/// What one project's one file says about one rule.
-///
-/// **Four states, and the fourth is why this is not a boolean.** A project
-/// whose settings will not parse has, per the vendor, *none* of its settings in
-/// effect — so it is neither covered nor missing, and its fix is `devplane
-/// check` rather than a paste. Reporting it as missing would hand somebody text
-/// to add to a file that is already broken.
+/// What one project's one file says about one rule. `Covered`: a wider rule
+/// speaks for every call (`Bash(rm:*)` for `Bash(rm -rf:*)`). `Unreadable` is
+/// neither covered nor missing: none of the file's settings are in effect, and
+/// its fix is `devplane check`, not a paste.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Coverage {
-    /// The rule is there, spelled the same way.
     Has,
-    /// A **wider** rule already speaks for every call this one names.
-    ///
-    /// Deliberately distinct from `Has`: `Bash(rm:*)` covers `Bash(rm -rf:*)`,
-    /// and a person deciding whether to paste needs to know they are looking at
-    /// a broader rule rather than the one they wrote.
     Covered { by: String },
-    /// Nothing here speaks for it.
     Missing,
-    /// The file does not parse, so none of its settings are in effect.
     Unreadable { why: String },
 }
 
 impl Coverage {
-    /// Whether this project would need the paste.
     #[must_use]
     pub fn wants_the_rule(&self) -> bool {
         matches!(self, Coverage::Missing)
@@ -112,21 +71,16 @@ impl Coverage {
     }
 }
 
-/// One file's rules, as read.
-///
-/// `error` and the rule lists are **mutually exclusive by construction** at the
-/// call site: a file that did not parse contributes no rules, because the
-/// vendor puts none of its settings in effect.
+/// One file's rules, as read. When `error` is set the lists are empty: an
+/// unparsable file contributes no rules.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuleSet {
     pub file: String,
     pub deny: Vec<String>,
     pub ask: Vec<String>,
-    /// Why the file could not be read, when it could not.
     pub error: Option<String>,
 }
 
-/// One project's two rule sets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectRules {
     pub project: String,
@@ -134,50 +88,28 @@ pub struct ProjectRules {
     pub agent: RuleSet,
 }
 
-/// One row of the answer: one project, one file, one verdict.
+/// One project, one file, one verdict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     pub project: String,
     pub source: Source,
-    /// The file this row is about, so two rows for one project cannot be read
-    /// as one.
     pub file: String,
     pub coverage: Coverage,
-    /// Where the text would go, when it is missing. `None` otherwise — there is
-    /// nothing to paste into a file that already covers the case, and nothing
-    /// to paste into one that does not parse.
+    /// Where the paste would go; `Some` only when `Missing`.
     pub section: Option<String>,
 }
 
-/// What one rule set says about one wanted rule.
-///
-/// **Under-reports on purpose, because `covers_rule` does.** Containment is
-/// decided exactly where this rule language allows it and answers *no*
-/// everywhere else — a negation, a differing tool pattern, a `?` in a command
-/// pattern. An undecidable pair is therefore reported as `Missing`, never
-/// guessed at, and the cost of that choice is showing somebody a paste they may
-/// not need. The opposite error hides a gap, which is the one this feature
-/// exists to find.
+/// What one rule set says about one wanted rule. Under-reports on purpose, as
+/// `covers_rule` does: an undecidable pair is `Missing`, never guessed — a
+/// needless paste is cheaper than a hidden gap.
 #[must_use]
 pub fn coverage(rules: &[Rule], wanted: &Rule) -> Coverage {
-    // **Equivalence first**, because *you already have this* and *something
-    // wider speaks for it* are different answers and the narrower one is more
-    // useful.
-    //
-    // Equivalence is **mutual containment**, not string equality. `Rule`
-    // derives `PartialEq` over its fields including the raw text, so
-    // `Bash(rm:*)` and `Bash(rm :*)` compare unequal while denying exactly the
-    // same calls — and a reader who wrote the second would be told they are
-    // missing the first. Each covering the other is the definition of the same
-    // rule, and it reuses the one procedure rather than adding a second reader
-    // of this syntax.
+    // Equivalence first, as mutual containment rather than `==`: `Rule`'s
+    // `PartialEq` includes the raw text, so two spellings of one rule differ.
     if rules.iter().any(|r| same(r, wanted)) {
         return Coverage::Has;
     }
-    // **A negation anywhere in the list stops containment being sound.** An
-    // exception carves a hole in the rule above it, so a wider rule with a
-    // `!Bash(rm -rf /tmp/*)` under it no longer speaks for everything it names.
-    // `Policy::redundancies` takes the same care for the same reason.
+    // A negation carves a hole in any wider rule, so containment is unsound.
     if rules.iter().any(Rule::is_negated) {
         return Coverage::Missing;
     }
@@ -192,21 +124,12 @@ pub fn coverage(rules: &[Rule], wanted: &Rule) -> Coverage {
     Coverage::Missing
 }
 
-/// Whether two rules deny exactly the same calls.
-///
-/// **Mutual containment, which is the definition.** `covers_rule` under-reports
-/// on purpose — a pair it cannot decide answers *no* — so two rules it cannot
-/// compare are treated as different, which is the safe direction: it shows a
-/// row that may be redundant rather than hiding one that is not.
+/// Whether two rules deny exactly the same calls; undecidable pairs differ.
 fn same(a: &Rule, b: &Rule) -> bool {
     a.covers_rule(b) && b.covers_rule(a)
 }
 
-/// Parse a list, dropping what will not parse.
-///
-/// A rule the parser rejects is already reported by `devplane check` and by the
-/// agent itself at startup; repeating it here would say the same thing twice
-/// under a heading about something else.
+/// Parse a list, dropping what will not parse (`devplane check` reports those).
 fn parsed(raw: &[String], class: Class) -> Vec<Rule> {
     raw.iter()
         .filter_map(|r| Rule::parse(r, class))
@@ -214,12 +137,8 @@ fn parsed(raw: &[String], class: Class) -> Vec<Rule> {
         .collect()
 }
 
-/// Every project's answer for one wanted rule, one row per file.
-///
-/// Both files are reported for every project, always — including the one that
-/// has nothing to say. A project with no `devplane.toml` is *missing* the rule
-/// in Devplane's file, and omitting the row would quietly narrow the question
-/// from *which repositories* to *which repositories I happened to configure*.
+/// Every project's answer for one wanted rule: always both files per project,
+/// so an absent `devplane.toml` shows as missing rather than vanishing.
 #[must_use]
 pub fn compare(projects: &[ProjectRules], wanted: &Rule) -> Vec<Row> {
     let mut out = Vec::new();
@@ -228,10 +147,7 @@ pub fn compare(projects: &[ProjectRules], wanted: &Rule) -> Vec<Row> {
             let cov = match &set.error {
                 Some(why) => Coverage::Unreadable { why: why.clone() },
                 None => {
-                    // Both lists, because a rule in `ask` does speak for the
-                    // call — it interrupts instead of refusing, and a person
-                    // asking "is this covered" is asking whether the call can
-                    // happen unattended.
+                    // `ask` counts too: covered means it cannot run unattended.
                     let mut rules = parsed(&set.deny, Class::Deny);
                     rules.extend(parsed(&set.ask, Class::Ask));
                     coverage(&rules, wanted)
@@ -256,24 +172,13 @@ pub fn compare(projects: &[ProjectRules], wanted: &Rule) -> Vec<Row> {
 pub struct Spread {
     pub rule: String,
     pub source: Source,
-    /// Projects whose file names this rule, sorted.
     pub held_by: Vec<String>,
-    /// Projects whose file does not, sorted. Never empty — a rule everybody
-    /// holds is agreement, not a disagreement.
+    /// Never empty.
     pub missing_from: Vec<String>,
 }
 
-/// What the projects disagree about, most-widely-held first.
-///
-/// **A rule held by exactly one project is a row, not noise.** One repository
-/// carrying a prohibition the other five lack is the most interesting thing
-/// this report can say — it is either the one that learned something or the one
-/// that is over-restricted, and both are worth a look. Filtering it as an
-/// outlier would drop the signal to keep the list short.
-///
-/// Projects whose file will not parse are **excluded from both sides** of every
-/// row. They have no settings in effect, so counting them as missing would
-/// invent a disagreement out of a broken file.
+/// What the projects disagree about, most-widely-held first. A rule held by one
+/// project is still a row. Unparsable files are on neither side.
 #[must_use]
 pub fn disagreements(projects: &[ProjectRules]) -> Vec<Spread> {
     let mut out = Vec::new();
@@ -288,11 +193,10 @@ pub fn disagreements(projects: &[ProjectRules]) -> Vec<Spread> {
             .iter()
             .filter(|p| pick(p).error.is_none())
             .collect();
-        // Fewer than two readable files cannot disagree about anything.
         if readable.len() < 2 {
             continue;
         }
-        // Compared as parsed rules, so two spellings of one rule are one row.
+        // Parsed, so two spellings of one rule are one row.
         let mut seen: Vec<(Rule, Vec<String>)> = Vec::new();
         for p in &readable {
             let set = pick(p);
@@ -328,9 +232,7 @@ pub fn disagreements(projects: &[ProjectRules]) -> Vec<Spread> {
             });
         }
     }
-    // Most-widely-held first: the rule five of six projects share is the one
-    // most likely to be an oversight in the sixth. Ties break by rule text so
-    // two runs over the same machine print the same list.
+    // Ties break by rule text so the output is stable.
     out.sort_by(|a, b| {
         b.held_by
             .len()
@@ -341,20 +243,16 @@ pub fn disagreements(projects: &[ProjectRules]) -> Vec<Spread> {
     out
 }
 
-/// The one sentence shown where somebody would look for *apply to all*.
-///
-/// **It is about the evidence, not the architecture.** "We cannot write files"
-/// reads as a limitation somebody will ask to have lifted. The measured result
-/// is the actual reason, and it does not change when the threat model does.
+/// Shown where somebody would look for *apply to all*.
 pub const WHY_NO_APPLY_TO_ALL: &str = "There is no apply-to-all. Across 15 549 agentic pull requests in 148 projects, adding \
      instruction files helped in 27.7% of them and hurt in 26.35% — what separated the two was \
      what the rules said, not that they were there. Pasting one rule into six repositories is a \
      coin flip you would be running on purpose.";
 
-/// The line every surface prints, so the refusal is never merely implied.
+/// Printed by every surface, so the refusal is never merely implied.
 pub const WROTE_NOTHING: &str = "Nothing was written. Devplane reads these files and never edits \
                                  them — an agent on this machine runs as your user and can reach \
-                                 anything the daemon can.";
+                                 anything the host can.";
 
 #[cfg(test)]
 mod tests {
@@ -378,9 +276,6 @@ mod tests {
         Rule::parse(raw, Class::Deny).expect("a rule this syntax can express")
     }
 
-    /// The four containment cases, on the same procedure `Policy::redundancies`
-    /// uses — an exact match, a wider rule, a narrower one, and a pair the
-    /// procedure cannot decide.
     #[test]
     fn coverage_answers_only_what_containment_can_prove() {
         assert_eq!(
@@ -393,16 +288,12 @@ mod tests {
                 by: "Bash(rm:*)".into()
             }
         );
-        // **A narrower rule does not cover a wider one**, and getting this
-        // backwards is the failure that matters: it would report a project as
-        // protected by a rule that answers one call out of the family.
+        // A narrower rule never covers a wider one.
         assert_eq!(
             coverage(&rules(&["Bash(rm -rf:*)"]), &want("Bash(rm:*)")),
             Coverage::Missing
         );
-        // Undecidable is silent, which is to say `Missing`. A `?` is a wildcard
-        // in a path and a literal in a command, so the containment primitive
-        // refuses the pair rather than picking a reading.
+        // Undecidable (`?` is literal in a command) is `Missing`.
         assert_eq!(
             coverage(
                 &rules(&["Bash(rm -rf /tmp/?:*)"]),
@@ -412,12 +303,6 @@ mod tests {
         );
     }
 
-    /// **A wider rule with an exception under it covers nothing.**
-    ///
-    /// The hole the negation carves could be exactly the call being asked
-    /// about, and this procedure cannot tell. Reporting `covered` here would
-    /// tell somebody they are protected by a rule that has been subtracted
-    /// from.
     #[test]
     fn an_exception_in_the_list_stops_a_wider_rule_speaking_for_it() {
         assert_eq!(
@@ -429,7 +314,6 @@ mod tests {
         );
     }
 
-    /// Unreadable and missing are different rows with different fixes.
     #[test]
     fn a_file_that_will_not_parse_is_never_reported_as_missing() {
         let broken = ProjectRules {
@@ -444,16 +328,12 @@ mod tests {
         let rows = compare(&[broken], &want("Bash(curl:*)"));
         let dev = rows.iter().find(|r| r.source == Source::Devplane).unwrap();
         assert!(matches!(dev.coverage, Coverage::Unreadable { .. }));
-        // **And it is offered no paste.** A file that does not parse has none
-        // of its settings in effect, so text added to it changes nothing — the
-        // fix is `devplane check`.
         assert_eq!(dev.section, None);
         let agent = rows.iter().find(|r| r.source == Source::Agent).unwrap();
         assert_eq!(agent.coverage, Coverage::Missing);
         assert_eq!(agent.section.as_deref(), Some("permissions.deny"));
     }
 
-    /// The paste names the key each file actually reads.
     #[test]
     fn the_destination_key_follows_the_file_and_the_class() {
         assert_eq!(Source::Devplane.section(Class::Deny), "policy.never_auto");
@@ -484,9 +364,6 @@ mod tests {
         assert_eq!(out[0].rule, "Read(./.env)");
         assert_eq!(out[0].held_by, ["a", "b", "c"]);
         assert_eq!(out[0].missing_from, ["d"]);
-        // **The rule exactly one project holds is a row, not noise.** It is
-        // either the project that learned something or the one that is
-        // over-restricted, and both are worth a look.
         let lone = out
             .iter()
             .find(|s| s.rule == "Bash(curl:*)")
@@ -505,11 +382,6 @@ mod tests {
         );
     }
 
-    /// **A project whose file will not parse is on neither side of a spread.**
-    ///
-    /// It has no settings in effect, so counting it as missing would invent a
-    /// disagreement out of a broken file — and send somebody to paste a rule
-    /// into it.
     #[test]
     fn an_unreadable_project_does_not_invent_a_disagreement() {
         let mut broken = project("b", &[]);
@@ -521,14 +393,8 @@ mod tests {
         );
     }
 
-    /// **Whitespace around an entry is not a disagreement; whitespace inside a
-    /// specifier is.**
-    ///
-    /// The first is a stray space in a JSON list and means nothing. The second
-    /// does not: `Bash( rm:* )` is a pattern that begins with a space, and it
-    /// does not speak for `rm` — the parser is right to keep them apart, and
-    /// this pins the distinction so nobody "fixes" it by trimming inside the
-    /// brackets.
+    /// `Bash( rm:* )` is a pattern beginning with a space; don't "fix" this by
+    /// trimming inside the brackets.
     #[test]
     fn spacing_around_an_entry_is_not_a_disagreement_and_spacing_inside_one_is() {
         assert!(

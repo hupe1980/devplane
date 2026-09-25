@@ -1,5 +1,5 @@
 +++
 title = "Devplane"
-description = "Devplane records who decided, when nobody asked you — a person, a rule, a classifier, a timer, or nobody. One page for every project: what needs you, what went red after the agent stopped, and which finished work can prove its checks passed. Local-first, one binary, no account."
+description = "The desktop workbench for spec-driven agentic development: write the spec, dispatch any ACP agent, verify against your own gates, and keep the record of who decided what. Local-first, one binary, no account."
 template = "index.html"
 +++

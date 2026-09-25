@@ -22,9 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The product reads process tables, sends signals to process groups and
-        # resolves editor windows, and does it differently per platform. Testing
-        # one of them proves the least interesting third.
+        # Process tables, signals and editor windows differ per platform.
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -37,72 +35,67 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # **Node is declared rather than assumed.** The interface is a node
-      # project, and its checks skip silently where node is absent — so the
-      # dependency is a fact of the workflow rather than a property of the
-      # runner image.
+      # `--all-features` compiles the app, which needs WebKitGTK on Linux.
+      - name: Install the app's Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      # Node is pinned here, not assumed from the runner image.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Build the interface
-        run: cd ui && npm ci && npm run build
+        run: cd ui && npm ci && npm run build && git diff --exit-code -- dist
 
-      # The wire types are generated from the Rust shapes. This fails when what
-      # is checked in is not what they would produce.
+      # Fails when the checked-in wire types differ from what Rust generates.
       - name: Check the generated wire types
-        run: TS_RS_EXPORT_DIR=ui/src cargo test --features typescript --quiet export_bindings
+        run: TS_RS_EXPORT_DIR=ui/src cargo test --features typescript --quiet export_bindings && git diff --exit-code -- ui/src/wire
 
       - name: Type-check the interface
         run: cd ui && npx svelte-check --tsconfig ./tsconfig.json
 
-      # Formatting first: it is the cheapest thing that can fail.
       - name: Format
         run: cargo fmt --all --check
 
-      # `-D warnings` on the clippy invocation only. Setting it in `RUSTFLAGS`
-      # would apply it to every dependency as well, so a new lint in a crate we
-      # do not own would turn the build red for something nobody here can fix.
+      # `-D warnings` here, not in RUSTFLAGS, so dependency lints cannot fail CI.
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # `cargo test` does not rebuild examples, so without this the protocol
-      # suite would drive whatever `examples/echo_agent` was built last. The
-      # suite refuses a fixture older than its source rather than passing.
+      # `cargo test` does not rebuild examples; the conformance suite needs a fresh fixture.
       - name: Build
         run: cargo build --all-targets --locked
 
       - name: Test
         run: cargo test --locked
 
-  # Kept separate: it is the one job whose failure means "the world changed
-  # under us" rather than "this commit is wrong".
-  claims:
+  # The `app` feature, on macOS (no display server needed; the tests open no window).
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: app
+      - name: Build the app
+        run: cargo build --locked --features app
+      # The ACP fixture agent the app tests drive.
+      - name: Build the fixture agent
+        run: cargo build --locked --example echo_agent
+      - name: Test the app's host
+        run: cargo test --locked --features app --test app
+
+  # Separate so a failure reads as "a dependency arrived", not "this commit is wrong".
+  # Checks that need the gitignored concepts/ run via `just notes`, not here.
+  deps:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The dependency ledger, which is only honest if something recomputes it.
-      - name: Dependency ledger
+      - name: Dependency count
         run: bash scripts/deps-count.sh
-
-      # `concepts/reference/`, not `specs/` — that directory is the project's own
-      # Spec Kit features now, and it is committed, so `-d specs` would be true on
-      # every checkout and this job would fail rather than skip.
-      - name: Claims that need the fetched reference docs
-        run: |
-          if [ -d concepts/reference ]; then
-            bash scripts/verify-claims.sh
-          else
-            echo "concepts/reference/ is gitignored and absent; nothing to verify here."
-          fi
-
-      # The ledger is committed and the changelog is not, so this runs only
-      # where the corpus has been fetched. Locally that is `just rows`; here it
-      # is the job that says the world changed under us.
-      - name: Every rule row in the changelog is accounted for
-        run: |
-          if [ -f concepts/reference/claude-code/CHANGELOG.md ]; then
-            bash scripts/changelog-rows.sh
-          else
-            echo "concepts/reference/ is gitignored and absent; nothing to account for here."
-          fi

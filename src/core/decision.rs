@@ -1,83 +1,37 @@
-//! The decision log: what Devplane decided, and on whose authority.
-//!
-//! Two questions have to be answerable months later, and neither is answerable
-//! from the event log. *Why did this command run without anybody being asked?*
-//! — because a rule in that repository allowed it, and the rule is named. *Why
-//! is there a pull request on this branch?* — because these checks passed, and
-//! they are named too.
-//!
-//! Observations are things that happened to Devplane. A decision is something
-//! Devplane *did*, or allowed, and the difference matters: an observation can
-//! be re-derived from the provider, a decision cannot be re-derived from
-//! anything. It is appended, never edited, and pruning the event log leaves it
-//! alone.
-//!
-//! What this deliberately is not: a hash-chained tamper-evident journal. This
-//! is a developer tool on a laptop, and the threat it defends against is *"I
-//! cannot remember why that happened"*, not an adversary with write access to
-//! the same machine as the agents themselves.
+//! The decision log: what Devplane decided or allowed, and on whose authority —
+//! the rule that allowed a command, the checks that opened a pull request.
+//! Unlike observations, a decision cannot be re-derived, so it is append-only
+//! and survives event-log pruning. Not a tamper-evident journal: the threat is
+//! *"I cannot remember why that happened"*, not an adversary on the same machine.
 
-use crate::core::ids::{ProjectId, RunId, WorkId};
+use crate::core::ids::{ChangeId, ProjectId, RunId};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-/// **On whose authority something happened.**
-///
-/// This is the column the product is named for, and for five passes it could
-/// not say what the design required. It had three values — `policy`, `human`,
-/// `daemon` — and *daemon* was doing three unrelated jobs at once: Devplane
-/// running a gate, a clock refusing a call nobody answered, and a question
-/// dying unanswered when its run ended. The reason string told those apart and
-/// the queryable column did not, in the one table whose whole purpose is being
-/// queried by exactly that dimension.
-///
-/// # Why these five and not six
-///
-/// `classifier` is deliberately absent, and its absence is a measurement
-/// rather than an oversight. Devplane has no channel that attributes an
-/// individual call to a model's approval: across four concurrent sessions,
-/// `PreToolUse` fired forty-nine times and `PermissionRequest` fired **zero**
-/// times, so a call in an `auto` session is one nobody was asked about — which
-/// is a fact about the *session's mode*, reported by `devplane modes`, and not
-/// a fact about the call. A variant nothing can produce is a documented
-/// trigger with no code behind it.
-///
-/// `unknown` is absent for the stronger reason: a row whose authority cannot be
-/// established is not a row with another kind of authority, it is **a row
-/// Devplane must not write**. A ledger that guesses is worse than one with
-/// gaps.
+/// On whose authority something happened. There is no `classifier` (no channel
+/// attributes a single call to a model's approval; an `auto` session is a mode,
+/// reported by `devplane modes`) and no `unknown`: a row whose authority cannot
+/// be established must not be written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum Authority {
-    /// Somebody was asked and answered — through the inbox, the board or the
-    /// CLI. The only value that needs no defence.
+    /// Somebody was asked and answered — inbox, board or CLI.
     Person,
     /// A rule matched: a `devplane.toml` prohibition or the machine-wide
-    /// policy. Deterministic and re-derivable, and the rule text is in
-    /// `reason`, which is the whole reason that field is not optional in
-    /// practice.
+    /// policy. The rule text goes in `reason`.
     Rule,
-    /// A clock decided, because nobody answered in time. **Distinct from
-    /// `Daemon` on purpose**: Devplane ran the timer, but the *decision* is
-    /// that time ran out, and a person auditing the week needs to find these
-    /// without reading prose. The duration belongs in `reason`.
+    /// Nobody answered in time and a clock decided; the duration goes in
+    /// `reason`. Distinct from `Devplane` so these are findable without prose.
     Timer,
-    /// Asked, never answered, and the moment passed — the run ended under the
-    /// question, or the call was cancelled beneath it. **Nobody decided.**
-    ///
-    /// This is the value the whole product exists to be able to write. Devin
-    /// ships the word *skipped* for it; nothing else records it at all.
+    /// Asked, never answered, and the moment passed — the run ended or the
+    /// call was cancelled. Nobody decided.
     Nobody,
-    /// Devplane itself, mechanically, carrying out something the project wrote
-    /// down: a gate verdict, a pipeline advancing, a pull request opening.
-    ///
-    /// **Not a decision taken on the person's behalf** — it is the tool doing
-    /// the job it was configured to do, and it is separated from `Rule` and
-    /// `Timer` so that filtering for *what was decided for me* does not return
-    /// every gate this machine has ever run.
-    Daemon,
+    /// Devplane mechanically carrying out what the project wrote down (a gate
+    /// verdict, a pull request). Not a decision taken on the person's behalf,
+    /// so *what was decided for me* excludes it.
+    Devplane,
 }
 
 impl Authority {
@@ -87,40 +41,33 @@ impl Authority {
             Authority::Rule => "rule",
             Authority::Timer => "timer",
             Authority::Nobody => "nobody",
-            Authority::Daemon => "daemon",
+            Authority::Devplane => "devplane",
         }
     }
 
-    /// Parses the stored spelling. Unknown text is an error rather than a
-    /// default: silently reading an unrecognised authority as `daemon` would
-    /// put the most reassuring label on the least known row, which is the
-    /// failure this enum was rebuilt to stop.
+    /// Parses the stored spelling. Unknown text is `None`, never a default:
+    /// guessing would put the most reassuring label on the least known row.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "person" => Authority::Person,
             "rule" => Authority::Rule,
             "timer" => Authority::Timer,
             "nobody" => Authority::Nobody,
-            "daemon" => Authority::Daemon,
+            "devplane" => Authority::Devplane,
             _ => return None,
         })
     }
 
-    /// Whether this row is something that was decided **instead of** the
-    /// person — the filter the seat's surfaces default to.
-    ///
-    /// `Daemon` is excluded because it is the tool doing what it was told;
-    /// `Person` is excluded because those are the ones you remember.
+    /// Whether this was decided instead of the person — the default filter of
+    /// the seat's surfaces. Excludes `Devplane` (doing what it was told) and `Person`.
     pub fn was_taken_for_you(self) -> bool {
         matches!(self, Authority::Rule | Authority::Timer | Authority::Nobody)
     }
 }
 
-/// One thing that was decided.
-///
-/// `action` is the verb, in the same vocabulary the policy speaks:
-/// `agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`, `work:advance`.
-/// `subject` is what it was about — the command, the gate, the branch.
+/// One thing that was decided. `action` is the verb in the policy's vocabulary
+/// (`agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`, `change:stop`);
+/// `subject` is what it was about.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
@@ -133,29 +80,16 @@ pub struct Decision {
     pub subject: String,
     /// `allow`, `deny`, `pass`, `fail`, `done`.
     pub outcome: String,
-    /// The rule that decided, or the reason. This is the field the whole table
-    /// exists for: "auto-approved" is not an answer, "auto-approved by
-    /// `Bash(pnpm test *)`" is.
+    /// The rule that decided, or the reason: "auto-approved by
+    /// `Bash(pnpm test *)`", not "auto-approved".
     pub reason: Option<String>,
-    /// The tool this call was, where it was a tool call at all.
-    ///
-    /// `Bash`, `Read`, `Edit`, `mcp__…`. Empty for a gate verdict, a push or a
-    /// pipeline advancing, which are decisions about something other than a
-    /// tool.
+    /// The tool, for a tool call (`Bash`, `Edit`, `mcp__…`); `None` otherwise.
     #[serde(default)]
     pub tool: Option<String>,
-    /// Where the MCP server behind `tool` came from, as the vendor reported it.
-    ///
-    /// **The adjacent question to `authority`, and the reason this field is
-    /// here rather than on the event alone.** `authority` answers *on whose
-    /// authority was this decided*; this answers *what was acting, and who put
-    /// it there*. A call into a server a cloned repository defined and one into
-    /// a server the person installed themselves are different facts, and until
-    /// this field existed they produced identical rows.
-    ///
-    /// `None` for a tool that is not an MCP tool, for a vendor that reports no
-    /// such thing, and for an agent older than the release that began sending
-    /// it. Absent is not unknown.
+    /// Where the MCP server behind `tool` came from, as the vendor reported it:
+    /// *what was acting, and who put it there*, beside `authority`. `None` for
+    /// non-MCP tools and vendors or versions that do not report it — absent is
+    /// not unknown.
     #[serde(default)]
     pub server_source: Option<String>,
     #[serde(default)]
@@ -163,7 +97,7 @@ pub struct Decision {
     #[serde(default)]
     pub run_id: Option<RunId>,
     #[serde(default)]
-    pub work_id: Option<WorkId>,
+    pub change_id: Option<ChangeId>,
 }
 
 impl Decision {
@@ -185,21 +119,19 @@ impl Decision {
             server_source: None,
             project_id: None,
             run_id: None,
-            work_id: None,
+            change_id: None,
         }
     }
 
-    /// Overrides the timestamp, for a decision recorded later than it was
-    /// taken — the spool the `command` hook writes when no daemon is running.
+    /// Overrides the timestamp, for a decision filed later than it was taken
+    /// (spooled by the `command` hook when the store would not open).
     pub fn at(mut self, at: Timestamp) -> Self {
         self.at = at;
         self
     }
 
-    /// Records where the MCP server behind this call came from.
-    ///
-    /// Transcribed from the vendor, never derived, and never mapped: a value
-    /// this build does not recognise is stored as received.
+    /// Records where the MCP server behind this call came from — transcribed
+    /// from the vendor, never mapped; unrecognised values are kept as received.
     #[must_use]
     pub fn from_server(mut self, source: Option<String>) -> Self {
         self.server_source = source.filter(|s| !s.is_empty());
@@ -225,8 +157,8 @@ impl Decision {
         self
     }
 
-    pub fn for_work(mut self, work: &WorkId) -> Self {
-        self.work_id = Some(work.clone());
+    pub fn for_change(mut self, change: &ChangeId) -> Self {
+        self.change_id = Some(change.clone());
         self
     }
 
@@ -275,11 +207,8 @@ mod tests {
     }
 
     #[test]
-    fn the_three_things_daemon_used_to_mean_are_now_three_values() {
-        // The defect this enum was rebuilt for. All three of these were
-        // `Actor::Daemon`, distinguishable only by reading English prose, in
-        // the one table whose entire purpose is being queried by this column.
-        let gate = Decision::new(Authority::Daemon, "gate:run", "cargo test", "pass");
+    fn the_three_things_one_value_used_to_mean_are_now_three_values() {
+        let gate = Decision::new(Authority::Devplane, "gate:run", "cargo test", "pass");
         let clock = Decision::new(Authority::Timer, "agent:tool.use", "req-1", "deny")
             .because("nobody answered within ten minutes");
         let lost = Decision::new(Authority::Nobody, "agent:question", "req-2", "unanswered")
@@ -292,9 +221,8 @@ mod tests {
             );
         }
 
-        // And the filter the seat's surfaces default to: what was decided
-        // *instead of* the person. A gate the project asked for is not that.
-        assert!(!Authority::Daemon.was_taken_for_you());
+        // What was decided instead of the person; a gate is not that.
+        assert!(!Authority::Devplane.was_taken_for_you());
         assert!(!Authority::Person.was_taken_for_you());
         for a in [Authority::Rule, Authority::Timer, Authority::Nobody] {
             assert!(a.was_taken_for_you(), "{a:?}");
@@ -302,17 +230,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_authority_is_refused_rather_than_read_as_daemon() {
-        // Reading an unrecognised value as `daemon` would put the most
-        // reassuring label on the least known row. Every spelling this build
-        // writes must round-trip; anything else is `None` and the row is
-        // dropped by the reader.
+    fn an_unknown_authority_is_refused_rather_than_read_as_devplane() {
+        // Every written spelling round-trips; anything else is `None`.
         for a in [
             Authority::Person,
             Authority::Rule,
             Authority::Timer,
             Authority::Nobody,
-            Authority::Daemon,
+            Authority::Devplane,
         ] {
             assert_eq!(Authority::parse(a.as_str()), Some(a), "{a:?}");
         }
@@ -323,43 +248,33 @@ mod tests {
 
     #[test]
     fn a_long_subject_is_cut_rather_than_wrapped() {
-        let d = Decision::new(Authority::Daemon, "gate:run", "x".repeat(500), "pass");
+        let d = Decision::new(Authority::Devplane, "gate:run", "x".repeat(500), "pass");
         assert!(d.line().chars().count() < 120);
     }
 }
 
-/// What the `command` hook hands back after it has enforced a verdict.
-///
-/// One shape for two journeys. Posted to `/devplane/decided` when a daemon is
-/// listening, and appended to `~/.devplane/pending-decisions.jsonl` when one
-/// is not — so a decision taken while the daemon was down is written down by
-/// exactly the code that writes down every other decision, rather than by a
-/// second path nobody exercises.
-///
-/// It carries the **verdict**, never the inputs to recompute one. The process
-/// that enforced a rule is the authority for which rule it was; the daemon's
-/// cached rules can be seconds behind the file the hook just read.
+/// What the `command` hook hands back after enforcing a verdict. Written to the
+/// store, or appended to `~/.devplane/pending-decisions.jsonl` when the store
+/// will not open, and filed by the same code either way. Carries the verdict,
+/// not inputs to recompute one: the enforcing process is the authority for
+/// which rule applied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecidedEnvelope {
     pub session: String,
-    /// `deny`, `ask`, `unresolved` or `undecided`.
-    ///
-    /// There is no `allow`: [`crate::core::Verdict`] cannot express one.
+    #[serde(default)]
+    pub source: crate::core::event::Source,
+    /// `deny`, `ask`, `unresolved` or `undecided` — never `allow`, which
+    /// [`crate::core::Verdict`] cannot express.
     pub verdict: String,
-    /// The rule that produced it. `None` means no rule did — which for
-    /// `undecided` is not a decision and is therefore only observed, and for
-    /// `unresolved` is a decision with no rule to name: see [`Self::why`].
+    /// The rule that produced it. `None` for `undecided` (observed only) and
+    /// `unresolved` (see [`Self::why`]).
     #[serde(default)]
     pub rule: Option<String>,
-    /// Where the MCP server behind the call came from, as the vendor reported
-    /// it. Carried so a decision spooled with no daemon running arrives whole.
+    /// Where the MCP server behind the call came from, as the vendor reported it.
     #[serde(default)]
     pub server_source: Option<String>,
-    /// Why the matcher could not decide, for an `unresolved` verdict.
-    ///
-    /// **The one decision Devplane takes with no rule behind it**, so the
-    /// sentence is the whole of the accounting: without it the audit row would
-    /// say a person was asked and be unable to say what for.
+    /// Why the matcher could not decide, for an `unresolved` verdict — the only
+    /// accounting for a decision with no rule behind it.
     #[serde(default)]
     pub why: Option<String>,
     /// What was asked for, in the words the audit log prints.
@@ -367,20 +282,15 @@ pub struct DecidedEnvelope {
     pub subject: String,
     #[serde(default)]
     pub tool: String,
-    /// When it was taken, which is not when it was filed.
+    /// When it was taken, not when it was filed.
     #[serde(default)]
     pub at: Option<Timestamp>,
-    /// Set on a row that waited in the spool, so the log can say so rather than
-    /// leaving a reader to wonder why the timestamps run backwards.
+    /// Set on a row that waited in the spool, so the log can explain backwards timestamps.
     #[serde(default)]
     pub late: bool,
-    /// Whether the session is now waiting on a person.
-    ///
-    /// True for a `PermissionRequest` no rule answered: Claude Code is showing
-    /// its own dialog and the run is blocked, which is how the inbox learns
-    /// about it the instant it happens rather than six seconds later on a
-    /// notification. False for `PreToolUse`, which fires on every call and
-    /// says nothing about whether anybody is going to be asked.
+    /// Whether the session is now waiting on a person: true for a
+    /// `PermissionRequest` no rule answered (the vendor's dialog is up), false
+    /// for `PreToolUse`, which fires on every call.
     #[serde(default)]
     pub blocked: bool,
     /// The raw hook payload, for the observation half.
@@ -388,24 +298,10 @@ pub struct DecidedEnvelope {
     pub payload: Option<serde_json::Value>,
 }
 
-/// Files a **shell** call in these decisions named for writing.
-///
-/// The one class Claude Code's own checkpointing documents that it does not
-/// cover: *"files modified by bash commands are not tracked."* Everything
-/// needed to answer it is already here — every tool call the gate saw, the
-/// command text, and the tool it was — so this is a query rather than a
-/// feature, with no snapshots and no second copy of anybody's files.
-///
-/// Three things it is careful about, and each is a way the answer could be a
-/// confident lie:
-///
-/// * **A refused call wrote nothing.** A `deny` row is a call that did not
-///   happen, so it is not in the list.
-/// * **A path nothing can pin is not a filename.** A glob, a `~` or a variable
-///   is left out rather than printed as though it named a file.
-/// * **The gate saw the call, not the write.** `PreToolUse` fires *before* the
-///   tool, so the honest sentence is *named for writing*, never *changed*.
-///   Everything downstream of this function has to keep that wording.
+/// Files a shell call in these decisions named for writing — the class Claude
+/// Code's checkpointing does not cover. Denied calls are skipped, paths that
+/// pin no file (globs, `~`, variables) are left out, and because `PreToolUse`
+/// fires before the tool, the wording must stay *named for writing*, never *changed*.
 pub fn files_a_shell_call_named_for_writing(decisions: &[Decision]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for d in decisions {
@@ -446,9 +342,7 @@ mod rewind_tests {
     fn a_shell_redirect_is_outside_the_vendors_checkpoint_and_an_edit_is_not() {
         let rows = vec![
             call("Bash", "echo x > notes.md", "allow"),
-            // The vendor's own editing tools *are* checkpointed, so naming
-            // them here would tell somebody to worry about a file that will
-            // come back.
+            // The vendor's editing tools are checkpointed, so they are not listed.
             call("Edit", "src/main.rs", "allow"),
         ];
         assert_eq!(
@@ -465,9 +359,6 @@ mod rewind_tests {
 
     #[test]
     fn a_path_nothing_can_pin_is_not_printed_as_a_filename() {
-        // A glob, a `~` or a variable names no single file. Printing one as
-        // though it did would be a confident answer whose evidence does not
-        // support it.
         let rows = vec![
             call("Bash", "echo x > $OUT", "allow"),
             call("Bash", "echo x > ~/notes.md", "allow"),
@@ -479,7 +370,7 @@ mod rewind_tests {
     #[test]
     fn a_decision_that_is_not_a_tool_call_is_ignored() {
         let rows = vec![Decision::new(
-            Authority::Daemon,
+            Authority::Devplane,
             "gh:pr.create",
             "fix/login",
             "done",
@@ -497,22 +388,9 @@ mod rewind_tests {
     }
 }
 
-/// Whether a tool call could have carried server provenance at all.
-///
-/// **Three states, and the middle one is the honest gap.** The
-/// vendor's `mcp_server.source` rides five hook events and only from Claude
-/// Code v2.1.274 — so for an MCP tool call three things are true at different
-/// times and a surface that prints nothing cannot tell them apart:
-///
-/// | The call | What is known |
-/// |---|---|
-/// | `Bash(ls)` | **absent** — not an MCP tool; there is no source to have |
-/// | `mcp__linear__create`, source `project` | **reported** |
-/// | `mcp__linear__create`, nothing carried | **not reported here** — an older build, or a vendor whose channel has no such field |
-///
-/// Printing nothing for the second and third alike teaches a reader that a
-/// blank means *ordinary tool*, which is the same defect as the capability
-/// table conflating *not probed* with *not supported*.
+/// Whether a tool call could carry server provenance (`mcp_server.source`) at
+/// all. Lets a surface tell *not an MCP tool* from *MCP, but the vendor or
+/// version reported no source*, rather than printing a blank for both.
 #[must_use]
 pub fn could_carry_provenance(tool: &str) -> bool {
     tool.starts_with("mcp__")
@@ -522,14 +400,6 @@ pub fn could_carry_provenance(tool: &str) -> bool {
 mod provenance_tests {
     use super::*;
 
-    /// **Three states, and the middle one had no representation.**
-    ///
-    /// `Bash(ls)` cannot have a source. `mcp__linear__create` can, and either
-    /// carried one or did not — and *did not* is a fact about the vendor and
-    /// the version, not about the call. A surface printing nothing for the
-    /// second and third alike teaches a reader that a blank means *ordinary
-    /// tool*, which is the capability table's *not probed* / *not supported*
-    /// defect one field over.
     #[test]
     fn a_call_that_cannot_have_a_source_reads_differently_from_one_that_lost_it() {
         assert!(could_carry_provenance("mcp__linear__create_issue"));
@@ -542,18 +412,14 @@ mod provenance_tests {
             );
         }
 
-        // The prefix is the vendor's own, and a tool merely *containing* it is
-        // not one: `mcp__` anchors at the start or it names nothing.
+        // `mcp__` anchors at the start.
         assert!(!could_carry_provenance("Bash(mcp__x)"));
         assert!(!could_carry_provenance("not_mcp__linear"));
     }
 
     #[test]
     fn a_source_this_build_has_never_seen_is_kept_as_received() {
-        // The SDK enumerates the values it knows and says how to treat one you
-        // do not. Mapping an unknown to `unknown` would replace a fact with a
-        // guess — the same rule the authority column follows one field over,
-        // where an unrecognised value drops the row rather than defaulting.
+        // Mapping an unknown to `unknown` would replace a fact with a guess.
         let d = Decision::new(Authority::Rule, "agent:tool.use", "x", "deny")
             .from_server(Some("something-nobody-has-shipped-yet".into()));
         assert_eq!(
@@ -564,10 +430,8 @@ mod provenance_tests {
 
     #[test]
     fn absent_is_not_unknown() {
-        // A tool that is not an MCP tool, a vendor that reports no such thing,
-        // and an agent older than the release that began sending it all produce
-        // *nothing said* — which reads differently from *said, and not
-        // understood*, and must keep doing so.
+        // Non-MCP tools, silent vendors and older agents all produce *nothing
+        // said*, which must read differently from *said, and not understood*.
         let d = Decision::new(Authority::Rule, "agent:tool.use", "x", "deny");
         assert_eq!(d.server_source, None);
         // An empty string is an absence, not a value.
@@ -577,8 +441,7 @@ mod provenance_tests {
 
     #[test]
     fn two_servers_sharing_a_name_are_two_things() {
-        // A count that aggregated these would be answering "how much did github
-        // do" with a number about two different pieces of software.
+        // Same name, different software: never aggregated.
         let from_project = Decision::new(Authority::Rule, "agent:tool.use", "x", "deny")
             .by_tool("mcp__github__create_issue")
             .from_server(Some("project".into()));

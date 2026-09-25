@@ -1,16 +1,6 @@
-//! The process-table reader, against this machine rather than against a
-//! fixture.
-//!
-//! `src/observe/procs.rs` unit-tests the parsing and the identity rules over
-//! canned rows, which is the right place for the logic. What no fixture can
-//! check is whether `ps` on *this* platform prints the columns this code asks
-//! for, in the order it expects — and that is the half that breaks silently,
-//! because a parser fed nothing returns an empty list and an empty list reads
-//! as *no leaked agents* rather than as *the reader is broken*.
-//!
-//! Unix only. There is no process-group semantics to reason about elsewhere,
-//! and the guard this whole mechanism backs up is `#[cfg(unix)]` in the
-//! protocol crate too.
+//! The process-table reader against this machine: checks that `ps` here prints
+//! the columns the parser expects, since a broken reader returns an empty list
+//! that reads as "no leaked agents". Unix only.
 
 #![cfg(unix)]
 
@@ -38,27 +28,13 @@ fn the_process_table_contains_the_process_that_asked_for_it() {
     );
 }
 
-/// **The whole mechanism, against a process shaped like the thing it hunts.**
-///
-/// A leaked agent is a group leader that outlived its parent. This spawns one —
-/// `setsid` makes it lead its own group exactly as the protocol crate's
-/// `process_group(0)` does — confirms it is found by pid, command and
-/// group-leadership together, and then confirms the two ways it must *not* be
-/// found: a pid that is not a leader, and a command that no longer matches,
-/// which is the pid-reuse case.
+/// A leaked agent is a group leader that outlived its parent. A `setsid` probe is
+/// found by pid, command and leadership together, and not found as a non-leader
+/// pid or with a changed command (pid reuse).
 #[test]
 fn a_group_leading_process_is_found_and_a_mismatched_one_is_not() {
-    // **A symlink rather than a shell, because `exec -a` is not portable.** The
-    // probe needs a distinctive `argv[0]`, and the obvious way to get one —
-    // `sh -c 'exec -a <name> sleep 30'` — is a bashism: on Debian and Ubuntu
-    // `/bin/sh` is dash, which answers `exec: -a: not found`, never execs, and
-    // leaves a zombie whose command column reads `[sh] <defunct>`. The test
-    // then failed for a reason that had nothing to do with the reader it
-    // checks, and only on the platform CI runs.
-    //
-    // Executing a symlink gives the same thing with no shell at all: the
-    // process really is named by the path it was started from, which is what a
-    // real agent's row looks like.
+    // A symlink gives the probe a distinctive `argv[0]` without `exec -a`, which
+    // dash (`/bin/sh` on Debian/Ubuntu) does not support.
     let marker = format!("devplane-leak-probe-{}", std::process::id());
     let dir = std::env::temp_dir().join(format!("devplane-probe-{}", std::process::id()));
     if std::fs::create_dir_all(&dir).is_err() {
@@ -81,8 +57,7 @@ fn a_group_leading_process_is_found_and_a_mismatched_one_is_not() {
         .process_group(0)
         .spawn()
     else {
-        // A machine that will not spawn a process has nothing to tell us about
-        // a reader of the process table.
+        // A machine that cannot spawn a process says nothing about the reader.
         let _ = std::fs::remove_dir_all(&dir);
         return;
     };
@@ -91,8 +66,7 @@ fn a_group_leading_process_is_found_and_a_mismatched_one_is_not() {
     // A moment for the process table to show it.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    // Everything below runs against a real process, and the result is computed
-    // before the probe is killed so that a failure cannot leave it behind.
+    // Computed before the probe is killed, so a failure cannot leave it behind.
     let snap = procs::snapshot();
     let outcome = (|| {
         let p = snap
@@ -109,17 +83,14 @@ fn a_group_leading_process_is_found_and_a_mismatched_one_is_not() {
         if hits.len() != 1 || hits[0].pid != pid {
             return Err(format!("the probe was not recognised: {p:?} -> {hits:?}"));
         }
-        // **Not** found when it does not — the pid-reuse guard. Without this a
-        // recycled pid would be reported as somebody's leaked agent.
+        // Not found when it does not: the pid-reuse guard.
         if !procs::leaked(&[(pid, "a-command-this-is-not".to_string())]).is_empty() {
             return Err("a recorded command that no longer matches was reported".to_string());
         }
         Ok(())
     })();
 
-    // Nothing is left behind, whatever the assertions said: the negative group
-    // id ends the probe and anything it started, which is the same signal the
-    // inbox row tells a person to send.
+    // The negative group id ends the probe and anything it started.
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
@@ -127,18 +98,14 @@ fn a_group_leading_process_is_found_and_a_mismatched_one_is_not() {
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 
-    // **Asserted after the cleanup and never skipped.** The first version of
-    // this test wrapped every assertion in `if let Some(p) = found`, so a
-    // snapshot that did not contain the probe passed silently — a vacuous test
-    // of a reader whose failure mode is returning nothing.
+    // Asserted after cleanup and never skipped: an empty snapshot must fail.
     outcome.expect("the live process-table check");
 }
 
 /// A pid nothing is using is not reported, whatever command is recorded for it.
 #[test]
 fn a_pid_that_is_not_running_is_never_reported_as_leaked() {
-    // Zero is never a process: `kill(0, …)` addresses the caller's own group,
-    // which is the bug this guards against in the other direction.
+    // Zero is never a process: `kill(0, …)` addresses the caller's own group.
     assert!(procs::leaked(&[(0, "sleep".to_string())]).is_empty());
     // And a pid far above the system maximum cannot be allocated.
     assert!(procs::leaked(&[(u32::MAX, "sleep".to_string())]).is_empty());

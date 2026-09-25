@@ -1,42 +1,30 @@
 //! Connecting and disconnecting Claude Code.
 //!
-//! The only part of Devplane that writes to a file the user owns, so the one
-//! that has to be most careful. Five rules:
-//!
-//! 1. **Merge, never replace.** Hooks the user already configured keep working,
-//!    and Devplane's entries are appended alongside them.
-//! 2. **Remove exactly what was added.** Every entry carries a recognisable
-//!    loopback URL, so disconnecting is subtraction rather than a guess.
-//! 3. **Never take over a setting that is already doing a job.** If telemetry
-//!    is already exported somewhere, Devplane does not redirect it; it reports
-//!    that the channel belongs to someone else.
-//! 4. **Never install a hook that replaces behaviour.** `WorktreeCreate`
-//!    replaces Claude Code's own `git worktree` logic when configured, so an
-//!    observer installing it would break `claude --worktree`, subagent
-//!    isolation and background sessions everywhere.
-//! 5. **Use the hook type each event actually supports.** `SessionStart`
-//!    accepts only `command` and `mcp_tool` hooks: an HTTP entry there is
-//!    accepted by the settings file and then silently never runs, which looks
-//!    exactly like a session that started without telling anyone.
+//! The only part of Devplane that writes a file the user owns, under five
+//! rules: merge, never replace; remove exactly what was added (every entry
+//! runs this binary's shim); never take over a setting already doing a job
+//! (someone else's telemetry export stays theirs); never install a hook that
+//! replaces behaviour (`WorktreeCreate` would break `claude --worktree`,
+//! subagent isolation and background sessions); and show the diff first,
+//! confirming on a terminal.
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-/// The marker in every URL Devplane writes. Disconnect removes entries whose
-/// URL contains it and nothing else.
+/// The marker in every URL Devplane writes (the telemetry endpoint), by which
+/// `connect` and `disconnect` recognise their own.
 pub const URL_MARKER: &str = "/devplane/";
 
-/// The environment variables Devplane sets for telemetry.
+/// The environment variables Devplane sets for telemetry, plus the metrics
+/// exporter pair, so `disconnect` also takes those back.
 const OTEL_VARS: &[&str] = &[
     "CLAUDE_CODE_ENABLE_TELEMETRY",
     "OTEL_LOGS_EXPORTER",
     "OTEL_METRICS_EXPORTER",
     "OTEL_EXPORTER_OTLP_PROTOCOL",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
-    // Set since the telemetry endpoints stopped being open. `disconnect` must
-    // take it with the endpoint: a stale bearer for a daemon that is gone is a
-    // credential left in a settings file for no reason.
+    // Taken with the endpoint: a stale bearer is a credential left behind.
     "OTEL_EXPORTER_OTLP_HEADERS",
     "OTEL_LOGS_EXPORT_INTERVAL",
     "OTEL_METRIC_EXPORT_INTERVAL",
@@ -46,51 +34,29 @@ const OTEL_VARS: &[&str] = &[
 
 /// The hook events Devplane subscribes to.
 ///
-/// **Two are synchronous, and they answer different questions.**
-///
-/// `PermissionRequest` is the instant signal that a session is blocked — the
-/// `permission_prompt` notification is six seconds late and, in a terminal,
-/// deferred by every keystroke — and it carries the full verdict, because it
-/// fires only when a human was going to be asked anyway.
-///
-/// `PreToolUse` fires before every tool call in every mode, which makes it the
-/// only way a prohibition reaches a session in auto mode, where a classifier
-/// approves routine calls and no prompt happens. It answers with a prohibition
-/// or nothing; an allow there would skip the classifier too.
-///
-/// Everything else is `async`, so no hook can make Claude feel slower.
-///
-/// The list deliberately excludes `WorktreeCreate`; see the module docs.
+/// Two are synchronous. `PermissionRequest` is the instant blocked signal and
+/// carries the full verdict. `PreToolUse` fires before every tool call in
+/// every mode, the only way a prohibition reaches auto mode; it answers with a
+/// prohibition or nothing. Everything else is `async`, so no hook slows
+/// Claude. `WorktreeCreate` is excluded; see the module docs.
 const HOOKS: &[(&str, Option<&str>, bool)] = &[
     ("UserPromptSubmit", None, true),
     ("PreToolUse", None, false),
     ("PostToolUse", None, true),
     ("PostToolUseFailure", None, true),
-    // The permission Claude Code's own auto mode refused, which is a decision
-    // about this session that Devplane would otherwise never see: the run
-    // stays "working" while the agent is being stopped from doing things. The
-    // receiver has always known how to read it; nothing subscribed to it.
+    // Auto mode refusing a permission: otherwise the run reads "working"
+    // while the agent is being stopped.
     ("PermissionDenied", None, true),
-    // An MCP server asking the user something, at the moment it asks. The
-    // `elicitation_dialog` notification below says the same thing about six
-    // seconds later and, in a terminal, defers again on every keystroke — the
-    // identical argument that makes `PermissionRequest` the hinge of the
-    // design. It is kept as the backstop, not as the signal.
+    // An MCP server asking the user, at once; the `elicitation_dialog`
+    // notification below is the late backstop.
     ("Elicitation", None, true),
-    // The other half of it, and the reason an answered question stops being
-    // asked. It fires when a person answers the elicitation — in their own
-    // terminal, where Devplane has no other way to learn the dialog closed.
-    // Without it the inbox went on showing a decision that had been made,
-    // which is what teaches somebody to skim the list.
+    // Fires when a person answers the elicitation in their terminal, so the
+    // inbox stops asking.
     ("ElicitationResult", None, true),
-    // Somebody edited the settings Devplane writes its hooks into, or a
-    // managed policy arrived that blocks loopback. Every other symptom of that
-    // is a channel going quiet, which is indistinguishable from a quiet
-    // machine.
+    // The hook settings were edited, or a managed policy blocks loopback;
+    // otherwise that only shows as a quiet channel.
     ("ConfigChange", None, true),
-    // An observed session's own task list — the plan a driven run gets over
-    // the protocol and a watched one never had. No matcher support: these fire
-    // on every occurrence.
+    // An observed session's own task list. No matcher support.
     ("TaskCreated", None, true),
     ("TaskCompleted", None, true),
     (
@@ -103,17 +69,12 @@ const HOOKS: &[(&str, Option<&str>, bool)] = &[
     ("SubagentStart", None, true),
     ("SubagentStop", None, true),
     ("CwdChanged", None, true),
-    // `PostCompact`, not `PreCompact`: the context gauge is reset by this, and
-    // resetting it *before* compaction meant the gauge dropped to zero while
-    // the window was still full, then filled again from the summarisation
-    // request — a `context_high` item that cleared itself and came back.
+    // `PostCompact`, not `PreCompact`: resetting the gauge before compaction
+    // would flicker `context_high` while the window is still full.
     ("PostCompact", None, true),
-    // The model decides the size of the context window, so without this a
-    // `/model` switch mid-session leaves the gauge a percentage of the window
-    // the session started with.
+    // A `/model` switch changes the window the gauge is a percentage of.
     ("PostModelSwitch", None, true),
-    // And its sequential sibling, which names the model *before* the switch —
-    // so the next turn is not priced against the previous model's window.
+    // Names the model before the switch, so the next turn is priced right.
     ("PreModelSwitch", None, true),
     ("SessionEnd", None, true),
     ("PermissionRequest", None, false),
@@ -152,16 +113,10 @@ pub fn settings_path() -> Result<PathBuf> {
 
 /// Where this platform's **managed** settings live, as the vendor documents it.
 ///
-/// One path per platform and no search: these are the documented locations, and
-/// a supervision tool that guessed at a second one would report a policy nobody
-/// deployed. The Windows `ProgramData` fallback is deliberately absent — the
-/// vendor removed it, and carrying a path they deleted is how a diagnostic
-/// starts describing a machine that no longer exists.
-///
-/// **What this does not resolve**: drop-ins, a policy helper, the Windows
-/// registry chain, and an SDK host's own policy. A value delivered by any of
-/// those is invisible here, which is why the absence of a timer is reported as
-/// *nothing in the files I read* rather than as *there is none*.
+/// The documented locations only, one per platform (the vendor removed the
+/// Windows `ProgramData` fallback). Drop-ins, policy helpers, the Windows
+/// registry and SDK hosts are not resolved, so an absent timer means "nothing
+/// in the files read", not "none".
 pub fn managed_settings_path() -> PathBuf {
     if cfg!(target_os = "macos") {
         PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json")
@@ -174,9 +129,9 @@ pub fn managed_settings_path() -> PathBuf {
 
 /// What can answer a question on this machine without the person.
 ///
-/// Absent where nothing sets it, and where a file exists and will not parse:
-/// the vendor says such a document has **none of its settings in effect**, so
-/// reading a value out of one would be reporting a policy that is not running.
+///
+/// Absent where nothing sets it, and where a file will not parse: the vendor
+/// says such a document has none of its settings in effect.
 pub fn question_clock() -> Option<crate::core::clock::QuestionClock> {
     let user_path = settings_path().ok()?;
     let user = read_settings(&user_path).unwrap_or_default();
@@ -195,8 +150,7 @@ fn dirs_home() -> Option<PathBuf> {
 }
 
 /// Reads user settings, tolerating an absent file but not a malformed one:
-/// silently discarding a file we could not parse would delete the user's
-/// configuration.
+/// discarding what we could not parse would delete the user's configuration.
 pub fn read_settings(path: &Path) -> Result<Map<String, Value>> {
     match std::fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() => Ok(Map::new()),
@@ -207,29 +161,114 @@ pub fn read_settings(path: &Path) -> Result<Map<String, Value>> {
     }
 }
 
+/// The settings as they would be written: what a diff is taken over.
+pub fn render_settings(settings: &Map<String, Value>) -> String {
+    serde_json::to_string_pretty(settings).unwrap_or_default() + "\n"
+}
+
 /// Writes settings back, preserving a backup of what was there before.
 pub fn write_settings(path: &Path, settings: &Map<String, Value>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
+    // Keep the file's mode on everything written in its place, backup
+    // included: a `0600` settings file can hold an API key.
+    let mode = std::fs::metadata(path).ok().map(|m| m.permissions());
     if path.exists() {
         let backup = path.with_extension("json.devplane-backup");
         std::fs::copy(path, &backup)
             .with_context(|| format!("backing up {} first", path.display()))?;
+        if let Some(p) = &mode {
+            std::fs::set_permissions(&backup, p.clone()).ok();
+        }
     }
-    let body = serde_json::to_string_pretty(settings)? + "\n";
-    // Write to a temporary file and rename, so an interrupted write cannot
-    // leave the user with half a settings file and no Claude Code.
+    let body = render_settings(settings);
+    // Temporary file and rename: an interrupted write never leaves half a
+    // settings file.
     let tmp = path.with_extension("json.devplane-tmp");
     std::fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Some(p) = mode {
+        std::fs::set_permissions(&tmp, p)
+            .with_context(|| format!("keeping the mode of {}", path.display()))?;
+    }
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
 
+/// A line diff of two renderings, in the unified style, with the unchanged
+/// lines around a change kept for orientation.
+///
+/// A small hand-rolled LCS; settings files are a few hundred lines. Empty when
+/// the two are equal, so a caller can say *nothing to change*.
+pub fn diff(before: &str, after: &str) -> String {
+    let a: Vec<&str> = before.lines().collect();
+    let b: Vec<&str> = after.lines().collect();
+    // lcs[i][j]: the longest common subsequence of a[i..] and b[j..].
+    let mut lcs = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            lcs[i][j] = if a[i] == b[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    // Walk it into a line-by-line script: ' ' kept, '-' removed, '+' added.
+    let mut script: Vec<(char, &str)> = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            script.push((' ', a[i]));
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            script.push(('-', a[i]));
+            i += 1;
+        } else {
+            script.push(('+', b[j]));
+            j += 1;
+        }
+    }
+    script.extend(a[i..].iter().map(|l| ('-', *l)));
+    script.extend(b[j..].iter().map(|l| ('+', *l)));
+
+    if script.iter().all(|(op, _)| *op == ' ') {
+        return String::new();
+    }
+    // Only the neighbourhood of a change is printed: three lines of context
+    // either side, and a `…` where unchanged lines were left out.
+    const CONTEXT: usize = 3;
+    let changed: Vec<usize> = script
+        .iter()
+        .enumerate()
+        .filter(|(_, (op, _))| *op != ' ')
+        .map(|(k, _)| k)
+        .collect();
+    let mut out = String::new();
+    let mut last_printed: Option<usize> = None;
+    for (k, (op, line)) in script.iter().enumerate() {
+        let near = changed.iter().any(|c| k.abs_diff(*c) <= CONTEXT);
+        if !near {
+            continue;
+        }
+        if let Some(p) = last_printed
+            && k > p + 1
+        {
+            out.push_str("…\n");
+        }
+        out.push(*op);
+        out.push(' ');
+        out.push_str(line);
+        out.push('\n');
+        last_printed = Some(k);
+    }
+    out
+}
+
 /// Adds Devplane's hooks and telemetry configuration.
 ///
-/// `exe` is the absolute path of the `devplane` binary, used for the one hook
-/// that cannot be delivered over HTTP.
+/// `exe` is the absolute path of the `devplane` binary every hook runs.
 pub fn connect(
     settings: &mut Map<String, Value>,
     base_url: &str,
@@ -250,9 +289,8 @@ pub fn connect(
         return report;
     };
 
-    // `SessionStart` only accepts `command` and `mcp_tool` hooks, so it gets
-    // the binary's own shim, which forwards the payload to the daemon. Without
-    // it a session is invisible until it does something.
+    // `SessionStart` only accepts `command` and `mcp_tool` hooks. Without it
+    // a session is invisible until it does something.
     {
         let entry = json!({
             "hooks": [{
@@ -273,53 +311,25 @@ pub fn connect(
     }
 
     for (event, matcher, is_async) in HOOKS {
-        // **The two deciding events ride a `command` hook; everything else
-        // rides HTTP.** Claude Code walks past an unreachable HTTP hook
-        // (*"Connection failure: non-blocking error, execution continues"*), so
-        // an HTTP gate is off whenever the daemon is — announced only as a
-        // generic hook error, once per tool call, naming no rule. A daemon is
-        // often not running; a binary at a fixed path is not.
-        //
-        // The cost is a spawn per tool call, measured before it was chosen:
-        // about 26 ms cold, against the ~50 ms this path already had over
-        // loopback. Observation stays on HTTP — it is `async`, and a dropped
-        // event costs history rather than a verdict.
-        let entry = if matches!(*event, "PermissionRequest" | "PreToolUse") {
-            gate_entry(exe, *matcher)
+        // Every event runs the binary, none uses HTTP: an HTTP hook needs a
+        // listening host, and `async` exists only for `command` hooks. The
+        // binary writes to the store; a host folds it in when there is one.
+        let entry = if *event == "PermissionRequest" {
+            gate_entry(exe, *matcher, crate::observe::hook::HOLD_TIMEOUT_SECS)
+        } else if *event == "PreToolUse" {
+            gate_entry(exe, *matcher, crate::observe::hook::GATE_TIMEOUT_SECS)
         } else {
-            hook_entry(base_url, "hook", token, *matcher, *is_async)
+            observe_entry(exe, *matcher, *is_async)
         };
         let list = hooks
             .entry(event.to_string())
             .or_insert_with(|| json!([]))
             .as_array_mut();
         let Some(list) = list else { continue };
-        // Replace ours if it is already there, so reconnecting after a port
-        // change updates the URL instead of adding a second copy.
+        // Replace ours if present, so reconnecting updates the path.
         list.retain(|e| !is_ours(e));
         list.push(entry);
         report.hooks_added += 1;
-    }
-
-    // ---- the HTTP hook allowlist -------------------------------------------
-    //
-    // Defining this key restricts *every* HTTP hook on the machine to the
-    // patterns it lists. Creating it would silently disable hooks the user
-    // already has, so it is only extended when it already exists.
-    match settings.get_mut("allowedHttpHookUrls") {
-        Some(Value::Array(list)) => {
-            let pattern = json!("http://127.0.0.1:*");
-            if !list.contains(&pattern) {
-                list.push(pattern);
-                report
-                    .notes
-                    .push("added http://127.0.0.1:* to the existing allowedHttpHookUrls".into());
-            }
-        }
-        Some(_) => report
-            .notes
-            .push("allowedHttpHookUrls is not an array; hooks may be blocked".into()),
-        None => {} // Absent means every HTTP hook is allowed. Leave it that way.
     }
 
     // ---- telemetry ---------------------------------------------------------
@@ -334,12 +344,18 @@ pub fn connect(
         return report;
     };
 
+    // Somebody else's collector is any endpoint without our marker — a
+    // collector on loopback included. In the file and in this process's
+    // environment alike.
+    let is_foreign = |endpoint: &str| !endpoint.is_empty() && !endpoint.contains(URL_MARKER);
     let foreign = env
         .get("OTEL_EXPORTER_OTLP_ENDPOINT")
         .and_then(|v| v.as_str())
-        .map(|v| !v.contains("127.0.0.1") && !v.contains("localhost"))
-        .unwrap_or(false)
-        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok();
+        .is_some_and(is_foreign)
+        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .as_deref()
+            .is_some_and(is_foreign);
 
     if foreign {
         report.telemetry = TelemetryStatus::External;
@@ -349,41 +365,29 @@ pub fn connect(
                 .into(),
         );
     } else {
+        // Log records only; metrics would repeat them. The two
+        // `OTEL_METRICS_INCLUDE_*` variables stay: despite the name, the vendor
+        // gates `app.entrypoint` and repository attributes on events with them.
         for (k, v) in [
             ("CLAUDE_CODE_ENABLE_TELEMETRY", "1"),
             ("OTEL_LOGS_EXPORTER", "otlp"),
-            ("OTEL_METRICS_EXPORTER", "otlp"),
             ("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json"),
             ("OTEL_LOGS_EXPORT_INTERVAL", "2000"),
-            ("OTEL_METRIC_EXPORT_INTERVAL", "10000"),
             ("OTEL_METRICS_INCLUDE_ENTRYPOINT", "true"),
             ("OTEL_METRICS_INCLUDE_REPOSITORY", "true"),
         ] {
             env.insert(k.into(), json!(v));
         }
+        // A metrics exporter switched on earlier goes with it.
+        env.remove("OTEL_METRICS_EXPORTER");
+        env.remove("OTEL_METRIC_EXPORT_INTERVAL");
         env.insert(
             "OTEL_EXPORTER_OTLP_ENDPOINT".into(),
             json!(format!("{base_url}/devplane/otel")),
         );
-        // **The telemetry endpoints are authenticated, and they were not.**
-        //
-        // They were left open on the stated grounds that "the OTLP exporter
-        // cannot be given a bearer token per signal without also sending it to
-        // every other collector the user configures" — and the vendor's own
-        // reference, in this repository's `concepts/reference/`, documents
-        // `OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer …"` on the page that
-        // documents the endpoint variable beside it.
-        //
-        // The premise was false in the only configuration this function
-        // creates. This branch runs **only** when no foreign collector is
-        // configured — that is what `foreign` above decides — so there is
-        // exactly one collector and the header reaches exactly it. When a
-        // foreign collector *is* configured, this branch does not run, Devplane
-        // receives no telemetry, and the endpoint has nothing to be open for.
-        //
-        // What it cost while it was open: a decision log whose entire claim is
-        // *who decided* accepting unauthenticated records from any process on
-        // the machine, and from any page the browser happened to load.
+        // The telemetry endpoints are authenticated. This branch runs only
+        // when no foreign collector is configured, so the bearer header
+        // reaches exactly one collector: ours.
         env.insert(
             "OTEL_EXPORTER_OTLP_HEADERS".into(),
             json!(format!("Authorization=Bearer {token}")),
@@ -394,13 +398,11 @@ pub fn connect(
     report
 }
 
-/// Wraps the user's status line so rate limits reach the daemon.
+/// Wraps the user's status line so rate limits reach the store.
 ///
-/// Optional, and off by default, because it takes over a command the user
-/// configured. The wrapper forwards the sample and then runs the original with
-/// the same input, so the status line on screen is unchanged — if the shim
-/// dies, the worst case is a status line that stops updating, which is why it
-/// is not installed unless asked for.
+/// Optional and off by default: it takes over a command the user configured.
+/// The wrapper forwards the sample, then runs the original with the same
+/// input, so the status line on screen is unchanged.
 pub fn wrap_status_line(settings: &mut Map<String, Value>, exe: &Path) -> String {
     let existing = settings
         .get("statusLine")
@@ -452,13 +454,8 @@ pub fn disconnect(settings: &mut Map<String, Value>) -> ConnectReport {
         }
     }
 
-    if let Some(Value::Array(list)) = settings.get_mut("allowedHttpHookUrls") {
-        list.retain(|v| v.as_str() != Some("http://127.0.0.1:*"));
-    }
-
-    // Unwrap the status line, restoring whatever it was wrapping. Leaving a
-    // shim behind that points at a daemon the user just removed would stop
-    // their status line updating and give no clue why.
+    // Unwrap the status line, restoring the original: a shim pointing at a
+    // removed binary would silently stop it updating.
     if let Some(cmd) = settings
         .get("statusLine")
         .and_then(|s| s.get("command"))
@@ -484,8 +481,7 @@ pub fn disconnect(settings: &mut Map<String, Value>) -> ConnectReport {
     }
 
     if let Some(Value::Object(env)) = settings.get_mut("env") {
-        // Only remove telemetry we pointed at ourselves. A user who exports
-        // elsewhere keeps their configuration.
+        // Only remove telemetry we pointed at ourselves.
         let ours = env
             .get("OTEL_EXPORTER_OTLP_ENDPOINT")
             .and_then(|v| v.as_str())
@@ -507,10 +503,10 @@ pub fn disconnect(settings: &mut Map<String, Value>) -> ConnectReport {
 
 /// Whether a hook entry is one Devplane wrote.
 ///
-/// HTTP entries are recognised by the marker in their URL; the one command
-/// entry by the shim it runs. Anything else in the file belongs to the user and
-/// is never touched.
-fn is_ours(entry: &Value) -> bool {
+///
+/// A command entry by the shim it runs, an HTTP entry by the URL marker in it.
+/// Anything else belongs to the user and is never touched.
+pub(crate) fn is_ours(entry: &Value) -> bool {
     entry
         .get("hooks")
         .and_then(|h| h.as_array())
@@ -554,7 +550,7 @@ fn is_shim_command(cmd: &str) -> bool {
 }
 
 /// Quotes a path for a shell command line.
-fn shell_quote(p: &Path) -> String {
+pub(crate) fn shell_quote(p: &Path) -> String {
     let s = p.to_string_lossy();
     if s.chars().all(|c| c.is_alphanumeric() || "/._-".contains(c)) {
         s.to_string()
@@ -564,16 +560,14 @@ fn shell_quote(p: &Path) -> String {
 }
 
 /// The deciding hook: this binary, reading the payload on stdin and answering
-/// on stdout, with no daemon in the path.
-fn gate_entry(exe: &Path, matcher: Option<&str>) -> Value {
+/// on stdout, with no host in the path.
+fn gate_entry(exe: &Path, matcher: Option<&str>, timeout: u64) -> Value {
     let mut hook = json!({
         "type": "command",
         "command": format!("{} hook", shell_quote(exe)),
-        // Generous against a cold page cache on a spinning disk, and still a
-        // bound. A gate slower than this is one nobody is waiting for: Claude
-        // Code cancels it and prompts the person itself, which is the same
-        // outcome as `undecided` and the right one.
-        "timeout": 5,
+        // See `GATE_TIMEOUT_SECS` and `HOLD_TIMEOUT_SECS`: short where the
+        // hook only decides, longer than the longest hold where it may hold.
+        "timeout": timeout,
     });
     if let Some(m) = matcher {
         hook["matcher"] = json!(m);
@@ -581,24 +575,16 @@ fn gate_entry(exe: &Path, matcher: Option<&str>) -> Value {
     json!({ "hooks": [hook] })
 }
 
-fn hook_entry(
-    base_url: &str,
-    path: &str,
-    token: &str,
-    matcher: Option<&str>,
-    is_async: bool,
-) -> Value {
+/// An observation hook: this binary, writing what it saw to the store and
+/// answering nothing. `async`, so no observation can make Claude feel slower.
+fn observe_entry(exe: &Path, matcher: Option<&str>, is_async: bool) -> Value {
     let mut hook = json!({
-        "type": "http",
-        "url": format!("{base_url}/devplane/{path}"),
-        "headers": { "Authorization": format!("Bearer {token}") },
+        "type": "command",
+        "command": format!("{} hook", shell_quote(exe)),
+        "timeout": crate::observe::hook::GATE_TIMEOUT_SECS,
     });
     if is_async {
         hook["async"] = json!(true);
-    } else {
-        // A policy decision that takes longer than this is a decision nobody is
-        // making; Claude Code carries on and prompts the human itself.
-        hook["timeout"] = json!(5);
     }
     let mut entry = json!({ "hooks": [hook] });
     if let Some(m) = matcher {
@@ -614,31 +600,20 @@ pub struct ConnectState {
     pub hooks_installed: Vec<String>,
     pub telemetry_endpoint: Option<String>,
     pub telemetry_is_ours: bool,
-    pub allowlist_blocks_us: bool,
-    /// A hook set installed before the gate became two hooks, so prohibitions
-    /// do not reach a session in auto mode.
-    ///
-    /// Worth its own field rather than a log line: "PreToolUse: installed" is
-    /// the answer that reads as reassurance and provides none, which is the
-    /// exact failure this whole layer is built to avoid. `doctor` says to
-    /// reconnect.
+    /// Hooks of ours are installed, but the deciding ones are not the shape
+    /// this build writes: a blocking `command` hook on `PreToolUse` and
+    /// `PermissionRequest`, the latter outlasting the longest hold. "Installed"
+    /// alone would be false reassurance; `doctor` says to reconnect.
     pub gate_is_stale: bool,
 }
 
-/// Whether an installed entry for `event` is the blocking, policy-routed shape
-/// the gate needs. An `async` entry, or one pointing at the observation
-/// endpoint, cannot decide anything.
-/// Whether the entries for a deciding event contain a gate that can actually
-/// decide.
+/// Whether the entries for a deciding event contain a gate that can decide.
 ///
-/// Two ways this has been false while reading as installed, and both are here
-/// because each was shipped. An **async** entry cannot answer at all. An
-/// **HTTP** entry answers only while the daemon is up, and Claude Code
-/// documents a connection failure as a non-blocking error that lets the call
-/// through — so a stopped daemon is a machine with no prohibitions, announced
-/// as a generic hook error once per tool call. A gate installed before the move
-/// is stale in exactly the sense this field means: present, and not deciding.
-fn is_live_gate(entries: &Value) -> bool {
+/// Not an `async` entry (cannot answer), not HTTP (a connection failure lets
+/// the call through, so a stopped host means no prohibitions), and, for the
+/// event a permission is held on, a timeout outlasting `outlast` seconds, or
+/// the vendor kills the hold mid-question.
+fn is_live_gate(entries: &Value, outlast: u64) -> bool {
     entries
         .as_array()
         .map(|list| {
@@ -648,6 +623,9 @@ fn is_live_gate(entries: &Value) -> bool {
                     .map(|hs| {
                         hs.iter().any(|h| {
                             h.get("async").is_none()
+                                && h.get("timeout")
+                                    .and_then(|t| t.as_u64())
+                                    .is_none_or(|t| t > outlast)
                                 && h.get("type").and_then(|t| t.as_str()) == Some("command")
                                 && h.get("command")
                                     .and_then(|c| c.as_str())
@@ -676,14 +654,10 @@ pub struct GateProbe {
 /// Runs the installed gate against a call its own rules must refuse, and
 /// reports whether it answered.
 ///
-/// **No hook can enforce its own presence** — a timed-out one does not block,
-/// and the vendor's reference says not to count on a stalled one to act as a
-/// gate — so detection is the defence, and it has to *run the thing*. A
-/// settings file containing the right line is evidence about a settings file.
 ///
-/// The probe is a `Read` deny on a path nothing will hold, in a temporary
-/// project of its own, so it exercises rule loading, path matching and the
-/// reply shape without depending on what the user has written.
+/// No hook can enforce its own presence, so detection has to run the thing: a
+/// `Read` deny on a path nothing holds, in a temporary project, exercising
+/// rule loading, path matching and the reply shape.
 pub fn probe_gate(settings: &Map<String, Value>) -> GateProbe {
     let started = std::time::Instant::now();
     let command = settings
@@ -833,24 +807,20 @@ pub fn inspect(settings: &Map<String, Value>, path: &Path) -> ConnectState {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // An allowlist that exists but does not cover loopback silently disables
-    // every hook we installed, which otherwise looks like "Claude is quiet".
-    let allowlist_blocks_us = match settings.get("allowedHttpHookUrls") {
-        Some(Value::Array(list)) => !list.iter().any(|v| {
-            v.as_str()
-                .map(|s| s.contains("127.0.0.1") || s == "*")
-                .unwrap_or(false)
-        }),
-        _ => false,
-    };
-
     let hooks = settings.get("hooks");
     let gate_is_stale = !hooks_installed.is_empty()
-        && ["PreToolUse", "PermissionRequest"].iter().any(|e| {
+        && [
+            ("PreToolUse", 0),
+            (
+                "PermissionRequest",
+                crate::core::config::Hold::CEILING.as_secs(),
+            ),
+        ]
+        .iter()
+        .any(|(e, outlast)| {
             !hooks
                 .and_then(|h| h.get(*e))
-                .map(is_live_gate)
-                .unwrap_or(false)
+                .is_some_and(|entries| is_live_gate(entries, *outlast))
         });
 
     ConnectState {
@@ -862,7 +832,6 @@ pub fn inspect(settings: &Map<String, Value>, path: &Path) -> ConnectState {
             .unwrap_or(false),
         hooks_installed,
         telemetry_endpoint,
-        allowlist_blocks_us,
     }
 }
 
@@ -892,16 +861,14 @@ mod tests {
         assert_eq!(
             hooks.len(),
             HOOKS.len() + 1,
-            "the HTTP hooks plus SessionStart"
+            "the listed hooks plus SessionStart"
         );
         assert!(hooks.contains_key("PermissionRequest"));
     }
 
     #[test]
     fn session_start_uses_a_command_hook_because_http_is_ignored_there() {
-        // `SessionStart` accepts only `command` and `mcp_tool` hooks. An HTTP
-        // entry is written happily and then never runs, which is how a session
-        // can start without anyone hearing about it.
+        // An HTTP `SessionStart` entry is written and then never runs.
         let s = connected();
         let hook = &s["hooks"]["SessionStart"][0]["hooks"][0];
         assert_eq!(hook["type"], json!("command"));
@@ -936,8 +903,7 @@ mod tests {
 
     #[test]
     fn worktree_create_is_never_installed() {
-        // Configuring it replaces Claude Code's own `git worktree` logic, which
-        // would break `claude --worktree` for every repository on the machine.
+        // It replaces Claude Code's own `git worktree` logic machine-wide.
         let s = connected();
         assert!(
             !s["hooks"]
@@ -949,10 +915,8 @@ mod tests {
 
     #[test]
     fn a_hook_set_from_before_the_second_gate_is_reported_as_stale() {
-        // "PreToolUse: installed" is the answer that reads as reassurance and
-        // provides none: an async entry pointing at the observation endpoint
-        // cannot decide anything, so every prohibition is inert in auto mode
-        // and nothing says so.
+        // An async entry cannot decide, so every prohibition is inert in auto
+        // mode; "installed" must not hide that.
         let mut old: Map<String, Value> = serde_json::from_str(
             r#"{"hooks": {"PreToolUse": [{"hooks": [{"type":"http",
                  "url":"http://127.0.0.1:47831/devplane/hook","async":true}]}]}}"#,
@@ -964,10 +928,8 @@ mod tests {
             "an async observation hook is not a gate"
         );
 
-        // And an HTTP gate is stale too, for a subtler reason: it decides only
-        // while the daemon is listening, and a connection failure is a
-        // non-blocking error the session never shows. Installed, and off
-        // whenever the daemon is.
+        // An HTTP gate decides only while a host listens; a connection
+        // failure is a silent non-blocking error.
         let http_gate: Map<String, Value> = serde_json::from_str(
             r#"{"hooks": {"PreToolUse": [{"hooks": [{"type":"http",
                  "url":"http://127.0.0.1:47831/devplane/policy","timeout":5}]}]},
@@ -977,7 +939,7 @@ mod tests {
         .unwrap();
         assert!(
             inspect(&http_gate, std::path::Path::new("/tmp/settings.json")).gate_is_stale,
-            "an HTTP gate is absent whenever the daemon is"
+            "an HTTP gate is absent whenever the host is"
         );
 
         connect_test(&mut old, "http://127.0.0.1:47831", "t");
@@ -987,12 +949,8 @@ mod tests {
 
     #[test]
     fn exactly_the_two_gate_hooks_block_and_they_reach_the_policy() {
-        // `PermissionRequest` answers a prompt that was going to be shown.
-        // `PreToolUse` is the only event that fires in auto mode, where a
-        // classifier approves silently and no prompt ever happens — without it
-        // a project's `never_auto` rule does not run at all in that mode.
-        // Everything else is async, because an observer has no business making
-        // the work it observes feel slower.
+        // `PreToolUse` is the only event that fires in auto mode; without it a
+        // `never_auto` rule never runs there. Everything else is async.
         let s = connected();
         let mut blocking = Vec::new();
         for (event, entries) in s["hooks"].as_object().unwrap() {
@@ -1000,14 +958,12 @@ mod tests {
             if matches!(event.as_str(), "PermissionRequest" | "PreToolUse") {
                 assert!(hook.get("async").is_none(), "{event} must block");
                 assert!(hook.get("timeout").is_some(), "{event} needs a deadline");
-                // **Not HTTP.** Claude Code treats a connection failure as a
-                // non-blocking error and carries on, so an HTTP gate is off
-                // whenever the daemon is — silently. The binary is on disk
-                // either way and decides in its own process.
+                // Not HTTP: a connection failure is non-blocking, so an HTTP
+                // gate is silently off whenever the host is.
                 assert_eq!(
                     hook["type"],
                     json!("command"),
-                    "{event} must not need a daemon"
+                    "{event} must not need a host"
                 );
                 assert!(
                     hook["command"].as_str().unwrap().ends_with(" hook"),
@@ -1020,6 +976,29 @@ mod tests {
         }
         blocking.sort();
         assert_eq!(blocking, vec!["PermissionRequest", "PreToolUse"]);
+    }
+
+    /// The vendor's timeout for the event a permission is held on exceeds
+    /// the longest hold, and a five-second hold gate reads as stale.
+    #[test]
+    fn the_holding_hook_outlasts_the_longest_hold() {
+        let s = connected();
+        let timeout = |e: &str| s["hooks"][e][0]["hooks"][0]["timeout"].as_u64().unwrap();
+        let ceiling = crate::core::config::Hold::CEILING.as_secs();
+        assert!(
+            timeout("PermissionRequest") > ceiling,
+            "a hold the vendor kills part-way is a question that never ends"
+        );
+        assert!(
+            timeout("PreToolUse") < ceiling,
+            "the hook that only decides stays short"
+        );
+        let mut old = s.clone();
+        old["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"] = json!(5);
+        assert!(
+            inspect(&old, std::path::Path::new("/tmp/settings.json")).gate_is_stale,
+            "a holding gate the vendor would kill mid-hold is not a live gate"
+        );
     }
 
     #[test]
@@ -1040,11 +1019,12 @@ mod tests {
         connect_test(&mut s, "http://127.0.0.1:99999", "t2");
         let list = s["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["hooks"][0]["type"], json!("command"));
         assert!(
-            list[0]["hooks"][0]["url"]
+            list[0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap()
-                .contains("99999")
+                .ends_with("devplane hook")
         );
     }
 
@@ -1065,21 +1045,9 @@ mod tests {
 
     #[test]
     fn an_absent_allowlist_is_not_created() {
-        // Creating it would restrict every other HTTP hook on the machine to
-        // the patterns we happened to list.
+        // Creating it would restrict every other HTTP hook on the machine.
         let s = connected();
         assert!(s.get("allowedHttpHookUrls").is_none());
-    }
-
-    #[test]
-    fn an_existing_allowlist_is_extended() {
-        let mut s: Map<String, Value> =
-            serde_json::from_str(r#"{"allowedHttpHookUrls": ["https://hooks.example.com/*"]}"#)
-                .unwrap();
-        connect_test(&mut s, "http://127.0.0.1:1", "t");
-        let list = s["allowedHttpHookUrls"].as_array().unwrap();
-        assert_eq!(list.len(), 2);
-        assert!(list.iter().any(|v| v == "https://hooks.example.com/*"));
     }
 
     #[test]
@@ -1097,6 +1065,113 @@ mod tests {
         assert!(!report.notes.is_empty(), "and the user is told why");
     }
 
+    /// A collector on this machine is somebody else's too: only the endpoint
+    /// with the marker is ours.
+    #[test]
+    fn a_local_collector_that_is_not_ours_is_left_alone() {
+        let mut s: Map<String, Value> = serde_json::from_str(
+            r#"{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318"}}"#,
+        )
+        .unwrap();
+        let report = connect_test(&mut s, "http://127.0.0.1:1", "t");
+        assert_eq!(report.telemetry, TelemetryStatus::External);
+        assert_eq!(
+            s["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"],
+            json!("http://localhost:4318"),
+            "a collector on loopback was taken over"
+        );
+
+        // Ours, from an earlier connect, is ours to replace.
+        let mut ours: Map<String, Value> = serde_json::from_str(
+            r#"{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:47831/devplane/otel"}}"#,
+        )
+        .unwrap();
+        let report = connect_test(&mut ours, "http://127.0.0.1:1", "t");
+        assert_eq!(report.telemetry, TelemetryStatus::Configured);
+        assert_eq!(
+            ours["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"],
+            json!("http://127.0.0.1:1/devplane/otel")
+        );
+    }
+
+    /// Log records only; a metrics exporter enabled earlier is taken back.
+    #[test]
+    fn the_metrics_exporter_is_not_enabled_and_an_old_one_is_removed() {
+        let s = connected();
+        let env = s["env"].as_object().unwrap();
+        assert!(!env.contains_key("OTEL_METRICS_EXPORTER"));
+        assert!(!env.contains_key("OTEL_METRIC_EXPORT_INTERVAL"));
+        assert_eq!(env["OTEL_LOGS_EXPORTER"], json!("otlp"));
+        // The attribute gates, which the vendor applies to events as well.
+        assert_eq!(env["OTEL_METRICS_INCLUDE_ENTRYPOINT"], json!("true"));
+
+        let mut old: Map<String, Value> = serde_json::from_str(
+            r#"{"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1/devplane/otel",
+                        "OTEL_METRICS_EXPORTER": "otlp", "OTEL_METRIC_EXPORT_INTERVAL": "10000"}}"#,
+        )
+        .unwrap();
+        connect_test(&mut old, "http://127.0.0.1:1", "t");
+        assert!(
+            !old["env"]
+                .as_object()
+                .unwrap()
+                .contains_key("OTEL_METRICS_EXPORTER")
+        );
+    }
+
+    /// The diff a person is shown before their settings file changes.
+    #[test]
+    fn the_diff_shows_exactly_the_changed_keys() {
+        let mut s: Map<String, Value> =
+            serde_json::from_str(r#"{"model": "opus", "theme": "dark"}"#).unwrap();
+        let before = render_settings(&s);
+        assert_eq!(diff(&before, &before), "", "nothing changed, nothing shown");
+
+        connect_test(&mut s, "http://127.0.0.1:1", "t");
+        let after = render_settings(&s);
+        let d = diff(&before, &after);
+        assert!(d.contains("+   \"hooks\": {"), "{d}");
+        assert!(d.contains("+     \"OTEL_LOGS_EXPORTER\": \"otlp\","), "{d}");
+        // `theme` legitimately gains a trailing comma; `model` is untouched
+        // and must not appear as removed.
+        assert!(
+            !d.lines()
+                .any(|l| l.starts_with("- ") && l.contains("model")),
+            "an untouched key was shown as removed:\n{d}"
+        );
+        // Removed lines read as removed, on the way back out.
+        disconnect(&mut s);
+        let back = diff(&after, &render_settings(&s));
+        assert!(back.contains("-   \"hooks\": {"), "{back}");
+        assert!(!back.contains("+   \"hooks\""), "{back}");
+    }
+
+    /// The file keeps its mode, and so does its backup: a `0600` settings
+    /// file can hold an API key.
+    #[cfg(unix)]
+    #[test]
+    fn writing_keeps_the_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vp-test-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        std::fs::write(&p, r#"{"model":"opus"}"#).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut s = read_settings(&p).unwrap();
+        connect_test(&mut s, "http://127.0.0.1:1", "t");
+        write_settings(&p, &s).unwrap();
+
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&p), 0o600, "the rewritten file lost its mode");
+        assert_eq!(
+            mode(&p.with_extension("json.devplane-backup")),
+            0o600,
+            "the backup is world-readable"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn disconnect_leaves_a_foreign_collector_alone() {
         let mut s: Map<String, Value> = serde_json::from_str(
@@ -1108,14 +1183,8 @@ mod tests {
         assert_eq!(s["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"], json!("1"));
     }
 
-    /// **The exporter carries the bearer, because the endpoint stopped being
-    /// open.**
-    ///
-    /// The telemetry routes took records from anybody on the stated grounds
-    /// that an exporter could not be given a credential. The vendor documents
-    /// `OTEL_EXPORTER_OTLP_HEADERS` on the same page as the endpoint variable,
-    /// and this branch only runs when there is no foreign collector — so there
-    /// is exactly one place the header can go.
+    /// The exporter carries the bearer; with no foreign collector there is
+    /// exactly one place the header can go.
     #[test]
     fn telemetry_is_configured_with_the_bearer_and_disconnect_takes_it_back() {
         let mut settings = Map::new();
@@ -1135,7 +1204,7 @@ mod tests {
         let env = settings.get("env").and_then(|v| v.as_object());
         assert!(
             env.is_none_or(|e| !e.contains_key("OTEL_EXPORTER_OTLP_HEADERS")),
-            "a bearer for a daemon that is gone was left in the settings file"
+            "a bearer for a host that is gone was left in the settings file"
         );
     }
 
@@ -1152,18 +1221,6 @@ mod tests {
         ] {
             assert!(!env.contains_key(forbidden), "{forbidden} must stay unset");
         }
-    }
-
-    #[test]
-    fn inspect_spots_an_allowlist_that_blocks_us() {
-        let mut s: Map<String, Value> =
-            serde_json::from_str(r#"{"allowedHttpHookUrls": ["https://hooks.example.com/*"]}"#)
-                .unwrap();
-        // Simulate a managed allowlist: connect cannot widen it.
-        let state = inspect(&s, Path::new("/x"));
-        assert!(state.allowlist_blocks_us);
-        connect_test(&mut s, "http://127.0.0.1:1", "t");
-        assert!(!inspect(&s, Path::new("/x")).allowlist_blocks_us);
     }
 
     #[test]

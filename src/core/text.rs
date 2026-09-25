@@ -1,19 +1,8 @@
-//! Text handling for things a human reads and an agent wrote.
-//!
-//! Every string on the board comes from outside: a shell command, a file path,
-//! a model's prose, an issue body from the internet. Two rules follow, and both
-//! were learned by getting them wrong.
-//!
-//! * **Cut on characters, never on bytes.** `&s[..80]` panics the moment a
-//!   command contains an umlaut or an emoji, and a control plane that crashes
-//!   because somebody named a file `café.rs` is not a control plane.
-//! * **Say that it was cut.** A truncated line that looks complete is a line
-//!   that misleads; the ellipsis is the whole point.
+//! Text handling for strings from outside (commands, paths, agent prose). Cut
+//! on characters, never bytes — `&s[..80]` panics on `café.rs` — and mark every
+//! cut with an ellipsis.
 
-/// Truncates to `width` characters, marking the cut with an ellipsis.
-///
-/// The ellipsis is counted, so the result is never wider than asked for — which
-/// is what keeps a table aligned.
+/// Truncates to `width` characters, the ellipsis included.
 pub fn clip(s: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -26,11 +15,8 @@ pub fn clip(s: &str, width: usize) -> String {
     out
 }
 
-/// Keeps the last `n` bytes of a string, cut on a character boundary and marked
-/// with a leading ellipsis.
-///
-/// Used for command output, where the end is where the summary lives and the
-/// beginning is a compilation log nobody reads.
+/// Keeps the last `n` bytes, cut on a character boundary and marked with a
+/// leading ellipsis — command output's summary is at the end.
 pub fn tail(s: &str, n: usize) -> String {
     if s.len() <= n {
         return s.to_string();
@@ -42,15 +28,8 @@ pub fn tail(s: &str, n: usize) -> String {
     format!("…\n{}", &s[start..])
 }
 
-/// Breaks prose onto lines no wider than `width`, for a terminal.
-///
-/// Word-wrapping rather than clipping, because these are *sentences*: a
-/// finding that explains why a rule grants more than it looks like is useless
-/// with its reason cut off, and a terminal that soft-wraps it puts the
-/// continuation under the left margin where the label column is.
-///
-/// A word longer than `width` — a path, a URL — is left whole on its own line.
-/// Breaking it would make it uncopyable, which is worse than one long line.
+/// Word-wraps prose to `width` for a terminal. A longer word (a path, a URL)
+/// stays whole on its own line so it can still be copied.
 pub fn wrap(s: &str, width: usize) -> Vec<String> {
     let width = width.max(16);
     let mut lines = Vec::new();
@@ -75,24 +54,13 @@ pub fn wrap(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// Splits YAML frontmatter from a markdown body.
-///
-/// Claude Code Skills are `---`-delimited frontmatter followed by the
-/// instructions. Devplane uses the *body* as a prompt, which is portable —
-/// markdown is markdown, and an agent that is not Claude reads it perfectly
-/// well. What does not travel is the frontmatter's meaning: `allowed-tools`,
-/// `context: fork` and `model` are directives the Claude harness honours when
-/// *it* loads the skill by name, and inlining the body takes the instructions
-/// without them. That is a real limitation and is why it is named here rather
-/// than left for somebody to discover.
-///
-/// A file with no frontmatter is all body, which is the common case for a
-/// hand-written prompt.
+/// Splits YAML frontmatter from a markdown body; a file without it is all body.
+/// Only the body is used as a prompt, so frontmatter directives (`allowed-tools`,
+/// `model`) do not travel with it.
 pub fn split_frontmatter(src: &str) -> (Option<&str>, &str) {
     let rest = match src.strip_prefix("---\n") {
         Some(r) => r,
-        // Tolerate a leading blank line or CRLF rather than silently treating
-        // the frontmatter as prose the agent should follow.
+        // Tolerate a leading blank line rather than read frontmatter as prose.
         None => match src.trim_start().strip_prefix("---\n") {
             Some(r) => r,
             None => return (None, src),
@@ -111,16 +79,7 @@ pub fn split_frontmatter(src: &str) -> (Option<&str>, &str) {
     }
 }
 
-/// Percent-encodes a query value.
-///
-/// Hand-rolled rather than a dependency: the alternative is a crate for one
-/// function, and the set that must be escaped in a query value is small and
-/// closed. Everything outside the unreserved set goes out as `%XX`, which is
-/// always correct if occasionally more than necessary.
-///
-/// **Here rather than beside its first caller**, because a second caller
-/// arrived and copying it would have made percent-encoding a thing this
-/// repository does two ways.
+/// Percent-encodes a query value: everything outside the unreserved set as `%XX`.
 pub fn url_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -138,10 +97,6 @@ pub fn url_escape(s: &str) -> String {
 mod tests {
     #[test]
     fn a_skill_contributes_its_body_and_not_its_frontmatter() {
-        // Claude Code's own prompt-template format. Devplane takes the body,
-        // which is portable markdown any agent can follow; the frontmatter is
-        // a set of directives only the Claude harness applies, and inlining it
-        // as prose would read as instructions to the model.
         let (front, body) = split_frontmatter(
             "---\nname: review\nallowed-tools: Bash(git *)\n---\nReview the diff.\n",
         );
@@ -158,8 +113,7 @@ mod tests {
 
     #[test]
     fn an_unclosed_fence_is_not_frontmatter() {
-        // Swallowing everything after an opening `---` would hand the agent an
-        // empty prompt, which is the worst possible way to fail: it runs.
+        // Swallowing it would hand the agent an empty prompt, and it would run.
         let src = "---\nname: broken\nReview the diff.";
         let (front, body) = split_frontmatter(src);
         assert!(front.is_none());
@@ -170,8 +124,6 @@ mod tests {
 
     #[test]
     fn clipping_counts_characters_not_bytes() {
-        // The bug this replaces: `&s[..80]` on a command with an umlaut in it
-        // panicked the receiver that was trying to describe it.
         assert_eq!(clip("äöüßéè", 4), "äöü…");
         assert_eq!(clip("hello", 10), "hello");
         assert_eq!(clip("hello world", 8), "hello w…");
@@ -205,8 +157,6 @@ mod tests {
 
     #[test]
     fn a_word_longer_than_the_width_is_left_whole() {
-        // Breaking a path or a URL makes it uncopyable, which is worse than one
-        // long line.
         let long = "/a/very/long/path/that/exceeds/the/width/entirely";
         let lines = wrap(&format!("see {long} now"), 20);
         assert!(lines.iter().any(|l| l == long), "{lines:?}");

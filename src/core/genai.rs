@@ -1,45 +1,10 @@
-//! The decision log, in the OpenTelemetry GenAI conventions' own shape.
+//! The decision log rendered in the OpenTelemetry GenAI conventions' shape.
 //!
-//! # Why this is a renderer and not an exporter
-//!
-//! Devplane **receives** OTLP; it has never sent any, and that is a decision
-//! rather than an omission — no telemetry of its own, nothing in the
-//! background, no endpoint configured for it. Adding an exporter to make a point in somebody else's tracker would
-//! be a subsystem nobody asked for, running all the time, to produce output
-//! that is wanted once.
-//!
-//! So this is a **rendering of rows that already exist**, written when a person
-//! runs a command, to standard output. It is a producer in the only sense the
-//! argument needs: real records, from a real machine, in the proposed shape.
-//!
-//! # What the conventions propose, and what they leave out
-//!
-//! `open-telemetry/semantic-conventions-genai` **#535**, opened 2026-09-23 and
-//! waiting on reviewers, adds `gen_ai.tool.call.decision` with
-//! `gen_ai.tool.call.decision.outcome` of `allow`, `deny` or `require_approval`.
-//! Its note reads:
-//!
-//! > *"This event SHOULD be recorded only when a **framework, harness,
-//! > application policy, or human approval flow** makes an explicit decision
-//! > before tool execution."*
-//!
-//! **Four deciders in the note. Three attributes on the wire. None of them says
-//! which.** An `allow` decided by a person and an `allow` decided by a
-//! classifier are the same three bytes — which is the distinction this product
-//! exists to record, stated in somebody else's prose and dropped from their
-//! schema.
-//!
-//! # The private attribute, and why it is private
-//!
-//! The authority rides under an application-specific prefix, which is the
-//! pattern #417 established precisely so that a producer does not mint
-//! normative `gen_ai.*` names. It is defined **once**, [`AUTHORITY_KEY`], so a
-//! normative name retires it in one edit.
-//!
-//! # What is never emitted
-//!
-//! Prompt and message content, on any path. This carries a tool name, an
-//! outcome and an authority.
+//! A renderer, not an exporter: Devplane receives OTLP and sends none, so this
+//! prints existing rows to stdout when a person runs a command. The proposed
+//! `gen_ai.tool.call.decision` event (semantic-conventions-genai #535) has no
+//! attribute for *who* decided; that rides under a private prefix,
+//! [`AUTHORITY_KEY`]. Prompt and message content is never emitted.
 
 use crate::core::decision::{Authority, Decision};
 
@@ -49,25 +14,21 @@ pub const EVENT: &str = "gen_ai.tool.call.decision";
 /// The outcome attribute #535 proposes, with its three members.
 pub const OUTCOME_KEY: &str = "gen_ai.tool.call.decision.outcome";
 
-/// **The attribute the proposal does not have**, under an application-specific
-/// prefix so that nothing here mints a normative name.
-///
-/// In one place, so the day the conventions adopt a name for it this is one
-/// edit rather than a search.
+/// Who decided — absent from the proposal. Application-prefixed so nothing here
+/// mints a normative name; defined once so adopting one is a single edit.
 pub const AUTHORITY_KEY: &str = "devplane.gen_ai.tool.call.decision.authority";
 
-/// What #535's outcome can say about a decision this product recorded.
-///
-/// **Mapped from what Devplane can decide, never from the member list.** There
-/// is no `Verdict::Allow` in this codebase and there has not been since
-/// approving was deleted, so `allow` is reachable from exactly one place: a
-/// recorded human selection carried to an agent. Everything else this product
-/// records is a refusal, a question, or a thing that is not a tool call at all.
+/// Set for `allow_always` / `reject_always`: every later call it covers is
+/// decided inside the agent and never reaches this log, so it must not be
+/// flattened into a one-off.
+pub const STANDING_KEY: &str = "devplane.gen_ai.tool.call.decision.standing";
+
+/// The proposed outcome for a recorded decision. There is no `Verdict::Allow`,
+/// so `allow` comes only from a recorded human selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// A recorded human selection, carried. The only path to this value.
+    /// A recorded human selection, carried.
     Allow,
-    /// A prohibition fired.
     Deny,
     /// Suspended pending somebody — a prompt, a question, a hold.
     RequireApproval,
@@ -82,84 +43,60 @@ impl Outcome {
         }
     }
 
-    /// The outcome for one recorded decision, or `None` where the row is not a
-    /// pre-execution decision about a tool call at all.
-    ///
-    /// **`None` is the common case and that is correct.** A gate verdict, a
-    /// pipeline advancing and a pull request opening are decisions this product
-    /// records and are not what this event is for — #535 says so itself:
-    /// *"not intended for generic hook lifecycle telemetry or post-execution
-    /// tool outcomes."*
+    /// `None` where the row is not a pre-execution tool-call decision (gate
+    /// verdicts, merges) — the common case, and out of scope for the event.
     pub fn of(d: &Decision) -> Option<Self> {
-        // A tool call, and nothing else. A row with no tool is a gate, a merge
-        // or a pipeline step.
         d.tool.as_deref()?;
         match d.outcome.as_str() {
-            "deny" => Some(Outcome::Deny),
-            "ask" | "unresolved" => Some(Outcome::RequireApproval),
-            // **The one path to `allow`, and it is narrow on purpose.** Only a
-            // decision a *person* made can be exported as an approval: this
-            // product cannot produce one from a rule, a clock, a default or a
-            // model, and emitting an `allow` it could not stand behind would be
-            // committing the exact error it is reviewing.
-            "allow" if d.authority == Authority::Person => Some(Outcome::Allow),
+            "deny" | "reject_always" => Some(Outcome::Deny),
+            // `chosen`: an option whose meaning the agent never declared, so
+            // it claims neither yes nor no.
+            "ask" | "unresolved" | "chosen" => Some(Outcome::RequireApproval),
+            // Only a person's decision may be exported as an approval.
+            "allow" | "allow_always" if d.authority == Authority::Person => Some(Outcome::Allow),
             _ => None,
         }
     }
 }
 
-/// Whether the authority is knowable for this row.
-///
-/// **Unknown is unset, never a default.** #386 argues the same for evidence
-/// origin, and it is the rule that keeps the column honest: a vendor classifier
-/// that decided out of sight is *nobody looked*, which is a different fact from
-/// `allow` and must not collapse into it.
-///
-/// **`Daemon` is absent, and the commonest row on a real machine is one.**
-/// Measured on this repository's own log: 162 pre-execution decisions, of which
-/// **150 are `daemon`/`unresolved`** — Devplane declining to decide and handing
-/// the call to whoever is at the keyboard. That is not an authority. Nobody has
-/// decided yet, and the person may well have answered in the vendor's own
-/// dialog where this product never saw it.
-///
-/// Writing `daemon` there would be claiming a decider for a call nobody has
-/// decided; writing `nobody` would be claiming it was abandoned. Absent is the
-/// only honest value, and it is also the sharpest illustration of what #535's
-/// `require_approval` is missing: **a suspension with no resolution**. The
-/// schema can say a call was held and cannot say whether anybody ever came.
+fn is_standing(d: &Decision) -> bool {
+    matches!(d.outcome.as_str(), "allow_always" | "reject_always")
+}
+
+/// The authority, or `None` when it cannot be known — unset, never defaulted.
+/// `Devplane` means Devplane declined to decide and handed the call on; the
+/// person may have answered in the vendor's dialog unseen, so neither
+/// `devplane` nor `nobody` would be true.
 pub fn authority_of(d: &Decision) -> Option<&'static str> {
     match d.authority {
         Authority::Person | Authority::Rule | Authority::Timer | Authority::Nobody => {
             Some(d.authority.as_str())
         }
-        Authority::Daemon => None,
+        Authority::Devplane => None,
     }
 }
 
-/// One decision as an OTLP/JSON log record carrying #535's event.
-///
-/// OTLP/JSON rather than a bespoke shape, because the point is that a collector
-/// can read it: this is the format Claude Code's own exporter sends and the
-/// format this daemon already parses on the way in.
+/// One decision as an OTLP/JSON log record, so any collector can read it.
 pub fn record(d: &Decision) -> Option<serde_json::Value> {
     let outcome = Outcome::of(d)?;
-    let mut attributes = vec![
-        serde_json::json!({
-            "key": OUTCOME_KEY,
-            "value": {"stringValue": outcome.as_str()}
-        }),
-        serde_json::json!({
-            "key": "gen_ai.tool.call.id",
-            "value": {"stringValue": d.id}
-        }),
-    ];
+    // No `gen_ai.tool.call.id`: that is the model's id for the call, which
+    // the hook channel never carries; a Devplane row id is not it.
+    let mut attributes = vec![serde_json::json!({
+        "key": OUTCOME_KEY,
+        "value": {"stringValue": outcome.as_str()}
+    })];
+    if is_standing(d) {
+        attributes.push(serde_json::json!({
+            "key": STANDING_KEY,
+            "value": {"boolValue": true}
+        }));
+    }
     if let Some(tool) = d.tool.as_deref() {
         attributes.push(serde_json::json!({
             "key": "gen_ai.tool.name",
             "value": {"stringValue": tool}
         }));
     }
-    // **The attribute the proposal drops.** Absent where it cannot be known.
     if let Some(a) = authority_of(d) {
         attributes.push(serde_json::json!({
             "key": AUTHORITY_KEY,
@@ -173,7 +110,6 @@ pub fn record(d: &Decision) -> Option<serde_json::Value> {
     }))
 }
 
-/// A whole decision log as one OTLP/JSON `resourceLogs` payload.
 pub fn payload(decisions: &[Decision]) -> serde_json::Value {
     let records: Vec<_> = decisions.iter().filter_map(record).collect();
     serde_json::json!({
@@ -199,19 +135,14 @@ mod tests {
         x
     }
 
-    /// **No `allow` exists that no recorded human selection stands behind.**
-    ///
-    /// The absence test, over every authority. This product has no
-    /// `Verdict::Allow` and cannot produce an approval from a rule, a clock, a
-    /// default or a model — so exporting one would be this project making the
-    /// exact error it is reviewing in somebody else's schema.
+    /// No `allow` exists that no recorded human selection stands behind.
     #[test]
     fn only_a_person_can_produce_an_allow() {
         for a in [
             Authority::Rule,
             Authority::Timer,
             Authority::Nobody,
-            Authority::Daemon,
+            Authority::Devplane,
         ] {
             assert_ne!(
                 Outcome::of(&d(a, "allow", Some("Bash"))),
@@ -226,10 +157,9 @@ mod tests {
         );
     }
 
-    /// An authority that cannot be known is **unset**, never defaulted.
     #[test]
     fn an_unknowable_authority_is_absent_rather_than_flattering() {
-        let r = record(&d(Authority::Daemon, "deny", Some("Bash"))).expect("a deny is an event");
+        let r = record(&d(Authority::Devplane, "deny", Some("Bash"))).expect("a deny is an event");
         let keys: Vec<&str> = r["attributes"]
             .as_array()
             .unwrap()
@@ -240,7 +170,6 @@ mod tests {
             !keys.contains(&AUTHORITY_KEY),
             "an authority nobody can establish was given a value: {keys:?}"
         );
-        // And the ones that *are* knowable carry it.
         for a in [
             Authority::Person,
             Authority::Rule,
@@ -257,17 +186,15 @@ mod tests {
         }
     }
 
-    /// **Not every decision is this event**, and #535 says so itself.
     #[test]
     fn a_row_that_is_not_a_pre_execution_tool_decision_is_not_emitted() {
         // A gate verdict: no tool, and a post-execution outcome.
-        assert!(record(&d(Authority::Daemon, "pass", None)).is_none());
-        assert!(record(&d(Authority::Daemon, "done", None)).is_none());
+        assert!(record(&d(Authority::Devplane, "pass", None)).is_none());
+        assert!(record(&d(Authority::Devplane, "done", None)).is_none());
         // A tool row whose outcome this event has no member for.
         assert!(record(&d(Authority::Rule, "undecided", Some("Bash"))).is_none());
     }
 
-    /// The three outcomes map from what this product can decide.
     #[test]
     fn the_outcomes_map_from_this_products_own_vocabulary() {
         assert_eq!(
@@ -283,8 +210,6 @@ mod tests {
         }
     }
 
-    /// **The private prefix is defined once**, so a normative name retires it in
-    /// one edit rather than in a search.
     #[test]
     fn the_authority_attribute_is_named_in_exactly_one_place() {
         let src = include_str!("genai.rs");
@@ -301,7 +226,61 @@ mod tests {
         );
     }
 
-    /// Prompt and message content never reach this path.
+    #[test]
+    fn a_persons_standing_choice_is_exported_as_standing() {
+        let always = record(&d(Authority::Person, "allow_always", Some("Bash")))
+            .expect("a standing grant is a pre-execution decision");
+        let attrs = always["attributes"].as_array().unwrap();
+        assert_eq!(attrs[0]["value"]["stringValue"], "allow");
+        assert!(
+            attrs
+                .iter()
+                .any(|a| a["key"] == STANDING_KEY && a["value"]["boolValue"] == true),
+            "a standing grant exported as a one-off: {attrs:?}"
+        );
+
+        let never = record(&d(Authority::Person, "reject_always", Some("Bash"))).unwrap();
+        assert_eq!(never["attributes"][0]["value"]["stringValue"], "deny");
+        assert!(is_standing(&d(
+            Authority::Person,
+            "reject_always",
+            Some("Bash")
+        )));
+
+        // A one-off carries no standing attribute at all, rather than `false`.
+        let once = record(&d(Authority::Person, "allow", Some("Bash"))).unwrap();
+        assert!(
+            !once["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["key"] == STANDING_KEY),
+            "a one-off was marked"
+        );
+
+        // `chosen` claims nothing about yes or no, and so does its export.
+        let chosen = Outcome::of(&d(Authority::Person, "chosen", Some("Bash")));
+        assert_eq!(chosen, Some(Outcome::RequireApproval));
+        // And a standing grant is still only a person's to make.
+        assert_ne!(
+            Outcome::of(&d(Authority::Rule, "allow_always", Some("Bash"))),
+            Some(Outcome::Allow)
+        );
+    }
+
+    #[test]
+    fn the_decision_id_is_not_exported_as_the_models_call_id() {
+        let r = record(&d(Authority::Rule, "deny", Some("Bash"))).unwrap();
+        assert!(
+            !r["attributes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["key"] == "gen_ai.tool.call.id"),
+            "{r}"
+        );
+    }
+
     #[test]
     fn nothing_here_carries_content() {
         let mut x = d(Authority::Rule, "deny", Some("Bash"));
@@ -319,24 +298,11 @@ mod measured {
     use super::*;
     use crate::core::decision::{Authority, Decision};
 
-    /// **The shape of a real machine's log, which is the argument.**
-    ///
-    /// Measured on this repository on 2026-09-23: 162 pre-execution decisions —
-    /// 152 `require_approval`, 10 `deny`, and **no `allow` at all**, because
-    /// this product cannot produce an approval. 150 of the 152 carry no
-    /// authority, because nobody has decided them yet.
-    ///
-    /// Under #535 as proposed, every one of those 162 events is a tool name and
-    /// an outcome. A fleet where a classifier approved everything and a fleet
-    /// where an engineer approved everything are the same telemetry — which is
-    /// precisely the distinction its own motivation, *incident and security
-    /// investigation*, is asked for.
-    ///
-    /// This test pins the shape rather than the numbers: the numbers are a fact
-    /// about one machine on one day and belong in the notes.
+    /// A held call carries no authority, and the proposal has no attribute for
+    /// whether it was ever resolved.
     #[test]
     fn a_held_call_carries_no_authority_and_no_resolution() {
-        let mut held = Decision::new(Authority::Daemon, "agent:tool.use", "cat a", "unresolved");
+        let mut held = Decision::new(Authority::Devplane, "agent:tool.use", "cat a", "unresolved");
         held.tool = Some("Bash".into());
 
         let r = record(&held).expect("a held call is a pre-execution decision");
@@ -355,11 +321,7 @@ mod measured {
             !attrs.contains(&AUTHORITY_KEY),
             "a call nobody has decided was given a decider"
         );
-        // **And there is nowhere to say whether anybody ever came.** #535's
-        // `require_approval` has no resolution, which is #445's dropped
-        // deadline and resolution fields under a second name, in a second
-        // thread that does not cite the first. Recorded here as an absence so
-        // that the day a resolution exists, this test is what fails.
+        // Pinned as an absence: if a resolution attribute appears, this fails.
         assert!(
             !attrs.iter().any(|k| k.contains("resolution")),
             "a resolution attribute appeared; the notes and the comment on #535 \

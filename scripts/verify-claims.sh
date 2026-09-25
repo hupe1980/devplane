@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The claim ledger of concepts/QUALITY.md §2: every load-bearing integration claim in the
-# concept notes is pinned to a file in concepts/reference/ and this script greps for it. Run
-# scripts/fetch-reference.sh first. Exit 1 if any claim is missing from its source.
+# The claim ledger: each claim the notes make about another system is grepped for in
+# its fetched source under concepts/reference/ (run scripts/fetch-reference.sh first).
+# Exits 1 if any claim is missing.
 set -u
 cd "$(dirname "$0")/../concepts/reference" || { echo "no concepts/reference/ (run scripts/fetch-reference.sh)"; exit 1; }
 fail=0; n=0
@@ -29,16 +29,10 @@ chk "copilot: tool rules are kind(specifier)"         copilot/allowing-tools.md 
 chk "copilot: deny beats allow"                       copilot/allowing-tools.md 'Deny rules always take precedence'
 # ── The parity rows the CHANGELOG carries and the weekly digest does not ────────
 chk "cc: a Bash tee target is checked as a write"     claude-code/CHANGELOG.md 'the file a Bash .tee. command writes'
-# The claim is that the set is *open* — "such as" — not which commands are in it.
-# Pinned to the members, this row went MISS on 2026-09-19 for the least interesting
-# possible reason: the vendor added `tee` to the list, so `and .sed.` stopped being
-# the tail of it. The vendor naming `tee` explicitly is a confirmation of D147, which
-# measured that behaviour against the running product while the page did not state it.
+# The claim is that the set is open ("such as"), not which commands are in it.
 chk "cc: file-command coverage is an open list"       claude-code/permissions.md 'file commands Claude Code recognizes in Bash, such as'
 chk "cc: and tee is now named among them"             claude-code/permissions.md 'such as .cat., .head., .tail., .sed., and .tee.'
-# A set of read-only Bash commands that no mode prompts for and no setting can
-# reach. It is the floor under the seat's derivation (SEAT.md §3.4): calls that
-# are never put to a person by construction rather than by a rule.
+# Read-only Bash commands no mode prompts for and no setting can reach.
 chk "cc: a built-in read-only set skips every prompt" claude-code/permissions.md 'recognizes a built-in set of Bash commands as read-only'
 chk "cc: and that set is not configurable"            claude-code/permissions.md 'The set is not configurable'
 chk "cc: a deny rule reaches a symlink's target"      claude-code/permissions.md 'apply when either the symlink path or its target matches'
@@ -48,16 +42,12 @@ chk "cc: a negation rule is scoped to its source"     claude-code/CHANGELOG.md '
 chk "cc: Cd rules are directory-anchored, not gitignore" claude-code/permissions.md 'anchored to the whole directory path rather than gitignore-style'
 chk "cc: an unparsed command always prompts"          claude-code/permissions.md 'Commands the analysis can.t parse'
 chk "cc: read-only git forms need no prompt"          claude-code/permissions.md 'read-only forms of .git.'
-# ── The question clock (2026-09-20) ────────────────────────────────────────
-# Three rows for one setting, because the argument in DIRECTION.md §1b rests on
-# all three and they live in two different pages. Nobody had pinned any of them:
-# both sentences were on disk through every pass that argued about timers, which
-# is the D98/R19 class — a row nobody read inside a page already fetched.
+# ── The question clock ───────────────────────────────────────────────────────
 chk "cc: an unanswered question can auto-continue"    claude-code/settings-reference.md 'askUserQuestionTimeout'
 chk "cc: and it is off unless somebody sets it"       claude-code/tools-reference.md 'Questions stay open until you answer them'
 chk "cc: permissions never auto-resolve on idle"      claude-code/tools-reference.md 'permission prompts, including plan approval, never auto-resolve on idle'
 chk "cc: the timer can be set by managed settings"    claude-code/settings-reference.md 'User or managed'
-# ── The surfaces the third index pass found ────────────────────────────────
+# ── Further provider surfaces ────────────────────────────────────────────────
 chk "ultrareview: findings are independently verified"  claude-code/ultrareview.md 'independently reproduced and verified'
 chk "ultrareview: runs in a remote cloud sandbox"       claude-code/ultrareview.md 'remote sandbox|cloud sandbox'
 chk "ultrareview: a non-interactive subcommand exists"  claude-code/ultrareview.md 'claude ultrareview'
@@ -82,9 +72,7 @@ chk "hooks: async flag"                             claude-code/hooks.md '"async
 chk "hooks: allowedHttpHookUrls"                    claude-code/hooks.md 'allowedHttpHookUrls'
 chk "hooks: httpHookAllowedEnvVars"                 claude-code/hooks.md 'httpHookAllowedEnvVars'
 chk "hooks: Notification permission_prompt"         claude-code/hooks.md 'permission_prompt'
-# Where an MCP tool call came from. Eight days old when it was adopted, which is
-# why every clause of it is pinned rather than remembered: the object, the
-# instruction not to trust the name, and the version floor.
+# Where an MCP tool call came from: the object, the don't-trust-the-name rule, the version floor.
 chk "hooks: mcp_server carries name and source"     claude-code/hooks.md 'mcp_server.*server.s .name. and a .source'
 chk "hooks: trust the source, not the name"         claude-code/hooks.md 'Base trust decisions on .source. rather than on .name'
 chk "hooks: mcp_server needs 2.1.274"               claude-code/hooks.md 'mcp_server. field requires Claude Code v2\.1\.274'
@@ -98,8 +86,7 @@ chk "hooks: PostCompact is after compaction"        claude-code/hooks.md 'PostCo
 chk "hooks: PostModelSwitch after a model change"   claude-code/hooks.md 'PostModelSwitch.*\| *After the session.s model changes'
 chk "hooks: Elicitation when MCP asks the user"     claude-code/hooks.md 'Elicitation.*\| *When an MCP server requests user input'
 chk "hooks: PermissionDenied on an auto denial"     claude-code/hooks.md 'PermissionDenied.*\| *When auto mode denies'
-# The permission-rule syntax. Six of these were claimed as implemented for months and were
-# not; each row is one way for a deny rule to match nothing without saying so.
+# The permission-rule syntax; each row is one way a deny rule could silently match nothing.
 chk "policy: :* is a trailing wildcard"             claude-code/permissions.md 'The .:\*. suffix is an equivalent way to write a trailing wildcard'
 chk "policy: :* only at the end"                    claude-code/permissions.md 'only recognized at the end of a pattern'
 chk "policy: a trailing * covers the bare command"  claude-code/permissions.md 'also matches the bare command'
@@ -110,8 +97,7 @@ chk "policy: a bare filename matches any depth"     claude-code/permissions.md '
 chk "policy: single-segment dir floats on deny"     claude-code/permissions.md 'matches a directory named .secrets. at any depth'
 chk "policy: Edit covers every editing tool"        claude-code/permissions.md 'Edit. rules apply to all built-in tools that edit files'
 
-# The files a shell command names. Each of these was a prohibition that
-# read as protection and provided none until the matcher reached them.
+# The files a shell command names, as the matcher must see them.
 chk "policy: an output redirect is checked as a write"  claude-code/permissions.md 'as if Claude wrote or read that file directly'
 chk "policy: output redirects use Edit rules"           claude-code/permissions.md 'the check covers your .Edit. allow and deny rules'
 chk "policy: input redirects use Read rules"            claude-code/permissions.md 'the check covers your .Read. allow and deny rules'
@@ -120,9 +106,7 @@ chk "policy: deny rules reach Bash file commands"       claude-code/permissions.
 chk "policy: a Read deny does not reach NotebookEdit"   claude-code/permissions.md 'NotebookEdit isn.t covered'
 chk "policy: no file behind these targets"              claude-code/permissions.md 'aren.t checked'
 
-# The second gate. `PermissionRequest` does not fire in auto mode, so a
-# prohibition answered only there does not run in the mode people pick when
-# they are not watching.
+# `PermissionRequest` does not fire in auto mode, hence a second gate.
 chk "hooks: PreToolUse runs before every tool call"     claude-code/hooks.md 'PreToolUse hooks run before every tool call'
 chk "hooks: PermissionRequest only when about to ask"   claude-code/hooks.md 'run only when Claude Code is about to ask you for permission'
 chk "hooks: a hook ask forces a prompt in auto mode"    claude-code/hooks.md "also forces a permission prompt in \\[auto mode\\]"
@@ -142,8 +126,7 @@ chk "changelog: PermissionRequest fires in --print" claude-code/CHANGELOG.md 'Pe
 chk "agent-view: --json"                            claude-code/agent-view.md 'agents --json'
 chk "agent-view: waitingFor"                        claude-code/agent-view.md 'waitingFor'
 chk "agent-view: single cwd / --cwd"                claude-code/agent-view.md '\-\-cwd'
-# D79/D80: the three facts the policy matcher is built on. Each one was wrong in
-# the implementation until it was read off this file, so each is pinned to it.
+# The facts the policy matcher is built on.
 chk "permissions: deny then ask then allow"        claude-code/permissions.md 'evaluated in order: deny, then ask, then allow'
 chk "permissions: ask outranks a narrower allow"   claude-code/permissions.md 'ask rule prompts even when a more specific allow rule'
 chk "permissions: rules split on shell operators"  claude-code/permissions.md 'must match each subcommand independently'
@@ -154,15 +137,8 @@ chk "permissions: deny looks past any assignment"  claude-code/permissions.md 'd
 chk "permissions: unknown tool name warns"         claude-code/permissions.md 'matches no known tool produces a startup warning'
 chk "permissions: Stop Task is TaskStop"           claude-code/permissions.md 'canonical name `TaskStop`'
 
-# `core::policy::KNOWN_TOOLS` is a snapshot of somebody else's tool reference,
-# used to catch a typo in a prohibition. It only ever warns, but a list that has
-# rotted warns about tools that exist — so the reference has to still contain
-# every name in it.
-# Paths are relative to concepts/reference/, because that is where this script runs — so the
-# tree is two levels up (`../../src`) and the notes are one (`../STATE.md`). Both were one
-# level closer until the corpus moved under concepts/ on 2026-09-18, and the KNOWN_TOOLS
-# check reported SKIP rather than failing when its source path stopped resolving, which is
-# the failure this file is otherwise built to prevent: a check that stops checking, quietly.
+# `core::policy::KNOWN_TOOLS` must be a subset of the vendor's tool reference.
+# Paths are relative to concepts/reference/: the tree is `../../src`, the notes `../`.
 if [ -f claude-code/tools-reference.md ] && [ -f ../../src/core/policy.rs ]; then
   missing=""
   for t in $(sed -n '/^const KNOWN_TOOLS/,/^];/p' ../../src/core/policy.rs \
@@ -206,10 +182,8 @@ chk "otel: vcs repository attributes"               claude-code/monitoring-usage
 chk "otel: desktop / VS Code entrypoints"           claude-code/monitoring-usage.md 'claude-vscode|desktop'
 chk "settings: env block"                           claude-code/settings-reference.md '"env"'
 chk "sdk: settingSources default all"               claude-agent-sdk/typescript.md 'settingSources'
-# These are documented on the site's v2 pages, which is where the claim that they were
-# "v2, behind unstable_protocol_v2" came from. They are in the *schema's* ungated v1 module,
-# advertised per agent as an initialize capability, and reachable on the SDK's default
-# features — so they are unbuilt here, not unavailable. The SDK checks below pin that.
+# These are in the schema's ungated v1 module and the SDK's default features, so
+# they are unbuilt here, not unavailable. The SDK checks below pin that.
 chk "acp: session/resume"                           acp/v2-session-list.md 'session/resume'
 chk "acp: replayFrom"                               acp/v2-session-list.md 'replayFrom'
 chk "acp: elicitation requestedSchema"              acp/v2-elicitation.md 'requestedSchema'
@@ -224,12 +198,9 @@ chk "symphony: stall timeout"                       symphony/SPEC.md 'stall'
 chk "codex app-server: JSON-RPC"                    codex/app-server-README.md 'JSON-RPC|thread/start'
 chk "opencode openapi: /session"                    opencode/openapi.json '"/session"'
 
-# D76: the SDK half of the claim above, checked against the installed crate source rather
-# than its documentation — this is the claim that was wrong, so it is the one pinned hardest.
+# The SDK half of the claim above, checked against the installed crate source.
 sdk=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -maxdepth 2 -type d -name 'agent-client-protocol-schema-*' 2>/dev/null | sort | tail -1)
-# The provider surfaces added through 2026 that these notes now rest on. Each row was
-# absent from the ledger while its page sat unread in concepts/reference/ — the gap R19 is about, and
-# the reason the unit of verification is the row rather than the page.
+# Provider surfaces the notes rest on; a fetched page is only verified row by row.
 chk "hooks: the prompt handler type exists"         claude-code/hooks.md '"type": "prompt"'
 chk "hooks: the agent handler type exists"          claude-code/hooks.md '"type": "agent"'
 chk "hooks: the mcp_tool handler type exists"       claude-code/hooks.md '"type": "mcp_tool"'
@@ -238,28 +209,28 @@ chk "hooks: ConfigChange fires on a settings change" claude-code/hooks.md 'Confi
 chk "hooks: TaskCreated/TaskCompleted exist"        claude-code/hooks.md 'TaskCreated. *\| *When a task is being created'
 chk "hooks: PreModelSwitch is before the switch"    claude-code/hooks.md 'PreModelSwitch. *\| *Before Claude Code applies a model switch'
 chk "hooks: WorktreeRemove non-zero fails removal"  claude-code/hooks.md 'causes worktree removal to fail'
-# /goal — the vendor's completion check, and the contrast D96 is built on.
+# /goal — a model checking a condition, the contrast to a gate command exiting zero.
 chk "goal: a small fast model checks each turn"     claude-code/goal.md 'a small fast model checks whether the condition holds'
 chk "goal: the evaluator runs no commands"          claude-code/goal.md "doesn't run commands or read files independently"
 chk "goal: it is a prompt-based Stop hook"          claude-code/goal.md 'wrapper around a session-scoped'
-# Skills — the prompt-template format adopted by D92, and the plugin channel of D99.
+# Skills — the prompt-template format and the plugin channel Devplane ships through.
 chk "skills: templates live in SKILL.md"            claude-code/skills.md 'SKILL\.md'
 chk "skills: allowed-tools frontmatter"             claude-code/skills.md 'allowed-tools'
 chk "skills: an argument-hint is declared"          claude-code/skills.md 'argument-hint'
 chk "skills: a skill can fork into a subagent"      claude-code/skills.md '`context`'
-# Deep links — the launch and handoff surface of D93.
+# Deep links — the launch and handoff surface the window opens a session through.
 chk "deep: claude-cli://open is the handler"        claude-code/deep-links.md 'claude-cli://open'
 chk "deep: the prompt is filled, never sent"        claude-code/deep-links.md 'populated but not sent'
 chk "deep: an external prompt is flagged"           claude-code/deep-links.md 'Prompt from an external link'
 chk "deep: registration needs a first prompt"       claude-code/deep-links.md 'registers the .claude-cli://. handler'
 chk "deep: VS Code opens a session by id"           claude-code/vs-code.md 'vscode://anthropic.claude-code/open'
-# Auto mode — the second gate D94 reads back and D95/R20 take the warning from.
+# Auto mode — why a hook's allow is refused: it would skip the classifier too.
 chk "auto: deny and ask precede the classifier"     claude-code/auto-mode-config.md 'evaluated before the classifier'
 chk "auto: hard_deny blocks unconditionally"        claude-code/auto-mode-config.md 'hard_deny. rules block unconditionally'
 chk "auto: project settings are not a source"       claude-code/auto-mode-config.md "doesn't read .autoMode. from project settings"
 chk "auto: the effective config is printable"       claude-code/auto-mode-config.md 'claude auto-mode config'
 chk "auto: PermissionDenied carries tool_input"     claude-code/auto-mode-config.md 'receives it as .tool_input'
-# Scheduling and session mobility — the three standing-pipeline analogues, and --teleport.
+# Scheduling and session mobility — /loop and session handoff.
 chk "sched: /loop re-runs a prompt on a timer"      claude-code/scheduled-tasks.md 'Run a prompt repeatedly with'
 chk "web: CLI session handoff is one-way"           claude-code/claude-code-on-the-web.md 'session handoff is one-way'
 
@@ -272,9 +243,7 @@ if [ -n "$sdk" ]; then
   sdkchk "sdk: SetSessionModeRequest is v1"         src/v1/agent.rs 'pub struct SetSessionModeRequest'
   sdkchk "sdk: CreateElicitationRequest is v1"      src/v1/elicitation.rs 'pub struct CreateElicitationRequest'
   sdkchk "sdk: resume is an agent capability"       src/v1/agent.rs 'pub resume: Option<SessionResumeCapabilities>'
-  # Devplane sends `session/resume` with no history replay and relies on that:
-  # it kept the transcript itself, so a replay would write every line down twice.
-  # `replayFrom` is a v2 field, and this is what says so.
+  # Devplane resumes with no history replay; `replayFrom` is a v2 field.
   sdkchk "sdk: v1 resume carries no replayFrom"     src/v1/agent.rs 'pub struct ResumeSessionRequest'
   if grep -A 40 'pub struct ResumeSessionRequest' "$sdk/src/v1/agent.rs" 2>/dev/null | grep -q 'replay_from'; then
     printf 'MISS %s  (v1 ResumeSessionRequest grew a replay_from field)\n' "acp: v1 resume has no replayFrom"
@@ -288,50 +257,42 @@ else
 fi
 
 # ── Counts, computed from the corpus rather than grepped from prose ──────────────
-# The whole ledger above asks "does the source say this", which cannot catch a number
-# these notes invented about somebody else's system. Four places said the ACP registry
-# held 51 agents while concepts/reference/acp/registry.json said 41, and nothing failed, because a
-# count is not a sentence to grep for. A number about external data is now DERIVED here
-# and the notes are checked against it.
+# A number about external data is derived from the corpus and the notes are checked
+# against it, since a count is not a sentence to grep for.
 countchk() { # label  actual  file-glob-in-concepts  regex-with-one-capture
   n=$((n+1))
   local claimed
-  # QUALITY.md and DECISIONS.md are excluded on purpose: their job is to record claims that
-  # turned out to be wrong, so they have to be able to quote the wrong number. Everywhere
-  # else, a figure about an external system is an assertion and is checked. (Found the first
-  # time this ran: the row describing the "51 agents" mistake failed the check for it.)
-  claimed=$(grep -rhoE "$4" $(ls ../*.md | grep -vE 'QUALITY|DECISIONS') 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  # DECISIONS.md is excluded: it records wrong claims and must be able to quote them.
+  claimed=$(grep -rhoE "$4" $(ls ../*.md | grep -v 'DECISIONS') 2>/dev/null | grep -oE '[0-9]+' | sort -u | tr '\n' ' ' | sed 's/ $//')
   if [ -z "$claimed" ]; then
-    printf 'SKIP %s (concepts/ not present)\n' "$1"
+    # Nothing to compare is a failure, not a skip.
+    printf 'MISS %s: nothing in the notes states this figure, so nothing was compared\n' "$1"; fail=1
   elif [ "$claimed" = "$2" ]; then
     printf 'OK   %s = %s\n' "$1" "$2"
   else
     printf 'MISS %s: corpus says %s, concepts/ says %s\n' "$1" "$2" "$claimed"; fail=1
   fi
 }
-# ── Which tools a rule reaches: the vendor's own rule-format table (D182) ─────
+# ── Which tools a rule reaches: the vendor's own rule-format table ────────────
 chk "cc: a Bash rule also governs Monitor"        claude-code/tools-reference.md '\`Bash\(npm run \*\)\`[^|]*\| Bash, Monitor'
 chk "cc: a Read rule also governs LSP"            claude-code/tools-reference.md '\`Read\(~/secrets/\*\*\)\`[^|]*\| Read, Grep, Glob, LSP'
 chk "cc: an Edit rule governs three writers"      claude-code/tools-reference.md '\`Edit\(/src/\*\*\)\`[^|]*\| Edit, Write, NotebookEdit'
 chk "cc: PowerShell has its own rule syntax"      claude-code/tools-reference.md '\`PowerShell\(Get-ChildItem \*\)\`'
 chk "cc: Monitor runs a command in background"    claude-code/tools-reference.md 'Runs a command in the background'
 chk "cc: LSP reads files through a language server" claude-code/tools-reference.md 'code intelligence from a running language server'
-# ── PowerShell is a dialect, not a spelling of Bash (D183) ────────────────────
+# ── PowerShell is a dialect, not a spelling of Bash ───────────────────────────
 chk "ps: aliases are canonicalized first"         claude-code/permissions.md 'aliases are canonicalized before matching'
 chk "ps: a cmdlet rule matches its aliases"       claude-code/permissions.md 'matches \`gci\`, \`ls\`, and \`dir\`'
 chk "ps: matching ignores case"                   claude-code/permissions.md 'Matching is case-insensitive'
 chk "ps: compound commands split like Bash"       claude-code/permissions.md 'A rule must match every subcommand'
 chk "ps: rules use the Bash rule shape"           claude-code/permissions.md 'PowerShell permission rules use the same shape as Bash rules'
-# ── Why an interpreter grant is overbroad *there* as well as here (D200) ──────
-# `devplane check` tells people `Bash(python:*)` approves `python -c '…'` and
-# that Claude Code reads it the same way. That second half is a claim about
-# somebody else's product, published in our own README, so it is pinned to the
-# sentence it follows from rather than left as a reading.
+# ── Why an interpreter grant is overbroad *there* as well as here ─────────────
+# `Bash(python:*)` approving `python -c '…'` in Claude Code too, as the README claims.
 chk "cc: :* is a trailing wildcard"              claude-code/permissions.md 'The `:\*` suffix is an equivalent way to write a trailing wildcard'
 chk "cc: a trailing wildcard takes any argument" claude-code/permissions.md 'npm run test --watch'
 # ── What a path deny does NOT reach, stated by the vendor ─────────────────────
 chk "cc: a deny misses an interpreter's own reads" claude-code/permissions.md 'like a Python or Node script that opens files itself'
-# ── Spec-driven development: the category's analysers report and never decide (D178) ─
+# ── Spec-driven development: the category's analysers report and never decide ─
 chk "sdd: speckit analyze is non-destructive"     sdd/spec-kit-analyze.md 'non-destructive cross-artifact consistency and quality analysis'
 chk "sdd: speckit analyze writes nothing"         sdd/spec-kit-analyze.md 'Do \*\*not\*\* modify any files'
 chk "sdd: its findings carry a severity"          sdd/spec-kit-analyze.md 'CRITICAL'
@@ -340,20 +301,15 @@ chk "sdd: the extension hook has no executor"     sdd/spec-kit-analyze.md 'leave
 chk "sdd: a mandatory hook is optional: false"    sdd/spec-kit-analyze.md 'optional: false'
 chk "sdd: the analyser calls itself read-only"    sdd/spec-kit-analyze.md 'STRICTLY READ-ONLY'
 chk "sdd: requirements carry stable ids"          sdd/spec-kit-analyze.md 'FR-###.*SC-###|FR-/SC- identifiers'
-# The shape `--spec` actually reads. Not the section names, which differ per
-# tool and are deliberately not recognised — the folder, and the task list.
+# The shape `--spec` reads: the folder and the task list, not per-tool section names.
 chk "sdd: a specification is a folder per feature" sdd/spec-kit-tasks-template.md '/specs/\[###-feature-name\]/'
 chk "sdd: its progress is a markdown task list"   sdd/spec-kit-tasks-template.md '^- \[ \] T[0-9]+'
 chk "sdd: openspec writes a task list too"        sdd/openspec-README.md 'tasks\.md.*implementation checklist'
 chk "sdd: openspec's unit is a change folder"     sdd/openspec-README.md 'openspec/changes/'
 chk "sdd: NEEDS CLARIFICATION is spec kit's word" sdd/spec-kit-spec-template.md '\[NEEDS CLARIFICATION'
-# ── Agent Skills: the six fields, and the one documented hard error (D272) ───
-#
-# `#library` reports only what a vendor documents as a failure, so these rows
-# are the whole evidence base for its portability finding. The error is **per
-# distribution path, not per vendor** — Claude Code accepts every field it
-# documents; leaving it is what fails — and the specification's six fields are
-# the allow-list the error message itself prints.
+# ── Agent Skills: the six fields, and the one documented hard error ──────────
+# The evidence for the skill portability finding: the unknown-field error is per
+# distribution path, and the spec's six fields are the allow-list it prints.
 chk "skills: six fields, name is required"    standards/agent-skills-spec.md '\| .name. *\| Yes'
 chk "skills: description is required too"     standards/agent-skills-spec.md '\| .description. *\| Yes'
 chk "skills: license is optional"             standards/agent-skills-spec.md '\| .license. *\| No'
@@ -366,20 +322,10 @@ chk "skills: description is capped at 1024"   standards/agent-skills-spec.md 'Ma
 chk "cc: an unknown field is a hard error"    claude-code/skills.md 'packaging or upload fails with a hard error'
 chk "cc: and it prints the allowed six"       claude-code/skills.md 'Unexpected key\(s\) in SKILL.md frontmatter'
 chk "cc: the error is per distribution path"  claude-code/skills.md 'Claude Code accepts every field in the table above'
-# ── Papers: the numbers these notes reason from (D269) ───────────────────────
-#
-# **Twenty-three were cited and nought were checked.** Every vendor claim above
-# has been tested since this script was written; the literature had no entry at
-# all, in a corpus whose own standing rule is that every number names its test.
-# Reading one paper in full on 2026-09-19 found a correlation quoted in the
-# opposite direction and a shipped-feature design resting on a criterion the
-# paper does not contain. These rows are the cheap half of not doing that again.
-#
-# Only load-bearing numbers are here — the ones a design decision rests on.
-# A paper with no HTML rendering is fetched as its abstract, so a body-only
-# claim about it will MISS rather than pass quietly.
-#
-# The vacuity criterion, which `#vacuity` may cite and may not restate.
+# ── Papers: the numbers these notes reason from ──────────────────────────────
+# Only load-bearing numbers. A paper without HTML is fetched as its abstract, so a
+# body-only claim about it will MISS.
+# The vacuity criterion.
 chk "vacuity: it is defined over residual risk"   papers/oversight-vacuity.txt 'Oversight is vacuous at level'
 chk "vacuity: 10 of 44 cells, at tau = 0.1"       papers/oversight-vacuity.txt '10 of 44 cells are vacuous'
 chk "vacuity: the flip thresholds are located"    papers/oversight-vacuity.txt '0\.93,0\.89,0\.84,0\.75'
@@ -399,18 +345,15 @@ chk "sabotage: they want recommend-and-wait"      papers/sabotage-detection.txt 
 # Why a gate exists at all: an agent's account of itself is not evidence.
 chk "self-eval: it claimed progress every cycle"  papers/self-evaluation-bias.txt 'claimed improvement every time'
 chk "self-eval: and 56% had no real delta"        papers/self-evaluation-bias.txt '56 percent had a measured delta'
-# ── AGENTS.md: the one context file every vendor reads (D179) ────────────────
+# ── AGENTS.md: the one context file every vendor reads ───────────────────────
 chk "agents.md: stewarded by the AAIF"            standards/agents-md.md 'Agentic AI Foundation'
-# The page is HTML-only since 2026-09 and is rendered to text by the fetcher, which
-# puts each element on its own line — so a phrase spanning two spans no longer spans
-# one grep line. Pinned to the noun rather than to the sentence.
+# The fetcher splits HTML elements onto lines, so this pins a noun, not a sentence.
 chk "agents.md: over 60k repositories"            standards/agents-md.md '60k open-source projects'
 chk "agents.md: it mandates no structure"         standards/agents-md.md 'the agent simply parses the text you provide'
 if [ -d .. ]; then
   acp_agents=$(python3 -c 'import json;print(len(json.load(open("acp/registry.json"))["agents"]))' 2>/dev/null || echo '?')
-  # Every spelling these notes use for the registry size, and only those: a loose pattern
-  # picks up "21 agent permission systems" from a cited paper and reports a false miss,
-  # which is how a check stops being read.
+  # Every spelling the notes use for the registry size, and only those: a loose pattern
+  # matches unrelated figures from cited papers.
   countchk "acp registry agent count" "$acp_agents" '' \
     '[0-9]+ registry agents|registry of [0-9]+|registry[^.]{0,40}: [0-9]+ agents|one client for [0-9]+ agents|\*\*[0-9]+\*\* agents'
 fi

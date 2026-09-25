@@ -1,135 +1,94 @@
 +++
 title = "The decision log"
-description = "Why a command ran without anybody being asked, and why there is a pull request on this branch — answerable months later, with the rule or the check named."
+description = "Why a command ran without anybody being asked, and why there is a pull request on this branch — answerable months later, with the authority and the rule or check named."
 weight = 14
 [extra]
 group = "guide"
 +++
 
-Two questions have to be answerable months later, in front of a repository you half remember:
-
-> Why did that command run without anybody being asked? Why is there a pull request on this branch?
-
-Neither is answerable from an event log, because an event log records what happened **to** Devplane.
-These are facts about what Devplane **did**, or refused.
+The event log records what happened **to** Devplane. The decision log records what Devplane **did**
+or refused, and on whose authority, so *why did that command run without anybody being asked?* and
+*why is there a pull request on this branch?* stay answerable months later.
 
 ```sh
-devplane audit
-devplane audit <run-or-work-id>
+devplane audit                   # the latest 50 decisions
+devplane audit <run-or-change>   # narrowed to one run or change
+devplane audit --without-me      # only what was decided instead of you
+devplane audit --otel            # OpenTelemetry GenAI log records on stdout
 ```
 
 ```console
-2026-09-13T18:04:11 daemon  gh:pr.create     https://github.com/acme/app/pull/142
-                     ↳ gates passed; opened as a draft
-2026-09-13T18:04:09 daemon  git:push         fix/flaky-login-a1b2c3
-                     ↳ the project's gates passed
-2026-09-13T18:04:02 daemon  gate:run         pnpm typecheck && pnpm test -- --run
+2026-09-13T18:04:11 person   gh:pr.create     https://github.com/acme/app/pull/142
+                     ↳ offered as a draft
+2026-09-13T18:04:09 person   git:push         fix/flaky-login-a1b2c3
+                     ↳ offered the change
+2026-09-13T18:04:02 devplane gate:run         pnpm typecheck && pnpm test -- --run
                      ↳ check passed
-2026-09-13T17:58:40 rule    agent:tool.use   Bash: rm -rf /tmp/build
-                     ↳ refused by Bash(rm -rf *)
-2026-09-13T17:58:31 person  agent:tool.use   rm -rf node_modules
-2026-09-13T17:41:09 timer   agent:tool.use   Bash: pnpm publish
+2026-09-13T17:58:40 rule     agent:tool.use   Bash: rm -rf /tmp/build
+                     ↳ refused by Bash(rm *)
+2026-09-13T17:58:31 person   agent:tool.use   rm -rf node_modules
+2026-09-13T17:41:09 timer    agent:tool.use   Bash: pnpm publish
                      ↳ a clock refused it after 4h — set in devplane.toml
-2026-09-13T17:22:55 nobody  agent:question   req-7c03
-                     ↳ the daemon stopped while the question was waiting
+2026-09-13T17:22:55 nobody   agent:question   req-7c03
+                     ↳ the run ended under the question
 ```
 
-![The audit surface: what Devplane decided, when, on whose authority, and the rule behind each verdict](/audit.png)
+The same rows are in the workbench's **Ledger**, and on each change's Ledger tab.
 
-## The field the table exists for
+![The ledger: what Devplane recorded as decided, when, on whose authority, and the rule behind each verdict](../../audit.png)
 
-Each row carries the **authority** — *on whose authority this happened* — the **action** in the same
-vocabulary the permission rules speak (`agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`,
-`work:advance`), the **subject**, the **outcome**, and the **reason**.
+## What a row says
 
-“Refused” is not an answer. “Refused by `Bash(rm -rf *)`” is.
+The **authority**, the **action** (`agent:tool.use`, `agent:question`, `gate:run`, `git:push`,
+`gh:pr.create`, `change:archive`), the **subject**, the **outcome**, and the **reason**: not
+"refused" but "refused by `Bash(rm *)`".
 
-### The five authorities
-
-| | What it means |
+| Authority | What it means |
 |---|---|
-| `person` | somebody was asked and answered — through the inbox, the board or the CLI |
-| `rule` | one of your `never_auto` or `always_ask` rules matched. The rule text is in the reason, and re-evaluating it must reproduce the verdict |
-| `timer` | **a clock decided**, because nobody answered before the deadline your project set in [`[questions]`](/docs/configuration/#questions). The duration and the file are in the reason — Devplane has no clock of its own |
-| `nobody` | **asked, never answered, and the moment passed** — the run ended under the question, or Devplane was killed while it was waiting. Nobody decided.<br>**Stopping Devplane cleanly does not produce this row**: the question survives, and it is still yours to answer when you start it again |
-| `daemon` | Devplane itself, carrying out something your project wrote down: a gate ran, a pipeline advanced, a pull request opened |
+| `person` | somebody was asked and answered — in the workbench or with `devplane answer` |
+| `rule` | a `never_auto` or `always_ask` rule matched. The rule is in the reason, and re-evaluating it reproduces the verdict |
+| `timer` | nobody answered before the deadline your project set in [`[questions]`](@/docs/configuration.md#questions); the duration and file are in the reason |
+| `nobody` | asked, never answered, and the moment passed — the run ended under the question, or a held permission lapsed. Quitting the host cleanly does **not** produce this: the question survives |
+| `devplane` | Devplane doing what your project wrote down: running a gate, stopping a change at its budget. A push and a pull request are `person`: you offered the change |
 
-**`classifier` is deliberately not on that list.** Devplane has no channel that attributes an
-individual call to a model's approval, so a variant for it would be one nothing could ever produce.
-Which of your sessions are running under a classifier is a different question, and
-[`devplane modes`](/docs/cli/#devplane-modes) answers it.
+There is no `unknown`: a row whose authority cannot be established is not written. `--without-me`
+leaves out `person` and `devplane` rows. With `--otel`, the authority rides on each
+`gen_ai.tool.call.decision` record; nothing is sent anywhere.
+[`devplane modes`](@/docs/cli.md#devplane-modes) shows which sessions run with no prompts at all.
 
-**And there is no `unknown`.** A row whose authority cannot be established is not a row with a sixth
-kind of authority — it is a row Devplane does not write. A log that guesses is worse than one with
-gaps.
+## Decisions are never pruned
 
-## Observations are pruned; decisions are not
+Runs, events, telemetry and transcripts are pruned on a timer. Decisions and asks are appended and
+kept.
 
-Both live in one SQLite file, and the asymmetry is the point rather than an accident of storage:
+The hook writes its decision straight to the store, so no host has to be running. If the store will
+not open, the decision goes to `~/.devplane/pending-decisions.jsonl`; `devplane doctor` counts what
+is waiting there, and the next host files it, marked as filed late.
 
-| | Nature | Retention | Rebuildable from |
-|---|---|---|---|
-| Runs, events, telemetry, transcripts | things that happened **to** Devplane | pruned on a timer, with the search index | the providers |
-| Decisions | what Devplane **did**, or refused | appended, never pruned | nothing |
-| Asks | what an agent put to **you**, and what became of it | kept while open, then with the decision that closed it | nothing |
+## What became of a report
 
-An observation can be re-derived from the provider. A decision cannot be re-derived from anything —
-so pruning it would leave a pull request nobody can account for. Nor can an ask: losing one loses
-the question itself, which is why it survives a restart rather than living in memory.
+A report writes up to three actions on the record of the change that filed it:
 
-It is written wherever something is decided — the permission hook, the protocol's permission and
-question handlers, the deadline sweep, the gate runner, the pipeline, and the git and GitHub
-mutations — and read from one place, which is why every row looks the same whatever wrote it.
+| Action | Authority | When |
+|---|---|---|
+| `report:resolved` | `person` | answered: fixed, rejected or deferred with a reason, or a GitHub draft discarded |
+| `report:opened` | `person` | a GitHub draft opened with your own `gh`; the issue address is the reason |
+| `report:delivered` | `rule` | the target's `[reports] deliver_from` named the source, so the report was handed to its live run |
 
-## An undecided request is not a decision
+Filing a report writes no decision. See [Reports between projects](@/docs/reports.md).
 
-When no rule matches, Devplane replies with *no decision* and Claude Code shows its own dialog. The
-human answering that dialog is not something Devplane saw, so nothing is written. Recording it
-would be recording a guess.
+## What is not in the log
 
-## A standing grant says so
+- **An undecided call.** When no rule matches, your agent shows its own dialog. Devplane does not see
+  your answer there, so it writes nothing.
+- **Calls under a standing "allow always".** That choice lives in the agent's session. When you choose
+  it in a run Devplane drives, the row's outcome says `allow_always`, so you know later matching calls
+  will not appear.
 
-"Allow always" lives inside **the agent's** session: every later call it covers is approved there,
-and no request for those reaches Devplane. It is the one decision whose consequences this log cannot
-show you, so two rules apply.
+## Limits
 
-- **Devplane never chooses one**, because it never approves a call at all. Every `allow_always` in
-  this log was chosen by a person.
-- **When you choose one, the log names it** — outcome `allow_always`, not `allow`.
+Devplane's own actions are accounted for; the agents' actions are supervised. The log is
+append-only in a local SQLite file, not tamper-evident. See [Security](@/docs/security.md).
 
-```console
-$ devplane audit
-2026-09-14T11:02:07 human   agent:tool.use   Bash: pnpm build
-                     ↳ allow_always — a standing choice made by a person: the agent
-                       applies it to later matching calls itself, and Devplane sees
-                       no request for those
-```
-
-## What this deliberately is not
-
-A hash-chained, tamper-evident journal in a second store.
-
-That defends against an adversary with write access to the same laptop as the agents themselves —
-which is not a threat this product has. The threat it actually faces is *“I cannot remember why that
-happened”*, and one append-only table answers it. Claiming tamper evidence it does not have would be
-worse than not having it.
-
-## The boundary of the claim
-
-> **Devplane's own actions are accounted for; the agents' actions are supervised.**
-
-Nothing here governs what Claude Code, Codex or OpenCode do. Their tool calls are theirs. Devplane
-sees a permission request for a run it drives, or a hook for a session it merely watches, and
-answers — and *that answer* is a decision with a rule behind it.
-
-No runtime, anywhere, can make an external agent's `rm -rf` at-most-once from outside the process
-that runs it.
-
-## Repeating an action is safe
-
-Everything Devplane does to the world is idempotent, free to repeat, or checked against the remote
-first: a gate is a read, pushing a branch twice is one branch, and `gh pr create` reads the branch's
-pull request back because it needs the number. A pipeline step resumes rather than repeats, because
-the cursor is a column on the work row.
-
-So a crash costs you nothing but the decision log — and that is the one thing that is never pruned.
+Everything Devplane does to the world is safe to repeat: a gate is a read, pushing a branch twice is
+one branch, and an existing pull request is looked up before one is opened.

@@ -1,27 +1,13 @@
 #!/usr/bin/env bash
-# Downloads the third-party specs and docs referenced by CONCEPT.md into concepts/reference/ (gitignored).
+# Downloads the third-party specs and docs the notes cite into concepts/reference/ (gitignored).
 # Usage: scripts/fetch-reference.sh
 set -u
 cd "$(dirname "$0")/.."
 mkdir -p concepts/reference/claude-code concepts/reference/claude-agent-sdk concepts/reference/copilot concepts/reference/codex concepts/reference/opencode concepts/reference/symphony concepts/reference/sdd concepts/reference/mcp concepts/reference/jsonrpc concepts/reference/acp concepts/reference/standards
 UA='devplane-specs-fetch'
-# The test is "did we get the document or an error page", and size was a bad proxy for it:
-# a `-gt 500` floor deleted 83 of the 130 generated Codex schema files, because a generated
-# TypeScript type alias is legitimately four lines long. A guard that removes the thing it
-# was checking is worse than no guard, and this one reported the deletion as FAIL 200 —
-# a success code beside the word FAIL, which is what it looks like when the check is wrong
-# rather than the fetch. The HTML sniff is the real test; size only has to be non-zero.
-#
-# And a guard may refuse, but it may not destroy. This function used to `rm -f`
-# the destination on a failed fetch, and on 2026-09-19 that deleted a page that
-# had been correct for five passes: `agents.md` moved to a Next.js site with no
-# markdown endpoint, the HTML sniff refused it — correctly — and then removed
-# the good copy underneath it. Three claims went from pinned to MISS, and every
-# one of the three is still true on the live page. **The fetch broke, not the
-# fact**, and a destructive guard makes those two indistinguishable. A failed
-# fetch now leaves the previous copy where it is and says it is stale; only a
-# page nobody has ever fetched is absent, which is the one case the claim ledger
-# should fail on.
+# An HTML body means an error page, not the document; size need only be non-zero.
+# A failed fetch keeps the previous copy and reports it stale, so a broken fetch
+# cannot erase a fact that is still true.
 fetch() { # url dest
   local code sz
   local tmp="$2.fetching"
@@ -35,23 +21,14 @@ fetch() { # url dest
   fi
 }
 
-# A page that serves only HTML, rendered to text. Used for exactly one source and
-# deliberately not made general: `agents.md` is the governance evidence for the one
-# standard in these notes that has any, it publishes no markdown, and a claim about
-# it is worth a few lines of `sed` rather than a footnote saying it could not be
-# checked. Everything else in this file is fetched as markdown or not at all.
+# A page that serves only HTML, rendered to text. Used for `agents.md` only, which
+# publishes no markdown.
 fetch_html_as_text() { # url dest
   local code tmp="$2.fetching"
   code=$(curl -sL -A "$UA" -o "$tmp" -w '%{http_code}' "$1")
   if [ "$code" = 200 ] && [ -s "$tmp" ]; then
-    # Tags become newlines and entities become characters; script and style
-    # bodies are deliberately *kept*, because this page is a Next.js build whose
-    # readable prose lives in a `__NEXT_DATA__` JSON blob rather than in the
-    # markup. Stripping scripts the tidy way produced an 11-byte file — and, on
-    # a minified single-line document, a greedy `s/<script.*<\/script>//`
-    # deletes everything between the first script and the last one, which is the
-    # whole page. Kept as a warning: the tidier transformation was the one that
-    # silently destroyed the content.
+    # Script bodies are kept: this Next.js page's prose lives in `__NEXT_DATA__`, and a
+    # greedy script strip on a minified page deletes everything.
     sed -e 's/<[^>]*>/\n/g' "$tmp" \
       | sed -e 's/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&#x27;/'"'"'/g; s/&#39;/'"'"'/g; s/&nbsp;/ /g; s/\\u0026/\&/g' \
       | tr -s ' \t' ' ' | grep -v '^ *$' > "$2.text"
@@ -75,17 +52,12 @@ for p in hooks hooks-guide headless cli-reference worktrees sessions agent-view 
   fetch "https://code.claude.com/docs/en/$p.md" "concepts/reference/claude-code/$p.md"
 done
 fetch https://code.claude.com/docs/llms.txt concepts/reference/claude-code/llms.txt
-# The vendor publishes a dated weekly digest of what changed. Re-verification reads these
-# rather than diffing a 300-page index by hand: a surface that landed since the last pass
-# is a row in one of them.
+# The vendor's dated weekly digests of what changed.
 fetch https://code.claude.com/docs/en/whats-new/index.md concepts/reference/claude-code/whats-new.md
 for w in 37 36 35 34 33 32 31 30 29 28 27 26; do
   fetch "https://code.claude.com/docs/en/whats-new/2026-w$w.md" "concepts/reference/claude-code/whats-new-2026-w$w.md"
 done
-# A week with no digest is normal and is not an absence of change: the digest stopped at week
-# 34 while the product reached 2.1.270, so thirty releases — including a sixth permission-rule
-# widening — exist only in the CHANGELOG. The digest tells you what the vendor thought was
-# notable; the changelog is the enumerated table.
+# The digests are selective; the CHANGELOG is the complete list.
 fetch https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md concepts/reference/claude-code/CHANGELOG.md
 # Claude Agent SDK docs
 for p in overview permissions user-input streaming-output structured-outputs sessions mcp hooks typescript python cost-tracking \
@@ -94,8 +66,7 @@ for p in overview permissions user-input streaming-output structured-outputs ses
 done
 fetch https://raw.githubusercontent.com/Roasbeef/claude-agent-sdk-go/main/docs/cli-protocol.md concepts/reference/claude-agent-sdk/community-cli-wire-protocol.md
 # GitHub Copilot: the second provider that documents all three channels.
-# GitHub publishes its docs as markdown in github/docs, so these are the source files
-# rather than a rendered page.
+# Fetched as the markdown sources in github/docs.
 CPD=https://raw.githubusercontent.com/github/docs/main/content/copilot
 fetch "$CPD/reference/hooks-reference.md"                              concepts/reference/copilot/hooks-reference.md
 fetch "$CPD/reference/copilot-cli-reference/acp-server.md"             concepts/reference/copilot/acp-server.md
@@ -112,12 +83,10 @@ fetch https://raw.githubusercontent.com/github/spec-kit/main/README.md concepts/
 fetch https://raw.githubusercontent.com/github/spec-kit/main/spec-driven.md concepts/reference/sdd/spec-kit-spec-driven.md
 fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/analyze.md concepts/reference/sdd/spec-kit-analyze.md
 fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/commands/converge.md concepts/reference/sdd/spec-kit-converge.md
-# The two templates that carry the shape a work item names: what a specification
-# document holds, and how its task list is written. `--spec` reads the second.
+# What a specification holds and how its task list is written; `--spec` reads the latter.
 fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/spec-template.md concepts/reference/sdd/spec-kit-spec-template.md
 fetch https://raw.githubusercontent.com/github/spec-kit/main/templates/tasks-template.md concepts/reference/sdd/spec-kit-tasks-template.md
-# HTML-only since 2026-09: the format with the governance is the one whose own page
-# cannot be fetched as markdown.
+# HTML-only; see `fetch_html`.
 fetch_html_as_text https://agents.md/ concepts/reference/standards/agents-md.md
 # Codex app-server (JSON-RPC)
 fetch https://raw.githubusercontent.com/openai/codex/main/codex-rs/app-server/README.md concepts/reference/codex/app-server-README.md
@@ -132,7 +101,7 @@ done
 fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/server.mdx concepts/reference/opencode/server.mdx
 fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/sdk.mdx concepts/reference/opencode/sdk.mdx
 fetch https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/sdk/openapi.json concepts/reference/opencode/openapi.json
-# Model Context Protocol (the gate server speaks it) + JSON-RPC 2.0 (daemon API, Codex app-server)
+# Model Context Protocol (the gate server speaks it) + JSON-RPC 2.0 (Codex app-server)
 MCP_REV=2026-07-28
 for p in basic/index server/tools basic/transports client/elicitation; do
   fetch "https://modelcontextprotocol.io/specification/$MCP_REV/$p.md" "concepts/reference/mcp/$(echo "$p" | tr '/' '-' | sed 's/-index$//').md"
@@ -156,26 +125,13 @@ fetch https://raw.githubusercontent.com/agentclientprotocol/claude-agent-acp/mai
 fetch https://raw.githubusercontent.com/agentclientprotocol/registry/main/README.md concepts/reference/acp/registry-README.md
 # claude-view (closest existing observer)
 fetch https://raw.githubusercontent.com/tombelieber/claude-view/main/README.md concepts/reference/claude-view-README.md
-# Agent Skills: the portable core the library carries, and the only authority
-# for which six fields survive leaving a vendor (#library, D272).
+# Agent Skills: the portable core, and the authority on which six fields are portable.
 mkdir -p concepts/reference/standards
 fetch https://agentskills.io/specification.md concepts/reference/standards/agent-skills-spec.md
 fetch https://agentskills.io/llms.txt concepts/reference/standards/agent-skills-llms.txt
 # ── Papers ───────────────────────────────────────────────────────────────────
-#
-# **Twenty-three papers were cited in these notes and nought were checkable.**
-# `verify-claims.sh` has tested every vendor claim since it was written and had
-# no arXiv entry at all, in a corpus whose own standing rule is that every
-# number names its test. Reading one of them in full on 2026-09-19 found a
-# correlation quoted in the opposite direction and a feature designed around a
-# criterion the paper does not contain (D269).
-#
-# HTML rather than the PDF: arXiv renders most recent submissions, the text is
-# greppable, and a claim check against a PDF is a claim check against nothing.
-# Tags are stripped here so the checks downstream match prose rather than
-# markup. A paper with no HTML rendering is fetched as its abstract page, and
-# a check that needs the body will simply miss — which is the correct outcome
-# and is why this does not fall back silently to something smaller.
+# arXiv HTML rather than PDF so claims are greppable; tags are stripped. A paper
+# with no HTML rendering is fetched as its abstract, so body-only checks will MISS.
 arxiv() { # id dest
   local dest="concepts/reference/papers/$2.txt" code
   mkdir -p concepts/reference/papers

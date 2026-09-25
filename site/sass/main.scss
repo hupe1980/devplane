@@ -645,3 +645,21 @@ kbd {
   body { font-size: 11pt; }
   a { color: inherit; text-decoration: underline; }
 }
+
+// Screenshots of the workbench: framed like the window they are, never wider
+// than the column, and sharp on a high-density screen.
+.shot {
+  margin: 1.5rem 0;
+  img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--line, rgba(127, 127, 127, 0.3));
+    border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  }
+}
+.showcase {
+  display: grid;
+  gap: 1.5rem;
+}

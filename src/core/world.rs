@@ -1,11 +1,10 @@
 //! The authoritative in-memory state, and the only place runs are created.
-//!
-//! The UI never reconstructs state from events: it subscribes to this. That is
-//! the difference between a dashboard that survives a high-volume session and
-//! one that melts, and it is why the reducer is pure — this struct is the only
-//! thing that mutates.
+//! Surfaces read this rather than reconstructing state from events; the
+//! reducer is pure and this struct is the only thing that mutates.
 
-use crate::core::attention::{AttentionConfig, AttentionItem, items_for_run, rank};
+use crate::core::attention::{
+    AttentionConfig, AttentionItem, Derived, items_for_run, run_items_at,
+};
 use crate::core::event::{Event, EventEnvelope};
 use crate::core::ids::{ProjectId, RunId, SessionId};
 use crate::core::project::{Project, governing_root};
@@ -14,72 +13,54 @@ use crate::core::run::{Run, RunMode, RunState};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// What is wrong with the machine itself, rather than with anything running on
-/// it.
-///
-/// All three facts have the same shape and the same reason to exist: the board
-/// looks completely normal while a prohibition somebody wrote is not being
-/// enforced, or while the record every other row is derived from has a hole in
-/// it — and no run-derived item can say so. Default is a healthy machine.
-#[derive(Default)]
+/// What is wrong with the machine itself rather than any run on it — facts no
+/// run-derived item can express. Default is a healthy machine.
 pub struct Health<'a> {
     /// Why the installed gate did not refuse a call its own rule denies, when
-    /// the daemon last asked it. `None` when it answered.
+    /// the host last asked it. `None` when it answered.
     pub gate_down: Option<&'a str>,
     /// Repository roots whose `devplane.toml` will not parse, with the
     /// parser's reason.
     pub broken_configs: &'a [(PathBuf, String)],
     /// Events and decisions the store would not take, and the last reason.
-    ///
-    /// `(0, 0, _)` is the ordinary case and raises nothing. Counted rather
-    /// than flagged because the row has to distinguish one lost write from
-    /// thousands.
+    /// `(0, 0, _)` raises nothing.
     pub unwritten: (u64, u64, Option<&'a str>),
-    /// Agents a previous daemon started that are still running with nothing
-    /// attached to them, as `(pid, command, worktree)`.
-    ///
-    /// Threaded in for the same reason as the other two: it cannot be derived
-    /// from the event log. The log says a run was driven; whether the process
-    /// behind it outlived the daemon is a fact about the machine, read from the
-    /// process table once at startup (`observe::procs`).
+    /// Agents a previous host started that still run unattached, as
+    /// `(pid, command, worktree)`, read from the process table at startup.
     pub leaked_agents: &'a [(u32, String, Option<String>)],
+    /// When these facts were first known — the host's start — so machine rows
+    /// age from then rather than always reading as new.
+    pub since: jiff::Timestamp,
+}
+
+impl Default for Health<'_> {
+    fn default() -> Self {
+        Self {
+            gate_down: None,
+            broken_configs: &[],
+            unwritten: (0, 0, None),
+            leaked_agents: &[],
+            since: jiff::Timestamp::UNIX_EPOCH,
+        }
+    }
 }
 
 /// Everything `devplane modes` and `/api/modes` say: which projects decide
-/// without you, and what can answer in your name.
-///
-/// **One type, because the reader deserialises the writer's shape.** This was a
-/// `json!` on one side and thirty-one `.get("key")` lookups on the other, and
-/// the two disagreed once already: a field renamed `file` → `where_set` left a
-/// reader untouched, `unwrap_or("")` turned the break into a blank line, and
-/// `devplane modes` went on telling people a clock was answering their
-/// questions without saying where to change it. Every test passed. A rename is
-/// a compile error now.
+/// without you, and what can answer in your name. One type for writer and
+/// reader, so a renamed field is a compile error.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Modes {
     pub projects: Vec<ProjectModes>,
     pub sessions: usize,
     pub unsupervised: usize,
     pub unknown: usize,
-    /// Sessions that have reported no mode at all.
-    ///
-    /// **The CLI read this key for the life of the feature and nothing served
-    /// it.** `.get("unreported")` against a payload with no such field is
-    /// `unwrap_or(0)` — so the sentence explaining that a busy session can
-    /// genuinely not have spoken never printed, and the guard on the reassuring
-    /// line, `unreported < total`, was `0 < total`: always true. On a machine
-    /// where **nothing** had reported, `devplane modes` printed *"Every session
-    /// that has reported asks you"* in green, which is the reassuring answer
-    /// over no evidence — the one direction of error this product calls
-    /// expensive: guessing that nobody is needed, when somebody is, is the
-    /// mistake this product cannot afford.
+    /// Sessions that have reported no mode at all. The CLI guards its
+    /// reassuring line on this, so it must never silently read as zero.
     pub unreported: usize,
     /// What can answer a question in your name on this machine, if anything.
     pub question_clock: Option<crate::core::clock::ClockLine>,
-    /// How many live sessions this surface can actually speak for. A session
-    /// that started before `devplane connect` has no environment reading, and
-    /// the coverage of a surface is a fact about it rather than something a
-    /// reader should assume.
+    /// Live sessions whose environment was read; one started before
+    /// `devplane connect` has no reading.
     pub clock_read: usize,
     pub clock_unread: usize,
 }
@@ -91,13 +72,9 @@ pub struct ProjectModes {
     pub name: Option<String>,
     /// Sessions whose mode means no person is asked about an ordinary call.
     pub unsupervised: usize,
-    /// Sessions whose mode this build does not recognise, counted separately
-    /// because *unknown* is not *fine*.
+    /// Sessions whose mode this build does not recognise.
     pub unknown: usize,
-    /// Sessions that have not reported a mode at all — a different fact from
-    /// having reported one nobody here recognises, and the two read the same
-    /// for exactly one pass before somebody noticed sixteen idle sessions
-    /// being described as running something exotic.
+    /// Sessions that have not reported a mode — a different, unalarming fact.
     pub unreported: usize,
     pub sessions: Vec<SessionMode>,
 }
@@ -112,32 +89,22 @@ pub struct SessionMode {
     pub label: Option<String>,
     pub asks_a_person: Option<bool>,
     pub seen: Option<String>,
-    /// The mode an **ACP agent** declared for itself, in its own spelling.
-    ///
-    /// A separate field from `mode` rather than a fallback for it, because the
-    /// two answer different questions. `mode` is one of a vendor's documented
-    /// modes, read from a named settings file, and `asks_a_person` is derivable
-    /// from it. This is a string the agent chose; nothing maps it onto anybody's
-    /// vocabulary, and **no `asks_a_person` can be derived from it at all**.
+    /// The mode an ACP agent declared for itself, in its own spelling. Not a
+    /// fallback for `mode`: nothing maps it, so no `asks_a_person` derives
+    /// from it.
     pub agent_mode: Option<String>,
     pub agent_mode_seen: Option<String>,
-    /// A clock this session's own **environment** put on its questions.
-    ///
-    /// `CLAUDE_AFK_TIMEOUT_MS` overrides the settings files and turns
-    /// auto-continue on even where they say `never`, so this is the one fact
-    /// that can make the machine-wide line wrong for a single session.
+    /// A clock this session's environment put on its questions
+    /// (`CLAUDE_AFK_TIMEOUT_MS` overrides the settings files).
     pub question_clock: Option<crate::core::clock::ClockLine>,
-    /// Whether the environment was read for this session at all.
-    ///
-    /// **`false` is not *nothing is set*.** A session that started before
-    /// `devplane connect`, or on a channel that carries no environment, has no
-    /// reading — and rendering that as *your questions wait for you* is the
-    /// reassuring wrong answer this whole feature exists to stop.
+    /// Whether the environment was read at all. `false` is not *nothing is
+    /// set*, and must not render as *your questions wait for you*.
     pub clock_read: bool,
 }
 
-/// Everything the daemon knows right now.
-#[derive(Debug, Default)]
+/// Everything the host knows right now. `Clone` so surfaces are composed from
+/// a snapshot rather than under the lock, which would stall ingest.
+#[derive(Debug, Default, Clone)]
 pub struct World {
     runs: BTreeMap<RunId, Run>,
     projects: BTreeMap<ProjectId, Project>,
@@ -146,7 +113,7 @@ pub struct World {
 
 /// What changed, so a subscriber can be told without diffing the whole world.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Change {
+pub enum Changed {
     RunUpserted(RunId),
     ProjectDiscovered(ProjectId),
 }
@@ -164,19 +131,10 @@ impl World {
         self.runs.get(id)
     }
 
-    /// Turns what a person typed into a run.
-    ///
-    /// The board prints a short label — eight characters of the id, or the
-    /// session's name with the project stripped off it — because a column of
-    /// full uuids tells you nothing about which row is which. Every command
-    /// then took the *whole* id, so the only identifier a user ever sees was
-    /// the one identifier they could not use. Resolving a prefix is what git
-    /// and docker do for exactly this reason.
-    ///
-    /// In order: the id exactly, then a unique id prefix, then a unique session
-    /// name — whole, or with a `<project>-` prefix stripped, which is the form
-    /// the board shows. Ambiguity is an error that names the candidates; a
-    /// silent pick would act on the wrong session.
+    /// Turns what a person typed — including the short label the board
+    /// prints — into a run. In order: the exact id, a unique id prefix, then a
+    /// unique session name, whole or with its `<project>-` prefix stripped.
+    /// Ambiguity names the candidates rather than picking one.
     pub fn resolve_run(&self, needle: &str) -> Result<RunId, Ambiguous> {
         if needle.is_empty() {
             return Err(Ambiguous::NotFound);
@@ -218,38 +176,26 @@ impl World {
         self.projects.get(id)
     }
 
-    /// For the few facts that come from outside this module — the git remote,
-    /// which only a subprocess can answer and which a launch link needs.
+    /// For facts from outside this module, such as the git remote.
     pub fn project_mut(&mut self, id: &ProjectId) -> Option<&mut Project> {
         self.projects.get_mut(id)
     }
 
-    /// The board, most recently active first.
-    ///
-    /// Ordered by real activity rather than by when the daemon noticed a
-    /// session: a tab left open on Tuesday should not sit above the run that
-    /// is asking you something now.
+    /// The board, by most recent real activity (not when the host noticed it).
     pub fn board(&self) -> Vec<&Run> {
         let mut v: Vec<&Run> = self.runs.values().collect();
         v.sort_by_key(|r| std::cmp::Reverse(r.last_activity_at));
         v
     }
 
-    /// The runs worth looking at: in play, or asking for something.
-    ///
-    /// A machine that has been running agents for a week accumulates editor
-    /// tabs whose processes are still alive. Listing them beside the work in
-    /// progress is technically complete and practically useless — the board's
-    /// job is to answer "what needs me", and twenty dormant rows answer nothing.
+    /// The runs worth looking at: in play, or asking for something. Dormant
+    /// editor tabs are left out.
     pub fn working_set(&self) -> Vec<&Run> {
         self.board().into_iter().filter(|r| r.is_active()).collect()
     }
 
-    /// The inbox, derived fresh every time. Cheap because it is a map over
-    /// runs, and correct because there is no cached copy to go stale.
-    ///
-    /// Uses the machine-wide stall threshold for every run. The daemon calls
-    /// [`World::inbox_with_health`] with the project resolver instead.
+    /// The inbox, derived fresh every time, with the machine-wide stall
+    /// threshold. The host calls [`World::inbox_with_health`] instead.
     pub fn inbox(&self) -> Vec<AttentionItem> {
         self.inbox_with_health(
             &[],
@@ -259,105 +205,86 @@ impl World {
             Vec::new(),
             Vec::new(),
         )
+        .items
     }
 
-    /// The inbox, plus the items that are about the machine rather than about
-    /// anything on it.
-    ///
-    /// [`Health`] is threaded in rather than derived, because neither of its
-    /// facts can be read off a run: nothing happening is exactly what a working
-    /// gate and a broken one both look like from the event log, and a
-    /// configuration file that will not parse leaves no event at all.
+    /// The inbox, plus items about the machine itself. [`Health`], `forge` and
+    /// `from_disk` are threaded in because this module may not touch the
+    /// outside world; ranking here keeps one list and one order.
     pub fn inbox_with_health(
         &self,
-        works: &[crate::core::Work],
+        changes: &[crate::core::Change],
         drivable: &std::collections::BTreeSet<RunId>,
         stall_for: &dyn Fn(&Path) -> Option<i64>,
         health: &Health<'_>,
         forge: Vec<AttentionItem>,
-        // Items derived from files on disk, threaded in for the same reason
-        // `forge` is: this module may not touch the outside world, and a
-        // specification is a folder the caller has to walk. Ranked here so
-        // there is one list and one order — the alternative is a second inbox
-        // nobody reads.
         from_disk: Vec<AttentionItem>,
-    ) -> Vec<AttentionItem> {
-        // The same runs the board shows, for the reason the notifier reads
-        // this list rather than deriving its own: two surfaces disagreeing
-        // about what needs a person is worse than either being wrong. A
-        // session asking for something never ages out — `is_active` keeps
-        // every blocked run — so what this drops is the noise: a stall, a
-        // context gauge or a lost tab from three days ago.
-        let from_runs = self.runs.values().filter(|r| r.is_active()).flat_map(|r| {
-            let stall = stall_for(r.working_dir()).unwrap_or(self.attention.stall_seconds);
-            items_for_run(r, &self.attention, stall)
-        });
-        let from_work = works.iter().flat_map(|w| {
-            let can_drive = w.current_run().is_some_and(|r| drivable.contains(r));
-            // Resumable is a different question from drivable, and only this
-            // module can answer it: the agent named a session, and Devplane no
-            // longer holds one. Both halves matter — offering to resume a run
-            // that is already running would start a second agent on one
-            // worktree.
-            let can_resume = !can_drive
-                && w.current_run()
-                    .and_then(|r| self.runs.get(r))
-                    .is_some_and(|r| r.mode == RunMode::Driven && r.agent_session.is_some());
-            // The slug, so an item that names work somebody is about to do
-            // carries a link that opens an agent where the work is.
-            let repo = self.projects.get(&w.project_id).and_then(|p| p.repo_slug());
-            crate::core::attention::items_for_work_in(w, can_drive, can_resume, repo.as_deref())
-        });
-        let gate = health.gate_down.map(crate::core::attention::gate_down_item);
+    ) -> Derived {
+        // The same runs the board shows, so the surfaces agree; `is_active`
+        // keeps every blocked run. One instant for the whole pass, so two runs
+        // cannot straddle a stall threshold.
+        // TODO(purity): take `now` from the caller rather than the clock.
+        let now = jiff::Timestamp::now();
+        let from_runs: Derived = self
+            .runs
+            .values()
+            .filter(|r| r.is_active())
+            .map(|r| {
+                let stall = stall_for(r.working_dir()).unwrap_or(self.attention.stall_seconds);
+                run_items_at(r, &self.attention, stall, now)
+            })
+            .collect();
+        let from_change: Derived = changes
+            .iter()
+            .map(|w| {
+                let can_drive = w.current_run().is_some_and(|r| drivable.contains(r));
+                // Resumable: the agent named a session Devplane no longer holds.
+                let can_resume = !can_drive
+                    && w.current_run()
+                        .and_then(|r| self.runs.get(r))
+                        .is_some_and(|r| r.mode == RunMode::Driven && r.agent_session.is_some());
+                let repo = self.projects.get(&w.project_id).and_then(|p| p.repo_slug());
+                crate::core::attention::change_items_in(w, can_drive, can_resume, repo.as_deref())
+            })
+            .collect();
+        let since = health.since;
+        let gate = health
+            .gate_down
+            .map(|why| crate::core::attention::gate_down_item_at(why, since));
         let configs = health
             .broken_configs
             .iter()
-            .map(|(root, why)| crate::core::attention::config_broken_item(root, why));
+            .map(|(root, why)| crate::core::attention::config_broken_item_at(root, why, since));
         let leaked = health.leaked_agents.iter().map(|(pid, command, worktree)| {
-            crate::core::attention::agent_leaked_item(*pid, command, worktree.as_deref())
+            crate::core::attention::agent_leaked_item_at(*pid, command, worktree.as_deref(), since)
         });
         let (lost_events, lost_decisions, last_loss) = health.unwritten;
         let record = (lost_events > 0 || lost_decisions > 0).then(|| {
-            crate::core::attention::record_incomplete_item(
+            crate::core::attention::record_incomplete_item_at(
                 lost_events,
                 lost_decisions,
                 last_loss.unwrap_or("The store gave no reason."),
+                since,
             )
         });
-        // `forge` is derived by the caller from state this module cannot see
-        // — the polled GitHub facts live on the other side of the purity line
-        // — and ranked here so there is one list and one order.
-        rank(
-            from_runs
-                .chain(from_work)
-                .chain(gate)
-                .chain(configs)
-                .chain(record)
-                .chain(leaked)
-                .chain(forge)
-                .chain(from_disk)
-                .collect(),
-        )
+        let mut all = Derived {
+            items: from_runs.items,
+            snoozed: from_runs.snoozed + from_change.snoozed,
+        };
+        all.items.extend(from_change.items);
+        all.items.extend(gate);
+        all.items.extend(configs);
+        all.items.extend(record);
+        all.items.extend(leaked);
+        all.items.extend(forge);
+        all.items.extend(from_disk);
+        all.rank()
     }
 
-    /// **Which projects are deciding without you, and since when we knew.**
-    ///
-    /// The first slice of the seat, and the only one the measurement of
-    /// 2026-09-19 left standing: forty-nine consecutive tool calls across four
-    /// sessions put nothing in front of a person, so *what was decided without
-    /// you* is everything and is a transcript. *Which of my six repositories
-    /// is in `auto`* is one short list, and nothing on this machine could
-    /// answer it.
-    ///
-    /// **Live sessions only.** The question is present tense. A run that ended
-    /// yesterday in `auto` is history, and putting it here would pad the list
-    /// with rows nobody can act on.
-    ///
-    /// **A session that has not reported a mode is a row, not a gap.** Eleven
-    /// hook events carry the mode and `PreToolUse` is not one of them, so a
-    /// session that has done nothing but run tools since the daemon started
-    /// genuinely has not said. Omitting those would make a partial answer look
-    /// complete, which is the failure this whole surface exists to prevent.
+    /// Which projects are deciding without you, and since when we knew. Live
+    /// sessions only. A session that has not reported a mode (`PreToolUse`
+    /// does not carry it) is a row, not a gap, so a partial answer never looks
+    /// complete.
     pub fn permission_modes(&self) -> Vec<ProjectModes> {
         let mut by_project: BTreeMap<Option<ProjectId>, Vec<&Run>> = BTreeMap::new();
         for r in self.runs.values().filter(|r| r.state.is_live()) {
@@ -378,13 +305,10 @@ impl World {
                         name: r.name.clone(),
                         mode: r.permission_mode.as_ref().map(|m| m.as_str().to_string()),
                         label: r.permission_mode.as_ref().map(|m| m.label().to_string()),
-                        // Three-valued on purpose: `None` is *we do not know*,
-                        // which is a different row from *nobody is asked*.
+                        // `None` is *we do not know*, not *nobody is asked*.
                         asks_a_person: r.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
-                        // "Seen", never "since". Nothing announces a mode
-                        // change, so this is when Devplane first heard it at
-                        // this value — at best the person's next prompt after
-                        // they switched.
+                        // "Seen", never "since": nothing announces a mode
+                        // change, so this is when Devplane first heard it.
                         seen: r.permission_mode_seen.map(|t| t.to_string()),
                         agent_mode: r.agent_mode.clone(),
                         agent_mode_seen: r.agent_mode_seen.map(|t| t.to_string()),
@@ -392,28 +316,11 @@ impl World {
                         clock_read: r.question_clock_read.is_some(),
                     })
                     .collect();
-                // Least supervised first: the row worth reading is the one
-                // nobody is watching, and a list sorted by name buries it.
-                // Least supervised first, then the ones that said something
-                // unreadable, then the quiet ones. A session nobody is
-                // watching is the row worth reading and a list sorted by name
-                // buries it.
+                // First a session closing its questions immediately (a
+                // question no longer waits for you), then a clock the person
+                // did not choose, then least supervised, unreadable, and
+                // quiet. A `never` clock ranks by mode like no clock.
                 modes.sort_by_key(|m| {
-                    // **A session closing its questions immediately sorts above
-                    // everything**, including an unsupervised one. An
-                    // unsupervised session is a mode somebody chose; this is a
-                    // session in which *a question waits for you* — the
-                    // product's own promise — is untrue right now.
-                    //
-                    // **Then a clock the person did not choose**, which is the
-                    // row this surface exists for and which used to sort with
-                    // the quiet ones because only `immediate` was read.
-                    //
-                    // **`never` is not either of those**, and until 2026-09-21
-                    // it could not be told apart from a timer at all: every
-                    // string in the settings file became a duration, so the
-                    // setting's own default read as a clock answering in
-                    // somebody's name.
                     let rank = match m.question_clock.as_ref() {
                         Some(c) if c.immediate => -2,
                         Some(c) if c.answers_for_you && !c.chosen_by_the_person => -1,
@@ -433,9 +340,7 @@ impl World {
                         .iter()
                         .filter(|m| m.asks_a_person == Some(false))
                         .count(),
-                    // `mode.is_some()` is the whole distinction: a session
-                    // that said something this build cannot read, versus one
-                    // that has not said anything.
+                    // Said something unreadable, versus said nothing.
                     unknown: modes
                         .iter()
                         .filter(|m| m.mode.is_some() && m.asks_a_person.is_none())
@@ -447,8 +352,8 @@ impl World {
             .collect()
     }
 
-    /// Registers a project explicitly. Explicit registration is what grants
-    /// trust later; discovery never does.
+    /// Registers a project. Only explicit registration can grant trust;
+    /// discovery never does.
     pub fn upsert_project(&mut self, project: Project) -> ProjectId {
         let id = project.id.clone();
         self.projects
@@ -467,32 +372,36 @@ impl World {
         id
     }
 
-    /// Finds or discovers the project a path belongs to.
-    ///
-    /// A worktree Claude created under `.claude/worktrees/` resolves to the
-    /// repository that owns it, so five parallel worktrees are five runs on one
-    /// project rather than five projects nobody recognises.
-    pub fn resolve_project(&mut self, path: &Path) -> Option<(ProjectId, Option<Change>)> {
-        let root = governing_root(path).unwrap_or_else(|| path.to_path_buf());
+    /// Finds or discovers the project a path belongs to. A worktree under
+    /// `.claude/worktrees/` resolves to the repository that owns it.
+    pub fn resolve_project(&mut self, path: &Path) -> Option<(ProjectId, Option<Changed>)> {
+        // A relative path (an event with no directory falls back to `.`)
+        // belongs to no project.
+        if !path.is_absolute() {
+            return None;
+        }
+        // As the filesystem names it, so one directory is never two projects.
+        let path = crate::core::project::named(path);
+        let root = governing_root(&path).unwrap_or_else(|| path.clone());
 
         let id = ProjectId::from_path(&root);
         if self.projects.contains_key(&id) {
             return Some((id, None));
         }
-        // A directory we have never seen becomes a project on sight, so that a
-        // session in an unregistered repository still lands somewhere sensible.
+        // An unseen directory becomes an (untrusted) project on sight.
         let mut p = Project::from_root(root);
         p.auto_discovered = true;
         let id = self.upsert_project(p);
-        Some((id.clone(), Some(Change::ProjectDiscovered(id))))
+        Some((id.clone(), Some(Changed::ProjectDiscovered(id))))
     }
 
-    /// Applies an event, creating the run if this is the first time we have
-    /// seen the session.
-    ///
-    /// Returns the envelope with its project filled in, so the caller persists
-    /// exactly what was applied.
-    pub fn apply(&mut self, mut env: EventEnvelope, hint: RunHint) -> (EventEnvelope, Vec<Change>) {
+    /// Applies an event, creating the run on first sight. Returns the envelope
+    /// with its project filled in, so the caller persists exactly what applied.
+    pub fn apply(
+        &mut self,
+        mut env: EventEnvelope,
+        hint: RunHint,
+    ) -> (EventEnvelope, Vec<Changed>) {
         let mut changes = Vec::new();
 
         let cwd = hint.cwd.clone().unwrap_or_else(|| {
@@ -511,7 +420,6 @@ impl World {
             self.runs.insert(env.run_id.clone(), run);
         }
 
-        // Resolve the project from the most specific path we have.
         if let Some((pid, change)) = self.resolve_project(&cwd) {
             if let Some(c) = change {
                 changes.push(c);
@@ -527,14 +435,12 @@ impl World {
                 run.agent_command = hint.agent_command.clone();
             }
             if run.mode == RunMode::Observed && hint.mode != RunMode::Observed {
-                // A session first seen through a hook and later found in the
-                // background roster is a background run: the stronger claim
-                // wins, because it tells us who supervises the process.
+                // The stronger claim wins: it says who supervises the process.
                 run.mode = hint.mode;
             }
             reduce::apply(run, &env);
         }
-        changes.push(Change::RunUpserted(env.run_id.clone()));
+        changes.push(Changed::RunUpserted(env.run_id.clone()));
         (env, changes)
     }
 
@@ -550,12 +456,8 @@ impl World {
         }
     }
 
-    /// Takes trust back, for the one caller that needs it: a grant whose row
-    /// never reached the store.
-    ///
-    /// In-memory trust that outlives a failed write is trust that disappears
-    /// at the next restart, and a security gesture that quietly expires is
-    /// worse than one that fails loudly.
+    /// Takes trust back when a grant's row never reached the store, so trust
+    /// cannot quietly expire at the next restart.
     pub fn untrust(&mut self, id: &ProjectId) -> bool {
         match self.projects.get_mut(id) {
             Some(p) => {
@@ -566,12 +468,8 @@ impl World {
         }
     }
 
-    /// Hides the run's *current* inbox items until `until`, or shows
-    /// everything again when `until` is `None`.
-    ///
-    /// The kinds are derived here rather than taken from the caller, because
-    /// "snooze this" means the things being asked right now. A kind that turns
-    /// up afterwards was never dismissed and is shown
+    /// Hides the run's *current* inbox item kinds until `until`, or shows
+    /// everything when `None`. A kind that appears later is shown
     /// ([`Snoozed`](crate::core::attention::Snoozed)).
     pub fn snooze(&mut self, run: &RunId, until: Option<jiff::Timestamp>) -> bool {
         let Some(existing) = self.runs.get(run) else {
@@ -589,18 +487,14 @@ impl World {
         true
     }
 
-    /// Loads previously persisted runs into memory.
-    ///
-    /// Restoring is not believing: a run recorded as working is a claim about a
-    /// process that may have died while the daemon was down. The caller
-    /// reconciles against the machine before any of this reaches the board.
+    /// Loads persisted runs. The caller must [`reconcile`](Self::reconcile)
+    /// them against the machine before they reach the board.
     pub fn restore_runs(&mut self, runs: impl IntoIterator<Item = Run>) {
         for run in runs {
             if let Some(pid) = run.project_id.clone()
                 && !self.projects.contains_key(&pid)
             {
-                // The project row may be gone while its runs remain; keep the
-                // reference resolvable rather than dropping the run.
+                // Keep the reference resolvable if the project row is gone.
                 let mut p = Project::from_root(run.cwd.clone());
                 p.id = pid;
                 p.auto_discovered = true;
@@ -610,12 +504,8 @@ impl World {
         }
     }
 
-    /// Records the surface a session is running on, and the repository it
-    /// reported.
-    ///
-    /// OpenTelemetry is the only channel that names the entrypoint — `cli`,
-    /// `claude-vscode`, `sdk-ts` — which is what lets the board say *where* a
-    /// session is, not just that it exists.
+    /// Records the entrypoint a session runs on (`cli`, `claude-vscode`, …;
+    /// only OpenTelemetry names it) and the repository it reported.
     pub fn set_entrypoint(&mut self, run: &RunId, entrypoint: &str, repo_url: Option<&str>) {
         let Some(r) = self.runs.get_mut(run) else {
             return;
@@ -632,13 +522,6 @@ impl World {
         }
     }
 
-    /// Records the plan a driven agent reported for its turn.
-    pub fn set_plan(&mut self, run: &RunId, plan: Vec<crate::core::PlanStep>) {
-        if let Some(r) = self.runs.get_mut(run) {
-            r.plan = plan;
-        }
-    }
-
     /// Records the context window a driven agent reported for itself.
     pub fn set_context_window(&mut self, run: &RunId, window: u64) {
         if let Some(r) = self.runs.get_mut(run)
@@ -648,32 +531,46 @@ impl World {
         }
     }
 
-    /// Re-derives state from a replay of stored events. Used at startup, and by
-    /// the tests that prove the reducer and the store agree.
-    pub fn replay(&mut self, events: impl IntoIterator<Item = EventEnvelope>) {
-        for env in events {
-            let cwd = match &env.event {
-                Event::SessionStarted { cwd, .. } | Event::CwdChanged { cwd } => Some(cwd.clone()),
-                _ => None,
-            };
-            self.apply(
-                env,
-                RunHint {
-                    cwd,
-                    mode: RunMode::Observed,
-                    agent: "claude".into(),
-                    agent_command: None,
-                },
-            );
+    /// [`apply`](Self::apply) for a stored event, at most once per run: an
+    /// event whose `seq` the run already holds is skipped and returns `None`.
+    pub fn apply_stored(
+        &mut self,
+        seq: i64,
+        env: EventEnvelope,
+        hint: RunHint,
+    ) -> Option<(EventEnvelope, Vec<Changed>)> {
+        if self
+            .runs
+            .get(&env.run_id)
+            .is_some_and(|r| r.last_seq >= seq)
+        {
+            return None;
+        }
+        let (applied, changes) = self.apply(env, hint);
+        if let Some(r) = self.runs.get_mut(&applied.run_id) {
+            r.last_seq = r.last_seq.max(seq);
+        }
+        Some((applied, changes))
+    }
+
+    /// [`replay`](Self::replay) for stored events with their `seq`.
+    pub fn replay_stored(&mut self, events: impl IntoIterator<Item = (i64, EventEnvelope)>) {
+        for (seq, env) in events {
+            let hint = replay_hint(&env);
+            self.apply_stored(seq, env, hint);
         }
     }
 
-    /// Marks live runs whose process is gone as lost, and returns the events
-    /// that recorded it so the caller can persist them.
-    ///
-    /// Never assume a run still exists because the database says so: that is
-    /// the difference between a board that reflects the machine and one that
-    /// reflects a memory of it.
+    /// Re-derives state from a replay of events.
+    pub fn replay(&mut self, events: impl IntoIterator<Item = EventEnvelope>) {
+        for env in events {
+            let hint = replay_hint(&env);
+            self.apply(env, hint);
+        }
+    }
+
+    /// Records that live runs whose process is gone have ended, and returns
+    /// the events so the caller can persist them.
     pub fn reconcile(&mut self, alive: &dyn Fn(&Run) -> bool) -> Vec<EventEnvelope> {
         let mut out = Vec::new();
         let ids: Vec<RunId> = self
@@ -689,15 +586,12 @@ impl World {
             if alive(run) {
                 continue;
             }
-            // One fact — the process is not there — and the reducer decides
-            // what it means from what the run was doing. Both readings used to
-            // be `Lost`, which is Critical, so every closed editor tab became a
-            // critical inbox item: twelve of the development machine's thirteen
-            // entries were sessions nobody had touched for two days.
+            // One fact — the process is gone; the reducer decides from what the
+            // run was doing whether that is `Lost` or merely stopped.
             {
                 let env = EventEnvelope::new(
                     id.clone(),
-                    crate::core::event::Source::Daemon,
+                    crate::core::event::Source::Host,
                     Event::Lost {
                         reason: "process not found at startup".into(),
                     },
@@ -711,28 +605,18 @@ impl World {
         out
     }
 
-    /// Drops terminal runs older than `max_age_seconds` from memory. The events
-    /// stay on disk; this only keeps the board from growing forever.
-    pub fn prune(&mut self, max_age_seconds: i64) -> usize {
+    /// Drops terminal runs older than `max_age_seconds` as of `now` from
+    /// memory; the events stay on disk.
+    pub fn prune(&mut self, now: jiff::Timestamp, max_age_seconds: i64) -> usize {
         let before = self.runs.len();
         self.runs.retain(|_, r| {
-            r.state.is_live()
-                || (jiff::Timestamp::now() - r.last_event_at).get_seconds() < max_age_seconds
+            r.state.is_live() || (now - r.last_event_at).get_seconds() < max_age_seconds
         });
         before - self.runs.len()
     }
 
-    /// Counts for the board header.
-    /// The numbers above the board, and they **partition what is on it**.
-    ///
-    /// They did not. The state counts ran over every run and `dormant` was an
-    /// orthogonal cut across the same set, so a line reading
-    /// `38 sessions · 1 working · 0 need you · 25 idle` plus `10 dormant`
-    /// double-counted and still left twelve sessions unmentioned. Now the
-    /// breakdown covers exactly the runs the board shows and `dormant` is
-    /// everything else, so `working + needs_you + idle + failed + dormant`
-    /// is `runs` — which is what a reader assumes the moment they see a list
-    /// of numbers with a total in front of it.
+    /// The counts for the board header. They partition the runs:
+    /// `working + needs_you + idle + failed + dormant == runs`.
     pub fn summary(&self) -> BoardSummary {
         let mut s = BoardSummary {
             projects: self.projects.len(),
@@ -740,7 +624,7 @@ impl World {
             ..Default::default()
         };
         for r in self.runs.values() {
-            // Spend is spend, whoever is looking: summed over everything.
+            // Summed over every run, dormant included.
             s.cost_usd += r.totals.cost_usd;
             if !r.is_active() {
                 s.dormant += 1;
@@ -751,12 +635,8 @@ impl World {
                 RunState::Waiting(_) => s.needs_you += 1,
                 RunState::Idle => s.idle += 1,
                 RunState::Failed | RunState::Lost => s.failed += 1,
-                // **Interrupted is counted here deliberately, and not as
-                // `needs_you`.** Work cut off by a daemon bounce does want a
-                // person, but the thing that asks for one is the inbox item
-                // (`AttentionKind::Interrupted`), and a run counted in both
-                // places is one interruption charging the attention budget
-                // twice. The header line summarises; the inbox asks.
+                // Interrupted is not `needs_you`: its inbox item asks, and
+                // counting it here too would charge attention twice.
                 RunState::Completed | RunState::Stopped | RunState::Interrupted => s.idle += 1,
             }
             if r.state.is_live() {
@@ -824,7 +704,7 @@ pub struct BoardSummary {
     pub dormant: usize,
     pub cost_usd: f64,
     /// Open issues across every registered project, from the last forge poll.
-    /// Filled by the daemon, which holds that state; zero here.
+    /// Filled by the host, which holds that state; zero here.
     #[serde(default)]
     pub open_issues: usize,
     /// Open pull requests, the same way.
@@ -833,18 +713,26 @@ pub struct BoardSummary {
     /// Of those, the ones waiting on the person (see `ForgeCounts`).
     #[serde(default)]
     pub forge_needs_you: usize,
-    /// Questions and permissions still waiting on a person **whose session is
-    /// no longer running**. Filled by the daemon, which holds that state.
-    ///
-    /// **A separate number rather than part of `needs_you`, and the separation
-    /// is the point twice over.** `needs_you` is a column in a breakdown of
-    /// *sessions* — every session is in exactly one of them, and a test says so
-    /// — and an ask that outlived its run is not a session at all. But leaving
-    /// it out of the line entirely is how a machine with an unanswered question
-    /// from yesterday came to print *"0 need you"*, which is the exact failure
-    /// the durable ask exists to prevent, one layer up in the summary.
+    /// Questions and permissions still waiting on a person whose session is no
+    /// longer running; filled by the host. Separate from `needs_you`, which
+    /// partitions sessions, so an orphaned ask never reads as *0 need you*.
     #[serde(default)]
     pub asks_waiting: usize,
+}
+
+/// How a replayed event's run is hinted: its own directory where it names
+/// one, watched rather than driven, the agent its source names.
+fn replay_hint(env: &EventEnvelope) -> RunHint {
+    let cwd = match &env.event {
+        Event::SessionStarted { cwd, .. } | Event::CwdChanged { cwd } => Some(cwd.clone()),
+        _ => None,
+    };
+    RunHint {
+        cwd,
+        mode: RunMode::Observed,
+        agent: env.source.agent().unwrap_or("claude").to_string(),
+        agent_command: None,
+    }
 }
 
 #[cfg(test)]
@@ -860,11 +748,6 @@ mod clock_ranking_tests {
             .into()
     }
 
-    /// **A session closing its questions immediately outranks an unsupervised
-    /// one.** An unsupervised session is a mode somebody chose; this is a
-    /// session in which *a question waits for you* is untrue right now, and a
-    /// list that buries it under an alphabetical neighbour has hidden the one
-    /// row it exists to show.
     #[test]
     fn a_session_that_answers_instantly_sorts_above_everything() {
         let immediate = line(After::Immediately);
@@ -877,8 +760,7 @@ mod clock_ranking_tests {
         assert!(!immediate.says.contains("0s"), "{}", immediate.says);
     }
 
-    /// The rendered line carries the words, so three surfaces cannot word one
-    /// fact differently.
+    /// The line carries the sentence, so surfaces cannot word it differently.
     #[test]
     fn the_rendered_line_carries_the_sentence_rather_than_the_ingredients() {
         let l = line(After::Idle("5m".into()));
@@ -898,9 +780,7 @@ mod tests {
     use super::*;
     use crate::core::event::WaitingFor;
 
-    /// An envelope carrying the channel the event actually comes from. A
-    /// roster sample is not a hook, and labelling it as one tells the reducer
-    /// a channel is connected that is not.
+    /// An envelope carrying the channel the event actually comes from.
     fn env(run: &str, e: Event) -> EventEnvelope {
         let source = e.test_source();
         EventEnvelope::new(RunId::new(run), source, e)
@@ -934,9 +814,6 @@ mod tests {
 
     #[test]
     fn the_id_the_board_prints_is_an_id_the_commands_accept() {
-        // The board shows eight characters of the id, or the session name with
-        // the project stripped off — and every command took the whole thing, so
-        // the one identifier a user ever sees was the one nothing accepted.
         let mut w = World::new();
         seed(&mut w, "7c4f9a20-1111-2222-3333-444455556666", None);
         seed(
@@ -945,7 +822,6 @@ mod tests {
             Some("repo-a1"),
         );
 
-        // Exactly, as before.
         assert_eq!(
             w.resolve_run("7c4f9a20-1111-2222-3333-444455556666")
                 .unwrap()
@@ -971,8 +847,6 @@ mod tests {
 
     #[test]
     fn an_ambiguous_id_names_the_candidates_rather_than_guessing() {
-        // Picking one would act on the wrong session, and the actions on offer
-        // include stopping an agent.
         let mut w = World::new();
         seed(&mut w, "abc111", None);
         seed(&mut w, "abc222", None);
@@ -990,9 +864,6 @@ mod tests {
 
     #[test]
     fn a_dormant_tab_does_not_make_todays_session_unaddressable() {
-        // A machine that has been running agents all week has editor tabs whose
-        // processes are still alive. One of them sharing a prefix must not cost
-        // the working session its short id.
         let mut w = World::new();
         seed(&mut w, "abc111", None);
         seed(&mut w, "abc222", None);
@@ -1003,6 +874,50 @@ mod tests {
         }
         assert!(!w.run(&RunId::new("abc222")).unwrap().is_active());
         assert_eq!(w.resolve_run("abc").unwrap().as_str(), "abc111");
+    }
+
+    /// Projection is at-least-once, and `turns` feeds the budget.
+    #[test]
+    fn replaying_a_stored_batch_twice_changes_nothing() {
+        let batch = vec![
+            (
+                1,
+                env(
+                    "s1",
+                    Event::SessionStarted {
+                        cwd: PathBuf::from("/tmp/repo"),
+                        source: None,
+                        model: None,
+                        entrypoint: None,
+                        question_clock: None,
+                        clock_read: false,
+                    },
+                ),
+            ),
+            (2, env("s1", Event::TurnEnded)),
+            (3, env("s1", Event::TurnEnded)),
+        ];
+        let mut w = World::new();
+        w.replay_stored(batch.clone());
+        let once = w.run(&RunId::new("s1")).cloned().unwrap();
+        assert_eq!(once.totals.turns, 2);
+        assert_eq!(once.last_seq, 3);
+        w.replay_stored(batch.clone());
+        assert_eq!(w.run(&RunId::new("s1")), Some(&once));
+
+        // And across a restart: the run as saved, the batch again.
+        let mut w = World::new();
+        w.restore_runs([once.clone()]);
+        w.replay_stored(batch);
+        assert_eq!(w.run(&RunId::new("s1")).unwrap().totals.turns, 2);
+    }
+
+    #[test]
+    fn an_event_with_no_directory_registers_no_project() {
+        let mut w = World::new();
+        let (env, _) = w.apply(env("s9", Event::TurnEnded), RunHint::default());
+        assert!(env.project_id.is_none());
+        assert_eq!(w.projects().count(), 0);
     }
 
     #[test]
@@ -1030,15 +945,13 @@ mod tests {
         assert!(
             changes
                 .iter()
-                .any(|c| matches!(c, Change::ProjectDiscovered(_)))
+                .any(|c| matches!(c, Changed::ProjectDiscovered(_)))
         );
         assert_eq!(w.summary().working, 1);
     }
 
     #[test]
     fn a_worktree_belongs_to_the_repository_that_owns_it() {
-        // Five parallel worktrees must be five runs on one project, not five
-        // projects nobody registered.
         let mut w = World::new();
         for (i, path) in [
             "/tmp/repo",
@@ -1132,6 +1045,7 @@ mod tests {
                     ask: None,
                     options: vec![],
                     call: None,
+                    context: None,
                 },
             ),
         ];
@@ -1164,9 +1078,6 @@ mod tests {
 
     #[test]
     fn a_tab_left_open_for_days_is_not_the_working_set() {
-        // A machine that has been running agents for a week accumulates editor
-        // tabs whose processes are still alive. Twenty rows that all look
-        // equally alive answer no question at all.
         let mut w = World::new();
         let three_days_ago =
             (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(72)).as_millisecond();
@@ -1188,8 +1099,6 @@ mod tests {
 
     #[test]
     fn the_age_shown_is_the_sessions_own_not_the_moment_we_noticed_it() {
-        // Otherwise a three-day-old tab reads as new, every row shows the same
-        // number, and the board sorts by nothing.
         let mut w = World::new();
         let two_days_ago =
             (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(48)).as_millisecond();
@@ -1224,7 +1133,6 @@ mod tests {
 
     #[test]
     fn a_dormant_session_that_needs_a_human_is_never_hidden() {
-        // Hiding is about noise, not about silencing a question.
         let mut w = World::new();
         let long_ago =
             (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(72)).as_millisecond();
@@ -1260,12 +1168,6 @@ mod tests {
     }
 
     /// A closed editor tab is not a loss.
-    ///
-    /// Reconciliation marked **every** live run whose process was missing as
-    /// `Lost`, which is Critical. On the development machine that made twelve
-    /// of the inbox's thirteen items sessions nobody had touched for two days
-    /// — the exact failure the ranking policy exists to prevent, produced by
-    /// the ranking policy itself.
     #[test]
     fn a_tab_that_closed_has_ended_and_work_that_vanished_is_lost() {
         let mut w = World::new();
@@ -1303,12 +1205,8 @@ mod tests {
         assert_eq!(kinds, [crate::core::AttentionKind::Lost]);
     }
 
-    /// A repository whose rules will not parse says so, at the top.
-    ///
-    /// The failure this covers is silence: the file is broken, the daemon kept
-    /// no previous rules to fall back on, every `never_auto` in that repository
-    /// is inert, and every other surface in the product looks exactly as it
-    /// does when the machine is healthy.
+    /// A repository whose rules will not parse has inert deny rules and must
+    /// say so, even on an otherwise quiet machine.
     #[test]
     fn a_configuration_that_will_not_parse_is_a_critical_item_on_a_quiet_machine() {
         let w = World::new();
@@ -1316,17 +1214,19 @@ mod tests {
             PathBuf::from("/repos/payments-api"),
             "TOML parse error at line 12".to_string(),
         )];
-        let inbox = w.inbox_with_health(
-            &[],
-            &Default::default(),
-            &|_| None,
-            &Health {
-                broken_configs: &broken,
-                ..Default::default()
-            },
-            Vec::new(),
-            Vec::new(),
-        );
+        let inbox = w
+            .inbox_with_health(
+                &[],
+                &Default::default(),
+                &|_| None,
+                &Health {
+                    broken_configs: &broken,
+                    ..Default::default()
+                },
+                Vec::new(),
+                Vec::new(),
+            )
+            .items;
         assert_eq!(inbox.len(), 1, "nothing else is wrong and this still shows");
         let item = &inbox[0];
         assert_eq!(item.kind, crate::core::AttentionKind::ConfigBroken);
@@ -1339,12 +1239,10 @@ mod tests {
             detail.contains("devplane check /repos/payments-api"),
             "{detail}"
         );
-        // Nothing to click: rewriting somebody's committed rules from an inbox
-        // row is not something this product does.
+        // Nothing to click: committed rules are not rewritten from the inbox.
         assert!(item.actions.is_empty());
 
-        // Two broken repositories are two items, and the id is stable per
-        // repository so the attention log does not grow one row per poll.
+        // Two repositories, two items, with ids stable across polls.
         let both = vec![
             broken[0].clone(),
             (
@@ -1352,75 +1250,75 @@ mod tests {
                 "unknown field `gate`".to_string(),
             ),
         ];
-        let inbox = w.inbox_with_health(
-            &[],
-            &Default::default(),
-            &|_| None,
-            &Health {
-                broken_configs: &both,
-                ..Default::default()
-            },
-            Vec::new(),
-            Vec::new(),
-        );
+        let inbox = w
+            .inbox_with_health(
+                &[],
+                &Default::default(),
+                &|_| None,
+                &Health {
+                    broken_configs: &both,
+                    ..Default::default()
+                },
+                Vec::new(),
+                Vec::new(),
+            )
+            .items;
         assert_eq!(inbox.len(), 2);
-        let again = w.inbox_with_health(
-            &[],
-            &Default::default(),
-            &|_| None,
-            &Health {
-                broken_configs: &both,
-                ..Default::default()
-            },
-            Vec::new(),
-            Vec::new(),
-        );
+        let again = w
+            .inbox_with_health(
+                &[],
+                &Default::default(),
+                &|_| None,
+                &Health {
+                    broken_configs: &both,
+                    ..Default::default()
+                },
+                Vec::new(),
+                Vec::new(),
+            )
+            .items;
         let ids: Vec<_> = inbox.iter().map(|i| i.id.clone()).collect();
         let ids_again: Vec<_> = again.iter().map(|i| i.id.clone()).collect();
         assert_eq!(ids, ids_again, "the id must not move between polls");
     }
 
-    /// **A hole in the record gets a row, and a whole record gets none.**
-    ///
-    /// The store write that fails is logged and dropped on purpose — losing
-    /// history beats stalling the hook a session is blocked on — and that log
-    /// line goes to a daemon's stderr, which is nobody's screen. So for as
-    /// long as this row did not exist, every count, every audit answer and
-    /// every "who decided this" on the board was derived from a log that could
-    /// be missing anything at all, and looked exactly as it does when it is
-    /// complete.
+    /// A failed store write is dropped on purpose (rather than stalling a
+    /// blocked hook), so the hole in the record must surface as a row.
     #[test]
     fn a_record_with_a_hole_in_it_says_so_and_a_whole_one_stays_quiet() {
         let w = World::new();
-        let quiet = w.inbox_with_health(
-            &[],
-            &Default::default(),
-            &|_| None,
-            &Health::default(),
-            Vec::new(),
-            Vec::new(),
-        );
+        let quiet = w
+            .inbox_with_health(
+                &[],
+                &Default::default(),
+                &|_| None,
+                &Health::default(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .items;
         assert!(
             quiet.is_empty(),
             "a healthy machine raises nothing: {quiet:?}"
         );
 
-        let inbox = w.inbox_with_health(
-            &[],
-            &Default::default(),
-            &|_| None,
-            &Health {
-                unwritten: (3, 1, Some("database or disk is full")),
-                ..Default::default()
-            },
-            Vec::new(),
-            Vec::new(),
-        );
+        let inbox = w
+            .inbox_with_health(
+                &[],
+                &Default::default(),
+                &|_| None,
+                &Health {
+                    unwritten: (3, 1, Some("database or disk is full")),
+                    ..Default::default()
+                },
+                Vec::new(),
+                Vec::new(),
+            )
+            .items;
         assert_eq!(inbox.len(), 1);
         let item = &inbox[0];
         assert_eq!(item.kind, crate::core::AttentionKind::RecordIncomplete);
-        // Critical: this is the one failure the product cannot absorb, because
-        // every other screen is a reading of the thing that is now incomplete.
+        // Critical: every other screen reads the now-incomplete record.
         assert_eq!(item.level, crate::core::attention::Level::Critical);
         // Both counts, said separately — a lost decision is not a lost event.
         assert!(
@@ -1434,47 +1332,43 @@ mod tests {
         // Nothing to click: the fix is disk space or a file permission.
         assert!(item.actions.is_empty());
 
-        // Stable, so a disk that stays full is one open row rather than one
-        // per write that failed — which would be the loudest possible way to
-        // make this unreadable.
-        let again = w.inbox_with_health(
-            &[],
-            &Default::default(),
-            &|_| None,
-            &Health {
-                unwritten: (9_001, 12, Some("database or disk is full")),
-                ..Default::default()
-            },
-            Vec::new(),
-            Vec::new(),
-        );
+        // Stable: a disk that stays full is one open row, not one per failure.
+        let again = w
+            .inbox_with_health(
+                &[],
+                &Default::default(),
+                &|_| None,
+                &Health {
+                    unwritten: (9_001, 12, Some("database or disk is full")),
+                    ..Default::default()
+                },
+                Vec::new(),
+                Vec::new(),
+            )
+            .items;
         assert_eq!(again[0].id, item.id, "one open row, whatever the count");
         assert!(again[0].title.contains("9001"), "{}", again[0].title);
 
-        // One of each, singular. `1 events` is how a person learns the row was
-        // generated rather than written.
-        let one = w.inbox_with_health(
-            &[],
-            &Default::default(),
-            &|_| None,
-            &Health {
-                unwritten: (1, 0, None),
-                ..Default::default()
-            },
-            Vec::new(),
-            Vec::new(),
-        );
+        // Singular for one.
+        let one = w
+            .inbox_with_health(
+                &[],
+                &Default::default(),
+                &|_| None,
+                &Health {
+                    unwritten: (1, 0, None),
+                    ..Default::default()
+                },
+                Vec::new(),
+                Vec::new(),
+            )
+            .items;
         assert!(one[0].title.starts_with("1 event "), "{}", one[0].title);
         assert!(!one[0].title.contains("1 events"), "{}", one[0].title);
     }
 
-    /// **Three states, not two: asked, unreadable, and silent.**
-    ///
-    /// Shipped briefly with the last two collapsed, and on a real machine that
-    /// rendered as *"16 report a mode this build does not know"* about sixteen
-    /// idle editors that had simply not spoken yet — a security incident made
-    /// of nothing. A session that said something unreadable and a session that
-    /// said nothing are different facts and only one of them is alarming.
+    /// Three states, not two: asked, unreadable, and silent — only one of the
+    /// last two is alarming.
     #[test]
     fn a_silent_session_is_not_a_session_running_something_exotic() {
         let mut w = World::new();
@@ -1505,8 +1399,7 @@ mod tests {
             "the two must not be the same number"
         );
 
-        // Least supervised first: the row worth reading must not be buried by
-        // an alphabetical sort.
+        // Least supervised first.
         let sessions = &all[0].sessions;
         assert_eq!(
             sessions[0].asks_a_person,
@@ -1558,11 +1451,6 @@ mod tests {
     }
 
     /// The numbers above the board add up to the board.
-    ///
-    /// They did not: the state counts ran over every run while `dormant` was an
-    /// orthogonal cut of the same set, so `38 sessions · 1 working · 0 need you
-    /// · 25 idle` left twelve failed sessions unmentioned and double-counted
-    /// the ten it did mention.
     #[test]
     fn the_summary_partitions_every_session() {
         let mut w = World::new();
@@ -1630,6 +1518,27 @@ mod tests {
         assert!(
             kinds.contains(&crate::core::AttentionKind::Permission),
             "a session that is asking is never history"
+        );
+    }
+
+    /// Retention measures against the instant it is handed; a live run never
+    /// ages out.
+    #[test]
+    fn a_prune_ages_terminal_runs_as_of_the_instant_it_is_given() {
+        let mut w = World::new();
+        seed(&mut w, "done", None);
+        seed(&mut w, "busy", None);
+        w.runs.get_mut(&RunId::new("done")).unwrap().state = RunState::Completed;
+        w.runs.get_mut(&RunId::new("busy")).unwrap().state = RunState::Working;
+
+        let now = jiff::Timestamp::now();
+        assert_eq!(w.prune(now, 86_400), 0, "nothing is a day old yet");
+        let two_days_on = now + jiff::SignedDuration::from_hours(48);
+        assert_eq!(w.prune(two_days_on, 86_400), 1);
+        assert!(w.run(&RunId::new("done")).is_none());
+        assert!(
+            w.run(&RunId::new("busy")).is_some(),
+            "live runs never age out"
         );
     }
 }

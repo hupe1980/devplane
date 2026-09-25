@@ -1,26 +1,16 @@
-//! Which agents can be driven, and how to start them.
-//!
-//! An agent is a command. The Agent Client Protocol registry publishes the
-//! command for each one — `npx @agentclientprotocol/claude-agent-acp@0.76`,
-//! `opencode acp`, a downloaded binary — so adding an agent is data rather than
-//! code, and the version is pinned to the one the conformance suite passed
-//! against.
+//! Which agents can be driven, and how to start them. An agent is a command,
+//! as the ACP registry publishes it, pinned to an exact version.
 
 use serde::{Deserialize, Serialize};
 
 /// How to launch one agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSpec {
-    /// The id used on the board and in `devplane dispatch --agent`.
+    /// The id used on the board and in `devplane change start --agent`.
     pub id: String,
     pub name: String,
     /// The command line, as the registry publishes it.
     pub command: String,
-    /// Whether the conformance suite has passed against this exact command.
-    /// An unverified agent still runs; the UI just stops pretending it is
-    /// known to work.
-    #[serde(default)]
-    pub verified: bool,
 }
 
 impl AgentSpec {
@@ -29,61 +19,44 @@ impl AgentSpec {
             id: id.into(),
             name: name.into(),
             command: command.into(),
-            verified: false,
         }
     }
 }
 
-/// The agents Devplane knows about out of the box.
-///
-/// Pinned to exact versions on purpose. An agent that silently upgrades under a
-/// conformance suite is an agent whose suite proves nothing, and `npx` will
-/// happily fetch a new major version overnight otherwise.
+/// The agents Devplane knows about out of the box, pinned to exact `x.y.z`
+/// versions: `@0.76` is a range, and `npx` would fetch whatever is newest.
 pub fn builtin() -> Vec<AgentSpec> {
     vec![
-        AgentSpec {
-            id: "claude".into(),
-            name: "Claude Code".into(),
-            command: "npx -y @agentclientprotocol/claude-agent-acp@0.76".into(),
-            verified: false,
-        },
-        AgentSpec {
-            id: "codex".into(),
-            name: "Codex".into(),
-            command: "npx -y @agentclientprotocol/codex-acp@1.11".into(),
-            verified: false,
-        },
-        AgentSpec {
-            id: "opencode".into(),
-            name: "OpenCode".into(),
-            command: "opencode acp".into(),
-            verified: false,
-        },
-        AgentSpec {
-            // The only other agent that documents all three channels, so the
-            // only other one this product can *watch* as well as drive. The
-            // ACP server is a public preview and the version is pinned like
-            // every other: a conformance run against something unpinned is a
-            // statement about a version nobody recorded.
-            id: "copilot".into(),
-            name: "GitHub Copilot".into(),
-            command: "npx -y @github/copilot@1.0.83 --acp".into(),
-            verified: false,
-        },
-        AgentSpec {
-            id: "gemini".into(),
-            name: "Gemini CLI".into(),
-            command: "npx -y @google/gemini-cli@0.59.0 --acp".into(),
-            verified: false,
-        },
+        AgentSpec::new(
+            "claude",
+            "Claude Code",
+            "npx -y @agentclientprotocol/claude-agent-acp@0.79.0",
+        ),
+        AgentSpec::new(
+            "codex",
+            "Codex",
+            "npx -y @agentclientprotocol/codex-acp@1.12.0",
+        ),
+        // The registry distributes OpenCode as a binary, launched as
+        // `opencode acp`; there is no `npx` entry to pin.
+        AgentSpec::new("opencode", "OpenCode", "opencode acp"),
+        // The only other agent documenting all three channels, so it can be
+        // watched as well as driven.
+        AgentSpec::new(
+            "copilot",
+            "GitHub Copilot",
+            "npx -y @github/copilot@1.0.86 --acp",
+        ),
+        AgentSpec::new(
+            "gemini",
+            "Gemini CLI",
+            "npx -y @google/gemini-cli@0.60.0 --acp",
+        ),
     ]
 }
 
-/// Agents the user added, from `<home>/agents.toml`.
-///
-/// The point of speaking a standard is that a new agent costs no code, so the
-/// launch commands are data rather than a release — and data the user owns,
-/// which is a smaller trust surface than fetching a registry.
+/// Agents the user added, from `<home>/agents.toml`, so a new agent needs no
+/// release.
 ///
 /// ```toml
 /// [agents.kimi]
@@ -118,25 +91,18 @@ pub fn user_agents(home: &std::path::Path) -> Vec<AgentSpec> {
             })
             .collect(),
         Err(e) => {
-            // Loud and empty rather than quiet and half-loaded: an agent list
-            // that silently lost an entry is a dispatch that fails with
-            // "unknown agent" for a name the user can see in their own file.
+            // Loud and empty rather than quiet and half-loaded: a silently
+            // dropped entry would fail later as "unknown agent".
             tracing::warn!(path = %path.display(), error = %e, "agents.toml was not read");
             Vec::new()
         }
     }
 }
 
-/// Looks an agent up by id, falling back to treating the id as a command so a
-/// developer can point at a binary without editing a registry.
-///
-/// The user's own `agents.toml` wins over the built-in list, so a pinned
-/// version can be moved without waiting for a release.
-///
-/// "Looks like a command" means it has arguments or a path separator, or names
-/// a file that exists. A bare word is a registry id and nothing else — turning
-/// a typo into a launch attempt would report a missing binary instead of an
-/// unknown agent.
+/// Looks an agent up by id (`extra` wins over the built-ins), falling back to
+/// treating the id as a command. Only something with arguments, a path
+/// separator, or an existing file counts as a command, so a typo reports an
+/// unknown agent rather than a missing binary.
 pub fn resolve(id: &str, extra: &[AgentSpec]) -> Option<AgentSpec> {
     extra
         .iter()
@@ -169,25 +135,40 @@ mod tests {
 
     #[test]
     fn builtin_agents_are_pinned() {
-        // An unpinned `npx` fetches whatever is newest, which makes a
-        // conformance run a statement about a version nobody recorded.
+        // A pin is three numeric components; `@0.76` is a range.
+        let mut npx = 0;
         for a in builtin() {
-            if a.command.starts_with("npx") {
-                assert!(
-                    a.command.contains('@') && a.command.rsplit('@').next().unwrap().contains('.'),
-                    "{} is not pinned: {}",
-                    a.id,
-                    a.command
+            if !a.command.starts_with("npx") {
+                // The one binary entry is the registry's own launch line.
+                assert_eq!(
+                    a.command, "opencode acp",
+                    "{} is not the registry's command",
+                    a.id
                 );
+                continue;
             }
+            npx += 1;
+            let package = a
+                .command
+                .split_whitespace()
+                .find(|w| w.contains('@') && !w.starts_with('-'))
+                .unwrap_or_else(|| panic!("{} names no package: {}", a.id, a.command));
+            let version = package.rsplit('@').next().unwrap();
+            let parts: Vec<&str> = version.split('.').collect();
+            assert!(
+                parts.len() == 3
+                    && parts
+                        .iter()
+                        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())),
+                "{} is pinned to `{version}`, which is a range rather than a version",
+                a.id
+            );
         }
+        assert_eq!(npx, 4, "four agents come from npm and one is a binary");
     }
 
     #[test]
     fn the_user_can_add_an_agent_without_a_release() {
-        // The argument for speaking a standard is that a new agent costs no
-        // code. Four were compiled in and the fifth needed a release, which is
-        // the opposite of that argument.
         let home = std::env::temp_dir().join(format!("vp-agents-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
@@ -223,8 +204,7 @@ mod tests {
 
     #[test]
     fn an_unknown_id_can_still_be_a_command() {
-        // A typo stays a typo, so the error names the agent rather than a
-        // binary nobody meant to run.
+        // A typo stays an unknown agent, not a launch attempt.
         assert!(resolve("nope", &[]).is_none());
         assert!(resolve("claud", &[]).is_none());
 

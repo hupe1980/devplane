@@ -7,13 +7,8 @@ use crate::{client, render};
 use anyhow::{Context, Result};
 
 fn print_board(board: &render::BoardResponse) {
-    // Grouped by project, because that is the unit the person cares about. A
-    // machine with nine sessions open on one repository otherwise prints nine
-    // near-identical rows that differ only in a hash, and reading them means
-    // matching prefixes by eye to work out that it is all one project.
-    //
-    // The board is already sorted by recency, so first appearance decides a
-    // project's place and the rows keep their order inside it.
+    // Grouped by project. The board is sorted by recency, so first appearance
+    // decides a project's place and rows keep their order inside it.
     let mut order: Vec<String> = Vec::new();
     let mut groups: std::collections::HashMap<String, Vec<&render::RunView>> =
         std::collections::HashMap::new();
@@ -33,8 +28,7 @@ fn print_board(board: &render::BoardResponse) {
         if i > 0 {
             println!();
         }
-        // What GitHub says is open here, on the heading — the other half of
-        // what is waiting on the person, and the half no session reports.
+        // What GitHub says is open here, on the heading.
         let forge = rows
             .iter()
             .find_map(|r| r.project.as_deref())
@@ -52,9 +46,7 @@ fn print_board(board: &render::BoardResponse) {
             paint(DIM, &forge)
         );
 
-        // Two sessions of one project can share a short name — `acp-01a0`
-        // twice — and a label that names two rows names neither, so a
-        // repeated one falls back to the id the commands accept.
+        // A short name shared by two sessions falls back to the id.
         let labels: Vec<String> = rows.iter().map(|r| session_label(r, project)).collect();
         for (r, label) in rows.iter().zip(&labels) {
             let label = if labels.iter().filter(|l| *l == label).count() > 1 {
@@ -66,16 +58,16 @@ fn print_board(board: &render::BoardResponse) {
                 .context_percent
                 .map(|p| format!("{p:3.0}%"))
                 .unwrap_or_else(|| "   -".into());
+            // Three states: a cost, a genuine nothing, and a gap (telemetry
+            // nobody received, which the vendor never replays) shown as `?`.
             let cost = if r.cost_usd > 0.0 {
                 format!("${:.2}", r.cost_usd)
+            } else if r.cost_unknown {
+                "?".into()
             } else {
                 "-".into()
             };
-            // The project is on the header line, so the row carries only what
-            // tells one of its sessions from another.
-            // Trimmed: a working run with nothing to say would otherwise leave
-            // two spaces at the end of every line, which shows up the moment
-            // anyone pipes the board into a file.
+            // Trimmed, so an empty summary leaves no trailing spaces in a pipe.
             let line = format!(
                 "  {} {:<10} {:<8} {:>5} {:>7} {:>5}  {}",
                 state_marker(&r.state),
@@ -90,15 +82,17 @@ fn print_board(board: &render::BoardResponse) {
             if let Some(w) = &r.worktree {
                 println!("    {}", paint(DIM, &format!("worktree {}", clip(w, 68))));
             }
+            // What the run was sent, or the sentence saying nothing was.
+            if !r.sent_says.is_empty() {
+                println!("    {}", paint(DIM, &r.sent_says));
+            }
         }
     }
 }
 
 /// `  ·  4 issues · 2 PRs (1 need you)`, or nothing when nothing is open.
 ///
-/// A project whose last poll failed says so, because the counts beside it are
-/// the last good ones rather than what GitHub says now — and a count that is
-/// quietly stale is worse than no count at all.
+/// A project whose last poll failed says so: its counts are the last good ones.
 fn forge_suffix(c: &render::ForgeCounts) -> String {
     if c.issues == 0 && c.pull_requests == 0 {
         return match &c.stale {
@@ -126,10 +120,8 @@ fn forge_suffix(c: &render::ForgeCounts) -> String {
     out
 }
 
-/// What distinguishes one session of a project from another.
-///
-/// Session names are `<project>-<hash>`, and the project is already the header
-/// above the row, so repeating it costs ten columns to say nothing.
+/// What distinguishes one session of a project from another: the name without
+/// its `<project>-` prefix, which the header already shows.
 fn session_label(run: &render::RunView, project: &str) -> String {
     let name = run.name.as_deref().unwrap_or("");
     let short = name
@@ -137,25 +129,23 @@ fn session_label(run: &render::RunView, project: &str) -> String {
         .and_then(|rest| rest.strip_prefix('-'))
         .unwrap_or(name);
     if short.is_empty() {
-        // Nothing to strip and nothing to show: fall back to the run's own id,
-        // which is what `devplane show` and `focus` take anyway.
+        // Nothing left: fall back to the id `show` and `focus` take.
         return run.id.chars().take(8).collect();
     }
     clip(short, 10)
 }
 
 pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
-    // A filter asks about sessions that may well be dormant — `--project x`
-    // meaning "and nothing in x" would be a lie — so either one widens the
-    // fetch and then narrows it here.
+    let c = crate::local::Reader::open().await?;
+    // A filter may match dormant sessions, so it widens the fetch and narrows
+    // here.
     let all = all || project.is_some() || needs_you;
     let path = if all {
         "/api/board?all=true"
     } else {
         "/api/board"
     };
-    let mut board: render::BoardResponse = c.get(path).await?;
+    let mut board: render::BoardResponse = c.get_as(path).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&raw(&c, path).await?)?);
@@ -204,8 +194,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
     }
 
     if board.runs.is_empty() {
-        // Two very different situations look identical here, and telling the
-        // user the wrong one wastes their afternoon.
+        // No sessions and no Claude Code look alike here; say which it is.
         match crate::observe::locate::claude_binary() {
             Some(bin) => println!(
                 "No Claude Code sessions are running.\n\n\
@@ -215,9 +204,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                  {}",
                 paint(DIM, &format!("using {}", bin.display())),
                 paint(BOLD, "devplane connect claude"),
-                // **What this list cannot see**, which a person has no other way
-                // to discover. The board says the same thing from the same
-                // source, so the two cannot disagree about it.
+                // What this list cannot see, from the source the board uses.
                 paint(DIM, &unwatched_note())
             ),
             None => println!(
@@ -229,20 +216,15 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
                  {}",
                 paint(render::YELLOW, "Claude Code was not found on this machine."),
                 paint(BOLD, "DEVPLANE_CLAUDE_BIN=/path/to/claude"),
-                // **The branch a person who does not use Claude Code sees**, and
-                // it said nothing about them. Telling somebody to install a
-                // vendor they have not chosen, while never saying that their own
-                // agent is one Devplane can drive but not watch, answers a
-                // question they did not ask and leaves theirs open.
+                // For someone on another agent: which ones Devplane can drive
+                // but not watch.
                 paint(DIM, &unwatched_note())
             ),
         }
         return Ok(());
     }
 
-    // A filtered view must not keep the whole machine's header: "7 projects ·
-    // 22 sessions" above two rows of one project is a summary of something
-    // else.
+    // A filtered view gets its own header, not the whole machine's.
     let filtered = project.is_some() || needs_you;
     if filtered {
         let projects: std::collections::HashSet<&str> = board
@@ -272,10 +254,8 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
     }
 
     let s = &board.summary;
-    // Every session is in exactly one of these, and the line says so: it used
-    // to print working + needs-you + idle against a total that also contained
-    // twelve failed sessions, so twelve of thirty-eight went unmentioned in a
-    // line that reads like a breakdown.
+    // Every session is in exactly one of these, so the breakdown sums to the
+    // total.
     println!(
         "{} · {} · {} working · {} need you · {} idle{}{}{}{}",
         paint(BOLD, &format!("{} projects", s.projects)),
@@ -297,10 +277,8 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
         } else {
             String::new()
         },
-        // Questions nobody answered whose sessions are gone. Its own clause,
-        // because the columns above are a breakdown of sessions and this is not
-        // a session — and silence here is how a machine with a question waiting
-        // since yesterday printed "0 need you".
+        // Unanswered questions whose sessions are gone: their own clause, since
+        // they are not sessions but still need you.
         if s.asks_waiting > 0 {
             paint(
                 render::YELLOW,
@@ -339,11 +317,8 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
             )
         );
     }
-    // Sessions are discovered from Claude Code's own roster, which carries no
-    // cost and no context figure — so on a machine that has never run
-    // `connect`, two columns are `-` on every row and nothing says why. The
-    // empty-board path already explains this; the populated one did not, which
-    // is the path somebody with twenty sessions open is actually on.
+    // Claude Code's roster carries no cost or context figure, so without
+    // `connect` those columns are `-` on every row; say why.
     if !board.runs.is_empty()
         && board
             .runs
@@ -366,7 +341,7 @@ pub async fn cmd_ls(all: bool, project: Option<&str>, needs_you: bool, json: boo
 }
 
 pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+    let c = crate::local::Reader::open().await?;
     let v = fetch_run(&c, run).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -381,6 +356,15 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
     );
     println!("  state      {}", v["state"].as_str().unwrap_or("?"));
     println!("  agent      {} ({})", str_of("agent"), str_of("mode"));
+    // From the run's record, never parsed; a watched session says it carries
+    // none rather than guessing from the diff.
+    println!("  tasks      {}", str_of("sent_says"));
+    for t in v["sent"].as_array().unwrap_or(&vec![]) {
+        println!(
+            "             {}",
+            paint(DIM, t["text"].as_str().unwrap_or(""))
+        );
+    }
     println!("  where      {}", str_of("cwd"));
     if let Some(w) = v["worktree"].as_str() {
         println!("  worktree   {w}");
@@ -402,9 +386,7 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         t["tool_calls"].as_u64().unwrap_or(0),
         t["errors"].as_u64().unwrap_or(0)
     );
-    // What the session actually changed. Cost and duration say how much it
-    // spent and how long it took; this is the only cheap signal on the machine
-    // about what came of it, and it arrives with the status line or not at all.
+    // What the session changed, as the status line reports it (or nothing).
     let (added, removed) = (
         t["lines_added"].as_u64().unwrap_or(0),
         t["lines_removed"].as_u64().unwrap_or(0),
@@ -430,10 +412,6 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         println!("  limits     {window} {pct:.0}% used{when}");
     }
     if let Some(v) = v["claude_version"].as_str() {
-        // No note beside it. This line used to carry "— newer than the release
-        // the gate was measured against" in yellow, which outlived the gate
-        // that was measured: `doctor` had already stopped claiming a live
-        // check while this one went on implying one.
         println!("  harness    Claude Code {v}");
     }
 
@@ -488,11 +466,10 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         }
     }
 
-    // The last of the conversation, for a run that has one. `devplane tail`
-    // is the live version; this is the glance.
+    // The tail of the conversation; `devplane watch <run>` is the live version.
     if v["mode"] == "driven" {
         let said: Vec<render::Message> = c
-            .get(&format!("/api/runs/{run}/messages?limit=6"))
+            .get_as(&format!("/api/runs/{run}/messages?limit=6"))
             .await
             .unwrap_or_default();
         if !said.is_empty() {
@@ -514,7 +491,7 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
                     clip(m.text.trim(), 70)
                 );
             }
-            println!("  {}", paint(DIM, &format!("devplane tail {run}")));
+            println!("  {}", paint(DIM, &format!("devplane watch {run}")));
         }
     }
     Ok(())
@@ -530,8 +507,7 @@ fn print_message(role: &str, text: &str, thinking: bool) {
         "thought" => ("···", DIM),
         _ => ("agent", render::MAGENTA),
     };
-    // Indented under its speaker so a wrapped paragraph still reads as one
-    // person talking.
+    // Indented under its speaker so a wrapped paragraph reads as one voice.
     let body = text
         .trim_end()
         .lines()
@@ -541,12 +517,11 @@ fn print_message(role: &str, text: &str, thinking: bool) {
 }
 
 /// Follows a driven run's conversation.
-pub async fn cmd_tail(run: &str, thinking: bool, history: i64) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+async fn follow_run(run: &str, thinking: bool, history: i64) -> Result<()> {
+    let c = client::Client::connect_running().await?;
 
-    // What kind of run this is decides whether there is anything to follow, and
-    // saying so beats printing nothing for ever.
-    let detail = fetch_run(&c, run).await?;
+    // Only a driven run has a conversation to follow; say so otherwise.
+    let detail = fetch_run(&crate::local::Reader::Host(c.clone()), run).await?;
     let mode = detail["mode"].as_str().unwrap_or("observed");
     if mode != "driven" {
         anyhow::bail!(
@@ -579,8 +554,7 @@ pub async fn cmd_tail(run: &str, thinking: bool, history: i64) -> Result<()> {
     let mut buffered = String::new();
     while let Some(chunk) = stream.next().await {
         buffered.push_str(&String::from_utf8_lossy(&chunk?));
-        // Server-sent events are newline-framed and a chunk can split one, so
-        // the last partial line is kept rather than parsed and dropped.
+        // A chunk can split an SSE line, so the partial tail is kept for the next.
         let complete = match buffered.rfind('\n') {
             Some(i) => buffered.drain(..=i).collect::<String>(),
             None => continue,
@@ -598,8 +572,7 @@ pub async fn cmd_tail(run: &str, thinking: bool, history: i64) -> Result<()> {
                     v["text"].as_str().unwrap_or(""),
                     thinking,
                 ),
-                // The turn ending is worth a line: it is the moment the answer
-                // is complete rather than merely paused.
+                // The turn ending marks the answer complete, not paused.
                 Some("event") if v["event"]["type"] == "turn_ended" => {
                     println!("{}", paint(DIM, "— turn ended —"));
                 }
@@ -611,8 +584,8 @@ pub async fn cmd_tail(run: &str, thinking: bool, history: i64) -> Result<()> {
 }
 
 pub async fn cmd_focus(run: &str) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
-    let v = fetch_run(&c, run).await?;
+    let c = client::Client::connect_running().await?;
+    let v = fetch_run(&crate::local::Reader::Host(c.clone()), run).await?;
     let dir = v["worktree"]
         .as_str()
         .or_else(|| v["cwd"].as_str())
@@ -623,10 +596,8 @@ pub async fn cmd_focus(run: &str) -> Result<()> {
             println!("Raised {app} (pid {pid}) for {dir}");
         }
         focus::Focused::Nothing => {
-            // Saying "focused" when nothing happened would be worse than
-            // admitting it, so the fallback is what always works: the command,
-            // and — on the surfaces that make a URL clickable — the handler
-            // Claude Code registers with the operating system.
+            // Nothing to raise: print what always works — the resume command
+            // and the VS Code deep link.
             println!(
                 "No editor window has {dir} open.\n\nResume it in a terminal:\n  claude --resume {run}"
             );
@@ -641,13 +612,9 @@ pub async fn cmd_focus(run: &str) -> Result<()> {
 
 /// Hands the terminal to Claude Code, resuming the session in its own
 /// directory.
-///
-/// This is the escape hatch the whole product is built around: Devplane is
-/// not a terminal, and when a session needs more than a decision the right
-/// answer is the real thing, in the right place, with one keystroke.
 pub async fn cmd_attach(run: &str) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
-    let v = fetch_run(&c, run).await?;
+    let c = client::Client::connect_running().await?;
+    let v = fetch_run(&crate::local::Reader::Host(c.clone()), run).await?;
     let dir = v["worktree"]
         .as_str()
         .or_else(|| v["cwd"].as_str())
@@ -658,8 +625,8 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
     let bin = crate::observe::locate::claude_binary()
         .context("no claude binary found; set DEVPLANE_CLAUDE_BIN")?;
 
-    // A background session is owned by Claude's daemon, which has its own way
-    // in; resuming it as a fresh conversation would fork the transcript.
+    // A background session belongs to Claude Code's own daemon and is attached
+    // to; resuming it as a fresh conversation would fork the transcript.
     let args: Vec<String> = if mode == "background" {
         vec!["attach".into(), session.into()]
     } else {
@@ -677,8 +644,7 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Replace this process rather than nesting one inside it: the user
-        // wanted Claude Code, not Devplane holding a pipe to it.
+        // Replace this process rather than holding a pipe to Claude Code.
         let err = std::process::Command::new(&bin)
             .args(&args)
             .current_dir(dir)
@@ -696,10 +662,41 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
     }
 }
 
+/// The board in a browser. If no host is running, this process becomes the
+/// host in the foreground until ctrl-c.
 pub async fn cmd_open() -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
-    let url = format!("{}/?token={}", c.base_url(), c.token());
-    println!("{}", paint(DIM, c.base_url()));
+    if let Ok(c) = client::Client::connect_running().await {
+        return open_browser(
+            &format!("{}/?token={}", c.base_url(), c.token()),
+            c.base_url(),
+        );
+    }
+    println!(
+        "{}",
+        paint(
+            DIM,
+            "nothing is running — hosting here until ctrl-c; the board opens when it is up"
+        )
+    );
+    tokio::spawn(async {
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Ok(c) = client::Client::connect()
+                && c.healthy().await
+            {
+                let _ = open_browser(
+                    &format!("{}/?token={}", c.base_url(), c.token()),
+                    c.base_url(),
+                );
+                return;
+            }
+        }
+    });
+    super::cmd_serve(crate::config::DEFAULT_PORT).await
+}
+
+fn open_browser(url: &str, base: &str) -> Result<()> {
+    println!("{}", paint(DIM, base));
     #[cfg(target_os = "macos")]
     let opener = "open";
     #[cfg(target_os = "linux")]
@@ -711,7 +708,7 @@ pub async fn cmd_open() -> Result<()> {
 
     if !opener.is_empty() {
         std::process::Command::new(opener)
-            .arg(&url)
+            .arg(url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -720,8 +717,12 @@ pub async fn cmd_open() -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_watch() -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+/// `devplane watch [run]` — every event, or one driven run's conversation.
+pub async fn cmd_watch(run: Option<&str>, thinking: bool, history: i64) -> Result<()> {
+    if let Some(run) = run {
+        return follow_run(run, thinking, history).await;
+    }
+    let c = client::Client::connect_running().await?;
     println!("{}", paint(DIM, "watching — ctrl-c to stop"));
     let res = reqwest::Client::new()
         .get(format!("{}/api/stream", c.base_url()))
@@ -770,9 +771,8 @@ pub async fn cmd_watch() -> Result<()> {
 
 /// What GitHub says across every project: one answer, both halves.
 ///
-/// Each list has its own row type rather than sharing a generic one: a pull
-/// request row carries every field an issue row requires, so a generic version
-/// reads one as the other without complaining.
+/// Each list has its own row type: a PR row has every field an issue row
+/// needs, so a shared type would silently read one as the other.
 #[derive(Debug, serde::Deserialize)]
 struct ForgeList {
     #[serde(default)]
@@ -814,8 +814,8 @@ struct ForgePrRow {
     review_requested: bool,
 }
 
-/// Why the list is empty, said plainly: no `gh`, not logged in, nothing polled
-/// yet, or genuinely nothing open. Four different afternoons.
+/// Why the list is empty: no `gh`, not logged in, nothing polled yet, or
+/// genuinely nothing open.
 fn forge_preamble(viewer: Option<&str>, error: Option<&str>, fetched_at: Option<&str>) -> bool {
     if let Some(e) = error {
         println!(
@@ -830,7 +830,7 @@ fn forge_preamble(viewer: Option<&str>, error: Option<&str>, fetched_at: Option<
             "{}",
             paint(
                 DIM,
-                "GitHub has not been read yet — the daemon polls it a few seconds after it starts."
+                "GitHub has not been read yet — the host polls it a few seconds after it starts."
             )
         );
         return false;
@@ -842,7 +842,7 @@ fn forge_preamble(viewer: Option<&str>, error: Option<&str>, fetched_at: Option<
 }
 
 pub async fn cmd_forge_issues(json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+    let c = crate::local::Reader::open().await?;
     if json {
         println!(
             "{}",
@@ -850,7 +850,7 @@ pub async fn cmd_forge_issues(json: bool) -> Result<()> {
         );
         return Ok(());
     }
-    let list: ForgeList = c.get("/api/forge").await?;
+    let list: ForgeList = c.get_as("/api/forge").await?;
     if !forge_preamble(
         list.viewer.as_deref(),
         list.error.as_deref(),
@@ -897,14 +897,14 @@ pub async fn cmd_forge_issues(json: bool) -> Result<()> {
         "\n{}",
         paint(
             DIM,
-            "◆ assigned to you · devplane work start --issue <n> --cwd <project> turns one into work"
+            "◆ assigned to you · devplane change start --issue <n> --cwd <project> turns one into a change"
         )
     );
     Ok(())
 }
 
 pub async fn cmd_forge_prs(json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+    let c = crate::local::Reader::open().await?;
     if json {
         println!(
             "{}",
@@ -912,7 +912,7 @@ pub async fn cmd_forge_prs(json: bool) -> Result<()> {
         );
         return Ok(());
     }
-    let list: ForgeList = c.get("/api/forge").await?;
+    let list: ForgeList = c.get_as("/api/forge").await?;
     if !forge_preamble(
         list.viewer.as_deref(),
         list.error.as_deref(),
@@ -981,12 +981,8 @@ pub async fn cmd_forge_prs(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// The sentence naming the vendors this machine cannot watch.
-///
-/// **Composed from the same table the board reads**, so `devplane ls` and the
-/// interface cannot disagree about what is invisible here — which is the class
-/// of defect that had one of them saying *no Claude Code sessions* and the
-/// other *no agent session is running on this machine*.
+/// The sentence naming the vendors this machine cannot watch, composed from
+/// the table the board reads so `devplane ls` and the interface agree.
 fn unwatched_note() -> String {
     let w = crate::core::vendors::watching();
     if w.driven_only.is_empty() {

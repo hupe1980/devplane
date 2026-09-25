@@ -2,9 +2,5 @@
 
 /**
  * How an ask stopped waiting, and on whose authority.
- *
- * **Three, and the third is the one the product is named for.** Every system
- * that lets a request expire has the first two; the row that says *nobody
- * decided this and here is what was asked* is the one nothing else writes.
  */
-export type AskEnded = "person" | { "timer": { after: number, set_by: string, } } | { "nobody": { because: string, } };
+export type AskEnded = "person" | "stopped" | { "timer": { after: number, set_by: string, } } | { "nobody": { because: string, } };

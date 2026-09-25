@@ -1,14 +1,6 @@
-//! Conformance: the client, driven against a real agent process.
-//!
-//! The agent is `examples/echo_agent`, which speaks the protocol over stdio the
-//! same way `claude-agent-acp` and `opencode acp` do. Using a fixture rather
-//! than a vendor's agent is what makes this suite runnable on every commit: no
-//! network, no subscription, no bill, and a failure means the client broke
-//! rather than someone's API being slow.
-//!
-//! What the real agents add — and what this cannot prove — is their own
-//! behaviour. That is what a pinned version and a separate, opt-in suite
-//! against the vendor binaries are for.
+//! Conformance: the client driven against a real agent process,
+//! `examples/echo_agent`, which speaks ACP over stdio like the vendor agents.
+//! Offline and free, so a failure means the client broke.
 
 mod common;
 
@@ -16,15 +8,12 @@ use devplane::acp::{AcpEvent, AgentSpec};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// The repository root, which is also the crate root.
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
-/// The fixture agent, built by `cargo test` as a sibling of the test binary.
-/// A working directory per test, so the fixture's on-disk session files land
-/// in a temporary place rather than in the repository the tests run from —
-/// which is where 847 of them had accumulated.
+/// A working directory per test, so the fixture's session files stay out of
+/// the repository.
 fn scratch() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "vp-conformance-{}-{}",
@@ -35,6 +24,7 @@ fn scratch() -> PathBuf {
     dir
 }
 
+/// The fixture agent, next to the test binary, refused if older than its source.
 fn echo_agent() -> AgentSpec {
     let exe = std::env::current_exe().expect("test binary path");
     // target/debug/deps/conformance-<hash> → target/debug/examples/echo_agent
@@ -50,12 +40,8 @@ fn echo_agent() -> AgentSpec {
         bin.display()
     );
 
-    // **And that it is the fixture in this working tree.** `cargo test` does
-    // not rebuild examples, so editing the agent and running the suite tests
-    // the *previous* agent — silently, and in the direction that passes. This
-    // was not hypothetical: a test written to exercise `session/load` went
-    // green against a fixture that did not implement it yet, and only failed
-    // once the example was rebuilt by hand.
+    // `cargo test` does not rebuild examples, so a stale agent would silently
+    // test the previous behaviour.
     let src = repo_root().join("examples/echo_agent.rs");
     if let (Ok(b), Ok(s)) = (
         std::fs::metadata(&bin).and_then(|m| m.modified()),
@@ -89,7 +75,7 @@ async fn collect(
 #[tokio::test]
 async fn a_prompt_runs_a_turn_and_streams_the_answer() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .expect("spawning the agent");
 
@@ -117,7 +103,7 @@ async fn a_prompt_runs_a_turn_and_streams_the_answer() {
 #[tokio::test]
 async fn a_tool_call_is_reported() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -125,20 +111,71 @@ async fn a_tool_call_is_reported() {
     session.prompt("run a tool please").await.unwrap();
     let turn = collect(&mut events, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
 
-    assert!(
-        turn.iter()
-            .any(|e| matches!(e, AcpEvent::Tool { call, .. } if call.title.contains("cargo test"))),
-        "tool calls are what the board summarises: {turn:?}"
+    // Three updates on one id, in order; only the first carries the title.
+    let seen: Vec<(String, Option<String>, String)> = turn
+        .iter()
+        .filter_map(|e| match e {
+            AcpEvent::Tool { call, status } => {
+                Some((call.id.clone(), status.clone(), call.title.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let statuses: Vec<Option<&str>> = seen.iter().map(|(_, s, _)| s.as_deref()).collect();
+    assert_eq!(
+        statuses,
+        [Some("pending"), Some("in_progress"), Some("completed")],
+        "{turn:?}"
     );
+    assert!(seen.iter().all(|(id, _, _)| id == "t1"), "{seen:?}");
+    assert!(seen[0].2.contains("cargo test"), "{seen:?}");
     session.stop();
+}
+
+/// Stopping a run blocked on a permission answers the request with
+/// `cancelled` first, so the agent can acknowledge the cancel instead of
+/// waiting out the grace period into a kill.
+#[tokio::test]
+async fn a_stop_answers_a_pending_permission_before_cancelling_the_turn() {
+    let _serial = common::one_agent_at_a_time();
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+        .await
+        .unwrap();
+    collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
+    session.prompt("this needs permission").await.unwrap();
+    collect(&mut events, |e| {
+        matches!(e, AcpEvent::PermissionRequested { .. })
+    })
+    .await;
+
+    let asked_at = std::time::Instant::now();
+    session.stop();
+    let rest = collect(&mut events, |e| {
+        matches!(e, AcpEvent::TurnEnded { .. } | AcpEvent::Ended { .. })
+    })
+    .await;
+    assert!(
+        matches!(
+            rest.last(),
+            Some(AcpEvent::TurnEnded { stop_reason }) if stop_reason == "cancelled"
+        ),
+        "the agent never got to acknowledge the cancel: {rest:?}"
+    );
+    assert!(
+        rest.iter()
+            .any(|e| matches!(e, AcpEvent::Text(t) if t.contains("Cancelled"))),
+        "the pending request was not answered with `cancelled`: {rest:?}"
+    );
+    assert!(
+        asked_at.elapsed() < Duration::from_secs(4),
+        "the stop waited out the grace period rather than being acknowledged"
+    );
 }
 
 #[tokio::test]
 async fn a_permission_request_blocks_until_it_is_answered() {
     let _serial = common::one_agent_at_a_time();
-    // This is the path the whole product turns on: the agent is stopped, the
-    // human decides, and the turn continues.
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -185,7 +222,7 @@ async fn a_permission_request_blocks_until_it_is_answered() {
 #[tokio::test]
 async fn refusing_a_permission_also_lets_the_turn_finish() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -200,8 +237,7 @@ async fn refusing_a_permission_also_lets_the_turn_finish() {
         other => panic!("{other:?}"),
     };
 
-    // `None` is a refusal, which is also what an unanswered request becomes
-    // when its deadline passes. A session must never be left wedged.
+    // `None` is a refusal, as for an unanswered request past its deadline.
     session.decide(&request_id, None).await.unwrap();
     let rest = collect(&mut events, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
     assert!(rest.iter().any(|e| matches!(e, AcpEvent::TurnEnded { .. })));
@@ -211,7 +247,7 @@ async fn refusing_a_permission_also_lets_the_turn_finish() {
 #[tokio::test]
 async fn a_refusal_is_reported_as_the_stop_reason() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -228,9 +264,7 @@ async fn a_refusal_is_reported_as_the_stop_reason() {
 #[tokio::test]
 async fn several_turns_run_on_one_session() {
     let _serial = common::one_agent_at_a_time();
-    // A driven run is a conversation, not a one-shot: the session has to
-    // survive a completed turn and take the next prompt.
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -247,20 +281,15 @@ async fn several_turns_run_on_one_session() {
     session.stop();
 }
 
-/// An agent that needs signing in says so, in its own words.
-///
-/// The agent already answers `initialize` with `authMethods` — a name, and
-/// often the literal command to run; Copilot's says *"Run `copilot login` in
-/// the terminal"*. Handing back the raw protocol error instead makes a first
-/// run look like a broken integration when it is a login, which is the worst
-/// five minutes a new user can have.
+/// An agent that needs sign-in fails with a message naming the cause and
+/// repeating the agent's own `authMethods` instruction.
 #[tokio::test]
 async fn an_agent_that_needs_a_login_says_how() {
     let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
     spec.command = format!("env DEVPLANE_ECHO_NEEDS_AUTH=1 {}", spec.command);
 
-    let (session, mut rx) = devplane::acp::spawn(&spec, std::env::temp_dir())
+    let (session, mut rx) = devplane::acp::spawn(&spec, std::env::temp_dir(), &[])
         .await
         .expect("the fixture starts");
     let events = collect(&mut rx, |e| {
@@ -283,27 +312,16 @@ async fn an_agent_that_needs_a_login_says_how() {
     session.stop();
 }
 
-/// An agent that offers `session/load` and not `session/resume` can still be
-/// continued.
-///
-/// The protocol has two ways of carrying a conversation across a restart and
-/// they are advertised separately: `session/resume` continues without replaying
-/// history, `session/load` continues with it. This client checked only for
-/// `resume`, so an agent with the other one was told its conversation "cannot
-/// be continued" — a refusal, on the feature whose whole promise is that a
-/// restart does not lose the work.
-///
-/// Not hypothetical: GitHub Copilot's ACP server advertises exactly this
-/// combination, which is how it was found. The fixture is asked to imitate it.
+/// An agent that offers `session/load` but not `session/resume` (as GitHub
+/// Copilot does) can still be continued, keeping its session id.
 #[tokio::test]
 async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
     let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
-    // The fixture reads this and drops `resume` from what it advertises.
     spec.command = format!("env DEVPLANE_ECHO_NO_RESUME=1 {}", spec.command);
     let cwd = std::env::temp_dir();
 
-    let (session, mut rx) = devplane::acp::spawn(&spec, cwd.clone())
+    let (session, mut rx) = devplane::acp::spawn(&spec, cwd.clone(), &[])
         .await
         .expect("the fixture starts");
     let ready = collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -317,7 +335,7 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
     session.stop();
 
     // Same id, a second connection: continued rather than started again.
-    let (again, mut rx2) = devplane::acp::resume(&spec, cwd, id.clone())
+    let (again, mut rx2) = devplane::acp::resume(&spec, cwd, id.clone(), &[])
         .await
         .expect("the fixture starts again");
     let ready2 = collect(&mut rx2, |e| {
@@ -338,11 +356,10 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
 async fn a_missing_agent_fails_loudly_rather_than_hanging() {
     let _serial = common::one_agent_at_a_time();
     let spec = AgentSpec::new("nope", "nope", "/definitely/not/an/agent --acp");
-    match devplane::acp::spawn(&spec, scratch()).await {
+    match devplane::acp::spawn(&spec, scratch(), &[]).await {
         Err(e) => assert!(!e.to_string().is_empty()),
         Ok((session, mut events)) => {
-            // Some transports only fail once the process is reaped, so an
-            // immediate error is not required — ending promptly is.
+            // Some transports fail only once the process is reaped.
             let seen = tokio::time::timeout(
                 Duration::from_secs(10),
                 collect(&mut events, |e| matches!(e, AcpEvent::Ended { .. })),
@@ -357,26 +374,19 @@ async fn a_missing_agent_fails_loudly_rather_than_hanging() {
     }
 }
 
-/// A cancelled turn ends with the agent saying so, not with a timeout.
-///
-/// **The half of `session/cancel` nothing measured.** The client sends the
-/// notification, waits a grace period for the turn to end with
-/// `stop_reason: cancelled`, and tears the connection down if it does not — and
-/// until the fixture could be interrupted, every turn finished in microseconds,
-/// so only the *timeout* branch was ever reachable. A handshake whose success
-/// path is untested is a handshake that can rot into its failure path silently.
+/// A cancelled turn ends with the agent acknowledging it
+/// (`stop_reason: cancelled`), not with the client's timeout.
 #[tokio::test]
 async fn a_cancelled_turn_is_acknowledged_rather_than_timed_out() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
-    // `slow` keeps the fixture working until it is told to stop.
+    // `slow` runs until cancelled.
     session.prompt("please work slow").await.unwrap();
 
-    // Long enough that the turn is certainly in flight, short enough that the
-    // fixture's own six-second ceiling cannot be what ends it.
+    // Long enough for the turn to be in flight, well short of its own ceiling.
     tokio::time::sleep(Duration::from_millis(300)).await;
     session.stop();
 
@@ -395,23 +405,14 @@ async fn a_cancelled_turn_is_acknowledged_rather_than_timed_out() {
 }
 
 // ── Questions ───────────────────────────────────────────────────────────────
-//
-// A question is not a permission and does not arrive like one. It comes over
-// `elicitation/create` as a form, and only to a client that declared it can
-// render one — which is the behaviour that cost a day to find, because an agent
-// with no way to ask a *structured* question asks in prose and stops, and a run
-// sitting on an unanswered question looks exactly like a run that finished.
-//
-// These run against the fixture, so every one of them is free and offline. The
-// shapes the fixture sends were captured from `claude-agent-acp@0.76` on
-// 2026-09-19 rather than invented, which is what stops them being a test of the
-// fixture's imagination.
+// A question arrives as an `elicitation/create` form, only to a client that
+// declared `elicitation.form`; the fixture's shapes copy `claude-agent-acp`.
 
-/// The round trip: asked, held, answered, and the agent continues.
+/// A question is held open until answered, and the agent receives the answer.
 #[tokio::test]
 async fn a_question_reaches_a_person_and_the_answer_reaches_the_agent() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -424,9 +425,7 @@ async fn a_question_reaches_a_person_and_the_answer_reaches_the_agent() {
         other => panic!("expected a question, got {other:?}"),
     };
 
-    // Everything the person needs, including the two things a hook-shaped model
-    // had no room for: each option's own reason, and a box for an answer the
-    // agent did not offer.
+    // Each option carries its reason, and there is a free-text field.
     assert_eq!(ask.questions.len(), 1);
     let q = &ask.questions[0];
     assert_eq!(q.options.len(), 2);
@@ -463,11 +462,11 @@ async fn a_question_reaches_a_person_and_the_answer_reaches_the_agent() {
     session.stop();
 }
 
-/// A person's own words, for a question whose options did not fit.
+/// A typed answer is sent under the custom field, not the selection.
 #[tokio::test]
 async fn a_typed_answer_reaches_the_agent_under_the_custom_field() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -491,11 +490,11 @@ async fn a_typed_answer_reaches_the_agent_under_the_custom_field() {
     session.stop();
 }
 
-/// Several questions in one form, each answerable under its own field.
+/// Several questions in one form keep their order and their own fields.
 #[tokio::test]
 async fn a_form_with_two_questions_keeps_them_in_order() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -528,16 +527,12 @@ async fn a_form_with_two_questions_keeps_them_in_order() {
     session.stop();
 }
 
-/// An elicitation this client cannot present is cancelled **and said out loud**.
-///
-/// The same protocol method carries forms from MCP servers, in shapes that are
-/// not questions with options. Guessing at one would put words in somebody's
-/// mouth; cancelling it silently would be the failure this whole feature is
-/// about, committed inside it.
+/// An elicitation that is not a question with options (e.g. an MCP form) is
+/// reported as unrenderable, not raised as a question or dropped silently.
 #[tokio::test]
 async fn an_elicitation_that_cannot_be_rendered_is_reported_not_swallowed() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -558,18 +553,12 @@ async fn an_elicitation_that_cannot_be_rendered_is_reported_not_swallowed() {
     session.stop();
 }
 
-/// A question that nobody answers ends as **cancelled**, never as an empty answer.
-///
-/// The distinction is the feature. The adapter folds a *decline* into
-/// "answered, with no answers" — the agent proceeds having asked and heard
-/// nothing, which is exactly what this exists to prevent — so the only refusal
-/// Devplane may send is a cancel. This drives the whole path rather than
-/// asserting it over source: the question is raised, the run is stopped under
-/// it, and the event that comes back says which of the two happened.
+/// An unanswered question ends as cancelled, never as an empty answer (the
+/// adapter would treat a decline as "answered with nothing").
 #[tokio::test]
 async fn a_question_nobody_answers_is_cancelled_rather_than_answered_with_nothing() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -580,8 +569,7 @@ async fn a_question_nobody_answers_is_cancelled_rather_than_answered_with_nothin
         other => panic!("expected a question, got {other:?}"),
     };
 
-    // Nobody answers; the run goes away under it. `None` is the cancel path —
-    // there is deliberately no way to express "answered with nothing".
+    // `None` cancels; there is no way to express "answered with nothing".
     session
         .answer(&request_id, None)
         .await
@@ -605,16 +593,12 @@ async fn a_question_nobody_answers_is_cancelled_rather_than_answered_with_nothin
     session.stop();
 }
 
-/// An answer is delivered exactly once, driven end to end.
-///
-/// The unit test proves the waiter map hands out one answer. This proves the
-/// property that matters: two answers against a **live** session produce one
-/// delivery and one refusal, and the refusal is an ordinary outcome rather than
-/// a failure — two tabs, or a phone and a laptop, is the expected case.
+/// Two answers to one question on a live session produce one delivery and one
+/// ordinary refusal (e.g. two open tabs).
 #[tokio::test]
 async fn two_answers_to_one_question_deliver_once() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch())
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -653,23 +637,15 @@ async fn two_answers_to_one_question_deliver_once() {
     session.stop();
 }
 
-/// An agent asking a client that cannot render a form gets **prose**, and the
-/// run goes quiet with nothing raised.
-///
-/// This is the shape of the defect that cost a day: before Devplane declared
-/// `elicitation.form`, the tool was withheld, the agent asked in plain text, the
-/// run went idle and the inbox said *"Nothing needs you"* about a session
-/// waiting on a person. It is pinned here so the capability cannot be dropped
-/// without something failing — and so the case can be exercised at all, which a
-/// live agent cannot be made to do on demand.
+/// Without form support the agent asks in prose and no question is raised;
+/// pins why the client must declare `elicitation.form`.
 #[tokio::test]
 async fn an_agent_asks_in_prose_when_the_client_cannot_render_a_question() {
     let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
-    // The fixture mirrors the real gate: no declared capability, no question.
     spec.command = format!("env DEVPLANE_ECHO_NO_FORMS=1 {}", spec.command);
 
-    let (session, mut events) = devplane::acp::spawn(&spec, scratch()).await.unwrap();
+    let (session, mut events) = devplane::acp::spawn(&spec, scratch(), &[]).await.unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
     session.prompt("ask me a question").await.unwrap();
     let seen = collect(&mut events, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
@@ -688,25 +664,8 @@ async fn an_agent_asks_in_prose_when_the_client_cannot_render_a_question() {
     session.stop();
 }
 
-/// **The cross-vendor half of *which sessions decide without you*.**
-///
-/// `devplane modes` answers that question by reading one vendor's settings
-/// files. Any agent that speaks the protocol can answer it directly — ACP
-/// carries a session mode — and the update was being dropped at the protocol
-/// boundary under a comment saying *"nothing consumes them yet"*.
-///
-/// Two properties, and the second is the one the design turns on.
-///
-/// **A mode is reported even when it never changes.** `current_mode_update`
-/// fires on a *change*, so an agent that starts in a mode and stays there would
-/// never be heard from — which is exactly the session worth knowing about. The
-/// initial mode comes from the session response instead.
-///
-/// **And it is the agent's own string.** There is no cross-vendor vocabulary for
-/// an ACP mode and nothing maps it onto a vendor's documented four, so the
-/// fixture declares something deliberately unlike any of them: a client that
-/// quietly normalised it into `default` would pass a test written with a
-/// familiar word and fail here.
+/// An agent's initial ACP session mode is reported without any mode change,
+/// verbatim as the agent's own string, never mapped onto a vendor's modes.
 #[tokio::test]
 async fn an_agent_declares_its_own_session_mode_and_it_is_not_a_vendor_s() {
     let _serial = common::one_agent_at_a_time();
@@ -714,7 +673,7 @@ async fn an_agent_declares_its_own_session_mode_and_it_is_not_a_vendor_s() {
     spec.command = format!("env DEVPLANE_ECHO_MODE=echo-supervised {}", spec.command);
     let cwd = std::env::temp_dir();
 
-    let (session, mut rx) = devplane::acp::spawn(&spec, cwd)
+    let (session, mut rx) = devplane::acp::spawn(&spec, cwd, &[])
         .await
         .expect("the fixture starts");
     let seen = collect(&mut rx, |e| matches!(e, AcpEvent::ModeChanged { .. })).await;
@@ -731,8 +690,6 @@ async fn an_agent_declares_its_own_session_mode_and_it_is_not_a_vendor_s() {
         mode, "echo-supervised",
         "the agent's own spelling reaches the client unaltered"
     );
-    // The negative half, and the reason the fixture's mode is spelled oddly:
-    // nothing may have mapped it onto a vendor's vocabulary on the way.
     for vendor in [
         "default",
         "acceptEdits",
@@ -747,16 +704,8 @@ async fn an_agent_declares_its_own_session_mode_and_it_is_not_a_vendor_s() {
     }
 }
 
-/// **What an agent supports is measured, not listed.**
-///
-/// Every session capability is advertised per agent at `initialize`, so it is a
-/// runtime fact about that agent at that version — never something this product
-/// can assert from a registry entry. The notes have carried *across vendors* as
-/// a design property for passes; this is the thing that makes it checkable, and
-/// it is allowed to come back disappointing.
-///
-/// The fixture is asked to be two different agents, because a record that cannot
-/// tell them apart is a record of nothing.
+/// Capabilities are read from each agent's `initialize` handshake, and two
+/// differently-configured agents produce different records.
 #[tokio::test]
 async fn what_an_agent_supports_is_read_from_its_own_handshake() {
     let _serial = common::one_agent_at_a_time();
@@ -770,7 +719,7 @@ async fn what_an_agent_supports_is_read_from_its_own_handshake() {
     };
 
     // The default fixture: both ways to continue a session.
-    let (session, mut rx) = devplane::acp::spawn(&caps(""), std::env::temp_dir())
+    let (session, mut rx) = devplane::acp::spawn(&caps(""), std::env::temp_dir(), &[])
         .await
         .expect("the fixture starts");
     let seen = collect(&mut rx, |e| matches!(e, AcpEvent::Capabilities { .. })).await;
@@ -793,12 +742,11 @@ async fn what_an_agent_supports_is_read_from_its_own_handshake() {
         "this fixture advertises resume and load, and needs no sign-in"
     );
 
-    // The same fixture asked to be GitHub Copilot's shape: `load` and no
-    // `resume`. A record that reported the two identically would be worthless
-    // for the one question it exists to answer.
+    // Load-only and needing sign-in.
     let (session, mut rx) = devplane::acp::spawn(
         &caps("DEVPLANE_ECHO_NO_RESUME=1 DEVPLANE_ECHO_NEEDS_AUTH=1"),
         std::env::temp_dir(),
+        &[],
     )
     .await
     .expect("the fixture starts again");

@@ -1,22 +1,20 @@
 //! Claude Code hooks — the lifecycle channel.
 //!
 //! The only documented way to learn about a session Devplane did not start,
-//! and it covers every surface: a terminal, the VS Code extension, the desktop
-//! app, a headless run.
+//! on every surface. Each event runs `devplane hook` as a `command` hook: the
+//! payload arrives on stdin and the process records it (see `crate::record`).
+//! `PreToolUse` and `PermissionRequest` answer on stdout first and write
+//! second; the rest answer `{}`. This module is the reading and the replies.
 //!
-//! `PermissionRequest` is the one that matters, and it does two jobs: it is the
-//! policy gate, and it is the instant "this session is blocked" signal. The
-//! `permission_prompt` notification says the same thing about six seconds later
-//! and, in a terminal, defers again on every keystroke. It must be answered
-//! immediately whatever the answer — holding it open stalls the session before
-//! its own dialog appears — so a call no rule covers is marked blocked *and*
-//! handed back for Claude Code to prompt about itself.
+//! `PermissionRequest` is both the policy gate and the instant "blocked"
+//! signal (the `permission_prompt` notification is ~6 s later). A call no rule
+//! covers is handed back for Claude Code to prompt; one a project leaves to a
+//! person is held for as long as that project says.
 //!
-//! `WorktreeCreate` is deliberately never installed: configuring it replaces
-//! Claude Code's own `git worktree` logic, which would break `claude
-//! --worktree`, subagent isolation and background sessions machine-wide.
-//! Worktrees are learned from `CwdChanged`, the status line and the roster.
-use crate::core::event::{Choice, Event, WaitingFor};
+//! `WorktreeCreate` is never installed: it replaces Claude Code's own
+//! `git worktree` logic machine-wide. Worktrees are learned from `CwdChanged`,
+//! the status line and the roster.
+use crate::core::event::{Choice, Event, PermissionContext, WaitingFor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -26,10 +24,8 @@ use std::path::PathBuf;
 pub struct HookPayload {
     pub hook_event_name: String,
     pub session_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::observe::canonical_cwd")]
     pub cwd: Option<PathBuf>,
-    #[serde(default)]
-    pub transcript_path: Option<PathBuf>,
     #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
@@ -38,24 +34,27 @@ pub struct HookPayload {
     pub tool_input: Option<Value>,
     #[serde(default)]
     pub tool_response: Option<Value>,
+    /// `PostToolUse` / `PostToolUseFailure`: how long the tool itself ran,
+    /// excluding time in permission prompts and `PreToolUse` hooks.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// What the vendor's permission system had worked out when a
+    /// `PermissionRequest` fired. Undocumented, so optional and carried
+    /// verbatim rather than interpreted.
+    #[serde(default)]
+    pub permission_context: Option<PermissionContext>,
     /// `Notification` only: which notification type fired.
     #[serde(default)]
     pub notification_type: Option<String>,
     /// `Elicitation` / `ElicitationResult`: which MCP server is asking.
     #[serde(default)]
     pub mcp_server_name: Option<String>,
-    /// **Where the MCP server behind this tool call came from.** Carried on
-    /// `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`
-    /// and `PermissionDenied` since Claude Code v2.1.274, with a `name` and a
-    /// `source` naming the definition's origin — `plugin`, `sdk`, or a
-    /// configuration scope such as `user` or `project`.
+    /// Where the MCP server behind this tool call came from: a `name` and a
+    /// `source` (`plugin`, `sdk`, or a config scope such as `user`), on the
+    /// tool-call events since Claude Code v2.1.274.
     ///
-    /// **Recorded, never read by a verdict.** The reference says to base trust
-    /// decisions on `source` rather than on the name or the `mcp__<server>__`
-    /// prefix; this product bases nothing on either, because it cannot approve.
-    /// What the field is for is the **ledger**: a call into a server a cloned
-    /// repository defined reads today exactly like one into a server the person
-    /// installed themselves.
+    /// Recorded for the ledger, never read by a verdict: a server a cloned
+    /// repository defined otherwise reads like one the person installed.
     #[serde(default)]
     pub mcp_server: Option<McpServer>,
     #[serde(default)]
@@ -63,24 +62,37 @@ pub struct HookPayload {
     /// `SessionStart` / `SessionEnd`.
     #[serde(default)]
     pub source: Option<String>,
-    /// **Devplane's own field, not the vendor's.** `CLAUDE_AFK_TIMEOUT_MS` as
-    /// it stood in the environment the session was started from, injected by
-    /// `devplane hook` before the payload is forwarded.
-    ///
-    /// It can only be read there: `SessionStart` accepts only `command` hooks,
-    /// so that process is a child of the session and inherits its environment,
-    /// while the daemon has an environment of its own and the HTTP hooks carry
-    /// a payload the vendor defines. Prefixed so it can never collide with a
-    /// field the vendor adds later.
+    /// Devplane's own field: `CLAUDE_AFK_TIMEOUT_MS` from the session's
+    /// environment, injected by `devplane hook`, which inherits it as the
+    /// session's child (the host does not). Prefixed to avoid vendor fields.
     #[serde(default)]
     pub devplane_afk_timeout_ms: Option<String>,
+    /// `SessionEnd`: why. `PermissionDenied`: the classifier's own words.
     #[serde(default)]
     pub reason: Option<String>,
-    /// `SubagentStart` / `SubagentStop`.
+    /// Present on every hook fired inside a subagent (under the parent's
+    /// session id), which tells its tool calls from the main thread's.
+    /// `SubagentStart` / `SubagentStop` name the subagent with it.
     #[serde(default)]
     pub agent_id: Option<String>,
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// `StopFailure`: the error type, its details, and the rendered error
+    /// text as the conversation showed it.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_details: Option<String>,
+    #[serde(default)]
+    pub last_assistant_message: Option<String>,
+    /// `Stop`: what the session left running. Empty when nothing is in
+    /// flight; absent means not checked.
+    #[serde(default)]
+    pub background_tasks: Option<Vec<Value>>,
+    /// `CwdChanged`: where the session went. `cwd` carries the same value and
+    /// is the fallback.
+    #[serde(default)]
+    pub new_cwd: Option<PathBuf>,
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
@@ -96,9 +108,8 @@ pub struct HookPayload {
     pub task_id: Option<String>,
     #[serde(default)]
     pub task_subject: Option<String>,
-    /// `PreModelSwitch`: the model the session is about to move to. The context
-    /// gauge is a percentage *of* that model's window, so it changes here
-    /// rather than when the first request on the new model returns.
+    /// `PreModelSwitch`: the model the session is about to move to, which
+    /// changes the context gauge's denominator.
     #[serde(default)]
     pub to_model: Option<String>,
     /// Anything else, so a new field never costs us a parse.
@@ -122,10 +133,8 @@ impl HookPayload {
 
 /// The MCP server behind a tool call, as the vendor reports it.
 ///
-/// **`source` is a string rather than an enum on purpose.** The SDK enumerates
-/// the values it knows and says how to treat one you do not; mapping an unknown
-/// to a default would replace a fact with a guess, which is the rule the
-/// authority column follows one field over.
+/// `source` stays a string: mapping an unknown value to a default would
+/// replace a fact with a guess.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct McpServer {
     #[serde(default)]
@@ -134,10 +143,10 @@ pub struct McpServer {
     pub source: Option<String>,
 }
 
-/// What the daemon should record for a hook payload.
+/// What a hook payload means: the events to append.
 ///
-/// Events only. A permission request arrives at its own endpoint, because it is
-/// the one hook whose *reply* matters; nothing on this path is answerable.
+/// Events only. The two deciding hooks are answered by whoever holds the
+/// payload (`permission_reply`, `pre_tool_use_reply`), recorded beside these.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HookOutcome {
     /// Events to record. Usually one; `CwdChanged` into a worktree is two.
@@ -157,22 +166,12 @@ impl HookOutcome {
 
 /// Translates a hook payload into domain events.
 ///
-/// Unknown events yield nothing rather than an error: Claude Code adds hook
-/// events regularly, and an observer that fails on one it has not heard of is
-/// an observer that breaks on upgrade.
+/// Unknown events yield nothing rather than an error, so a vendor upgrade
+/// cannot break the observer.
 pub fn to_events(p: &HookPayload) -> HookOutcome {
     let mut out = to_events_inner(p);
-    // **The mode rides along on whatever carried it.**
-    //
-    // Eleven of the vendor's hook events include `permission_mode` and
-    // `PreToolUse` — the one every tool call fires — is *not* among them; the
-    // reference says so in one sentence and the obvious implementation is
-    // wrong because of it. So this is read from any payload that has the field
-    // rather than from a chosen event, which is also what makes it survive the
-    // vendor moving it around.
-    //
-    // Appended after, never instead: an event that already says something
-    // about the run still says it.
+    // The mode rides on whatever payload carries `permission_mode`; notably
+    // `PreToolUse` does not. Appended after the event, never instead of it.
     if let Some(raw) = p.permission_mode.as_deref()
         && !raw.is_empty()
     {
@@ -191,8 +190,8 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
             source: p.source.clone(),
             model: p.model_name(),
             entrypoint: None,
-            // Read here or never: this is the one moment a process that
-            // inherited the session's environment reports in.
+            // Read here or never: only a process that inherited the session's
+            // environment can see it.
             question_clock: p
                 .devplane_afk_timeout_ms
                 .as_deref()
@@ -201,18 +200,14 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
         }),
 
         "UserPromptSubmit" => HookOutcome::just(Event::PromptSubmitted {
-            // Characters, not bytes. The prompt itself is never stored — this
-            // is the only thing recorded about it — so a number that says
-            // "chars" and counts UTF-8 bytes is the whole field being wrong for
-            // anybody not typing ASCII.
+            // Characters, not bytes; the prompt itself is never stored.
             chars: p.prompt.as_deref().map(|s| s.chars().count()).unwrap_or(0),
         }),
 
         "PreToolUse" => {
             let tool = p.tool_name.clone().unwrap_or_default();
-            // `AskUserQuestion` is a tool call, and it is the only one whose
-            // arrival means a human is needed. Reading it here is instant;
-            // waiting for a notification about it is not.
+            // `AskUserQuestion` is the one tool call whose arrival means a
+            // human is needed; reading it here is instant.
             if tool == "AskUserQuestion" {
                 let (question, options) = parse_ask_user_question(p.tool_input.as_ref());
                 // An observed session's dialog belongs to the provider: no
@@ -233,45 +228,52 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
                     .as_ref()
                     .and_then(|m| m.source.clone())
                     .filter(|s| !s.is_empty()),
+                // Under the parent's session id: only the main thread moving
+                // on ends a question the main thread asked.
+                agent_id: p.agent_id.clone().filter(|a| !a.is_empty()),
+                call_id: None,
             })
         }
 
         "PostToolUse" => HookOutcome::just(Event::ToolFinished {
             tool: p.tool_name.clone().unwrap_or_default(),
             ok: true,
-            duration_ms: None,
+            duration_ms: p.duration_ms,
+            call_id: None,
         }),
 
         "PostToolUseFailure" => HookOutcome::just(Event::ToolFinished {
             tool: p.tool_name.clone().unwrap_or_default(),
             ok: false,
-            duration_ms: None,
+            duration_ms: p.duration_ms,
+            call_id: None,
         }),
 
-        // The instant blocked signal, and the only hook whose reply matters.
-        // It is delivered to `/devplane/policy` instead, which answers it; a
-        // copy arriving here has nothing to record.
+        // The instant blocked signal. The process holding it answers and
+        // records the verdict with its block, so nothing is produced here.
         "PermissionRequest" => HookOutcome::none(),
 
+        // Auto mode refusing a call by itself, with the classifier's reason.
         "PermissionDenied" => HookOutcome::just(Event::PermissionDecided {
             tool: p.tool_name.clone().unwrap_or_default(),
             decision: "deny".into(),
-            by: "claude".into(),
+            by: "auto mode".into(),
+            reason: p.reason.clone().filter(|r| !r.is_empty()),
+            context: p.permission_context.clone(),
         }),
 
         "Notification" => match p.notification_type.as_deref() {
-            // A late backstop for a prompt we already know about, and the only
-            // signal for a sandboxed command's network request, which
-            // `PermissionRequest` does not fire for.
+            // A late backstop, and the only signal for a sandboxed command's
+            // network request, which `PermissionRequest` does not fire for.
             Some("permission_prompt") => HookOutcome::just(Event::Blocked {
                 waiting_for: WaitingFor::Permission,
                 message: p.message.clone(),
-                // An observed session's dialog is Claude Code's own: Devplane
-                // can show that it is there, never answer it.
+                // Claude Code's own dialog: shown, never answered from here.
                 request_id: None,
                 ask: None,
                 options: Vec::new(),
                 call: None,
+                context: None,
             }),
             Some("elicitation_dialog") | Some("elicitation_url_dialog") => {
                 HookOutcome::just(Event::Blocked {
@@ -281,6 +283,7 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
                     ask: None,
                     options: Vec::new(),
                     call: None,
+                    context: None,
                 })
             }
             Some("idle_prompt") => HookOutcome::just(Event::Blocked {
@@ -290,17 +293,32 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
                 ask: None,
                 options: Vec::new(),
                 call: None,
+                context: None,
             }),
             _ => HookOutcome::none(),
         },
 
-        "Stop" => HookOutcome::just(Event::TurnEnded),
+        // The turn, and what the session says it left running; absent means
+        // nobody checked.
+        "Stop" => {
+            let mut events = vec![Event::TurnEnded];
+            if let Some(tasks) = &p.background_tasks {
+                events.push(Event::JobsSeen {
+                    running: tasks.len().min(u32::MAX as usize) as u32,
+                });
+            }
+            HookOutcome { events }
+        }
 
+        // Prefer the rendered error a person saw, then the vendor's details,
+        // then the type — never the generic sentence when there is more.
         "StopFailure" => HookOutcome::just(Event::TurnFailed {
             message: p
-                .message
+                .last_assistant_message
                 .clone()
-                .or_else(|| p.reason.clone())
+                .or_else(|| p.error_details.clone())
+                .or_else(|| p.error.clone())
+                .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| "turn ended with an API error".into()),
         }),
 
@@ -313,9 +331,10 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
         }),
 
         "CwdChanged" => {
-            // Entering a worktree moves the session's working directory, which
-            // is how a worktree is detected without replacing Claude's own
-            // worktree machinery.
+            // `new_cwd` is documented; `cwd` is the fallback.
+            let cwd = p.new_cwd.clone().unwrap_or(cwd);
+            // Entering a worktree is how worktrees are detected without
+            // replacing Claude's own worktree machinery.
             if is_worktree_path(&cwd) {
                 HookOutcome {
                     events: vec![
@@ -331,50 +350,42 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
             }
         }
 
-        // After, not before. The gauge is a level, and it only drops once the
-        // window has actually been rewritten.
+        // After, not before: the gauge only drops once the window is rewritten.
         "PostCompact" => HookOutcome::just(Event::Compacted),
-        // Kept readable because a settings file written by an older Devplane
-        // still has it, and an event an observer does not understand is an
-        // event it drops silently.
+        // Recognised so a settings file that still registers it stays silent.
         "PreCompact" => HookOutcome::none(),
 
-        // The session changed model, so the context window it is measured
-        // against changed with it.
-        "PostModelSwitch" => match p.model_name() {
+        // The context window changes with the model. `to_model`, as on
+        // `PreModelSwitch`; `model` is only on `SessionStart`.
+        "PostModelSwitch" => match p.to_model.clone().or_else(|| p.model_name()) {
             Some(model) => HookOutcome::just(Event::ModelChanged { model }),
             None => HookOutcome::none(),
         },
 
-        // An MCP server is asking the user something, reported the moment it
-        // asks rather than six seconds later through a notification.
+        // An MCP server asking the user, reported at once.
         "Elicitation" => HookOutcome::just(Event::Blocked {
             waiting_for: WaitingFor::Question,
             message: p
                 .message
                 .clone()
                 .or_else(|| p.mcp_server_name.clone().map(|s| format!("{s} is asking"))),
-            // The dialog belongs to Claude Code. Devplane can say it is there
-            // and raise the window that has it; it cannot answer it — and with
-            // nothing to answer there is nothing to make durable, which is why
-            // this carries no ask either. A token offered for a dialog no route
-            // can reach would be a button that fails.
+            // The dialog belongs to Claude Code: Devplane can show it and
+            // raise its window, never answer it, so it carries no ask.
             request_id: None,
             ask: None,
             options: Vec::new(),
             call: None,
+            context: None,
         }),
 
-        // A question has been answered, wherever it was answered. Without this
-        // an elicitation resolved in a terminal sat in the inbox for ever,
-        // asking for a decision that had already been made.
+        // Answered wherever it was answered; without this an elicitation
+        // resolved in a terminal would sit in the inbox.
         "ElicitationResult" => HookOutcome::just(Event::QuestionAnswered {
             action: p.action.clone().unwrap_or_else(|| "accept".into()),
         }),
 
-        // Somebody edited the settings Devplane writes its own hooks into.
-        // `policy_settings` is the interesting one: managed policy can block
-        // loopback hooks, and the only other symptom is silence.
+        // A settings file Devplane writes hooks into changed. Managed policy
+        // can block loopback hooks, and the only other symptom is silence.
         "ConfigChange" => HookOutcome::just(Event::ConfigChanged {
             source: p.source.clone().unwrap_or_else(|| "settings".into()),
             path: p.file_path.clone(),
@@ -390,9 +401,8 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
             _ => HookOutcome::none(),
         },
 
-        // The size of the context window is about to change, which is the
-        // denominator of the gauge. `PostModelSwitch` says the same thing
-        // afterwards; this says it before the next turn is priced against it.
+        // The gauge's denominator is about to change; this arrives before the
+        // next turn is priced against it.
         "PreModelSwitch" => match p.to_model.clone().or_else(|| p.model_name()) {
             Some(model) => HookOutcome::just(Event::ModelChanged { model }),
             None => HookOutcome::none(),
@@ -408,9 +418,8 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
 
 /// A checkout that some other repository owns.
 ///
-/// The same test the board and the policy use, so a worktree that is a worktree
-/// to one of them is a worktree to all three. It covers a `git worktree add`
-/// anywhere on the disk as well as Claude Code's `.claude/worktrees/`.
+/// The same test the board and the policy use: any `git worktree add`
+/// checkout, including Claude Code's `.claude/worktrees/`.
 fn is_worktree_path(p: &std::path::Path) -> bool {
     crate::core::project::is_worktree(p)
 }
@@ -457,10 +466,8 @@ fn parse_ask_user_question(input: Option<&Value>) -> (String, Vec<Choice>) {
 
 /// The JSON a `PermissionRequest` hook returns.
 ///
-/// An empty response means "no decision": Claude Code shows its own dialog, and
-/// the human answers where they already are. That is the right answer for a
-/// session Devplane only observes, and it is why the hook can be answered in a
-/// millisecond without waiting for anybody.
+/// Empty means "no decision": Claude Code shows its own dialog, so the hook
+/// answers in a millisecond for a session Devplane only observes.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PermissionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -490,7 +497,9 @@ impl PermissionResponse {
         }
     }
 
-    pub fn allow() -> Self {
+    /// Carries a person's allow back to the vendor: the selection they made
+    /// on a held permission, after a recorded answer — never a verdict.
+    pub fn carrying_a_persons_allow() -> Self {
         Self::decide("allow", None)
     }
 
@@ -510,14 +519,10 @@ impl PermissionResponse {
 
 /// The JSON a `PreToolUse` hook returns.
 ///
-/// Differently shaped from [`PermissionResponse`], and not interchangeable with
-/// it: this hook fires before every tool call in every mode, which is the only
-/// way a prohibition reaches a session in auto mode, where a classifier
-/// approves routine calls and no prompt is ever shown.
-///
-/// It may only ever carry a prohibition. An `allow` here skips the permission
-/// system, the classifier included. `ask` is the useful half — a hook's `ask`
-/// forces a prompt the classifier "can't approve the call silently".
+/// Not interchangeable with [`PermissionResponse`]: this fires before every
+/// tool call in every mode, the only way a prohibition reaches auto mode. It
+/// only ever prohibits or asks — an `allow` would skip the permission system,
+/// classifier included.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PreToolUseResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -569,21 +574,33 @@ impl PreToolUseResponse {
 // Deciding, in whichever process is holding the payload
 // ---------------------------------------------------------------------------
 
+/// The vendor's timeout, in seconds, for a hook that only decides: every
+/// `PreToolUse`, and every event that is not a hold.
+///
+/// Generous against a cold disk and still a bound: past it the vendor cancels
+/// the hook and prompts the person itself.
+pub const GATE_TIMEOUT_SECS: u64 = 5;
+
+/// The vendor's timeout, in seconds, for the event a permission is **held**
+/// on — `PermissionRequest`.
+///
+/// Derived from [`Hold::CEILING`](crate::core::config::Hold::CEILING): a hold
+/// the vendor kills part-way is a question that never ends. The margin covers
+/// opening the store and the one read after the deadline.
+pub const HOLD_TIMEOUT_SECS: u64 =
+    crate::core::config::Hold::CEILING.as_secs() + GATE_TIMEOUT_SECS + 25;
+
 /// The session id `devplane doctor` uses when it runs the gate to see whether
 /// it answers.
 ///
-/// The gate is a real gate however it was started, so the probe gets a real
-/// verdict — and a real verdict used to get a real row in the decision log.
-/// **A diagnostic must not write history.** Running `devplane doctor` three
-/// times left three refusals of a command nobody ran, in the one table that is
-/// never pruned and exists to answer "why did that happen".
+/// The probe gets a real verdict but writes no decision row: a diagnostic must
+/// not write history.
 pub const PROBE_SESSION: &str = "devplane-doctor";
 
 /// What a tool call is called in the decision log: the tool, and as much of its
 /// specifier as fits.
 ///
-/// Here rather than in the API because the process that *decides* is now the
-/// one that names the subject, and the daemon only writes down what it is told.
+/// Named by the deciding process; the record writes down what it is told.
 pub fn describe_call(tool: &str, input: &serde_json::Value) -> String {
     match crate::core::policy::rule_content(tool, input) {
         Some(c) => format!("{tool}: {}", crate::core::text::clip(&c, 120)),
@@ -593,38 +610,29 @@ pub fn describe_call(tool: &str, input: &serde_json::Value) -> String {
 
 /// Turns a verdict into what a Claude Code `PermissionRequest` hook returns.
 ///
-/// Extracted so the daemon and the `command` hook cannot drift: two processes
-/// answering the same question in two spellings is a difference nobody would
-/// see until it mattered.
-///
-/// **There is no allow arm, and there will not be one.** Answering *yes* here
-/// would mean Devplane claiming the vendor would also have said yes, which is a
-/// claim about somebody else's code that decays with every release. Devplane
-/// prohibits, defers, and reports; it does not approve.
+/// One place, so nothing answering beside the `command` hook can drift. There
+/// is no allow arm: Devplane prohibits, defers and reports; it never claims
+/// the vendor would have said yes.
 pub fn permission_reply(verdict: &crate::core::Verdict) -> PermissionResponse {
     use crate::core::Verdict;
     match verdict {
         Verdict::Deny { rule } => {
             PermissionResponse::deny(format!("denied by Devplane policy rule {rule}"))
         }
-        // A project said a person decides this one. The reply is the same as
-        // `Undecided` — Claude Code prompts exactly as it would have — but the
-        // rule is recorded, because "nobody had an opinion" and "the project
-        // asked to be asked" are different facts.
-        Verdict::Ask { .. } | Verdict::Undecided => PermissionResponse::undecided(),
-        // The dialog this hook fires for is already on its way to a person, so
-        // there is nothing to escalate to. The verdict is still recorded, which
-        // is the half that matters here: the decision log says the matcher
-        // could not read the command rather than that no rule spoke for it.
-        Verdict::Unresolved { .. } => PermissionResponse::undecided(),
+        // The dialog is already on its way to a person, which is what `ask`
+        // and `unresolved` want, so the reply equals `undecided`. The verdict
+        // is still recorded: the three are different facts.
+        Verdict::Ask { .. } | Verdict::Unresolved { .. } | Verdict::Undecided => {
+            PermissionResponse::undecided()
+        }
     }
 }
 
 /// Turns a verdict into what a Claude Code `PreToolUse` hook returns.
 ///
-/// Only ever a prohibition. An `allow` here skips the permission system
-/// altogether, the auto-mode classifier included, so a rule that merely meant
-/// "no need to ask me" would switch off a safety layer the user chose.
+///
+/// Only ever a prohibition: an `allow` would skip the permission system,
+/// auto-mode classifier included.
 pub fn pre_tool_use_reply(verdict: &crate::core::Verdict) -> PreToolUseResponse {
     use crate::core::Verdict;
     match verdict {
@@ -634,11 +642,9 @@ pub fn pre_tool_use_reply(verdict: &crate::core::Verdict) -> PreToolUseResponse 
         Verdict::Ask { rule } => {
             PreToolUseResponse::ask(format!("{rule} asks that a person decides this"))
         }
-        // **The one case where Devplane asks without a rule to name**, and the
-        // reason is in the sentence it prints: a prohibition was written about
-        // what may run here and this line hides what runs. Answering
-        // `undecided` would hand the call to a classifier that reads the same
-        // unreadable string.
+        // The one case where Devplane asks without a rule to name: a
+        // prohibition exists and this line hides what runs, so `undecided`
+        // would hand it to a classifier reading the same unreadable string.
         Verdict::Unresolved { why } => PreToolUseResponse::ask(format!(
             "Devplane cannot tell whether a prohibition covers this: {why}"
         )),
@@ -679,10 +685,8 @@ mod tests {
         }
     }
 
-    /// **The case the feature exists for.** A session whose environment carries
-    /// a timer, on a machine whose settings say `never`, was reported as having
-    /// no clock at all — the sentence that means *your questions wait for you*,
-    /// about a session that was answering them without anybody.
+    /// A session whose environment carries a timer, on a machine whose
+    /// settings say `never`, reports the session's timer.
     #[test]
     fn a_session_reports_the_timer_its_own_environment_put_on_it() {
         let (clock, read) = clock_of(&session_start(
@@ -700,8 +704,7 @@ mod tests {
         );
     }
 
-    /// Zero is the worst case and it is not a small number: every question in
-    /// that session ended by nobody, the instant it is asked.
+    /// Zero ends every question in that session the instant it is asked.
     #[test]
     fn zero_is_reported_as_closing_immediately() {
         let (clock, _) = clock_of(&session_start(
@@ -712,8 +715,7 @@ mod tests {
         assert!(!c.says().contains("0s"), "{}", c.says());
     }
 
-    /// **Read, and nothing was set** — which is a different row from *not read*
-    /// and must not be conflated with it.
+    /// Read, and nothing was set — a different row from not read.
     #[test]
     fn a_session_with_no_such_variable_is_read_and_empty() {
         let (clock, read) = clock_of(&session_start(serde_json::json!({})));
@@ -737,14 +739,7 @@ mod tests {
         }
     }
 
-    /// **The mode rides on whatever carried it, and `PreToolUse` does not.**
-    ///
-    /// Eleven of Claude Code's hook events include `permission_mode`. The one
-    /// that fires on every single tool call is not among them, which makes the
-    /// obvious implementation — read it where the calls are — silently produce
-    /// nothing at all. This test exists because that is a sentence in a table
-    /// in somebody else's documentation, and a sentence in a table is exactly
-    /// the kind of fact this project has been wrong about before.
+    /// The mode rides on whatever carried it, and `PreToolUse` does not.
     #[test]
     fn the_mode_is_read_from_any_payload_that_has_it_and_invented_for_none() {
         let carrying = |event: &str, mode: &str| -> Vec<String> {
@@ -777,8 +772,7 @@ mod tests {
         );
 
         // `PermissionRequest` records nothing of its own and still reports the
-        // mode — which is the only reason the mode is visible for a session
-        // that never submits another prompt.
+        // mode.
         assert_eq!(
             carrying("PermissionRequest", "default"),
             vec!["permission_mode_seen".to_string()]
@@ -813,11 +807,8 @@ mod tests {
 
     #[test]
     fn an_answered_elicitation_stops_being_asked() {
-        // The bug: `Elicitation` opened a question and nothing ever closed it,
-        // so a dialog answered in the person's own terminal left an inbox item
-        // for a decision already made. An inbox that shows resolved requests
-        // is one people learn to skim — and that costs the permission request
-        // beside it, not just the stale row.
+        // An elicitation answered in the person's own terminal must close the
+        // inbox item.
         let asked = to_events(&payload(json!({
             "hook_event_name": "Elicitation",
             "session_id": "s1",
@@ -882,9 +873,8 @@ mod tests {
 
     #[test]
     fn a_settings_change_is_recorded_with_its_source() {
-        // Devplane writes its own hooks into one of these files. Somebody
-        // removing them, or a managed policy arriving that blocks loopback,
-        // otherwise shows up only as a channel that stopped speaking.
+        // Otherwise hook removal or a managed policy blocking loopback shows up
+        // only as a channel that stopped speaking.
         match to_events(&payload(json!({
             "hook_event_name": "ConfigChange",
             "session_id": "s1",
@@ -904,9 +894,8 @@ mod tests {
 
     #[test]
     fn the_context_window_changes_before_the_switch_not_after() {
-        // The gauge is a percentage *of* the model's window. `PostModelSwitch`
-        // says so afterwards; this says it before the next turn is priced
-        // against the wrong denominator.
+        // The gauge is a percentage of the model's window; this arrives before
+        // the next turn is priced.
         match to_events(&payload(json!({
             "hook_event_name": "PreModelSwitch",
             "session_id": "s1",
@@ -924,9 +913,8 @@ mod tests {
 
     #[test]
     fn the_gauge_resets_after_compaction_not_before() {
-        // `PreCompact` fires while the window is still full. Resetting there
-        // made the gauge drop to zero, the `context_high` item disappear, and
-        // both come back a moment later when the summarisation request landed.
+        // `PreCompact` fires while the window is still full; resetting there
+        // would flicker the gauge and the `context_high` item.
         assert!(
             to_events(&payload(json!({
                 "hook_event_name": "PreCompact", "session_id": "s1", "trigger": "auto"
@@ -945,10 +933,13 @@ mod tests {
 
     #[test]
     fn switching_model_changes_the_window_the_gauge_divides_by() {
+        // The vendor sends `from_model` and `to_model` here, never `model`.
         let out = to_events(&payload(json!({
             "hook_event_name": "PostModelSwitch",
             "session_id": "s1",
-            "model": {"id": "claude-opus-5[1m]"}
+            "from_model": "claude-sonnet-5",
+            "to_model": "claude-opus-5[1m]",
+            "source": "command"
         })));
         assert!(
             matches!(&out.events[0], Event::ModelChanged { model } if model.contains("1m")),
@@ -959,9 +950,8 @@ mod tests {
 
     #[test]
     fn an_mcp_server_asking_a_question_blocks_the_run_at_once() {
-        // The `elicitation_dialog` notification says the same thing about six
-        // seconds later and, in a terminal, defers again on every keystroke —
-        // the identical argument that makes `PermissionRequest` the hinge.
+        // The `elicitation_dialog` notification arrives ~6 s later and, in a
+        // terminal, defers on every keystroke.
         let out = to_events(&payload(json!({
             "hook_event_name": "Elicitation",
             "session_id": "s1",
@@ -985,18 +975,204 @@ mod tests {
 
     #[test]
     fn a_permission_claude_code_refused_by_itself_is_recorded() {
-        // Auto mode denying a call is a decision about this session that
-        // nothing else reports. The receiver always knew how to read it; until
-        // now `connect` never subscribed to the event.
+        // Auto mode denying a call is reported nowhere else, with the
+        // classifier's reason; the decider is the mode.
         let out = to_events(&payload(json!({
             "hook_event_name": "PermissionDenied",
             "session_id": "s1",
-            "tool_name": "Bash"
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /tmp/build"},
+            "reason": "[Irreversible Local Destruction]"
+        })));
+        match &out.events[0] {
+            Event::PermissionDecided {
+                decision,
+                by,
+                reason,
+                ..
+            } => {
+                assert_eq!(decision, "deny");
+                assert_eq!(by, "auto mode");
+                assert_eq!(
+                    reason.as_deref(),
+                    Some("[Irreversible Local Destruction]"),
+                    "the classifier's reason is the whole point of the row"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// **A subagent's tool call says whose it was.**
+    ///
+    /// Subagent hooks fire under the parent's session id with `agent_id` set;
+    /// without it a subagent's first call would read as the parent moving
+    /// past its open question.
+    #[test]
+    fn a_subagents_tool_call_carries_the_subagent_and_the_main_threads_does_not() {
+        let sub = to_events(&payload(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "cwd": "/repo",
+            "agent_id": "agent-abc123",
+            "agent_type": "Explore",
+            "tool_name": "Grep",
+            "tool_input": {"pattern": "login"}
+        })));
+        match &sub.events[0] {
+            Event::ToolStarted { agent_id, .. } => {
+                assert_eq!(agent_id.as_deref(), Some("agent-abc123"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let main = to_events(&payload(json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"}
         })));
         assert!(matches!(
-            &out.events[0],
-            Event::PermissionDecided { decision, .. } if decision == "deny"
+            &main.events[0],
+            Event::ToolStarted { agent_id: None, .. }
         ));
+    }
+
+    /// The reply can never defer.
+    ///
+    /// Claude Code falls open when every `PreToolUse` hook defers, so that
+    /// word would be an allow no rule wrote. Both reply types choose their word
+    /// in a private constructor; this checks them and the source.
+    #[test]
+    fn a_reply_has_no_way_to_defer() {
+        let word = ["de", "fer"].concat();
+        for reply in [
+            serde_json::to_string(&PermissionResponse::undecided()).unwrap(),
+            serde_json::to_string(&PermissionResponse::carrying_a_persons_allow()).unwrap(),
+            serde_json::to_string(&PermissionResponse::deny("x")).unwrap(),
+            serde_json::to_string(&PreToolUseResponse::undecided()).unwrap(),
+            serde_json::to_string(&PreToolUseResponse::deny("x")).unwrap(),
+            serde_json::to_string(&PreToolUseResponse::ask("x")).unwrap(),
+        ] {
+            assert!(!reply.contains(&word), "{reply}");
+        }
+        // No quoted literal of the word in this file: the words are set only
+        // inside `decide`.
+        let quoted = format!("\"{word}\"");
+        assert!(
+            !include_str!("hook.rs").contains(&quoted),
+            "a reply constructor can spell {quoted}"
+        );
+        assert!(
+            !include_str!("copilot.rs").contains(&quoted),
+            "a Copilot reply constructor can spell {quoted}"
+        );
+    }
+
+    /// **The vendor's permission context rides on the payload, verbatim.**
+    #[test]
+    fn a_permission_context_is_parsed_and_an_absent_one_costs_nothing() {
+        let p = payload(json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push"},
+            "permission_context": {
+                "classifier_verdict": "ask",
+                "classifier_confidence": 0.62,
+                "permission_rule_matched": "Bash(git push *)",
+                "agent_id": "agent-1",
+                "agent_type": "Explore",
+                "something_new": true
+            }
+        }));
+        let ctx = p.permission_context.clone().expect("parsed");
+        assert_eq!(ctx.classifier_verdict.as_deref(), Some("ask"));
+        assert_eq!(ctx.classifier_confidence, Some(0.62));
+        assert_eq!(
+            ctx.permission_rule_matched.as_deref(),
+            Some("Bash(git push *)")
+        );
+        assert_eq!(ctx.agent_type.as_deref(), Some("Explore"));
+        assert!(
+            payload(json!({"hook_event_name": "PermissionRequest", "session_id": "s1"}))
+                .permission_context
+                .is_none()
+        );
+    }
+
+    /// The fields the vendor documents, read under the names it documents.
+    #[test]
+    fn documented_field_names_are_the_ones_read() {
+        // `PostToolUse` carries the tool's own duration.
+        match &to_events(&payload(json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "duration_ms": 4187
+        })))
+        .events[0]
+        {
+            Event::ToolFinished { duration_ms, .. } => assert_eq!(*duration_ms, Some(4187)),
+            other => panic!("{other:?}"),
+        }
+
+        // `CwdChanged` documents `new_cwd`.
+        match &to_events(&payload(json!({
+            "hook_event_name": "CwdChanged",
+            "session_id": "s1",
+            "cwd": "/old",
+            "old_cwd": "/old",
+            "new_cwd": "/new"
+        })))
+        .events[0]
+        {
+            Event::CwdChanged { cwd } => assert_eq!(cwd, std::path::Path::new("/new")),
+            other => panic!("{other:?}"),
+        }
+
+        // `StopFailure` sends `error`, `error_details` and the rendered text.
+        match &to_events(&payload(json!({
+            "hook_event_name": "StopFailure",
+            "session_id": "s1",
+            "error": "rate_limit",
+            "error_details": "429 Too Many Requests",
+            "last_assistant_message": "API Error: Rate limit reached"
+        })))
+        .events[0]
+        {
+            Event::TurnFailed { message } => assert_eq!(message, "API Error: Rate limit reached"),
+            other => panic!("{other:?}"),
+        }
+        match &to_events(&payload(json!({
+            "hook_event_name": "StopFailure",
+            "session_id": "s1",
+            "error": "overloaded"
+        })))
+        .events[0]
+        {
+            Event::TurnFailed { message } => assert_eq!(message, "overloaded"),
+            other => panic!("{other:?}"),
+        }
+
+        // `Stop` says what the session left running, and absent is not zero.
+        let with = to_events(&payload(json!({
+            "hook_event_name": "Stop",
+            "session_id": "s1",
+            "background_tasks": [{"id": "t1", "type": "shell", "status": "running"}]
+        })))
+        .events;
+        assert!(matches!(with[0], Event::TurnEnded));
+        assert!(matches!(with[1], Event::JobsSeen { running: 1 }));
+        let without = to_events(&payload(json!({
+            "hook_event_name": "Stop",
+            "session_id": "s1"
+        })))
+        .events;
+        assert_eq!(
+            without.len(),
+            1,
+            "a payload that did not report tasks was given a count"
+        );
     }
 
     #[test]
@@ -1013,8 +1189,7 @@ mod tests {
 
     #[test]
     fn ask_user_question_is_read_at_pre_tool_use() {
-        // Waiting for a notification about a question costs six seconds and,
-        // in a terminal, may never arrive at all.
+        // A notification costs six seconds and, in a terminal, may never come.
         let out = to_events(&payload(json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -1042,8 +1217,8 @@ mod tests {
 
     #[test]
     fn a_permission_request_is_answered_elsewhere_and_recorded_there() {
-        // It goes to `/devplane/policy`, which is the endpoint that replies.
-        // Recording it here too would double every blocked signal.
+        // The process holding it records the verdict and block; recording
+        // here too would double every blocked signal.
         let out = to_events(&payload(json!({
             "hook_event_name": "PermissionRequest",
             "session_id": "s1",
@@ -1075,8 +1250,7 @@ mod tests {
     #[test]
     fn agent_notifications_are_ignored() {
         // `agent_needs_input` and `agent_completed` fire only while `claude
-        // agents` is open in a terminal, so treating them as state would make
-        // the board depend on whether a TUI happens to be running.
+        // agents` is open, so they are not state.
         let out = to_events(&payload(json!({
             "hook_event_name": "Notification",
             "session_id": "s1",
@@ -1115,7 +1289,7 @@ mod tests {
 
     #[test]
     fn an_allow_response_carries_the_documented_shape() {
-        let v = serde_json::to_value(PermissionResponse::allow()).unwrap();
+        let v = serde_json::to_value(PermissionResponse::carrying_a_persons_allow()).unwrap();
         assert_eq!(
             v["hookSpecificOutput"]["hookEventName"],
             "PermissionRequest"

@@ -1,380 +1,367 @@
 <script lang="ts">
-  // The board surface. **A port, so it owes every control the page it replaces
-  // had** — a rebuild that loses one is a regression with a new coat of paint.
-  //
-  // This is the first surface through the registry, and it exists to prove the
-  // contract before the other three follow: it registers itself, declares its
-  // keys, renders every outside value as text, and has an empty state that is
-  // a *result* rather than a blank.
-  import { clip, ago } from "../../lib/text";
+  // Every session on this machine, watched or driven, as one grid. The counts
+  // are both summary and filter. A selected row offers raising its window or
+  // attaching a terminal. An empty grid says what Devplane cannot see, never
+  // calm.
   import { api } from "../../lib/api";
-  import Counts from "./Counts.svelte";
-  import Supervision from "./Supervision.svelte";
+  import Grid, { type Column } from "../../lib/ui/Grid.svelte";
+  import Pill from "../../lib/ui/Pill.svelte";
+  import Icon from "../../lib/ui/Icon.svelte";
+  import Empty from "../../lib/ui/Empty.svelte";
+  import Props from "../../lib/ui/Props.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
 
   type Run = {
     id: string;
-    project_name: string | null;
-    agent: string;
-    state: string;
-    summary: string | null;
-    cost_usd: number;
-    context_percent: number | null;
-    idle_seconds: number;
+    project?: string;
+    project_name?: string | null;
+    agent?: string | null;
+    mode?: string | null;
     permission_mode?: string | null;
-    asks_a_person?: boolean | null;
+    state?: string | null;
+    waiting_for?: unknown;
+    cwd?: string | null;
+    branch?: string | null;
+    model?: string | null;
+    name?: string | null;
+    summary?: string | null;
+    cost_usd?: number | null;
+    cost_unknown?: boolean;
+    context_percent?: number | null;
+    rate_limit_percent?: number | null;
+    tool_calls?: number;
+    subagents?: number;
+    idle_seconds?: number;
+    last_event_at?: string | null;
+    plan_done?: number | null;
+    plan_total?: number | null;
+    sent_says?: string | null;
   };
+  type Summary = Record<string, number>;
 
-  /// Which projects this board is actually about.
-  ///
-  /// **The list's promise is *across everything*.** When a project cannot be
-  /// read — its forge poll failed, its configuration will not parse — its rows
-  /// are simply absent, and an empty list that silently covers four projects
-  /// out of six reads as good news. That is the worst way for this page to be
-  /// wrong, because it is wrong in the **reassuring** direction.
-  type Coverage = { projects: number; unreadable: Array<{ name: string; why: string }> };
-
-  /// Which vendors this board can see at all.
-  ///
-  /// **The same obligation `Coverage` carries, one level up.** An empty board
-  /// on a machine running three Codex sessions is not reporting quiet; it is
-  /// reporting the limit of its own sight, and a person reading it as *nothing
-  /// is happening* has been misled by an interface that was technically
-  /// correct. Composed by the daemon so this and `devplane ls` cannot disagree.
-  type Watching = { watched: string[]; unproved: string[]; driven_only: string[] };
-
-  /// The numbers that decide when a session is worth looking at.
-  ///
-  /// **Read from the daemon, never chosen here.** They are configurable, so a
-  /// figure written into this page would disagree with the one `devplane ls`
-  /// uses the moment somebody changes it — and the two surfaces would call the
-  /// same session crowded and fine.
-  type Thresholds = { context_high_percent?: number; rate_limit_percent?: number };
-
-  type Summary = {
-    projects: number; runs: number; working: number; needs_you: number;
-    idle: number; failed: number; dormant: number; cost_usd: number;
-    open_issues: number; open_prs: number; forge_needs_you: number; asks_waiting: number;
-  };
-
-  const NOTHING: Summary = {
-    projects: 0, runs: 0, working: 0, needs_you: 0, idle: 0, failed: 0, dormant: 0,
-    cost_usd: 0, open_issues: 0, open_prs: 0, forge_needs_you: 0, asks_waiting: 0,
-  };
-
-  /// What the last action did, so a refusal is never silent.
-  let said = $state("");
-
-  /// **Raises the editor window that owns a run.** The one control here that
-  /// reaches outside the browser, and it is the daemon's to perform: a page
-  /// cannot focus somebody else's window.
-  async function focus(run: Run) {
-    try {
-      await api(`/api/runs/${encodeURIComponent(run.id)}/focus`, { method: "POST" });
-      said = "raised the window that owns it";
-    } catch (e) {
-      said = `that did not land: ${e instanceof Error ? e.message : String(e)}`;
-    }
-  }
-
-  /// **Copies the command rather than attaching.** Attaching a terminal is
-  /// something a terminal does; a page that claimed to would be a button that
-  /// cannot keep its promise. The fallback is real — the command is on screen
-  /// as text — because a browser may withhold the clipboard.
-  async function attach(run: Run) {
-    const cmd = `devplane attach ${run.id}`;
-    try {
-      await navigator.clipboard?.writeText(cmd);
-      said = `copied: ${cmd}`;
-    } catch {
-      said = `no clipboard here — run: ${cmd}`;
-    }
-  }
-
-  // **There is no selected row.** One was carried over with the keyboard
-  // model: `j` and `k` moved it and the highlight said where they would act.
-  // With the keys gone it marked whichever session happened to be first in an
-  // unsorted list — a cursor nobody placed and nobody could move, which reads
-  // as *this one is special* and means nothing.
   let {
     runs = [],
-    summary = NOTHING,
-    coverage = null,
+    summary = null,
     thresholds = null,
     watching = null,
+    loaded = false,
+    error = null,
+    focus = "",
   }: {
     runs?: Run[];
-    summary?: Summary;
-    coverage?: Coverage | null;
-    thresholds?: Thresholds | null;
-    watching?: Watching | null;
+    summary?: Summary | null;
+    thresholds?: { context_high_percent?: number } | null;
+    watching?: { driven_only?: string[]; unproved?: string[] } | null;
+    loaded?: boolean;
+    /// Why the feed is not current: an empty grid then is a gap, not calm.
+    error?: string | null;
+    focus?: string;
   } = $props();
 
-  /// English for a list, because "Codex, OpenCode, Gemini CLI" in a sentence
-  /// reads as a fragment and this is a sentence.
-  function listed(xs: string[]): string {
-    if (xs.length <= 1) return xs[0] ?? "";
-    return `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`;
-  }
+  const bucket = (r: Run) => {
+    const s = (r.state ?? "").toLowerCase();
+    if (/wait|ask|need|block/.test(s)) return "needs you";
+    if (/work|run|busy|think/.test(s)) return "working";
+    if (/fail|error/.test(s)) return "failed";
+    if (/idle/.test(s)) return "idle";
+    if (/complete|done|finish|exit/.test(s)) return "done";
+    // An unknown state is counted as *other*, never guessed into *done*.
+    return "other";
+  };
+  const BUCKETS = ["working", "needs you", "idle", "failed", "done", "other"];
+  let only = $state<string | null>(null);
+  let groupBy = $state<"project" | "state" | "none">("project");
+  let selected = $state<string | null>(null);
+  // A link to one session (`#board/<id>`, the activity panel) selects it.
+  $effect(() => {
+    if (focus) selected = focus;
+  });
 
-  /// Whether a context window is close enough to compaction to say so.
-  ///
-  /// **`false` when the daemon has not said.** No threshold means no opinion,
-  /// and a default invented here would be this page deciding what "crowded"
-  /// means on its own.
-  function crowded(pct: number | null): boolean {
-    const at = thresholds?.context_high_percent;
-    return pct !== null && typeof at === "number" && pct >= at;
-  }
-
-  // Grouped by project, because that is the unit a person thinks in: nine
-  // sessions on one repository are one line of context, not nine rows that
-  // differ by a hash.
-  const grouped = $derived(
-    Object.entries(
-      runs.reduce<Record<string, Run[]>>((acc, r) => {
-        const k = r.project_name ?? "(no project)";
-        (acc[k] ??= []).push(r);
-        return acc;
-      }, {}),
-    ).sort(([a], [b]) => a.localeCompare(b)),
+  const counts = $derived(BUCKETS.map((b) => [b, runs.filter((r) => bucket(r) === b).length] as const));
+  const shown = $derived(only ? runs.filter((r) => bucket(r) === only) : runs);
+  const pick = $derived(runs.find((r) => r.id === selected) ?? null);
+  /// The threshold is the host's; with none, nothing is marked crowded.
+  const high = $derived(thresholds?.context_high_percent ?? null);
+  const crowded = (r: Run) => high != null && r.context_percent != null && r.context_percent >= high;
+  /// What this board cannot see, said beside an empty one.
+  const blind = $derived(
+    [
+      watching?.driven_only?.length ? `${watching.driven_only.join(", ")} appear only when Devplane starts them.` : "",
+      watching?.unproved?.length ? `${watching.unproved.join(", ")} ${watching.unproved.length === 1 ? "is" : "are"} read, but has not been proved against a live session.` : "",
+    ]
+      .filter(Boolean)
+      .join(" "),
   );
+
+  function when(at?: string | null): string {
+    if (!at) return "—";
+    const s = Math.max(0, Math.round((Date.now() - Date.parse(at)) / 1000));
+    return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`;
+  }
+  const columns: Column<Run>[] = [
+    { key: "state", label: "State", width: 130, sort: (r) => bucket(r) },
+    { key: "session", label: "Session", width: 220, sort: (r) => r.name ?? r.agent ?? r.id },
+    { key: "project", label: "Project", width: 120, sort: (r) => r.project_name ?? "" },
+    { key: "doing", label: "Doing", width: 320 },
+    { key: "context", label: "Context", width: 90, align: "end", sort: (r) => r.context_percent ?? -1, mono: true },
+    { key: "cost", label: "Cost", width: 80, align: "end", sort: (r) => r.cost_usd ?? -1, mono: true },
+    { key: "tools", label: "Tools", width: 70, align: "end", sort: (r) => r.tool_calls ?? 0, mono: true },
+    { key: "last", label: "Last", align: "end", sort: (r) => r.last_event_at ?? "", mono: true },
+  ];
+
+  let said = $state("");
+  async function raise(r: Run) {
+    try {
+      await api(`/api/runs/${encodeURIComponent(r.id)}/focus`, { method: "POST" });
+      said = "Raised its window.";
+    } catch (e) {
+      said = `That did not land: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+  async function copy(t: string) {
+    try {
+      await navigator.clipboard?.writeText(t);
+      said = `Copied: ${t}`;
+    } catch {
+      said = t;
+    }
+  }
 </script>
 
-<section aria-labelledby="board-head">
-  <h2 id="board-head">What is happening</h2>
-  <Counts {summary} />
-
-  <!-- **Above the list, because it is a fact about the list rather than a row
-       in it** — a reader who has started down the rows has already decided the
-       list is complete. -->
-  {#if coverage && coverage.unreadable.length > 0}
-    <p class="coverage" role="status">
-      This is {coverage.projects - coverage.unreadable.length} of {coverage.projects} projects.
-      {#each coverage.unreadable as u (u.name)}
-        <span class="miss"><b>{u.name}</b> — {u.why}</span>
+<div class="board">
+  <header class="head">
+    <h1>Sessions</h1>
+    <div class="chips" role="group" aria-label="by state">
+      <button class:on={only === null} onclick={() => (only = null)}>all <span>{runs.length}</span></button>
+      {#each counts as [b, n] (b)}
+        <button class:on={only === b} class={b.replace(" ", "-")} disabled={n === 0} onclick={() => (only = only === b ? null : b)}>{b} <span>{n}</span></button>
       {/each}
-    </p>
-  {/if}
-  <p class="said" role="status" aria-live="polite">{said}</p>
+    </div>
+    <span class="gap"></span>
+    <label class="group">Group
+      <select bind:value={groupBy} aria-label="group by">
+        <option value="project">by project</option>
+        <option value="state">by state</option>
+        <option value="none">none</option>
+      </select>
+    </label>
+    {#if summary?.cost_usd}<span class="cost" title="reported by the vendors' own telemetry">${summary.cost_usd.toFixed(2)} reported today</span>{/if}
+  </header>
 
-  {#if runs.length === 0}
-    <!-- **An empty state is a result, not a blank** — and it has to be the
-         *right* result. This said "No agent session is running on this
-         machine", which is a claim about the machine and not about what
-         Devplane can see: on a machine running three Codex sessions it was
-         false, in the reassuring direction, on the surface people trust to tell
-         them nothing needs them. `devplane ls` had always said "no **Claude
-         Code** sessions are running". -->
-    <div class="empty">
-      {#if watching && watching.watched.length > 0}
-        <p><b>Nothing is running that Devplane can see.</b></p>
-        <p class="seen">
-          It watches {listed(watching.watched)} sessions you started yourself — start one and it
-          appears here with no configuration.
-        </p>
-        {#if watching.unproved.length > 0}
-          <p class="seen">
-            {listed(watching.unproved)}: the channels are read and that path has not been proved
-            end to end yet.
-          </p>
-        {/if}
-        {#if watching.driven_only.length > 0}
-          <!-- **Named, because this is the gap a person cannot otherwise
-               discover.** A session you opened yourself in one of these never
-               appears, and an empty board that does not say so is the whole
-               failure this block exists to prevent. -->
-          <p class="unseen">
-            {listed(watching.driven_only)} appear only when Devplane starts them. A session you
-            opened yourself in one of those is not on this board.
-          </p>
-        {/if}
-      {:else}
-        <p><b>Nothing is running that Devplane can see.</b></p>
+  {#if !loaded && runs.length === 0}
+    <Skeleton />
+  {:else if runs.length === 0 && error}
+    <p class="quiet">The last read had no session in it, and Devplane has not answered since.</p>
+  {:else if runs.length === 0}
+    <Empty
+      icon="sessions"
+      title="No session is reporting"
+      body="Sessions you start yourself appear here as soon as they report — Claude Code with no configuration, others once connected."
+      limit={blind}
+    />
+  {:else}
+    <div class="frame">
+      <Grid
+        id="sessions"
+        {columns}
+        rows={shown}
+        key={(r) => r.id}
+        group={groupBy === "none" ? undefined : groupBy === "project" ? (r) => r.project_name ?? "no project" : bucket}
+        bind:selected
+        label="sessions"
+      >
+        {#snippet cell(r, c)}
+          {#if c.key === "state"}<Pill word={r.state ?? "unknown"} />
+          {:else if c.key === "session"}
+            <span class="sess"><Icon name={r.mode === "driven" ? "agent" : "eye"} size={13} /> <b>{r.name ?? r.agent ?? "session"}</b> <span class="dim">{r.model ?? ""}</span></span>
+          {:else if c.key === "project"}{r.project_name ?? "—"}
+          {:else if c.key === "doing"}<span class="dim">{r.summary ?? ""}</span>
+          {:else if c.key === "context"}
+            {#if r.context_percent != null}<span class="ctx" class:hot={crowded(r)} title={crowded(r) ? "context nearly full" : undefined}>{#if crowded(r)}<Icon name="alert" size={12} /><span class="sr-only">context nearly full</span>{/if}{Math.round(r.context_percent)}%</span>{:else}<span class="dim" title="not reported">—</span>{/if}
+          {:else if c.key === "cost"}{#if r.cost_unknown || r.cost_usd == null}<span class="dim">—</span>{:else}${r.cost_usd.toFixed(2)}{/if}
+          {:else if c.key === "tools"}{r.tool_calls ?? 0}
+          {:else}{when(r.last_event_at)}{/if}
+        {/snippet}
+        {#snippet empty()}<p class="quiet">{only ? `No session is ${only}.` : "No session."}</p>{/snippet}
+      </Grid>
+
+      {#if pick}
+        <aside class="drawer" aria-label="the session">
+          <header>
+            <b>{pick.name ?? pick.agent ?? "session"}</b>
+            <Pill word={pick.state ?? "unknown"} />
+            <button class="x" aria-label="close" onclick={() => (selected = null)}><Icon name="x" size={13} /></button>
+          </header>
+          <Props
+            rows={[
+              { label: "Project", value: pick.project_name },
+              { label: "Agent", value: pick.agent },
+              { label: "Mode", value: pick.mode === "driven" ? "driven by Devplane" : "watched" },
+              { label: "Permissions", value: pick.permission_mode, missing: "not reported" },
+              { label: "Model", value: pick.model, missing: "not reported" },
+              { label: "Branch", value: pick.branch, mono: true, missing: "none" },
+              { label: "Directory", value: pick.cwd, mono: true },
+              { label: "Plan", value: pick.plan_total ? `${pick.plan_done ?? 0} of ${pick.plan_total} steps done` : null, missing: "no plan reported" },
+              { label: "Sent", value: pick.sent_says },
+              { label: "Subagents", value: pick.subagents ? String(pick.subagents) : null, missing: "none" },
+              { label: "Session", value: pick.id, mono: true },
+            ]}
+          />
+          <div class="acts">
+            <button onclick={() => raise(pick!)}><Icon name="external" size={13} /> Raise its window</button>
+            <button onclick={() => copy(`devplane attach ${pick!.id}`)}><Icon name="terminal" size={13} /> Copy attach command</button>
+          </div>
+          {#if said}<p class="said">{said}</p>{/if}
+        </aside>
       {/if}
     </div>
-  {:else}
-    {#each grouped as [project, rows] (project)}
-      <h3>{project} <span class="n">{rows.length}</span></h3>
-      <ul role="list">
-        {#each rows as r, i (r.id)}
-          <li role="listitem">
-            <!-- **The state leads the row.** The identifier led it before, and
-                 a hash is the least useful thing about a session: what it is
-                 doing and whether it needs somebody are what a person came
-                 for. The word carries it and the dot only repeats it. -->
-            <span class="state s-{r.state}">
-              <span class="dot" aria-hidden="true"></span>{r.state}
-            </span>
-
-            <span class="what">
-              <!-- **The row is reachable.** Every session had a decision log
-                   behind it and no way to open one, so *why this is here*
-                   rendered an instruction to open a row that nothing could
-                   carry out. An anchor rather than a click handler: it works
-                   from the keyboard, it can be opened in a new tab, and the
-                   hash is the router. -->
-              <a class="says" href="#why/{encodeURIComponent(r.id)}"
-                >{r.summary ?? "—"}<span class="sr"> — why this is here</span></a
-              >
-              <span class="sub">
-                <span class="who">{clip(r.id, 8)}</span>
-                <span>{r.agent}</span>
-                <Supervision mode={r.permission_mode ?? null} asksAPerson={r.asks_a_person ?? null} />
-              </span>
-            </span>
-
-            <span class="nums">
-              <span class="cost">{r.cost_usd > 0 ? `$${r.cost_usd.toFixed(2)}` : "–"}</span>
-              <!-- **The word, not only the colour.** A percentage turning amber
-                   says nothing to somebody who cannot separate it from the ones
-                   above, so the row close to compaction says so. -->
-              <span class="ctx" class:crowded={crowded(r.context_percent ?? null)}>
-                {r.context_percent === null ? "–" : `${r.context_percent}%`}
-                {#if crowded(r.context_percent ?? null)}<span class="sr">context nearly full</span>{/if}
-              </span>
-              <span class="idle">{ago(r.idle_seconds)}</span>
-            </span>
-
-            <span class="acts">
-              <button onclick={() => focus(r)} title="raise the window that owns this run">focus</button>
-              <button onclick={() => attach(r)} title="copy `devplane attach`">attach</button>
-            </span>
-            <span class="sr">row {i + 1} of {rows.length}</span>
-          </li>
-        {/each}
-      </ul>
-    {/each}
   {/if}
-</section>
+</div>
 
 <style>
-  h2 { font-size: var(--t-lg); margin: 0; }
-
-  h3 {
+  .board {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: var(--s-4) var(--s-5) var(--s-4);
+    gap: var(--s-3);
+    box-sizing: border-box;
+  }
+  .head {
     display: flex;
     align-items: center;
-    gap: var(--s-2);
-    font-size: var(--t-sm);
-    font-weight: 600;
-    margin: var(--s-5) 0 var(--s-2);
-    color: var(--ink);
+    gap: var(--s-4);
+    flex-wrap: wrap;
   }
-  .n {
-    color: var(--dim);
-    font-weight: 400;
-    font-size: var(--t-xs);
+  h1 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+  .chips {
+    display: flex;
+    gap: var(--s-1);
+    flex-wrap: wrap;
+  }
+  .chips button {
+    height: 1.6rem;
+    padding: 0 0.6rem;
     border: 1px solid var(--line);
     border-radius: 999px;
-    padding: 0 var(--s-2);
-  }
-
-  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s-1); }
-
-  /* **A row, not a table cell.** Nine equal columns made every field shout at
-     the same volume, so nothing told a reader where to look. Now the state
-     leads, what it is doing is the subject, and the numbers are metadata
-     against the right edge. */
-  li {
-    display: grid;
-    grid-template-columns: 7.5rem minmax(0, 1fr) auto auto;
-    gap: var(--s-4);
-    align-items: center;
-    padding: var(--s-3);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
     background: var(--panel);
-  }
-  li:hover { border-color: var(--edge); }
-
-  .state {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s-2);
-    font-size: var(--t-sm);
     color: var(--dim);
+    font: inherit;
+    font-size: var(--t-xs);
+    cursor: pointer;
   }
-  .state .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
-  .s-working { color: var(--work); }
-  .s-waiting { color: var(--wait); font-weight: 600; }
-  .s-failed { color: var(--fail); font-weight: 600; }
-
-  .what { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-  .says {
-    color: var(--ink);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    text-decoration: none;
-    display: block;
-  }
-  .says:hover { text-decoration: underline; text-underline-offset: 2px; }
-  .sub { display: flex; gap: var(--s-2); color: var(--dim); font-size: var(--t-xs); align-items: center; }
-  .who { font-family: var(--mono); }
-
-  .nums {
-    display: flex;
-    gap: var(--s-4);
-    color: var(--dim);
-    font-size: var(--t-sm);
+  .chips button span {
+    color: var(--faint);
+    margin-left: 0.15rem;
     font-variant-numeric: tabular-nums;
   }
-  .nums .cost, .nums .ctx { min-width: 3.2rem; text-align: right; }
-  .nums .idle { min-width: 2.5rem; text-align: right; }
-  .ctx.crowded { color: var(--wait); font-weight: 600; }
-
-  /* **Quiet until the row is pointed at.** Twenty always-lit buttons told a
-     reader every row was equally worth acting on, which is the opposite of
-     what this list is for. They stay in the document and in the tab order —
-     hiding them would take them from the people who cannot hover. */
-  .acts { display: inline-flex; gap: var(--s-1); }
-  .acts button { font-size: var(--t-xs); padding: 2px var(--s-2); opacity: .55; }
-  li:hover .acts button,
-  .acts button:focus-visible { opacity: 1; }
-
-  .empty, .said { color: var(--dim); }
-  .said { font-size: var(--t-xs); margin: var(--s-1) 0; }
-  .said:empty { display: none; }
-
-  .empty p { margin: 0 0 var(--s-2); }
-  .empty p:last-child { margin-bottom: 0; }
-  .empty .seen { color: var(--dim); }
-  .empty .unseen { color: var(--wait); }
-  .empty {
-    max-width: 68ch;
-    border: 1px dashed var(--line);
-    border-radius: var(--radius-lg);
-    padding: var(--s-6) var(--s-5);
-    margin-top: var(--s-4);
-    text-align: center;
+  .chips button.on {
+    border-color: var(--accent);
+    background: var(--select);
+    color: var(--ink);
   }
-
-  .coverage {
+  .chips button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .chips .needs-you:not(:disabled) {
     color: var(--wait);
+  }
+  .chips .failed:not(:disabled) {
+    color: var(--fail);
+  }
+  .gap {
+    flex: 1;
+  }
+  .group {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    font-size: var(--t-xs);
+    color: var(--faint);
+  }
+  .group select {
+    font-size: var(--t-xs);
+  }
+  .cost {
+    font-size: var(--t-xs);
+    color: var(--faint);
+  }
+  .frame {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .sess {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .sess b {
+    font-weight: 550;
+    color: var(--ink);
+  }
+  .dim {
+    color: var(--faint);
+  }
+  .hot {
+    color: var(--wait);
+    font-weight: 700;
+  }
+  .drawer {
+    width: 22rem;
+    flex: none;
+    border-left: 1px solid var(--line);
+    background: var(--side);
+    padding: var(--s-3) var(--s-4);
+    overflow: auto;
+    display: grid;
+    align-content: start;
+    gap: var(--s-3);
+  }
+  .drawer header {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+  }
+  .x {
+    margin-left: auto;
+    display: grid;
+    place-items: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .acts {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-2);
+  }
+  .acts button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    justify-content: flex-start;
     font-size: var(--t-sm);
-    margin: var(--s-3) 0;
-    border: 1px solid currentColor;
-    border-radius: var(--radius);
-    padding: var(--s-2) var(--s-3);
   }
-  .coverage .miss { display: block; color: var(--ink); }
-
-  /* On a phone the numbers wrap under the subject rather than competing with
-     it for a 390-point line. */
-  @media (max-width: 52rem) {
-    li { grid-template-columns: 1fr auto; gap: var(--s-2); }
-    .state { grid-column: 1; }
-    .acts { grid-column: 2; grid-row: 1; }
-    .acts button { opacity: 1; }
-    .what { grid-column: 1 / -1; }
-    .nums { grid-column: 1 / -1; justify-content: flex-start; }
-    .nums .cost, .nums .ctx, .nums .idle { min-width: 0; text-align: left; }
+  .said {
+    margin: 0;
+    font-size: var(--t-xs);
+    color: var(--dim);
   }
-
-  /* Visible to a screen reader, and to nothing else. Position matters: a
-     `display:none` here would take the row count away from the people it is
-     for. */
-  .sr {
-    position: absolute; width: 1px; height: 1px;
-    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  .quiet {
+    padding: var(--s-4);
+    color: var(--faint);
+    margin: 0;
   }
 </style>

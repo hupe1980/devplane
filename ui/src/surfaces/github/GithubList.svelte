@@ -1,76 +1,132 @@
-<script lang="ts">
-  // The rows, given to it. **Pure on purpose**: the fetch lives in the
-  // container beside this, so this half can be rendered with a list and
-  // asserted on, and the half that talks to the daemon is the half the wiring
-  // check covers. One component doing both is how the surface came to render
-  // its own defaults for ever with every test green.
-  import { clip } from "../../lib/text";
+<script lang="ts" module>
+  export type Row = { title: string; url: string; project_name: string; needs_you: boolean; number?: number; author?: string };
+  export type Coverage = { projects: number; configured: number };
+</script>
 
-  export type Row = { title: string; url: string; project_name: string; needs_you: boolean };
+<script lang="ts">
+  // Every open issue and pull request, what needs you first, read with your
+  // own `gh`. Projects the forge cannot see are counted above the list, so an
+  // empty list never reads as *nothing open*.
+  import Grid, { type Column } from "../../lib/ui/Grid.svelte";
+  import Tabs from "../../lib/ui/Tabs.svelte";
+  import Icon from "../../lib/ui/Icon.svelte";
+  import Empty from "../../lib/ui/Empty.svelte";
 
   let {
     issues = [],
     pulls = [],
-    loaded = true,
+    loaded = false,
     failed = "",
-    tab = $bindable<"issues" | "pulls">("issues"),
+    tab = "issues",
+    coverage = null,
   }: {
     issues?: Row[];
     pulls?: Row[];
     loaded?: boolean;
     failed?: string;
     tab?: "issues" | "pulls";
+    coverage?: Coverage | null;
   } = $props();
 
-  const shown = $derived(tab === "issues" ? issues : pulls);
+  let showing = $state<string>("issues");
+  $effect(() => {
+    showing = tab;
+  });
+  const shown = $derived(showing === "issues" ? issues : pulls);
+  const absent = $derived(coverage ? Math.max(0, coverage.projects - coverage.configured) : 0);
+  let selected = $state<string | null>(null);
+  const columns: Column<Row>[] = [
+    { key: "you", label: "", width: 36 },
+    { key: "title", label: "Title", width: 520, sort: (r) => r.title },
+    { key: "project", label: "Project", width: 160, sort: (r) => r.project_name },
+    { key: "open", label: "", align: "end" },
+  ];
 </script>
 
-<section aria-labelledby="gh-head">
-  <h2 id="gh-head">Issues and pull requests</h2>
-
-  <div role="tablist" aria-label="what to show">
-    <button role="tab" aria-selected={tab === "issues"} onclick={() => (tab = "issues")}>
-      issues ({issues.length})
-    </button>
-    <button role="tab" aria-selected={tab === "pulls"} onclick={() => (tab = "pulls")}>
-      pull requests ({pulls.length})
-    </button>
-  </div>
-
-  {#if failed}
-    <p class="empty" role="status">
-      The forge could not be read: {failed}. Devplane reads it through your own
-      <code>gh</code> — <code>devplane doctor</code> says whether it is signed in.
-    </p>
-  {:else if !loaded}
-    <p class="empty">Reading the forge…</p>
+<div class="page">
+  <header class="head">
+    <h1>Issues and pull requests</h1>
+    {#if coverage}<span class="cov">{coverage.configured} of {coverage.projects} projects are on GitHub{absent ? ` — ${absent} not seen here` : ""}</span>{/if}
+  </header>
+  <Tabs
+    tabs={[
+      { id: "issues", label: "Issues", icon: "dot", count: issues.length },
+      { id: "pulls", label: "Pull requests", icon: "forge", count: pulls.length },
+    ]}
+    bind:active={showing}
+    label="what to show"
+  />
+  {#if !loaded}
+    <p class="quiet">Asking GitHub through your own <code>gh</code>…</p>
+  {:else if failed}
+    <Empty icon="alert" title="The forge could not be read" body={failed} />
   {:else if shown.length === 0}
-    <p class="empty">
-      Nothing open{tab === "issues" ? "" : " that is waiting"} across your projects. Devplane reads
-      the forge through your own <code>gh</code>; a project with none configured is simply absent
-      rather than empty.
-    </p>
+    <Empty icon="forge" title={showing === "issues" ? "No open issue" : "No open pull request"} body="Across every registered project that has a GitHub remote." limit={absent ? `${absent} projects have no GitHub remote and are not counted.` : ""} />
   {:else}
-    <ul role="list">
-      {#each shown as r (r.url)}
-        <li>
-          {#if r.needs_you}<span class="wait">needs you</span>{/if}
-          <span class="where">{r.project_name}</span>
-          <!-- A link, never a button: nothing is written to somebody else's
-               repository from a list. -->
-          <a href={r.url} target="_blank" rel="noreferrer">{clip(r.title, 90)}</a>
-        </li>
-      {/each}
-    </ul>
+    <div class="frame">
+      <Grid id="forge" {columns} rows={shown} key={(r) => r.url} group={(r) => (r.needs_you ? "Needs you" : "Everything else")} bind:selected open={(r) => window.open(r.url, "_blank", "noopener")} label={showing}>
+        {#snippet cell(r, c)}
+          {#if c.key === "you"}{#if r.needs_you}<span class="you" title="needs you"><Icon name="person" size={13} /></span>{/if}
+          {:else if c.key === "title"}<span class="t">{r.title}</span>
+          {:else if c.key === "project"}<span class="dim">{r.project_name}</span>
+          {:else}<a href={r.url} target="_blank" rel="noopener noreferrer" class="open"><Icon name="external" size={13} /> open</a>{/if}
+        {/snippet}
+      </Grid>
+    </div>
   {/if}
-</section>
+</div>
 
 <style>
-  h2 { font-size: 1rem; margin: 0 0 .3rem; }
-  [role="tablist"] { display: flex; gap: .3rem; margin-bottom: .3rem; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  li { display: flex; gap: .6rem; padding: .1rem 0; align-items: baseline; }
-  .where { color: var(--dim); font-weight: 600; }
-  .wait { color: var(--wait); }
-  .empty { color: var(--dim); max-width: 60ch; }
+  .page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: var(--s-4) var(--s-5);
+    gap: var(--s-3);
+    box-sizing: border-box;
+  }
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s-4);
+  }
+  h1 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+  .cov {
+    font-size: var(--t-xs);
+    color: var(--faint);
+  }
+  .frame {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .you {
+    color: var(--wait);
+  }
+  .t {
+    color: var(--ink);
+  }
+  .dim {
+    color: var(--faint);
+  }
+  .open {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--accent);
+    text-decoration: none;
+    font-size: var(--t-xs);
+  }
+  .quiet {
+    color: var(--faint);
+  }
+  code {
+    font-family: var(--mono);
+  }
 </style>

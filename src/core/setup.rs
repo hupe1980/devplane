@@ -1,26 +1,9 @@
-//! What a repository's agent configuration grants, read before anybody trusts
-//! it.
-//!
-//! `devplane trust` tells the daemon that headless agents may start in a
-//! directory, and a headless agent runs that repository's **own** hooks and MCP
-//! servers with no dialog of its own. The command said exactly that and then
-//! printed the word `trusted`, which is a consent dialog rather than a gate.
-//! This is the evidence: the same files the agent will load, and what they do.
-//!
-//! Three of the four classes have a measured base rate — of 3,171 public agent
-//! setups, 16.0 % carried a confirmed defect: 9.8 % unpinned MCP servers, 3.8 %
-//! skills pre-approving the shell, 3.1 % scoped-appearing grants. The fourth, a
-//! hook that runs a command out of the repository, is what `trust` has always
-//! been about.
-//!
-//! **It reports and refuses nothing.** A `PreToolUse` hook is a normal thing to
-//! ship, and grading repositories would teach people to skip the one prompt
-//! here that matters.
-//!
-//! **It is deliberately shallow.** It does not follow a hook command into the
-//! script it names: deciding whether a shell script is hostile is a problem
-//! nobody has solved, and a confident tick in front of that case is worse than
-//! no tick.
+//! What a repository's agent configuration grants, read before `devplane
+//! trust`: a headless agent runs the repository's own hooks and MCP servers
+//! with no dialog. Reports four classes — command hooks, unpinned MCP servers,
+//! skills pre-approving the shell, over-broad allow rules — and refuses
+//! nothing. Deliberately shallow: it does not follow a hook into the script it
+//! names, since judging a script hostile is unsolved.
 
 use std::path::{Path, PathBuf};
 
@@ -29,10 +12,8 @@ use std::path::{Path, PathBuf};
 pub struct Finding {
     /// The file it came from, relative to the repository root.
     pub source: String,
-    /// What it is, in one word, for the left column: `hook`, `mcp`, `skill`,
-    /// `policy`.
     pub kind: Kind,
-    /// The thing itself — a command, a server name, a rule.
+    /// A command, a server name, a rule.
     pub subject: String,
     /// One sentence about what it means. Never advice, never a grade.
     pub detail: String,
@@ -61,19 +42,11 @@ impl Kind {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Setup {
     pub findings: Vec<Finding>,
-    /// Skills the repository ships, whether or not any of them is a finding.
-    ///
-    /// **Counted separately because "nothing to flag" is not "nothing here".**
-    /// A skill is reported only when it pre-approves a tool, which is the right
-    /// bar for a *finding* — and it left `trust` saying a repository "declares
-    /// no skills" about one shipping ten of them. A person deciding whether to
-    /// trust a repository wants to know what will load into their agent, not
-    /// only which part of it alarmed a scanner.
+    /// Skills the repository ships, findings or not: "nothing to flag" is not
+    /// "nothing will load".
     pub skills: usize,
-    /// Files that exist and could not be parsed. Reported rather than skipped:
-    /// a `settings.json` this cannot read is one whose hooks are invisible
-    /// here and entirely visible to the agent, which is the worst combination
-    /// and the one a silent `continue` used to produce.
+    /// Files that exist and could not be parsed: their hooks are invisible
+    /// here and fully visible to the agent, so this is never silent.
     pub unreadable: Vec<String>,
 }
 
@@ -83,17 +56,11 @@ impl Setup {
     }
 }
 
-/// Reads a repository's agent configuration.
-///
-/// A missing file is not a finding — most repositories have none of these, and
-/// "no hooks" is the common case rather than a result. A file that exists and
-/// will not parse *is* a finding, in `unreadable`.
+/// Reads a repository's agent configuration. A missing file is not a finding;
+/// one that exists and will not parse is, in `unreadable`.
 pub fn scan(root: &Path) -> Setup {
     let mut out = Setup::default();
-    // **One read per file.** Hooks and permissions are two questions about the
-    // same document, and asking them separately meant a file that would not
-    // parse was reported once per question — which is the "absence is
-    // distinguishable" rule failing into double vision instead of silence.
+    // One read per file, so an unparsable file is reported once.
     for rel in [".claude/settings.json", ".claude/settings.local.json"] {
         read_json(root, rel, &mut out, |v, findings| {
             hooks(v, rel, findings);
@@ -107,15 +74,8 @@ pub fn scan(root: &Path) -> Setup {
     out
 }
 
-/// Allow rules in the agent's own settings that grant an arbitrary program.
-///
-/// **This reads `.claude/settings.json`, and it used to read `devplane.toml`.**
-/// The old version analysed a key that has approved nothing since the approval
-/// path was deleted, so it warned about an over-grant that could not happen —
-/// while the file where such a rule genuinely does grant was scanned for hooks
-/// and not for permissions. Trusting a directory means adopting whatever
-/// arrived with somebody else's code, and an accumulated `permissions.allow` is
-/// the record of an agent escalating past transient failures.
+/// Allow rules in the agent's settings that grant an arbitrary program.
+/// Trusting a directory adopts whatever `permissions.allow` arrived with it.
 fn granted(v: &serde_json::Value, rel: &str, findings: &mut Vec<Finding>) {
     let rules: Vec<String> = v
         .get("permissions")
@@ -132,15 +92,13 @@ fn granted(v: &serde_json::Value, rel: &str, findings: &mut Vec<Finding>) {
             source: rel.to_string(),
             kind: Kind::Policy,
             subject: wide.rule,
-            // The `why` and not the suggestion: this surface is somebody
-            // deciding about a repository, not editing its rules.
+            // The `why`, not a suggestion: the reader is deciding, not editing.
             detail: wide.why,
         });
     }
 }
 
-/// Every skill in the repository that pre-approves a tool for whoever installs
-/// it.
+/// Counts skills and reports each that pre-approves a tool.
 fn skills(root: &Path, out: &mut Setup) {
     let dir = root.join(".claude/skills");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -151,8 +109,6 @@ fn skills(root: &Path, out: &mut Setup) {
         .map(|e| e.path().join("SKILL.md"))
         .filter(|p| p.is_file())
         .collect();
-    // Directory order is filesystem order, which differs between machines and
-    // would make this output unstable for no reason.
     paths.sort();
     out.skills = paths.len();
     for path in paths {
@@ -198,18 +154,13 @@ fn read_json(
     }
 }
 
-/// Every `command` hook the settings file installs.
-///
-/// Only `command` hooks: an `http` hook points at a URL rather than at
-/// something in this checkout, and a `prompt` hook runs no program. The point
-/// of the list is *what will execute on this machine because you trusted this
-/// directory*.
+/// Every `command` hook the settings file installs. `http` and `prompt` hooks
+/// run no program on this machine, so they are not listed.
 pub fn hooks(v: &serde_json::Value, source: &str, out: &mut Vec<Finding>) {
     let Some(events) = v.get("hooks").and_then(|h| h.as_object()) else {
         return;
     };
-    // Object order is insertion order in serde_json, which is the file's own
-    // order — stable, and the order the person wrote them in.
+    // serde_json keeps insertion order: the file's own order.
     for (event, matchers) in events {
         let Some(list) = matchers.as_array() else {
             continue;
@@ -236,11 +187,8 @@ pub fn hooks(v: &serde_json::Value, source: &str, out: &mut Vec<Finding>) {
     }
 }
 
-/// Every MCP server the repository declares, and whether it is pinned.
-///
-/// An unpinned `npx -y <pkg>` is whatever that package's owner published most
-/// recently, fetched and executed when an agent starts. It is the largest
-/// single class in the study (9.8 %) and the cheapest to see.
+/// Every MCP server the repository declares, and whether it is pinned: an
+/// unpinned `npx -y <pkg>` runs whatever was published most recently.
 pub fn mcp_servers(v: &serde_json::Value, source: &str, out: &mut Vec<Finding>) {
     let Some(servers) = v.get("mcpServers").and_then(|s| s.as_object()) else {
         return;
@@ -275,19 +223,14 @@ pub fn mcp_servers(v: &serde_json::Value, source: &str, out: &mut Vec<Finding>) 
 }
 
 /// The package a fetch-and-run launcher will install, when it carries no
-/// version.
-///
-/// `npx -y pkg@1.2.3` is pinned; `npx -y pkg` is not. A scoped name keeps its
-/// leading `@`, so the version test looks for an `@` after the first
-/// character rather than anywhere.
+/// version. A scoped name's leading `@` is not a version.
 pub fn unpinned_package(command: &str, args: &[&str]) -> Option<String> {
     const LAUNCHERS: &[&str] = &["npx", "bunx", "pnpm", "uvx", "dlx"];
     let program = Path::new(command).file_name()?.to_str()?;
     if !LAUNCHERS.contains(&program) {
         return None;
     }
-    // The first argument that is not a flag and not the launcher's own
-    // subcommand is the package.
+    // The first non-flag argument that is not the launcher's subcommand.
     let pkg = args
         .iter()
         .find(|a| !a.starts_with('-') && **a != "dlx" && **a != "exec")?;
@@ -295,15 +238,8 @@ pub fn unpinned_package(command: &str, args: &[&str]) -> Option<String> {
     (!versioned).then(|| (*pkg).to_string())
 }
 
-/// The tools a skill's front matter pre-approves, if any.
-///
-/// Claude Code's `allowed-tools` in a skill's front matter means those calls
-/// are not asked about while the skill runs. A skill that lists `Bash` is
-/// handing the shell to whoever installs it, which is the 3.8 % class.
-///
-/// Only bare tool names count. `Bash(npm test *)` is a scoped grant and is the
-/// author doing the right thing; reporting it would make the common good case
-/// noisy and teach people to ignore this line.
+/// The bare command tools a skill's `allowed-tools` pre-approves, if any.
+/// A scoped grant like `Bash(npm test *)` is the good case and is not reported.
 pub fn pre_approved_tools(markdown: &str) -> Option<String> {
     let (front, _) = crate::core::text::split_frontmatter(markdown);
     let front = front?;
@@ -342,8 +278,7 @@ mod tests {
 
     #[test]
     fn an_http_or_prompt_hook_is_not_a_thing_this_checkout_runs() {
-        // The list answers "what executes here because you trusted this
-        // directory". A URL and a model are neither.
+        // A URL and a model are not programs this checkout runs.
         let v = serde_json::json!({
             "hooks": { "Stop": [ { "hooks": [
                 { "type": "http", "url": "http://127.0.0.1:1/x" },
@@ -372,21 +307,12 @@ mod tests {
             None,
             "the leading @ of a scope is not a version"
         );
-        // Not a fetch-and-run launcher: a local binary is whatever is on the
-        // machine already, which trusting this directory did not change.
+        // Not a fetch-and-run launcher.
         assert_eq!(unpinned_package("/usr/local/bin/my-server", &[]), None);
         assert_eq!(unpinned_package("node", &["server.js"]), None);
     }
 
     /// A repository that ships skills is not a repository that ships nothing.
-    ///
-    /// **Found by pointing `trust` at this repository** after installing Spec
-    /// Kit, which drops ten skills into `.claude/skills/`. None of them
-    /// pre-approves a tool, so none is a finding — and the command said the
-    /// repository *"declares no hooks, MCP servers or skills"*. The scan was
-    /// right and the sentence was false, which is the worse of the two failures
-    /// for a gate whose entire job is telling a person what will load into
-    /// their agent before they consent to it.
     #[test]
     fn skills_that_pre_approve_nothing_are_still_counted() {
         let root = std::env::temp_dir().join(format!("vp-setup-{}", uuid::Uuid::new_v4().simple()));
@@ -409,8 +335,7 @@ mod tests {
             "but two skills will load, and trust says so"
         );
 
-        // And a repository with none says none, so the count is a fact rather
-        // than a number that is always printed.
+        // A repository with none says none.
         let bare = std::env::temp_dir().join(format!("vp-setup-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&bare).unwrap();
         assert_eq!(scan(&bare).skills, 0);
@@ -423,10 +348,9 @@ mod tests {
     fn a_skill_that_pre_approves_the_shell_is_reported_and_a_scoped_one_is_not() {
         let bare = "---\nname: deploy\nallowed-tools: Bash, Read\n---\n\nbody";
         assert_eq!(pre_approved_tools(bare).as_deref(), Some("Bash"));
-        // Scoped is the author doing the right thing.
         let scoped = "---\nname: deploy\nallowed-tools: Bash(npm test *)\n---\n\nbody";
         assert_eq!(pre_approved_tools(scoped), None);
-        // `Read` is not a command tool, so it is not this line's business.
+        // `Read` is not a command tool.
         let reads = "---\nname: notes\nallowed-tools: Read, Glob\n---\n\nbody";
         assert_eq!(pre_approved_tools(reads), None);
         // No front matter at all.
@@ -446,8 +370,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".claude")).unwrap();
         // Absent: nothing to say.
         assert!(scan(root).is_empty());
-        // Present and broken: the agent will read it and this cannot, which is
-        // the one combination that must never be silent.
+        // Present and broken: the agent reads it and this cannot.
         std::fs::write(root.join(".claude/settings.json"), "{ not json").unwrap();
         let s = scan(root);
         assert_eq!(s.unreadable, vec![".claude/settings.json".to_string()]);

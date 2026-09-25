@@ -1,12 +1,10 @@
-//! The observation store: SQLite, WAL, rebuildable.
+//! The store: SQLite, WAL, one file.
 //!
-//! Two rules shape everything here:
-//!
-//! * **Observations only.** Events, and the run and project rows derived from
-//!   them. Anything Devplane causes belongs in the runtime journal instead, so
-//!   there is never a question about which store owns a fact.
-//! * **Rebuildable.** Losing this database costs history, not correctness: the
-//!   providers are still the source of truth for what is running.
+//! It holds observations (events and the runs projected from them, which the
+//! providers can say again) and the record (changes, asks, decisions, agent
+//! capabilities, inbox reads), which nothing can say again; `schema.sql` says
+//! which table is which. Timestamps are compared as text, so every one is
+//! written through [`ts`] at a fixed width.
 
 use crate::core::event::EventEnvelope;
 use crate::core::ids::{ProjectId, RunId};
@@ -16,32 +14,20 @@ use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::path::{Path, PathBuf};
-// Only the in-memory store parses a connection string, and that is test-only.
 #[cfg(test)]
 use std::str::FromStr;
 
 /// The shape of `schema.sql`, stamped into every database this build writes.
 ///
-/// **Bump it whenever `schema.sql` changes in a way an older file would not
-/// satisfy** — a renamed or added column, a changed type, a dropped table. A
-/// file stamped with anything else is moved aside on open rather than migrated
-/// (`Store::retire_if_stale`), which is affordable because everything here
-/// except `decisions` is re-derivable from the event log or the provider.
-///
-/// **It is 2. The count started at 1 on 2026-09-20 and moved once, the same
-/// day, when `decisions` grew a `server_source` column.** A database written by
-/// the previous build is moved aside rather than migrated, which is what the
-/// number is for. It had reached 5 by recording every
-/// shape this schema passed through before anybody could have a database — and
-/// with nothing released, none of those numbers described a file that exists.
-/// A version is for telling *your* file from *another* one, not for keeping a
-/// history; the history is in the changelog.
-pub const SCHEMA_VERSION: i64 = 3;
+/// Bump it whenever `schema.sql` changes in a way an older file would not
+/// satisfy (a renamed or added column, a changed type, a dropped table). A file
+/// stamped with anything else is moved aside on open (`Store::retire`), not
+/// migrated.
+pub const SCHEMA_VERSION: i64 = 9;
 
-/// The statement that stamps it. Written out rather than formatted, because
-/// `PRAGMA user_version` accepts no bind parameter and a formatted string
-/// would be a dynamic SQL string for a value that is a literal in this file.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 3";
+/// The statement that stamps it, written out because `PRAGMA user_version`
+/// accepts no bind parameter.
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 9";
 
 /// A handle on the observation store.
 #[derive(Debug, Clone)]
@@ -49,37 +35,61 @@ pub struct Store {
     pool: SqlitePool,
 }
 
-/// One `agent_capabilities` row as SQLite hands it back, before it becomes a
-/// [`AgentCapabilityRecord`](crate::core::AgentCapabilityRecord).
-///
-/// Named rather than written inline because eight positional columns are a type
-/// nobody can read at the call site, and the compiler says so.
-type AgentCapabilityRow = (String, Option<String>, i64, i64, i64, i64, i64, String);
-
 impl Store {
     /// Opens the store, creating it if needed.
     pub async fn open(path: &Path) -> Result<Self> {
+        Self::open_waiting(path, std::time::Duration::from_secs(5)).await
+    }
+
+    /// Opens the store, waiting at most `busy` for another writer's lock. The
+    /// hook passes a short one: it runs under the vendor's timeout, and a locked
+    /// database must cost the record (which is spooled), never the answer.
+    pub async fn open_waiting(path: &Path, busy: std::time::Duration) -> Result<Self> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
-        // `filename`, not a `sqlite://…` URL built by string formatting: a home
-        // directory with a `?` or a `#` in it turned the rest of the path into
-        // query parameters and opened a database somewhere else entirely.
+        // `filename`, not a formatted `sqlite://` URL: a `?` or `#` in the path
+        // would become query parameters.
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
             .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        // A database written by a different schema is moved aside before it is
-        // opened, never migrated and never silently reused. See [`SCHEMA_VERSION`].
-        Self::retire_if_stale(path).await?;
-        let pool = SqlitePoolOptions::new()
-            .max_connections(8)
-            .connect_with(opts)
+            .busy_timeout(busy);
+        // One connection: the hook opens the store on every tool call, so the
+        // version is read on the connection that will do the work.
+        let existed = path.exists();
+        let connect = || {
+            SqlitePoolOptions::new()
+                .max_connections(8)
+                .connect_with(opts.clone())
+        };
+        let pool = connect()
             .await
             .with_context(|| format!("opening {}", path.display()))?;
+        let found: Option<i64> = sqlx::query_as::<_, (i64,)>("PRAGMA user_version")
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|(n,)| n);
+        // The stamp is written after the schema applies, so a file carrying
+        // this build's version is complete and the schema is not re-run.
+        if existed && found == Some(SCHEMA_VERSION) {
+            return Ok(Self { pool });
+        }
+        // A database written by a different schema is moved aside, never
+        // migrated or reused.
+        let pool = if existed && found.is_some_and(|v| v != 0) {
+            pool.close().await;
+            Self::retire(path, found.unwrap_or(0))?;
+            connect()
+                .await
+                .with_context(|| format!("opening {}", path.display()))?
+        } else {
+            pool
+        };
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
@@ -87,49 +97,10 @@ impl Store {
 
     /// Renames a database written by a different schema out of the way.
     ///
-    /// **There is no migration machinery and there is not going to be.** Every
-    /// table here except `decisions` is a projection of the event log or of the
-    /// provider, so the cost of starting again is a replay rather than a loss —
-    /// and `decisions` is why the old file is *moved* rather than deleted. The
+    /// There is no migration machinery. Observations cost a replay to rebuild;
+    /// the record tables are why the old file is moved rather than deleted. The
     /// user is told where it went.
-    ///
-    /// This replaces a loop of `ALTER TABLE … ADD COLUMN` statements whose
-    /// success case was a duplicate-column error. That worked for exactly the
-    /// change it was written for and silently did nothing for the next one: a
-    /// renamed column, a changed type or a dropped table all leave a file that
-    /// opens cleanly and fails on the first write naming the new shape, at
-    /// runtime, in whichever surface happened to write first.
-    async fn retire_if_stale(path: &Path) -> Result<()> {
-        if !path.exists() {
-            return Ok(());
-        }
-        let opts = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(false)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        let found: Option<i64> = match SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await
-        {
-            Ok(pool) => {
-                let v: Option<(i64,)> = sqlx::query_as("PRAGMA user_version")
-                    .fetch_optional(&pool)
-                    .await
-                    .ok()
-                    .flatten();
-                pool.close().await;
-                v.map(|(n,)| n)
-            }
-            // Unreadable is not the same as stale. A file this build cannot
-            // open at all is left exactly where it is, because moving it would
-            // be this tool destroying evidence about its own failure.
-            Err(_) => return Ok(()),
-        };
-        if found == Some(SCHEMA_VERSION) {
-            return Ok(());
-        }
-        let found = found.unwrap_or(0);
+    fn retire(path: &Path, found: i64) -> Result<()> {
         let aside = path.with_extension(format!("v{found}.bak"));
         std::fs::rename(path, &aside).with_context(|| {
             format!(
@@ -137,7 +108,7 @@ impl Store {
                 aside.display()
             )
         })?;
-        // Both sidecars go with it or the new database inherits a stale journal.
+        // Both sidecars go too, or the new database inherits a stale journal.
         for suffix in ["-wal", "-shm"] {
             let from = PathBuf::from(format!("{}{suffix}", path.display()));
             if from.exists() {
@@ -149,23 +120,14 @@ impl Store {
             schema_expected = SCHEMA_VERSION,
             moved_to = %aside.display(),
             "the database was written by a different schema and has been moved aside; \
-             observations will be rebuilt from the providers, and the decision log in the \
-             old file is the one thing that is not re-derivable"
+             observations will be rebuilt from the providers; the record tables — changes, \
+             asks, decisions, reports — are in the old file and nowhere else"
         );
         Ok(())
     }
 
-    /// An in-memory store, for tests.
-    ///
-    /// Configured exactly like the real one — foreign keys included. A test
-    /// database with the constraints turned off proves nothing about the
-    /// database the product ships.
-    ///
-    /// **Gated, because it was shipping.** Nothing outside this file's own test
-    /// module has ever called it, so it was a test fixture compiled into every
-    /// released binary — and invisible to the no-reader guard until that guard
-    /// was widened past `src/core/`. Gating it is the honest form of the
-    /// exemption: the compiler now enforces what the doc comment always said.
+    /// An in-memory store for tests, configured exactly like the real one
+    /// (foreign keys included).
     #[cfg(test)]
     pub async fn open_in_memory() -> Result<Self> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
@@ -178,27 +140,17 @@ impl Store {
         Ok(store)
     }
 
-    /// Applies the schema and stamps its version.
-    ///
-    /// There is no migration machinery on purpose: almost everything here is a
-    /// projection of the event log, and a row this build cannot decode is
-    /// dropped and counted (`unreadable rows`) rather than migrated. A file
-    /// written by a different schema never reaches this function —
-    /// [`Self::retire_if_stale`] has already moved it aside.
+    /// Applies the schema and stamps its version. A file written by a
+    /// different schema never gets here: [`Self::retire`] moved it aside.
     async fn migrate(&self) -> Result<()> {
-        // `raw_sql` runs the whole file, comments and all, in one round trip.
-        // Hand-splitting on `;` is how a schema loses the statement that a
-        // comment happens to sit above.
+        // `raw_sql` runs the whole file in one round trip; splitting on `;`
+        // by hand risks losing a statement.
         sqlx::raw_sql(include_str!("schema.sql"))
             .execute(&self.pool)
             .await
             .context("applying schema")?;
-        // Stamp the version this file was written by, so the next build can
-        // tell whether it understands it. Written after the schema applies, so
-        // a half-created file is not stamped as complete.
-        // `PRAGMA user_version` takes no bind parameters, so the statement is
-        // built from the constant — which is an integer literal in this source
-        // file and can never be user input.
+        // Stamped after the schema applies, so a half-created file is never
+        // stamped as complete.
         sqlx::query(SCHEMA_VERSION_PRAGMA)
             .execute(&self.pool)
             .await
@@ -210,13 +162,8 @@ impl Store {
         &self.pool
     }
 
-    /// Appends an event and indexes anything searchable in it.
-    ///
-    /// Both writes in one transaction, for the same reason the retention sweep
-    /// is one: the index and the thing it indexes are two tables that have to
-    /// agree, and a crash between two separate statements leaves an event that
-    /// search can never find. The sweep was already transactional and this was
-    /// not, which is the half of the invariant nobody had looked at.
+    /// Appends an event and indexes anything searchable in it, in one
+    /// transaction so a crash cannot leave an event search never finds.
     pub async fn append_event(&self, env: &EventEnvelope) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
@@ -224,7 +171,7 @@ impl Store {
              VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&env.id)
-        .bind(env.at.to_string())
+        .bind(ts(&env.at))
         .bind(env.run_id.as_str())
         .bind(env.project_id.as_ref().map(|p| p.as_str()))
         .bind(env.source.as_str())
@@ -234,9 +181,8 @@ impl Store {
         .await?;
 
         if let Some(text) = searchable_text(&env.event) {
-            // Indexed only when the event itself was new. The insert above
-            // ignores a duplicate id; an unconditional index row beside it
-            // meant a replayed event was findable twice.
+            // Indexed only when the event was new, so a replayed event is not
+            // findable twice.
             sqlx::query(
                 "INSERT INTO events_fts (text, run_id, event_id)
                  SELECT ?, ?, ? WHERE NOT EXISTS
@@ -253,8 +199,49 @@ impl Store {
         Ok(())
     }
 
-    /// Every event for a run, oldest first. Uuid v7 ids sort by time, so this
-    /// is the replay order without a join on the timestamp.
+    /// Events past `after` from the sources short-lived processes write, oldest
+    /// first: the rows the host has yet to fold into `runs`. Ordered by `seq`,
+    /// not `at`, because two processes' clocks may disagree.
+    pub async fn shim_events_since(
+        &self,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, EventEnvelope)>> {
+        let rows = sqlx::query(
+            "SELECT seq, id, at, run_id, project_id, source, payload FROM events
+             WHERE seq > ? AND source IN ('hook', 'copilot_hook', 'codex_hook', 'statusline')
+             ORDER BY seq ASC LIMIT ?",
+        )
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading events to project")?;
+        Ok(decode_rows("event", &rows, |row| {
+            let seq: i64 = row.try_get("seq")?;
+            Ok((seq, row_to_event(row)?))
+        }))
+    }
+
+    /// The last event `seq` the host folded into `runs`. Zero on a fresh store.
+    pub async fn projected_through(&self) -> Result<i64> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT through FROM projection WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .context("reading the projection mark")?;
+        Ok(row.map(|(n,)| n).unwrap_or(0))
+    }
+
+    pub async fn set_projected_through(&self, seq: i64) -> Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO projection (id, through) VALUES (1, ?)")
+            .bind(seq)
+            .execute(&self.pool)
+            .await
+            .context("writing the projection mark")?;
+        Ok(())
+    }
+
+    /// Every event for a run, oldest first (uuid v7 ids sort by time).
     pub async fn events_for_run(&self, run: &RunId, limit: i64) -> Result<Vec<EventEnvelope>> {
         let rows = sqlx::query(
             "SELECT id, at, run_id, project_id, source, payload FROM events
@@ -264,30 +251,22 @@ impl Store {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_to_event).collect()
+        // An unreadable row drops that row, not the whole replay.
+        Ok(decode_rows("event", &rows, row_to_event))
     }
 
-    /// Every tool call this machine has observed, newest first, with the
-    /// directory the session was working in.
+    /// Every tool call observed on this machine, newest first, with the
+    /// directory whose rules govern it (from the run; calls whose run is pruned
+    /// are dropped). Only tools a path or command rule can speak for.
     ///
-    /// The directory is what decides whose rules apply, so it comes from the
-    /// run rather than from the event. A run whose row has been pruned is
-    /// dropped rather than evaluated against the wrong project's rules.
-    ///
-    /// Only the tools a path or command rule can speak for; a replay that
-    /// counted `TodoWrite` would report a coverage figure nobody can act on.
-    /// `under` scopes the query to one directory tree. It is applied **in the
-    /// query** rather than after it, because a limit that runs first would
-    /// return the most recent calls on the whole machine and then throw most of
-    /// them away — so a person asking about one project on a busy laptop would
-    /// be told they have no history.
+    /// `under` scopes to one directory tree inside the query, so the limit is
+    /// not spent on other projects' calls first.
     pub async fn observed_tool_calls(
         &self,
         under: Option<&Path>,
         limit: i64,
     ) -> Result<Vec<ObservedCall>> {
-        // `LIKE` with the tree as a prefix. The escape keeps a `%` or `_` in a
-        // real directory name from turning into a wildcard.
+        // The escape keeps a `%` or `_` in a directory name from being a wildcard.
         let prefix = under.map(|p| {
             let mut t = p.to_string_lossy().into_owned();
             t = t
@@ -332,12 +311,8 @@ impl Store {
         Ok(out)
     }
 
-    /// Full-text search across tool commands, questions and summaries.
-    ///
-    /// What the user typed is a phrase, not an FTS5 expression. Passing it
-    /// through raw meant `devplane search "a-b"` or a query containing a quote
-    /// was a syntax error the user could not have predicted and the daemon
-    /// reported as a 500.
+    /// Full-text search across tool commands, questions and summaries. The
+    /// query is treated as words, not an FTS5 expression (see `fts_phrase`).
     pub async fn search(&self, query: &str, limit: i64) -> Result<Vec<(RunId, String)>> {
         let phrase = fts_phrase(query);
         if phrase.is_empty() {
@@ -356,35 +331,20 @@ impl Store {
             .collect())
     }
 
-    /// Writes the run projection. Called after every applied event, which is
-    /// cheap because it is one upsert of one row.
+    /// Writes the run projection; one upsert, called after every applied event.
     pub async fn save_run(&self, run: &Run) -> Result<()> {
         sqlx::query(
-            "INSERT INTO runs (id, session_id, project_id, agent, mode, state, cwd, worktree,
-                               branch, model, entrypoint, name, pid, started_at, last_event_at, payload)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO runs (id, session_id, agent, cwd, last_event_at, payload)
+             VALUES (?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
-               project_id=excluded.project_id, agent=excluded.agent, mode=excluded.mode,
-               state=excluded.state, cwd=excluded.cwd, worktree=excluded.worktree,
-               branch=excluded.branch, model=excluded.model, entrypoint=excluded.entrypoint,
-               name=excluded.name, pid=excluded.pid, last_event_at=excluded.last_event_at,
-               payload=excluded.payload",
+               agent=excluded.agent, cwd=excluded.cwd,
+               last_event_at=excluded.last_event_at, payload=excluded.payload",
         )
         .bind(run.id.as_str())
         .bind(run.session_id.as_str())
-        .bind(run.project_id.as_ref().map(|p| p.as_str()))
         .bind(&run.agent)
-        .bind(run.mode.as_str())
-        .bind(run.state.as_str())
         .bind(run.cwd.to_string_lossy().to_string())
-        .bind(run.worktree.as_ref().map(|p| p.to_string_lossy().to_string()))
-        .bind(run.branch.as_deref())
-        .bind(run.model.as_deref())
-        .bind(run.entrypoint.as_deref())
-        .bind(run.name.as_deref())
-        .bind(run.pid.map(|p| p as i64))
-        .bind(run.started_at.to_string())
-        .bind(run.last_event_at.to_string())
+        .bind(ts(&run.last_event_at))
         .bind(serde_json::to_string(run)?)
         .execute(&self.pool)
         .await?;
@@ -395,7 +355,7 @@ impl Store {
         let rows = sqlx::query("SELECT id, payload FROM runs ORDER BY last_event_at DESC")
             .fetch_all(&self.pool)
             .await?;
-        Ok(decode_rows("run", &rows))
+        Ok(decode_rows("run", &rows, payload))
     }
 
     pub async fn save_project(&self, p: &Project) -> Result<()> {
@@ -412,7 +372,30 @@ impl Store {
         .bind(p.trusted as i32)
         .bind(p.repo_url.as_deref())
         .bind(p.auto_discovered as i32)
-        .bind(jiff::Timestamp::now().to_string())
+        .bind(ts(&jiff::Timestamp::now()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Records a project something saw (a hook resolving a directory, the host
+    /// learning a remote) without touching `trusted`. Inserts a new row, and on
+    /// an existing one only fills a missing remote, so a hook's stale read can
+    /// never revoke a trust granted in between.
+    pub async fn note_project(&self, p: &Project) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered, created_at)
+             VALUES (?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET
+               repo_url = COALESCE(projects.repo_url, excluded.repo_url)",
+        )
+        .bind(p.id.as_str())
+        .bind(&p.name)
+        .bind(p.root.to_string_lossy().to_string())
+        .bind(p.trusted as i32)
+        .bind(p.repo_url.as_deref())
+        .bind(p.auto_discovered as i32)
+        .bind(ts(&jiff::Timestamp::now()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -436,55 +419,15 @@ impl Store {
             .collect())
     }
 
-    pub async fn save_work(&self, w: &crate::core::Work) -> Result<()> {
+    pub async fn save_change(&self, w: &crate::core::Change) -> Result<()> {
         sqlx::query(
-            "INSERT INTO works (id, project_id, kind, phase, title, worktree, branch,
-                                created_at, updated_at, batch_id, payload)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            "INSERT INTO changes (id, updated_at, payload) VALUES (?,?,?)
              ON CONFLICT(id) DO UPDATE SET
-               phase=excluded.phase, title=excluded.title, worktree=excluded.worktree,
-               branch=excluded.branch, updated_at=excluded.updated_at,
-               batch_id=excluded.batch_id, payload=excluded.payload",
+               updated_at=excluded.updated_at, payload=excluded.payload",
         )
         .bind(w.id.as_str())
-        .bind(w.project_id.as_str())
-        .bind(w.kind.as_str())
-        .bind(w.phase.as_str())
-        .bind(&w.title)
-        .bind(w.worktree.as_ref().map(|p| p.to_string_lossy().to_string()))
-        .bind(w.branch.as_deref())
-        .bind(w.created_at.to_string())
-        .bind(w.updated_at.to_string())
-        .bind(w.batch_id.as_ref().map(|b| b.as_str()))
+        .bind(ts(&w.updated_at))
         .bind(serde_json::to_string(w)?)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Records a fan-out.
-    ///
-    /// Written once and never updated: a batch's own facts — the prompt, the
-    /// targets, the position, who sent it and when — are fixed the moment it is
-    /// sent. What changes afterwards belongs to its members, which are work
-    /// rows with their own lifecycle.
-    pub async fn save_batch(&self, b: &crate::core::batch::Batch) -> Result<()> {
-        sqlx::query(
-            "INSERT OR REPLACE INTO batches
-               (id, kind, position, prompt, template, sent_at, sent_by, targets)
-             VALUES (?,?,?,?,?,?,?,?)",
-        )
-        .bind(b.id.as_str())
-        .bind(match b.kind {
-            crate::core::batch::Kind::Drafted => "drafted",
-            crate::core::batch::Kind::Dispatched => "dispatched",
-        })
-        .bind(b.position.as_str())
-        .bind(&b.prompt)
-        .bind(b.template.as_deref())
-        .bind(b.sent_at.to_string())
-        .bind(&b.sent_by)
-        .bind(serde_json::to_string(&b.targets)?)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -492,18 +435,11 @@ impl Store {
 
     // ── Asks ────────────────────────────────────────────────────────────
     //
-    // The one projection here that is *not* rebuildable from the providers. An
-    // agent asks once; if the row is lost, the question is lost with it, and
-    // nothing on the machine can re-derive what somebody was asked.
+    // Not rebuildable: if an ask's row is lost, the question is lost with it.
 
-    /// Writes an ask, and every later state of it.
-    ///
     /// Records what an agent said it could do, the last time it was started.
-    ///
-    /// **Overwrites on purpose.** The interesting value is the *current* one: an
-    /// agent that gains `session/list` in a release should read as having it,
-    /// not as two rows a surface has to choose between. The date says when the
-    /// answer was true.
+    /// Overwrites: the current answer is the interesting one, and the date
+    /// says when it was true.
     pub async fn save_agent_capabilities(
         &self,
         c: &crate::core::AgentCapabilityRecord,
@@ -521,19 +457,14 @@ impl Store {
         .bind(c.list_sessions as i64)
         .bind(c.declares_modes as i64)
         .bind(c.needs_auth as i64)
-        .bind(c.measured_at.to_string())
+        .bind(ts(&c.measured_at))
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Notes that this agent declared a session mode.
-    ///
-    /// **A separate write because it is a separate observation.** The rest of
-    /// the record comes from `initialize`; whether an agent declares a mode is
-    /// only visible when a session is created, which is later and can fail. A
-    /// single write covering both would have to choose one moment and be wrong
-    /// about the other.
+    /// Notes that this agent declared a session mode. A separate write because
+    /// it is only visible when a session is created, later than `initialize`.
     pub async fn note_agent_declares_modes(&self, command: &str) -> Result<()> {
         sqlx::query("UPDATE agent_capabilities SET declares_modes = 1 WHERE command = ?")
             .bind(command)
@@ -542,34 +473,33 @@ impl Store {
         Ok(())
     }
 
-    /// Everything measured so far. An agent with no row has never been started,
-    /// and the caller reports that as *not probed*.
+    /// Everything measured so far. An agent with no row was never started,
+    /// which the caller reports as *not probed*.
     pub async fn agent_capabilities(&self) -> Result<Vec<crate::core::AgentCapabilityRecord>> {
-        let rows: Vec<AgentCapabilityRow> = sqlx::query_as(
-            "SELECT command, agent_name, resume, load_session, list_sessions,
+        let rows = sqlx::query(
+            "SELECT command AS id, command, agent_name, resume, load_session, list_sessions,
                     declares_modes, needs_auth, measured_at
                FROM agent_capabilities",
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| crate::core::AgentCapabilityRecord {
-                command: r.0,
-                agent_name: r.1,
-                resume: r.2 != 0,
-                load_session: r.3 != 0,
-                list_sessions: r.4 != 0,
-                declares_modes: r.5 != 0,
-                needs_auth: r.6 != 0,
-                measured_at: r.7.parse().unwrap_or_else(|_| jiff::Timestamp::now()),
+        Ok(decode_rows("agent_capabilities", &rows, |r| {
+            Ok(crate::core::AgentCapabilityRecord {
+                command: r.get("command"),
+                agent_name: r.get("agent_name"),
+                resume: r.get::<i64, _>("resume") != 0,
+                load_session: r.get::<i64, _>("load_session") != 0,
+                list_sessions: r.get::<i64, _>("list_sessions") != 0,
+                declares_modes: r.get::<i64, _>("declares_modes") != 0,
+                needs_auth: r.get::<i64, _>("needs_auth") != 0,
+                measured_at: stamp(r, "measured_at")?,
             })
-            .collect())
+        }))
     }
 
-    /// `INSERT OR REPLACE` on an opaque primary key, so the answer path is
-    /// idempotent at the storage layer too: the row is the whole state and the
-    /// pure [`Ask`](crate::core::ask::Ask) decides what may change.
+    /// Writes an ask as it is raised. Not for closing one: that goes through
+    /// [`Self::close_ask`], because a whole-row replace from a stale copy could
+    /// overwrite an answer another surface just wrote.
     pub async fn save_ask(&self, a: &crate::core::ask::Ask) -> Result<()> {
         let deadline: Option<i64> = match a.deadline {
             crate::core::ask::Deadline::Never => None,
@@ -588,116 +518,219 @@ impl Store {
         .bind(&a.request_id)
         .bind(&a.message)
         .bind(serde_json::to_string(&a.payload)?)
-        .bind(a.asked_at.to_string())
+        .bind(ts(&a.asked_at))
         .bind(deadline)
         .bind(a.answer.as_ref().map(serde_json::to_string).transpose()?)
-        .bind(a.answered_at.map(|t| t.to_string()))
+        .bind(a.answered_at.as_ref().map(ts))
         .bind(a.answered_from.as_deref())
         .bind(a.delivery.as_ref().map(serde_json::to_string).transpose()?)
         .bind(a.ended.as_ref().map(serde_json::to_string).transpose()?)
-        .bind(a.ended_at.map(|t| t.to_string()))
+        .bind(a.ended_at.as_ref().map(ts))
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// One ask by its token.
-    pub async fn ask(&self, id: &str) -> Result<Option<crate::core::ask::Ask>> {
-        let row = sqlx::query("SELECT * FROM asks WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.as_ref().and_then(decode_ask))
+    /// Closes an ask only if it is still open (compare-and-set). `true` when
+    /// this call closed it, `false` when somebody else already had; so two
+    /// surfaces answering get one answer and a sweep never overwrites one.
+    pub async fn close_ask(&self, a: &crate::core::ask::Ask) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE asks SET answer = ?, answered_at = ?, answered_from = ?, ended = ?,
+                    ended_at = ?, delivery = ?
+              WHERE id = ? AND answer IS NULL AND ended IS NULL",
+        )
+        .bind(a.answer.as_ref().map(serde_json::to_string).transpose()?)
+        .bind(a.answered_at.as_ref().map(ts))
+        .bind(a.answered_from.as_deref())
+        .bind(a.ended.as_ref().map(serde_json::to_string).transpose()?)
+        .bind(a.ended_at.as_ref().map(ts))
+        .bind(a.delivery.as_ref().map(serde_json::to_string).transpose()?)
+        .bind(a.id.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() == 1)
     }
 
-    /// Every ask still waiting for a person, oldest first.
-    ///
-    /// **Oldest first and not newest**, because this is a queue of things owed
-    /// to somebody rather than a feed: the one that has been waiting longest is
-    /// the one that has been failing longest.
+    /// Records what became of delivering an answer, on a row already closed.
+    pub async fn set_ask_delivery(
+        &self,
+        id: &str,
+        delivery: &crate::core::ask::Delivery,
+    ) -> Result<()> {
+        sqlx::query("UPDATE asks SET delivery = ? WHERE id = ?")
+            .bind(serde_json::to_string(delivery)?)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// One ask by its token.
+    pub async fn ask(&self, id: &str) -> Result<Option<crate::core::ask::Ask>> {
+        let rows = sqlx::query("SELECT * FROM asks WHERE id = ?")
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(decode_rows("ask", &rows, decode_ask).pop())
+    }
+
+    /// Every ask still waiting for a person, oldest first: it is a queue of
+    /// things owed, not a feed.
     pub async fn open_asks(&self) -> Result<Vec<crate::core::ask::Ask>> {
         let rows = sqlx::query("SELECT * FROM asks WHERE ended IS NULL ORDER BY asked_at ASC")
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().filter_map(decode_ask).collect())
+        Ok(decode_rows("ask", &rows, decode_ask))
     }
 
-    /// Recent asks whatever became of them, newest first — the surface that
-    /// answers *who answered that one, and when*.
+    /// Recent asks whatever became of them, newest first.
     pub async fn asks(&self, limit: i64) -> Result<Vec<crate::core::ask::Ask>> {
         let rows = sqlx::query("SELECT * FROM asks ORDER BY asked_at DESC LIMIT ?")
             .bind(limit)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().filter_map(decode_ask).collect())
+        Ok(decode_rows("ask", &rows, decode_ask))
     }
 
-    /// Every fan-out, newest first.
-    ///
-    /// A row this build cannot decode is **dropped and counted**, like every
-    /// other projection here — not migrated, and not guessed at.
-    pub async fn load_batches(&self, limit: i64) -> Result<Vec<crate::core::batch::Batch>> {
-        let rows = sqlx::query("SELECT * FROM batches ORDER BY sent_at DESC LIMIT ?")
+    pub async fn load_changes(&self) -> Result<Vec<crate::core::Change>> {
+        let rows = sqlx::query("SELECT id, payload FROM changes ORDER BY updated_at DESC")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(decode_rows("change", &rows, payload))
+    }
+
+    // ── Reports ─────────────────────────────────────────────────────────
+
+    /// Writes a report, and every later state of it.
+    pub async fn save_report(&self, r: &crate::core::report::Report) -> Result<()> {
+        let target = match &r.target {
+            crate::core::report::Target::Project { project, .. } => Some(project.as_str()),
+            _ => None,
+        };
+        sqlx::query(
+            "INSERT OR REPLACE INTO reports
+               (id, filed_at, source_project, target_project, state, payload)
+             VALUES (?,?,?,?,?,?)",
+        )
+        .bind(r.id.as_str())
+        .bind(ts(&r.provenance.at))
+        .bind(r.provenance.project.as_str())
+        .bind(target)
+        .bind(r.state.as_str())
+        .bind(serde_json::to_string(r)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// One report by id or id prefix, since people copy the part a table printed.
+    pub async fn report(&self, id: &str) -> Result<Option<crate::core::report::Report>> {
+        let rows = sqlx::query("SELECT id, payload FROM reports WHERE id = ?")
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+        if let Some(r) = decode_rows("report", &rows, payload).pop() {
+            return Ok(Some(r));
+        }
+        let rows = sqlx::query("SELECT id, payload FROM reports WHERE id LIKE ? || '%' LIMIT 2")
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut hits = decode_rows("report", &rows, payload);
+        Ok(match hits.len() {
+            1 => hits.pop(),
+            _ => None,
+        })
+    }
+
+    /// Every report addressed to a project, newest first; only the open ones
+    /// when asked.
+    pub async fn reports_to(
+        &self,
+        project: &crate::core::ProjectId,
+        open_only: bool,
+    ) -> Result<Vec<crate::core::report::Report>> {
+        let rows = sqlx::query(
+            "SELECT id, payload FROM reports
+              WHERE target_project = ? AND (? = 0 OR state = 'open')
+              ORDER BY filed_at DESC",
+        )
+        .bind(project.as_str())
+        .bind(open_only as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(decode_rows("report", &rows, payload))
+    }
+
+    /// Every report a project filed, newest first; only the unanswered ones
+    /// when asked.
+    pub async fn reports_from(
+        &self,
+        project: &crate::core::ProjectId,
+        open_only: bool,
+    ) -> Result<Vec<crate::core::report::Report>> {
+        let rows = sqlx::query(
+            "SELECT id, payload FROM reports
+              WHERE source_project = ?
+                AND (? = 0 OR state IN ('open', 'accepted', 'drafted'))
+              ORDER BY filed_at DESC",
+        )
+        .bind(project.as_str())
+        .bind(open_only as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(decode_rows("report", &rows, payload))
+    }
+
+    /// Every report, newest first, bounded — the inbox and the list read
+    /// the whole set and ask the struct.
+    pub async fn reports(&self, limit: i64) -> Result<Vec<crate::core::report::Report>> {
+        let rows = sqlx::query("SELECT id, payload FROM reports ORDER BY filed_at DESC LIMIT ?")
             .bind(limit)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows
-            .iter()
-            .filter_map(|r| {
-                Some(crate::core::batch::Batch {
-                    id: crate::core::BatchId::new(r.get::<String, _>("id")),
-                    kind: match r.get::<String, _>("kind").as_str() {
-                        "drafted" => crate::core::batch::Kind::Drafted,
-                        "dispatched" => crate::core::batch::Kind::Dispatched,
-                        _ => return None,
-                    },
-                    position: crate::core::batch::Position::parse(
-                        r.get::<String, _>("position").as_str(),
-                    )?,
-                    prompt: r.get("prompt"),
-                    template: r.get("template"),
-                    sent_at: r.get::<String, _>("sent_at").parse().ok()?,
-                    sent_by: r.get("sent_by"),
-                    targets: serde_json::from_str(&r.get::<String, _>("targets")).ok()?,
-                })
-            })
-            .collect())
+        Ok(decode_rows("report", &rows, payload))
     }
 
-    /// One fan-out by id.
-    pub async fn batch(&self, id: &str) -> Result<Option<crate::core::batch::Batch>> {
-        Ok(self
-            .load_batches(500)
-            .await?
-            .into_iter()
-            .find(|b| b.id.as_str() == id))
+    /// The reports a change raised or was started from, newest first. Read from
+    /// the payload rather than a column.
+    pub async fn reports_for_change(
+        &self,
+        change: &crate::core::ChangeId,
+    ) -> Result<Vec<crate::core::report::Report>> {
+        let rows = sqlx::query(
+            "SELECT id, payload FROM reports
+              WHERE json_extract(payload, '$.provenance.change') = ?
+                 OR json_extract(payload, '$.state.change') = ?
+              ORDER BY filed_at DESC",
+        )
+        .bind(change.as_str())
+        .bind(change.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(decode_rows("report", &rows, payload))
     }
 
-    pub async fn load_works(&self) -> Result<Vec<crate::core::Work>> {
-        let rows = sqlx::query("SELECT id, payload FROM works ORDER BY updated_at DESC")
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(decode_rows("work", &rows))
-    }
-
-    /// How many stored rows this build can no longer read.
-    ///
-    /// Asked by `devplane doctor`, because the answer is otherwise invisible:
-    /// the rows are simply absent from the board, which looks exactly like
-    /// never having had them.
+    /// How many stored rows this build can no longer read, for `devplane
+    /// doctor`: on the board they look exactly like rows that never existed.
     pub async fn unreadable(&self) -> Result<Vec<(String, String)>> {
-        // Literal queries, one per table: sqlx refuses a table name built by
-        // `format!`, and it is right to — the rule that keeps one of these from
-        // ever taking a parameter is worth more than the repetition it costs.
+        // Literal queries, one per table: sqlx refuses a `format!`ed table name.
         let mut out = Vec::new();
         let runs = sqlx::query("SELECT id, payload FROM runs")
             .fetch_all(&self.pool)
             .await?;
         out.extend(unreadable_in::<Run>("run", &runs));
-        let works = sqlx::query("SELECT id, payload FROM works")
+        let changes = sqlx::query("SELECT id, payload FROM changes")
             .fetch_all(&self.pool)
             .await?;
-        out.extend(unreadable_in::<crate::core::Work>("work", &works));
+        out.extend(unreadable_in::<crate::core::Change>("change", &changes));
+        let reports = sqlx::query("SELECT id, payload FROM reports")
+            .fetch_all(&self.pool)
+            .await?;
+        out.extend(unreadable_in::<crate::core::report::Report>(
+            "report", &reports,
+        ));
         Ok(out)
     }
 
@@ -708,7 +741,7 @@ impl Store {
         )
         .bind(&m.id)
         .bind(m.run_id.as_str())
-        .bind(m.at.to_string())
+        .bind(ts(&m.at))
         .bind(m.role.as_str())
         .bind(&m.text)
         .execute(&self.pool)
@@ -716,21 +749,11 @@ impl Store {
         Ok(())
     }
 
-    /// One run's transcript, oldest first.
+    /// The last thing the agent said on a run, to read beside a gate's exit
+    /// code rather than on its own.
     ///
-    /// `limit` takes the *newest* rows and hands them back in order, because a
-    /// long conversation is read from the end — the same reason `tail` exists.
-    /// The last thing the agent said on a run.
-    ///
-    /// For putting a claim beside the evidence: an agent's end-of-task report
-    /// references about one action in eleven and drifts toward its plan as the
-    /// run leaves it, so the report is worth reading **next to** a gate's exit
-    /// code and worth very little on its own.
-    ///
-    /// `None` when there is no transcript — a run Devplane only watched, or a
-    /// repository with `[transcripts] keep = false`. That is *nothing was
-    /// recorded*, never *the agent said nothing*, and every surface that shows
-    /// this has to keep the two apart.
+    /// `None` when nothing was recorded (a watched run, or `[transcripts] keep
+    /// = false`), which surfaces must not show as *the agent said nothing*.
     pub async fn last_agent_message(&self, run: &RunId) -> Result<Option<String>> {
         let row = sqlx::query(
             "SELECT text FROM messages WHERE run_id = ? AND role = 'agent'
@@ -742,6 +765,8 @@ impl Store {
         Ok(row.map(|r| r.get::<String, _>("text")))
     }
 
+    /// One run's transcript, oldest first. `limit` keeps the newest rows,
+    /// because a long conversation is read from the end.
     pub async fn messages_for_run(
         &self,
         run: &RunId,
@@ -756,19 +781,17 @@ impl Store {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(|r| crate::core::Message {
+        Ok(decode_rows("message", &rows, |r| {
+            let role: String = r.get("role");
+            Ok(crate::core::Message {
                 id: r.get("id"),
                 run_id: RunId::new(r.get::<String, _>("run_id")),
-                at: r
-                    .get::<String, _>("at")
-                    .parse()
-                    .unwrap_or_else(|_| jiff::Timestamp::now()),
-                role: crate::core::Role::parse(&r.get::<String, _>("role")),
+                at: stamp(r, "at")?,
+                role: crate::core::Role::parse(&role)
+                    .with_context(|| format!("unknown role {role:?}"))?,
                 text: r.get("text"),
             })
-            .collect())
+        }))
     }
 
     /// Appends a decision. Never updated, never pruned.
@@ -776,11 +799,11 @@ impl Store {
         sqlx::query(
             "INSERT OR IGNORE INTO decisions
                (id, at, authority, action, subject, outcome, reason, tool, server_source,
-                project_id, run_id, work_id)
+                project_id, run_id, change_id)
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
-        .bind(d.at.to_string())
+        .bind(ts(&d.at))
         .bind(d.authority.as_str())
         .bind(&d.action)
         .bind(&d.subject)
@@ -790,22 +813,18 @@ impl Store {
         .bind(d.server_source.as_deref())
         .bind(d.project_id.as_ref().map(|p| p.as_str()))
         .bind(d.run_id.as_ref().map(|r| r.as_str()))
-        .bind(d.work_id.as_ref().map(|w| w.as_str()))
+        .bind(d.change_id.as_ref().map(|w| w.as_str()))
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Records that the inbox is asking for something, once per asking.
-    ///
-    /// Idempotent against the *open* row rather than against the item id: the
-    /// same question asked again after being answered is a new raise, because
-    /// it is a new decision. That is the same rule the notifier follows when it
-    /// decides whether to interrupt somebody twice.
+    /// Records that the inbox is asking for something. Idempotent against the
+    /// open row, not the item id: asked again after an answer is a new raise.
     pub async fn attention_raise(&self, item: &crate::core::AttentionItem) -> Result<()> {
         sqlx::query(
             "INSERT INTO attention_log
-               (item_id, kind, level, project_id, run_id, work_id, raised_at)
+               (item_id, kind, level, project_id, run_id, change_id, raised_at)
              SELECT ?,?,?,?,?,?,?
              WHERE NOT EXISTS (
                SELECT 1 FROM attention_log WHERE item_id = ? AND resolved_at IS NULL)",
@@ -815,20 +834,17 @@ impl Store {
         .bind(item.level.as_str())
         .bind(item.project_id.as_ref().map(|p| p.as_str()))
         .bind(item.run_id.as_ref().map(|r| r.as_str()))
-        .bind(item.work_id.as_ref().map(|w| w.as_str()))
-        .bind(item.since.to_string())
+        .bind(item.change_id.as_ref().map(|w| w.as_str()))
+        .bind(ts(&item.since))
         .bind(item.id.0.as_str())
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Closes the open row for these items, if any is still open.
-    ///
-    /// `WHERE resolved_at IS NULL` is what makes the measurement exact rather
-    /// than heuristic: the API writes `Acted` the instant a person answers, the
-    /// sweeper follows with `Elsewhere` for whatever merely vanished, and the
-    /// first writer wins. No timing window, no correlation guess.
+    /// Closes the open row for these items, if still open. First writer wins
+    /// (`WHERE resolved_at IS NULL`): the API's `Acted` is never overwritten by
+    /// the sweeper's `Elsewhere`.
     pub async fn attention_resolve(
         &self,
         item_ids: &[String],
@@ -837,16 +853,13 @@ impl Store {
         if item_ids.is_empty() {
             return Ok(0);
         }
-        // The id list rides as JSON through one bind rather than as a built
-        // string of placeholders: the statement stays literal, which is what
-        // `sqlx` asks for and what keeps an item id — a value derived from a
-        // session id — away from the SQL itself.
+        // The ids ride as JSON through one bind, keeping the statement literal.
         let ids = serde_json::to_string(item_ids)?;
         Ok(sqlx::query(
             "UPDATE attention_log SET resolved_at = ?, resolution = ?
              WHERE resolved_at IS NULL AND item_id IN (SELECT value FROM json_each(?))",
         )
-        .bind(jiff::Timestamp::now().to_string())
+        .bind(ts(&jiff::Timestamp::now()))
         .bind(resolution.as_str())
         .bind(ids)
         .execute(&self.pool)
@@ -854,16 +867,8 @@ impl Store {
         .rows_affected())
     }
 
-    /// Closes everything still open that is no longer being asked.
-    ///
-    /// One statement per tick rather than a read-then-write, so a run that
-    /// unblocks between the two cannot be lost.
-    /// Resolves every open item whose id starts with `prefix`.
-    ///
-    /// The forge items are keyed `gh:<project>:<kind>:<number>`, and a snooze
-    /// dismisses a kind for a project — every number of it — so the match is
-    /// on the prefix rather than on a list of ids the caller would have to
-    /// reconstruct.
+    /// Resolves every open item whose id starts with `prefix`: a snooze
+    /// dismisses a kind for a project (`gh:<project>:<kind>:`), every number of it.
     pub async fn attention_resolve_prefix(
         &self,
         prefix: &str,
@@ -873,7 +878,7 @@ impl Store {
             "UPDATE attention_log SET resolved_at = ?, resolution = ?
              WHERE resolved_at IS NULL AND item_id LIKE ? || '%'",
         )
-        .bind(jiff::Timestamp::now().to_string())
+        .bind(ts(&jiff::Timestamp::now()))
         .bind(resolution.as_str())
         .bind(prefix)
         .execute(&self.pool)
@@ -881,90 +886,27 @@ impl Store {
         .rows_affected())
     }
 
+    /// Closes everything still open that is no longer being asked, in one
+    /// statement so a run that unblocks mid-sweep cannot be lost.
     pub async fn attention_sweep(&self, still_open: &[String]) -> Result<u64> {
         let ids = serde_json::to_string(still_open)?;
         Ok(sqlx::query(
             "UPDATE attention_log SET resolved_at = ?, resolution = 'elsewhere'
              WHERE resolved_at IS NULL AND item_id NOT IN (SELECT value FROM json_each(?))",
         )
-        .bind(jiff::Timestamp::now().to_string())
+        .bind(ts(&jiff::Timestamp::now()))
         .bind(ids)
         .execute(&self.pool)
         .await?
         .rows_affected())
     }
 
-    /// What the inbox did, per kind, since a point in time.
-    /// How much of what happened in the person's name reached them.
-    ///
-    /// Three counts from two tables, and the seams matter:
-    ///
-    /// * **`unattended`** is tool calls — the `PreToolUse` half. Measured on
-    ///   2026-09-19, this is everything: no session on the machine asked about
-    ///   anything in forty-nine consecutive calls.
-    /// * **`asked`** is the moments a person was actually put in the loop,
-    ///   which arrive as a `blocked` event or a rule's `permission_decided`.
-    /// * **`answered`** is what a person then did about it, from the decision
-    ///   log rather than from the absence of a follow-up event — *nobody
-    ///   answered* and *nothing was recorded* are different facts and only the
-    ///   decision log can tell them apart.
-    ///
-    /// The window is a caller's, so `7 days` and `today` are the same query.
-    pub async fn oversight(
-        &self,
-        since: jiff::Timestamp,
-    ) -> Result<crate::core::attention::Oversight> {
-        use sqlx::Row;
-        let at = since.to_string();
-        let unattended: i64 =
-            sqlx::query("SELECT COUNT(*) AS n FROM events WHERE at >= ? AND kind = 'tool_started'")
-                .bind(&at)
-                .fetch_one(&self.pool)
-                .await?
-                .get("n");
-        // **Both halves from one table, which is a correction.**
-        //
-        // `asked` was first counted from event kinds — `blocked` and
-        // `permission_decided`. On a real machine that returned nought while
-        // the attention log held sixty-nine raised permissions, and the
-        // product printed *"not one was put in front of you"* underneath a
-        // table showing sixty-nine. A driven run's permission never writes
-        // those event kinds; it raises an item directly. The attention log is
-        // where *a person was put in the loop* is actually recorded, and
-        // counting the numerator and the denominator from two different
-        // tables is how a ratio ends up contradicting the rows beneath it.
-        let asked = sqlx::query(
-            "SELECT COUNT(*) AS asked,
-                    SUM(resolution = 'acted') AS answered
-             FROM attention_log
-             WHERE raised_at >= ? AND kind IN ('permission', 'question')",
-        )
-        .bind(&at)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(crate::core::attention::Oversight {
-            unattended,
-            asked: asked.try_get("asked").unwrap_or(0),
-            answered: asked.try_get("answered").unwrap_or(0),
-        })
-    }
-
     /// Which agents raised anything in the window.
     ///
-    /// **Because a raise count is a fact about the model, not about the
-    /// machine.** Implicit escalation thresholds differ markedly by model
-    /// family and self-estimates are miscalibrated in model-specific ways
-    /// ([arXiv:2604.08588]), so *how often did something need me* compared
-    /// across a week when the vendor mix changed is comparing two escalation
-    /// policies and calling it a trend.
-    ///
-    /// The surface says so only when it is true — when more than one agent is
-    /// behind the numbers — because a caveat printed on every run is a caveat
-    /// nobody reads.
-    ///
-    /// A row whose run has been pruned contributes nothing rather than an
-    /// `unknown` agent: the question is *did more than one vendor produce
-    /// these*, and a missing join cannot answer it either way.
+    /// Escalation rates differ by model family ([arXiv:2604.08588]), so a raise
+    /// count across a changing vendor mix is not a trend; surfaces caveat that
+    /// only when more than one agent is behind the numbers. Rows whose run is
+    /// pruned contribute nothing rather than an `unknown` agent.
     ///
     /// [arXiv:2604.08588]: https://arxiv.org/abs/2604.08588
     pub async fn agents_behind_attention(&self, since: jiff::Timestamp) -> Result<Vec<String>> {
@@ -974,7 +916,7 @@ impl Store {
               WHERE a.raised_at >= ? AND r.agent != ''
               ORDER BY r.agent",
         )
-        .bind(since.to_string())
+        .bind(ts(&since))
         .fetch_all(&self.pool)
         .await?;
         use sqlx::Row;
@@ -996,7 +938,7 @@ impl Store {
                     SUM(folded_at IS NOT NULL AND resolution = 'acted') AS folded_then_acted
              FROM attention_log WHERE raised_at >= ? GROUP BY kind ORDER BY raised DESC",
         )
-        .bind(since.to_string())
+        .bind(ts(&since))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1019,17 +961,8 @@ impl Store {
             .collect())
     }
 
-    /// The decision log, newest first, optionally about one run or one work
-    /// item.
-    /// When somebody last read the inbox on this machine.
-    /// Stamps the items a read folded, so folding can be measured.
-    ///
-    /// **Only on a read.** The board polls every couple of seconds; counting a
-    /// fold per render would measure polling, which is the same mistake the
-    /// boundary mark exists to avoid. First fold wins — `folded_at` is the
-    /// moment a kind was first summarised rather than listed, and overwriting
-    /// it on every read would turn a measurement into a timestamp of the last
-    /// time anybody looked.
+    /// Stamps the items a read folded. Only on a read, since the board polls;
+    /// the first fold wins, so `folded_at` stays a measurement.
     pub async fn mark_folded(&self, ids: &[crate::core::AttentionId]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
@@ -1040,13 +973,17 @@ impl Store {
              WHERE resolved_at IS NULL AND folded_at IS NULL
                AND item_id IN (SELECT value FROM json_each(?))",
         )
-        .bind(jiff::Timestamp::now().to_string())
+        .bind(ts(&jiff::Timestamp::now()))
         .bind(serde_json::to_string(&list)?)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
+    /// When the inbox was last read, not polled.
+    ///
+    /// `None` folds *never looked* with *could not read*, unlike [`Self::day`]:
+    /// here the failure over-reports what is new, which is the safe direction.
     pub async fn last_look(&self) -> Option<jiff::Timestamp> {
         sqlx::query("SELECT at FROM looks WHERE id = 1")
             .fetch_optional(&self.pool)
@@ -1058,73 +995,60 @@ impl Store {
 
     /// Records that the inbox was read.
     ///
-    /// **Called on a dwell, never on a render.** See the table's own comment:
-    /// advancing this on every paint erases the boundary it exists to draw.
+    /// Called on a dwell, never on a render: advancing it on every paint erases
+    /// the boundary it draws.
     pub async fn mark_look(&self, at: jiff::Timestamp) -> Result<()> {
         sqlx::query(
             "INSERT INTO looks (id, at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET at = ?",
         )
-        .bind(at.to_string())
-        .bind(at.to_string())
+        .bind(ts(&at))
+        .bind(ts(&at))
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// One day's decisions and the day's questions, for the close.
-    ///
-    /// **Bounded by the day rather than by a count**, because the tally is a
-    /// statement about a day and a `LIMIT` would silently make it a statement
-    /// about the most recent N of it. The index on `at` is what makes that
-    /// cheap.
-    pub async fn day(&self, since: &str) -> Result<(Vec<crate::core::Decision>, u32, u64)> {
+    /// One day's decisions and the count of the day's questions, for the close.
+    /// Bounded by the day, not a count, so the tally is about the whole day.
+    pub async fn day(&self, since: &str) -> Result<(Vec<crate::core::Decision>, u32)> {
+        // Re-stamped through `ts` to compare in the stored format.
+        let since: jiff::Timestamp = since
+            .parse()
+            .with_context(|| format!("the day's start {since:?} is not a timestamp"))?;
+        let since = ts(&since);
         let rows =
             sqlx::query("SELECT * FROM decisions WHERE at >= ? ORDER BY at DESC, rowid DESC")
-                .bind(since)
+                .bind(&since)
                 .fetch_all(&self.pool)
                 .await?;
-        let decisions: Vec<crate::core::Decision> =
-            rows.iter().filter_map(decode_decision).collect();
+        let decisions = decode_rows("decision", &rows, decode_decision);
 
-        // Questions that waited for somebody at any point today, and the
-        // longest any one of them waited. An ask still open is counted with the
-        // wait it has accrued so far, because a question that has been waiting
-        // six hours is the most interesting row on the page.
-        let asks = sqlx::query(
-            "SELECT asked_at, ended_at FROM asks WHERE asked_at >= ? ORDER BY asked_at ASC",
-        )
-        .bind(since)
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-        let now = jiff::Timestamp::now();
-        let mut longest = 0u64;
-        for r in &asks {
-            let Ok(start) = r.get::<String, _>("asked_at").parse::<jiff::Timestamp>() else {
-                continue;
-            };
-            let end = r
-                .get::<Option<String>, _>("ended_at")
-                .and_then(|t| t.parse::<jiff::Timestamp>().ok())
-                .unwrap_or(now);
-            longest = longest.max(u64::try_from(end.as_second() - start.as_second()).unwrap_or(0));
-        }
-        Ok((
-            decisions,
-            u32::try_from(asks.len()).unwrap_or(u32::MAX),
-            longest,
-        ))
+        // A count only: the longest wait would measure the person.
+        let asks = sqlx::query("SELECT count(*) AS n FROM asks WHERE asked_at >= ?")
+            .bind(&since)
+            .fetch_all(&self.pool)
+            .await
+            // Unreadable is not empty: a failing store must not render as
+            // *0 questions waited* on the summary a person trusts most.
+            .context("reading today's asks")?;
+        let waited: i64 = asks.first().map(|r| r.get("n")).unwrap_or(0);
+        Ok((decisions, u32::try_from(waited).unwrap_or(u32::MAX)))
     }
 
+    /// The decision log, newest first, optionally about one run or change.
     pub async fn decisions(
         &self,
         about: Option<&str>,
         limit: i64,
     ) -> Result<Vec<crate::core::Decision>> {
         let rows = match about {
+            // Two indexed lookups rather than an `OR` that scans the log.
+            // `rowid` is carried out explicitly as the same-second tie-break.
             Some(id) => sqlx::query(
-                "SELECT * FROM decisions WHERE run_id = ? OR work_id = ?
-                 ORDER BY at DESC, rowid DESC LIMIT ?",
+                "SELECT rowid AS seq, * FROM decisions WHERE run_id = ?
+                 UNION
+                 SELECT rowid AS seq, * FROM decisions WHERE change_id = ?
+                 ORDER BY at DESC, seq DESC LIMIT ?",
             )
             .bind(id)
             .bind(id)
@@ -1135,12 +1059,10 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.iter().filter_map(decode_decision).collect())
+        Ok(decode_rows("decision", &rows, decode_decision))
     }
 
-    /// Records that a channel delivered something, with how long the handler
-    /// took. A hook that is slow is a hook the user feels, so the number is
-    /// kept rather than inferred.
+    /// Records that a channel delivered something, with the handler's latency.
     pub async fn record_channel(
         &self,
         channel: &str,
@@ -1159,10 +1081,10 @@ impl Store {
                last_error_at = COALESCE(excluded.last_error_at, channel_health.last_error_at)",
         )
         .bind(channel)
-        .bind(jiff::Timestamp::now().to_string())
+        .bind(ts(&jiff::Timestamp::now()))
         .bind(micros as i64)
         .bind(error)
-        .bind(error.map(|_| jiff::Timestamp::now().to_string()))
+        .bind(error.map(|_| ts(&jiff::Timestamp::now())))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1188,17 +1110,8 @@ impl Store {
             .collect())
     }
 
-    /// Deletes events and transcripts older than `days`. Runs are kept: a row
-    /// on the board costs nothing, and losing it would make a resumable session
-    /// invisible.
-    ///
-    /// The search index goes with them, in the same transaction: it is the
-    /// larger half of the file, and an index that outlives what it indexes is a
-    /// search that finds things that are gone.
-    /// Removes everything a gate probe left behind in an earlier build: the
-    /// probe session's run, events and decisions, and the temporary project
-    /// its working directory was discovered as. Run once at start; a store
-    /// that never held any returns zero and costs a few statements.
+    /// Removes what a gate probe left behind: the probe session's run, events
+    /// and decisions, and the temporary project it was discovered as.
     pub async fn forget_probe(&self, session: &str) -> Result<u64> {
         let mut n = 0;
         for sql in [
@@ -1221,9 +1134,10 @@ impl Store {
         Ok(n)
     }
 
+    /// Deletes events and transcripts older than `days`, with their search
+    /// index in the same transaction. Runs are kept (see [`Self::prune_runs`]).
     pub async fn prune_events(&self, days: i64) -> Result<u64> {
-        let cutoff =
-            (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * days)).to_string();
+        let cutoff = ts(&(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * days)));
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "DELETE FROM events_fts WHERE event_id IN
@@ -1236,15 +1150,8 @@ impl Store {
             .bind(&cutoff)
             .execute(&mut *tx)
             .await?;
-        // The attention log goes too, and this is where it was supposed to
-        // have been going all along: it is an observation about what Devplane
-        // *showed*, one row per item raised, and nothing was removing it.
-        // `devplane attention` only ever looks back a fixed number of days,
-        // and the table grew without bound on exactly the machines this product
-        // is for — twenty agents raising items all day.
-        //
-        // Only rows that have been **resolved**. An item still open is a
-        // question somebody has not answered, and age is not an answer.
+        // Resolved attention rows go too; an open item is unanswered, and age
+        // is not an answer.
         sqlx::query("DELETE FROM attention_log WHERE raised_at < ? AND resolved_at IS NOT NULL")
             .bind(&cutoff)
             .execute(&mut *tx)
@@ -1255,6 +1162,32 @@ impl Store {
             .await?;
         tx.commit().await?;
         Ok(r.rows_affected())
+    }
+
+    /// Deletes runs that ended more than `days` ago, so restarts stop reloading
+    /// them. Liveness is the struct's own `is_live`; a live run or an unreadable
+    /// row is never pruned.
+    pub async fn prune_runs(&self, days: i64) -> Result<u64> {
+        let cutoff = ts(&(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * days)));
+        let rows = sqlx::query("SELECT id, payload FROM runs WHERE last_event_at < ?")
+            .bind(&cutoff)
+            .fetch_all(&self.pool)
+            .await?;
+        let ended: Vec<String> = decode_rows("run", &rows, payload::<Run>)
+            .into_iter()
+            .filter(|r| !r.state.is_live())
+            .map(|r| r.id.to_string())
+            .collect();
+        if ended.is_empty() {
+            return Ok(0);
+        }
+        Ok(
+            sqlx::query("DELETE FROM runs WHERE id IN (SELECT value FROM json_each(?))")
+                .bind(serde_json::to_string(&ended)?)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
     }
 }
 
@@ -1274,29 +1207,22 @@ fn unreadable_in<T: serde::de::DeserializeOwned>(
         .collect()
 }
 
-/// Decodes stored payloads, saying so when one cannot be read.
-///
-/// The schema here changes without a migration on purpose — the store is
-/// rebuildable and the project is unreleased — which makes *silence* the danger.
-/// A `filter_map(…ok())` dropped any row this build could no longer parse, so a
-/// changed struct made runs and work quietly disappear from the board, which
-/// looks identical to never having had them. A Work row is the worst case: it
-/// carries the branch and the worktree, so losing one orphans a checkout that
-/// nobody is left to tell you about.
-fn decode_rows<T: serde::de::DeserializeOwned>(
+/// Decodes stored payloads. Every reader goes through it: a row this build
+/// cannot parse is dropped and counted, never defaulted or silently filtered,
+/// because a missing Change row orphans a branch and worktree nobody mentions.
+fn decode_rows<T>(
     kind: &str,
     rows: &[sqlx::sqlite::SqliteRow],
+    decode: impl Fn(&sqlx::sqlite::SqliteRow) -> Result<T>,
 ) -> Vec<T> {
     let mut out = Vec::with_capacity(rows.len());
     let mut lost = 0usize;
     for r in rows {
-        let payload: String = r.get("payload");
-        match serde_json::from_str(&payload) {
+        match decode(r) {
             Ok(v) => out.push(v),
             Err(e) => {
                 lost += 1;
-                // Bounded: a schema change makes *every* row unreadable, and a
-                // line each would bury the one summary that matters.
+                // Bounded: a schema change makes every row unreadable.
                 if lost <= 3 {
                     let id: String = r.get("id");
                     tracing::warn!(%kind, %id, error = %e, "a stored row could not be read");
@@ -1309,14 +1235,53 @@ fn decode_rows<T: serde::de::DeserializeOwned>(
             %kind,
             lost,
             kept = out.len(),
-            "rows this build cannot read were left out of the board — \
-             `devplane doctor` lists them; deleting the database rebuilds it from the providers"
+            "rows this build cannot read were left out — \
+             `devplane doctor` lists the run and change rows among them"
         );
     }
     out
 }
 
-/// Liveness of one observation channel.
+/// The JSON `payload` column, as the struct it holds.
+fn payload<T: serde::de::DeserializeOwned>(r: &sqlx::sqlite::SqliteRow) -> Result<T> {
+    Ok(serde_json::from_str(&r.get::<String, _>("payload"))?)
+}
+
+/// A timestamp column, or the reason it is not one.
+fn stamp(r: &sqlx::sqlite::SqliteRow, col: &str) -> Result<jiff::Timestamp> {
+    let s: String = r.get(col);
+    s.parse()
+        .with_context(|| format!("{col} {s:?} is not a timestamp"))
+}
+
+/// A nullable timestamp column. Text that is not a timestamp is an error, never
+/// `None`: for `ended_at` that decides whether a question is still open.
+fn stamp_opt(r: &sqlx::sqlite::SqliteRow, col: &str) -> Result<Option<jiff::Timestamp>> {
+    r.get::<Option<String>, _>(col)
+        .map(|s| {
+            s.parse()
+                .with_context(|| format!("{col} {s:?} is not a timestamp"))
+        })
+        .transpose()
+}
+
+/// A nullable JSON column, on the same terms as [`stamp_opt`].
+fn json_opt<T: serde::de::DeserializeOwned>(
+    r: &sqlx::sqlite::SqliteRow,
+    col: &str,
+) -> Result<Option<T>> {
+    r.get::<Option<String>, _>(col)
+        .map(|s| serde_json::from_str(&s).with_context(|| format!("{col} would not parse")))
+        .transpose()
+}
+
+/// How every timestamp column is written: fixed width, nine fractional digits,
+/// `Z`. Columns are compared as text, and jiff's `Display` omits a zero
+/// fraction, which sorts `10:00:00Z` after `10:00:00.5Z`.
+fn ts(t: &jiff::Timestamp) -> String {
+    format!("{t:.9}")
+}
+
 /// One tool call as it was observed, with the directory whose rules govern it.
 #[derive(Debug, Clone)]
 pub struct ObservedCall {
@@ -1325,28 +1290,22 @@ pub struct ObservedCall {
     pub input: serde_json::Value,
 }
 
+/// Liveness of one observation channel.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChannelHealth {
     pub channel: String,
     pub last_seen_at: String,
     pub count: u64,
-    /// The worst handler latency seen — a maximum, not a percentile, in the
-    /// column of the same name. Keeping a real p99 would need a histogram per
-    /// channel, and the number is only ever read by a person looking for a
-    /// stall, who wants the worst case.
+    /// The worst handler latency seen: a maximum, not a percentile.
     pub worst_micros: u64,
     pub last_error: Option<String>,
     /// When that error happened. An error with no date on it reads as current.
     pub last_error_at: Option<String>,
 }
 
-/// Turns what a person typed into an FTS5 query they would recognise.
-///
-/// Each run of word characters becomes a quoted term, and the terms are ANDed:
-/// `pnpm test` finds rows containing both. Everything else — quotes, hyphens,
-/// `NEAR`, unbalanced parentheses — is punctuation to a human and a syntax
-/// error to FTS5, so it is dropped rather than passed on. A trailing `*` on the
-/// last term keeps prefix search, which is what makes typing feel live.
+/// Turns what a person typed into an FTS5 query: each run of word characters
+/// becomes a quoted term, terms are ANDed, other punctuation is dropped, and
+/// the last term keeps a trailing `*` for prefix search.
 fn fts_phrase(query: &str) -> String {
     let terms: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -1357,26 +1316,20 @@ fn fts_phrase(query: &str) -> String {
 }
 
 fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<EventEnvelope> {
-    let at: String = row.get("at");
     let project: Option<String> = row.get("project_id");
+    let source: String = row.get("source");
     Ok(EventEnvelope {
         id: row.get("id"),
-        at: at.parse().unwrap_or_else(|_| jiff::Timestamp::now()),
+        at: stamp(row, "at")?,
         run_id: RunId::new(row.get::<String, _>("run_id")),
         project_id: project.map(ProjectId::new),
-        source: match row.get::<String, _>("source").as_str() {
-            "otel" => crate::core::event::Source::Otel,
-            "agents_json" => crate::core::event::Source::AgentsJson,
-            "statusline" => crate::core::event::Source::StatusLine,
-            "daemon" => crate::core::event::Source::Daemon,
-            _ => crate::core::event::Source::Hook,
-        },
-        event: serde_json::from_str(row.get::<String, _>("payload").as_str())?,
+        source: crate::core::event::Source::parse(&source)
+            .with_context(|| format!("unknown source {source:?}"))?,
+        event: payload(row)?,
     })
 }
 
-/// What of an event is worth searching for. Deliberately narrow: commands,
-/// questions and errors are what a human looks for months later.
+/// What of an event is worth searching for: commands, questions and errors.
 fn searchable_text(e: &crate::core::event::Event) -> Option<String> {
     use crate::core::event::Event as E;
     match e {
@@ -1396,30 +1349,17 @@ fn searchable_text(e: &crate::core::event::Event) -> Option<String> {
     }
 }
 
-/// One `asks` row back into the pure type.
-///
-/// A row this build cannot decode is **dropped**, like every other projection
-/// here — never migrated and never guessed at. Dropping an ask loses a
-/// question, which is why every field that decides *whether it is still open*
-/// is required and only the descriptive ones are tolerant.
 /// One `decisions` row as SQLite hands it back.
 ///
-/// **An unrecognised authority drops the row rather than defaulting it.**
-/// Reading it as `daemon` would put the most reassuring label on the least
-/// known row, in the one table a person queries by exactly this column.
-fn decode_decision(r: &sqlx::sqlite::SqliteRow) -> Option<crate::core::Decision> {
-    use sqlx::Row as _;
-    Some(crate::core::Decision {
+/// An unrecognised authority drops the row: reading it as `devplane` would put
+/// the most reassuring label on the least known row.
+fn decode_decision(r: &sqlx::sqlite::SqliteRow) -> Result<crate::core::Decision> {
+    let authority: String = r.get("authority");
+    Ok(crate::core::Decision {
         id: r.get("id"),
-        at: r
-            .get::<String, _>("at")
-            .parse()
-            .unwrap_or_else(|_| jiff::Timestamp::now()),
-        // An unrecognised authority is **dropped**, not defaulted.
-        // Reading it as `daemon` would put the most reassuring label
-        // on the least known row, in the one table a person queries
-        // by exactly this column.
-        authority: crate::core::Authority::parse(r.get::<String, _>("authority").as_str())?,
+        at: stamp(r, "at")?,
+        authority: crate::core::Authority::parse(&authority)
+            .with_context(|| format!("unknown authority {authority:?}"))?,
         action: r.get("action"),
         subject: r.get("subject"),
         outcome: r.get("outcome"),
@@ -1428,138 +1368,56 @@ fn decode_decision(r: &sqlx::sqlite::SqliteRow) -> Option<crate::core::Decision>
         server_source: r.get("server_source"),
         project_id: r.get::<Option<String>, _>("project_id").map(ProjectId::new),
         run_id: r.get::<Option<String>, _>("run_id").map(RunId::new),
-        work_id: r
-            .get::<Option<String>, _>("work_id")
-            .map(crate::core::WorkId::new),
+        change_id: r
+            .get::<Option<String>, _>("change_id")
+            .map(crate::core::ChangeId::new),
     })
 }
 
-fn decode_ask(r: &sqlx::sqlite::SqliteRow) -> Option<crate::core::ask::Ask> {
+/// One `asks` row back into the pure type.
+///
+/// Undecodable rows are dropped and counted, nullable columns included: an
+/// unparseable `ended` read as none would reopen an answered question.
+fn decode_ask(r: &sqlx::sqlite::SqliteRow) -> Result<crate::core::ask::Ask> {
     use crate::core::ask::{Ask, Deadline};
     let deadline = match r.get::<Option<i64>, _>("deadline_secs") {
         None => Deadline::Never,
         Some(s) if s > 0 => Deadline::After(s as u32),
-        // A stored zero or a negative is not a deadline anybody could have
-        // written through the parser, so the row is dropped rather than read as
-        // "already expired" — which would end somebody's question on a number
-        // nothing produced.
-        Some(_) => return None,
+        // Not a deadline the parser could produce; dropping beats "expired".
+        Some(s) => anyhow::bail!("deadline_secs {s} is not a deadline"),
     };
-    Some(Ask {
+    let kind: String = r.get("kind");
+    Ok(Ask {
         id: crate::core::AskId::new(r.get::<String, _>("id")),
-        kind: crate::core::ask::Kind::parse(r.get::<String, _>("kind").as_str())?,
+        kind: crate::core::ask::Kind::parse(&kind)
+            .with_context(|| format!("unknown kind {kind:?}"))?,
         run: crate::core::RunId::new(r.get::<String, _>("run_id")),
         project: r
             .get::<Option<String>, _>("project_id")
             .map(crate::core::ProjectId::new),
         request_id: r.get("request_id"),
         message: r.get("message"),
-        payload: serde_json::from_str(&r.get::<String, _>("payload")).ok()?,
-        asked_at: r.get::<String, _>("asked_at").parse().ok()?,
+        payload: payload(r)?,
+        asked_at: stamp(r, "asked_at")?,
         deadline,
-        answer: r
-            .get::<Option<String>, _>("answer")
-            .and_then(|s| serde_json::from_str(&s).ok()),
-        answered_at: r
-            .get::<Option<String>, _>("answered_at")
-            .and_then(|s| s.parse().ok()),
+        answer: json_opt(r, "answer")?,
+        answered_at: stamp_opt(r, "answered_at")?,
         answered_from: r.get("answered_from"),
-        delivery: r
-            .get::<Option<String>, _>("delivery")
-            .and_then(|s| serde_json::from_str(&s).ok()),
-        ended: r
-            .get::<Option<String>, _>("ended")
-            .and_then(|s| serde_json::from_str(&s).ok()),
-        ended_at: r
-            .get::<Option<String>, _>("ended_at")
-            .and_then(|s| s.parse().ok()),
+        delivery: json_opt(r, "delivery")?,
+        ended: json_opt(r, "ended")?,
+        ended_at: stamp_opt(r, "ended_at")?,
     })
 }
 
 #[cfg(test)]
 mod tests {
 
-    /// **The ratio and the table under it must come from the same place.**
-    ///
-    /// `asked` was first counted from event kinds. On a real machine that
-    /// returned nought while the attention log held sixty-nine raised
-    /// permissions, and the product printed *"not one of them was put in front
-    /// of you"* directly above a table showing sixty-nine of them. A driven
-    /// run's permission never writes those event kinds — it raises an item.
-    ///
-    /// Counting a numerator and a denominator from two tables is how a summary
-    /// ends up contradicting its own rows, and a person who catches a product
-    /// contradicting itself on screen is right to stop believing the rest.
-    #[tokio::test]
-    async fn the_oversight_ratio_agrees_with_the_table_beneath_it() {
-        let s = Store::open_in_memory().await.unwrap();
-        let long_ago = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
-
-        // Three moments a person was put in the loop, through the path a
-        // *driven* run uses — which writes no `blocked` event at all.
-        let mut ids = Vec::new();
-        for (n, kind) in [
-            (0, crate::core::AttentionKind::Permission),
-            (1, crate::core::AttentionKind::Permission),
-            (2, crate::core::AttentionKind::Question),
-        ] {
-            let item = crate::core::AttentionItem {
-                id: crate::core::AttentionId::from(format!("i{n}")),
-                level: kind.default_level(),
-                kind,
-                run_id: None,
-                project_id: None,
-                title: "t".into(),
-                detail: None,
-                answer_in: None,
-                ask: None,
-                options: Vec::new(),
-                actions: Vec::new(),
-                request_id: None,
-                form: None,
-                url: None,
-                launch: None,
-                work_id: None,
-                offer: None,
-                no_offer: None,
-                since: jiff::Timestamp::now(),
-            };
-            s.attention_raise(&item).await.unwrap();
-            ids.push(format!("i{n}"));
-        }
-        // A person answered exactly one of them.
-        s.attention_resolve(&ids[2..], crate::core::attention::Resolution::Acted)
-            .await
-            .unwrap();
-
-        let o = s.oversight(long_ago).await.unwrap();
-        let stats = s.attention_stats(long_ago).await.unwrap();
-
-        let raised: i64 = stats.values().map(|k| k.raised).sum();
-        let acted: i64 = stats.values().map(|k| k.acted).sum();
-        assert_eq!(
-            o.asked, raised,
-            "the ratio says {} were put in front of a person and the table says {raised}",
-            o.asked
-        );
-        assert_eq!(
-            o.answered, acted,
-            "the ratio says {} were answered and the table says {acted}",
-            o.answered
-        );
-        assert_eq!(o.answered, 1);
-        // And the unattended half is the tool calls, which nothing raised.
-        assert_eq!(o.unattended, 0, "nothing ran, so nothing ran unattended");
-        assert_eq!(o.total(), 3);
-    }
     use super::*;
 
     #[tokio::test]
     async fn a_replay_reads_the_directory_from_the_run_not_the_event() {
-        // The directory decides whose rules apply, and the event does not
-        // carry one. A tool call whose run row is gone is dropped rather than
-        // evaluated against some other project's rules, which would report a
-        // coverage figure about a repository the call never touched.
+        // A call whose run row is gone has no directory, so it is dropped
+        // rather than judged against another project's rules.
         let s = Store::open_in_memory().await.unwrap();
         let run = crate::core::run::Run::new(
             crate::core::ids::SessionId::new("s1"),
@@ -1596,8 +1454,7 @@ mod tests {
 
         let calls = s.observed_tool_calls(None, 100).await.unwrap();
         assert_eq!(calls.len(), 1);
-        // Scoping happens in the query, so a limit cannot spend itself on other
-        // projects' calls before the filter runs.
+        // Scoped in the query, so the limit is not spent on other projects.
         assert_eq!(
             s.observed_tool_calls(Some(Path::new("/repo")), 100)
                 .await
@@ -1611,9 +1468,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // The `TodoWrite` is dropped because no path or command rule can speak
-        // for it, and counting it would make the coverage figure unactionable.
-        // The orphan is dropped because its directory is unknown.
+        // `TodoWrite` no rule speaks for, and the orphan has no directory.
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool, "Bash");
         assert_eq!(calls[0].cwd, PathBuf::from("/repo"));
@@ -1621,10 +1476,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_channel_error_is_kept_with_the_date_it_happened() {
-        // The error is kept after the problem is fixed, because "this channel
-        // has had a problem" is worth knowing. It is kept *with its date*
-        // because an error carrying none reads as current, and a diagnostic
-        // that cries wolf is one nobody reads twice.
+        // The error outlives the fix, but keeps its own date.
         let s = Store::open_in_memory().await.unwrap();
         s.record_channel("otel", 10, Some("record had no session"))
             .await
@@ -1634,9 +1486,7 @@ mod tests {
         let stamped = ch.last_error_at.clone().expect("an error carries its date");
         assert_eq!(ch.last_error.as_deref(), Some("record had no session"));
 
-        // A later success does not erase the error, and does not restamp it
-        // either — otherwise a channel that failed once last week would look
-        // like it failed a moment ago, every moment, for ever.
+        // A later success neither erases nor restamps the error.
         s.record_channel("otel", 5, None).await.unwrap();
         let after = s.channel_health().await.unwrap();
         let ch = after.iter().find(|c| c.channel == "otel").unwrap();
@@ -1647,8 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_schema_creates_every_table() {
-        // Proves the schema applied, not that a string contains a word: a
-        // half-applied schema only fails on the first query otherwise.
+        // Proves the schema applied: a half-applied one fails only on query.
         let s = Store::open_in_memory().await.unwrap();
         let names: Vec<String> =
             sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -1661,7 +1510,7 @@ mod tests {
             "events",
             "events_fts",
             "channel_health",
-            "works",
+            "changes",
             "decisions",
             "messages",
         ] {
@@ -1736,8 +1585,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_query_a_person_would_type_is_not_a_syntax_error() {
-        // `devplane search "cargo test --workspace"` would otherwise reach FTS5 as an
-        // expression and come back as a 500.
+        // Would otherwise reach FTS5 as an expression and fail.
         let s = Store::open_in_memory().await.unwrap();
         s.append_event(&EventEnvelope::new(
             RunId::new("s1"),
@@ -1766,8 +1614,7 @@ mod tests {
 
     #[tokio::test]
     async fn pruning_takes_the_search_index_with_it() {
-        // Otherwise the index outgrows the log it indexes, and search keeps
-        // finding events that are no longer there.
+        // The index must not outlive the events it indexes.
         let s = Store::open_in_memory().await.unwrap();
         s.append_event(&EventEnvelope::new(
             RunId::new("s1"),
@@ -1784,6 +1631,50 @@ mod tests {
             s.search("typecheck", 10).await.unwrap().is_empty(),
             "the index still points at a deleted event"
         );
+    }
+
+    /// A retention pass that empties `events` must not restart `seq` below
+    /// the projection mark.
+    #[tokio::test]
+    async fn a_hook_event_after_retention_emptied_the_log_is_still_projected() {
+        let s = Store::open_in_memory().await.unwrap();
+        let hook = |cmd: &str| {
+            EventEnvelope::new(
+                RunId::new("s1"),
+                Source::Hook,
+                Event::tool_started("Bash", serde_json::json!({ "command": cmd })),
+            )
+        };
+        for i in 0..3 {
+            s.append_event(&hook(&format!("before {i}"))).await.unwrap();
+        }
+        let rows = s.shim_events_since(0, 100).await.unwrap();
+        let through = rows.last().unwrap().0;
+        s.set_projected_through(through).await.unwrap();
+
+        s.prune_events(-1).await.unwrap();
+        s.append_event(&hook("after")).await.unwrap();
+        let rows = s
+            .shim_events_since(s.projected_through().await.unwrap(), 100)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the new event is invisible to the host");
+        assert!(rows[0].0 > through, "a sequence number was reused");
+    }
+
+    /// Recording what a hook saw never revokes a trust granted in between.
+    #[tokio::test]
+    async fn noting_a_project_never_touches_trust() {
+        let s = Store::open_in_memory().await.unwrap();
+        let seen = Project::from_root(PathBuf::from("/repo"));
+        assert!(!seen.trusted);
+        s.note_project(&seen).await.unwrap();
+        let mut trusted = seen.clone();
+        trusted.trusted = true;
+        s.save_project(&trusted).await.unwrap();
+        s.note_project(&seen).await.unwrap();
+        let back = s.load_projects().await.unwrap();
+        assert!(back[0].trusted, "a hook revoked the trust");
     }
 
     #[tokio::test]
@@ -1826,7 +1717,7 @@ mod tests {
         assert_eq!(all[3].text, "Found it");
         assert_eq!(all[1].role, crate::core::Role::Thought);
 
-        // A long conversation is read from the end, and still in order.
+        // Read from the end, still in order.
         let tail = s.messages_for_run(&RunId::new("r1"), 2).await.unwrap();
         assert_eq!(
             tail.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
@@ -1836,8 +1727,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_transcript_ages_out_with_the_events_beside_it() {
-        // History, like any other observation — unlike the decision log, which
-        // is neither and stays.
+        // Transcripts are pruned like any observation; decisions stay.
         let s = Store::open_in_memory().await.unwrap();
         s.append_message(&crate::core::Message::new(
             RunId::new("r1"),
@@ -1872,21 +1762,18 @@ mod tests {
             form: None,
             url: None,
             launch: None,
-            work_id: None,
+            change_id: None,
             offer: None,
             no_offer: None,
+            report: None,
             since: jiff::Timestamp::now(),
         }
     }
 
     #[tokio::test]
     async fn an_answered_item_is_never_counted_as_one_that_went_away() {
-        // The whole measurement rests on this. The API writes `acted` the
-        // instant a person answers; the sweeper follows a moment later and
-        // closes everything that merely stopped being asked. If the sweeper
-        // could overwrite, every answered item would eventually be recorded as
-        // noise and the number would say the opposite of the truth — so the
-        // guard is `resolved_at IS NULL` and this test is what holds it.
+        // The API writes `acted` when a person answers and the sweeper
+        // follows; `resolved_at IS NULL` keeps the sweeper from overwriting it.
         use crate::core::AttentionKind;
         use crate::core::attention::Resolution;
         let s = Store::open_in_memory().await.unwrap();
@@ -1938,14 +1825,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_resolved_attention_row_is_pruned_and_an_open_one_is_not() {
-        // One row per item raised, on a machine running twenty agents all day,
-        // and nothing was removing them: this table was meant to be pruned with
-        // the events and the sweep never touched it. A documented behaviour
-        // with no code behind it, in the table that measures whether the inbox
-        // is worth reading.
-        //
-        // Resolved rows only. An item still open is a question nobody has
-        // answered, and age is not an answer.
+        // Resolved attention rows are pruned with the events; open ones are
+        // kept whatever their age.
         let s = Store::open_in_memory().await.unwrap();
         let mk = |id: &str| crate::core::AttentionItem {
             id: crate::core::AttentionId(id.to_string()),
@@ -1956,9 +1837,10 @@ mod tests {
             answer_in: None,
             project_id: None,
             run_id: Some(RunId::new("r1")),
-            work_id: None,
+            change_id: None,
             offer: None,
             no_offer: None,
+            report: None,
             since: jiff::Timestamp::now(),
             options: Vec::new(),
             actions: Vec::new(),
@@ -1986,18 +1868,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_database_from_another_schema_is_moved_aside_rather_than_migrated() {
-        // **The hard cut, asserted.** This used to be a test that an older
-        // file kept working: the schema grew columns through `ALTER TABLE`
-        // statements whose success case was a duplicate-column error. That
-        // handles exactly the change it was written for — an added, nullable
-        // column — and silently does nothing for a renamed one, which is what
-        // `actor` → `authority` is. The old file then opens cleanly and fails
-        // on the first write, at runtime, in whichever surface wrote first.
-        //
-        // So: a file stamped with a different schema is renamed out of the way
-        // and a fresh one takes its place. Observations are re-derivable; the
-        // decision log is not, which is why the old file is **moved and not
-        // deleted**, and why this test checks that it is still on disk.
+        // A file stamped with a different schema is renamed aside and a fresh
+        // one takes its place. The old file must still be on disk: the
+        // decision log in it cannot be re-derived.
         let dir = std::env::temp_dir().join(format!("devplane-schema-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("devplane.db");
@@ -2012,14 +1885,12 @@ mod tests {
                 .await
                 .unwrap();
             sqlx::raw_sql(
-                // **Any version but this build's.** It said `1`, which was a
-                // real older shape at the time and is this build's own version
-                // now — a fixture that collides with the thing it is testing.
+                // Any version but this build's.
                 "PRAGMA user_version = 99;
                  CREATE TABLE decisions (
                    id TEXT PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
                    action TEXT NOT NULL, subject TEXT NOT NULL, outcome TEXT NOT NULL,
-                   reason TEXT, project_id TEXT, run_id TEXT, work_id TEXT);
+                   reason TEXT, project_id TEXT, run_id TEXT, change_id TEXT);
                  INSERT INTO decisions (id, at, actor, action, subject, outcome)
                  VALUES ('d1', '2026-09-15T00:00:00Z', 'policy', 'agent:tool.use', 'cat a', 'allow');",
             )
@@ -2052,9 +1923,7 @@ mod tests {
              cannot be re-derived, so it is moved and never deleted"
         );
 
-        // And opening again is idempotent: the file now carries this schema's
-        // version, so nothing is moved a second time and the row just written
-        // is still there.
+        // Opening again moves nothing: the file carries this schema's version.
         let s = Store::open(&path).await.unwrap();
         assert_eq!(s.decisions(None, 10).await.unwrap().len(), 1);
 
@@ -2063,9 +1932,7 @@ mod tests {
 
     #[tokio::test]
     async fn decisions_are_appended_and_survive_a_prune() {
-        // The event log is history you can lose. The decision log is the answer
-        // to "why is there a pull request on this branch", and losing it leaves
-        // one nobody can account for.
+        // Events are prunable history; decisions are not.
         let s = Store::open_in_memory().await.unwrap();
         s.append_decision(
             &crate::core::Decision::new(
@@ -2080,7 +1947,7 @@ mod tests {
         .await
         .unwrap();
         s.append_decision(&crate::core::Decision::new(
-            crate::core::Authority::Daemon,
+            crate::core::Authority::Devplane,
             "gh:pr.create",
             "fix/login",
             "done",
@@ -2098,33 +1965,21 @@ mod tests {
         assert_eq!(about[0].reason.as_deref(), Some("Bash(pnpm test *)"));
     }
 
-    /// **Decisions taken in the same instant come back in the order they were
-    /// taken.**
-    ///
-    /// `at` ties constantly — a gate finishing and the run it was about ending
-    /// share a second — and under `ORDER BY at DESC` alone SQLite may return
-    /// either first. This surfaced as the test above passing alone and failing
-    /// under parallel load; the real cost is an audit page showing two
-    /// decisions in the wrong sequence, in the one table whose purpose is
-    /// saying what happened in what order.
-    ///
-    /// The tie-break is `rowid`, which is the append order. The row's own id
-    /// cannot serve: it is a uuid v7 whose head is a millisecond and whose tail
-    /// is random, so two rows written in the same millisecond sort by the
-    /// random part — which is not an order at all.
+    /// Decisions stamped with the same instant come back in insertion order:
+    /// `rowid` breaks `at` ties, since a uuid v7's tail is random within a
+    /// millisecond.
     #[tokio::test]
     async fn decisions_taken_in_one_instant_keep_the_order_they_were_taken_in() {
         let s = Store::open_in_memory().await.unwrap();
         let at = jiff::Timestamp::now();
         for n in 0..8 {
             let mut d = crate::core::Decision::new(
-                crate::core::Authority::Daemon,
+                crate::core::Authority::Devplane,
                 &format!("step:{n}"),
                 "subject",
                 "done",
             );
-            // The same stamp on every row, which is what a fast sequence
-            // produces anyway — this only makes it certain rather than likely.
+            // The same stamp on every row, to make the tie certain.
             d.at = at;
             s.append_decision(&d).await.unwrap();
         }
@@ -2151,11 +2006,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_this_build_cannot_read_is_reported_rather_than_dropped() {
-        // The schema changes here without a migration, on purpose. That makes
-        // silence the danger: a row whose shape this build no longer
-        // understands used to be filtered out, so it was absent from the board
-        // in a way that looks exactly like never having existed. For a `work`
-        // row that means an orphaned branch and worktree nobody is told about.
+        // A row this build cannot decode is reported, not silently absent,
+        // since a missing `change` row orphans its branch and worktree.
         let s = Store::open_in_memory().await.unwrap();
 
         let mut run = Run::new(
@@ -2169,10 +2021,8 @@ mod tests {
 
         // A row written by some other version of this struct.
         sqlx::query(
-            "INSERT INTO runs (id, session_id, agent, mode, state, cwd, started_at,
-                               last_event_at, payload)
-             VALUES ('s-bad','s-bad','claude','observed','working','/tmp/repo','t','t',
-                     '{\"not\":\"a run\"}')",
+            "INSERT INTO runs (id, session_id, agent, cwd, last_event_at, payload)
+             VALUES ('s-bad','s-bad','claude','/tmp/repo','t','{\"not\":\"a run\"}')",
         )
         .execute(&s.pool)
         .await
@@ -2211,5 +2061,401 @@ mod ask_store_tests {
         let back = s.ask("a1").await.unwrap().expect("stored");
         assert_eq!(back, a);
         assert_eq!(s.open_asks().await.unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod report_store_tests {
+    use super::*;
+    use crate::core::report::{Draft, Provenance, Report, State, Target};
+
+    fn filed(from: &str, to: &str, change: Option<&str>) -> Report {
+        Report::new(
+            Draft {
+                kind: "defect".into(),
+                title: "client retries on 4xx".into(),
+                finding: "retry() does not check status".into(),
+                ..Default::default()
+            },
+            Target::Project {
+                project: crate::core::ProjectId::new(to),
+                name: to.trim_start_matches('/').into(),
+            },
+            Provenance::of_run(
+                crate::core::ProjectId::new(from),
+                from.trim_start_matches('/').into(),
+                change.map(crate::core::ChangeId::new),
+                RunId::new("acp-1"),
+                "claude".into(),
+                jiff::Timestamp::now(),
+            ),
+            |_| Ok(()),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_report_is_found_from_both_ends_and_by_its_change() {
+        let s = Store::open_in_memory().await.unwrap();
+        let mut r = filed("/api", "/core-lib", Some("c-src"));
+        s.save_report(&r).await.unwrap();
+        let api = crate::core::ProjectId::new("/api");
+        let core = crate::core::ProjectId::new("/core-lib");
+
+        assert_eq!(s.report(r.id.as_str()).await.unwrap().as_ref(), Some(&r));
+        assert_eq!(
+            s.report(&r.id.as_str()[..10]).await.unwrap().map(|x| x.id),
+            Some(r.id.clone()),
+            "the start of an id is enough when it names one"
+        );
+        assert_eq!(s.reports_to(&core, true).await.unwrap().len(), 1);
+        assert_eq!(s.reports_from(&api, true).await.unwrap().len(), 1);
+        assert!(s.reports_to(&api, false).await.unwrap().is_empty());
+
+        // Accepted into a change in the target: that change finds it too.
+        r.state = State::Accepted {
+            change: crate::core::ChangeId::new("c-dst"),
+        };
+        s.save_report(&r).await.unwrap();
+        assert!(
+            s.reports_to(&core, true).await.unwrap().is_empty(),
+            "no longer open"
+        );
+        assert_eq!(s.reports_to(&core, false).await.unwrap().len(), 1);
+        for c in ["c-src", "c-dst"] {
+            let found = s
+                .reports_for_change(&crate::core::ChangeId::new(c))
+                .await
+                .unwrap();
+            assert_eq!(found.len(), 1, "{c}");
+        }
+        assert_eq!(
+            s.reports(10).await.unwrap().len(),
+            1,
+            "rewritten, not appended"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_report_is_dropped_and_counted() {
+        let s = Store::open_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO reports (id, filed_at, source_project, target_project, state, payload)
+             VALUES ('rp-bad', '2026-09-25T00:00:00.000000000Z', '/a', '/b', 'open', '{')",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+        s.save_report(&filed("/a", "/b", None)).await.unwrap();
+        assert_eq!(s.reports(10).await.unwrap().len(), 1);
+        let lost = s.unreadable().await.unwrap();
+        assert!(
+            lost.iter().any(|(what, _)| what == "report rp-bad"),
+            "{lost:?}"
+        );
+    }
+}
+
+/// A row this build cannot read is dropped and counted, never defaulted.
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+    use crate::core::event::{Event, Source};
+    use crate::core::run::RunMode;
+    use std::path::PathBuf;
+
+    fn ask(id: &str) -> crate::core::ask::Ask {
+        crate::core::ask::Ask::new(
+            crate::core::AskId::new(id),
+            RunId::new("r1"),
+            crate::core::ask::Asked {
+                kind: crate::core::ask::Kind::Question,
+                request_id: "req".into(),
+                message: "Keep it?".into(),
+                payload: serde_json::json!({}),
+                at: jiff::Timestamp::now(),
+                deadline: crate::core::ask::Deadline::Never,
+            },
+        )
+    }
+
+    /// An ending that will not parse is not the absence of one: read as
+    /// `None`, an answered ask would reappear in the inbox.
+    #[tokio::test]
+    async fn an_ask_whose_ending_will_not_parse_is_dropped_rather_than_reopened() {
+        let s = Store::open_in_memory().await.unwrap();
+        let mut a = ask("a1");
+        a.answer(
+            serde_json::json!({"q": "keep"}),
+            "board",
+            jiff::Timestamp::now(),
+        )
+        .unwrap();
+        s.save_ask(&a).await.unwrap();
+        assert!(!s.ask("a1").await.unwrap().unwrap().is_open());
+
+        for (column, corrupt) in [
+            (
+                "ended",
+                "UPDATE asks SET ended = 'not json' WHERE id = 'a1'",
+            ),
+            (
+                "answer",
+                "UPDATE asks SET answer = 'not json' WHERE id = 'a1'",
+            ),
+            (
+                "delivery",
+                "UPDATE asks SET delivery = 'not json' WHERE id = 'a1'",
+            ),
+        ] {
+            sqlx::query(corrupt).execute(&s.pool).await.unwrap();
+            assert!(
+                s.ask("a1").await.unwrap().is_none(),
+                "an ask whose `{column}` cannot be read must not be handed back"
+            );
+            assert!(
+                s.asks(10).await.unwrap().is_empty(),
+                "nor listed ({column})"
+            );
+            s.save_ask(&a).await.unwrap();
+        }
+        // And the same for a stamp that is not one.
+        sqlx::query("UPDATE asks SET ended_at = 'yesterday-ish' WHERE id = 'a1'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert!(s.ask("a1").await.unwrap().is_none());
+    }
+
+    /// A source this build has no name for drops the row rather than
+    /// borrowing another source's name.
+    #[tokio::test]
+    async fn a_feed_event_reads_back_as_a_feed_event_and_an_unknown_source_is_dropped() {
+        let s = Store::open_in_memory().await.unwrap();
+        s.append_event(&EventEnvelope::new(
+            RunId::new("s1"),
+            Source::Feed,
+            Event::tool_started("Bash", serde_json::json!({"command": "ls"})),
+        ))
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO events (id, at, run_id, project_id, source, kind, payload)
+             VALUES ('e-odd', '2026-09-14T10:00:00.000000000Z', 's1', NULL, 'telepathy',
+                     'tool_started', ?)",
+        )
+        .bind(serde_json::json!({"tool": "Bash", "input": {}}).to_string())
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        let back = s.events_for_run(&RunId::new("s1"), 10).await.unwrap();
+        assert_eq!(
+            back.len(),
+            1,
+            "the unknown source is dropped, not defaulted"
+        );
+        assert_eq!(back[0].source, Source::Feed);
+    }
+
+    /// One stray row must not take its run's good events off the board.
+    #[tokio::test]
+    async fn one_unreadable_event_does_not_take_the_replay_with_it() {
+        let s = Store::open_in_memory().await.unwrap();
+        for i in 0..3 {
+            s.append_event(&EventEnvelope::new(
+                RunId::new("s1"),
+                Source::Hook,
+                Event::tool_started(format!("Tool{i}"), serde_json::json!({})),
+            ))
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO events (id, at, run_id, project_id, source, kind, payload)
+             VALUES ('e-bad', '2026-09-14T10:00:00.000000000Z', 's1', NULL, 'hook', 'x', '{')",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let back = s.events_for_run(&RunId::new("s1"), 10).await.unwrap();
+        assert_eq!(back.len(), 3, "three good events survive one bad one");
+    }
+
+    /// Stamps are written at one width, so `10:00:00Z` sorts before
+    /// `10:00:00.000000001Z` (jiff omits a zero fraction and `'Z'` > `'.'`).
+    #[tokio::test]
+    async fn a_whole_second_stamp_sorts_before_the_nanosecond_after_it() {
+        let whole: jiff::Timestamp = "2026-09-24T10:00:00Z".parse().unwrap();
+        let after = whole + jiff::SignedDuration::from_nanos(1);
+        assert!(
+            whole.to_string() > after.to_string(),
+            "the premise: jiff's own spelling sorts the earlier instant later"
+        );
+        assert!(ts(&whole) < ts(&after));
+        assert_eq!(ts(&whole).parse::<jiff::Timestamp>().unwrap(), whole);
+
+        let s = Store::open_in_memory().await.unwrap();
+        for (id, at) in [("later", after), ("earlier", whole)] {
+            let mut env = EventEnvelope::new(
+                RunId::new("s1"),
+                Source::Hook,
+                Event::tool_started("Bash", serde_json::json!({})),
+            );
+            env.id = id.into();
+            env.at = at;
+            s.append_event(&env).await.unwrap();
+        }
+        let order: Vec<String> = sqlx::query_scalar("SELECT id FROM events ORDER BY at ASC")
+            .fetch_all(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(order, ["earlier", "later"]);
+    }
+
+    /// A stamp that will not parse drops the row rather than reading as now.
+    #[tokio::test]
+    async fn a_row_with_a_corrupt_stamp_is_dropped_rather_than_stamped_now() {
+        let s = Store::open_in_memory().await.unwrap();
+        s.append_message(&crate::core::Message::new(
+            RunId::new("r1"),
+            crate::core::Role::Agent,
+            "fine",
+        ))
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, run_id, at, role, text) VALUES
+               ('m-bad', 'r1', 'last tuesday', 'agent', 'when?'),
+               ('m-role', 'r1', '2026-09-14T10:00:00.000000000Z', 'oracle', 'who?')",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let back = s.messages_for_run(&RunId::new("r1"), 10).await.unwrap();
+        assert_eq!(
+            back.len(),
+            1,
+            "the corrupt stamp and the unknown role are both dropped"
+        );
+        assert_eq!(back[0].text, "fine");
+
+        sqlx::query(
+            "INSERT INTO decisions (id, at, authority, action, subject, outcome)
+             VALUES ('d-bad', 'never', 'person', 'a', 's', 'o')",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        assert!(s.decisions(None, 10).await.unwrap().is_empty());
+    }
+
+    /// A run that ended is deleted once old enough; a live one never is.
+    #[tokio::test]
+    async fn prune_runs_deletes_ended_runs_and_keeps_live_ones() {
+        let s = Store::open_in_memory().await.unwrap();
+        let long_ago = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * 30);
+        let mut done = Run::new(
+            crate::core::SessionId::new("done"),
+            PathBuf::from("/repo"),
+            RunMode::Observed,
+            "claude",
+        );
+        done.state = crate::core::RunState::Completed;
+        done.last_event_at = long_ago;
+        let mut busy = done.clone();
+        busy.id = RunId::new("busy");
+        busy.state = crate::core::RunState::Working;
+        let mut fresh = done.clone();
+        fresh.id = RunId::new("fresh");
+        fresh.last_event_at = jiff::Timestamp::now();
+        for r in [&done, &busy, &fresh] {
+            s.save_run(r).await.unwrap();
+        }
+
+        assert_eq!(s.prune_runs(7).await.unwrap(), 1);
+        let left: Vec<String> = s
+            .load_runs()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
+        assert_eq!(
+            left,
+            ["fresh", "busy"],
+            "newest first; the old finished run is gone"
+        );
+    }
+
+    /// `runs` and `changes` carry only the columns a query reads beside the
+    /// payload; this keeps the next convenient column out.
+    #[tokio::test]
+    async fn the_runs_and_changes_tables_hold_only_the_columns_a_query_reads() {
+        let s = Store::open_in_memory().await.unwrap();
+        for (table, expected) in [
+            (
+                "runs",
+                vec![
+                    "id",
+                    "session_id",
+                    "agent",
+                    "cwd",
+                    "last_event_at",
+                    "payload",
+                ],
+            ),
+            ("changes", vec!["id", "updated_at", "payload"]),
+        ] {
+            let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+                .bind(table)
+                .fetch_all(&s.pool)
+                .await
+                .unwrap();
+            assert_eq!(cols, expected, "{table}");
+        }
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "the pragma and the constant drifted"
+        );
+    }
+
+    /// `about` answers for a change id as well as a run id, in order.
+    #[tokio::test]
+    async fn decisions_about_a_change_are_found_as_well_as_about_a_run() {
+        let s = Store::open_in_memory().await.unwrap();
+        let at = jiff::Timestamp::now();
+        for (n, id) in ["w1", "r1", "w1"].iter().enumerate() {
+            let mut d = crate::core::Decision::new(
+                crate::core::Authority::Devplane,
+                &format!("step:{n}"),
+                "s",
+                "done",
+            );
+            d.at = at;
+            d = match *id {
+                "w1" => d.for_change(&crate::core::ChangeId::new("w1")),
+                _ => d.for_run(&RunId::new("r1")),
+            };
+            s.append_decision(&d).await.unwrap();
+        }
+        let about_change: Vec<String> = s
+            .decisions(Some("w1"), 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|d| d.action.clone())
+            .collect();
+        assert_eq!(
+            about_change,
+            ["step:2", "step:0"],
+            "newest first, by insertion when tied"
+        );
+        assert_eq!(s.decisions(Some("r1"), 10).await.unwrap().len(), 1);
+        assert!(s.decisions(Some("nobody"), 10).await.unwrap().is_empty());
     }
 }

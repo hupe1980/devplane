@@ -1,16 +1,11 @@
-# Turns a tag into installable artifacts. `dist` owns cross-compilation,
-# checksums and the shell installer; its configuration
-# lives in `[workspace.metadata.dist]` in Cargo.toml.
-#
-# A thin shim over the tool. `dist init` replaces this with its own generated
-# workflow, which fans out per platform, and should be run before a real release.
+# Turns a tag into installable artifacts via `dist`; configured in
+# `[workspace.metadata.dist]` in Cargo.toml.
 name: release
 
 on:
   push:
     tags: ["v*"]
-  # Plans the release without building it, so a tag that would fail is known
-  # before it is pushed.
+  # Plans the release without building it.
   workflow_dispatch:
 
 permissions:
@@ -26,21 +21,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dist
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
-      # Reads the config and says what a release would contain. Cheap, and the
-      # only part that runs on a manual dispatch.
+      # The only part that runs on a manual trigger.
       - name: Plan
         run: dist plan --output-format=json | tee dist-plan.json
       - uses: actions/upload-artifact@v4
         with:
           name: dist-plan
           path: dist-plan.json
-      # crates.io rejects a bad manifest only at publish time, which is after
-      # the tag is pushed and the artifacts are built.
-      # **The bundle is committed, so this checks it rather than making it.**
-      # `cargo publish` packages what is in git; a bundle rebuilt here would be
-      # content the published crate carries and no commit contains, which is
-      # the opposite of what this product asks of everybody else. The build is
-      # byte-reproducible, so a difference means the committed bundle is stale.
+      # Catch a bad manifest before artifacts are built. The UI bundle is
+      # committed and reproducible, so a rebuild that differs means it is stale.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -62,12 +51,10 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          # Cross-compiled from the same Apple Silicon runner: the SDK carries
-          # both slices, so `libsqlite3-sys` builds with no extra toolchain.
+          # Cross-compiled on the Apple Silicon runner; no extra toolchain.
           - os: macos-latest
             target: x86_64-apple-darwin
-          # Native ARM rather than a cross toolchain: `libsqlite3-sys` is C, and
-          # `musl-gcc` only targets the host architecture.
+          # Native ARM: `musl-gcc` only targets the host architecture.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
           - os: ubuntu-latest
@@ -87,16 +74,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
-      # **The interface is built here, or the release ships without one.**
-      #
-      # `build.rs` treats a missing bundle as `None` rather than as a build
-      # failure, which is right — a clean checkout with no node still compiles.
-      # It also means a release job that forgets this step produces a binary
-      # that serves nothing, silently, and the first person to notice is
-      # somebody who installed it.
-      #
-      # Every target needs it: the bundle is embedded at compile time, so it
-      # has to exist before `dist build` runs on each one.
+      # `build.rs` embeds the bundle but tolerates its absence, so every target
+      # must build it before `dist build` or the binary serves no interface.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -129,12 +108,10 @@ jobs:
           path: target/distrib
       - name: Install dist
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
-      # The installers are generated from the manifest, not from the binaries,
-      # so they are produced here rather than per platform.
+      # Installers come from the manifest, not the binaries, so they build once.
       - name: Installers and checksums
         run: dist build --artifacts=global --output-format=json > dist-global.json
-      # Only regular files: `dist` stages each archive as a directory beside it,
-      # and the manifests are build output rather than something to publish.
+      # Regular files only: skip dist's staging directories and manifests.
       - name: Publish
         shell: bash
         env:
@@ -146,8 +123,7 @@ jobs:
           [ ${#files[@]} -gt 0 ] || { echo "no artifacts to publish"; exit 1; }
           printf 'publishing %s\n' "${files[@]}"
 
-          # A run that failed partway through upload has already created the
-          # release, so re-running must add to it rather than fail on the name.
+          # A re-run after a partial upload adds to the existing release.
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" --clobber "${files[@]}"
           else
@@ -162,17 +138,11 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     permissions:
-      # **Trusted publishing, exactly as crates.io below.** npm mints a
-      # short-lived credential from this workflow's own OIDC identity, so no
-      # registry token is stored in this repository. The trust is configured on
-      # the npm side against `hupe1980/devplane` and this file.
+      # Trusted publishing via OIDC; no npm token is stored in the repository.
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      # Hand-written because `dist`'s generated `publish-npm` is token-shaped:
-      # no `permissions:`, Node 20.x, `NODE_AUTH_TOKEN`.
-      #
-      # OIDC needs npm 11.5.1+ on Node 22.14.0+; `npm stage` would need 11.15.0+.
+      # Hand-written: dist's generated job is token-based. OIDC needs npm 11.5.1+ on Node 22.14.0+.
       - uses: actions/setup-node@v4
         with:
           node-version: '22.14.0'
@@ -186,14 +156,10 @@ jobs:
           path: target/distrib
       - name: Install dist
         run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
-      # Built from the same manifest the binaries came from, so the published
-      # shim and the release cannot disagree about versions or platforms.
+      # Built from the binaries' manifest, so versions and platforms match.
       - name: Build the npm package
         run: dist build --artifacts=global > /dev/null
-      # No `--provenance`: OIDC attaches the attestation itself.
-      #
-      # Fails the release if the package is missing or the publish is refused —
-      # shipping one door and not the other silently is worse than stopping.
+      # No `--provenance`: OIDC attaches it. A missing package fails the release.
       - name: Publish to npm
         shell: bash
         run: |
@@ -212,16 +178,11 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     permissions:
-      # Trusted publishing: crates.io mints a short-lived token from this
-      # workflow's identity, so no registry token is stored in the repository.
+      # Trusted publishing via OIDC; no crates.io token is stored.
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      # **The bundle is committed, so this checks it rather than making it.**
-      # `cargo publish` packages what is in git; a bundle rebuilt here would be
-      # content the published crate carries and no commit contains, which is
-      # the opposite of what this product asks of everybody else. The build is
-      # byte-reproducible, so a difference means the committed bundle is stale.
+      # The UI bundle is committed and reproducible; a rebuild that differs means it is stale.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/devplane"
 title = "Devplane"
-description = "Devplane records who decided, when nobody asked you — a person, a rule, a classifier, a timer, or nobody — across every project and every agent on your machine. One binary, one page: what needs you, what went red after the agent stopped, and which finished work can prove its checks passed. Local-first, and it never approves a tool call."
+description = "Devplane — the desktop workbench for spec-driven agentic development. Write the spec, dispatch any ACP agent, verify against your own gates, and keep the record of who decided what while you were not looking. Local-first, one binary, and it never approves a tool call."
 default_language = "en"
 author = "hupe1980"
 
@@ -41,10 +41,10 @@ include_path = true
 include_content = true
 
 [extra]
-tagline = "Where work that outlives a session lives."
+tagline = "The desktop workbench for spec-driven agentic development."
 repo = "https://github.com/hupe1980/devplane"
 acp = "https://agentclientprotocol.com"
-version = "0.9.0"
+version = "0.10.0"
 og_image = "/og.png"
 
 [[extra.nav]]

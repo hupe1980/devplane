@@ -1,13 +1,7 @@
-//! GitHub, through the `gh` command.
-//!
-//! Using the CLI rather than the API directly is a deliberate trade. `gh` is
-//! already authenticated on the machines this runs on — with SSO, with a token
-//! in a keychain, with whatever an enterprise put in the way — and asking a
-//! developer to create an OAuth app so a local tool can read their own pull
-//! requests is a worse first five minutes than any amount of saved latency.
-//!
-//! Parsing is separated from invoking throughout, so the shapes below are
-//! tested against captured `gh` output rather than against a network.
+//! GitHub, through the `gh` command, which is already authenticated (SSO,
+//! keychain tokens, enterprise setups) where this runs; no OAuth app needed.
+//! Parsing is separate from invoking, so shapes are tested against captured
+//! `gh` output.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -79,7 +73,7 @@ impl Check {
 pub enum PrStatus {
     /// Checks are still running.
     Pending,
-    /// Something failed. The most actionable state there is.
+    /// Something failed; the most actionable state.
     Failing,
     /// Green, and nothing is blocking a merge but a person.
     ReadyForReview,
@@ -93,9 +87,7 @@ pub enum PrStatus {
 }
 
 impl PrStatus {
-    /// The wire name, which is the *only* name: the inbox matches on these
-    /// strings, so deriving them from `Debug` (`ReadyForReview` →
-    /// `readyforreview`) silently broke every item that reads one.
+    /// The wire name the inbox matches on; never derive it from `Debug`.
     pub fn as_str(&self) -> &'static str {
         match self {
             PrStatus::Pending => "pending",
@@ -122,11 +114,8 @@ impl std::fmt::Display for PrStatus {
 }
 
 impl PullRequest {
-    /// Reduces the many ways GitHub describes a pull request to the one thing a
-    /// human has to decide about.
-    ///
-    /// Failure outranks everything: a red check is the one state where waiting
-    /// is definitely wrong.
+    /// Reduces GitHub's description to the one thing a person has to decide.
+    /// A failing check outranks everything.
     pub fn status(&self) -> PrStatus {
         match self.state.to_ascii_uppercase().as_str() {
             "MERGED" => return PrStatus::Merged,
@@ -157,16 +146,11 @@ impl PullRequest {
         self.checks.iter().filter(|c| c.is_failure()).collect()
     }
 
-    /// The board's view of this pull request, relative to the person whose
-    /// `gh` this is.
+    /// The board's view of this pull request, relative to the `gh` user.
     ///
-    /// `review_requested` is **not** derived from the pull request's own
-    /// `reviewRequests` list, and that is the whole point. That list names
-    /// users and *teams*, and nothing in it says which teams this person
-    /// belongs to — so reading it here marked every team's review request as
-    /// theirs. GitHub can answer the question and the client cannot, so
-    /// [`review_requested_of_me`] asks it once per pass and the answer is
-    /// passed in.
+    /// `review_requested` is passed in, not derived from `reviewRequests`: that
+    /// list names teams, and only GitHub knows which the person belongs to (see
+    /// [`review_requested_of_me`]).
     pub fn to_forge(
         &self,
         me: Option<&str>,
@@ -187,7 +171,7 @@ impl PullRequest {
     }
 }
 
-/// An issue, as imported into work.
+/// An issue, as imported into a change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Issue {
     pub number: u64,
@@ -197,8 +181,8 @@ pub struct Issue {
     pub url: String,
     #[serde(default)]
     pub labels: Vec<Label>,
-    /// Assignment is unambiguous — assignees are people, never teams — so
-    /// unlike a review request this one *is* answered from the row itself.
+    /// Assignees are people, never teams, so "assigned to me" is answered from
+    /// the row.
     #[serde(default)]
     pub assignees: Vec<Author>,
     #[serde(default, rename = "updatedAt")]
@@ -225,9 +209,7 @@ impl Issue {
 
     /// What an agent is told to do about this issue.
     ///
-    /// The body is included because it is the report, but bounded: an issue
-    /// with a thousand-line log in it would otherwise spend the context window
-    /// before the agent has read the code.
+    /// The body is bounded so a pasted log cannot spend the agent's context.
     pub fn prompt(&self) -> String {
         let body: String = self.body.chars().take(4000).collect();
         format!(
@@ -240,17 +222,17 @@ impl Issue {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Invocation
-// ---------------------------------------------------------------------------
-
-/// The fields fetched for a pull request. Named once so the parse and the
-/// request cannot drift apart.
+/// The fields fetched for a pull request; one constant so request and parse agree.
 const PR_FIELDS: &str = "number,title,url,state,isDraft,headRefName,reviewDecision,mergeStateStatus,statusCheckRollup,author,updatedAt";
 const ISSUE_FIELDS: &str = "number,title,body,url,labels,assignees,updatedAt";
 
-async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new("gh")
+/// Runs the person's own `gh`.
+///
+/// `DEVPLANE_GH` substitutes another binary, so tests can see what would run
+/// without reaching a forge.
+pub(crate) async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
+    let program = std::env::var_os("DEVPLANE_GH").unwrap_or_else(|| "gh".into());
+    let out = tokio::process::Command::new(program)
         .args(args)
         .current_dir(dir)
         .kill_on_drop(true)
@@ -259,8 +241,7 @@ async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
         .context("running gh — is the GitHub CLI installed?")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        // The two failures worth naming, because the fix is different and
-        // neither is obvious from a generic error.
+        // Name the two failures whose fixes differ and aren't obvious.
         if err.contains("gh auth login") || err.contains("authentication") {
             bail!("gh is not logged in — run `gh auth login`");
         }
@@ -277,8 +258,8 @@ pub async fn is_available(dir: &Path) -> bool {
     gh(dir, &["repo", "view", "--json", "name"]).await.is_ok()
 }
 
-/// Whose `gh` this is. Asked once per daemon: it is what "assigned to you"
-/// and "review requested from you" are relative to.
+/// Whose `gh` this is; what "assigned to you" and "review requested from you"
+/// are relative to.
 pub async fn viewer_login(dir: &Path) -> Result<String> {
     let out = gh(dir, &["api", "user", "--jq", ".login"]).await?;
     let login = out.trim().to_string();
@@ -288,9 +269,7 @@ pub async fn viewer_login(dir: &Path) -> Result<String> {
     Ok(login)
 }
 
-/// Every open pull request on the repository this directory belongs to,
-/// newest first. Bounded: a project with four hundred open pull requests is
-/// a project whose board shows a count, not a list.
+/// Open pull requests on this directory's repository, newest first, up to `limit`.
 pub async fn open_pull_requests(dir: &Path, limit: u32) -> Result<Vec<PullRequest>> {
     let limit = limit.to_string();
     let out = gh(
@@ -303,24 +282,16 @@ pub async fn open_pull_requests(dir: &Path, limit: u32) -> Result<Vec<PullReques
     parse_pr_list(&out)
 }
 
-/// Every open issue, newest first, whatever its labels. Pull requests are
-/// not issues here: `gh issue list` already excludes them.
+/// Every open issue, newest first; `gh issue list` excludes pull requests.
 pub async fn open_issues(dir: &Path, limit: u32) -> Result<Vec<Issue>> {
     issues(dir, None, limit).await
 }
 
-/// The pull requests GitHub says are waiting for **this person's** review,
-/// as `(owner/name, number)`.
+/// Open pull requests awaiting this person's review, as `(owner/name, number)`.
 ///
-/// Asked of the search API once for the whole machine rather than derived
-/// from each pull request's `reviewRequests`: `review-requested:@me` is
-/// resolved server-side and covers requests made to a team the person is
-/// actually a member of, which is precisely the fact a client cannot know.
-/// Deriving it locally marked every team's request as theirs.
-///
-/// A failure here costs the `review_requested` signal and nothing else — the
-/// counts and every other item still come from the per-project lists — so it
-/// is logged by the caller rather than failing the pass.
+/// One search for the whole machine: `review-requested:@me` is resolved
+/// server-side and includes team requests for teams the person is in, which a
+/// client cannot know. The caller logs a failure rather than failing the pass.
 pub async fn review_requested_of_me(
     dir: &Path,
 ) -> Result<std::collections::BTreeSet<(String, u64)>> {
@@ -358,9 +329,8 @@ pub async fn review_requested_of_me(
         .collect())
 }
 
-/// Whether an error from `gh` means this directory will never have a forge —
-/// no remote, no GitHub host, not a repository — as opposed to a network or
-/// login problem that a later poll may not have.
+/// Whether a `gh` error means this directory will never have a forge (no
+/// remote, not a repo), as opposed to a network or login problem.
 pub fn is_permanent(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
     e.contains("remote") || e.contains("not a git repository") || e.contains("no known github host")
@@ -384,9 +354,8 @@ pub fn parse_pr_list(json: &str) -> Result<Vec<PullRequest>> {
 
 /// Opens a pull request for a branch and returns it.
 ///
-/// Always a draft unless asked otherwise: a pull request that appears finished
-/// summons reviewers, and work a machine just finished has not been looked at
-/// by anybody yet.
+/// Draft unless the caller says otherwise: a finished-looking pull request
+/// summons reviewers before anyone has looked at the work.
 pub async fn create_pr(
     dir: &Path,
     branch: &str,
@@ -465,7 +434,6 @@ mod tests {
 
     #[test]
     fn a_red_check_outranks_everything_else() {
-        // It is the one state where waiting is definitely the wrong move.
         let pr = &parse_pr_list(PR_JSON).unwrap()[0];
         assert_eq!(pr.status(), PrStatus::Failing);
         assert_eq!(pr.failing_checks().len(), 1);
@@ -514,8 +482,8 @@ mod tests {
 
     #[test]
     fn an_empty_check_state_counts_as_pending_not_green() {
-        // GitHub reports a queued check with no state at all. Reading that as
-        // success would merge on nothing.
+        // A queued check can have no state; reading that as success would
+        // merge on nothing.
         let mut pr: PullRequest = parse_pr_list(PR_JSON).unwrap().pop().unwrap();
         pr.checks = vec![Check {
             name: "test".into(),
@@ -539,19 +507,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(issues[0].number, 7);
-        // The labels themselves, because nothing in this build reads one yet.
-        // There was a `has_label` helper here with a case-insensitive match and
-        // three assertions about it, and no caller anywhere outside this test —
-        // a rule stated where nothing reads it. `#community` is what wants it,
-        // and it is three lines when it does.
         let labels: Vec<&str> = issues[0].labels.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(labels, ["bug", "devplane:ready"]);
     }
 
     #[test]
     fn an_issue_prompt_is_bounded_and_says_the_report_is_untrusted() {
-        // The body is written by anyone on the internet. It is a report, not an
-        // instruction, and the agent has to be told so.
+        // The body is untrusted, and the agent must be told so.
         let issue = Issue {
             number: 7,
             title: "Login fails".into(),
@@ -569,8 +531,7 @@ mod tests {
 
     #[test]
     fn the_wire_name_is_the_serialised_name_not_a_debug_string() {
-        // The inbox matches on `ready_for_review`; `format!("{:?}")` produced
-        // `readyforreview`, so a green pull request never reached anybody.
+        // The inbox matches on `ready_for_review`, not `readyforreview`.
         for s in [
             PrStatus::Pending,
             PrStatus::Failing,
@@ -593,9 +554,8 @@ mod tests {
 
     #[test]
     fn who_wrote_it_is_read_from_the_row_and_who_was_asked_is_not() {
-        // Authorship is in the row and is exact. A review request is not:
-        // `reviewRequests` names teams, and which of them this person belongs
-        // to is a fact only GitHub has — so it arrives from the search instead.
+        // Authorship comes from the row; a review request cannot (team
+        // indirection), so it arrives from the search.
         let prs = parse_pr_list(
             r#"[{
               "number": 5, "title": "t", "url": "u", "state": "OPEN",
@@ -617,8 +577,7 @@ mod tests {
 
     #[test]
     fn an_assignee_makes_an_issue_mine() {
-        // Assignees are people. Unlike a review request there is no team
-        // indirection, so this one is answered from the row.
+        // Assignees are people, so this is answered from the row.
         let issues = parse_issues(
             r#"[{"number": 9, "title": "t", "url": "u",
                  "assignees": [{"login": "hupe1980"}], "labels": [{"name": "bug"}]}]"#,

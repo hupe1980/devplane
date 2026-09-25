@@ -1,56 +1,27 @@
-//! Every colour this interface renders is readable against the surface it sits
-//! on, in both themes — **computed here, never listed**.
-//!
-//! The property this replaces read *"contrast is checked at AA for text and for
-//! the state colours against both grounds"* and was **asserted by eye**. It was
-//! wrong by 3.2:1 in the dark theme and 2.9:1 in the light one, on `--faint`,
-//! which carries the cost and the context percentage — the two numbers this
-//! persona scans most were the least legible things on the row, in both themes,
-//! for every pass since the page existed.
-//!
-//! **A maintained list of approved pairs would fail the same way**, the first
-//! time somebody adds a token and forgets to add its row. So this reads the
-//! tokens out of the page itself and computes the ratio: a token that exists is
-//! a token that is checked.
+//! Every colour the interface renders is readable against its surface in both
+//! themes. Ratios are computed from the stylesheet's own tokens, so a new token
+//! is checked without a list to maintain.
 
 use std::collections::BTreeMap;
 
-/// **The rebuild's stylesheet is the palette now**, since the page this read
-/// was deleted at the switch on 2026-09-21.
-///
-/// Nothing else about this file changed, and that is the point: it never
-/// checked the tokens against a *reference*, it computed the contrast ratio
-/// from whatever the tokens are. A check that reads the values out of the file
-/// under test survives the file being replaced; a check that compared them to a
-/// golden copy would have had to be rewritten, and would have been rewritten by
-/// somebody in a hurry.
+/// The palette. Values are read from it, never compared against a golden copy.
 const PAGE: &str = include_str!("../ui/src/tokens.css");
 
-/// The floor for text, and the floor for everything else.
-///
-/// Not named as a number anywhere but here. A specification that repeated it
-/// would be a second home for a figure, and the two would disagree the first
-/// time one moved.
+/// The floor for text, and the floor for everything else. Stated only here.
 const TEXT_FLOOR: f64 = 4.5;
 const NON_TEXT_FLOOR: f64 = 3.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Role {
     Surface,
-    /// A separator between things. Decorative: nothing about operating the
-    /// interface depends on perceiving it, so no floor applies.
+    /// A separator; decorative, so no floor applies.
     Decoration,
-    /// The boundary of a control. Held to the non-text floor, because an input
-    /// whose edge cannot be seen is a control that cannot be found.
+    /// A control's boundary, held to the non-text floor so the control can be found.
     Edge,
     Text,
 }
 
 /// Relative luminance, per the contrast definition.
-///
-/// A dozen lines rather than a crate, for the reason every other piece of
-/// arithmetic in this tree has none: nothing belongs between a claim and its
-/// evidence.
 fn luminance(hex: &str) -> f64 {
     let h = hex.trim_start_matches('#');
     let full = match h.len() {
@@ -76,10 +47,6 @@ fn ratio(a: &str, b: &str) -> f64 {
 }
 
 /// The tokens of one theme, read out of the page.
-///
-/// From the page, never from a copy here: a token that exists is a token that
-/// is checked, and a duplicate table would go stale exactly the way the
-/// accessibility section did.
 fn theme(block: &str) -> BTreeMap<String, (String, Role)> {
     let mut out = BTreeMap::new();
     for line in block.lines() {
@@ -89,8 +56,11 @@ fn theme(block: &str) -> BTreeMap<String, (String, Role)> {
         let Some((name, tail)) = rest.split_once(':') else {
             continue;
         };
+        // A token with no role would go unchecked, so it is refused, not skipped.
         let Some((value, comment)) = tail.split_once("/*") else {
-            continue;
+            panic!(
+                "`--{name}` declares no role: write `/* surface | line | edge | text */` beside it"
+            );
         };
         let role = match comment.trim().trim_end_matches("*/").trim() {
             "surface" => Role::Surface,
@@ -110,12 +80,24 @@ fn theme(block: &str) -> BTreeMap<String, (String, Role)> {
 /// One theme's tokens: name to (value, the role it plays).
 type Tokens = BTreeMap<String, (String, Role)>;
 
-/// Every block that declares tokens, with the selector that introduces it.
-///
-/// There are three and they are two themes: the light default, the dark one
-/// under the system preference, and the dark one under an explicit choice. The
-/// last two carry the same values and **have to**, because a media query and an
-/// attribute cannot be one selector — so they are compared rather than trusted.
+#[test]
+fn a_token_without_a_role_is_refused_rather_than_skipped() {
+    let refused = std::panic::catch_unwind(|| {
+        theme("    --bg: #fbfbfa;      /* surface */\n    --oops: #123456;\n")
+    });
+    let msg = match refused {
+        Ok(_) => panic!("a token with no role comment was silently skipped"),
+        Err(e) => e
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default(),
+    };
+    assert!(msg.contains("--oops"), "the refusal names the token: {msg}");
+}
+
+/// Every block that declares tokens, with its selector: light, dark by system
+/// preference, and dark by explicit choice. The two dark blocks must match.
 fn token_blocks() -> Vec<(String, Tokens)> {
     let mut out = Vec::new();
     for (at, _) in PAGE.match_indices(":root") {
@@ -158,9 +140,8 @@ fn themes() -> Vec<(&'static str, Tokens)> {
 
 #[test]
 fn the_two_ways_of_asking_for_dark_agree() {
-    // A media query and an attribute cannot be one selector, so the values are
-    // written twice — and two copies of a figure is how a document starts
-    // lying. This is the check that stops them drifting.
+    // A media query and an attribute cannot share a selector, so the dark values
+    // are written twice; this keeps the copies from drifting.
     let blocks = token_blocks();
     let by_preference = blocks
         .iter()
@@ -198,8 +179,6 @@ fn every_text_token_is_readable_on_every_surface_in_both_themes() {
                 let r = ratio(value, bg);
                 if r < floor {
                     // The failure names the token, the surface and the ratio.
-                    // "Contrast failed" is not actionable at the moment
-                    // somebody is changing a colour.
                     failures.push(format!(
                         "  {name}: --{token} ({value}) on --{surface} ({bg}) is {r:.2}:1, below {floor}:1"
                     ));
@@ -216,8 +195,7 @@ fn every_text_token_is_readable_on_every_surface_in_both_themes() {
 
 #[test]
 fn every_token_is_defined_in_both_themes_with_the_same_role() {
-    // A missing value fails rather than falling back, because a fallback
-    // silently renders one theme wearing the other's colour.
+    // A missing value fails: a fallback would render one theme in the other's colour.
     let t = themes();
     let (a_name, a) = &t[0];
     let (b_name, b) = &t[1];

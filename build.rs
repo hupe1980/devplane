@@ -1,34 +1,15 @@
-//! Embeds the built interface into the binary at compile time.
+//! Embeds the built interface (`ui/dist`) into the binary at compile time.
 //!
-//! **One binary is the property this exists to keep.** The interface is built
-//! by a second toolchain now, and the whole argument for accepting that was
-//! that the *output* still ships inside one executable with nothing fetched and
-//! nothing else to run. A bundle the binary loaded from disk at runtime would
-//! give that away for nothing.
-//!
-//! # Why a missing bundle is not an error
-//!
-//! `cargo build` must work on a machine with no node. **The bundle is committed**
-//! — `cargo publish` packages what is in git, and publishing bytes that exist in
-//! no commit would leave nobody able to check the interface they installed
-//! against the tag — so an ordinary checkout has one and needs no toolchain to
-//! use it.
-//!
-//! It can still be absent: somebody deleted it, or a tree that has never run the
-//! interface build. So this emits `BUNDLE: Option<&[Asset]>` and the absence is
-//! a value rather than a failure.
-//!
-//! What that must never become is a silent downgrade: a release binary that
-//! quietly shipped without an interface because somebody forgot to build it.
-//! **Since the switch on 2026-09-21 the bundle is load-bearing**: a binary
-//! built without it serves a page that says so, in words, on the address a
-//! person would open — rather than a blank one, or the API's JSON 404, either
-//! of which would send them debugging the daemon. `tests/ui_bundle.rs` holds
-//! the release pipeline to building it.
+//! A missing bundle is a warning and `BUNDLE = None` (the binary serves a page
+//! saying so), except in release or CI builds, where it is a hard failure.
 
 use std::path::Path;
 
 fn main() {
+    // Only under the feature: a build without it must need nothing of Tauri's.
+    #[cfg(feature = "app")]
+    tauri_build::build();
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dist = root.join("ui/dist");
 
@@ -56,6 +37,16 @@ fn main() {
     );
 
     if assets.is_empty() {
+        println!(
+            "cargo:warning=ui/dist is absent: this binary will serve a page saying so instead of the interface (cd ui && npm run build)"
+        );
+        let release = std::env::var("PROFILE").is_ok_and(|p| p == "release");
+        if release || std::env::var("CI").is_ok() {
+            panic!(
+                "ui/dist is absent in {} — build the interface first (cd ui && npm run build)",
+                if release { "a release build" } else { "CI" }
+            );
+        }
         src.push_str(
             "/// No bundle was present when this was built. `None` rather than an\n\
              /// empty slice, because *nothing was built* and *a build produced\n\
@@ -75,13 +66,8 @@ fn main() {
     std::fs::write(&generated, src).expect("writing the bundle index");
 }
 
-/// Every file under `dist`, as `(served path, absolute path)`.
-///
-/// Source maps are **excluded**. They are four times the size of the bundle,
-/// they are a development aid rather than part of the interface, and embedding
-/// them would quadruple the binary to ship something nobody loads over
-/// loopback. The readable output is what makes the bundle followable without
-/// one — which is the property the map would otherwise be compensating for.
+/// Every file under `dist`, as `(served path, absolute path)`. Source maps are
+/// excluded: they would quadruple the binary for something nobody loads.
 fn collect(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;

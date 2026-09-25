@@ -1,13 +1,12 @@
 # Contributing
 
-Devplane is early and one person maintains it. The most useful contribution is a precise report,
-and the second most useful is a test.
+One person maintains Devplane. The most useful contribution is a precise report; the second is a
+test.
 
 ## Reports that matter most
 
-1. **A prohibition that did not fire.** Use the *gate widening* issue template. Every defect of this
-   kind found so far was silent, so an exact call and an exact rule is worth more than a feature
-   request. (Devplane never *approves* a call, so there is no allow-side report to make.)
+1. **A prohibition that did not fire.** Use the *gate widening* issue template with the exact call
+   and the exact rule. (Devplane never approves a call, so there is no allow-side report.)
 2. **A vendor release that moved something.** Claude Code, Copilot and Codex change weekly. Use the
    *vendor drift* template and quote the changelog row.
 
@@ -15,73 +14,64 @@ and the second most useful is a test.
 
 ```sh
 just check          # fmt, clippy, build, test — what CI runs
-just verify         # plus the claim ledger and the dependency count; needs `just reference` once
+just verify         # check, then deps (dependency count), site-build and site-check (Zola links)
+just notes          # checks over the maintainer's gitignored notes; says "skipped" where absent
 ```
 
-## Where a change is planned
+Features are specified with [GitHub Spec Kit](https://github.com/github/spec-kit) before they are
+built. Those working files are not published; every behaviour they ask for is a test, and
+`just verify` runs all of them.
 
-A feature is specified before it is built, with
-[GitHub Spec Kit](https://github.com/github/spec-kit) — requirements with stable ids, a plan checked
-against a written constitution, then a task list. Those working files are not published — they are
-the maintainer's, and a reader would have neither the folder nor the identifiers it cites.
-
-**What reaches you instead is the result.** Every behaviour the specification asked for is a test
-that names it, and `just verify` runs all of them. If you want to know what a feature must do, the
-tests are the answer that cannot go stale.
-
-Every behaviour change to the permission layer needs a test that asserts **both** the verdict and
-the rule that produced it; a right answer with a wrong reason is a bug here. `Verdict` has no
-`Allow` variant and will not be given one. A dependency bump is a
-reviewed change: agents and packages are pinned on purpose.
+A change to the permission layer needs a test that asserts **both** the verdict and the rule that
+produced it. A dependency bump is a reviewed change: agents and packages are pinned on purpose.
 
 ## The interface
 
-**`ui/` is a Svelte project**, being ported from the single hand-written page the binary still
-serves. The reason for the build step is that the interfaces this product now needs are editors
-rather than lists.
+`ui/` is a Svelte project built to a bundle the binary embeds at compile time.
 
 ```sh
 cd ui && npm install     # Node 22+
-npm run build            # → ui/dist/, embedded into the binary at compile time
-npm run dev              # a dev server that proxies /api to a running daemon
-npm run check            # svelte-check, over TypeScript and every component
+npm run build            # → ui/dist/, embedded into the binary
+npm run dev              # a dev server that proxies /api to a running host (`devplane serve`)
+npm run check            # svelte-check over TypeScript and every component
+npm run render           # renders every surface and asserts on the result
+npm run dev:fixtures     # the interface over recorded host responses, no host needed
 ```
 
-**`ui/dist/` is committed**, because `cargo publish` packages what is in git. Change a surface, run
-`npm run build`, and commit the result — CI rebuilds it and fails if it differs. The build is
-byte-reproducible, so it only differs when it is stale.
+- **`ui/dist/` is committed**, because `cargo publish` packages what is in git. Change a surface, run
+  `npm run build`, commit the result. CI rebuilds it and fails if `ui/dist` differs.
+- **`ui/fixtures/` are recorded, never hand-written**: `bash scripts/capture-fixtures.sh` seeds a real
+  host and saves what it serves. `bash scripts/make-board.sh` photographs the same seed into
+  `site/static/`.
+- **`ui/src/wire/` is generated** from the Rust types (`ts-rs`). After changing a type that crosses
+  the API, run `TS_RS_EXPORT_DIR=ui/src cargo test --features typescript export_bindings` and commit
+  the result.
+- **The built output stays readable** (`minify: false`), and **nothing is fetched from outside the
+  machine**, fonts included.
+- A surface is a directory under `ui/src/surfaces/`: an `index.ts` that registers itself and binds its
+  keys, plus its components. The frame is `ui/src/shell/`. Keys go through `ui/src/lib/keys.ts`;
+  `npm run build` runs `scripts/check-keys.mjs` first and fails on a key bound twice in one scope or a
+  surface rebinding a global. `tests/ui_bundle.rs` holds the interface to the API and the bundle.
+- **`cargo package` shares the target directory**, and its verification build embeds the packaged
+  interface, which a later `cargo build` can reuse. `rm -rf target/package` after packaging, or set
+  `CARGO_TARGET_DIR` elsewhere.
+- TypeScript is pinned at 5.9 because `svelte-check` does not accept 7.
 
-**Two properties are not preferences, and both are enforced rather than requested.**
+## The window
 
-**The built output stays readable** — `minify: false`. This is a product about being able to see what
-was decided on your machine, and the interface has always been the one artefact a person could read
-without this repository: over a tunnel, with `curl`, on a machine that has never built it. Shipping
-an opaque bundle would make the accountability tool the least accountable thing in it.
+```sh
+just app                 # cargo run --features app -- app
+```
 
-**Nothing is fetched from outside the machine, in any build, for any asset — including a font.** A
-control plane whose own interface phones somewhere is not one.
+The app is the cargo feature `app`, off by default. On macOS it needs no system packages; on Linux
+install `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev` first
+(`cargo clippy --all-features` compiles the app). `tests/app.rs` drives the app's host without a
+window (`cargo test --features app --test app`); `scripts/make-icon.py` regenerates `icons/`.
 
-`tests/ui_bundle.rs` holds the interface to the API and to the bundle it ships;
-`ui/tests/render.ts` renders every surface and asserts on the result. The second needs `node`, so
-install it before trusting a green run of the interface tests.
+## Out of scope
 
-**`cargo package` shares the target directory**, and its verification build embeds the interface
-from the packaged copy. A `cargo build` afterwards can reuse that build-script output and produce a
-binary carrying the *packaged* bundle rather than `ui/dist` — a stale interface, silently. `rm -rf
-target/package` after packaging, or package with `CARGO_TARGET_DIR` set elsewhere.
-
-**Versions are pinned on purpose**, including the toolchain. TypeScript is held at 5.9 because
-`svelte-check` does not accept 7 yet; the registry's `latest` is not usable here.
-
-A surface is a directory under `ui/src/surfaces/`: an `index.ts` that registers itself and a
-component. Nothing else names it, so adding one is not a merge conflict.
-
-## Scope
-
-Things that will not be merged, so nobody spends a weekend on them: a model deciding a permission
-or a gate result; a cloud relay or account; a second rule language; parsing transcript JSONL on the
-critical path; a React or WASM interface, which were measured against and rejected on weight. The public docs explain the reasoning:
-<https://hupe1980.github.io/devplane/docs/decisions/>.
+A model deciding a permission or a gate result; a cloud relay or account; a second rule language;
+parsing transcript JSONL on the critical path; a React or WASM interface.
 
 ## Licence
 

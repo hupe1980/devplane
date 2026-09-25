@@ -4,13 +4,16 @@
 <section class="hero">
   <div class="wrap">
     <p class="eyebrow">Local-first · One binary · MIT OR Apache-2.0</p>
-    <h1>A session ends.<br><span class="accent">The work does not.</span></h1>
+    <h1>Write the spec.<br><span class="accent">Verify the change.</span></h1>
     <p class="lede">
-      Devplane is one page for every project on your machine: what needs you, what went red after
-      the agent stopped, who is waiting on a review — and which finished work can <em>prove</em> its
-      checks passed. It watches the sessions already running, drives any agent that speaks the
-      <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a>, and never approves
-      a tool call on your agent’s behalf.
+      Devplane is the desktop workbench for spec-driven agentic development. Write the spec, dispatch
+      any agent that speaks the <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a>,
+      verify against your own gates, and keep the record of who decided what while you were not
+      looking.
+    </p>
+    <p class="muted small">
+      It sits on top of your tools: the spec is your spec tool’s folder, the checks are your commands,
+      the isolation is <code>git worktree</code>. Delete Devplane and the project still builds.
     </p>
 
     <div class="cta-row">
@@ -27,56 +30,37 @@
       <a href="{{ get_url(path='/docs/install/') }}">Other install paths</a>.
     </p>
 
-    {# A real capture, not a mock. #}
-    <figure class="terminal" aria-label="Example output of the devplane ls command">
+    <figure class="terminal" aria-label="Starting a change and reading its state">
       <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span></div>
-<pre><code><span class="t-dim">$</span> devplane ls
-<span class="t-bold">8 projects</span> · 23 sessions · 5 working · <span class="t-warn">2</span> need you · 4 idle <span class="t-dim">· $4.18</span>
-<span class="t-dim">12 quiet (nothing heard for hours) — devplane ls --all</span>
-
-<span class="t-bold">saas</span>  <span class="t-dim">·  4 issues · 2 PRs (1 needs you)</span>
-  <span class="t-warn">◆</span> 7c         <span class="t-dim">vscode</span>     62%   $1.04   3m  Keep the legacy /v1/login route?
-
-<span class="t-bold">core-lib</span>  <span class="t-dim">·  2 sessions  ·  1 PR</span>
-  <span class="t-ok">●</span> a1         <span class="t-dim">vscode</span>     88%   $0.41   2s  Bash: cargo test --workspace
-  <span class="t-dim">○</span> 4f         <span class="t-dim">vscode</span>     12%   $0.02  41m  waiting for a prompt
-
-<span class="t-bold">mobile</span>
-  <span class="t-warn">◆</span> 04         <span class="t-dim">cli</span>         –    $0.12   8m  Permission: Bash rm -rf node_modules
+<pre><code><span class="t-dim">$</span> devplane change start "password reset" --spec specs/142-password-reset
+<span class="t-dim">$</span> devplane change show c-3f9a
+<span class="t-bold">password reset</span>  <span class="t-dim">c-3f9a</span>
+  state      <span class="t-ok">✓ verified</span>
+  gates      <span class="t-ok">every declared gate exited zero against the tree as it stands</span>
+  branch     fix/password-reset
+  spec       specs/142-password-reset <span class="t-dim">at 3f9a1c40b7e2d518 over 4 documents</span>
+  tasks      11 ticked · 9 verified
+<span class="t-dim">$</span> devplane change offer c-3f9a
 </code></pre>
     </figure>
-    <p class="muted small caption">
-      Grouped by project, with the issues and pull requests waiting on you. Quiet editor tabs are
-      counted, not listed — and any that starts asking for something joins the working set at once.
-    </p>
   </div>
+</section>
+
+<section class="wrap showcase">
+  <figure class="shot"><img src="{{ get_url(path="workbench.png") | safe }}" alt="A change open in the Devplane workbench: verified against the working tree, with its lifecycle, six views and evidence" width="1440"></figure>
+  <figure class="shot"><img src="{{ get_url(path="review.png") | safe }}" alt="The review leads with a check the agent weakened — a skipped test — before anything else" width="1440" loading="lazy"></figure>
 </section>
 
 <section class="band">
   <div class="wrap">
-    <h2>The check goes red two hours after the agent stopped</h2>
-    <div class="two-col">
-      <div>
-        <p>
-          By then there is no session left to show it. Claude Code’s own <code>claude agents</code>
-          shows background sessions and does it well — but a session view can only render sessions,
-          and a branch, an open pull request and a reviewer all outlive the one that made them.
-        </p>
-        <p>
-          Devplane’s unit is a <strong>Work</strong>: the branch, the project’s own checks, the pull
-          request, the cost. It sits above every agent on documented interfaces only, and stays out
-          of the way. It does not replace your editor, your tracker or your agent.
-        </p>
-      </div>
-      <div>
-        <p class="muted">
-          <strong>It works before you configure anything.</strong> Sessions are discovered from
-          Claude Code’s own roster, so <code>devplane ls</code> is useful on first run with nothing
-          installed. Connecting is what adds live state: cost, context usage, blocking, and the
-          prohibitions you write.
-        </p>
-      </div>
-    </div>
+    <h2 class="section-head">The loop</h2>
+    <ol class="loop">
+      <li><strong>Specify</strong><span>The spec you already write — Spec Kit, OpenSpec, Kiro, or plain Markdown.</span></li>
+      <li><strong>Start a change</strong><span>An isolated worktree, any ACP agent, the tasks you chose. One prompt to several repositories if you like.</span></li>
+      <li><strong>Supervise</strong><span>Questions, permissions and red checks, across every project, most urgent first.</span></li>
+      <li><strong>Verify</strong><span>Your own <code>check</code> passed against the tree exactly as it stands — or it is not verified.</span></li>
+      <li><strong>Review and offer</strong><span>Weakened checks read first, then a pull request with a certificate anyone can re-run.</span></li>
+    </ol>
   </div>
 </section>
 
@@ -84,99 +68,80 @@
   <h2 class="section-head">What it does</h2>
   <div class="features">
     <article class="feature">
-      <h3>Sight</h3>
+      <h3>A workbench, not a dashboard</h3>
       <p>
-        Every session on the machine, on one board, with state, cost, context percentage, worktree
-        and pull request — and every open issue and pull request across your projects beside them.
-        Hooks and OpenTelemetry for live state; the session roster for discovery. Your workflow does
-        not change.
+        Laid out like your editor: a palette on <kbd>⌘K</kbd>, an activity bar, tabs, a bottom panel.
+        A change opens as a document with six views — Overview, Tasks, Review, Gates, Ledger, Agent —
+        and the review is a file tree beside the diff, walked with <kbd>j</kbd>/<kbd>k</kbd>.
       </p>
-      <a class="more" href="{{ get_url(path='/docs/observe/') }}">How observing works</a>
+      <a class="more" href="{{ get_url(path='/docs/workbench/') }}">The workbench</a>
     </article>
 
     <article class="feature">
-      <h3>Hands</h3>
+      <h3>Verified means verified</h3>
       <p>
-        Dispatch, prompt, answer permissions and cancel — for Claude&nbsp;Code, Codex, OpenCode and
-        Gemini&nbsp;CLI out of the box, and any other agent that speaks the protocol by naming its
-        command in one file.
-      </p>
-      <a class="more" href="{{ get_url(path='/docs/agents/') }}">Driving agents</a>
-    </article>
-
-    <article class="feature">
-      <h3>Proof</h3>
-      <p>
-        Work outlives sessions. An isolated checkout, your own commands as the definition of done,
-        failures handed back to the agent that wrote the code — bounded — and then a person is
-        asked. An unearned claim of done never reaches <em>review</em>.
+        Your committed gate, run by Devplane rather than the agent, against a digest of the working
+        tree — uncommitted files included. Touch one file and it is stale. Only the gate that defines
+        done can make a change verified.
       </p>
       <a class="more" href="{{ get_url(path='/docs/verified-done/') }}">Verified done</a>
     </article>
 
     <article class="feature">
-      <h3>Pipelines</h3>
+      <h3>Spec-driven, no format to adopt</h3>
       <p>
-        Declared chains of runs: one agent implements, another reviews, a gate decides, and a person
-        approves where the project says so. The cursor lives on the work item, so a crash resumes
-        where it stopped instead of paying twice.
+        Name the spec folder and the tasks to send. Ticked boxes and verified tasks are two counts,
+        never one. Inside Spec Kit, Devplane’s gate is the hook that decides.
       </p>
-      <a class="more" href="{{ get_url(path='/docs/pipelines/') }}">Agents checking agents</a>
+      <a class="more" href="{{ get_url(path='/docs/specs/') }}">Working to a spec</a>
+    </article>
+
+    <article class="feature">
+      <h3>Any ACP agent, and the ones you already run</h3>
+      <p>
+        Drives Claude&nbsp;Code, Codex, GitHub&nbsp;Copilot, OpenCode and Gemini&nbsp;CLI, or any agent
+        you name in one file. Watches the sessions you started yourself, and says which ones it cannot see.
+      </p>
+      <a class="more" href="{{ get_url(path='/docs/agents/') }}">Driving agents</a>
     </article>
 
     <article class="feature">
       <h3>Devplane never approves</h3>
       <p>
-        It can prohibit a call and defer one to you; it cannot approve one — the type has no
-        <code>Allow</code> variant, so approving is not something this code can express. Prohibitions
-        use Claude&nbsp;Code’s own syntax, resolve per repository, and hold in auto mode where no
-        prompt ever appears. A spelling that cannot match anything is refused rather than carried,
-        because a deny rule that silently matches nothing reads as protection and is none.
+        It can refuse a tool call and put one in front of you; it cannot approve one. Rules use
+        Claude&nbsp;Code’s syntax, reach through shell tricks, and fail closed when the file will not load.
+        An agent cannot answer its own permission.
       </p>
-      <a class="more" href="{{ get_url(path='/docs/permissions/') }}">The rule syntax</a>
+      <a class="more" href="{{ get_url(path='/docs/permissions/') }}">Permissions</a>
     </article>
 
     <article class="feature">
-      <h3>An answer months later</h3>
+      <h3>Who decided</h3>
       <p>
-        Every verdict a rule reaches, every gate, every push and every pull request is appended to a
-        decision log with the reason behind it. “Refused” is not an answer.
-        “Refused&nbsp;by <code>Bash(rm -rf *)</code>” is.
+        Every decision is on the record with its authority — a person, a rule, a timer, nobody, or
+        Devplane doing what your project wrote down. “Refused” is not an answer;
+        “refused&nbsp;by <code>Bash(rm -rf *)</code>” is.
       </p>
       <a class="more" href="{{ get_url(path='/docs/decisions/') }}">The decision log</a>
     </article>
   </div>
 </section>
 
-<section class="band">
-  <div class="wrap">
-    <h2 class="section-head">The loop</h2>
-    <ol class="loop">
-      <li><strong>See</strong><span>One list: what needs you, across every project.</span></li>
-      <li><strong>Decide</strong><span>Permissions, questions, red checks, spent budgets — ranked by what is waiting.</span></li>
-      <li><strong>Dispatch</strong><span>An agent in an isolated checkout, with the project’s rules.</span></li>
-      <li><strong>Verify</strong><span>Your own commands decide. Failures go back, bounded.</span></li>
-      <li><strong>Account</strong><span>Every decision, with the rule or the check behind it.</span></li>
-    </ol>
-  </div>
-</section>
-
 <section class="wrap">
   <h2 class="section-head">Principles</h2>
   <div class="principles">
-    <div><h3>Local-first</h3><p>No account, no cloud relay, no service to run. Loopback only, and a token in a file only you can read. Nothing leaves the machine.</p></div>
-    <div><h3>Documented interfaces only</h3><p>Hooks, OpenTelemetry, the session roster, the Agent Client Protocol. No transcript scraping, no undocumented wire protocols.</p></div>
-    <div><h3>Observe before own</h3><p>A session Devplane did not start is first-class. Ownership is additive, never a prerequisite.</p></div>
-    <div><h3>Work outlives sessions</h3><p>Sessions crash and get handed to an editor. A pull request goes red hours later. Only work carries gates, evidence and history.</p></div>
-    <div><h3>The model is never the authority</h3><p>If the answer is a function of trusted inputs, it is a function. Attention, gates and policy never call a model.</p></div>
-    <div><h3>An offered action is an implemented action</h3><p>A button that cannot do what it says is the one failure a control plane cannot afford, because the whole product is a claim about what is true.</p></div>
+    <div><h3>Local-first</h3><p>No account, no cloud relay, no telemetry of our own. Loopback only, with a token in a file only you can read. Nothing starts unless you start it.</p></div>
+    <div><h3>On top, never the only way in</h3><p>Plain files your agents read without Devplane: the spec folder, your gate commands, <code>git worktree</code>, <code>AGENTS.md</code>.</p></div>
+    <div><h3>Documented interfaces only</h3><p>Hooks, OpenTelemetry, the session roster, the Agent Client Protocol. No transcript scraping.</p></div>
+    <div><h3>The model is never the authority</h3><p>Gates, policy and the inbox are functions of trusted inputs. None of them calls a model.</p></div>
+    <div><h3>Evidence over claims</h3><p>An agent saying it is done is an input. Exit codes against a tree digest are the verdict, and a stranger can re-run them.</p></div>
   </div>
 </section>
 
 <section class="closer">
   <div class="wrap narrow">
     <h2>Try it on the machine you already have</h2>
-    <p class="lede">One binary. It finds your sessions on the first run.</p>
+    <p class="lede">One binary. It finds your running sessions on the first run.</p>
     <div class="install-line big">
       <code>curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh &amp;&amp; devplane ls</code>
       <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh && devplane ls" aria-label="Copy the install command">Copy</button>

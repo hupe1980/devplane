@@ -1,34 +1,27 @@
 //! Devplane — records who decided, when nobody asked you, across every project
 //! and every coding agent on your machine.
 //!
-//! One crate. [`core`] is the half that may not reach the outside world — the
-//! types, the reducer, the attention engine, the permission policy — and
-//! `tests/purity.rs` fails the build if it ever does. Everything else here
-//! touches something: the daemon, the receivers that learn what other people's
-//! agents are doing, the client that drives agents of our own, and the layers
-//! that turn "the agent says it is done" into "the project's own checks agree".
-//!
-//! The binary is a thin argument parser over this library. Everything
-//! interesting in this product happens at the seam with a provider, and a seam
-//! that can only be exercised through a subprocess is a seam nobody exercises.
+//! [`core`] is the pure half — types, reducer, attention, permission policy —
+//! and `tests/purity.rs` fails the build if it reaches the outside world. The
+//! binary is a thin parser over this library so tests can drive every seam.
 
 /// The Agent Client Protocol client: driving any agent that speaks it.
 pub mod acp;
 /// The HTTP surface: receivers for the providers, an API for the clients.
 pub mod api;
-pub mod batch;
+/// The window: the host with a tray, notifications and a shortcut (`app` feature).
+#[cfg(feature = "app")]
+pub mod app;
+/// The loop that makes a run mean something.
+pub mod change;
 /// The command line, one module per thing a person is trying to do.
 pub mod cli;
-/// The CLI's view of the daemon.
+/// The CLI's view of the host.
 pub mod client;
+/// Where Devplane keeps its own state, and how a client finds the host.
 pub mod config;
-/// Where Devplane keeps its own state, and how a client finds the daemon.
 /// Types and the pure logic over them. Reaches nothing outside the process.
 pub mod core;
-/// The daemon: receivers, API and the authoritative state.
-pub mod daemon;
-/// Starting the daemon in the background.
-pub mod daemonise;
 /// Runs Devplane owns, over the Agent Client Protocol.
 pub mod driven;
 /// Raising the window that owns a session.
@@ -39,19 +32,28 @@ pub mod gates;
 pub mod git;
 /// GitHub, through the `gh` command: issues, pull requests, checks.
 pub mod github;
-pub mod library;
-/// Desktop notifications.
+/// `devplane hook` and `devplane statusline`, run in the vendor's process.
+pub mod hook;
+/// The host: receivers, API and the authoritative state.
+pub mod host;
+/// Reading the store with nothing running, into the same views the host serves.
+pub mod local;
+/// An MCP server agents can ask and cannot act through.
 pub mod mcp;
+/// Desktop notifications.
 pub mod notify;
 /// Observation channels: hooks, OpenTelemetry, the roster, the status line.
 pub mod observe;
-/// Declared chains of agent runs.
-pub mod pipeline;
 /// Background loops: the roster poller, the stall sweeper, the PR watcher.
 pub mod poller;
+/// What a short-lived process writes down, with no host in the path.
+pub mod record;
 /// Terminal output.
 pub mod render;
+/// Reports between projects: filed, routed, answered, and opened on a forge
+/// only by a person.
+pub mod reports;
 /// The observation store: SQLite, WAL, rebuildable.
 pub mod store;
-/// The loop that makes a run mean something.
-pub mod work;
+/// What the surfaces show, composed once for every caller.
+pub mod view;

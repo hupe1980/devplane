@@ -1,163 +1,217 @@
 +++
 title = "Architecture"
-description = "One binary, one store, one rule: the pure half may not reach the outside world. The event bus, the reducers, the API and what recovery does."
+description = "One binary and one store: the hook writes, the host folds, the pure core may not reach the outside world. The API route table, recovery, shutdown and the window."
 weight = 23
 [extra]
 group = "reference"
 +++
 
-## One binary
+## One binary, and the store is the bus
 
 ```
-┌───────────────┐  ┌────────────────┐
-│ browser tab   │  │ devplane CLI  │
-│ (embedded UI) │  │ (same binary)  │
-└──────┬────────┘  └──────┬─────────┘
-       │  HTTP + SSE      │ HTTP + SSE
-┌──────▼──────────────────▼───────────────────────────────────┐
-│                 devplane serve (the daemon)                 │
-│ api      REST + SSE, bearer token, loopback only             │
-│ core     domain, reducers, attention engine, policy (pure)   │
-│ acp      protocol client; every agent that speaks it         │
-│ observe  hooks (HTTP), OTLP/HTTP, the session roster         │
-│ work     worktrees, gates, declared chains, findings         │
-│ git/gh   the git CLI, the gh CLI                             │
-│ web      the built interface, embedded, on loopback          │
-│ store    SQLite (WAL, FTS5): observations + decisions        │
-└──────────────────────────────────────────────────────────────┘
-   ▲ hooks / telemetry from any session   ▲ stdio to agents
+  Claude Code / Codex / Copilot session
+        │ command hooks
+        ▼
+  ┌──────────────────┐
+  │  devplane hook   │  decides in its own process, answers on stdout
+  └────────┬─────────┘
+           │ appends events, decisions, held asks
+           ▼
+  ┌─────────────────────────────────────────────┐
+  │     ~/.devplane/devplane.db   (SQLite)      │ ◀── read commands, with no host
+  └─────────────────────────────────────────────┘
+           ▲ tails past the projection mark every 500 ms
+           │
+  ┌────────┴────────────────────────────────────┐
+  │ the host: devplane serve · open · app       │
+  │ api      REST + SSE, bearer token, loopback │
+  │ core     domain, reducers, attention, policy│
+  │ acp      the client for every driven agent  │
+  │ observe  OTLP, the roster, OpenCode's feed  │
+  │ change   worktrees, gates, offers           │
+  │ git/gh   the git and gh CLIs                │
+  │ web      the workbench, embedded            │
+  └─────────────────────────────────────────────┘
+           ▲ HTTP + SSE
+    browser tab · the window · devplane CLI
 ```
 
-Install is one binary with nothing else to run. The daemon is started by any client command and
-found through `~/.devplane/daemon.json`, which records the pid and the port it actually bound.
-Notifications and window raising shell out to the platform, so neither needs a GUI framework.
+- **The hook writes.** Every hook is a `command` hook running `devplane hook`: it decides in its own
+  process, appends the event, the decision or a held permission to SQLite, and exits. If the store
+  will not open, the decision goes to `~/.devplane/pending-decisions.jsonl` and the next host files
+  it.
+- **The host folds.** `devplane serve`, `devplane open` or `devplane app` is the one long-lived
+  process and the only one holding a socket. It tails what the hooks wrote, drives agents, receives
+  telemetry, polls the roster and GitHub, and serves the workbench. Nothing auto-starts it.
+- **Read commands need no host.** They ask a running host if one answers; otherwise they open the
+  store, replay what the hooks wrote since the last projection in memory, write nothing, and name
+  what they cannot see (live driven sessions, GitHub, the gate probe).
 
-A **second instance is supported rather than an error**: `DEVPLANE_HOME=/tmp/vp devplane ls` gets
-its own database, token and daemon record, and — because the usual port is taken by the real one — its
-own port.
+## One host per home
 
-## Events, reducers, state
+The host writes `~/.devplane/host.json`: port, version, start time, binary and pid. **A host is alive
+when `/healthz` on that port answers**, not because a pid exists. A second `serve`, `open` or `app`
+on the same home is refused with the running host's uptime; a record whose port answers nothing is
+stale and cleared. `devplane quit` posts `/api/quit` with the token and waits for the port to go
+quiet; it sends no signal.
 
-- `EventEnvelope { id, at, run_id, project_id?, source, event }`. Observations are append-only.
-- Reducers are **pure functions** `(Run, Event) -> Run`, unit-tested by replay.
-- The board subscribes to state rather than reconstructing it from events, which is the difference
-  between a dashboard that survives a high-volume session and one that melts.
-- The live stream carries **two kinds of frame, tagged**: `event` for a state change, `message` for a
-  fragment of what a driven agent said. A reader never has to inspect a payload to find out which it
-  was handed, and `?run=` narrows it.
+A second instance is a second home: `DEVPLANE_HOME=/tmp/vp devplane serve --port 47832`.
 
-Three claims rest on that purity and on nothing else: the board is rebuildable, because run state is
-a replayable reduction; the inbox is correct after a restart, because it is derived and never stored;
-and the permission policy cannot fail open, because it cannot wait on anything.
+## Events and reducers
 
-## One rule, enforced
+- `EventEnvelope { id, at, run_id, project_id?, source, event }`, append-only. The source names the
+  channel (a hook, OpenTelemetry, the roster, the status line, a vendor feed, a driven agent) or
+  `host` for the host's own acts.
+- Reducers are pure functions `(Run, Event) -> Run`, tested by replay.
+- The inbox is derived from state, never stored.
+- `/api/stream` carries two tagged frames: `event` for a state change and `message` for a fragment of
+  what a driven agent said. `?run=` narrows it.
+
+## The purity rule
 
 `src/core/` may not reach the outside world: no `async fn`, no `.await`, no runtime, no database, no
-HTTP. A test reads every file in that directory and fails the build on a violation — with the
-sentence explaining the rule rather than only the token that broke it, and a second test asserting
-the matcher itself, because a guard that cannot fail is a guard nobody should trust.
+HTTP. `tests/purity.rs` fails the build on a violation. The one allowance is a synchronous read of a
+small local file (`config`, `policy_cache`), which is how the hook reads a project's rules.
 
-The one thing deliberately allowed there is a **synchronous** read of a small local file, which is how
-a project's rules are read on the permission hook and is bounded in a way a network call is not.
+This is what keeps state rebuildable by replay, the inbox correct after a restart, and the permission
+policy unable to fail open by waiting.
 
-## One store, four kinds of row
+## The store
 
-SQLite, WAL, FTS5, in one file.
+SQLite with WAL and FTS5, in one file. A schema change moves the old file aside
+(`devplane.v<n>.bak`) instead of migrating it. `sqlite3 ~/.devplane/devplane.db` opens it.
 
-It holds **observations** — events and the run and work rows derived from them. Query-heavy, and
-rebuildable from the providers, which is why losing the file costs history rather than correctness.
-It holds **transcripts**: what driven agents said, pruned on the same sweep because that is history
-too. It holds the **decision log**: appended, never updated, never pruned, outside the sweep. And it
-holds **asks** — what an agent put to a person and what became of it. An ask is neither of the first
-two: nothing can re-derive what somebody was asked, so losing one loses the question itself.
+| Rows | What | Re-derivable? |
+|---|---|---|
+| `events`, `runs`, `projects` | observations and the runs folded from them; `events_fts` indexes them for search | largely, from the providers |
+| `changes` | each change: its project, branch, worktree and agent | no |
+| `messages` | what driven agents said | no; pruned with the events |
+| `decisions` | the decision log. Appended, never updated, never pruned | no |
+| `asks` | what an agent put to a person, and what became of it | no |
+| `reports` | findings one project filed about another, with evidence and resolved origin | no |
+| `projection`, `channel_health`, `attention_log`, `agent_capabilities`, `looks` | the tail's mark, channel latency, inbox outcomes, what each agent advertised, when you last looked | bookkeeping |
 
-The retention sweep prunes the event log **and its search index together** — an index that outlives
-what it indexes is both the larger half of the file and a search that finds things that are no longer
-there.
-
-It is one file, and `sqlite3 ~/.devplane/devplane.db` opens it — the search, the run history and
-the decision log are all queryable with a tool you already have.
+The retention sweep runs when a host starts and prunes the event log and its search index together.
 
 ## The API
 
-HTTP + JSON on loopback, with Server-Sent Events for live updates, and a bearer token on everything.
-One transport, not two: the hook receivers need an HTTP listener regardless, a hook can only post to
-a URL, and SSE is one line in a browser and needs no client library.
+HTTP + JSON on `127.0.0.1`, with Server-Sent Events for live updates. Everything under `/api` and
+`/devplane` needs the bearer token from `~/.devplane/token` (header, or `?token=` for the stream).
+`/healthz` is open, and so are the static files of the workbench, which contain no data.
 
-| | |
-|---|---|
-| **Read** | `/api/board` (`?all=true`), `/api/inbox`, `/api/asks`, `/api/runs/{id}`, `/api/runs/{id}/{events,messages,rewind-gap}`, `/api/agents`, `/api/work`, `/api/work/{id}/{changes,certificate}`, `/api/batch`, `/api/library`, `/api/modes`, `/api/decisions`, `/api/explain`, `/api/search`, `/api/forge`, `/api/diagnostics`, `/api/setup`, `/api/attention`, `/api/projects`, `/api/stream`, `/healthz`, and `POST /api/dispatch/preflight`, which takes a body and writes nothing |
-| **Write** | `/api/dispatch`, `/api/asks/{id}/answer`, `/api/work`, `/api/work/{id}/{verify,finish,approve,retry,resume}`, `/api/issues`, `/api/projects/trust`, `/api/runs/{id}/{prompt,stop,snooze,focus}`, `/api/shutdown` |
-| **Receivers** | `/devplane/hook`, `/devplane/decided`, `/devplane/statusline`, `/devplane/copilot/hook`, `/devplane/otel/v1/{logs,metrics,traces}` |
+| Route | Method | Purpose |
+|---|---|---|
+| `/healthz` | GET | `ok <version>`; proves the port is a Devplane host |
+| `/devplane/otel/v1/logs` | POST | Claude Code's OpenTelemetry log records |
+| `/devplane/otel/v1/metrics` | POST | OpenTelemetry metrics |
+| `/devplane/otel/v1/traces` | POST | GenAI-convention traces (Copilot, Codex) |
+| `/api/board` | GET | the working set (`?all=true` for everything) |
+| `/api/inbox` | GET | what needs a person |
+| `/api/runs/{id}` | GET | one run |
+| `/api/runs/{id}/rewind-gap` | GET | files a shell command named for writing |
+| `/api/runs/{id}/messages` | GET | what a driven agent said |
+| `/api/runs/{id}/snooze` | POST | quieten a run's inbox items |
+| `/api/runs/{id}/focus` | POST | raise the editor window that owns it |
+| `/api/runs/{id}/prompt` | POST | send a driven run a message; queued mid-turn |
+| `/api/asks` | GET | everything asked, and what became of each |
+| `/api/asks/{id}/answer` | POST | answer a permission or a question |
+| `/api/runs/{id}/stop` | GET | what stopping would leave behind; stops nothing |
+| `/api/runs/{id}/stop` | POST | stop a driven run |
+| `/api/agents` | GET | the agents that can be driven, and what each advertised |
+| `/api/changes` | GET | every change, with its state and gate standing |
+| `/api/changes` | POST | start a change, in one project or several |
+| `/api/changes/preflight` | POST | what starting would do in each project; writes nothing |
+| `/api/changes/{id}` | GET | one change, its runs, tasks and drifts |
+| `/api/changes/{id}/drift/accept` | POST | accept that the specification moved under a run |
+| `/api/changes/{id}/drift/tell` | POST | resume the run with the changed files named |
+| `/api/changes/{id}/verify` | POST | run the gates now |
+| `/api/changes/{id}/finish` | POST | accept it as finished; removes nothing |
+| `/api/changes/{id}/retry` | POST | one more feedback round past the bound |
+| `/api/changes/{id}/snooze` | POST | quieten its inbox items |
+| `/api/changes/{id}/review` | GET | the change for review: checks weakened or changed first, then files in role order |
+| `/api/changes/{id}/certificate` | GET | the done certificate |
+| `/api/changes/{id}/open` | POST | open its worktree in an editor or terminal (the window); the path otherwise |
+| `/api/changes/{id}/resume` | POST | reconnect to the agent's session |
+| `/api/changes/adopt` | POST | make a hand-made branch a change |
+| `/api/changes/{id}/archive` | POST | remove the worktree, keep the record |
+| `/api/changes/{id}/offer` | POST | push and open the pull request, or answer with the commands |
+| `/api/reports` | GET | reports, newest first, each with its quoted rendering |
+| `/api/reports` | POST | file a report; the origin is resolved from the run |
+| `/api/reports/{id}` | GET | one report |
+| `/api/reports/{id}/start` | POST | start a change in the target from it |
+| `/api/reports/{id}/resolve` | POST | reject, defer, mark fixed or discard |
+| `/api/reports/{id}/open` | POST | open a GitHub draft with your `gh`; the only route that writes to a forge |
+| `/api/projects` | GET | registered projects |
+| `/api/specs` | GET | every project's specifications and their requirement-to-task trace |
+| `/api/projects/trust` | POST | trust a repository |
+| `/api/projects/{id}/snooze` | POST | quieten a project's GitHub items |
+| `/api/issues` | POST | a repository's open issues, read live through `gh` |
+| `/api/forge` | GET | what the last GitHub poll read, per project |
+| `/api/decisions` | GET | the decision log |
+| `/api/explain` | GET | what the gate would decide about one call |
+| `/api/search` | GET | full-text search |
+| `/api/diagnostics` | GET | channel health and latency, unwritten rows, leaked agents |
+| `/api/setup` | GET | this machine and every project's `devplane.toml`, read back |
+| `/api/attention` | GET | per inbox kind: raised, acted on, dismissed, resolved elsewhere |
+| `/api/modes` | GET | which sessions decide without you |
+| `/api/quitting` | GET | what quitting would end |
+| `/api/quit` | POST | quit the host |
+| `/api/stream` | GET | Server-Sent Events |
+| `/api/rules` | GET | which projects are missing a rule |
+| `/`, `/{file}` | GET | the embedded workbench |
 
-Everything under `/api` and `/devplane` requires the token, except `/healthz` — which proves the port
-is ours without revealing what is on it.
-
-**The telemetry endpoints are not an exception.** `connect` writes the telemetry block only where no
-other collector is configured, so a bearer set in `OTEL_EXPORTER_OTLP_HEADERS` reaches this daemon and
-nothing else. An open ingest into a ledger whose claim is *who decided* would let any process running
-as the user write records into it; the observations **are** the product.
-
-`/api/work` serves each item with its last gate **already judged** (`gate.passed`, `gate.summary`).
-There is one definition of a passing gate, it lives in the domain, and it is the one on the wire — so
-no surface can read a reproduction gate, where failing *is* passing, backwards.
+There is no hook receiver: hooks write to the store. The telemetry endpoints need the token too, so
+no other local process can write into the record.
 
 ## Recovery
 
-On daemon start: load projects, work and runs → reconcile against the session roster and live process
-ids → mark `lost` where appropriate → re-arm stall timers → rebuild the inbox → open the API.
+On host start: file what the spool holds → load projects, changes and runs → reconcile against the
+roster and live process ids → mark `lost` where a recorded process is gone → re-arm stall timers →
+open the API. The tail then catches up on what the hooks wrote while no host ran.
 
-**Restoring is not believing.** A run recorded as working is a claim about a process that may have
-died while the daemon was down. But “we could not ask” and “nothing is running” are different
-answers, and conflating them would mark every restored run lost at once — so a roster that cannot be
-read is *no evidence*, and the process-id check carries the weight alone.
+An unreadable roster never marks a run lost. A driven run that was mid-flight becomes `interrupted`,
+branch and worktree untouched, with **resume** offered where the agent supports it
+([Driving agents](@/docs/agents.md#resuming-after-a-restart)).
 
-Work that was mid-flight produces an **`interrupted`** item rather than sitting on the board looking
-busy for ever. Its branch and worktree are untouched, and nothing will move it on its own — but the
-item carries a **resume** where one is possible, because the id the agent knows its session by is
-recorded when the run starts and comes back with it. See [Agents](/docs/agents/).
+## The window
 
-A driven run has no process id, so reconciliation rightly leaves its row alone — but no session
-survives a restart. **“Can this be driven” is therefore a question about sessions**, answered from
-the set the daemon still holds and never from run state.
+`devplane app` runs the host in its own process and opens a WebView on
+`http://127.0.0.1:<port>/?token=…`, the address `devplane open` gives a browser. Same page, same API;
+no data crosses the window's bridge. The window adds native notifications, a tray count, one global
+shortcut, `devplane://` links, and opening a worktree in an editor or terminal. It is the cargo
+feature `app`, off by default, so the CLI build carries no WebKit.
 
 ## Shutdown
 
-Every agent Devplane started is a protocol connection holding a child process group. A daemon that
-simply exits leaves each of them re-parented to init and still spending — a model with a subscription
-attached, running, with nothing left on the machine that knows it is there.
+`devplane quit` (or the window's Quit) says what quitting ends, then the host stops answering, stops
+its pollers, stops every agent it drives (each agent's whole process group) and waits, bounded, for
+their endings to be written. `Stopped.` prints once the port is quiet.
 
-`serve` stops them and waits, bounded, before it returns. `devplane stop` reaches the same path.
+A killed host (`kill -9`, a crash, a power cut) cannot do this. The next host raises each agent it
+had started that is still running as a critical inbox item with the command to end it; it does not
+kill them for you.
 
 ## Technology
 
 | Area | Choice |
 |---|---|
-| Core | Rust stable, Tokio, serde, tracing |
-| Agents | the Agent Client Protocol Rust SDK — one client for every agent that speaks it |
+| Core | Rust (1.90+), Tokio, serde, tracing |
+| Agents | the Agent Client Protocol Rust SDK — one client for every agent |
+| HTTP | `axum` |
 | Store | SQLite via `sqlx`, WAL, FTS5 |
-| Telemetry ingest | a hand-written OTLP/HTTP **JSON** reader behind `axum` — the exporter is configured for JSON, so the four record shapes are about sixty lines of serde rather than a protobuf toolchain |
-| Git / GitHub | the `git` and `gh` CLIs, for parity with what agents and people run by hand |
-| UI | Svelte 5 and Vite, built to a bundle the binary embeds, against the same JSON the CLI reads |
-| Notifications | the platform's own notifier: `osascript`, `notify-send`, PowerShell toast |
+| Telemetry | an OTLP/HTTP JSON reader |
+| Git / GitHub | the `git` and `gh` CLIs |
+| Workbench | Svelte 5 and Vite, embedded in the binary; fetches nothing from any other origin |
+| Window | Tauri 2, behind the `app` feature |
 
-**A surface is a directory.** `ui/src/surfaces/*/index.ts` is resolved at build time, so adding one
-touches no other file — no import to add, no list to edit. A test fails when any shared file names a
-surface, because a central list is the merge conflict the arrangement exists to remove.
-
-**The bundle fetches nothing.** No CDN, no web font, no second origin — a page that reaches the
-network breaks the board over Tailscale on a phone, and `curl` when you are debugging it. A test holds
-the served artefact under 250 KB gzipped and requires the refusal.
-
-`DEVPLANE_UI=/path/to/dist devplane serve` serves a built directory from disk instead of the embedded
-copy, which makes the edit loop a rebuild and a browser reload.
+`DEVPLANE_UI=/path/to/dist devplane serve` serves a built interface from disk instead of the embedded
+copy.
 
 ## Performance
 
-Targets, each asserted by a test where a test can assert it.
+Each is asserted by a test or fixed in code:
 
-- Daemon start → API ready < 1 s.
-- Permission check **< 200 µs**, path rules included, over 10 000 lookups.
-- Permission hook round trip over loopback **< 50 ms**, worst of 50 consecutive requests.
-- Session roster polled at most once every 2 s while anything is busy, 10 s when idle.
-- Binary ≤ 25 MB; measured 12 MB on macOS arm64, release, stripped.
+- Deciding a prohibition costs under 60 ms over starting the binary at all.
+- The host folds hook-written rows within 500 ms.
+- The roster is polled every 2 s while anything is busy, 10 s when idle; GitHub every five minutes.
+- The embedded workbench stays under 250 KB gzipped.

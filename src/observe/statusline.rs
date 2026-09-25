@@ -1,24 +1,12 @@
 //! The status line — the richest per-session channel the vendor publishes.
 //!
-//! Claude Code runs a status-line command on every update and hands it a
-//! documented JSON payload on stdin: roughly forty fields.
+//! Claude Code pipes a documented JSON payload to the status-line command on
+//! each (debounced) update. Only this channel carries rate limits and resets,
+//! the provider's context percentage and window, and the session's release.
 //!
-//! What only this channel carries, with no telemetry connected and no hook
-//! installed: the subscription rate limits and when they reset, the provider's
-//! own context percentage and the window it is a percentage *of*, the model,
-//! the session cost, the lines it changed, and the Claude Code release this
-//! session is running — which is the difference between an assumption about
-//! this machine and a fact about one session.
-//!
-//! Updates are event-driven and debounced at 300 ms: session start and resume,
-//! a new assistant message, `/compact` finishing, a permission-mode change, a
-//! vim-mode toggle, a `refreshInterval` tick, and a rate-limit or prompt-cache
-//! window reaching its own expiry.
-//!
-//! **Nothing may depend on it.** The shim is optional, off by default, exists
-//! only in an interactive session that renders a status line, and wraps a
-//! command the user already configured. Every field degrades to the channel
-//! that already answers, or to absent.
+//! Nothing may depend on it: the shim is optional, off by default and only
+//! runs in interactive sessions. Every field degrades to another channel or to
+//! absent.
 use crate::core::event::{Event, RateWindow, StatusSample};
 use serde::Deserialize;
 
@@ -110,9 +98,8 @@ pub fn to_events(p: &StatusPayload) -> Vec<Event> {
             ("seven_day", &r.seven_day),
             ("spend_limit", &r.spend_limit),
         ] {
-            // A window with no percentage is a window the account does not
-            // have. Reporting it as 0 % would put a false "plenty left" on the
-            // board, which is the one direction this number must not be wrong.
+            // No percentage means the account lacks that window; reporting
+            // 0 % would show a false "plenty left".
             if let Some(w) = w
                 && let Some(used) = w.used_percentage
             {
@@ -130,9 +117,7 @@ pub fn to_events(p: &StatusPayload) -> Vec<Event> {
         context_window_size: ctx.and_then(|c| c.context_window_size),
         rate_limits: windows,
         session_name: p.session_name.clone(),
-        // The id, not the display name: rules, budgets and every other place a
-        // model is named use the id, and two spellings of one fact is the
-        // thing that rots.
+        // The id, not the display name: everywhere else names models by id.
         model: p
             .model
             .as_ref()
@@ -142,8 +127,7 @@ pub fn to_events(p: &StatusPayload) -> Vec<Event> {
         lines_added: cost.and_then(|c| c.total_lines_added),
         lines_removed: cost.and_then(|c| c.total_lines_removed),
     })];
-    // The status line is the one channel that names the worktree branch, which
-    // a directory change cannot tell us.
+    // The only channel that names the worktree branch.
     if let Some(w) = &p.worktree
         && let Some(path) = &w.path
     {
@@ -195,9 +179,8 @@ mod tests {
 
     #[test]
     fn absent_blocks_are_absent_not_zero() {
-        // Rate limits appear only for subscription accounts and only after the
-        // first response. Reporting a missing window as 0 % would put a false
-        // "plenty left" on the board.
+        // Rate limits appear only for subscription accounts, after the first
+        // response; a missing window must not read as 0 %.
         let s = sample(r#"{"session_id": "s1"}"#);
         assert!(s.rate_limits.is_empty());
         assert_eq!(s.context_used_percent, None);
@@ -208,10 +191,8 @@ mod tests {
 
     #[test]
     fn a_window_the_account_does_not_have_is_not_a_window_at_zero() {
-        // The block is present and the percentage is not — which is what an
-        // account without that limit looks like. An entry at 0 % would win no
-        // comparison, but it would be reported as the window under pressure on
-        // a machine where the real one is absent.
+        // The block is present and the percentage is not: an account without
+        // that limit, which must not be reported as a window under pressure.
         let s = sample(
             r#"{"session_id":"s1","rate_limits":{"five_hour":{},"seven_day":{"used_percentage":12.0}}}"#,
         );
@@ -221,9 +202,7 @@ mod tests {
 
     #[test]
     fn the_spend_limit_window_is_read_and_may_exceed_a_hundred() {
-        // Behind a Claude apps gateway. It is the only spending signal that
-        // persona has, and it runs past 100 once the limit is exceeded — so a
-        // percentage is not clamped on the way in.
+        // Gateway spend runs past 100 once exceeded, so it is not clamped.
         let s = sample(
             r#"{"session_id":"s1","rate_limits":{"spend_limit":{"used_percentage":118.5,"resets_at":1738429200}}}"#,
         );
@@ -234,9 +213,8 @@ mod tests {
 
     #[test]
     fn the_payload_carries_the_model_the_version_the_window_and_the_cost() {
-        // The five facts no other channel reports without telemetry, a hook or
-        // a guess. `version` is the one the gate cares about: it is the release
-        // *this session* runs, against a matcher measured on one release.
+        // Facts no other channel reports; `version` is the release this
+        // session runs, which the gate's matcher depends on.
         let s = sample(
             r#"{
               "session_id": "s1",
@@ -247,7 +225,7 @@ mod tests {
             }"#,
         );
         assert_eq!(s.claude_version.as_deref(), Some("2.1.272"));
-        // The id, not the display name: one spelling of one fact.
+        // The id, not the display name.
         assert_eq!(s.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(s.context_window_size, Some(1_000_000));
         assert_eq!(s.cost_usd, Some(1.25));
@@ -263,10 +241,8 @@ mod tests {
 
     #[test]
     fn an_unknown_field_does_not_lose_the_sample() {
-        // The payload grows; the vendor adds fields between releases. A sample
-        // carrying something this build has never heard of must still deliver
-        // the fields it does know, or one new key silently turns the whole
-        // channel off.
+        // The vendor adds fields between releases; an unknown key must not
+        // turn the channel off.
         let s = sample(
             r#"{"session_id":"s1","vim":{"mode":"NORMAL"},"prompt_cache":{"hit_ratio":0.91},"version":"2.1.272"}"#,
         );

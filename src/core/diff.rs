@@ -1,36 +1,14 @@
-//! A change, read back and rendered.
-//!
-//! **Pure on purpose.** Text in, structure out, HTML out — no filesystem, no
-//! process, no waiting. `tests/purity.rs` holds everything under `src/core/` to
-//! that, which is the whole reason this lives here rather than beside the git
-//! call that produces its input: a renderer asserted to be pure with nothing
-//! enforcing it is a claim, and this project's own specification process caught
-//! exactly that before a line was written.
-//!
-//! **Everything here is somebody else's bytes.** A diff body is repository
-//! contents and a path is whatever an agent named a file; both are escaped on
-//! the way out, once, in one place, so no caller can forget.
-//!
-//! **And the daemon renders rather than the browser.** The board ships no build
-//! step and no bundler, and a client-side diff renderer is the change that
-//! would force one. The daemon is on loopback, so a round trip costs a
-//! millisecond and the rendering is covered by this crate's tests instead of by
-//! nothing.
+//! A change, read back from `git diff` text into structure. Pure: no
+//! filesystem, no process. Paths and bodies are somebody else's bytes, carried
+//! verbatim; the interface escapes them by construction, so there is no HTML
+//! and no escaper here.
 
 use serde::{Deserialize, Serialize};
 
-/// How much of a change is rendered before the rest is reported rather than
-/// shown.
-///
-/// A bound rather than a guess at what is readable: a work that touched
-/// hundreds of files must still open promptly, and the honest answer past the
-/// bound is *here is what is not shown and the command that shows it* — never a
-/// silent subset.
+/// How much of a change is carried before the rest is reported, with the
+/// command that shows it, rather than silently dropped.
 pub const MAX_FILES: usize = 60;
 pub const MAX_LINES: usize = 4_000;
-
-// **Nothing here renders.** The change set is data; the interface renders it and
-// escapes by construction, which is why this module has no HTML and no escaper.
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,16 +29,13 @@ pub enum Kind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hunk {
-    /// The `@@ … @@` line, verbatim — it locates the change in the file.
+    /// The `@@ … @@` line, verbatim.
     pub header: String,
     pub lines: Vec<(Kind, String)>,
 }
 
-/// What a file's change looks like, or why it does not look like anything.
-///
-/// Three variants because *there is nothing to show* and *we chose not to show
-/// it* are different sentences, and a reviewer deciding whether to approve is
-/// entitled to know which one they are reading.
+/// A file's change, or why there is nothing to show (`Binary`) versus why it
+/// was not shown (`Skipped`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Body {
@@ -82,14 +57,13 @@ pub struct FileChange {
 pub struct Truncation {
     pub files_shown: usize,
     pub files_total: usize,
-    /// The exact command that shows the whole thing. A reviewer told only that
-    /// something is missing has been told half of what they need.
+    /// The exact command that shows the whole thing.
     pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ChangeSet {
-    /// What was compared against — the merge base, never the branch tip.
+    /// The merge base, never the branch tip.
     pub base: String,
     pub files: Vec<FileChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,10 +71,8 @@ pub struct ChangeSet {
 }
 
 impl ChangeSet {
-    /// Whether the branch changed nothing.
-    ///
-    /// A **finding**, not an empty state: a gate that passed over no change
-    /// verified nothing, and the view says so rather than showing a blank.
+    /// A branch that changed nothing is a finding, not an empty state: a gate
+    /// that passed over no change verified nothing.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
@@ -112,12 +84,7 @@ impl ChangeSet {
     }
 }
 
-/// Reads `git diff` output into a change set.
-///
-/// Hand-written rather than a crate, for the reason the rest of this project
-/// gives: the format is small, closed and stable, and the alternative is a
-/// dependency for one function. What it does **not** do is interpret — no
-/// language, no syntax, no guess about what a change means.
+/// Reads `git diff` output into a change set, without interpreting it.
 pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
     let mut files: Vec<FileChange> = Vec::new();
     let mut total = 0usize;
@@ -125,6 +92,9 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
     let mut cur: Option<FileChange> = None;
     let mut hunks: Vec<Hunk> = Vec::new();
     let mut hunk: Option<Hunk> = None;
+    // Lines still due in the current hunk (old, new). Content is recognised by
+    // count, never by shape: a removed `-- x` arrives as `--- x`.
+    let mut left = (0u32, 0u32);
 
     let flush_hunk = |hunk: &mut Option<Hunk>, hunks: &mut Vec<Hunk>| {
         if let Some(h) = hunk.take() {
@@ -140,6 +110,7 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
                 push(&mut files, f, &mut total);
             }
             hunks = Vec::new();
+            left = (0, 0);
             cur = Some(FileChange {
                 path: path_of(rest),
                 status: Status::Modified,
@@ -161,16 +132,10 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
             };
         } else if raw.starts_with("Binary files ") || raw.starts_with("GIT binary patch") {
             f.body = Body::Binary { bytes: None };
-        } else if raw.starts_with("@@") {
-            flush_hunk(&mut hunk, &mut hunks);
-            hunk = Some(Hunk {
-                header: raw.to_string(),
-                lines: Vec::new(),
-            });
-        } else if let Some(h) = hunk.as_mut() {
-            // `--- a/…` and `+++ b/…` are the file header, not content, and a
-            // `\ No newline at end of file` marker is neither.
-            if raw.starts_with("--- ") || raw.starts_with("+++ ") || raw.starts_with('\\') {
+        } else if (left.0 > 0 || left.1 > 0) && hunk.is_some() {
+            let Some(h) = hunk.as_mut() else { continue };
+            // `\ No newline at end of file` is neither side.
+            if raw.starts_with('\\') {
                 continue;
             }
             let (kind, body) = match raw.as_bytes().first() {
@@ -179,9 +144,18 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
                 _ => (Kind::Context, raw.strip_prefix(' ').unwrap_or(raw)),
             };
             match kind {
-                Kind::Added => f.added += 1,
-                Kind::Removed => f.removed += 1,
-                Kind::Context => {}
+                Kind::Added => {
+                    f.added += 1;
+                    left.1 = left.1.saturating_sub(1);
+                }
+                Kind::Removed => {
+                    f.removed += 1;
+                    left.0 = left.0.saturating_sub(1);
+                }
+                Kind::Context => {
+                    left.0 = left.0.saturating_sub(1);
+                    left.1 = left.1.saturating_sub(1);
+                }
             }
             if lines_rendered < MAX_LINES {
                 h.lines.push((kind, body.to_string()));
@@ -191,7 +165,16 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
                     why: "the change is longer than this view renders".into(),
                 };
             }
+        } else if raw.starts_with("@@") {
+            flush_hunk(&mut hunk, &mut hunks);
+            left = hunk_counts(raw);
+            hunk = Some(Hunk {
+                header: raw.to_string(),
+                lines: Vec::new(),
+            });
         }
+        // Anything else between hunks — `index`, `--- a/…`, `+++ b/…`, mode
+        // lines — is header, not content.
     }
     flush_hunk(&mut hunk, &mut hunks);
     if let Some(mut f) = cur.take() {
@@ -211,6 +194,23 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
     }
 }
 
+/// The old and new line counts of an `@@ -a,b +c,d @@` header; omitted is one.
+fn hunk_counts(header: &str) -> (u32, u32) {
+    let mut words = header.split_whitespace().skip(1);
+    let count = |w: Option<&str>, sign: char| -> u32 {
+        let Some(w) = w.and_then(|w| w.strip_prefix(sign)) else {
+            return 0;
+        };
+        match w.split_once(',') {
+            Some((_, n)) => n.parse().unwrap_or(0),
+            None => 1,
+        }
+    };
+    let old = count(words.next(), '-');
+    let new = count(words.next(), '+');
+    (old, new)
+}
+
 /// Keeps a parsed body unless the file already declared itself unrenderable.
 fn finish_body(body: Body, hunks: Vec<Hunk>) -> Body {
     match body {
@@ -226,9 +226,8 @@ fn push(files: &mut Vec<FileChange>, f: FileChange, total: &mut usize) {
     }
 }
 
-/// The path out of a `diff --git a/x b/x` line.
+/// The `b/` side of a `diff --git a/x b/x` line: a rename's new name.
 fn path_of(rest: &str) -> String {
-    // The `b/` side, because for a rename it is the name the file now has.
     match rest.rsplit_once(" b/") {
         Some((_, b)) => b.to_string(),
         None => rest.trim_start_matches("a/").to_string(),
@@ -267,6 +266,29 @@ diff --git a/logo.png b/logo.png
 Binary files a/logo.png and b/logo.png differ
 ";
 
+    /// A removed SQL comment `-- x` arrives as `--- x`; an added `++ y` as
+    /// `+++ y`. Both are content, because the header counted them.
+    #[test]
+    fn content_that_looks_like_a_file_header_is_content() {
+        let text = "\
+diff --git a/q.sql b/q.sql
+index 1..2 100644
+--- a/q.sql
++++ b/q.sql
+@@ -1,2 +1,2 @@
+--- the old comment
++++ the new one
+ select 1;
+";
+        let set = parse("main", text, "git diff");
+        let f = &set.files[0];
+        assert_eq!((f.added, f.removed), (1, 1));
+        let Body::Hunks(h) = &f.body else { panic!() };
+        assert_eq!(h[0].lines[0], (Kind::Removed, "-- the old comment".into()));
+        assert_eq!(h[0].lines[1], (Kind::Added, "++ the new one".into()));
+        assert_eq!(h[0].lines.len(), 3);
+    }
+
     #[test]
     fn every_status_a_change_can_have_is_read_back() {
         let set = parse("main", SAMPLE, "git diff main...HEAD");
@@ -289,7 +311,6 @@ Binary files a/logo.png and b/logo.png differ
             },
             "a rename keeps the name the file now has, and says where it came from"
         );
-        // Nothing to show is not the same as chose not to show.
         assert!(matches!(by("logo.png").body, Body::Binary { .. }));
         // The file header is not content.
         let h = match by("src/api.rs").body {
@@ -304,10 +325,6 @@ Binary files a/logo.png and b/logo.png differ
         );
     }
 
-    /// Every byte that reaches the page is escaped.
-    ///
-    /// A diff body is repository contents and a path is whatever an agent named
-    /// a file. Both are the reason this module has exactly one way out.
     #[test]
     fn a_change_cannot_carry_markup_onto_the_page() {
         let hostile = "\
@@ -318,17 +335,8 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
 -<script>alert('old')</script>
 +<script>alert(\"new\")</script>
 ";
-        // **The parser's obligation is to carry it verbatim, not to escape
-        // it.** Escaping was the renderer's job and the renderer is deleted:
-        // the interface renders the structured set through Svelte, which
-        // escapes by construction, and `ui/tests/render.ts` asserts that no
-        // surface reaches for `{@html}`.
-        //
-        // What would be wrong here is *interpretation* — stripping a tag,
-        // collapsing an entity, deciding a line is markup. A parser that
-        // sanitises has changed the diff it was asked to report, and a reviewer
-        // approving the sanitised version is approving something that was never
-        // written.
+        // Carried verbatim: the interface escapes. A parser that sanitised
+        // would change the diff a reviewer approves.
         let set = parse("main", hostile, "git diff");
         let f = &set.files[0];
         assert_eq!(
@@ -353,7 +361,6 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
         );
     }
 
-    /// A change too large reports what is missing, and how to see it.
     #[test]
     fn a_change_past_the_bound_says_so_rather_than_showing_a_subset() {
         let mut big = String::new();
@@ -372,14 +379,9 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
         assert!(t.command.contains("git diff"), "and how to see the rest");
     }
 
-    /// No change at all is a finding, not a blank.
     #[test]
     fn a_branch_that_changed_nothing_says_that_in_words() {
         let set = parse("main", "", "git diff");
-        // **The finding is that the set is empty and known to be**, not that a
-        // particular sentence exists: the sentence moved to the surface with
-        // the renderer, and `ui/tests/render.ts` asserts a branch that changed
-        // nothing renders as a finding rather than as an empty state.
         assert!(set.is_empty());
         assert!(
             set.truncated.is_none(),
@@ -389,10 +391,7 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
 
     #[test]
     fn the_totals_are_the_sum_of_the_files() {
-        // `src/api.rs` is +2/-1, `new.rs` is +1, `gone.rs` is -1. The rename
-        // carries no hunk and the binary file carries no lines, so neither
-        // contributes — which is the point of counting from the parsed files
-        // rather than from the raw text.
+        // `src/api.rs` +2/-1, `new.rs` +1, `gone.rs` -1; rename and binary add none.
         let set = parse("main", SAMPLE, "git diff");
         assert_eq!(set.totals(), (3, 2));
     }
@@ -400,26 +399,13 @@ diff --git a/<img src=x onerror=alert(1)>.rs b/<img src=x onerror=alert(1)>.rs
 
 #[cfg(test)]
 mod sc003 {
-    /// The render budget, measured rather than asserted — and reproducible.
-    ///
-    /// The specification says the view opens in under two seconds for a change
-    /// of up to 500 modified lines. That bound covers the whole round trip —
-    /// git, parse, render, insert — and only the middle two happen here, so
-    /// what this records is the part measurable in this crate.
-    ///
-    /// **It builds its own input.** A measurement that depends on a file in
-    /// `/tmp` that nothing creates is a number nobody can check, which is the
-    /// opposite of the point. `--ignored`, because a timing assertion on a
-    /// loaded machine fails for reasons that have nothing to do with the code —
-    /// the number belongs in the specification's quickstart, taken by hand.
+    /// Parse time for a 500-modified-line change, on input it builds itself.
+    /// Ignored: a timing assertion on a loaded machine is noise.
     #[test]
     #[ignore]
     fn measure() {
         let mut text = String::new();
-        // 28 files × 18 changed lines each. Sized to the criterion's own unit:
-        // *modified* lines means added plus removed, not lines of diff — the
-        // first sample had 504 lines of diff and only 216 changes, and the
-        // assertion below is what said so.
+        // 28 files × 18 changed (added plus removed) lines each.
         for f in 0..28 {
             text.push_str(&format!("diff --git a/src/mod{f}.rs b/src/mod{f}.rs\n"));
             text.push_str("--- a/x\n+++ b/x\n@@ -1,20 +1,22 @@\n");
@@ -442,10 +428,6 @@ mod sc003 {
         let parsed = t.elapsed();
         let (a, r) = set.totals();
         assert!(a + r >= 500, "the sample is the size the criterion names");
-        // **Parse time only, since the renderer is gone.** What the interface
-        // does with the set is measured where the interface is measured; what
-        // this file owes is that reading a large diff off `git` is not itself
-        // the slow part.
         println!(
             "diff budget: {} files, +{a}/-{r} lines · parse {parsed:?}",
             set.files.len()

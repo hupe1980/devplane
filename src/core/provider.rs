@@ -1,29 +1,14 @@
-//! Which world this machine is in.
-//!
-//! Claude Code's own availability matrix splits cleanly, in a way that decides
-//! what Devplane is *for* on a given laptop:
-//!
-//! > Everything Claude Code ships to **run** an agent works on every provider.
-//! > Everything it ships to **supervise, schedule, review and audit** one needs
-//! > a claude.ai sign-in.
-//!
-//! Hooks, OpenTelemetry, workflows, skills, sandboxing and the managed settings
-//! file are on the first list. Remote Control, Routines, ultrareview, Code
-//! Review, Channels, Desktop and the analytics dashboard are on the second. So
-//! on Bedrock, Google Cloud's Agent Platform, Microsoft Foundry or behind a
-//! gateway, Devplane's substrate is intact and the vendor's supervision layer
-//! is gone — and the honest sentence there is *"Devplane is the only gate on
-//! this machine"*.
-//!
-//! Pure: it reads an environment somebody else captured, so the daemon, the CLI
-//! and a test all ask the same question of the same function.
+//! Which provider this machine uses. Per Claude Code's availability matrix,
+//! what runs an agent (hooks, OpenTelemetry, skills) works everywhere, while
+//! the vendor's supervision surfaces need a claude.ai sign-in — so on Bedrock,
+//! Vertex, Foundry or a gateway, Devplane is the only gate. Pure over a
+//! captured environment.
 
 /// How this machine authenticates, which is what decides the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
     /// A claude.ai sign-in: the vendor's full supervision layer is available.
     Subscription,
-    /// An Anthropic Console API key. Local everything, no claude.ai surfaces.
     Console,
     Bedrock,
     Vertex,
@@ -44,8 +29,7 @@ impl Provider {
         }
     }
 
-    /// The variable that decided it, so a person can see *why* this was chosen
-    /// rather than being told an answer they cannot check.
+    /// The variable that decided it, so a person can check why.
     pub fn because(&self) -> &'static str {
         match self {
             Provider::Subscription => "no provider variable is set",
@@ -57,13 +41,11 @@ impl Provider {
         }
     }
 
-    /// Whether the vendor's supervision surfaces are reachable at all.
     pub fn has_vendor_supervision(&self) -> bool {
         *self == Provider::Subscription
     }
 
-    /// What a claude.ai sign-in buys that this provider does not, quoted from
-    /// the vendor's own availability matrix rather than inferred.
+    /// What a claude.ai sign-in buys that this provider lacks, per the vendor's matrix.
     pub fn missing(&self) -> &'static [&'static str] {
         if self.has_vendor_supervision() {
             return &[];
@@ -80,8 +62,7 @@ impl Provider {
         ]
     }
 
-    /// What still works, which is the half that matters here: it is exactly
-    /// Devplane's substrate.
+    /// What still works: exactly Devplane's substrate.
     pub fn intact(&self) -> &'static [&'static str] {
         &[
             "hooks",
@@ -95,9 +76,7 @@ impl Provider {
         ]
     }
 
-    /// Surfaces that are present but reduced. Auto mode is the one that changes
-    /// what the *gate* has to do, because a session that starts in Manual is a
-    /// session where every call reaches a person unless a rule answers it.
+    /// Surfaces present but reduced.
     pub fn partial(&self) -> &'static [&'static str] {
         if self.has_vendor_supervision() {
             return &[];
@@ -106,12 +85,8 @@ impl Provider {
     }
 }
 
-/// Reads the provider out of an environment.
-///
-/// The order is the vendor's own credential precedence, with one addition it
-/// puts outside the list: a signed-in gateway session outranks every provider
-/// variable. Devplane cannot see that session, so the variable it *can* see —
-/// `ANTHROPIC_BASE_URL` — is read last and only decides when nothing else did.
+/// Reads the provider out of an environment, in the vendor's credential
+/// precedence.
 pub fn detect(get: impl Fn(&str) -> Option<String>) -> Provider {
     let set = |k: &str| {
         get(k)
@@ -139,7 +114,6 @@ pub fn detect(get: impl Fn(&str) -> Option<String>) -> Provider {
     Provider::Subscription
 }
 
-/// Reads it from this process's environment.
 pub fn from_env() -> Provider {
     detect(|k| std::env::var(k).ok())
 }
@@ -178,7 +152,7 @@ mod tests {
             detect(env(&[("CLAUDE_CODE_USE_FOUNDRY", "1")])),
             Provider::Foundry
         );
-        // A cloud provider outranks a key, which is the vendor's precedence.
+        // A cloud provider outranks a key.
         assert_eq!(
             detect(env(&[
                 ("ANTHROPIC_API_KEY", "sk-x"),
@@ -190,9 +164,7 @@ mod tests {
 
     #[test]
     fn a_variable_set_to_nothing_is_a_variable_that_is_not_set() {
-        // Exported-and-empty is how a shell profile leaves a variable somebody
-        // meant to unset, and reading it as "on" would tell a person their
-        // supervision surfaces are gone when they are not.
+        // Exported-and-empty is how a profile leaves a variable meant unset.
         for off in ["", "0", "false", "FALSE"] {
             assert_eq!(
                 detect(env(&[("CLAUDE_CODE_USE_BEDROCK", off)])),
@@ -221,9 +193,6 @@ mod tests {
 
     #[test]
     fn every_provider_that_loses_supervision_keeps_devplanes_substrate() {
-        // The whole point of the split: what is gone is the vendor's
-        // supervision layer, and what is left is exactly what Devplane runs on
-        //.
         for p in [
             Provider::Bedrock,
             Provider::Vertex,

@@ -1,94 +1,95 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 
-// The one thing this config needs from Node, declared rather than depended on.
-// `@types/node` is 2 MB of ambient declarations to type a single environment
-// read, in a repository that counts its dependencies and publishes the number.
+// The one thing this config needs from Node, declared rather than pulling in
+// `@types/node`.
 declare const process: { env: Record<string, string | undefined> };
 
-// Devplane's interface, built to a bundle the Rust binary embeds at compile
-// time. Three settings here are not preferences — each is a property the
-// product argues for elsewhere, enforced at the one place that can enforce it.
+// Devplane's interface, built to a bundle the Rust binary embeds at compile time.
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte(), ...(process.env.DEVPLANE_FIXTURES ? [fixtures()] : [])],
 
   build: {
     outDir: "dist",
     emptyOutDir: true,
 
-    // **The output stays readable.** Not developer convenience: this is a
-    // product about being able to see what was decided on your machine, and the
-    // interface has always been the one artefact a person could read without
-    // this repository — over a tunnel, with `curl`, on a machine that has never
-    // built it. Shipping an opaque bundle would make the accountability tool
-    // the least accountable thing in it.
-    //
-    // The cost is bytes, and a compiler-first framework has the room: readable
-    // output at a few kilobytes is still an order of magnitude under an
-    // unreadable mainstream runtime.
+    // The served output stays readable without this repository — over a
+    // tunnel, with `curl`. `tests/ui_bundle.rs` checks the bytes.
     minify: false,
 
-    // No source map is *required* to follow the output — that is what `minify:
-    // false` buys. One is emitted anyway because it costs nothing at rest and
-    // helps whoever is debugging; the readability check asserts against the
-    // bundle, never against the map.
+    // Emitted for debugging and never embedded; readability never relies on it.
     sourcemap: true,
 
-    // **Everything inlined into one document where it fits.** The binary
-    // embeds what is built here, and a second file is a second thing to embed,
-    // serve and keep in step. 100 KB is above anything this interface should
-    // produce; passing it is a signal rather than a limit.
+    // Inline assets where they fit, so there are fewer files to embed and serve.
     assetsInlineLimit: 100_000,
 
     rollupOptions: {
       output: {
-        // Stable names, because the Rust side embeds them by path and a
-        // content hash would mean regenerating that list on every build.
+        // Stable names: the Rust side embeds them by path.
         entryFileNames: "app.js",
         chunkFileNames: "[name].js",
         assetFileNames: "[name][extname]",
       },
     },
 
-    // The floor the whole rebuild is measured against is the current page's
-    // 40 036 gzipped bytes. Warn well under it, so the number is noticed while
-    // it is still a choice.
+    // Warn early, so growth is noticed while it is still a choice.
     chunkSizeWarningLimit: 60,
   },
 
-  // **Nothing is fetched from outside the machine, in any build, for any
-  // asset** — including a font. A control plane whose own interface phones
-  // somewhere is not one. There is no CDN, no font URL and no analytics here,
-  // and `tests/ui_contract.rs` asserts the absence against the served bytes
-  // rather than trusting this comment.
+  // Nothing is fetched from outside the machine — no CDN, font or analytics.
+  // `tests/ui_bundle.rs` asserts it against the served bytes.
   server: {
-    // Dev only: the daemon is on loopback and serves the API the app reads.
+    // Dev only: the host is on loopback and serves the API the app reads.
     proxy: {
-      "/api": daemon(),
+      "/api": host(),
     },
   },
 
-  // **`preview` exists so the rebuild can be photographed before it is
-  // served.** The screenshot script drives the page compiled into the binary,
-  // which is the interface being replaced — so until the switch there was no
-  // way to look at the rebuilt one with real data, and the three tasks gating
-  // the switch are all *somebody looks at it*.
-  //
-  // This is not a second served interface, which the switch refuses. Nothing
-  // ships it and the daemon does not know it exists; it is a static server over
-  // `dist/` with the API proxied at a port the script passes in.
+  // A static server over `dist/` for screenshots, with the API proxied. Nothing
+  // ships it.
   preview: {
     proxy: {
-      "/api": daemon(),
+      "/api": host(),
     },
   },
 });
 
-/// Where the daemon is, for the two dev servers that proxy to it.
-///
-/// A throwaway daemon picks a free port and writes it to `daemon.json`, so the
-/// screenshot script reads it there and passes it in. The fallback is the
-/// default port, which is what `npm run dev` against your own daemon wants.
-function daemon(): string {
+/// Where the host is, for the dev servers that proxy to it: `DEVPLANE_PORT`
+/// (set by the screenshot script), else the default port.
+function host(): string {
   return `http://127.0.0.1:${process.env.DEVPLANE_PORT ?? 47831}`;
 }
+
+/// `npm run dev:fixtures`: answers `/api/*` from `ui/fixtures/` (recorded by
+/// `scripts/capture-fixtures.sh`), with no host running. A missing recording is
+/// a 404; a write answers `{}`. Dev only.
+function fixtures() {
+  return {
+    name: "devplane-fixtures",
+    configureServer(server: { middlewares: { use: (f: (req: Req, res: Res, next: () => void) => void) => void } }) {
+      server.middlewares.use(async (req, res, next) => {
+        const url = new URL(req.url ?? "/", "http://x");
+        if (!url.pathname.startsWith("/api/")) return next();
+        res.setHeader("content-type", "application/json");
+        if (req.method !== "GET") return res.end("{}");
+        const parts = url.pathname.slice(5).split("/");
+        const name =
+          parts.length === 1
+            ? parts[0]
+            : parts.length === 2
+              ? `${parts[0].replace(/s$/, "")}-${parts[1]}`
+              : `${parts[2]}-${parts[1]}`;
+        // @ts-expect-error — `@types/node` is not installed, on purpose (see the top of this file).
+        const { readFile } = await import("node:fs/promises");
+        try {
+          res.end(await readFile(new URL(`./fixtures/${name}.json`, import.meta.url)));
+        } catch {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: `no recording for ${url.pathname}` }));
+        }
+      });
+    },
+  };
+}
+type Req = { url?: string; method?: string };
+type Res = { setHeader: (k: string, v: string) => void; end: (b?: string | Uint8Array) => void; statusCode: number };

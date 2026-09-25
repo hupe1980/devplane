@@ -1,28 +1,21 @@
 <script lang="ts">
-  // Every open issue and pull request across every project.
+  // Every open issue and pull request across every project, read through the
+  // person's own `gh`. Nothing is written: every action is a link.
   //
-  // **Half of what is waiting on you is not a session.** The forge is read
-  // through the person's own `gh`, and nothing here is ever written to it:
-  // every action is a link, because opening an issue under somebody's name
-  // from a list is a write they did not review.
-  //
-  // **This surface fetches, and until 2026-09-21 it did not.** Its `select`
-  // returned `{}`, so the list rendered its own defaults — two empty tabs and
-  // a sentence saying nothing is open — on every machine, for ever, while the
-  // daemon served the rows on `/api/forge` and nothing asked. The rows are not
-  // in the poll feed on purpose: they are a `gh` read the daemon refreshes on
-  // its own schedule, and carrying them in a two-second poll would send a
-  // payload nobody is looking at on every board refresh.
+  // Fetched from `/api/forge` rather than the poll feed: the host refreshes
+  // it on its own schedule.
   import { onMount } from "svelte";
   import { api } from "../../lib/api";
   import GithubList from "./GithubList.svelte";
-  import type { Row } from "./GithubList.svelte";
+  import type { Row, Coverage } from "./GithubList.svelte";
+
+  /// How many projects the poll feed knows, and how many of them the forge
+  /// covers — the number the empty state owes.
+  let { coverage = null }: { coverage?: Coverage | null } = $props();
 
   let issues = $state<Row[]>([]);
   let pulls = $state<Row[]>([]);
-  /// **Three states, not two.** Before the first answer there is nothing to
-  /// say; after it, an empty list and a failed read are different facts and
-  /// only one of them is good news.
+  /// Not loaded, empty, and failed are three different facts.
   let loaded = $state(false);
   let failed = $state("");
 
@@ -39,4 +32,4 @@
   });
 </script>
 
-<GithubList {issues} {pulls} {loaded} {failed} />
+<GithubList {issues} {pulls} {loaded} {failed} {coverage} />

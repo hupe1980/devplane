@@ -1,19 +1,18 @@
-//! End-to-end tests for the observer.
+//! End-to-end tests for the observer, driven with the payloads Claude Code sends.
 //!
-//! These drive the real HTTP surface with the payloads Claude Code actually
-//! sends, because every interesting bug in this product lives at that seam: a
-//! hook whose shape changed, a permission answered a millisecond too late, a
-//! notification that empties the inbox instead of filling it.
+//! A test feeds the host as a hook does — `record::*` into the host's store,
+//! then one pass of the tail — and reads the result over the API.
 
 mod common;
 
 use devplane::core::Policy;
-use devplane::daemon::{AppState, Shared};
+use devplane::host::{AppState, Shared};
 use serde_json::Value;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
-/// Boots a daemon on an ephemeral port with a throwaway store.
+/// Boots a host on an ephemeral port with a throwaway store.
 async fn boot(policy: Policy) -> (SocketAddr, String, reqwest::Client) {
     let db = std::env::temp_dir().join(format!(
         "vp-it-{}-{}.db",
@@ -24,9 +23,17 @@ async fn boot(policy: Policy) -> (SocketAddr, String, reqwest::Client) {
     (addr, token, c)
 }
 
-/// The same, keeping the state so a test can reach into the daemon's own view
-/// of itself — which is where `gate_down` lives, because nothing observable
-/// distinguishes a gate that has stopped deciding from a quiet machine.
+/// [`boot`], keeping the state, for tests that feed the host through its store.
+async fn boot_with_state(policy: Policy) -> (SocketAddr, String, reqwest::Client, Shared) {
+    let db = std::env::temp_dir().join(format!(
+        "vp-it-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    boot_shared(policy, &db).await
+}
+
+/// Keeps the state so a test can reach `gate_down`, which nothing observable exposes.
 async fn boot_shared(policy: Policy, db: &Path) -> (SocketAddr, String, reqwest::Client, Shared) {
     let state = boot_with_db(db, "test-token".into(), policy).await;
     let addr = listen(state.clone()).await;
@@ -46,7 +53,7 @@ async fn boot_with_db(db: &Path, token: String, policy: Policy) -> Shared {
         db.parent().unwrap().to_path_buf(),
     )
     .await
-    .expect("daemon state")
+    .expect("host state")
 }
 
 /// Serves on an ephemeral port and returns the address.
@@ -60,14 +67,8 @@ async fn listen(state: Shared) -> SocketAddr {
     addr
 }
 
-/// Runs the gate the way Claude Code runs it: the binary, a payload on stdin,
-/// the verdict on stdout, with a `~/.devplane` of our own and **no daemon**.
-///
-/// The gate used to be an HTTP handler in the daemon, and these tests used to
-/// drive that handler. It is a `command` hook now, because Claude Code treats a
-/// connection failure as a non-blocking error and carries on — so an HTTP gate
-/// is one that is off whenever the daemon is, silently. Testing the handler
-/// would now be testing something no session ever reaches.
+/// Runs the gate as Claude Code does: the binary, a payload on stdin, the
+/// verdict on stdout, with our own `~/.devplane` and no host.
 fn gate(home: &Path, machine_rules: &str, payload: &str) -> Value {
     std::fs::create_dir_all(home).unwrap();
     std::fs::write(home.join("policy.toml"), machine_rules).unwrap();
@@ -91,7 +92,6 @@ fn gate(home: &Path, machine_rules: &str, payload: &str) -> Value {
     serde_json::from_str(text.trim()).unwrap_or_else(|e| panic!("stdout was {text:?}: {e}"))
 }
 
-/// A throwaway `~/.devplane`.
 fn gate_home(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!(
         "vp-gate-{}-{name}-{}",
@@ -137,38 +137,81 @@ async fn get_json(
         .unwrap()
 }
 
-/// The inbox's **items**, which is what almost every test here is about.
-///
-/// `/api/inbox` answers `{ items, close }`: the list, and what the day came to
-/// for a list that is empty. The close is the daemon's sentences and is asserted
-/// in the tests that are about it.
+/// The inbox's items (`/api/inbox` answers `{ items, close }`).
 async fn inbox_items(c: &reqwest::Client, addr: &SocketAddr, token: &str) -> serde_json::Value {
     get_json(c, addr, "/api/inbox", token).await["items"].clone()
 }
 
+/// Feeds an observation as `devplane hook` does: appended to the store, folded
+/// in on the host's next pass of the tail.
+async fn hook(state: &Shared, payload: &str) {
+    let value: Value = serde_json::from_str(payload).expect("a hook payload");
+    ensure_cwd(&value);
+    let payload: devplane::observe::hook::HookPayload =
+        serde_json::from_value(value).expect("a hook payload");
+    devplane::record::observe(&state.store, &payload, devplane::core::Source::Hook)
+        .await
+        .unwrap();
+    devplane::poller::tail_once(state).await.unwrap();
+}
+
+/// Files a verdict the gate already gave, as the hook does after answering.
+async fn decided(state: &Shared, env: Value) {
+    if let Some(payload) = env.get("payload") {
+        ensure_cwd(payload);
+    }
+    let env: devplane::core::DecidedEnvelope = serde_json::from_value(env).expect("an envelope");
+    devplane::record::decided(&state.store, env).await.unwrap();
+    devplane::poller::tail_once(state).await.unwrap();
+}
+
+/// Creates the directory a payload names; the host only folds a row into a
+/// project whose directory it can see.
+fn ensure_cwd(payload: &Value) {
+    if let Some(cwd) = payload.get("cwd").and_then(|v| v.as_str()) {
+        std::fs::create_dir_all(cwd).ok();
+    }
+}
+
+/// Holds a watched session's permission in its own task, as a `PermissionRequest`
+/// hook does while the session waits.
+fn hold(
+    state: &Shared,
+    session: &'static str,
+    call: &'static str,
+    wait: Duration,
+) -> tokio::task::JoinHandle<Option<String>> {
+    let state = state.clone();
+    tokio::spawn(async move {
+        devplane::record::hold(
+            &state.store,
+            session,
+            Path::new("/tmp/alpha"),
+            "Bash",
+            call,
+            wait,
+            false,
+        )
+        .await
+    })
+}
+
 #[tokio::test]
 async fn a_session_that_asks_a_question_reaches_the_inbox() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
-    // The shape Claude Code posts for an `AskUserQuestion` tool call.
-    post(
-        &c,
-        &addr,
-        "/devplane/hook",
-        &token,
+    // The shape Claude Code hands the hook for an `AskUserQuestion` tool call.
+    hook(
+        &state,
         r#"{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/tmp/repo",
             "tool_name":"AskUserQuestion",
             "tool_input":{"questions":[{"question":"Keep the legacy route?",
               "options":[{"label":"Keep"},{"label":"Remove"}]}]}}"#,
     )
     .await;
-    // The turn ends immediately afterwards — this is the ordinary shape, and
-    // the question must survive it.
-    post(
-        &c,
-        &addr,
-        "/devplane/hook",
-        &token,
+    // The turn ends immediately afterwards; the question must survive it.
+    hook(
+        &state,
         r#"{"hook_event_name":"Stop","session_id":"s1","cwd":"/tmp/repo"}"#,
     )
     .await;
@@ -176,8 +219,7 @@ async fn a_session_that_asks_a_question_reaches_the_inbox() {
     let inbox = inbox_items(&c, &addr, &token).await;
     assert_eq!(inbox.as_array().unwrap().len(), 1);
     assert_eq!(inbox[0]["kind"], "question");
-    // An option a human can read; no id, because Claude Code owns this dialog
-    // and only the person in front of it can answer.
+    // Human-readable, no id: only the person at Claude Code's dialog can answer.
     assert_eq!(inbox[0]["options"][1]["label"], "Remove");
     assert!(inbox[0]["options"][1]["id"].is_null());
 
@@ -187,31 +229,24 @@ async fn a_session_that_asks_a_question_reaches_the_inbox() {
 
 #[tokio::test]
 async fn a_permission_no_rule_covers_is_left_to_claude_and_shown_to_the_human() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
     let payload = r#"{"hook_event_name":"PermissionRequest","session_id":"s2","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"rm -rf node_modules"}}"#;
 
-    // An empty object means "no decision": Claude Code prompts exactly as it
-    // would have. Anything else would change what the user sees.
+    // An empty object means "no decision": Claude Code prompts as it would have.
     let reply = gate(&gate_home("nocover"), "", payload);
     assert_eq!(reply, serde_json::json!({}));
 
-    // The daemon learns about it through the envelope the gate files.
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        &serde_json::json!({
+    decided(
+        &state,
+        serde_json::json!({
             "session": "s2", "verdict": "undecided", "rule": null, "blocked": true,
             "subject": "Bash: rm -rf node_modules", "tool": "Bash",
             "payload": serde_json::from_str::<Value>(payload).unwrap(),
-        })
-        .to_string(),
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     let inbox = inbox_items(&c, &addr, &token).await;
     assert_eq!(inbox[0]["kind"], "permission");
     assert!(
@@ -220,17 +255,52 @@ async fn a_permission_no_rule_covers_is_left_to_claude_and_shown_to_the_human() 
     );
 }
 
-/// **A prohibition answers; nothing approves.**
-///
-/// This test used to assert that a project allow rule made Devplane answer
-/// `allow` on the vendor's behalf. That verdict is gone: saying yes was a claim
-/// that Claude Code would also have said yes, and keeping that claim true meant
-/// mirroring the vendor's semantics for ever. What remains is the half that
-/// costs nothing — a project's prohibition still fires, and everything else
-/// reaches the person.
+/// With no host, a prohibition is refused naming its rule, an `always_ask` rule
+/// still reaches a person, and an uncovered call is left alone. Nothing approves.
+#[test]
+fn the_gate_decides_with_no_host_running() {
+    let home = gate_home("no-host");
+    let rules = r#"
+[policy]
+never_auto = ["Bash(rm -rf *)"]
+always_ask = ["Bash(git push *)"]
+"#;
+    let denied = gate(
+        &home,
+        rules,
+        r#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash",
+            "tool_input":{"command":"rm -rf node_modules"}}"#,
+    );
+    let out = &denied["hookSpecificOutput"];
+    assert_eq!(out["permissionDecision"], "deny", "got {denied}");
+    assert!(
+        out["permissionDecisionReason"]
+            .as_str()
+            .is_some_and(|r| r.contains("rm -rf")),
+        "a refusal must name the rule that refused it: {denied}"
+    );
+
+    let asked = gate(
+        &home,
+        rules,
+        r#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash",
+            "tool_input":{"command":"git push origin main"}}"#,
+    );
+    assert_eq!(asked["hookSpecificOutput"]["permissionDecision"], "ask");
+
+    // And a call no rule covers is left alone rather than guessed at.
+    let untouched = gate(
+        &home,
+        rules,
+        r#"{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash",
+            "tool_input":{"command":"cargo test"}}"#,
+    );
+    assert_eq!(untouched, serde_json::json!({}), "got {untouched}");
+}
+
 #[tokio::test]
 async fn a_prohibition_answers_and_nothing_is_approved() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
     let home = gate_home("matching");
     let rules = r#"
 [policy]
@@ -243,8 +313,7 @@ never_auto = ["Bash(git push *)"]
         r#"{"hook_event_name":"PermissionRequest","session_id":"s3","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"pnpm test -- --run"}}"#,
     );
-    // No approval, whatever the project wrote: the vendor's own permission
-    // system decides that, using the vendor's own configuration.
+    // No approval, whatever the project wrote: the vendor's permission system decides that.
     assert_ne!(
         permitted["hookSpecificOutput"]["decision"]["behavior"],
         "allow"
@@ -266,16 +335,14 @@ never_auto = ["Bash(git push *)"]
     );
 
     // A decided permission is not a decision the human has to make.
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        r#"{"session":"s3","verdict":"deny","rule":"Bash(git push *)",
-            "subject":"Bash: git push --force origin main","tool":"Bash"}"#,
+    decided(
+        &state,
+        serde_json::json!({
+            "session": "s3", "verdict": "deny", "rule": "Bash(git push *)",
+            "subject": "Bash: git push --force origin main", "tool": "Bash",
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     let inbox = inbox_items(&c, &addr, &token).await;
     assert!(inbox.as_array().unwrap().is_empty());
 
@@ -289,47 +356,19 @@ never_auto = ["Bash(git push *)"]
 
 #[tokio::test]
 async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
-    // The session is blocked while this runs. A gate that takes long enough to
-    // notice is a gate that makes Claude Code feel slower than it is.
-    //
-    // **This test used to measure an HTTP handler, and then it measured
-    // nothing.** When the gate moved to a `command` hook the route went with
-    // it, and the assertion went on passing — a 404 is very fast. A latency
-    // test pointed at something that no longer exists is worse than no latency
-    // test, because it reports a budget nobody is holding. It now spawns the
-    // binary, which is what Claude Code does.
-    //
-    // The budget is what the move was justified on: a cold process answering
-    // from disk beat the ~50 ms this path was already allowed over loopback.
-    // Measured on the **debug** binary, which is the slow one — release was
-    // about 26 ms.
+    // The session is blocked while the gate runs, so it must not be felt. This
+    // spawns the binary, as Claude Code does.
     let home = gate_home("latency");
     let body = r#"{"hook_event_name":"PermissionRequest","session_id":"s4","cwd":"/tmp/repo",
         "tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#;
     let rules = "[policy]\nnever_auto = [\"Bash(rm *)\"]\n";
 
-    // Warm the page cache so the measurement is the gate, not the first read of
-    // a 40 MB debug binary off a cold disk.
+    // Warm the page cache so the first read of the debug binary is not measured.
     gate(&home, rules, body);
 
-    // **A control, because the thing being measured is not the expensive part.**
-    //
-    // Each run spawns the binary, so most of the elapsed time is process start
-    // and has nothing to do with policy. On an idle machine that is invisible;
-    // under sustained load it taxes **every** run, which is why the median — the
-    // statistic chosen precisely to be immune to tail noise — still failed at
-    // 315ms against a 250ms budget while a release build was competing for the
-    // machine. The same test alone measured well inside it, three times.
-    //
-    // The control is `--version`: the same binary, the same spawn, and **none of
-    // the path under test**. The difference is reading the hook and deciding it.
-    //
-    // **The first control was the same hook with no policy declared, and it was
-    // wrong in a way that passed.** Sharing the spawn was the point, but it also
-    // shared the evaluation — so a deliberate 120ms sleep planted inside the rule
-    // evaluator lengthened the measurement *and the control* and cancelled out,
-    // and the test reported a pass. A control has to share the noise and none of
-    // the subject.
+    // Control: `--version` shares the spawn cost and none of the path under test,
+    // so the difference is reading the hook and deciding it. The control must not
+    // share rule evaluation, or a slow evaluator cancels out.
     let control_run = || {
         let t = std::time::Instant::now();
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
@@ -347,8 +386,7 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
         let t = std::time::Instant::now();
         let reply = gate(&home, rules, body);
         runs.push(t.elapsed());
-        // The latency that matters is a *prohibition's*: that is the only
-        // answer Devplane gives, and it is the one that must not be felt.
+        // A prohibition's latency is the one that must not be felt.
         assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "deny");
 
         controls.push(control_run());
@@ -359,10 +397,7 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
     let control = controls[controls.len() / 2];
     let worst = *runs.last().expect("twenty runs");
 
-    // **The budget, and it is a difference.** Deciding a prohibition costs
-    // almost nothing over starting the process at all; anything that made rule
-    // evaluation expensive would show up here whatever else the machine is
-    // doing.
+    // The budget is the difference over process start.
     let own_cost = median.saturating_sub(control);
     assert!(
         own_cost < std::time::Duration::from_millis(60),
@@ -372,25 +407,9 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
         runs.len()
     );
 
-    // **The median carries the budget, and it did not always.**
-    //
-    // This asserted on the *worst* of twenty runs, which is the right statistic
-    // for "must not be felt" and the wrong one to measure inside `cargo test`:
-    // fifteen test binaries run in parallel, each spawning processes, so the
-    // tail is the scheduler rather than the gate. It passed for months on luck
-    // and began failing the day another test started spawning a process — at
-    // 598ms, while the same test alone measured well inside budget.
-    //
-    // A budget that fails for reasons unrelated to what it measures gets raised
-    // until it stops failing, and then it is not a budget. So the median
-    // carries it: a real regression in the gate moves every run, and scheduler
-    // noise moves the tail.
-    // **And a loose absolute ceiling, which catches catastrophe and nothing
-    // else.** A budget that fails for reasons unrelated to what it measures gets
-    // raised until it stops failing, and then it is not a budget — so the real
-    // budget is the difference above and this is only here to notice a gate that
-    // has become unusable in absolute terms. It is deliberately far above any
-    // load this has been seen under.
+    // The median carries it: a gate regression moves every run, while scheduler
+    // noise from parallel test binaries moves the tail.
+    // A loose absolute ceiling, only to catch a gate that has become unusable.
     assert!(
         median < std::time::Duration::from_millis(1_500),
         "median gate answer was {median:?} over {} runs, which is unusable whatever the machine \
@@ -398,9 +417,7 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
         runs.len()
     );
 
-    // **And a loose ceiling on the tail**, because the median alone would not
-    // notice a gate that answers instantly nineteen times and hangs once. Set
-    // where only a hang can reach it, not where the suite's own load can.
+    // A loose tail ceiling, so a single hang is still caught.
     assert!(
         worst < std::time::Duration::from_secs(5),
         "worst gate answer was {worst:?}. The median is the budget; this catches a hang, \
@@ -410,24 +427,17 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
 
 #[tokio::test]
 async fn telemetry_gives_the_run_its_cost_and_context() {
-    let (addr, token, c) = boot(Policy::default()).await;
-    post(
-        &c,
-        &addr,
-        "/devplane/hook",
-        &token,
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    hook(
+        &state,
         r#"{"hook_event_name":"UserPromptSubmit","session_id":"s5","cwd":"/tmp/repo","prompt":"hi"}"#,
     )
     .await;
 
-    // OTLP/HTTP JSON, as Claude Code's exporter sends it: 64-bit integers are
-    // strings.
+    // OTLP/HTTP JSON as Claude Code exports it: 64-bit integers are strings.
     c.post(format!("http://{addr}/devplane/otel/v1/logs"))
         .header("content-type", "application/json")
-        // The bearer the exporter now carries. `observe::connect` writes it as
-        // `OTEL_EXPORTER_OTLP_HEADERS` beside the endpoint, and it does so only
-        // when no foreign collector is configured — so it reaches this daemon
-        // and nothing else.
+        // The bearer `observe::connect` writes into `OTEL_EXPORTER_OTLP_HEADERS`.
         .header("authorization", format!("Bearer {token}"))
         .body(
             r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{
@@ -448,28 +458,23 @@ async fn telemetry_gives_the_run_its_cost_and_context() {
     let run = &board["runs"][0];
     assert_eq!(run["cost_usd"], 0.25);
     assert_eq!(run["entrypoint"], "claude-vscode");
-    // 180k of a 200k window, and the gauge counts input plus cache, never
-    // output — the same formula the provider's own status line uses.
+    // 180k of 200k; the gauge counts input plus cache, never output.
     assert_eq!(run["context_percent"], 90.0);
 
-    // Which is high enough that the human should hear about it.
     let inbox = inbox_items(&c, &addr, &token).await;
     assert_eq!(inbox[0]["kind"], "context_high");
 }
 
 #[tokio::test]
 async fn a_worktree_session_belongs_to_the_repository_that_owns_it() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
     for (session, cwd) in [
         ("main", "/tmp/vp-repo"),
         ("wt-a", "/tmp/vp-repo/.claude/worktrees/feature-a"),
         ("wt-b", "/tmp/vp-repo/.claude/worktrees/feature-b"),
     ] {
-        post(
-            &c,
-            &addr,
-            "/devplane/hook",
-            &token,
+        hook(
+            &state,
             &format!(
                 r#"{{"hook_event_name":"UserPromptSubmit","session_id":"{session}","cwd":"{cwd}","prompt":"x"}}"#
             ),
@@ -496,8 +501,7 @@ async fn an_unauthorised_client_learns_nothing() {
             .status();
         assert_eq!(status, 401, "{path} must require the token");
     }
-    // The live stream too — an empty stream would leak nothing, but it would
-    // be indistinguishable from a quiet machine.
+    // The live stream too: an empty stream is indistinguishable from a quiet machine.
     assert_eq!(
         c.get(format!("http://{addr}/api/stream"))
             .send()
@@ -507,8 +511,7 @@ async fn an_unauthorised_client_learns_nothing() {
         401
     );
 
-    // The health probe is deliberately open: it proves the port is ours
-    // without revealing anything about what is running on it.
+    // The health probe is open: it proves the port is ours and reveals nothing.
     assert!(
         c.get(format!("http://{addr}/healthz"))
             .send()
@@ -521,9 +524,7 @@ async fn an_unauthorised_client_learns_nothing() {
 
 #[tokio::test]
 async fn the_browser_shell_is_served_and_needs_no_token_of_its_own() {
-    // The page carries no data; it cannot fetch any without the token the
-    // user's browser holds. Gating it would only stop it rendering the message
-    // that explains as much.
+    // The page carries no data and cannot fetch any without the token.
     let (addr, _token, c) = boot(Policy::default()).await;
     let res = c.get(format!("http://{addr}/")).send().await.unwrap();
     assert!(res.status().is_success());
@@ -537,12 +538,9 @@ async fn the_browser_shell_is_served_and_needs_no_token_of_its_own() {
 
 #[tokio::test]
 async fn a_snooze_takes_a_run_out_of_the_inbox_and_gives_it_back() {
-    let (addr, token, c) = boot(Policy::default()).await;
-    post(
-        &c,
-        &addr,
-        "/devplane/hook",
-        &token,
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    hook(
+        &state,
         r#"{"hook_event_name":"PreToolUse","session_id":"s9","cwd":"/tmp/repo",
             "tool_name":"AskUserQuestion",
             "tool_input":{"questions":[{"question":"which?","options":[]}]}}"#,
@@ -590,24 +588,35 @@ async fn a_snooze_takes_a_run_out_of_the_inbox_and_gives_it_back() {
     );
 }
 
-#[tokio::test]
-async fn a_malformed_hook_payload_never_fails_the_session() {
-    let (addr, token, c) = boot(Policy::default()).await;
-    // Claude Code shows the user an error if a hook fails. An observer that
-    // cannot parse something must swallow it, not interrupt the work.
-    let res = c
-        .post(format!("http://{addr}/devplane/hook"))
-        .bearer_auth(&token)
-        .header("content-type", "application/json")
-        .body("{ not json at all")
-        .send()
-        .await
-        .unwrap();
-    assert!(res.status().is_success());
-
+#[test]
+fn a_malformed_hook_payload_never_fails_the_session() {
+    // A hook that cannot parse its input must not interrupt the work: exit zero
+    // and an empty object. Run with no rules; under rules it asks (`tests/hook.rs`).
+    let home = gate_home("garbage");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+        .arg("hook")
+        .current_dir(&home)
+        .env("DEVPLANE_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"{ not json at all")?;
+            child.wait_with_output()
+        })
+        .expect("the hook runs");
+    assert!(
+        out.status.success(),
+        "an unreadable payload failed the hook, which Claude Code shows as an error"
+    );
     assert_eq!(
-        gate(&gate_home("garbage"), "", "{ also not json }"),
-        serde_json::json!({}),
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "{}",
         "and an unreadable permission request is left alone"
     );
 }
@@ -620,13 +629,10 @@ async fn events_survive_a_restart_and_rebuild_the_same_board() {
 
     {
         let state = boot_with_db(&db, "tok".into(), Policy::default()).await;
-        let addr = listen(state).await;
+        let addr = listen(state.clone()).await;
         let c = reqwest::Client::new();
-        post(
-            &c,
-            &addr,
-            "/devplane/hook",
-            "tok",
+        hook(
+            &state,
             r#"{"hook_event_name":"PreToolUse","session_id":"keep","cwd":"/tmp/repo",
                 "tool_name":"Bash","tool_input":{"command":"cargo build"}}"#,
         )
@@ -635,16 +641,19 @@ async fn events_survive_a_restart_and_rebuild_the_same_board() {
         assert_eq!(board["summary"]["runs"], 1);
     }
 
-    // A new daemon over the same store.
     let state = boot_with_db(&db, "tok".into(), Policy::default()).await;
-    let addr = listen(state).await;
+    let addr = listen(state.clone()).await;
     let c = reqwest::Client::new();
     let board = get_json(&c, &addr, "/api/board", "tok").await;
     assert_eq!(board["summary"]["runs"], 1, "the run survived the restart");
     assert_eq!(board["runs"][0]["summary"], "Bash: cargo build");
 
-    let events = get_json(&c, &addr, "/api/runs/keep/events", "tok").await;
-    assert_eq!(events.as_array().unwrap().len(), 1);
+    let events = state
+        .store
+        .events_for_run(&devplane::core::RunId::new("keep"), 200)
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -670,22 +679,20 @@ fn echo_agent_path() -> Option<String> {
 
 #[tokio::test]
 async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() {
-    // The whole point of driving an agent is that the answer happens here
-    // rather than in somebody's terminal. This walks that path end to end.
+    // The answer happens here rather than in a terminal, end to end.
     let _serial = common::one_agent_at_a_time();
     let Some(agent) = echo_agent_path() else {
         eprintln!("skipping: build the fixture with `cargo build -p devplane-acp --examples`");
         return;
     };
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
     let cwd = std::env::temp_dir()
         .canonicalize()
         .unwrap()
         .to_string_lossy()
         .to_string();
 
-    // Every path that starts an agent goes through the trust gate, dispatch
-    // included — so the test has to make the same decision a person would.
+    // Every path that starts an agent goes through the trust gate.
     c.post(format!("http://{addr}/api/projects/trust"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "path": cwd }))
@@ -693,19 +700,12 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         .await
         .unwrap();
 
-    let started: Value = c
-        .post(format!("http://{addr}/api/dispatch"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "agent": agent, "cwd": cwd }))
-        .send()
+    let spec = devplane::acp::resolve(&agent, &state.agents).expect("the fixture resolves");
+    let run = devplane::driven::dispatch(&state, &spec, cwd.clone().into(), None, Vec::new())
         .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let run = started["run_id"].as_str().expect("a run id").to_string();
+        .expect("a run id")
+        .to_string();
 
-    // It is a run like any other: same board, same project resolution.
     let board = get_json(&c, &addr, "/api/board", &token).await;
     let row = board["runs"]
         .as_array()
@@ -722,8 +722,7 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         .await
         .unwrap();
 
-    // Wait for the request to surface rather than sleeping a fixed time: a
-    // test that races the agent is a test that fails on a busy machine.
+    // Poll for the request rather than sleeping a fixed time.
     let mut item = Value::Null;
     for _ in 0..100 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -745,9 +744,7 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
             .any(|a| a == "allow"),
         "a driven permission is answerable, not merely visible"
     );
-    // **The token, not the session.** An inbox item offers the ask's own id,
-    // which is what an answer is addressed to from any surface at any later
-    // time — including after the process holding the request has gone.
+    // Answered by the ask's own id, valid from any surface after the process is gone.
     let ask = item["ask"]
         .as_str()
         .expect("an answerable item carries its ask")
@@ -777,9 +774,7 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         "a waiting agent takes the answer down the connection it asked on"
     );
 
-    // **Answered exactly once, however many surfaces try.** Two people, two
-    // devices, one agent: the second is told who answered rather than being
-    // allowed to answer again.
+    // Answered exactly once: a second surface is told who answered.
     let again: Value = c
         .post(format!("http://{addr}/api/asks/{ask}/answer"))
         .bearer_auth(&token)
@@ -796,8 +791,7 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         "the second answer is refused and names the first: {said}"
     );
 
-    // And it is on the record afterwards, which is what makes *who answered
-    // this?* answerable without opening a transcript.
+    // And it is on the record afterwards.
     let asks = get_json(&c, &addr, "/api/asks", &token).await;
     let settled = asks["settled"]
         .as_array()
@@ -832,10 +826,17 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
 #[tokio::test]
 async fn an_unknown_agent_is_refused_by_name() {
     let (addr, token, c) = boot(Policy::default()).await;
-    let res: Value = c
-        .post(format!("http://{addr}/api/dispatch"))
+    let cwd = std::env::temp_dir().canonicalize().unwrap();
+    c.post(format!("http://{addr}/api/projects/trust"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "agent": "clauude", "cwd": "/tmp" }))
+        .json(&serde_json::json!({ "path": cwd }))
+        .send()
+        .await
+        .unwrap();
+    let res: Value = c
+        .post(format!("http://{addr}/api/changes"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "agent": "clauude", "cwd": cwd, "title": "x" }))
         .send()
         .await
         .unwrap()
@@ -849,16 +850,12 @@ async fn an_unknown_agent_is_refused_by_name() {
 }
 
 #[tokio::test]
-async fn stopping_the_daemon_is_a_request_rather_than_a_signal() {
-    // A record left behind by a crash names a pid the operating system has
-    // since given to something else, and killing a stranger's process because a
-    // file said so is not a thing a tool should be able to do. A request needs the
-    // bearer token, so only something that can read `~/.devplane/token` can
-    // stop it.
+async fn stopping_the_host_is_a_request_rather_than_a_signal() {
+    // A crash's record may name a pid now reused; stopping requires the bearer token.
     let (addr, token, c) = boot(Policy::default()).await;
 
     let refused = c
-        .post(format!("http://{addr}/api/shutdown"))
+        .post(format!("http://{addr}/api/quit"))
         .send()
         .await
         .unwrap();
@@ -869,7 +866,7 @@ async fn stopping_the_daemon_is_a_request_rather_than_a_signal() {
     );
 
     let ok = c
-        .post(format!("http://{addr}/api/shutdown"))
+        .post(format!("http://{addr}/api/quit"))
         .bearer_auth(&token)
         .send()
         .await
@@ -892,9 +889,9 @@ async fn dispatching_into_a_directory_that_does_not_exist_is_refused() {
         return;
     };
     let res: Value = c
-        .post(format!("http://{addr}/api/dispatch"))
+        .post(format!("http://{addr}/api/changes"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "agent": agent, "cwd": "/no/such/place" }))
+        .json(&serde_json::json!({ "agent": agent, "cwd": "/no/such/place", "title": "x" }))
         .send()
         .await
         .unwrap()
@@ -904,22 +901,12 @@ async fn dispatching_into_a_directory_that_does_not_exist_is_refused() {
     assert!(res["error"].as_str().unwrap_or("").contains("directory"));
 }
 
-/// The rule that made auto mode safe to observe.
-///
-/// In auto mode Claude Code reviews actions with a classifier instead of
-/// asking the user. Routine calls are approved with no prompt, so
-/// `PermissionRequest` — which fires only when Claude Code is about to ask —
-/// never happens, and a project's `never_auto` rule would never be consulted.
-/// `PreToolUse` fires before every tool call in every mode, so that is where a
-/// prohibition has to be answered.
-///
-/// It answers with a prohibition or with nothing. Never an allow: a
-/// `PreToolUse` allow skips Claude Code's permission system altogether,
-/// classifier included, so a rule meaning "no need to ask me" would switch off
-/// a safety layer the user chose.
+/// `PreToolUse` answers a prohibition in every mode, including auto mode where
+/// `PermissionRequest` never fires. It never answers allow, which would skip
+/// Claude Code's classifier.
 #[tokio::test]
 async fn a_prohibition_reaches_a_session_that_is_never_going_to_prompt() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
     let home = gate_home("auto");
     let rules = r#"
 [policy]
@@ -951,27 +938,22 @@ always_ask = ["Bash(gh release *)"]
     let asked = gate(&home, rules, &pre("gh release create v1"));
     assert_eq!(asked["hookSpecificOutput"]["permissionDecision"], "ask");
 
-    // An *allowed* command is answered with nothing at all. The call still
-    // goes through the classifier, which is the layer this must not remove.
+    // An allowed command gets nothing, so the classifier still runs.
     assert_eq!(
         gate(&home, rules, &pre("pnpm test -- --run")),
         serde_json::json!({}),
         "a PreToolUse allow would skip the classifier as well as the prompt"
     );
 
-    // And the prohibition is accounted for afterwards, like every other verdict
-    // — through the envelope the gate files rather than by the daemon deciding
-    // a second time.
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        r#"{"session":"auto","verdict":"deny","rule":"Bash(git push *)",
-            "subject":"Bash: git push --force","tool":"Bash"}"#,
+    // And the prohibition is recorded from the envelope the gate writes.
+    decided(
+        &state,
+        serde_json::json!({
+            "session": "auto", "verdict": "deny", "rule": "Bash(git push *)",
+            "subject": "Bash: git push --force", "tool": "Bash",
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let log = get_json(&c, &addr, "/api/decisions", &token).await;
     let rules: Vec<&str> = log
         .as_array()
@@ -985,38 +967,42 @@ always_ask = ["Bash(gh release *)"]
     );
 }
 
-/// The property the move to a `command` hook was for: a stopped daemon costs
-/// the *record*, never the enforcement.
-///
-/// Claude Code documents a connection failure on an HTTP hook as a non-blocking
-/// error that lets execution continue, so while the gate lived in the daemon,
-/// every `never_auto` rule on the machine was off whenever the daemon was —
-/// silently, with nothing in the session to say so.
+/// A stopped host costs nothing: the gate still enforces, and the decision goes
+/// straight into the store (the spool is only for a store that will not open).
 #[tokio::test]
-async fn the_gate_decides_with_no_daemon_and_files_the_decision_afterwards() {
-    let home = gate_home("nodaemon");
+async fn the_gate_decides_with_no_host_and_files_the_decision_afterwards() {
+    let home = gate_home("nohost");
     let rules = "[policy]\nnever_auto = [\"Read(.env)\"]\n";
     let payload = r#"{"hook_event_name":"PreToolUse","session_id":"offline","cwd":"/tmp/repo",
         "tool_name":"Bash","tool_input":{"command":"cat .env"}}"#;
 
-    // Nothing is listening: `DEVPLANE_HOME` is fresh, so there is no
-    // `daemon.json` for the gate to find.
-    assert!(!home.join("daemon.json").exists());
+    // Fresh `DEVPLANE_HOME`: no `host.json` for the gate to find.
+    assert!(!home.join("host.json").exists());
     let reply = gate(&home, rules, payload);
     assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");
 
-    // The decision it took is waiting to be written down, with the rule and the
-    // time it was actually taken.
-    let spool = std::fs::read_to_string(home.join("pending-decisions.jsonl"))
-        .expect("a decision taken with no daemon is spooled, not lost");
-    let row: Value = serde_json::from_str(spool.lines().next().unwrap()).unwrap();
-    assert_eq!(row["verdict"], "deny");
-    assert_eq!(row["rule"], "Read(.env)");
-    assert_eq!(row["late"], true, "the log has to say it was filed late");
-    assert!(row["at"].is_string());
+    // Recorded in the ledger with the rule and the time it was taken.
+    assert!(
+        !home.join("pending-decisions.jsonl").exists(),
+        "a store that opens is written, not spooled"
+    );
+    let store = devplane::store::Store::open(&home.join("devplane.db"))
+        .await
+        .expect("the gate left a store behind");
+    let rows = store.decisions(Some("offline"), 10).await.unwrap();
+    assert_eq!(rows.len(), 1, "one refusal, one row: {rows:?}");
+    assert_eq!(rows[0].outcome, "deny");
+    assert_eq!(rows[0].reason.as_deref(), Some("Read(.env)"));
+    assert!(
+        !rows[0]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("filed late"),
+        "written at the time, so nothing about it is late"
+    );
 
-    // An *undecided* call is not spooled: nobody had a rule about it, and the
-    // provider can be asked again. Only decisions have to survive.
+    // An undecided call is observed but not a decision, so the ledger stays at one.
     let quiet = gate(
         &home,
         rules,
@@ -1024,28 +1010,26 @@ async fn the_gate_decides_with_no_daemon_and_files_the_decision_afterwards() {
             "tool_name":"Bash","tool_input":{"command":"ls -la"}}"#,
     );
     assert_eq!(quiet, serde_json::json!({}));
-    let spool = std::fs::read_to_string(home.join("pending-decisions.jsonl")).unwrap();
-    assert_eq!(spool.lines().count(), 1, "observations are not decisions");
+    let rows = store.decisions(Some("offline"), 10).await.unwrap();
+    assert_eq!(rows.len(), 1, "observations are not decisions: {rows:?}");
+    let seen = store.shim_events_since(0, 100).await.unwrap();
+    assert!(
+        seen.iter().any(|(_, e)| e.run_id.as_str() == "offline"),
+        "the call itself is on the record for a host to fold in: {seen:?}"
+    );
 }
 
-/// A `Read` deny has to survive the trip through a shell command, because
-/// `cat .env` is reading `.env` by any honest reading of the rule.
+/// A `Read` deny survives a shell command: `cat .env` reads `.env`.
 #[tokio::test]
 async fn a_file_rule_reaches_the_files_a_shell_command_names() {
-    // `Read` covers the read and `Edit` covers the write, because that is where
-    // the running product draws the line: under `Read(.env)` alone it refuses
-    // `cat .env` and runs `echo pwned > .env`. Both halves are needed to
-    // protect a file from a shell, and saying so is the honest version of a
-    // test that used to assert `Read` did both.
+    // `Read` covers the read and `Edit` the write; both are needed to protect a
+    // file from a shell.
     let home = gate_home("filerule");
     let rules = r#"
 [policy]
 never_auto = ["Read(.env)", "Edit(.env)"]
 "#;
-    // The glob spellings are here because they were not, and `cat .en?` read
-    // the file under this exact rule for two passes: the shell expands the
-    // operand before the program sees it, and the matcher was comparing a rule
-    // against a pattern as though it were a path.
+    // Globs: the shell expands the operand, so the matcher must treat it as a pattern.
     for cmd in [
         "cat .env",
         "echo pwned > .env",
@@ -1065,25 +1049,208 @@ never_auto = ["Read(.env)", "Edit(.env)"]
     }
 }
 
+/// On the built binary, every shell spelling of the prohibited command is a
+/// refusal or a question, and a line that merely mentions it is neither.
+#[test]
+fn a_prohibition_is_never_walked_past_by_a_spelling() {
+    let home = gate_home("spellings");
+    let rules = "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n";
+    let run = |cmd: &str| {
+        let body = serde_json::json!({
+            "hook_event_name": "PreToolUse", "session_id": "sp", "cwd": "/tmp/repo",
+            "tool_name": "Bash", "tool_input": {"command": cmd},
+        });
+        gate(&home, rules, &body.to_string())
+    };
+    for cmd in [
+        "rm  -rf /",
+        "rm\t-rf /",
+        "rm -fr /",
+        "rm -r -f /",
+        "rm -RF /",
+        "RM -rf /",
+        "sh -lc 'rm -rf /'",
+        "bash -ec 'rm -rf /'",
+        "bash -c'rm -rf /'",
+        "bash x.sh",
+        "python x.py",
+        "echo / | xargs -0 rm -rf",
+        "xargs -I{} rm -rf {}",
+        "busybox rm -rf /",
+        "exec -a x rm -rf /",
+        "env -S 'rm -rf /'",
+        "su -c 'rm -rf /'",
+        "ssh h rm -rf /",
+        "flock /tmp/l rm -rf /",
+        "awk 'BEGIN{system(\"rm -rf /\")}'",
+        "git -c core.pager='rm -rf /' log",
+        "docker run x rm -rf /",
+        "node --eval 'x'",
+        "sh <<EOF\nrm -rf /\nEOF",
+    ] {
+        let v = run(cmd);
+        let decision = v["hookSpecificOutput"]["permissionDecision"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            decision == "deny" || decision == "ask",
+            "{cmd:?} was handed to the vendor without a word: {v}"
+        );
+    }
+    // A readable line that only mentions the command is nobody's business.
+    for cmd in [
+        "echo \"a; rm -rf x\"",
+        "cat <<EOF\nrm -rf /\nEOF",
+        "rm -r x",
+    ] {
+        assert_eq!(
+            run(cmd),
+            serde_json::json!({}),
+            "{cmd:?} is readable and matches nothing"
+        );
+    }
+}
+
+/// On the built binary: shell reader spellings of `Bash(rm -rf *)` are refused
+/// or asked; an exception excuses one simple command, never the line; an exact
+/// rule compares its flags as a set.
+#[test]
+fn the_gate_fails_closed_on_every_hole_the_audit_found() {
+    let home = gate_home("us9");
+    let run = |rules: &str, cmd: &str| {
+        let body = serde_json::json!({
+            "hook_event_name": "PreToolUse", "session_id": "us9", "cwd": "/tmp/repo",
+            "tool_name": "Bash", "tool_input": {"command": cmd},
+        });
+        let v = gate(&home, rules, &body.to_string());
+        v["hookSpecificOutput"]["permissionDecision"]
+            .as_str()
+            .unwrap_or("undecided")
+            .to_string()
+    };
+    let rm = "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n";
+    for cmd in [
+        "function f { rm -rf /; }; f",
+        "coproc rm -rf /",
+        "/bin/r? -rf /",
+        "/bin/r[m] -rf /",
+        "{rm,-rf,/}",
+        "bash <<< 'rm -rf /'",
+        "sh < x.sh",
+        "builtin rm -rf /",
+        "sudo --user root rm -rf /",
+        "sudo -R /tmp rm -rf /",
+        "env -P /bin rm -rf /",
+        "/usr/bin/time -o f rm -rf /",
+        "caffeinate -i rm -rf /",
+        "arch -arm64 rm -rf /",
+        "strace -f rm -rf /",
+        "watch rm -rf /",
+        "script -qc 'rm -rf /' /dev/null",
+    ] {
+        let d = run(rm, cmd);
+        assert!(d == "deny" || d == "ask", "{cmd:?} was {d}");
+    }
+
+    let except = "[policy]\nnever_auto = [\"Bash(git *)\", \"!Bash(git status *)\"]\n";
+    assert_eq!(run(except, "git status && git push --force"), "deny");
+    assert_eq!(run(except, "git status"), "undecided");
+
+    let exact = "[policy]\nnever_auto = [\"Bash(rm -rf /)\"]\n";
+    for cmd in ["rm -rf /", "rm -r -f /", "rm -fr /"] {
+        assert_eq!(run(exact, cmd), "deny", "{cmd}");
+    }
+}
+
+/// Measures the gate on the release binary (cold, warm median, p95); run
+/// `cargo build --release` first.
+#[test]
+#[ignore = "a measurement, not a check: run with --ignored --nocapture"]
+fn measure_the_gate_on_the_release_binary() {
+    let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/release/devplane");
+    assert!(bin.is_file(), "build the release binary first");
+    let home = gate_home("measure");
+    std::fs::write(
+        home.join("policy.toml"),
+        "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
+    )
+    .unwrap();
+    let run = |cmd: &str| {
+        let body = serde_json::json!({
+            "hook_event_name": "PreToolUse", "session_id": "m", "cwd": "/tmp/repo",
+            "tool_name": "Bash", "tool_input": {"command": cmd},
+        })
+        .to_string();
+        let t = std::time::Instant::now();
+        let out = std::process::Command::new(&bin)
+            .arg("hook")
+            .env("DEVPLANE_HOME", &home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.as_mut().unwrap().write_all(body.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("the gate runs");
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::json!({}));
+        (v, t.elapsed())
+    };
+    let cold = run("rm -rf /tmp/x").1;
+    let mut warm: Vec<_> = (0..40).map(|_| run("rm -rf /tmp/x").1).collect();
+    warm.sort();
+    println!(
+        "release gate: cold {cold:?}, warm median {:?}, p95 {:?}, min {:?}",
+        warm[20], warm[37], warm[0]
+    );
+    for cmd in [
+        "rm  -rf /",
+        "rm\t-rf /",
+        "rm -fr /",
+        "rm -r -f /",
+        "rm -RF /",
+        "RM -rf /",
+        "sh -lc 'rm -rf /'",
+        "bash -ec 'rm -rf /'",
+        "bash -c'rm -rf /'",
+        "bash x.sh",
+        "python x.py",
+        "echo / | xargs -0 rm -rf",
+        "xargs -I{} rm -rf {}",
+        "busybox rm -rf /",
+        "exec -a x rm -rf /",
+        "env -S 'rm -rf /'",
+        "su -c 'rm -rf /'",
+        "ssh h rm -rf /",
+        "flock /tmp/l rm -rf /",
+        "awk 'BEGIN{system(\"rm -rf /\")}'",
+        "git -c core.pager='rm -rf /' log",
+        "docker run x rm -rf /",
+        "node --eval 'require(\"child_process\").execSync(\"rm -rf /\")'",
+        "echo \"a; rm -rf x\"",
+        "cat <<EOF\nrm -rf /\nEOF",
+        "sh <<EOF\nrm -rf /\nEOF",
+    ] {
+        let (v, _) = run(cmd);
+        let out = &v["hookSpecificOutput"];
+        println!(
+            "{cmd:?} => {} {}",
+            out["permissionDecision"].as_str().unwrap_or("undecided"),
+            out["permissionDecisionReason"].as_str().unwrap_or("")
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_repository_with_no_remote_is_asked_about_once() {
-    // A regression test for a bug this suite caught before it shipped, and the
-    // reason it is worth a test rather than a comment: the symptom was not an
-    // error anywhere, it was an unrelated test going flaky one run in six.
-    //
-    // A launch link names a repository rather than a path, so Devplane reads
-    // `git remote get-url origin`. Asking whenever `repo_url` was still empty
-    // meant a repository with **no** remote — a scratch checkout, a worktree of
-    // something never pushed — spawned a subprocess on *every event, for ever*,
-    // on the hot path, starving the process-global reactor the agent sessions
-    // run on. The fix is to remember having asked, whatever the answer.
+    // A repository with no remote must not spawn `git remote get-url` on every
+    // event: the host remembers having asked, whatever the answer.
     let dir = std::env::temp_dir().join(format!("vp-noremote-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
 
     let db = dir.join("d.db");
     let state = boot_with_db(&db, "t".into(), Policy::default()).await;
-    let addr = listen(state.clone()).await;
-    let c = reqwest::Client::new();
 
     let ev = |n: u32| {
         format!(
@@ -1093,7 +1260,7 @@ async fn a_repository_with_no_remote_is_asked_about_once() {
         )
     };
     for n in 0..5 {
-        post(&c, &addr, "/devplane/hook", "t", &ev(n)).await;
+        hook(&state, &ev(n)).await;
     }
 
     let asked = state.remote_asked.lock().await;
@@ -1106,13 +1273,8 @@ async fn a_repository_with_no_remote_is_asked_about_once() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// `doctor` must **run** the gate, not read a settings file.
-///
-/// Every way this layer has been wrong was a gate that read as installed and
-/// decided nothing: an async entry, an HTTP entry with no daemon behind it, a
-/// hook set from before the second event existed. And no hook can enforce its
-/// own presence — the vendor's reference says not to count on a stalled hook to
-/// act as a gate — so detection is the only defence there is.
+/// `doctor` runs the gate rather than reading a settings file, since no hook
+/// can enforce its own presence.
 #[test]
 fn doctor_runs_the_gate_rather_than_reading_about_it() {
     use serde_json::Map;
@@ -1139,9 +1301,7 @@ fn doctor_runs_the_gate_rather_than_reading_about_it() {
     .unwrap();
     assert!(!devplane::observe::connect::probe_gate(&http).answered);
 
-    // A binary that has been moved or uninstalled reads as installed and is
-    // not a gate. This is the failure the probe exists for, and the provider
-    // lets the call through when it happens.
+    // A moved or uninstalled binary reads as installed and is not a gate.
     let moved: Map<String, Value> = serde_json::from_str(
         r#"{"hooks": {"PreToolUse": [{"hooks": [
             {"type":"command","command":"/nowhere/devplane hook","timeout":5}]}]}}"#,
@@ -1152,47 +1312,55 @@ fn doctor_runs_the_gate_rather_than_reading_about_it() {
     assert!(probe.error.is_some(), "and it says what went wrong");
 }
 
-/// Running the diagnostic must not write history.
-///
-/// The probe gets a real verdict, because it goes through the real gate. A real
-/// verdict used to get a real row: three `devplane doctor` runs left three
-/// refusals of a command nobody issued, in the one table that is never pruned
-/// and exists to answer "why did that happen".
-#[test]
-fn probing_the_gate_writes_nothing_down() {
+/// Running the diagnostic writes no history: the probe's verdict is not recorded.
+#[tokio::test]
+async fn probing_the_gate_writes_nothing_down() {
+    let probe_session = devplane::observe::hook::PROBE_SESSION;
     let home = gate_home("probe-noop");
     let rules = "[policy]\nnever_auto = [\"Read(.env)\"]\n";
     let probe = format!(
-        r#"{{"hook_event_name":"PreToolUse","session_id":"{}","cwd":"/tmp/repo",
-            "tool_name":"Bash","tool_input":{{"command":"cat .env"}}}}"#,
-        devplane::observe::hook::PROBE_SESSION
+        r#"{{"hook_event_name":"PreToolUse","session_id":"{probe_session}","cwd":"/tmp/repo",
+            "tool_name":"Bash","tool_input":{{"command":"cat .env"}}}}"#
     );
 
-    // It still decides — a gate that answered the probe differently would be
-    // testing something other than the gate.
+    // It still decides, through the real gate.
     let reply = gate(&home, rules, &probe);
     assert_eq!(reply["hookSpecificOutput"]["permissionDecision"], "deny");
 
-    // And with no daemon listening, a real decision would have been spooled.
+    // Neither the store nor the spool carries the probe.
     assert!(
         !home.join("pending-decisions.jsonl").exists(),
+        "the diagnostic spooled a decision about a call nobody made"
+    );
+    let store = devplane::store::Store::open(&home.join("devplane.db"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .decisions(Some(probe_session), 10)
+            .await
+            .unwrap()
+            .is_empty(),
         "the diagnostic filed a decision about a call nobody made"
     );
+    assert!(
+        store
+            .shim_events_since(0, 100)
+            .await
+            .unwrap()
+            .iter()
+            .all(|(_, e)| e.run_id.as_str() != probe_session),
+        "the diagnostic left an observation of a session that never existed"
+    );
 
-    // The same call from a real session does spool, which is what makes the
-    // assertion above mean something.
-    let real = probe.replace(devplane::observe::hook::PROBE_SESSION, "s-real");
+    // The same call from a real session is recorded, so the absence above means something.
+    let real = probe.replace(probe_session, "s-real");
     gate(&home, rules, &real);
-    assert!(home.join("pending-decisions.jsonl").exists());
+    assert_eq!(store.decisions(Some("s-real"), 10).await.unwrap().len(), 1);
 }
 
-/// A gate that has stopped deciding and a quiet machine are the same thing in
-/// the event log: no hook arrives either way.
-///
-/// So this is the one inbox item Devplane raises about **itself**, and the
-/// only one that is about the machine rather than about a run. It is critical,
-/// which nothing else is except a lost run, because the board looks completely
-/// normal while no rule in any project is being enforced.
+/// A gate that has stopped deciding raises a critical inbox item about the
+/// machine itself, since the event log looks the same as a quiet machine.
 #[tokio::test]
 async fn a_gate_that_stopped_answering_reaches_the_inbox() {
     let db = std::env::temp_dir().join(format!(
@@ -1229,71 +1397,51 @@ async fn a_gate_that_stopped_answering_reaches_the_inbox() {
         item["detail"].as_str().unwrap().contains("No such file"),
         "and it carries the reason, so `doctor` is a confirmation rather than a hunt"
     );
-    // Nothing is offered, because the fix is reinstalling and this product does
-    // not rewrite somebody's settings.json from an inbox row.
+    // Nothing is offered: the fix is reinstalling, and settings.json is not rewritten.
     assert!(item["actions"].as_array().unwrap().is_empty());
 
-    // **The CLI has to be able to read it**, and this is the assertion that
-    // would have caught a bug that was already shipped: `render::InboxItem`
-    // typed `run_id` as `String` while the API has always sent `null` for an
-    // item with no session — so `devplane inbox` failed to decode the *whole*
-    // response the moment one existed, which `AttentionItem` describes as "the
-    // ordinary case, not an edge one". Driving the API and never the decoder is
-    // how a whole surface stayed broken.
+    // The CLI decodes it too: an item with no session sends `run_id: null`.
     let decoded: Vec<devplane::render::InboxItem> =
         serde_json::from_value(inbox.clone()).expect("the CLI decodes what the API serves");
     assert!(decoded.iter().any(|i| i.kind == "gate_down"));
 
-    // The shape that was already broken before this item existed: a work item
-    // whose runs have all ended. A pull request going red hours later is the
-    // ordinary case.
+    // A change whose runs have all ended.
     let work_shaped = serde_json::json!([{
         "kind": "ci_red", "level": "high", "run_id": null,
-        "title": "CI is red", "work_id": "w-1", "actions": ["open_pr"]
+        "title": "CI is red", "change_id": "w-1", "actions": ["open_pr"]
     }]);
     let decoded: Vec<devplane::render::InboxItem> =
-        serde_json::from_value(work_shaped).expect("a work item with no run must decode too");
+        serde_json::from_value(work_shaped).expect("a change with no run must decode too");
     assert!(decoded[0].run_id.is_none());
 }
 
 #[tokio::test]
 async fn the_gates_own_probe_never_reaches_the_board_from_either_receiver() {
-    // `doctor` and the daemon's timer run the installed gate against a probe
-    // call. The hook declines to report it — and an older hook binary, or a
-    // spool it wrote, can still deliver one to the daemon. Both receivers have
-    // to drop it: once it arrived as a `devplane-probe-<pid>` project with a
-    // working session and two audit rows.
-    let (addr, token, c) = boot(Policy::default()).await;
+    // A probe call handed to the recorders must be dropped by both, not appear
+    // as a `devplane-probe-<pid>` project.
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
     let probe = devplane::observe::hook::PROBE_SESSION;
 
-    post(
-        &c,
-        &addr,
-        "/devplane/hook",
-        &token,
+    hook(
+        &state,
         &format!(
             r#"{{"hook_event_name":"PreToolUse","session_id":"{probe}","cwd":"/tmp/devplane-probe-1",
                 "tool_name":"Bash","tool_input":{{"command":"cat .devplane-probe"}}}}"#
         ),
     )
     .await;
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        &serde_json::json!({
+    decided(
+        &state,
+        serde_json::json!({
             "session": probe, "verdict": "deny", "rule": "Read(.devplane-probe)",
             "blocked": true, "subject": "Bash: cat .devplane-probe", "tool": "Bash",
             "late": true,
             "payload": {"hook_event_name":"PreToolUse","session_id":probe,
                         "cwd":"/tmp/devplane-probe-1","tool_name":"Bash",
                         "tool_input":{"command":"cat .devplane-probe"}},
-        })
-        .to_string(),
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let board = get_json(&c, &addr, "/api/board?all=true", &token).await;
     assert_eq!(
@@ -1321,10 +1469,8 @@ async fn the_gates_own_probe_never_reaches_the_board_from_either_receiver() {
 }
 
 #[tokio::test]
-async fn the_health_probe_names_the_version_so_a_client_can_restart_a_stale_daemon() {
-    // Every command compares this to its own version and restarts a daemon
-    // older than itself. Two releases of `audit` and `attention` answered 404
-    // on machines that had upgraded without a restart.
+async fn the_health_probe_names_the_version_so_a_client_can_refuse_a_stale_host() {
+    // Every command refuses a host of another version.
     let (addr, _token, c) = boot(Policy::default()).await;
     let text = c
         .get(format!("http://{addr}/healthz"))
@@ -1337,13 +1483,8 @@ async fn the_health_probe_names_the_version_so_a_client_can_restart_a_stale_daem
     assert_eq!(text, format!("ok {}", env!("CARGO_PKG_VERSION")));
 }
 
-/// The forge endpoint: one route, both halves, what needs the person first.
-///
-/// Everything else that knows about GitHub here is either pure (the derivation
-/// in `core::forge`) or a process running `gh`. The seam between them — the
-/// route, its bearer check, the sort, the envelope the board reads — had no
-/// test at all, which is the seam every interesting bug in this product lives
-/// at.
+/// The forge endpoint: one route, both halves, what needs the person first,
+/// including its bearer check and sort.
 #[tokio::test]
 async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() {
     use devplane::core::{ForgeIssue, ForgePullRequest, ProjectForge, ProjectId};
@@ -1394,8 +1535,7 @@ async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() 
                         updated_at: None,
                     },
                 ],
-                // A draft of your own with red checks asks nothing, so it sorts
-                // below the review that was actually requested of you.
+                // A draft of your own with red checks sorts below a requested review.
                 pull_requests: vec![
                     pr(10, true, false, "failing", true),
                     pr(11, false, true, "ready_for_review", false),
@@ -1405,8 +1545,7 @@ async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() 
         );
     }
 
-    // The bearer check is the thing that separates this from every other
-    // process running as this user, and a `?token=` is not it.
+    // The bearer check, and a `?token=` does not count.
     let un = c
         .get(format!("http://{addr}/api/forge?token={token}"))
         .send()
@@ -1424,9 +1563,7 @@ async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() 
         issues[0]["number"], 2,
         "what is assigned to you comes first"
     );
-    // The poller only ever reads registered projects, so a name is normally
-    // there. This is the fallback: a forge entry whose project the world no
-    // longer has still renders as a row rather than failing to serialise.
+    // A forge entry whose project is gone still renders as a row.
     assert_eq!(issues[0]["project"], "p1");
     assert_eq!(issues[0]["project_name"], "");
     assert_eq!(issues[0]["labels"][0], "bug");
@@ -1476,14 +1613,8 @@ async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() 
     std::fs::remove_file(&db).ok();
 }
 
-/// A project ruled out of the forge is re-checked, and says why it was.
-///
-/// `is_permanent` decides "this will never have a forge" by looking for the
-/// word `remote` in another program's English error message. That is brittle
-/// by construction, and it used to be *final*: a wrong guess dropped a project
-/// from the forge for the daemon's lifetime, with no row anywhere saying so.
-/// It was also simply wrong about time — `git remote add origin …` makes a
-/// project a GitHub project, and nothing noticed until a restart.
+/// A project ruled out of the forge is re-checked, and says why: the ruling
+/// rests on parsing another program's error text and a remote can be added later.
 #[tokio::test]
 async fn a_project_ruled_out_of_the_forge_is_re_checked_and_says_why() {
     use devplane::core::ProjectId;
@@ -1520,9 +1651,7 @@ async fn a_project_ruled_out_of_the_forge_is_re_checked_and_says_why() {
         "a count of things ruled out is a number a person can do nothing with"
     );
 
-    // An hour-old ruling is spent; a fresh one still holds. This calls the
-    // predicate the poller calls: a test that re-implements it can agree with
-    // itself while the code does something else entirely.
+    // An hour-old ruling is spent; a fresh one holds. Calls the poller's own predicate.
     let now = jiff::Timestamp::now();
     let f = state.forge.lock().await;
     assert!(
@@ -1537,12 +1666,8 @@ async fn a_project_ruled_out_of_the_forge_is_re_checked_and_says_why() {
     std::fs::remove_file(&db).ok();
 }
 
-/// What is configured, answered for the whole machine in one request.
-///
-/// The product could always answer this and only in a terminal, one repository
-/// at a time. The failure that made it worth an endpoint is the last assertion
-/// here: a `devplane.toml` that will not parse takes that repository's
-/// prohibitions with it, and nothing on any screen said so.
+/// The machine's configuration in one request, including a `devplane.toml`
+/// that will not parse and so takes its prohibitions with it.
 #[tokio::test]
 async fn setup_reads_every_registered_repository_and_names_the_one_that_will_not_parse() {
     let (addr, token, c) = boot(Policy::default()).await;
@@ -1581,19 +1706,17 @@ async fn setup_reads_every_registered_repository_and_names_the_one_that_will_not
             .unwrap_or_else(|| panic!("no project for {name}"))
     };
 
-    // The file read back: the gate it will run and the rule it will enforce,
-    // in the order the rules are evaluated.
+    // The gates and rules read back, in evaluation order.
     let ok = find("good");
     assert_eq!(ok["config"]["exists"], true);
-    assert_eq!(ok["verified"], true);
+    assert_eq!(ok["declares_gates"], true);
     assert_eq!(ok["describes"]["gates"]["check"][0], "cargo test");
     assert_eq!(
         ok["describes"]["policy"]["deny"][0]["rule"],
         "Bash(git push:*)"
     );
 
-    // And the one that cannot. The parser's own reason, not a boolean: a person
-    // who is told only that a file is broken has to go and find out why.
+    // The unparseable one carries the parser's reason, not a boolean.
     let bad = find("broken");
     let why = bad["error"].as_str().expect("the parser's reason");
     assert!(
@@ -1621,24 +1744,16 @@ async fn setup_requires_the_token() {
     assert_eq!(status, 401);
 }
 
-/// The offer: the rule that answers this call and the ones like it.
-///
-/// The half `explain --replay` always had and the inbox never did. Three
-/// distinct calls in one family are the evidence; below that the offer is the
-/// exact call, because one interruption says this command needed a decision and
-/// says nothing about the shape of the ones like it.
+/// The offer: a rule covering this call's family once three distinct calls are
+/// seen; below that, the exact call.
 #[tokio::test]
 async fn a_repeated_permission_is_offered_the_rule_that_answers_its_family() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
-    // Calls this machine has already seen, in the same directory. Nothing
-    // allows them, so every one of them would interrupt.
+    // Calls already seen in the same directory; each would interrupt.
     for cmd in ["cargo test --lib diff", "cargo test --doc", "cargo test -q"] {
-        post(
-            &c,
-            &addr,
-            "/devplane/hook",
-            &token,
+        hook(
+            &state,
             &format!(
                 r#"{{"hook_event_name":"PreToolUse","session_id":"s-hist","cwd":"/tmp/repo",
                     "tool_name":"Bash","tool_input":{{"command":"{cmd}"}}}}"#
@@ -1649,20 +1764,15 @@ async fn a_repeated_permission_is_offered_the_rule_that_answers_its_family() {
 
     let payload = r#"{"hook_event_name":"PermissionRequest","session_id":"s-off","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"cargo test --lib policy"}}"#;
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        &serde_json::json!({
+    decided(
+        &state,
+        serde_json::json!({
             "session": "s-off", "verdict": "undecided", "rule": null, "blocked": true,
             "subject": "Bash: cargo test --lib policy", "tool": "Bash",
             "payload": serde_json::from_str::<Value>(payload).unwrap(),
-        })
-        .to_string(),
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let inbox = inbox_items(&c, &addr, &token).await;
     let item = inbox
@@ -1682,14 +1792,8 @@ async fn a_repeated_permission_is_offered_the_rule_that_answers_its_family() {
         "three observed calls plus the one being asked about: {offer}"
     );
 
-    // **Where it goes, and that nothing put it there.**
-    //
-    // It used to name an allow list in Devplane's own `[policy]`. There is no
-    // such key any more — Devplane does not approve tool calls — so an offer
-    // pointing at it would be worse than none: somebody pastes it, nothing
-    // changes, and the next identical call interrupts again. A grant goes where
-    // it is enforced: the agent's own settings. `/tmp/repo` is inside no
-    // registered project, so the user-scope file is the honest answer.
+    // A grant goes where it is enforced, the agent's own settings; `/tmp/repo` is
+    // in no registered project, so that is the user-scope file.
     let file = offer["file"].as_str().unwrap();
     assert!(file.ends_with("settings.json"), "{file}");
     assert!(!file.contains("devplane.toml"), "{file}");
@@ -1699,24 +1803,19 @@ async fn a_repeated_permission_is_offered_the_rule_that_answers_its_family() {
 /// One interruption is not evidence about the shape of the ones like it.
 #[tokio::test]
 async fn a_permission_seen_once_is_offered_only_its_own_call() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
     let payload = r#"{"hook_event_name":"PermissionRequest","session_id":"s-one","cwd":"/tmp/solo",
             "tool_name":"Bash","tool_input":{"command":"pnpm test --run"}}"#;
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        &serde_json::json!({
+    decided(
+        &state,
+        serde_json::json!({
             "session": "s-one", "verdict": "undecided", "rule": null, "blocked": true,
             "subject": "Bash: pnpm test --run", "tool": "Bash",
             "payload": serde_json::from_str::<Value>(payload).unwrap(),
-        })
-        .to_string(),
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let inbox = inbox_items(&c, &addr, &token).await;
     let offer = &inbox[0]["offer"];
@@ -1725,30 +1824,22 @@ async fn a_permission_seen_once_is_offered_only_its_own_call() {
     assert_eq!(offer["covers"], 1);
 }
 
-/// A call no rule can cover says which reason it is, in words.
-///
-/// The absence is the interesting half: a blank where a rule belongs reads as a
-/// surface that failed rather than one with nothing to say.
+/// A call no rule can cover says why, in words, rather than leaving a blank.
 #[tokio::test]
 async fn a_permission_no_rule_can_cover_says_why() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
     let payload = r#"{"hook_event_name":"PermissionRequest","session_id":"s-cmp","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"pnpm build && rm -rf dist"}}"#;
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        &serde_json::json!({
+    decided(
+        &state,
+        serde_json::json!({
             "session": "s-cmp", "verdict": "undecided", "rule": null, "blocked": true,
             "subject": "Bash: pnpm build && rm -rf dist", "tool": "Bash",
             "payload": serde_json::from_str::<Value>(payload).unwrap(),
-        })
-        .to_string(),
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let inbox = inbox_items(&c, &addr, &token).await;
     assert!(inbox[0]["offer"].is_null(), "{}", inbox[0]);
@@ -1763,27 +1854,17 @@ async fn a_permission_no_rule_can_cover_says_why() {
     );
 }
 
-/// What the offer costs, measured rather than asserted.
-///
-/// The inbox is polled by every open board and this feature adds a store query
-/// per permission item. The number worth watching is not the endpoint's cost —
-/// it is whether that cost grows with the number of permission items or with
-/// the size of the event log, because only one of those is bounded by anything.
-///
-/// Recorded, not enforced: a timing assertion that fails on a loaded machine
-/// teaches people to ignore tests.
+/// Records what the offer costs, and whether it grows with permission items or
+/// with the event log. Recorded, not enforced.
 #[tokio::test]
 #[ignore = "a measurement, not a check: run with --ignored --nocapture"]
 async fn sc007_the_offer_costs_one_query_per_permission_item() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
     // A log far larger than the evidence any one offer reads.
     for n in 0..400 {
-        post(
-            &c,
-            &addr,
-            "/devplane/hook",
-            &token,
+        hook(
+            &state,
             &format!(
                 r#"{{"hook_event_name":"PreToolUse","session_id":"s-bulk","cwd":"/tmp/repo",
                     "tool_name":"Bash","tool_input":{{"command":"cargo test --lib m{n}"}}}}"#
@@ -1804,20 +1885,15 @@ async fn sc007_the_offer_costs_one_query_per_permission_item() {
 
     let payload = r#"{"hook_event_name":"PermissionRequest","session_id":"s-cost","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{"command":"cargo test --lib policy"}}"#;
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        &serde_json::json!({
+    decided(
+        &state,
+        serde_json::json!({
             "session": "s-cost", "verdict": "undecided", "rule": null, "blocked": true,
             "subject": "Bash: cargo test --lib policy", "tool": "Bash",
             "payload": serde_json::from_str::<Value>(payload).unwrap(),
-        })
-        .to_string(),
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let inbox = inbox_items(&c, &addr, &token).await;
     let covered = inbox
@@ -1835,34 +1911,26 @@ async fn sc007_the_offer_costs_one_query_per_permission_item() {
     );
 }
 
-/// Every row of the edge-case walk, through the daemon rather than the composer.
-///
-/// The requirement is about what a person reads, and the unit test beside `compose`
-/// checks the sentences in isolation. This checks they survive the wire and
-/// that each input really produces its own — a variant nothing reaches is a
-/// sentence nobody will see.
+/// Every edge case of the offer sentence, through the host: each input produces
+/// its own sentence over the wire.
 #[tokio::test]
 async fn every_way_a_rule_cannot_be_offered_reads_differently() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
     let raise = |session: &'static str, tool: &'static str, input: Value| {
-        let (c, token) = (c.clone(), token.clone());
+        let state = state.clone();
         async move {
             let payload = serde_json::json!({
                 "hook_event_name": "PermissionRequest", "session_id": session,
                 "cwd": "/tmp/walk", "tool_name": tool, "tool_input": input,
             });
-            post(
-                &c,
-                &addr,
-                "/devplane/decided",
-                &token,
-                &serde_json::json!({
+            decided(
+                &state,
+                serde_json::json!({
                     "session": session, "verdict": "undecided", "rule": null,
                     "blocked": true, "subject": format!("{tool}: walk"),
                     "tool": tool, "payload": payload,
-                })
-                .to_string(),
+                }),
             )
             .await;
         }
@@ -1876,7 +1944,6 @@ async fn every_way_a_rule_cannot_be_offered_reads_differently() {
     )
     .await;
     raise("w-shape", "TodoWrite", serde_json::json!({"todos": []})).await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let inbox = inbox_items(&c, &addr, &token).await;
     let mut said: Vec<String> = Vec::new();
@@ -1900,19 +1967,13 @@ async fn every_way_a_rule_cannot_be_offered_reads_differently() {
         said.push(sentence);
     }
 
-    // **A permission nobody named a call for.** Claude Code raises some through
-    // a notification that carries no tool input, and skipping those left the one
-    // blank this surface exists to avoid.
-    post(
-        &c,
-        &addr,
-        "/devplane/hook",
-        &token,
+    // A permission raised by a notification with no tool input.
+    hook(
+        &state,
         r#"{"hook_event_name":"Notification","session_id":"w-dialog","cwd":"/tmp/walk",
             "notification_type":"permission_prompt","message":"Allow network access?"}"#,
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let again = inbox_items(&c, &addr, &token).await;
     let dialog = again
         .as_array()
@@ -1923,9 +1984,7 @@ async fn every_way_a_rule_cannot_be_offered_reads_differently() {
     assert!(dialog["offer"].is_null(), "{dialog}");
     assert_eq!(dialog["no_offer"]["reason"], "unknown_call", "{dialog}");
 
-    // And the row that is about presence rather than absence: a session
-    // Devplane only watches has no `allow` and no `deny`, and that is exactly
-    // where a rule is the only remedy.
+    // A watched-only session has no allow or deny, so a rule is the only remedy.
     let watched = inbox
         .as_array()
         .unwrap()
@@ -1943,19 +2002,8 @@ async fn every_way_a_rule_cannot_be_offered_reads_differently() {
     );
 }
 
-/// **A dead session's version is not a fact about this machine now.**
-///
-/// `doctor` reported *"726 releases behind a session on this machine"* off a run
-/// that had been finished for four days. The sentence was true in the past tense
-/// and printed in the present, about a gap that did not exist — which is the
-/// exact failure this diagnostic is supposed to catch in the permission layer,
-/// committed by the diagnostic itself.
-///
-/// **The gap itself was deleted on 2026-09-19** — it counted releases since a
-/// frozen date, for a compatibility claim this product no longer makes. The
-/// invariant it taught outlives it and is what this test now holds: a figure
-/// about *this machine right now* counts live sessions only, and the numerator
-/// and denominator move together or the ratio lies.
+/// A figure about this machine counts live sessions only; a finished run's
+/// version is history, not a claim about now.
 #[tokio::test]
 async fn only_a_live_session_reports_the_release_this_machine_is_running() {
     use devplane::core::event::{Event, StatusSample};
@@ -1997,8 +2045,7 @@ async fn only_a_live_session_reports_the_release_this_machine_is_running() {
         "both are live so far, so both count"
     );
 
-    // One of them ends. It is now history, and history is not a claim about
-    // what this machine is running.
+    // One ends and becomes history.
     state
         .ingest(
             RunId::new("finished"),
@@ -2015,10 +2062,7 @@ async fn only_a_live_session_reports_the_release_this_machine_is_running() {
         "an ended session still counted as reporting a version"
     );
 
-    // And the thing that used to sit beside it is gone rather than empty. The
-    // count of sessions *ahead of a baseline* measured the decay of a claim
-    // this product stopped making; a key that is always `[]` would be worse
-    // than its absence, because a reader would think it meant something.
+    // There is no ahead-of-baseline key at all, not even an empty one.
     assert!(
         d["gate"].get("sessions_ahead_of_baseline").is_none(),
         "the baseline gap was deleted with the baseline: {}",
@@ -2031,31 +2075,17 @@ async fn only_a_live_session_reports_the_release_this_machine_is_running() {
     std::fs::remove_file(&db).ok();
 }
 
-/// **The property the feature claimed and did not have until 2026-09-20.**
-///
-/// A question held in a map on a live connection survived a person leaving for
-/// the day and did not survive the daemon restarting: the run, the agent and
-/// the question died together, the inbox said *"Nothing needs you"*, and the
-/// run read `completed`. This walks the same path across a restart.
-///
-/// Four of the five durable-execution properties are asserted here: the asking
-/// state persists outside the asking process, the wait costs nothing across the
-/// restart, resume is addressed by an opaque token, and the answer is recorded
-/// before anything is delivered. The fifth — a deadline — is `core::ask`'s, and
-/// is off unless a project asks for it.
-///
-/// **The answer reaches the agent.** The original session is gone with the
-/// daemon that held it, so the person's answer is delivered into a *resumed*
-/// one and the row says so, which is the difference between this feature
-/// working and this feature being polite about failing.
+/// A durable ask survives a host restart: it is persisted outside the asking
+/// process, resumed by an opaque token, recorded before delivery, and the answer
+/// is delivered into a resumed session, which the row names.
 #[tokio::test]
-async fn a_question_outlives_the_daemon_that_was_holding_it() {
+async fn a_question_outlives_the_host_that_was_holding_it() {
     let _serial = common::one_agent_at_a_time();
     let Some(agent) = echo_agent_path() else {
         eprintln!("skipping: build the fixture with `cargo build -p devplane-acp --examples`");
         return;
     };
-    // One database, two daemons — which is the whole test.
+    // One database, two hosts — which is the whole test.
     let db = std::env::temp_dir().join(format!(
         "vp-restart-{}-{}.db",
         std::process::id(),
@@ -2075,17 +2105,11 @@ async fn a_question_outlives_the_daemon_that_was_holding_it() {
             .send()
             .await
             .unwrap();
-        let started: Value = c
-            .post(format!("http://{addr}/api/dispatch"))
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "agent": agent, "cwd": cwd }))
-            .send()
+        let spec = devplane::acp::resolve(&agent, &state.agents).expect("the fixture resolves");
+        let run = devplane::driven::dispatch(&state, &spec, cwd.clone().into(), None, Vec::new())
             .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let run = started["run_id"].as_str().expect("a run id").to_string();
+            .expect("a run id")
+            .to_string();
         c.post(format!("http://{addr}/api/runs/{run}/prompt"))
             .bearer_auth(&token)
             .json(&serde_json::json!({ "text": "this needs permission" }))
@@ -2108,15 +2132,12 @@ async fn a_question_outlives_the_daemon_that_was_holding_it() {
         }
         assert!(!ask.is_empty(), "the ask reaches the inbox");
 
-        // A graceful stop, which is the case that leaves the question
-        // legitimately still answerable — as against an agent whose own turn
-        // ended, which does not.
+        // A graceful stop leaves the question answerable; an agent whose turn ended does not.
         state.shutdown().await;
         ask
     };
 
-    // A second daemon on the same store, knowing nothing but what was written
-    // down.
+    // A second host on the same store.
     let (addr, token, c, _state) = boot_shared(Policy::default(), &db).await;
 
     let asks = get_json(&c, &addr, "/api/asks", &token).await;
@@ -2125,12 +2146,11 @@ async fn a_question_outlives_the_daemon_that_was_holding_it() {
         .unwrap()
         .iter()
         .find(|a| a["id"] == ask_id.as_str())
-        .expect("the ask survived the daemon that was holding it");
+        .expect("the ask survived the host that was holding it");
     assert_eq!(open["open"], true);
     assert_eq!(open["outcome"], "waiting for you");
 
-    // And it is in front of the person again, rather than in a table they would
-    // have to know to query.
+    // And it is back in the inbox.
     let inbox = inbox_items(&c, &addr, &token).await;
     assert!(
         inbox
@@ -2141,10 +2161,8 @@ async fn a_question_outlives_the_daemon_that_was_holding_it() {
         "a question nobody answered is still in the inbox after a restart"
     );
 
-    // Still answerable, and the answer still arrives: the session the agent
-    // left on disk is resumed and the person's own words are delivered into it.
-    // The one thing that must not happen is a claim of a delivery that did not
-    // occur, so the sentence has to name which of the two it was.
+    // Still answerable: the answer is delivered into the resumed session, and the
+    // row says which delivery happened.
     let answered: Value = c
         .post(format!("http://{addr}/api/asks/{ask_id}/answer"))
         .bearer_auth(&token)
@@ -2183,14 +2201,8 @@ async fn a_question_outlives_the_daemon_that_was_holding_it() {
     );
 }
 
-/// **A question waiting from an earlier session is in the header, not only in
-/// the inbox.**
-///
-/// The durable ask exists so a question outlives the process that asked it. The
-/// summary line counts *sessions* by state, and an ask whose run has ended is
-/// not a session — so without a number of its own, a machine with a question
-/// waiting since yesterday prints `0 need you` and is telling the same lie the
-/// feature was built to stop, one layer up.
+/// A question waiting from an earlier session counts in the summary header, not
+/// only in the inbox.
 #[tokio::test]
 async fn an_ask_that_outlived_its_session_is_counted_in_the_summary() {
     let db = std::env::temp_dir().join(format!(
@@ -2200,8 +2212,7 @@ async fn an_ask_that_outlived_its_session_is_counted_in_the_summary() {
     ));
     let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
 
-    // An ask nobody answered, on a run with no live session — which is what a
-    // restart leaves behind.
+    // An unanswered ask on a run with no live session, as a restart leaves.
     let ask = devplane::core::ask::Ask::new(
         devplane::core::AskId::new("ask-1"),
         devplane::core::RunId::new("run-gone"),
@@ -2222,9 +2233,7 @@ async fn an_ask_that_outlived_its_session_is_counted_in_the_summary() {
         "the header counts what the inbox lists"
     );
 
-    // And the two agree, which is the property that matters: a person reading
-    // the line and then the list must not find different numbers of things
-    // waiting on them.
+    // The header and the list agree.
     let inbox = inbox_items(&c, &addr, &token).await;
     let listed = inbox
         .as_array()
@@ -2244,11 +2253,7 @@ async fn an_ask_that_outlived_its_session_is_counted_in_the_summary() {
     assert_eq!(board["summary"]["asks_waiting"], 0);
 }
 
-/// The close: an empty inbox says what the day came to.
-///
-/// **Every board in this category is built to be full.** An empty list rendered
-/// as an absence is the surface failing at the exact moment it has the best
-/// thing it will ever have to say.
+/// An empty inbox says what the day came to.
 #[tokio::test]
 async fn an_empty_inbox_says_what_the_day_came_to() {
     let (addr, token, c) = boot(Policy::default()).await;
@@ -2257,7 +2262,7 @@ async fn an_empty_inbox_says_what_the_day_came_to() {
     assert_eq!(
         body["items"].as_array().map(Vec::len),
         Some(0),
-        "a fresh daemon has nothing in its inbox"
+        "a fresh host has nothing in its inbox"
     );
     let close = &body["close"];
     assert_eq!(close["clear"], true);
@@ -2279,11 +2284,7 @@ async fn an_empty_inbox_says_what_the_day_came_to() {
     assert!(close["next"].is_null(), "{close}");
 }
 
-/// A poll is not a look.
-///
-/// The board fetches the inbox every couple of seconds. Advancing the boundary
-/// on every fetch would erase the thing it exists to draw, and the failure would
-/// be invisible — the hairline would simply always read `0m`.
+/// Polling the inbox does not advance the "since last read" boundary.
 #[tokio::test]
 async fn the_boundary_moves_when_somebody_reads_and_not_when_a_page_polls() {
     let (addr, token, c) = boot(Policy::default()).await;
@@ -2315,9 +2316,7 @@ async fn the_boundary_moves_when_somebody_reads_and_not_when_a_page_polls() {
         "after a read there is a boundary: {}",
         after["close"]
     );
-    // And the *hairline* stays absent, because under a minute is not a boundary
-    // worth drawing — two different reasons to print nothing, and only one of
-    // them is a decision.
+    // The hairline stays absent: under a minute is not worth drawing.
     assert!(
         after["close"]["since_last_look"].is_null(),
         "a twelve-second gap is not a boundary: {}",
@@ -2325,20 +2324,14 @@ async fn the_boundary_moves_when_somebody_reads_and_not_when_a_page_polls() {
     );
 }
 
-/// What was decided on somebody's behalf, and what the tool did, are two counts.
-///
-/// Folding them together would make the headline number a measure of how much
-/// Devplane did, which is the opposite of what the seat is for.
+/// Decisions taken on somebody's behalf and actions the tool took are separate counts.
 #[tokio::test]
 async fn the_tally_counts_what_was_decided_for_you_apart_from_what_the_tool_did() {
-    let (addr, token, c) = boot(Policy::rules(&["Bash(rm *)".into()], &[])).await;
+    let (addr, token, c, state) = boot_with_state(Policy::rules(&["Bash(rm *)".into()], &[])).await;
 
     // A rule refuses a call: a decision taken on somebody's behalf.
-    post(
-        &c,
-        &addr,
-        "/devplane/hook",
-        &token,
+    hook(
+        &state,
         &serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s-close",
@@ -2349,27 +2342,21 @@ async fn the_tally_counts_what_was_decided_for_you_apart_from_what_the_tool_did(
         .to_string(),
     )
     .await;
-    post(
-        &c,
-        &addr,
-        "/devplane/decided",
-        &token,
-        &serde_json::json!({
+    decided(
+        &state,
+        serde_json::json!({
             "session": "s-close",
             "verdict": "deny",
             "rule": "Bash(rm *)",
             "subject": "rm -rf /tmp/x",
             "tool": "Bash",
-        })
-        .to_string(),
+        }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let body = get_json(&c, &addr, "/api/inbox", &token).await;
     let close = &body["close"];
-    // The inbox is not empty now, so only the boundary is served — which is the
-    // other half of the contract: the tally is what an empty list is for.
+    // The inbox is not empty, so only the boundary is served.
     if body["items"].as_array().is_some_and(Vec::is_empty) {
         assert_eq!(close["quiet"], false, "a rule decided something: {close}");
         let text = close["sentences"].to_string();
@@ -2381,18 +2368,8 @@ async fn the_tally_counts_what_was_decided_for_you_apart_from_what_the_tool_did(
     }
 }
 
-/// **`doctor` answers *what is watched here* without anybody reading the
-/// source.**
-///
-/// The product's headline sentence is about every agent on your machine, and
-/// that sentence covers two different lists: an agent Devplane **drives**
-/// reports through the protocol by construction, and an agent somebody started
-/// **themselves** is readable only as far as that vendor publishes channels.
-/// Collapsing the two is how the claim becomes half true without anybody lying,
-/// and it had been collapsed in the README.
-///
-/// So the matrix is a command rather than a paragraph: a person deciding
-/// whether to install this can find out what it covers first.
+/// `doctor` reports what is watched: driven agents versus those only readable
+/// through vendor-published channels.
 #[test]
 fn doctor_says_what_is_watched_per_vendor_and_per_channel() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
@@ -2407,8 +2384,7 @@ fn doctor_says_what_is_watched_per_vendor_and_per_channel() {
         "`doctor` does not say what is watched here"
     );
 
-    // Every vendor that can be driven is named, because the failure this
-    // catches is the second list silently inheriting the first one's length.
+    // Every drivable vendor is named.
     for vendor in devplane::core::vendors::vendors() {
         assert!(
             text.contains(vendor),
@@ -2416,10 +2392,8 @@ fn doctor_says_what_is_watched_per_vendor_and_per_channel() {
         );
     }
 
-    // **The three reaches are distinguishable in the output**, not only in the
-    // type. `unproved` is the one that matters: a channel that is built and has
-    // never been run is neither working nor absent, and printing it as either
-    // is the lie.
+    // The three reaches are distinguishable in the output; `unproved` is neither
+    // working nor absent.
     for word in ["read", "unproved", "not published"] {
         assert!(
             text.contains(word),
@@ -2427,41 +2401,22 @@ fn doctor_says_what_is_watched_per_vendor_and_per_channel() {
         );
     }
 
-    // And the reason travels with the row: a state with no reason is a verdict
-    // a person cannot act on.
+    // Each row carries its reason.
     assert!(
         text.contains("no session roster"),
         "`doctor` reports a channel as absent without saying what that costs"
     );
 
-    // The table is a claim about somebody else's product, so it carries the
-    // date it was checked. A row nobody re-reads is how this table came to say
-    // Copilot had no permission event while its own reference documented one.
+    // The table is a claim about other products, so it carries its checked date.
     assert!(
         text.contains(devplane::core::vendors::CHECKED),
         "`doctor` prints vendor facts with no date, so nobody can tell how stale they are"
     );
 }
 
-/// **An empty list names the vendors it cannot see — on either way of being
-/// empty.**
-///
-/// `devplane ls` has two empty states and they are different facts: Claude Code
-/// is installed and running nothing, or Claude Code is not here at all. Both are
-/// lists that show nothing, and both have to say what Devplane could not have
-/// shown — a session opened in Codex never appears, and nothing else on the
-/// machine says so.
-///
-/// **The second branch is the one a person who does not use Claude Code sees**,
-/// and it said nothing about them: it told them to install a vendor they had not
-/// chosen and left their own question open.
-///
-/// # Why this is driven rather than observed
-///
-/// The first version read whatever `ls` printed on the machine running it. It
-/// passed here, where `claude` is on `PATH`, and failed on CI, where it is not —
-/// it had asserted a precondition that is a property of the developer's laptop.
-/// A guard whose branch depends on the host tests the host.
+/// Both empty states of `devplane ls` (Claude Code idle, or not installed) name
+/// the vendors it cannot see. Driven via env so neither branch depends on the
+/// developer's machine.
 #[test]
 fn an_empty_list_names_the_vendors_it_cannot_see() {
     let driven_only = core_vendors_driven_only();
@@ -2475,9 +2430,7 @@ fn an_empty_list_names_the_vendors_it_cannot_see() {
     let claude = gate_home("empty-list-claude");
     std::fs::create_dir_all(claude.join("projects")).expect("an empty roster");
 
-    // `claude_binary()` takes `DEVPLANE_CLAUDE_BIN` when it names a real file,
-    // then falls back to `PATH`. Both branches are reached by controlling those
-    // two rather than by hoping about the machine.
+    // `claude_binary()` tries `DEVPLANE_CLAUDE_BIN`, then `PATH`; both are controlled here.
     let cases: [(&str, &str, &str); 2] = [
         (
             "installed and quiet",
@@ -2499,16 +2452,20 @@ fn an_empty_list_names_the_vendors_it_cannot_see() {
             .env("DEVPLANE_HOME", &home)
             .env("CLAUDE_CONFIG_DIR", &claude)
             .env("DEVPLANE_CLAUDE_BIN", bin)
-            // Emptied so the fallback cannot find a `claude` the developer has
-            // and CI does not. This is the difference that broke the first
-            // version of this guard.
-            //
-            // `HOME` too: the lookup also tries the native installer's path and
-            // a VS Code extension under it, and this machine has the second.
+            // Emptied so the lookup cannot find a local `claude`; `HOME` too, since it
+            // also checks the native installer and VS Code extension paths.
             .env("PATH", "/nonexistent")
             .env("HOME", &home)
             .output()
             .expect("the binary runs");
+
+        // `ls` must not start a host: with none answering it reads the store. A host
+        // here would leave a `host.json`.
+        assert!(
+            !home.join("host.json").exists(),
+            "`{what}`: `ls` started a host, which nothing does by asking any more"
+        );
+
         let text = String::from_utf8_lossy(&out.stdout);
 
         assert!(
@@ -2538,20 +2495,8 @@ fn core_vendors_driven_only() -> Vec<String> {
         .collect()
 }
 
-/// **The telemetry endpoints are not open, and they were.**
-///
-/// They took OTLP records with no credential at all, on the stated grounds that
-/// an exporter could not carry one. The vendor documents
-/// `OTEL_EXPORTER_OTLP_HEADERS` on the same reference page as the endpoint
-/// variable, and `observe::connect` only ever writes the telemetry block when
-/// there is no other collector to leak it to.
-///
-/// The consequence was the one that matters for this product specifically: any
-/// process on the machine — and any page the browser happened to load — could
-/// post fabricated cost, context and session records into the ledger whose
-/// entire claim is a record of what happened and who decided it. A forged
-/// observation is not a lesser problem than a forged command here; the
-/// observations are the product.
+/// The telemetry endpoints require the bearer: otherwise any local process or
+/// page could forge cost, context and session records.
 #[tokio::test]
 async fn telemetry_without_the_token_is_refused_on_every_signal() {
     let (addr, token, c) = boot(Policy::default()).await;
@@ -2599,28 +2544,16 @@ async fn telemetry_without_the_token_is_refused_on_every_signal() {
     }
 }
 
-/// **The board and the terminal narrow identically, because they narrow once.**
-///
-/// The property the fold already has and the reason it was built that way:
-/// `core::attention::narrow` is a pure function the daemon applies, and both
-/// surfaces ask the daemon. Two surfaces each implementing *contains,
-/// case-insensitive* agree until one of them is changed — and the one that
-/// changes is never the one somebody is looking at.
-///
-/// Driven through the API rather than through the pure function, because the
-/// claim is about the two callers rather than about the narrowing.
+/// Board and terminal narrow identically because the host narrows once; driven
+/// through the API since the claim is about both callers.
 #[tokio::test]
 async fn both_surfaces_narrow_from_one_computation() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
-    // Two projects, each with a session that asked a question and stopped —
-    // the ordinary shape, and one that survives the turn ending.
+    // Two projects, each with a session that asked a question and stopped.
     for (n, dir) in [("alpha", "/tmp/alpha"), ("beta", "/tmp/beta")] {
-        post(
-            &c,
-            &addr,
-            "/devplane/hook",
-            &token,
+        hook(
+            &state,
             &format!(
                 r#"{{"hook_event_name":"PreToolUse","session_id":"s-{n}","cwd":"{dir}",
                     "tool_name":"AskUserQuestion",
@@ -2629,11 +2562,8 @@ async fn both_surfaces_narrow_from_one_computation() {
             ),
         )
         .await;
-        post(
-            &c,
-            &addr,
-            "/devplane/hook",
-            &token,
+        hook(
+            &state,
             &format!(r#"{{"hook_event_name":"Stop","session_id":"s-{n}","cwd":"{dir}"}}"#),
         )
         .await;
@@ -2643,10 +2573,8 @@ async fn both_surfaces_narrow_from_one_computation() {
     let all = whole["items"].as_array().map(Vec::len).unwrap_or(0);
     assert!(all >= 2, "expected both sessions to be waiting, got {all}");
 
-    // The narrowed reply is the same computation both surfaces read: the board
-    // fetches this URL for `#inbox/<project>`, the CLI for `--project`.
-    // The project's name is the last segment of its root, which is how the
-    // daemon names a directory it discovered.
+    // The URL the board fetches for `#inbox/<project>` and the CLI for `--project`;
+    // a discovered project is named after the last segment of its root.
     let narrowed = get_json(&c, &addr, "/api/inbox?project=alpha", &token).await;
     let listed = narrowed["items"].as_array().map(Vec::len).unwrap_or(0);
     let left_out = narrowed["narrowed"]["count"].as_u64().unwrap_or(0) as usize;
@@ -2663,8 +2591,7 @@ async fn both_surfaces_narrow_from_one_computation() {
         "a project that exists was reported as a typo"
     );
 
-    // **The close does not render over a narrowed list.** It answers *how was
-    // the day*, and a day is not one project.
+    // The close does not render over a narrowed list: a day is not one project.
     assert!(
         narrowed["close"].is_null(),
         "the close was composed for a narrowed list"
@@ -2680,21 +2607,12 @@ async fn both_surfaces_narrow_from_one_computation() {
     assert_eq!(typo["items"].as_array().map(Vec::len).unwrap_or(9), 0);
 }
 
-/// **Narrowing is a view of the inbox and changes nothing about what was
-/// raised.**
-///
-/// `devplane attention` reports the record — how often a kind was raised and
-/// what came of it — and a filter somebody typed this morning must not move
-/// those numbers. They are two different questions and the second one is how
-/// this product measures whether its own inbox is any good.
+/// Narrowing is a view: it changes nothing in the `devplane attention` record.
 #[tokio::test]
 async fn a_narrowing_does_not_change_what_was_raised() {
-    let (addr, token, c) = boot(Policy::default()).await;
-    post(
-        &c,
-        &addr,
-        "/devplane/hook",
-        &token,
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    hook(
+        &state,
         r#"{"hook_event_name":"PreToolUse","session_id":"s-a","cwd":"/tmp/alpha",
             "tool_name":"AskUserQuestion",
             "tool_input":{"questions":[{"question":"Keep it?",
@@ -2704,11 +2622,8 @@ async fn a_narrowing_does_not_change_what_was_raised() {
 
     let _ = get_json(&c, &addr, "/api/inbox?read=true", &token).await;
 
-    // **The structural half, which is the one that can be asserted here.** The
-    // record is written by the daemon's own loop rather than by a read, so a
-    // test that waits for a row would be timing the notifier. What this holds
-    // is that the narrowing cannot reach this route at all: the same window
-    // answers the same way whether or not somebody appends a filter to it.
+    // The record is written by the host's loop, so this checks structurally that
+    // the narrowing filter cannot reach this route.
     let plain = get_json(&c, &addr, "/api/attention?days=7", &token).await;
     let with_filter = get_json(
         &c,
@@ -2718,8 +2633,7 @@ async fn a_narrowing_does_not_change_what_was_raised() {
     )
     .await;
 
-    // Everything but `since`, which is `now` minus the window and moves on its
-    // own between two calls — comparing it would make this a clock test.
+    // Everything but `since`, which moves with the clock.
     for field in ["kinds", "oversight", "agents", "days"] {
         assert_eq!(
             plain[field], with_filter[field],
@@ -2741,80 +2655,71 @@ async fn a_narrowing_does_not_change_what_was_raised() {
     }
 }
 
-/// **A hold nobody answers is indistinguishable from today.**
-///
-/// The feature's whole safety argument. A `command` hook that reaches its
-/// timeout is cancelled and its output discarded, so it renders no decision and
-/// Claude Code shows its own dialog — `PreToolUse` and `PreModelSwitch` are the
-/// documented exceptions and `PermissionRequest` is not one. So the failure
-/// mode of a hold is *exactly* the behaviour with no hold configured.
-///
-/// This is the objection the feature was rejected on, turned into the reason to
-/// bound it: holding stalls the session before the vendor's dialog appears, and
-/// a bounded hold lets that dialog arrive a few seconds later instead.
+/// A hold nobody answers behaves as with no hold: the timed-out hook is
+/// discarded and Claude Code shows its own dialog, a few seconds later.
 #[tokio::test]
 async fn a_hold_nobody_answers_lapses_and_decides_nothing() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
     let before = get_json(&c, &addr, "/api/decisions", &token).await;
     let before = before.as_array().map(Vec::len).unwrap_or(0);
 
     let started = std::time::Instant::now();
-    let said = post(
-        &c,
-        &addr,
-        "/devplane/hold",
-        &token,
-        r#"{"session":"s-hold","cwd":"/tmp/alpha","tool":"Bash",
-            "call":"git push origin main","message":"Bash · git push","wait_ms":400}"#,
+    let said = hold(
+        &state,
+        "s-hold",
+        "git push origin main",
+        Duration::from_millis(400),
     )
-    .await;
+    .await
+    .expect("the hold returns");
     let took = started.elapsed();
 
-    let v: serde_json::Value = serde_json::from_str(&said).expect("the hold answers JSON");
     assert!(
-        v["behavior"].is_null(),
-        "an unanswered hold produced a decision: {said}"
+        said.is_none(),
+        "an unanswered hold produced a decision: {said:?}"
     );
     assert!(
-        took >= std::time::Duration::from_millis(300),
+        took >= Duration::from_millis(300),
         "the hold returned in {took:?} without waiting for anybody"
     );
 
-    // **Nothing was decided, so nothing is recorded.** A row here would be this
-    // product claiming an authority for a call it handed straight back.
+    // Nothing was decided, so nothing is recorded; the ask closes as nobody's.
     let after = get_json(&c, &addr, "/api/decisions", &token).await;
     assert_eq!(
         after.as_array().map(Vec::len).unwrap_or(0),
         before,
         "a lapsed hold wrote to the decision log"
     );
+    let asks = get_json(&c, &addr, "/api/asks", &token).await;
+    assert!(
+        asks["open"].as_array().is_some_and(Vec::is_empty),
+        "a lapsed hold is still open: {}",
+        asks["open"]
+    );
+    let lapsed = asks["settled"]
+        .as_array()
+        .and_then(|a| a.iter().find(|a| a["run"] == "s-hold"))
+        .expect("the lapsed hold is on the record");
+    assert!(
+        lapsed["ended"]["nobody"].is_object(),
+        "a lapse ends as nobody's: {lapsed}"
+    );
 }
 
-/// **A person's selection is carried, and recorded as theirs.**
-///
-/// The decision is in transit, not a verdict: the policy engine never sees it,
-/// and it is unconstructible without the selection having been written down
-/// first.
+/// A person's selection is carried and recorded as theirs; the policy engine
+/// never sees it.
 #[tokio::test]
 async fn a_person_can_answer_a_watched_permission_from_anywhere() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
     // The hook holds. Answered from another surface while it waits.
-    let held = tokio::spawn({
-        let (c, addr, token) = (c.clone(), addr, token.clone());
-        async move {
-            post(
-                &c,
-                &addr,
-                "/devplane/hold",
-                &token,
-                r#"{"session":"s-ans","cwd":"/tmp/alpha","tool":"Bash",
-                    "call":"git push origin main","message":"Bash · git push","wait_ms":8000}"#,
-            )
-            .await
-        }
-    });
+    let held = hold(
+        &state,
+        "s-ans",
+        "git push origin main",
+        Duration::from_millis(8000),
+    );
 
     // Find the ask the hold raised, the way a surface would.
     let mut id = String::new();
@@ -2841,48 +2746,42 @@ async fn a_person_can_answer_a_watched_permission_from_anywhere() {
         r#"{"option":"allow"}"#,
     )
     .await;
-    assert!(
-        !answered.contains("error"),
+    let answered: Value = serde_json::from_str(&answered).expect("the answer is JSON");
+    assert_eq!(
+        answered["open"], false,
         "answering the held permission failed: {answered}"
     );
 
     let said = held.await.expect("the hold returns");
-    let v: serde_json::Value = serde_json::from_str(&said).expect("JSON");
     assert_eq!(
-        v["behavior"], "allow",
-        "the person's selection was not carried: {said}"
+        said.as_deref(),
+        Some("allow"),
+        "the person's selection was not carried"
+    );
+
+    // And it is recorded as theirs: the ledger names a person, not a rule.
+    let log = get_json(&c, &addr, "/api/decisions?about=s-ans", &token).await;
+    assert!(
+        log.as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["authority"] == "person"),
+        "the ledger does not name the person who answered: {log}"
     );
 }
 
-/// **Nothing but a recorded human selection can produce an `allow` here.**
-///
-/// Asserted as an absence over the values that are not one. This path carries a
-/// decision; it may never make one, and there is no `Verdict::Allow` in this
-/// product for it to have returned.
+/// Only a recorded human selection can produce an `allow` here.
 #[tokio::test]
 async fn no_rule_clock_or_default_can_allow_through_a_hold() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
     for answer in [
         r#"{"option":"maybe"}"#,
         r#"{"option":""}"#,
         r#"{"text":"allow"}"#,
     ] {
-        let held = tokio::spawn({
-            let (c, addr, token) = (c.clone(), addr, token.clone());
-            async move {
-                post(
-                    &c,
-                    &addr,
-                    "/devplane/hold",
-                    &token,
-                    r#"{"session":"s-x","cwd":"/tmp/alpha","tool":"Bash","call":"rm x",
-                        "message":"Bash · rm x","wait_ms":700}"#,
-                )
-                .await
-            }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let held = hold(&state, "s-x", "rm x", Duration::from_millis(700));
+        tokio::time::sleep(Duration::from_millis(120)).await;
         let asks = get_json(&c, &addr, "/api/asks", &token).await;
         if let Some(a) = asks["open"].as_array().and_then(|a| a.first())
             && let Some(id) = a["id"].as_str()
@@ -2890,51 +2789,22 @@ async fn no_rule_clock_or_default_can_allow_through_a_hold() {
             let _ = post(&c, &addr, &format!("/api/asks/{id}/answer"), &token, answer).await;
         }
         let said = held.await.expect("the hold returns");
-        let v: serde_json::Value = serde_json::from_str(&said).expect("JSON");
         assert!(
-            v["behavior"].is_null(),
-            "`{answer}` produced a behavior this product cannot stand behind: {said}"
+            said.is_none(),
+            "`{answer}` produced a behavior this product cannot stand behind: {said:?}"
         );
     }
 }
 
-/// **An answer has to name something that was asked.**
-///
-/// `Decision::Option(id)` labels as `allow` for any id that is not literally
-/// `Deny`, on the supposition that the id is one the agent published and that
-/// the agent's own protocol decides what it means. **Nothing checked that
-/// supposition.** A caller passing an id nobody offered — a typo, an id read
-/// off a stale row, a client guessing — had an `allow` written to the decision
-/// log under their name, for a call no person approved.
-///
-/// Found by an absence check on a neighbouring feature rather than by an audit
-/// of this one: the neighbouring feature asserted that nothing but a recorded
-/// human selection can produce an approval, and this path could.
-///
-/// Refused **before** the answer is written, because the write happens before
-/// anything is delivered — that ordering is what makes a crash between the two
-/// replay as answered, and validating after it would be validating a fact
-/// already recorded.
+/// An answer must name an offered option: an unknown id is refused before
+/// anything is written, rather than recorded as an `allow` no person gave.
 #[tokio::test]
 async fn an_option_nobody_offered_is_refused_rather_than_recorded_as_an_allow() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
-    let held = tokio::spawn({
-        let (c, addr, token) = (c.clone(), addr, token.clone());
-        async move {
-            post(
-                &c,
-                &addr,
-                "/devplane/hold",
-                &token,
-                r#"{"session":"s-opt","cwd":"/tmp/alpha","tool":"Bash","call":"rm -rf x",
-                    "message":"Bash · rm -rf x","wait_ms":1500}"#,
-            )
-            .await
-        }
-    });
+    let held = hold(&state, "s-opt", "rm -rf x", Duration::from_millis(1500));
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let asks = get_json(&c, &addr, "/api/asks", &token).await;
     let id = asks["open"][0]["id"]
         .as_str()
@@ -2957,25 +2827,12 @@ async fn an_option_nobody_offered_is_refused_rather_than_recorded_as_an_allow() 
     assert!(said.contains("allow") && said.contains("deny"), "{said}");
 
     // The hold lapses, because nothing was answered.
-    let v: serde_json::Value = serde_json::from_str(&held.await.unwrap()).unwrap();
-    assert!(v["behavior"].is_null(), "a refused option still decided");
+    let said = held.await.unwrap();
+    assert!(said.is_none(), "a refused option still decided: {said:?}");
 
     // And an option that *was* offered still works, or this is a mute button.
-    let held = tokio::spawn({
-        let (c, addr, token) = (c.clone(), addr, token.clone());
-        async move {
-            post(
-                &c,
-                &addr,
-                "/devplane/hold",
-                &token,
-                r#"{"session":"s-opt2","cwd":"/tmp/alpha","tool":"Bash","call":"rm -rf x",
-                    "message":"Bash · rm -rf x","wait_ms":4000}"#,
-            )
-            .await
-        }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let held = hold(&state, "s-opt2", "rm -rf x", Duration::from_millis(4000));
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let asks = get_json(&c, &addr, "/api/asks", &token).await;
     let id = asks["open"][0]["id"]
         .as_str()
@@ -2989,38 +2846,21 @@ async fn an_option_nobody_offered_is_refused_rather_than_recorded_as_an_allow() 
         r#"{"option":"deny"}"#,
     )
     .await;
-    let v: serde_json::Value = serde_json::from_str(&held.await.unwrap()).unwrap();
-    assert_eq!(v["behavior"], "deny", "an offered option stopped working");
+    assert_eq!(
+        held.await.unwrap().as_deref(),
+        Some("deny"),
+        "an offered option stopped working"
+    );
 }
 
-/// **A held permission says an agent is waiting, and does not offer to take you
-/// to the editor.**
-///
-/// The point of a hold is to *not* go there. An item that offered `focus` while
-/// the agent sat waiting would be the surface undoing the feature — and the
-/// sentence a stranded ask carries, *the agent that asked is no longer
-/// running*, is confidently wrong about the one fact that decides whether to
-/// hurry.
+/// A held permission says an agent is waiting and does not offer `focus`.
 #[tokio::test]
 async fn a_held_permission_says_somebody_is_waiting_and_offers_no_editor() {
-    let (addr, token, c) = boot(Policy::default()).await;
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
 
-    let held = tokio::spawn({
-        let (c, addr, token) = (c.clone(), addr, token.clone());
-        async move {
-            post(
-                &c,
-                &addr,
-                "/devplane/hold",
-                &token,
-                r#"{"session":"s-wait","cwd":"/tmp/alpha","tool":"Bash","call":"git push",
-                    "message":"Bash · git push","wait_ms":3000}"#,
-            )
-            .await
-        }
-    });
+    let held = hold(&state, "s-wait", "git push", Duration::from_millis(3000));
 
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
     let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
     let row = inbox["items"]
         .as_array()
@@ -3055,9 +2895,7 @@ async fn a_held_permission_says_somebody_is_waiting_and_offers_no_editor() {
         "a held permission cannot be answered: {actions:?}"
     );
 
-    // And once it lapses, the vendor's own dialog is the only thing that can
-    // answer — so raising the window becomes the honest offer rather than the
-    // only one left.
+    // Once it lapses, only the vendor's dialog can answer, so `focus` is offered.
     let _ = held.await;
     let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
     if let Some(row) = inbox["items"]

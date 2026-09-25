@@ -1,22 +1,20 @@
-//! Background loops: the roster poller and the stall sweeper.
+//! The host's background tasks: roster poll, projection tail, sweepers,
+//! forge and gate watches, and startup reconciliation.
 
 use crate::core::event::{Event, Source};
 use crate::core::ids::RunId;
 use crate::core::run::RunMode;
-use crate::daemon::Shared;
+use crate::host::Shared;
 use std::time::Duration;
 
-/// How often the background roster is read. The command is cheap, but it is a
-/// process spawn, so the interval backs off when nothing is running.
+/// Roster poll interval; it backs off when nothing is running.
 const POLL_BUSY: Duration = Duration::from_secs(2);
 const POLL_IDLE: Duration = Duration::from_secs(10);
 
-/// Polls `claude agents --json` for sessions the provider's own daemon
-/// supervises.
+/// Polls `claude agents --json` for sessions the vendor supervises.
 ///
-/// Hooks tell us about background sessions too, but only while they are firing:
-/// a session that is blocked emits nothing, and a daemon that was restarted has
-/// missed everything. The roster is the correction.
+/// Hooks only speak while they fire, and a blocked session emits nothing; the
+/// roster is the correction.
 pub async fn run(state: Shared) {
     let mut interval = POLL_BUSY;
     loop {
@@ -26,19 +24,103 @@ pub async fn run(state: Shared) {
             Ok(_) => interval = POLL_IDLE,
             Err(e) => {
                 tracing::debug!(error = %e, "roster poll failed");
-                // `claude` may not be on PATH at all. That is a normal
-                // configuration, not an error worth repeating every 2 seconds.
+                // `claude` may simply not be on PATH; don't retry every 2s.
                 interval = POLL_IDLE;
             }
         }
     }
 }
 
-/// Reads the roster once, before the API is reachable.
+/// Folds rows other processes appended to the store into the world.
 ///
-/// Without this the first `devplane ls` after a cold start shows an empty
-/// board while twenty sessions are running, and the first thing the product
-/// ever says about itself is wrong.
+/// A hook appends and exits; this is the one projector. The event is durable
+/// the moment the hook writes it; 500 ms is only board latency.
+pub async fn tail(state: Shared) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Err(e) = tail_once(&state).await {
+            tracing::warn!(error = %e, "could not project what other processes wrote");
+        }
+    }
+}
+
+/// One pass over the rows past the projection mark; returns how many folded.
+pub async fn tail_once(state: &Shared) -> anyhow::Result<usize> {
+    const BATCH: i64 = 500;
+    let mut through = state.store.projected_through().await?;
+    let mut folded = 0usize;
+    loop {
+        let rows = state.store.shim_events_since(through, BATCH).await?;
+        if rows.is_empty() {
+            break;
+        }
+        // Pick up projects a hook registered, so the run lands in a project
+        // the world knows rather than a second copy.
+        for p in state.store.load_projects().await? {
+            let mut w = state.world.lock().await;
+            if w.project(&p.id).is_none() {
+                w.upsert_project(p);
+            }
+        }
+        let n = rows.len() as i64;
+        for (seq, env) in rows {
+            // The run's directory: the event's, else the root of the project the
+            // hook resolved, whether or not it still exists. Without it
+            // `World::apply` falls back to this process's cwd.
+            let cwd = match &env.event {
+                Event::SessionStarted { cwd, .. } | Event::CwdChanged { cwd } => Some(cwd.clone()),
+                _ => {
+                    let w = state.world.lock().await;
+                    env.project_id
+                        .as_ref()
+                        .and_then(|p| w.project(p).map(|p| p.root.clone()))
+                }
+            };
+            let project = env.project_id.clone();
+            // At most once per run: a run saved with this event already applied
+            // (host stopped before the mark moved) skips it.
+            let applied = {
+                let mut w = state.world.lock().await;
+                w.apply_stored(
+                    seq,
+                    env,
+                    crate::core::RunHint {
+                        cwd,
+                        mode: RunMode::Observed,
+                        ..Default::default()
+                    },
+                )
+            };
+            let Some((applied, _)) = applied else {
+                through = seq;
+                continue;
+            };
+            if let Some(pid) = project.or_else(|| applied.project_id.clone()) {
+                state.learn_project(&pid).await;
+            }
+            let snapshot = {
+                let w = state.world.lock().await;
+                w.run(&applied.run_id).cloned()
+            };
+            if let Some(run) = snapshot
+                && let Err(e) = state.store.save_run(&run).await
+            {
+                tracing::warn!(error = %e, "could not persist a projected run");
+            }
+            let _ = state.tx.send(crate::core::Frame::Event(Box::new(applied)));
+            through = seq;
+            folded += 1;
+        }
+        state.store.set_projected_through(through).await?;
+        if n < BATCH {
+            break;
+        }
+    }
+    Ok(folded)
+}
+
+/// Reads the roster once, before the API is reachable, so the first `ls`
+/// after a cold start does not show an empty board.
 pub async fn initial_poll(state: &Shared) {
     match poll_once(state).await {
         Ok(n) => tracing::info!(sessions = n, "discovered sessions from the roster"),
@@ -62,31 +144,26 @@ async fn poll_once(state: &Shared) -> anyhow::Result<usize> {
     }
     let rows = crate::observe::agents_json::parse(&out.stdout);
 
-    // The roster does not name the surface a session runs on. The local
-    // registry does, and telemetry does — but telemetry only once the session
-    // makes a request, and the registry is there the moment it starts.
-    let registry = crate::observe::registry::sessions();
-    let entrypoint_of = |session: &str| -> Option<String> {
-        registry
-            .iter()
-            .find(|e| e.session_id.as_deref() == Some(session))
-            .and_then(|e| e.entrypoint.clone())
+    // The roster's `idle` covers both "waiting on a person" and "waiting on a
+    // background job it started"; the process table tells them apart. One
+    // `ps` covers every session, and it is only asked for non-busy sessions
+    // with no hooks: a hooked session reports its background tasks on `Stop`,
+    // which outranks a guess from `ps`.
+    let hookless: std::collections::HashSet<String> = {
+        let w = state.world.lock().await;
+        rows.iter()
+            .filter_map(|r| r.run_key())
+            .filter(|k| {
+                w.run(&RunId::new(k.clone()))
+                    .is_none_or(|run| run.last_hook_at.is_none())
+            })
+            .collect()
     };
-
-    // **What the roster calls `idle` is two situations, and one `ps` tells
-    // them apart.** A session waiting on a test suite it started reports
-    // exactly as one waiting for a person to type, and the board said the same
-    // sentence for both. The process table carries the difference and the
-    // roster does not.
-    //
-    // Only asked when a row could be affected, so a machine whose sessions are
-    // all busy or all connected pays nothing. One `ps` answers for every
-    // session at once, beside the `claude agents --json` this loop already
-    // spawns each pass — a second short-lived process on a poll that has one.
     let jobs = {
         let idle_pids: Vec<u32> = rows
             .iter()
             .filter(|r| r.status.as_deref() != Some("busy"))
+            .filter(|r| r.run_key().is_some_and(|k| hookless.contains(&k)))
             .filter_map(|r| r.pid)
             .collect();
         match idle_pids.is_empty() {
@@ -99,9 +176,8 @@ async fn poll_once(state: &Shared) -> anyhow::Result<usize> {
     for row in &rows {
         let Some(key) = row.run_key() else { continue };
         seen += 1;
-        // Every live session belongs on the board, whoever started it. The
-        // mode records who supervises the process, which decides whose word
-        // counts about the state.
+        // Every live session belongs on the board; the mode records who
+        // supervises the process, which decides whose word counts.
         let mode = if row.is_background() {
             RunMode::Background
         } else {
@@ -109,17 +185,12 @@ async fn poll_once(state: &Shared) -> anyhow::Result<usize> {
         };
         let mut event = row.to_event();
         if let crate::core::Event::RosterSeen {
-            ref mut entrypoint,
             jobs: ref mut jobs_field,
             ..
         } = event
         {
-            if entrypoint.is_none() {
-                *entrypoint = entrypoint_of(&key);
-            }
-            // Absent unless this row was actually looked at, because the
-            // reducer treats a checked zero as *the job finished* and must
-            // never be handed one that means *nobody asked*.
+            // `None` unless this row was checked: the reducer reads a checked
+            // zero as "the job finished", never as "nobody asked".
             *jobs_field = row.pid.and_then(|pid| jobs.get(&pid).copied());
         }
         state
@@ -140,32 +211,20 @@ async fn poll_once(state: &Shared) -> anyhow::Result<usize> {
     Ok(seen)
 }
 
-/// Notices runs that stopped producing events, and keeps the inbox audible.
-///
-/// A stall is the absence of evidence, so nothing can report it: the only way
-/// to know is to look at the clock. The sweeper also drives desktop
-/// notifications, because the inbox changes for reasons no event announces —
-/// a run going quiet is one of them.
 /// Ends asks whose project-set deadline has passed.
 ///
-/// **The third of the five durable-execution properties, and the one this
-/// product does differently from every system it took the other four from.**
-/// Temporal, Inngest, Restate, Step Functions and LangGraph all let an
-/// unanswered request end; none of them records *who ended it*. An ask that
-/// ends here ends with an authority, the duration, and the file the duration
-/// came from — and if nothing wrote a duration down, nothing ends.
-///
-/// It is a query rather than a timer per waiting ask, which is what makes the
-/// second property (*the wait costs nothing*) true after a restart as well as
-/// before one: the rows are the state, and a daemon that has just started knows
-/// exactly as much as one that has been up for a week.
+/// The ending records an authority (`timer`), the duration and the file it
+/// came from; with no configured duration nothing ends. It is a query over
+/// stored rows rather than a timer per ask, so it holds across restarts.
 pub async fn expiry_sweeper(state: Shared) {
     loop {
-        // A minute is fine and deliberately coarse. The alternative — waking at
-        // each deadline — is a timer per waiting ask, which is the design this
-        // one exists instead of, and nobody sets a deadline where a minute of
-        // slack matters.
+        // A minute of slack is fine; waking per deadline would mean a timer
+        // per waiting ask.
         tokio::time::sleep(Duration::from_secs(60)).await;
+
+        // A held permission whose hook is gone ends too, so the inbox stops
+        // offering a question nobody is waiting on.
+        crate::record::end_orphaned_holds(&state.store).await;
 
         let now = jiff::Timestamp::now();
         let overdue: Vec<crate::core::ask::Ask> = match state.store.open_asks().await {
@@ -183,60 +242,54 @@ pub async fn expiry_sweeper(state: Shared) {
             let crate::core::ask::Deadline::After(after) = ask.deadline else {
                 continue;
             };
-            // **The file, not "a setting"**: a person reading this row has to be
-            // able to go and change the thing that did it.
-            //
-            // Which means the *path*, not the filename. Both arms of this used
-            // to produce the bare string `devplane.toml` — a conditional that
-            // computed the same answer either way — so the row that exists to
-            // say *where the clock that ended your question is configured* told
-            // somebody with six projects to go and look in six places. The
-            // project id is the project's path, so the real file is one join
-            // away.
+            // The config file's path, not just its name, so the reader can go
+            // and change the setting that did this.
             let set_by = deadline_source(ask.project.as_ref());
             let ended = crate::core::ask::Ended::Timer { after, set_by };
             ask.end(ended.clone(), now);
-            if let Err(e) = state.store.save_ask(&ask).await {
-                tracing::error!(error = %e, ask = %ask.id, "could not close an expired ask");
-                continue;
+            // Only onto a still-open row: an answer that landed since the read
+            // above wins.
+            match state.store.close_ask(&ask).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    tracing::error!(error = %e, ask = %ask.id, "could not close an expired ask");
+                    continue;
+                }
             }
 
-            // **Told to the agent, recorded in the log, and shown to the
-            // person — in that order and all three.** The old ten-minute
-            // refusal did only the middle one, which is how a call refused in
-            // somebody's name became findable only by running `devplane audit`.
+            // Tell the agent, record it, and show the person — all three.
             crate::driven::expire(&state, &ask, &ended).await;
         }
     }
 }
 
+/// Marks runs that went quiet and keeps desktop notifications in sync.
+///
+/// A stall is the absence of evidence, so only the clock can find it; and the
+/// inbox changes for reasons no event announces, so notifications are driven
+/// from here too.
 pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
     let mut notifier = crate::notify::Notifier::new(notify_enabled);
     loop {
         tokio::time::sleep(Duration::from_secs(15)).await;
 
+        // One clock for the whole pass.
+        let now = jiff::Timestamp::now();
         let newly_stalled: Vec<(RunId, i64)> = {
             let w = state.world.lock().await;
             let cfg = w.attention;
             w.runs()
                 .filter(|r| {
-                    // How long is too quiet is a property of the work, not of
-                    // the machine: a repository whose suite takes twelve
-                    // minutes and one that answers in seconds cannot share a
-                    // threshold. The project's `[policy] stall_timeout` wins
-                    // where it is set, and the run's worktree resolves back to
-                    // the repository that owns it.
+                    // The threshold is per project (`[policy] stall_timeout`,
+                    // resolved from the run's worktree), else the host default.
                     let dir = r.worktree.as_deref().unwrap_or(&r.cwd);
                     let limit = state.policy.stall_seconds(dir).unwrap_or(cfg.stall_seconds);
-                    // Only a session on a channel that carries activity can be
-                    // seen to go quiet — the same question the inbox asks, for
-                    // the reason both must ask it the same way.
-                    r.activity_seen
-                        && matches!(r.state, crate::core::RunState::Working)
-                        && !r.stall_noticed
-                        && r.idle_seconds() > limit
+                    // `facts::stalled` is the reducer; `stall_noticed` only
+                    // dedups the notification.
+                    crate::core::reduce::facts::stalled(r, now, limit) && !r.stall_noticed
                 })
-                .map(|r| (r.id.clone(), r.idle_seconds()))
+                .map(|r| (r.id.clone(), crate::core::reduce::facts::idle_for(r, now)))
                 .collect()
         };
 
@@ -244,7 +297,7 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
             state
                 .ingest(
                     id,
-                    Source::Daemon,
+                    Source::Host,
                     Event::Stalled { idle_seconds },
                     None,
                     RunMode::Observed,
@@ -252,22 +305,15 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
                 .await;
         }
 
-        // The same list the person sees, derived the same way — Work items
-        // included, and the project's own stall threshold. A notifier reading a
-        // different list announces things the inbox does not show, and stays
-        // silent about things it does.
+        // The same inbox the person sees; a notifier reading a different list
+        // would announce things the inbox does not show.
         let inbox = state.current_inbox().await;
         notifier.sync(&inbox);
 
-        // The inbox measuring itself. Every item asking right now is recorded
-        // once; everything that stopped asking without a person using one of
-        // its actions is closed as `elsewhere`. The API has already written
-        // `acted` or `dismissed` for anything somebody touched, and the
-        // `resolved_at IS NULL` guard means this pass cannot overwrite it — so
-        // the numbers are exact rather than correlated after the fact.
-        //
-        // Errors are logged and dropped: this is a measurement of the product,
-        // and a measurement that can take the product down is worse than none.
+        // Record every open item once and close as `elsewhere` whatever stopped
+        // asking untouched. The API writes `acted`/`dismissed` first and the
+        // `resolved_at IS NULL` guard keeps this pass from overwriting it.
+        // Errors are logged, never fatal: this is only a measurement.
         let open: Vec<String> = inbox.iter().map(|i| i.id.0.clone()).collect();
         for item in &inbox {
             if let Err(e) = state.store.attention_raise(item).await {
@@ -281,21 +327,17 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
     }
 }
 
-/// Refreshes the pull requests Devplane opened.
+/// Refreshes the pull requests Devplane opened, since checks finish long after
+/// the session that wrote the code is gone.
 ///
-/// Checks finish minutes or hours after the agent stopped, which is the clearest
-/// illustration of why Work is the durable unit: the session that wrote the code
-/// is long gone, and somebody still has to be told the build went red.
-///
-/// Polled rather than pushed, because a webhook needs a public address and this
-/// is a local tool. Slowly, because nothing here is urgent to the second.
+/// Polled, not pushed: a webhook needs a public address and this is local.
 pub async fn pull_requests(state: Shared) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
 
-        let watched: Vec<(crate::core::WorkId, std::path::PathBuf, String)> = {
-            let works = state.works.lock().await;
-            works
+        let watched: Vec<(crate::core::ChangeId, std::path::PathBuf, String)> = {
+            let changes = state.changes.lock().await;
+            changes
                 .values()
                 .filter(|w| {
                     w.pull_request
@@ -315,8 +357,8 @@ pub async fn pull_requests(state: Shared) {
             let failing: Vec<String> = pr.failing_checks().iter().map(|c| c.name.clone()).collect();
 
             let changed = {
-                let mut works = state.works.lock().await;
-                match works.get_mut(&id) {
+                let mut changes = state.changes.lock().await;
+                match changes.get_mut(&id) {
                     Some(w) => match &mut w.pull_request {
                         Some(existing) if existing.status != status => {
                             existing.status = status.clone();
@@ -330,31 +372,26 @@ pub async fn pull_requests(state: Shared) {
                 }
             };
             if let Some(w) = changed {
-                tracing::info!(work = %id, %status, "pull request changed");
-                // Not `.ok()`: this write carries the fact behind a `ci_red`
-                // item, and dropping it leaves the board ahead of the store.
-                crate::work::persist(&state, &w).await;
+                tracing::info!(change = %id, %status, "pull request changed");
+                // Not `.ok()`: this write backs a `ci_red` item, and dropping
+                // it leaves the board ahead of the store.
+                crate::change::persist(&state, &w).await;
                 state.notify_changed();
             }
         }
     }
 }
 
-/// How often every project's forge is read. Slowly: an issue assigned to you
-/// five minutes late is still an issue assigned to you, and `gh` is two
-/// process spawns per project.
+/// How often every project's forge is read (`gh` is two spawns per project).
 const FORGE_EVERY: Duration = Duration::from_secs(300);
-/// How many of each a project contributes. Past this the board shows a count,
-/// and a count is the honest shape of four hundred open issues anyway.
+/// Per-project cap on issues and pull requests; past it the board shows a count.
 const FORGE_LIMIT: u32 = 100;
 
-/// Reads GitHub for every registered project: open issues, open pull
-/// requests, and which of them are waiting on the person whose `gh` this is.
+/// Reads open issues and pull requests for every registered project, and which
+/// are waiting on the `gh` user. Read-only.
 ///
-/// Soon after start, then on a slow timer. Never writes. A project whose
-/// directory has no GitHub remote is asked once and then skipped for the life
-/// of the daemon; a `gh` that is not logged in stops the whole pass and is
-/// reported in `doctor` rather than retried every second.
+/// A project without a GitHub remote is skipped for a while; a `gh` that is not
+/// logged in stops the pass and is reported in `doctor`.
 pub async fn forge_watch(state: Shared) {
     tokio::time::sleep(Duration::from_secs(3)).await;
     loop {
@@ -370,7 +407,7 @@ async fn forge_once(state: &Shared) {
         return;
     }
 
-    // Whose forge. Asked once, from a directory that is certainly there.
+    // Whose forge; asked once.
     let viewer = {
         let known = state.forge.lock().await.viewer.clone();
         match known {
@@ -393,11 +430,9 @@ async fn forge_once(state: &Shared) {
         }
     };
 
-    // Which pull requests GitHub says are waiting for this person's review —
-    // one search for the whole machine, because whether a team request reaches
-    // them is a fact only the server has (see `review_requested_of_me`). A
-    // failure costs that one signal and nothing else, so it is logged rather
-    // than allowed to fail the pass.
+    // Review requests for this person, in one search: whether a team request
+    // reaches them is known only to the server. A failure costs this signal
+    // only.
     let asked_of_me = match crate::github::review_requested_of_me(&std::env::temp_dir()).await {
         Ok(set) => set,
         Err(e) => {
@@ -406,9 +441,7 @@ async fn forge_once(state: &Shared) {
         }
     };
 
-    // A project ruled out stays ruled out for an hour, not forever: adding a
-    // GitHub remote is a thing people do, and a daemon restart is not a
-    // reasonable thing to require of them for it.
+    // A ruled-out project is retried after an hour, since people add remotes.
     let now = jiff::Timestamp::now();
     let skip: std::collections::BTreeSet<_> = {
         let f = state.forge.lock().await;
@@ -442,8 +475,7 @@ async fn forge_once(state: &Shared) {
                         pull_requests: prs
                             .iter()
                             .map(|r| {
-                                // Server-resolved, because team membership is
-                                // not in the row (see `review_requested_of_me`).
+                                // Server-resolved: team membership is not in the row.
                                 let asked = slug.as_deref().is_some_and(|s| {
                                     asked_of_me.contains(&(s.to_string(), r.number))
                                 });
@@ -457,7 +489,7 @@ async fn forge_once(state: &Shared) {
             (Err(e), _) | (_, Err(e)) => {
                 let msg = e.to_string();
                 if crate::github::is_permanent(&msg) {
-                    // Not a GitHub project. Say so once, then stop asking.
+                    // Not a GitHub project; stop asking.
                     tracing::debug!(project = %p.name, error = %msg, "forge: no GitHub remote");
                     f.skip.insert(p.id.clone(), (msg, jiff::Timestamp::now()));
                     f.projects.remove(&p.id);
@@ -490,55 +522,46 @@ async fn forge_once(state: &Shared) {
     }
 }
 
-/// Keeps the store and the board from growing without bound.
+/// Prunes old events and old terminal runs, once per host start.
 ///
-/// Events age out; runs do not, because a row on the board costs nothing and
-/// losing one would make a resumable session invisible. Terminal runs leave
-/// memory once they are old enough to be history rather than context.
-pub async fn retention(state: Shared, keep_event_days: i64, keep_run_days: i64) {
-    loop {
-        tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
-        match state.store.prune_events(keep_event_days).await {
-            Ok(n) if n > 0 => tracing::info!(events = n, "pruned old events"),
-            Err(e) => tracing::warn!(error = %e, "pruning events failed"),
-            _ => {}
-        }
-        let dropped = {
-            let mut w = state.world.lock().await;
-            w.prune(keep_run_days * 86_400)
-        };
-        if dropped > 0 {
-            tracing::info!(runs = dropped, "dropped finished runs from the board");
-        }
+/// Runs are kept longer than events: losing one would hide a resumable
+/// session. A startup pass rather than a timer, because hosts restart often.
+pub async fn retention(state: &Shared, keep_event_days: i64, keep_run_days: i64) {
+    match state.store.prune_events(keep_event_days).await {
+        Ok(n) if n > 0 => tracing::info!(events = n, "pruned old events"),
+        Err(e) => tracing::warn!(error = %e, "pruning events failed"),
+        _ => {}
+    }
+    let dropped = {
+        let mut w = state.world.lock().await;
+        w.prune(jiff::Timestamp::now(), keep_run_days * 86_400)
+    };
+    if dropped > 0 {
+        tracing::info!(runs = dropped, "dropped finished runs from the board");
+    }
+    // From the store too, or the next start restores them.
+    match state.store.prune_runs(keep_run_days).await {
+        Ok(n) if n > 0 => tracing::info!(runs = n, "pruned finished runs"),
+        Err(e) => tracing::warn!(error = %e, "pruning runs failed"),
+        _ => {}
     }
 }
 
-/// Whether a process is still alive. Used by reconciliation at startup.
+/// Whether a process is still alive; used by startup reconciliation.
 ///
-/// On Unix, signal 0 tests for existence without touching the process. On every
-/// other platform the honest answer is "we cannot tell", and the caller treats
-/// that as alive rather than declaring a run lost on a guess.
+/// On non-Unix platforms we cannot tell, so the answer is "alive" rather than
+/// declaring a run lost on a guess.
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // **Zero is not a process id, and `kill` does not treat it as one.**
-        // `kill(0, sig)` addresses every process in the *caller's own process
-        // group*, so `process_alive(0)` asked whether this daemon exists and
-        // answered yes — a run that ever recorded a pid of 0 would have been
-        // considered alive for ever. The same is true of negative values,
-        // which address a group; `pid` is unsigned here, so only zero can
-        // reach it. Found by writing the test rather than by anything failing.
+        // Zero is not a pid: `kill(0, …)` addresses the caller's own process
+        // group and would always answer yes.
         if pid == 0 {
             return false;
         }
-        // SAFETY: `kill` with signal 0 performs no action; it only reports
-        // whether the pid exists and is signalable.
-        //
-        // **`EPERM` means the process exists.** `kill(pid, 0)` fails two ways
-        // that mean opposite things: `ESRCH` is *no such process*, `EPERM` is
-        // *it is there and you may not signal it* — owned by another user, or
-        // by root. Comparing the return code to zero conflates them, and reads
-        // everything this daemon does not own as dead.
+        // SAFETY: signal 0 performs no action; it only reports whether the
+        // pid exists. `EPERM` means it exists but is not ours; only `ESRCH`
+        // means gone.
         if unsafe { libc::kill(pid as i32, 0) } == 0 {
             return true;
         }
@@ -551,19 +574,9 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// Which file set the deadline that ended an ask.
-///
-/// Pure, and separated from the sweeper for the same reason [`still_running`]
-/// is: the rule can then be stated and tested without a store, a clock or a
-/// waiting agent.
-///
-/// **A path, not a filename.** The row this feeds says *a clock refused your
-/// question, and here is where that clock is configured* — so `devplane.toml`
-/// alone sends somebody with six projects to look in six places. A project id
-/// **is** the project's path, so the answer is one join away.
-///
-/// Without a project there is no path to give, and the bare filename is then
-/// the honest answer rather than a misleading one.
+/// Which file set the deadline that ended an ask: the project's config path,
+/// so the reader knows where to change it, or the bare filename with no
+/// project.
 pub fn deadline_source(project: Option<&crate::core::ProjectId>) -> String {
     match project {
         Some(p) => std::path::Path::new(p.as_str())
@@ -576,29 +589,13 @@ pub fn deadline_source(project: Option<&crate::core::ProjectId>) -> String {
 
 /// Whether a restored run is still being run by something, at startup.
 ///
-/// Pure, and separated from [`reconcile_at_startup`] so the rule can be stated
-/// and tested rather than inferred from a closure inside an async function that
-/// needs a database and a roster to call.
+/// * named by the vendor's roster: alive; the roster outranks everything;
+/// * driven by Devplane: not alive. Its ACP pipes died with the previous host
+///   and nothing can reattach, so it would otherwise read `working` for ever;
+/// * otherwise: its pid if it reported one, else alive, since an interactive
+///   session reports no pid and its own hooks correct the record.
 ///
-/// Three cases, and the middle one was wrong for months:
-///
-/// * the provider's roster names it — alive, and the roster outranks everything
-///   because it is the provider speaking about its own sessions;
-/// * **Devplane drove it — not alive, whatever the row says.** It was driven
-///   over an ACP connection on the old daemon's stdio, and those pipes died
-///   with the process that held them. No new daemon can re-establish them:
-///   `sessions` is rebuilt empty on every boot by construction. This answered
-///   *alive* until 2026-09-19, on the reasoning that "its own hooks correct the
-///   record the moment it does anything" — but a driven agent does nothing,
-///   because nothing is driving it. A run Devplane started therefore read
-///   **working** for ever after a bounce, and a question it was holding sat
-///   behind a row that looked busy;
-/// * anything else — a pid if it reported one, and otherwise the benefit of the
-///   doubt, because an interactive session reports no pid and its own hooks
-///   really do correct the record.
-///
-/// `roster` is `None` when it could not be read, which is not the same as
-/// empty: conflating them marks every restored run lost at once.
+/// `roster` is `None` when it could not be read, which is not the same as empty.
 pub fn still_running(run: &crate::core::Run, roster: Option<&[String]>) -> bool {
     if roster.is_some_and(|r| r.iter().any(|k| k == run.id.as_str())) {
         return true;
@@ -612,20 +609,13 @@ pub fn still_running(run: &crate::core::Run, roster: Option<&[String]>) -> bool 
     }
 }
 
-/// Reconciles restored runs against the machine at startup.
-///
-/// A run the store believes is live, whose process is gone and which the
-/// provider's roster does not list, is lost. Never assume a run still exists
-/// because the database says so.
+/// Reconciles restored runs against the machine at startup: a run the store
+/// thinks is live, whose process is gone and which the roster does not list,
+/// is lost.
 pub async fn reconcile_at_startup(state: &Shared) {
-    // "We could not ask" and "nothing is running" are different answers, and
-    // conflating them is how every restored run gets marked lost at once. So a
-    // roster that cannot be read is `None` — no evidence — rather than an empty
-    // list, and the pid check below carries the weight on its own.
-    //
-    // Returning early when there is no `claude` on the machine would skip
-    // reconciliation entirely for a protocol-only user, and leave every
-    // restored run reading "working" for ever.
+    // An unreadable roster is `None` (no evidence), not an empty list, or every
+    // restored run is marked lost at once. No `claude` binary is not a reason
+    // to skip reconciliation.
     let roster: Option<Vec<String>> = match crate::observe::locate::claude_binary() {
         None => None,
         Some(bin) => match tokio::process::Command::new(bin)
@@ -647,19 +637,10 @@ pub async fn reconcile_at_startup(state: &Shared) {
         },
     };
 
-    // **Agents a previous daemon abandoned.**
-    //
-    // Read before reconciliation, because reconciliation is about to mark
-    // these runs not-live and this needs their recorded pid and worktree while
-    // the rows still carry them.
-    //
-    // A driven run that this daemon did not start, whose recorded process is
-    // still alive and still leads its own group and still looks like the agent
-    // it was: that process outlived the daemon that spawned it, which only
-    // happens when the daemon was killed rather than stopped. Nothing can
-    // reach it — its stdio was the dead daemon's pipes — so it will never
-    // finish and never be answered, and until this ran nothing on the machine
-    // knew it was there.
+    // Agents a killed host left behind: a driven, still-live run whose process
+    // is alive, leads its group and still looks like its agent. Nothing can
+    // reach it (its stdio was the dead host's pipes). Read before
+    // reconciliation, which clears the pid and worktree this needs.
     {
         let recorded: Vec<(u32, String, Option<String>)> = {
             let w = state.world.lock().await;
@@ -695,30 +676,16 @@ pub async fn reconcile_at_startup(state: &Shared) {
                 .collect();
             tracing::warn!(
                 count = leaked.len(),
-                "agents started by a previous daemon are still running and cannot be reached"
+                "agents started by a previous host are still running and cannot be reached"
             );
             *state.leaked_agents.lock().await = leaked;
         }
     }
 
-    // Questions a driven run was holding when the daemon stopped, captured
-    // **before** reconciliation resolves the run, because resolving it clears
-    // `blocked_on` and the question would then have never existed.
-    //
-    // Each one gets a row naming `nobody`: the agent asked, the person was
-    // never given the chance, and the moment passed.
-    //
-    // **This is the killed-daemon case and only that.** A daemon that is
-    // *stopped* tears its agents down deliberately, and the teardown records
-    // `interrupted` rather than ending the ask — the vendor's session is on
-    // disk, the question is still answerable, and the inbox goes on offering
-    // it. Such a run is not live by the time this runs, so the filter
-    // below never sees it. What reaches here is a run that was still `working`
-    // when the process died, which only happens when nothing got to tear
-    // anything down. That is the authority the
-    // decision log exists to be able to write, and the row it wrote before
-    // 2026-09-19 said `daemon` — Devplane taking responsibility for a question
-    // it had faithfully delivered and nobody had answered.
+    // Questions a driven run held when the host was killed, captured before
+    // reconciliation clears `blocked_on`. Each gets a row with authority
+    // `nobody`. A cleanly stopped host records `interrupted` instead and the
+    // ask stays answerable; such a run is no longer live here.
     let abandoned: Vec<(crate::core::RunId, String)> = {
         let w = state.world.lock().await;
         w.runs()
@@ -741,7 +708,7 @@ pub async fn reconcile_at_startup(state: &Shared) {
                     request_id,
                     "unanswered",
                 )
-                .because("the daemon did not stop cleanly, and the question went with it")
+                .because("the host did not stop cleanly, and the question went with it")
                 .for_run(&run),
             )
             .await;
@@ -766,71 +733,106 @@ pub async fn reconcile_at_startup(state: &Shared) {
         }
         let _ = state.tx.send(crate::core::Frame::Event(Box::new(env)));
     }
+
+    // A change left mid-setup: the install died with the previous host and
+    // the agent never started, so it reads as isolated with no setup report.
+    let mid_setup: Vec<crate::core::Change> = {
+        let mut changes = state.changes.lock().await;
+        changes
+            .values_mut()
+            .filter(|c| matches!(c.waiting, Some(crate::core::Waiting::Setup { .. })))
+            .map(|c| {
+                c.waiting = None;
+                c.updated_at = jiff::Timestamp::now();
+                c.clone()
+            })
+            .collect()
+    };
+    for c in &mid_setup {
+        tracing::info!(change = %c.id.as_str(), "the setup this change was waiting on died with the previous host");
+        crate::change::persist(state, c).await;
+    }
 }
 
-/// Runs the installed gate on a slow timer and remembers whether it answered.
+/// Probes the installed permission gate at startup and on every settings
+/// change, and records whether it answered.
 ///
-/// **A broken gate and a quiet machine are the same thing in the event log** —
-/// no hook arrives either way — so this is the only mechanism that can tell
-/// them apart without a person. `devplane doctor` asks the same question and
-/// only helps whoever runs it; this puts the answer in the inbox.
-///
-/// Slow on purpose. The probe spawns a process, and a gate that broke four
-/// minutes ago is caught soon enough: the failure it is looking for is a
-/// binary that moved or a settings file somebody edited, neither of which
-/// happens between two tool calls. The first check is immediate, because the
-/// interesting moment is a daemon starting on a machine whose gate has been
-/// broken since the last reboot.
+/// A broken gate and a quiet machine look the same in the event log; this
+/// puts the difference in the inbox.
 pub async fn gate_watch(state: Shared) {
-    const EVERY: Duration = Duration::from_secs(240);
+    // No timer: only a `ConfigChange` hook can break it between probes.
+    probe_gate_once(&state).await;
+    let mut rx = state.tx.subscribe();
     loop {
-        let settings = crate::observe::connect::settings_path()
-            .ok()
-            .and_then(|p| crate::observe::connect::read_settings(&p).ok());
-        if let Some(settings) = settings {
-            // The probe spawns a process and reads a file, so it goes on the
-            // blocking pool rather than holding a reactor thread that agent
-            // sessions are also using.
-            let probe =
-                tokio::task::spawn_blocking(move || crate::observe::connect::probe_gate(&settings))
-                    .await;
-            if let Ok(probe) = probe {
-                // Not installed is not the same as broken. Somebody who has
-                // never run `connect` is being told that by every other
-                // surface, and an inbox item saying the gate is down would be
-                // the product complaining that it has not been set up.
-                let down = (probe.command.is_some() && !probe.answered).then(|| {
-                    probe
-                        .error
-                        .unwrap_or_else(|| "it did not refuse a denied read".into())
-                });
-                let mut held = state.gate_down.lock().await;
-                if *held != down {
-                    match &down {
-                        Some(why) => tracing::error!(why, "the permission gate is not answering"),
-                        None => tracing::info!("the permission gate is answering again"),
-                    }
+        match rx.recv().await {
+            Ok(crate::core::Frame::Event(env)) => {
+                if matches!(env.event, Event::ConfigChanged { .. }) {
+                    probe_gate_once(&state).await;
                 }
-                *held = down;
             }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         }
-        tokio::time::sleep(EVERY).await;
+    }
+}
+
+async fn probe_gate_once(state: &Shared) {
+    let settings = crate::observe::connect::settings_path()
+        .ok()
+        .and_then(|p| crate::observe::connect::read_settings(&p).ok());
+    let Some(settings) = settings else {
+        return;
+    };
+    // Spawns a process and reads a file: keep it off the reactor.
+    let probe =
+        tokio::task::spawn_blocking(move || crate::observe::connect::probe_gate(&settings)).await;
+    let Ok(probe) = probe else {
+        return;
+    };
+    // Not installed is not broken; other surfaces already say to `connect`.
+    let down = (probe.command.is_some() && !probe.answered).then(|| {
+        probe
+            .error
+            .unwrap_or_else(|| "it did not refuse a denied read".into())
+    });
+    let mut held = state.gate_down.lock().await;
+    if *held != down {
+        match &down {
+            Some(why) => tracing::error!(why, "the permission gate is not answering"),
+            None => tracing::info!("the permission gate is answering again"),
+        }
+    }
+    *held = down;
+}
+
+/// How often the tree of every open change is read (one `git status` each).
+const TREE_EVERY: Duration = Duration::from_secs(30);
+
+/// Reads the tree of every open change with a worktree, so *verified* follows
+/// the tree rather than the last time an agent stopped.
+///
+/// A run ending or a gate finishing refresh it at once; this catches hand
+/// edits no event announces. It writes only when the stamp changed.
+pub async fn tree_watch(state: Shared) {
+    loop {
+        tokio::time::sleep(TREE_EVERY).await;
+        tree_tick(&state).await;
+    }
+}
+
+/// One pass of [`tree_watch`]: every open change's tree, read now.
+pub async fn tree_tick(state: &Shared) {
+    for id in crate::change::with_worktrees(state).await {
+        crate::change::refresh_tree(state, &id).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    /// **A process you may not signal is still a process.**
-    ///
-    /// `kill(pid, 0)` fails two ways that mean opposite things: `ESRCH` is *no
-    /// such process*, `EPERM` is *it exists and is not yours*. Comparing the
-    /// return code to zero — which is what this function did — reports every
-    /// process owned by another user as dead. pid 1 is the case every Unix has:
-    /// `launchd` or `init`, always running, never signalable by a normal user.
-    ///
-    /// What believed it: reconciliation, which would mark a live run `lost`,
-    /// and the guard that stops a second daemon starting on one home.
+    /// `EPERM` means the process exists but is not ours. pid 1 always exists and
+    /// is never signalable by a normal user.
     #[cfg(unix)]
     #[test]
     fn a_process_we_may_not_signal_is_still_alive() {
@@ -838,20 +840,12 @@ mod tests {
             process_alive(1),
             "pid 1 always exists; EPERM was being read as 'no such process'"
         );
-        // Our own pid is the control: alive and signalable, so this passed
-        // before the fix too and must still pass after it.
+        // Our own pid is the control.
         assert!(process_alive(std::process::id()));
-        // And a pid nothing can plausibly hold is still dead, which is the
-        // property the fix must not trade away.
         assert!(!process_alive(0), "0 addresses a group, never a process");
     }
 
-    /// **The timer row names a file somebody can open.**
-    ///
-    /// This is the authority column's whole promise applied to itself: a clock
-    /// ended your question, and the row has to say *which* clock. It said
-    /// `devplane.toml` for every project on the machine, from a conditional
-    /// whose two branches returned the same string.
+    /// The timer row names the project's own config file.
     #[test]
     fn the_deadline_row_names_the_project_s_own_file() {
         let p = crate::core::ProjectId::from_path(std::path::Path::new("/repos/saas"));
@@ -862,13 +856,11 @@ mod tests {
             "a person with six projects has to be told which one: {named}"
         );
 
-        // Two projects must not produce the same answer, which is the property
-        // the old shape violated for every pair.
+        // Two projects must not produce the same answer.
         let q = crate::core::ProjectId::from_path(std::path::Path::new("/repos/mobile"));
         assert_ne!(deadline_source(Some(&p)), deadline_source(Some(&q)));
 
-        // With no project there is no path to give, and the bare filename is
-        // then honest rather than misleading.
+        // No project: the bare filename.
         assert_eq!(deadline_source(None), "devplane.toml");
     }
 
@@ -886,27 +878,21 @@ mod tests {
         r
     }
 
-    /// **The measured bug.** A run Devplane drove came back from a restart
-    /// reading `working` for ever: nothing was driving it, nothing ever would
-    /// be, and no hook was going to correct the record because a driven agent
-    /// with no connection does nothing at all.
+    /// A driven run never survives a restart: nothing drives it and no hook will
+    /// correct its record.
     #[test]
     fn a_driven_run_is_never_still_running_after_a_restart() {
         assert!(
             !still_running(&run(RunMode::Driven), None),
-            "its ACP pipes died with the daemon that held them"
+            "its ACP pipes died with the host that held them"
         );
-        // Not even with an empty roster, and not even if it reported a pid:
-        // the process being alive is a fact about a process nobody is talking
-        // to. Answering `alive` here is what left the run reading `working`.
+        // Not even with an empty roster or a live pid.
         let mut with_pid = run(RunMode::Driven);
         with_pid.pid = Some(std::process::id());
         assert!(!still_running(&with_pid, Some(&[])));
     }
 
-    /// The one thing that outranks it: the provider saying the session is its
-    /// own and is live. That is the provider speaking about its own roster,
-    /// which beats anything inferred here.
+    /// The vendor's roster naming the session outranks the rule.
     #[test]
     fn the_providers_roster_outranks_the_rule() {
         assert!(still_running(
@@ -915,22 +901,19 @@ mod tests {
         ));
     }
 
-    /// An observed session is given the benefit of the doubt, and this is the
-    /// half that must not change: a closed editor tab reports no pid, its own
-    /// hooks correct the record the moment it does anything, and calling it
-    /// lost on a bounce fills the inbox with ghosts.
+    /// An observed session without a pid gets the benefit of the doubt: its own
+    /// hooks correct the record, and calling it lost would fill the inbox with ghosts.
     #[test]
     fn an_observed_run_without_a_pid_is_given_the_benefit_of_the_doubt() {
         assert!(still_running(&run(RunMode::Observed), None));
         assert!(still_running(&run(RunMode::Observed), Some(&[])));
     }
 
-    /// And one that reported a pid is checked against the machine.
+    /// An observed run that reported a pid is checked against the machine.
     #[test]
     fn an_observed_run_with_a_dead_pid_is_not_still_running() {
         let mut r = run(RunMode::Observed);
-        // Zero is not a process id: `kill(0, …)` addresses the caller's own
-        // process group, so this used to answer "alive".
+        // Zero is not a process id.
         r.pid = Some(0);
         assert!(!still_running(&r, Some(&[])));
         r.pid = Some(std::process::id());

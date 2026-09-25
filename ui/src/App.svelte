@@ -1,211 +1,325 @@
 <script lang="ts">
-  // The shell. **It knows the registry and not the surfaces** — no import here
-  // names one, which is the property the rebuild exists for: the page it
-  // replaces was one 2,700-line file and every feature landed in the middle of
-  // it.
+  // The workbench frame. It knows the registry, never a surface by name.
   //
-  // Its whole job is the frame: which surface is showing, whether the daemon is
-  // answering, and the theme. Everything else belongs to a surface.
-  import { surfaces, listed, landing, BANDS, BAND_LABELS } from "./lib/surfaces";
+  // The address is the source of truth: `#<surface>` or `#<surface>/<focus>`.
+  // Tabs are a memory laid over it. Deep links arrive as a query (`?surface=`,
+  // `?change=`, `?ask=`, `?run=`), read once and folded into the hash.
+  import { surfaces, listed, landing, type Feed } from "./lib/surfaces";
   import { loadSurfaces } from "./lib/load";
   import { live } from "./lib/live.svelte";
   import { theme } from "./lib/theme.svelte";
+  import { claimToken } from "./lib/api";
+  import { dispatch, help, onAction, run } from "./lib/keys";
+  import { go } from "./lib/route";
+  import Stale from "./lib/Stale.svelte";
+  import Split from "./lib/ui/Split.svelte";
+  import Icon from "./lib/ui/Icon.svelte";
+  import TitleBar from "./shell/TitleBar.svelte";
+  import ActivityBar from "./shell/ActivityBar.svelte";
+  import EditorTabs from "./shell/EditorTabs.svelte";
+  import StatusBar from "./shell/StatusBar.svelte";
+  import Panel from "./shell/Panel.svelte";
+  import { tabs, show, close, pin, hashOf, type Tab } from "./shell/tabs.svelte";
+  import "./shell/keys";
 
   loadSurfaces();
 
-  const { state: feed, start } = live();
+  let current = $state(landing()?.id ?? "");
+  let focus = $state("");
+  let notice = $state("");
+  let helpOpen = $state(false);
+  const showing = $derived(surfaces().find((s) => s.id === current));
+
+  /// Whether a person is looking at the surface that marks a look.
+  const looking = () => showing?.marksLook === true && document.visibilityState === "visible";
+  const { state: feed, start, look } = live(looking);
   $effect(start);
+  $effect(() => {
+    if (showing?.marksLook) look();
+  });
 
   const { state: themeState, restore, cycle } = theme();
   $effect(restore);
 
-  let current = $state(landing()?.id ?? "");
-  /// What the current surface was opened *about*. Opaque here, on purpose.
-  let focus = $state("");
-  const showing = $derived(surfaces().find((s) => s.id === current));
+  // ── the regions a person arranges, remembered per browser ────────────────
+  function flag(key: string, dflt: boolean): boolean {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? dflt : v === "1";
+    } catch {
+      return dflt;
+    }
+  }
+  function keepFlag(key: string, v: boolean) {
+    try {
+      localStorage.setItem(key, v ? "1" : "0");
+    } catch {
+      /* lasts the tab */
+    }
+  }
+  let sideOpen = $state(flag("vp-side", true));
+  let panelOpen = $state(flag("vp-panel", false));
+  $effect(() => keepFlag("vp-side", sideOpen));
+  $effect(() => keepFlag("vp-panel", panelOpen));
 
-  // **The address bar is the record of where you are.** Without it, reloading a
-  // page somebody has open on the work view drops them back on the board, and a
-  // link to a surface cannot be sent to anybody — including to yourself, on the
-  // phone. The hash rather than a path because this is one static document
-  // served from a binary, with no server-side router to teach about routes.
-  /// `#<surface>` or `#<surface>/<focus>`.
-  ///
-  /// The focus is everything after the first slash, undecoded beyond the URL's
-  /// own encoding — ids here contain no slash, and a surface that wants one
-  /// can encode it.
+  // ── the address ───────────────────────────────────────────────────────────
   function read() {
     const raw = location.hash.slice(1);
     const cut = raw.indexOf("/");
     const id = cut === -1 ? raw : raw.slice(0, cut);
-    if (!surfaces().some((s) => s.id === id)) return;
+    if (!surfaces().some((s) => s.id === id)) {
+      if (!raw) {
+        const home = landing()?.id;
+        if (home) go(`#${home}`);
+      }
+      return;
+    }
     current = id;
     focus = cut === -1 ? "" : decodeURIComponent(raw.slice(cut + 1));
+    helpOpen = false;
+    const s = surfaces().find((x) => x.id === id);
+    // The palette and the answer window never become tabs.
+    if (s && !s.transient && !s.bare) show(id, focus);
+  }
+
+  function readQuery() {
+    claimToken();
+    const url = new URL(location.href);
+    const q = url.searchParams;
+    if ([...q.keys()].length === 0) return;
+    let id = "";
+    let f = "";
+    const want = q.get("surface");
+    if (want && surfaces().some((s) => s.id === want)) id = want;
+    for (const s of surfaces()) {
+      const v = s.link ? q.get(s.link) : null;
+      if (s.link && v) {
+        id = s.id;
+        f = s.linkFocus ? s.linkFocus(v) : v;
+      }
+    }
+    const link = q.get("link");
+    if (link) {
+      notice = `${link} names nothing this app opens; links are change, review, ask, run, inbox`;
+      id = landing()?.id ?? "";
+      f = "";
+    }
+    const hash = id ? `#${id}${f ? `/${encodeURIComponent(f)}` : ""}` : url.hash;
+    history.replaceState({}, "", `${url.pathname}${hash}`);
   }
 
   $effect(() => {
+    readQuery();
     read();
     addEventListener("hashchange", read);
     return () => removeEventListener("hashchange", read);
   });
 
-  function go(id: string) {
-    current = id;
-    focus = "";
-    // `replaceState` rather than assigning `location.hash`: assigning pushes a
-    // history entry per click, so Back walks through every surface somebody
-    // glanced at instead of leaving the page.
-    history.replaceState({}, "", `#${id}`);
+  /// A surface picked from the activity bar: its most recent tab, or itself.
+  function pick(id: string) {
+    const last = [...tabs.list].reverse().find((t) => t.surface === id);
+    if (id === current && sideOpen && surfaces().find((s) => s.id === id)?.side) {
+      sideOpen = false;
+      return;
+    }
+    sideOpen = true;
+    go(last ? hashOf(last) : `#${id}`);
+  }
+  function pickTab(i: number) {
+    const t = tabs.list[i];
+    if (t) go(hashOf(t));
+  }
+  function closeTab(i: number) {
+    const next = close(i);
+    go(next ? hashOf(next) : `#${landing()?.id ?? ""}`);
   }
 
-  /// Keeps the current tab on screen.
-  ///
-  /// **The nav scrolls sideways on a phone**, and the surface you are on is
-  /// routinely past the right edge — so the one thing the nav exists to tell
-  /// you, *where am I*, is the one thing it cannot. Arriving by link or by
-  /// reload lands you there with no way to know it short of scrolling.
-  ///
-  /// `nearest` rather than `center`: it moves only when the tab is actually
-  /// out of view, so switching between two adjacent tabs does not slide the
-  /// whole nav under the pointer.
-  function keepInView(node: HTMLElement, isCurrent: boolean) {
-    const show = (on: boolean) => {
-      if (!on) return;
-      node.scrollIntoView({ block: "nearest", inline: "nearest" });
+  // ── keys ─────────────────────────────────────────────────────────────────
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      dispatch(current, e);
     };
-    show(isCurrent);
-    return { update: show };
-  }
+    addEventListener("keydown", onKey);
+    const offs = [
+      onAction("help", () => {
+        helpOpen = !helpOpen;
+        return true;
+      }),
+      onAction("toggle-side", () => {
+        sideOpen = !sideOpen;
+        return true;
+      }),
+      onAction("toggle-panel", () => {
+        panelOpen = !panelOpen;
+        return true;
+      }),
+      onAction("close-tab", () => {
+        if (tabs.active !== -1) closeTab(tabs.active);
+        return true;
+      }),
+      onAction("next-tab", () => {
+        if (tabs.list.length) pickTab((tabs.active + 1) % tabs.list.length);
+        return true;
+      }),
+      onAction("prev-tab", () => {
+        if (tabs.list.length) pickTab((tabs.active - 1 + tabs.list.length) % tabs.list.length);
+        return true;
+      }),
+      onAction("leave", () => {
+        if (helpOpen) {
+          helpOpen = false;
+          return true;
+        }
+        if (notice) {
+          notice = "";
+          return true;
+        }
+        return false;
+      }),
+    ];
+    return () => {
+      removeEventListener("keydown", onKey);
+      offs.forEach((off) => off());
+    };
+  });
 
-  /// The nav: the listed surfaces, grouped into bands, each with its count.
-  ///
-  /// **Each band carries its label into the markup**, which it did not: a `<ul>`
-  /// with a one-pixel gap, no heading and no accessible name, while the errand
-  /// was pushed into every item's title instead.
-  ///
-  /// **And the count says what is in each place.** The nav advertised capability
-  /// and said nothing about content, so on a machine with six projects and no
-  /// Work two entries were empty with no way to know without visiting each.
-  const banded = $derived(
-    BANDS.map((band) => ({
-      band,
-      label: BAND_LABELS[band],
-      items: listed()
-        .filter((s) => s.band === band)
-        .map((s) => ({ ...s, n: s.count?.(feed) ?? null })),
-    })).filter((g) => g.items.length > 0),
+  // ── what the frame shows ─────────────────────────────────────────────────
+  const tabTitle = (t: Tab) => {
+    const s = surfaces().find((x) => x.id === t.surface);
+    if (!s) return t.surface;
+    return (t.focus && s.tab?.(feed as Feed, t.focus)) || (t.focus ? `${s.title}: ${t.focus}` : s.title);
+  };
+  const tabIcon = (t: Tab) => surfaces().find((x) => x.id === t.surface)?.icon;
+  const crumbs = $derived(
+    showing ? (focus && tabs.list[tabs.active] ? [showing.title, tabTitle(tabs.list[tabs.active])] : [showing.title]) : [],
   );
-
-  /// Finding something is not a place you go.
-  ///
-  /// It was a nav entry, so looking something up meant leaving whatever you were
-  /// doing — the shape every comparable tool abandoned. The field lives here;
-  /// the results still need somewhere to render, so that surface stayed routable
-  /// and left the nav.
-  ///
-  /// The surface is found by the capability it declares, because the shell may
-  /// not name one.
-  let query = $state("");
-  const searcher = $derived(surfaces().find((s) => s.takesQuery));
-  function find(e: Event) {
-    e.preventDefault();
-    const q = query.trim();
-    const to = searcher;
-    if (!q || !to) return;
-    current = to.id;
-    focus = q;
-    history.replaceState({}, "", `#${to.id}/${encodeURIComponent(q)}`);
-  }
-
-  const themeLabel = $derived(
-    themeState.choice === "system" ? "following your system" : `${themeState.choice} theme`,
+  const pulse = $derived(
+    feed.unauthorised ? "no token" : feed.error ? "not answering" : feed.loaded ? "live" : "connecting",
   );
+  const projects = $derived((feed.board as { summary?: { projects?: number } } | null)?.summary?.projects ?? null);
+  /// Each surface's own status-bar line, so the bar names none of them.
+  const status = $derived(
+    surfaces().flatMap((s) => (s.status?.(feed as Feed) ?? []).map((i) => ({ ...i, surface: s.id, title: s.title }))),
+  );
+  /// The surface a run opens on, for the activity panel's rows.
+  const runsAt = $derived(surfaces().find((s) => s.holds === "run")?.id ?? "");
+  const keys = $derived(help(current));
+  /// Under a transient surface, the page is the active tab's.
+  const under = $derived.by(() => {
+    if (!showing?.transient) return { s: showing, f: focus };
+    const t = tabs.list[tabs.active];
+    return { s: (t ? surfaces().find((x) => x.id === t.surface) : undefined) ?? landing(), f: t?.focus ?? "" };
+  });
+  const page = $derived(under.s);
+  const Side = $derived(page?.side);
+  const props = $derived(page ? page.select(feed as Feed, under.f) : {});
+  const overlayProps = $derived(showing?.transient ? showing.select(feed as Feed, focus) : {});
+  function openFocus(f: string, pinIt = false) {
+    if (!page) return;
+    go(`#${page.id}${f ? `/${encodeURIComponent(f)}` : ""}`);
+    if (pinIt) pin();
+  }
 </script>
 
-<a class="skip" href="#surface">Skip to content</a>
-
-<div class="app">
-  <aside>
-    <div class="mark">
-      <b>Devplane</b>
-      <!-- What this page is, for somebody who does not know. The verb matters:
-           without it the fragment reads as a riddle, and `Devplane` above makes
-           it a sentence — the same one the CLI's `about` and the site say. -->
-      <span class="what">records who decided, when nobody asked you</span>
-    </div>
-
-    <!-- Always available, and it is a control rather than a shortcut: this
-         interface has no keyboard model to hang a palette on. -->
-    {#if searcher}
-      <form class="find" onsubmit={find} role="search">
-        <input
-          type="search"
-          bind:value={query}
-          placeholder="find a command or error"
-          aria-label="search every session"
-        />
-      </form>
-    {/if}
-
-    <nav aria-label="surfaces">
-      {#each banded as g (g.band)}
-        <!-- The heading names the errand, the list names the things — the CLI's
-             own shape, held to it by a guard that reads `COMMAND_GROUPS`. -->
-        <h2 id="band-{g.band}">{g.label}</h2>
-        <ul role="list" aria-labelledby="band-{g.band}">
-          {#each g.items as s (s.id)}
-            <li>
-              <button
-                class="tab"
-                use:keepInView={s.id === current}
-                onclick={() => go(s.id)}
-                aria-current={s.id === current ? "page" : undefined}
-                >{s.title}{#if s.n !== null}<span class="n" class:zero={s.n === 0}>{s.n}</span
-                  >{/if}</button
-              >
-            </li>
-          {/each}
-        </ul>
-      {/each}
-    </nav>
-
-    <div class="foot">
-      <!-- **The connection, said out loud.** A board that has silently stopped
-           refreshing looks like a quiet machine, which is the worst way for
-           this page to be wrong: it is wrong in the reassuring direction. -->
-      <span class="pulse" class:bad={!!feed.error || feed.unauthorised} role="status">
-        <span class="dot" aria-hidden="true"></span>
-        {feed.unauthorised ? "no token" : feed.error ? "not answering" : "live"}
-      </span>
-      <button class="theme" onclick={cycle} title="Theme: {themeLabel}" aria-label="Theme: {themeLabel}">
-        {themeState.choice === "system" ? "auto" : themeState.choice}
-      </button>
-    </div>
-  </aside>
-
-  <main id="surface">
-    {#if feed.unauthorised}
-      <p class="problem" role="alert">
-        This tab has no token. Run <code>devplane open</code> again to get a fresh link.
-      </p>
-    {:else if feed.error}
-      <p class="problem" role="status">Devplane could not be reached: {feed.error}</p>
-    {/if}
-
-    {#if showing}
-      <!-- The surface renders itself; the shell passes nothing it knows about. -->
-      {@const Surface = showing.component}
-      <Surface {...showing.select(feed, focus)} />
-    {:else}
-      <p>No surface is registered.</p>
-    {/if}
+{#if showing?.bare}
+  <main id="surface" class="bare">
+    {#if feed.unauthorised}<p class="problem" role="alert">{feed.error}</p>{/if}
+    <showing.component {...props} />
   </main>
-</div>
+{:else}
+  <a class="skip" href="#surface">Skip to content</a>
+  <div class="wb">
+    <TitleBar
+      {crumbs}
+      {sideOpen}
+      {panelOpen}
+      find={() => run("open-palette", current)}
+      create={() => run("new-change", current)}
+      toggleSide={() => (sideOpen = !sideOpen)}
+      togglePanel={() => (panelOpen = !panelOpen)}
+    />
+    <div class="mid">
+      <ActivityBar items={listed()} feed={feed as Feed} {current} {pick} />
+      <Split id="side" size={300} min={200} max={560} collapsed={!sideOpen || !Side}>
+        {#snippet pane()}
+          <aside class="side" aria-label="{showing?.title ?? ''} list">
+            {#if Side}<Side {...props} {focus} open={openFocus} />{/if}
+          </aside>
+        {/snippet}
+        <Split id="panel" axis="y" side="end" size={220} min={120} max={560} collapsed={!panelOpen}>
+          {#snippet pane()}
+            <Panel board={feed.board as never} open={runsAt ? (id) => go(`#${runsAt}/${encodeURIComponent(id)}`) : null} />
+          {/snippet}
+          {#if tabs.list.length > 0}
+            <EditorTabs
+              list={tabs.list}
+              active={tabs.active}
+              title={tabTitle}
+              icon={tabIcon}
+              pick={pickTab}
+              close={closeTab}
+              pin={(i) => {
+                pickTab(i);
+                pin();
+              }}
+            />
+          {/if}
+          <main id="surface" class="editor" tabindex="-1" aria-label={page?.heading}>
+            {#if feed.unauthorised}
+              <p class="problem" role="alert">{feed.error}</p>
+            {:else if feed.error}
+              <Stale error={feed.error} stale_since={feed.stale_since} />
+            {/if}
+            {#if notice}<p class="notice" role="status">{notice}</p>{/if}
+            {#if page}
+              <page.component {...props} focus={under.f} open={openFocus} />
+            {:else}
+              <p>No surface is registered.</p>
+            {/if}
+          </main>
+        </Split>
+      </Split>
+    </div>
+    <StatusBar
+      items={status}
+      {projects}
+      {pulse}
+      bad={!!feed.error || feed.unauthorised}
+      theme={themeState.choice === "system" ? "auto" : themeState.choice}
+      cycleTheme={cycle}
+      help={() => (helpOpen = !helpOpen)}
+      go={(h) => go(h)}
+    />
+  </div>
+
+  {#if showing?.transient}
+    <div class="scrim" role="presentation" onclick={() => run("leave", current)}></div>
+    <div class="overlay" role="dialog" aria-label={showing.title}>
+      <showing.component {...overlayProps} />
+    </div>
+  {/if}
+
+  {#if helpOpen}
+    <!-- Generated from the bindings: every row is a binding with its label. -->
+    <div class="scrim" role="presentation" onclick={() => (helpOpen = false)}></div>
+    <div class="help" role="dialog" aria-label="keys bound here">
+      <header><Icon name="keyboard" size={16} /> <h2>Keys bound here</h2></header>
+      <dl>
+        {#each keys as k (k.surface + k.combo)}
+          <dt><kbd>{k.combo}</kbd></dt>
+          <dd>{k.label}{#if k.surface === "global"}<span class="dim"> · everywhere</span>{/if}</dd>
+        {/each}
+      </dl>
+    </div>
+  {/if}
+{/if}
 
 <style>
-  /* **First in the tab order and invisible until focused.** With no keyboard
-     shortcuts, tabbing is the entire keyboard story here, and without this
-     every visit starts by tabbing through the whole nav. */
+  :global(html),
+  :global(body) {
+    height: 100%;
+    overflow: hidden;
+  }
   .skip {
     position: absolute;
     left: -9999px;
@@ -214,181 +328,120 @@
     background: var(--panel);
     border: 1px solid var(--edge);
     border-radius: var(--radius);
-    z-index: 3;
+    z-index: 30;
   }
-  .skip:focus { left: var(--s-4); }
-
-  /* **A sidebar, not a strip of tabs.** The surfaces under four errand headings
-     do not fit across the top without becoming a menu bar you read left to
-     right. Down the side they are a list you scan. The errand is the heading,
-     read once; each item is the noun it shows. */
-  .app {
-    display: grid;
-    grid-template-columns: 15rem 1fr;
-    /* **Rows are named, not implied.** Two implicit rows under a `min-height`
-       share the viewport between them, which on a phone gave the nav strip a
-       third of the screen and the surface the rest. */
-    grid-template-rows: 1fr;
-    min-height: 100vh;
+  .skip:focus {
+    left: var(--s-4);
   }
-
-  aside {
+  .wb {
     display: flex;
     flex-direction: column;
-    gap: var(--s-5);
-    padding: var(--s-4);
-    border-right: 1px solid var(--line);
-    position: sticky;
-    top: 0;
     height: 100vh;
-    overflow-y: auto;
   }
-
-  .mark { display: flex; flex-direction: column; gap: 2px; }
-  .mark b { font-size: var(--t-md); letter-spacing: -0.02em; }
-  .what { color: var(--dim); font-size: var(--t-xs); line-height: 1.35; }
-
-  .find { display: flex; }
-  .find input { width: 100%; min-width: 0; font-size: var(--t-sm); }
-
-  nav { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
-  nav ul { list-style: none; display: flex; flex-direction: column; gap: 1px; }
-
-  /* **Quiet, and above the group it names.** It has to be readable and it must
-     not compete with the items — a band heading somebody reads before every
-     item is a heading that has become part of each label again. */
-  nav h2 {
-    font-size: var(--t-xs);
-    font-weight: 600;
-    color: var(--dim);
-    letter-spacing: 0.01em;
-    line-height: 1.3;
-    margin: 0 0 var(--s-2) var(--s-3);
-  }
-
-  /* The current surface is marked by weight, a ground and a bar — so it
-     survives being read in greyscale, which colour alone would not. */
-  .tab {
-    width: 100%;
-    justify-content: flex-start;
-    text-align: left;
-    border: 0;
-    border-left: 2px solid transparent;
-    border-radius: var(--radius);
-    background: none;
-    padding: var(--s-2) var(--s-3);
-    color: var(--dim);
-    line-height: 1.3;
-  }
-  /* **The count, so an empty place looks empty before you go there.** A zero is
-     shown rather than hidden: *nothing here yet* is the fact, and an absent
-     number reads as one nobody measured. */
-  .tab .n {
-    margin-left: auto;
-    color: var(--dim);
-    font-size: var(--t-xs);
-    font-variant-numeric: tabular-nums;
-  }
-  .tab .n.zero { opacity: 0.55; }
-  .tab:hover:not([aria-current]) { color: var(--ink); background: var(--panel); }
-  .tab[aria-current="page"] {
-    color: var(--ink);
-    font-weight: 600;
-    background: var(--panel);
-    border-left-color: var(--accent);
-  }
-
-  .foot {
-    margin-top: auto;
+  .mid {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--s-2);
+    flex: 1;
+    min-height: 0;
   }
-  .pulse { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--dim); font-size: var(--t-xs); }
-  .pulse .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--done); }
-  /* **The word changes, not only the dot.** Colour may never be the only thing
-     carrying a distinction — this one matters most to the people least able to
-     see it. */
-  .pulse.bad { color: var(--fail); }
-  .pulse.bad .dot { background: var(--fail); }
-  .theme { font-size: var(--t-xs); padding: 1px var(--s-2); }
-
-  main { padding: var(--s-6) var(--s-6) var(--s-7); max-width: 72rem; min-width: 0; }
-
+  .side {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    background: var(--side);
+    overflow: hidden;
+  }
+  /* A surface reflows to its pane's width, never the viewport's. */
+  .editor {
+    container-type: inline-size;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    background: var(--bg);
+    outline: none;
+  }
+  main.bare {
+    padding: var(--s-2);
+  }
+  .problem,
+  .notice {
+    margin: var(--s-3) var(--s-5) 0;
+    padding: var(--s-2) var(--s-3);
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    font-size: var(--t-sm);
+  }
   .problem {
     color: var(--fail);
-    border: 1px solid currentColor;
-    border-radius: var(--radius);
-    padding: var(--s-3) var(--s-4);
-    margin-bottom: var(--s-4);
   }
-
-  /* **The phone is a different errand, not a narrower desktop.** Read the
-     queue, answer one thing, close it — so the sidebar becomes a scrolling
-     strip at the top and gives up its subtitle, which is a first-run aid and
-     not worth a fifth of a phone screen. */
-  @media (max-width: 52rem) {
-    .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-    aside {
-      position: static;
-      height: auto;
-      flex-direction: row;
-      align-items: center;
-      gap: var(--s-3);
-      border-right: 0;
-      border-bottom: 1px solid var(--line);
-      padding: var(--s-3) var(--s-4);
-      overflow-x: auto;
-    }
-    .what { display: none; }
-    .mark { flex: none; }
-    /* **After the nav, and narrow.** At the head of the strip it took a fifth of
-       a phone's width and pushed the nav off — the first screenshot showed
-       `Inbox` and half of `Decisions`. The queue is the phone's errand, so it
-       comes first; the field is still reachable by scrolling, which is where a
-       desktop-shaped affordance belongs on a 500-pixel screen. */
-    .find { flex: none; width: 6rem; order: 3; }
-    nav { order: 2; }
-    .foot { order: 4; }
-    /* The nav is the only thing that scrolls sideways; the mark and the
-       status sit outside it, or a scrolled tab slides under them. */
-    nav { flex-direction: row; gap: var(--s-2); min-width: 0; overflow-x: auto; scrollbar-width: none; }
-    nav::-webkit-scrollbar { display: none; }
-    nav ul { flex-direction: row; gap: var(--s-1); }
-    /* **Off-screen here, and still in the accessibility tree.** Four errand
-       sentences sideways would be most of a phone's width. Short nouns scan in
-       a row without them, and the lists keep their names. */
-    nav h2 {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      margin: 0;
-      padding: 0;
-      overflow: hidden;
-      clip-path: inset(50%);
-      white-space: nowrap;
-    }
-    .tab { white-space: nowrap; border-left: 0; border-bottom: 2px solid transparent; border-radius: 0; }
-    .tab[aria-current="page"] { border-left-color: transparent; border-bottom-color: var(--accent); }
-    .tab .n { margin-left: var(--s-2); }
-    /* **A ground of its own.** The nav scrolls sideways underneath it, and
-       without a background a scrolled tab reads as text printed through the
-       status. */
-    .foot {
-      margin-top: 0;
-      flex: none;
-      background: var(--bg);
-      padding-left: var(--s-3);
-      box-shadow: -8px 0 8px -4px var(--bg);
-    }
-    main { padding: var(--s-4); }
+  .notice {
+    color: var(--dim);
   }
-
-  /* **No state is carried by motion**, so removing it costs nothing. This is
-     the contract rather than a preference: every interaction completes with
-     animation disabled, because nothing here animates to communicate. */
-  @media (prefers-reduced-motion: reduce) {
-    :global(*) { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .scrim {
+    position: fixed;
+    inset: 0;
+    background: rgb(0 0 0 / 0.35);
+    z-index: 20;
+  }
+  .overlay {
+    position: fixed;
+    top: 9vh;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(44rem, calc(100vw - 2rem));
+    max-height: 72vh;
+    overflow: auto;
+    z-index: 21;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 24px 64px rgb(0 0 0 / 0.45);
+  }
+  .help {
+    position: fixed;
+    top: 12vh;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(40rem, calc(100vw - 2rem));
+    max-height: 70vh;
+    overflow: auto;
+    z-index: 21;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 18px 48px rgb(0 0 0 / 0.35);
+    padding: var(--s-4) var(--s-5);
+  }
+  .help header {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    margin-bottom: var(--s-3);
+  }
+  .help h2 {
+    font-size: var(--t-md);
+    margin: 0;
+  }
+  .help dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--s-2) var(--s-4);
+    margin: 0;
+    font-size: var(--t-sm);
+  }
+  .help dd {
+    margin: 0;
+  }
+  .dim {
+    color: var(--faint);
+  }
+  kbd {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    padding: 0 0.35rem;
+    background: var(--bg);
   }
 </style>

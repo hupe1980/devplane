@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 # Renders site/static/og.png from scripts/og-card.html.
-#
-# The card carries the product's name, so a rename invalidates it and nothing
-# notices — it said "Vibeplane" through the rename because it was a hand-made
-# PNG that no check could read. Regenerating is one command now.
+# Needs Chrome. 1200×630, Open Graph's size.
 #
 #   bash scripts/make-og.sh
-#
-# Needs Chrome. The size is Open Graph's: 1200×630.
 set -eu
 cd "$(dirname "$0")/.."
 

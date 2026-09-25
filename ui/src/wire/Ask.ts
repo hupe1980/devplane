@@ -8,19 +8,14 @@ import type { ProjectId } from "./ProjectId";
 import type { RunId } from "./RunId";
 
 /**
- * One thing an agent asked a person, and everything that became of it.
- *
- * **The id is an opaque token and that is deliberate.** It is what a person
- * answers by, from any surface, at any later time — Restate calls the same
- * thing an awakeable, Temporal a signal id, Inngest a match. Addressing an
- * answer by *session* was what made an answer undeliverable the moment the
- * session was gone.
+ * One thing an agent asked a person, and everything that became of it. The id
+ * is an opaque token a person answers by from any surface at any later time —
+ * never the session, which may be gone.
  */
 export type Ask = { id: AskId, kind: AskKind, run: RunId, project: ProjectId | null, 
 /**
- * The protocol's own id for the in-flight request. Only meaningful while
- * the connection that carried it is alive, which is exactly why it is not
- * the key.
+ * The protocol's in-flight request id; only meaningful while its connection
+ * lives, which is why it is not the key.
  */
 request_id: string, 
 /**
@@ -28,12 +23,8 @@ request_id: string,
  */
 message: string, 
 /**
- * The options and form, untouched. Rendered, never summarised.
- *
- * Typed as `unknown` on the wire rather than given a shape here: it
- * carries whatever the agent asked, in the agent's own schema, and
- * inventing a TypeScript type for it would be this product claiming to
- * know the shape of somebody else's question.
+ * The options and form, untouched. `unknown` on the wire: it is the agent's
+ * own schema, not ours to type.
  */
 payload: unknown, asked_at: string, deadline: AskDeadline, 
 /**
@@ -41,10 +32,6 @@ payload: unknown, asked_at: string, deadline: AskDeadline,
  */
 answer?: unknown | null, answered_at?: string | null, 
 /**
- * Which surface it came from — `cli`, `board`, `mcp`.
- *
- * *Who answered this?* has to be answerable without opening a transcript,
- * and an answer is the one record in this product whose authority is
- * **known** rather than inferred.
+ * Which surface answered — `cli`, `board`, `mcp`.
  */
 answered_from?: string | null, delivery?: AskDelivery | null, ended?: AskEnded | null, ended_at?: string | null, };

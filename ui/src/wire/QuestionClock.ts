@@ -7,9 +7,6 @@ import type { ClockSource } from "./ClockSource";
  */
 export type QuestionClock = { after: After, source: ClockSource, 
 /**
- * **Where to go and change it** — a settings path for the two files, the
- * variable's name for the environment. One meaning, two shapes, which is
- * what a person actually needs; it was `file`, and a field called `file`
- * holding a variable name is a field with two meanings.
+ * Where to change it: a settings path, or the variable's name.
  */
 where_set: string, };

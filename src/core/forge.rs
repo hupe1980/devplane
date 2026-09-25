@@ -1,15 +1,7 @@
 //! What the forge says about a project: its open issues and pull requests.
-//!
-//! A control plane for *all* of somebody's projects has to show the things
-//! waiting on them, and half of those are not sessions — they are the issues
-//! and pull requests on GitHub, per repository, that a person otherwise finds
-//! by opening eight browser tabs. So GitHub is an observed source beside the
-//! roster: polled, kept in memory, rebuilt on restart, never written to from
-//! here. Nothing in this module can post a comment, apply a label or merge.
-//!
-//! The types are the forge's facts reduced to what a board needs. The
-//! `gh`-shaped structs and the process that runs `gh` live in `crate::github`,
-//! on the other side of the purity line; this side only derives.
+//! GitHub is an observed source, polled and kept in memory, never written to:
+//! nothing here can comment, label or merge. The process that runs `gh` lives
+//! in `crate::github`; this side only derives.
 
 use crate::core::attention::{Action, AttentionItem, AttentionKind, Snoozed};
 use crate::core::ids::{AttentionId, ProjectId};
@@ -38,8 +30,7 @@ pub struct ForgePullRequest {
     pub number: u64,
     pub title: String,
     pub url: String,
-    /// The one word a person has to act on — `failing`, `ready_to_merge`,
-    /// `changes_requested`, … — the same vocabulary the Work items use.
+    /// `failing`, `ready_to_merge`, `changes_requested`, …: the Change vocabulary.
     pub status: String,
     #[serde(default)]
     pub draft: bool,
@@ -56,19 +47,11 @@ pub struct ForgePullRequest {
 }
 
 impl ForgePullRequest {
-    /// The one thing this pull request asks of the person, if it asks
-    /// anything.
-    ///
-    /// The heading's count and the inbox's rows are the same question, so they
-    /// are the same function: [`needs_me`] is this, and [`items_for_forge`]
-    /// renders whatever kind comes back. A heading that counts one thing while
-    /// the inbox lists another is a board that lies.
-    ///
-    /// **A draft is the author saying the work is not finished**, and that
-    /// governs what the author is asked about: red checks and a waiting
-    /// approval are both statements about finished work. What still reaches
-    /// them is what a *person* asked for — a review requested of them, or
-    /// changes requested on their own.
+    /// The one thing this pull request asks of the person, if any. Both the
+    /// heading's count ([`needs_me`]) and the inbox rows ([`items_for_forge`])
+    /// use this, so they cannot disagree. On a draft only what a person asked
+    /// for reaches its author (a requested review, requested changes), not red
+    /// checks or a waiting approval.
     ///
     /// [`needs_me`]: Self::needs_me
     pub fn asks_of_me(&self) -> Option<AttentionKind> {
@@ -86,8 +69,7 @@ impl ForgePullRequest {
         }
     }
 
-    /// Whether this pull request is waiting on the person rather than on
-    /// somebody else or on a machine.
+    /// Whether this pull request is waiting on the person.
     pub fn needs_me(&self) -> bool {
         self.asks_of_me().is_some()
     }
@@ -97,8 +79,7 @@ impl ForgePullRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectForge {
     pub project_id: ProjectId,
-    /// The `owner/name` slug, when the remote is a recognisable forge URL. It
-    /// is what a launch link needs.
+    /// The `owner/name` slug a launch link needs.
     #[serde(default)]
     pub repo: Option<String>,
     pub fetched_at: Timestamp,
@@ -106,9 +87,8 @@ pub struct ProjectForge {
     pub issues: Vec<ForgeIssue>,
     #[serde(default)]
     pub pull_requests: Vec<ForgePullRequest>,
-    /// Why the last poll produced nothing. Kept beside stale data rather than
-    /// replacing it: "GitHub was unreachable at 10:42" is a fact the board can
-    /// show; an empty list is not.
+    /// Why the last poll failed, kept beside the stale data rather than
+    /// replacing it with an empty list.
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -118,14 +98,11 @@ pub struct ProjectForge {
 pub struct ForgeCounts {
     pub issues: usize,
     pub pull_requests: usize,
-    /// Assigned issues, requested reviews, and the person's own pull requests
-    /// that are red, contested or approved and unmerged.
+    /// Assigned issues, requested reviews, and the person's own red, contested
+    /// or approved-unmerged pull requests.
     pub needs_you: usize,
-    /// Why the last poll of *this* project failed, if it did. The counts
-    /// beside it are the last good ones.
-    ///
-    /// A count that is quietly stale is worse than no count: the heading's
-    /// promise is that it says what GitHub says now.
+    /// Why the last poll of this project failed; the counts are the last good
+    /// ones, and must not look fresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<String>,
 }
@@ -142,32 +119,24 @@ impl ProjectForge {
     }
 }
 
-/// Parses the forge's timestamp, so an item's age is the thing's own age and
-/// not the moment this daemon first saw it — otherwise everything discovered
-/// in one poll is exactly as old as everything else.
+/// Parses the forge's timestamp, so an item's age is its own, not the poll's.
 fn since(updated_at: Option<&str>, fallback: Timestamp) -> Timestamp {
     updated_at
         .and_then(|s| s.parse::<Timestamp>().ok())
         .unwrap_or(fallback)
 }
 
-/// The inbox items one project's forge produces.
-///
-/// `own_prs` are the pull requests Devplane itself opened for this project.
-/// Their Work already raises `ci_red`, `changes_requested` and `pr_ready`, so
-/// they are skipped here rather than reported twice under two ids.
-///
-/// Only what needs *this* person: an issue assigned to them, a review asked
-/// of them, or their own pull request that is red, contested, or approved and
-/// waiting for a merge. Everything else is a count on the board, not a row in
-/// the inbox — a list that names every open issue in every repository is a
-/// list nobody reads.
+/// The inbox items one project's forge produces: only what needs this person.
+/// `own_prs` (opened by Devplane) are skipped, since their Change already
+/// raises the same items.
 pub fn items_for_forge(
     forge: &ProjectForge,
     snoozed: &Snoozed,
     own_prs: &BTreeSet<u64>,
-) -> Vec<AttentionItem> {
+) -> crate::core::attention::Derived {
     let mut out = Vec::new();
+    // Hidden is counted, never dropped.
+    let hidden = std::cell::Cell::new(0usize);
     let launch = |prompt: String| -> Option<String> {
         crate::core::deeplink::open_repo(forge.repo.as_deref()?, &prompt)
     };
@@ -180,6 +149,7 @@ pub fn items_for_forge(
               actions: Vec<Action>,
               launch: Option<String>| {
         if snoozed.hides(&kind) {
+            hidden.set(hidden.get() + 1);
             return None;
         }
         Some(AttentionItem {
@@ -188,18 +158,15 @@ pub fn items_for_forge(
                 forge.project_id.as_str(),
                 kind.as_str()
             )),
-            // **Normal, whatever the kind defaults to, because a poll is not
-            // an event**: nothing here just happened, a sweep noticed a
-            // standing condition. `high` is not a label — it fires a desktop
-            // notification and outranks live sessions in the inbox, and an
-            // agent waiting on an answer now beats a week-old red check.
+            // Normal whatever the kind's default: a poll notices standing
+            // conditions, and `high` would fire a desktop notification and
+            // outrank a live session waiting on an answer.
             level: crate::core::attention::Level::Normal,
             kind,
             run_id: None,
             project_id: Some(forge.project_id.clone()),
             title,
             detail,
-            // A forge item is about a pull request or an issue, not a dialog.
             answer_in: None,
             ask: None,
             options: vec![],
@@ -208,9 +175,10 @@ pub fn items_for_forge(
             form: None,
             url: Some(url.to_string()),
             launch,
-            work_id: None,
+            change_id: None,
             offer: None,
             no_offer: None,
+            report: None,
             since: since_at,
         })
     };
@@ -280,7 +248,10 @@ pub fn items_for_forge(
             launch,
         ));
     }
-    out
+    crate::core::attention::Derived {
+        items: out,
+        snoozed: hidden.get(),
+    }
 }
 
 #[cfg(test)]
@@ -359,14 +330,12 @@ mod tests {
 
     #[test]
     fn only_what_needs_this_person_reaches_the_inbox() {
-        let items = items_for_forge(&forge(), &Snoozed::default(), &BTreeSet::new());
+        let items = items_for_forge(&forge(), &Snoozed::default(), &BTreeSet::new()).items;
         let kinds: Vec<_> = items.iter().map(|i| i.kind.as_str()).collect();
         assert_eq!(kinds, ["issue_assigned", "ci_red", "review_requested"]);
-        // Every item carries where to go, and nothing here can write to GitHub.
         assert!(items.iter().all(|i| i.url.is_some()));
         assert!(items.iter().all(|i| !i.actions.contains(&Action::Allow)));
-        // A red PR of mine gets the same launch link a Work's `ci_red` does —
-        // the slug is percent-encoded inside it, so the check is on the scheme.
+        // The slug is percent-encoded in the launch link; check the scheme.
         assert!(
             items[1]
                 .launch
@@ -378,10 +347,9 @@ mod tests {
 
     #[test]
     fn a_pull_request_devplane_opened_is_not_reported_twice() {
-        // Its Work already raises `ci_red`; a second row under a second id
-        // would be the same fact asking twice.
+        // Its Change already raises `ci_red`.
         let own = BTreeSet::from([142u64]);
-        let items = items_for_forge(&forge(), &Snoozed::default(), &own);
+        let items = items_for_forge(&forge(), &Snoozed::default(), &own).items;
         assert!(items.iter().all(|i| i.kind != AttentionKind::CiRed));
     }
 
@@ -392,7 +360,9 @@ mod tests {
             [AttentionKind::ReviewRequested],
             Timestamp::now() + jiff::SignedDuration::from_hours(1),
         );
-        let items = items_for_forge(&forge(), &s, &BTreeSet::new());
+        let derived = items_for_forge(&forge(), &s, &BTreeSet::new());
+        assert_eq!(derived.snoozed, 1, "hidden is counted, not dropped");
+        let items = derived.items;
         assert!(
             items
                 .iter()
@@ -402,8 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn an_items_age_is_the_forges_not_the_daemons() {
-        let items = items_for_forge(&forge(), &Snoozed::default(), &BTreeSet::new());
+    fn an_items_age_is_the_forges_not_the_hosts() {
+        let items = items_for_forge(&forge(), &Snoozed::default(), &BTreeSet::new()).items;
         let issue = items
             .iter()
             .find(|i| i.kind == AttentionKind::IssueAssigned)
@@ -413,14 +383,10 @@ mod tests {
 
     #[test]
     fn nothing_the_forge_produces_interrupts_a_person() {
-        // `ci_red` and `changes_requested` are *high* by default, and high is
-        // not a label: it fires a desktop notification, and the notifier's
-        // memory lasts one daemon. Four red pull requests meant four
-        // notifications at every restart, about four things that had been true
-        // for days. A poll is not an event — it notices standing conditions.
+        // High by default, but a poll is not an event: no notification.
         let mut f = forge();
         f.pull_requests[0].status = "changes_requested".into();
-        let items = items_for_forge(&f, &Snoozed::default(), &BTreeSet::new());
+        let items = items_for_forge(&f, &Snoozed::default(), &BTreeSet::new()).items;
         assert!(!items.is_empty());
         for i in &items {
             assert_eq!(
@@ -430,29 +396,24 @@ mod tests {
                 i.kind.as_str()
             );
         }
-        // And a live session asking a question still outranks all of it.
         let asking = crate::core::attention::Level::High;
         assert!(asking > items[0].level);
     }
 
     #[test]
     fn a_draft_of_your_own_does_not_ask_you_for_anything() {
-        // You marked it a draft; red checks on unfinished work are its
-        // ordinary condition, and this is the "twelve closed editor tabs"
-        // mistake one source further out — true, and not news.
+        // Red checks on a draft are its ordinary condition.
         let mut f = forge();
         f.pull_requests[0].draft = true; // #142: mine, checks failing
         assert_eq!(f.pull_requests[0].asks_of_me(), None);
-        let items = items_for_forge(&f, &Snoozed::default(), &BTreeSet::new());
+        let items = items_for_forge(&f, &Snoozed::default(), &BTreeSet::new()).items;
         assert!(items.iter().all(|i| i.kind != AttentionKind::CiRed));
         assert_eq!(f.counts().needs_you, 2, "and the heading agrees");
     }
 
     #[test]
     fn what_a_person_asked_for_reaches_you_through_a_draft() {
-        // A machine's verdict on unfinished work is noise. Somebody spending
-        // their time to ask is not, and a review requested of you by name is
-        // a direct request whatever state the branch is in.
+        // A person's request reaches the author whatever state the branch is in.
         let mut pr = forge().pull_requests[0].clone();
         pr.draft = true;
         pr.status = "changes_requested".into();
@@ -466,12 +427,8 @@ mod tests {
 
     #[test]
     fn the_heading_counts_exactly_what_the_inbox_lists() {
-        // The heading's number and the inbox's rows were two independent
-        // readings of one question — `counts` called `needs_me`, and
-        // `items_for_forge` ran its own `match` over the same statuses. They
-        // are one function now, and this is what says so: over every status
-        // and every combination of the flags that gate them, a pull request
-        // counts if and only if it produces a row.
+        // Over every status and flag combination, a pull request counts if and
+        // only if it produces an inbox row.
         let mut f = forge();
         f.issues.clear();
         for status in [
@@ -498,8 +455,9 @@ mod tests {
                             updated_at: None,
                         }];
                         let counted = f.counts().needs_you;
-                        let listed =
-                            items_for_forge(&f, &Snoozed::default(), &BTreeSet::new()).len();
+                        let listed = items_for_forge(&f, &Snoozed::default(), &BTreeSet::new())
+                            .items
+                            .len();
                         assert_eq!(
                             counted, listed,
                             "{status} draft={draft} mine={mine} review={review_requested}: \
@@ -516,9 +474,6 @@ mod tests {
         let mut f = forge();
         f.error = Some("gh: connection refused".into());
         assert_eq!(f.counts().issues, 2, "an error does not empty the board");
-        // And it is *carried*, which it was not: the poller wrote this field
-        // and nothing served it, so a project whose reads had been failing for
-        // an hour showed hour-old numbers as confidently as fresh ones.
         assert_eq!(
             f.counts().stale.as_deref(),
             Some("gh: connection refused"),

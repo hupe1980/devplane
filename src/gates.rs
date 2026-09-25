@@ -1,67 +1,43 @@
-//! Verification gates: turning "the agent says it is done" into "the project's
-//! own checks agree".
-//!
-//! This is the smallest idea in the product and the one that earns it. An agent
-//! reporting success is a claim; the repository's test command is evidence. The
-//! gate runs the commands the project committed, in the worktree the work
-//! happened in, as a child of the daemon — never through the agent, which would
-//! let the thing being checked choose the check.
-//!
-//! Output is bounded and failures are extracted where the runner is recognised,
-//! because what goes back to the agent has to fit in the context window it
-//! needs to do the fixing.
+//! Verification gates: the project's own committed checks, run in the
+//! change's worktree as a child of Devplane — never through the agent, which
+//! would let the thing being checked choose the check. Output is bounded and
+//! failure lines are extracted where the runner is recognised, so feedback
+//! fits the agent's context.
 
+use crate::core::change::{CommandResult, CommitStamp, GateReport, Outcome};
 use crate::core::text::tail;
-use crate::core::work::{CommandResult, CommitStamp, GateReport, Outcome};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 
-/// How much of a command's output is kept. A failing suite can print megabytes;
-/// the end is where the summary lives.
+/// How much of a command's output is kept; a failing suite's summary is at the end.
 const OUTPUT_TAIL_BYTES: usize = 8 * 1024;
 
-/// Runs a gate's commands in order, stopping at the first failure.
+/// Runs a gate's commands in order, stopping at the first failure (a later
+/// command would usually fail for the same reason and bury the cause).
 ///
-/// Stopping early is deliberate: if the type check fails, the test run that
-/// follows will fail for the same reason, and reporting both makes the cause
-/// harder to see, not easier.
+/// `env` (e.g. a shared cache variable from `core::caches`) is set on each
+/// command over the host's environment; empty in a person's own checkout.
 pub async fn run(
     gate: &str,
     commands: &[String],
     dir: &Path,
     timeout: Duration,
     attempt: u32,
-) -> GateReport {
-    run_expecting(gate, commands, dir, timeout, attempt, false).await
-}
-
-/// The same, for a gate that is supposed to fail.
-///
-/// A reproduction is the one check whose success is a failure: if the command
-/// that demonstrates a bug passes, the bug has not been demonstrated. Stopping
-/// at the first failure is therefore wrong here — the failure is the result —
-/// so every command runs.
-pub async fn run_expecting(
-    gate: &str,
-    commands: &[String],
-    dir: &Path,
-    timeout: Duration,
-    attempt: u32,
-    expect_fail: bool,
+    env: &[(String, PathBuf)],
 ) -> GateReport {
     let started = Instant::now();
     let deadline = Instant::now() + timeout;
     let mut results = Vec::new();
+    // Stamped before and after: a pass describes the tree only if it did not
+    // move while the gate ran.
+    let before = commit_stamp(dir).await;
 
     for command in commands {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        // Out of time: record it rather than starting a process only to kill
-        // it in the same breath. A reproduction gate runs *every* command, so
-        // this is reachable — and spawning `pnpm test` with nothing left on the
-        // clock costs a real process, can leave real side effects, and reports
-        // a timeout for a command that was never given a chance to run.
+        // Out of time: record it rather than spawning a process only to kill
+        // it and report a timeout for a command that never ran.
         if remaining.is_zero() {
             results.push(CommandResult {
                 command: command.clone(),
@@ -79,21 +55,19 @@ pub async fn run_expecting(
             });
             continue;
         }
-        let result = run_one(command, dir, remaining).await;
+        let result = run_one(command, dir, remaining, env).await;
         let passed = result.passed();
         results.push(result);
-        if !passed && !expect_fail {
+        if !passed {
             break;
         }
     }
 
+    let after = commit_stamp(dir).await;
     GateReport {
-        expect_fail,
-        // Stamped by the caller, which knows the work and its project root.
-        // The gate runner is given commands and a directory and deliberately
-        // knows nothing about what the work is answering.
+        // Stamped by the caller, which knows the change and its project root.
         spec: None,
-        commit: commit_stamp(dir).await,
+        commit: settled(before, after),
         gate: gate.to_string(),
         at: jiff::Timestamp::now(),
         duration_ms: started.elapsed().as_millis() as u64,
@@ -102,21 +76,66 @@ pub async fn run_expecting(
     }
 }
 
-/// What the tree was when this gate ran.
-///
-/// `None` when the gate did not run in a repository at all — which a
-/// certificate states out loud rather than rendering as a blank.
+/// The stamp a report keeps: the post-run one, with its digest only if the
+/// pre-run digest matches. A command that writes into the tree (a formatter,
+/// a generated file) or a concurrent edit leaves no digest, and a report
+/// without one can never make a change verified.
+fn settled(before: Option<CommitStamp>, after: Option<CommitStamp>) -> Option<CommitStamp> {
+    let mut after = after?;
+    let same = matches!(
+        (before.as_ref().and_then(|b| b.tree.as_ref()), after.tree.as_ref()),
+        (Some(a), Some(b)) if a == b
+    );
+    if !same {
+        after.tree = None;
+    }
+    Some(after)
+}
+
+/// What the tree was when this gate ran; `None` outside a repository, which a
+/// certificate states explicitly.
 async fn commit_stamp(dir: &Path) -> Option<CommitStamp> {
     crate::git::commit_stamp(dir).await
 }
 
-async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult {
+/// The report for a gate whose worktree is gone (removed by hand).
+///
+/// Every command is recorded as never started, with the reason, and no commit
+/// is stamped. Not a failure of the work, and never a pass.
+pub fn absent_worktree(gate: &str, commands: &[String], dir: &Path, attempt: u32) -> GateReport {
+    let reason = format!("the worktree {} is gone, so nothing ran", dir.display());
+    GateReport {
+        gate: gate.to_string(),
+        at: jiff::Timestamp::now(),
+        duration_ms: 0,
+        commands: commands
+            .iter()
+            .map(|c| {
+                CommandResult::without_verdict(
+                    c,
+                    Outcome::NeverStarted {
+                        reason: reason.clone(),
+                    },
+                )
+            })
+            .collect(),
+        attempt,
+        spec: None,
+        commit: None,
+    }
+}
+
+async fn run_one(
+    command: &str,
+    dir: &Path,
+    timeout: Duration,
+    env: &[(String, PathBuf)],
+) -> CommandResult {
     let started = Instant::now();
 
     if timeout.is_zero() {
-        // The constructor, not the fields: *a command that never produced a
-        // verdict* is one shape with one set of empty values, and writing it
-        // out here is how two of them end up differing by a digest.
+        // Use the constructor so every no-verdict result has identical empty
+        // values, digest included.
         return CommandResult::without_verdict(
             command,
             Outcome::NeverStarted {
@@ -125,23 +144,21 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
         );
     }
 
-    // Through a shell, because the commands are written by a person in a TOML
-    // file and they expect `&&`, pipes and their own `$PATH`.
+    // Through a shell: commands come from a TOML file and expect `&&`, pipes
+    // and the person's `$PATH`.
     let mut cmd = tokio::process::Command::new(shell());
     cmd.arg(shell_flag())
         .arg(command)
         .current_dir(dir)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_os_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(unix)]
     {
-        // The shell leads its own process group, so a timeout can reach the
-        // whole tree. `sh -c "cargo test"` execs cargo and killing the child is
-        // enough; `sh -c "a && b"` does not, and a `vitest --watch` somebody
-        // wrote by accident would otherwise survive the gate and eat the
-        // machine — which is exactly what the timeout exists to prevent.
+        // Lead a process group so a timeout kills the whole tree: `sh -c "a && b"`
+        // does not exec, and an accidental `--watch` would otherwise survive.
         cmd.process_group(0);
     }
     let child = cmd.spawn();
@@ -149,9 +166,8 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
     let mut child = match child {
         Ok(c) => c,
         Err(e) => {
-            // **Structurally distinct, not a message to be parsed later.** A
-            // missing binary is a broken gate, not a broken change, and a
-            // reader should never have to recover that from prose.
+            // A structured outcome, not prose: a missing binary is a broken
+            // gate, not a broken change.
             return CommandResult::without_verdict(
                 command,
                 Outcome::NeverStarted {
@@ -163,20 +179,12 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
 
     let pid = child.id();
 
-    // Both pipes are drained **at the same time**, into a buffer that outlives
-    // the read. Two bugs, one shape.
-    //
-    // Reading stdout to EOF first and stderr afterwards deadlocks the moment a
-    // command fills the 64 KiB stderr buffer while still writing to stdout —
-    // which `cargo test` does on any real failure. The symptom was a gate that
-    // always timed out, and the cause was invisible in the report.
-    //
-    // And the buffer is shared rather than owned by the future, because a
-    // timeout drops that future: a gate that ran out of time reported "killed
-    // after 600s" and not one line of what the command had printed, which is
-    // exactly the failure where the output is the only clue. A hung test suite
-    // names the test it hung in.
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    // Both pipes are drained concurrently into a buffer that outlives the
+    // read. Sequential reads deadlock once a command fills the 64 KiB stderr
+    // buffer while still writing stdout. The buffer is shared rather than owned
+    // by the future because a timeout drops the future, and a hung suite's
+    // output is exactly what names the test it hung in.
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Captured::default()));
     let status = tokio::time::timeout(timeout, async {
         let (_, _) = tokio::join!(
             drain(child.stdout.take(), captured.clone()),
@@ -189,8 +197,7 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
     let outcome = match status {
         Ok(Ok(s)) => match s.code() {
             Some(code) => Outcome::Exited { code },
-            // Killed by a signal. It ran, and there is no verdict — which is
-            // its own state rather than a failure of the work.
+            // Killed by a signal: it ran, but there is no verdict.
             None => Outcome::Unknown {
                 reason: "killed by a signal".into(),
             },
@@ -199,8 +206,7 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
             reason: e.to_string(),
         },
         Err(_) => {
-            // The whole group, not just the shell: a test runner left behind by
-            // a timed-out gate quietly eats the machine.
+            // Kill the whole group, not just the shell.
             terminate_group(pid);
             let _ = child.kill().await;
             Outcome::TimedOut {
@@ -208,22 +214,21 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
             }
         }
     };
-    // Decoded once, at the end. Decoding each chunk as it arrived would put a
-    // replacement character wherever an 8 KiB read happened to land in the
-    // middle of a multi-byte one — and the place that shows up is the failing
-    // line handed back to the agent, which is the one string here that has to
-    // be exact.
-    let buf = captured
+    // Decoded once at the end, so an 8 KiB read boundary never splits a
+    // multi-byte character in the failing line handed to the agent. The byte
+    // count and digest cover the whole output, not the tail; the digest binds
+    // the record to this run but does not reproduce, since the two pipes
+    // interleave nondeterministically.
+    let (buf, output_bytes, output_digest) = captured
         .lock()
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default();
-
-    // **Digested before the tail is cut**, so the value covers what the command
-    // actually produced rather than what was kept. It binds this record to that
-    // run; it does not reproduce, because both pipes drain concurrently into one
-    // buffer and the interleaving belongs to the scheduler.
-    let output_digest = crate::core::hash::hex(buf.as_bytes());
-    let output_bytes = buf.len() as u64;
+        .map(|c| {
+            (
+                String::from_utf8_lossy(&c.tail).into_owned(),
+                c.bytes,
+                c.digest.hex(),
+            )
+        })
+        .unwrap_or_else(|_| (String::new(), 0, crate::core::hash::hex(b"")));
 
     CommandResult {
         command: command.to_string(),
@@ -236,16 +241,21 @@ async fn run_one(command: &str, dir: &Path, timeout: Duration) -> CommandResult 
     }
 }
 
+/// What a command printed: the kept tail, plus the count and digest of
+/// everything.
+#[derive(Default)]
+struct Captured {
+    tail: Vec<u8>,
+    bytes: u64,
+    digest: crate::core::hash::Stream,
+}
+
 /// Reads one pipe into the shared buffer until it closes.
 ///
-/// Generic over the pipe, because stdout and stderr are different types and the
-/// only alternative is the same twenty lines written twice — which is how the
-/// two of them end up drifting apart, and the drift would be invisible.
-///
-/// Bounded as it arrives: a runaway command must not be able to fill memory
-/// faster than the timeout can stop it. Bytes rather than text, so the bound
-/// never cuts a character in half.
-async fn drain<R>(pipe: Option<R>, into: std::sync::Arc<std::sync::Mutex<Vec<u8>>>)
+/// Bounded as it arrives, so a runaway command cannot fill memory before the
+/// timeout; in bytes, so the bound never cuts a character. Count and digest
+/// see every byte first.
+async fn drain<R>(pipe: Option<R>, into: std::sync::Arc<std::sync::Mutex<Captured>>)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -255,11 +265,13 @@ where
         if n == 0 {
             return;
         }
-        let Ok(mut buf) = into.lock() else { return };
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.len() > 4 * OUTPUT_TAIL_BYTES {
-            let keep = buf.len() - 2 * OUTPUT_TAIL_BYTES;
-            buf.drain(..keep);
+        let Ok(mut c) = into.lock() else { return };
+        c.bytes += n as u64;
+        c.digest.update(&chunk[..n]);
+        c.tail.extend_from_slice(&chunk[..n]);
+        if c.tail.len() > 4 * OUTPUT_TAIL_BYTES {
+            let keep = c.tail.len() - 2 * OUTPUT_TAIL_BYTES;
+            c.tail.drain(..keep);
         }
     }
 }
@@ -269,9 +281,9 @@ where
 fn terminate_group(pid: Option<u32>) {
     #[cfg(unix)]
     if let Some(pid) = pid {
-        // SAFETY: `kill` with a negative pid signals the process group; the
-        // group was created by `process_group(0)` above and contains only this
-        // gate's children. ESRCH just means it has already exited.
+        // SAFETY: a negative pid signals the group created by
+        // `process_group(0)`, which holds only this gate's children. ESRCH just
+        // means it already exited.
         unsafe {
             libc::kill(-(pid as i32), libc::SIGKILL);
         }
@@ -289,10 +301,8 @@ fn shell_flag() -> &'static str {
 
 /// Pulls out the lines that name what failed.
 ///
-/// Deliberately a handful of well-known shapes rather than a clever heuristic.
-/// A wrong guess is worse than none: it sends the agent after the wrong line
-/// and hides the real one. When nothing matches, the caller falls back to the
-/// output tail and says so.
+/// Only a handful of well-known shapes: a wrong guess sends the agent after the
+/// wrong line. When nothing matches, the caller falls back to the output tail.
 pub fn extract_failures(output: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in output.lines() {
@@ -336,6 +346,7 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
+            &[],
         )
         .await;
         assert!(report.passed());
@@ -345,22 +356,20 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_gate_is_not_a_pass() {
-        // A Definition of Done with nothing in it proves nothing, and must
-        // never read as success.
-        let report = run("check", &[], &dir(), Duration::from_secs(10), 1).await;
+        // An empty Definition of Done proves nothing.
+        let report = run("check", &[], &dir(), Duration::from_secs(10), 1, &[]).await;
         assert!(!report.passed());
     }
 
     #[tokio::test]
     async fn the_first_failure_stops_the_gate() {
-        // The second command would fail for the same reason; reporting both
-        // buries the cause.
         let report = run(
             "check",
             &["false".into(), "echo should-not-run".into()],
             &dir(),
             Duration::from_secs(10),
             1,
+            &[],
         )
         .await;
         assert!(!report.passed());
@@ -375,6 +384,7 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
+            &[],
         )
         .await;
         assert!(!report.passed());
@@ -389,17 +399,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_that_floods_both_pipes_still_finishes() {
-        // Reading stdout to EOF before touching stderr deadlocks as soon as a
-        // command fills the 64 KiB stderr buffer — which every real failing
-        // test suite does. The gate then "timed out" and said nothing useful.
+        // Sequential pipe reads deadlock once stderr's 64 KiB buffer fills.
         let report = run(
             "check",
-            // stderr *first*: the old reader waited on stdout to EOF, so the
-            // child blocked on a full stderr buffer and neither side moved.
+            // stderr first, to fill its buffer before stdout closes.
             &["yes stderr | head -c 400000 >&2; yes stdout | head -c 400000; echo DRAINED".into()],
             &dir(),
             Duration::from_secs(20),
             1,
+            &[],
         )
         .await;
         assert!(!report.commands[0].timed_out(), "the gate deadlocked");
@@ -410,19 +418,97 @@ mod tests {
         );
     }
 
+    /// The byte count and digest cover everything printed, not the kept tail.
+    #[tokio::test]
+    async fn output_over_the_tail_counts_whole() {
+        let report = run(
+            "check",
+            &["yes 0123456789 | head -c 200000".into()],
+            &dir(),
+            Duration::from_secs(20),
+            1,
+            &[],
+        )
+        .await;
+        let c = &report.commands[0];
+        assert_eq!(c.output_bytes, 200_000, "counted over the trimmed buffer");
+        let whole: Vec<u8> = "0123456789\n".bytes().cycle().take(200_000).collect();
+        assert_eq!(c.output_digest, crate::core::hash::hex(&whole));
+        assert!(c.output_tail.len() < 200_000);
+    }
+
+    /// A gate that writes into the tree it checks keeps its stamp but loses its
+    /// digest.
+    #[tokio::test]
+    async fn a_tree_that_moves_while_the_gate_runs_has_no_digest() {
+        let root = std::env::temp_dir().join(format!(
+            "devplane-gate-moves-{}-{}",
+            std::process::id(),
+            jiff::Timestamp::now().as_nanosecond()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "i",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let still = run(
+            "check",
+            &["true".into()],
+            &root,
+            Duration::from_secs(10),
+            1,
+            &[],
+        )
+        .await;
+        assert!(still.commit.as_ref().unwrap().tree.is_some());
+        let moved = run(
+            "check",
+            &["echo generated > out.txt".into()],
+            &root,
+            Duration::from_secs(10),
+            1,
+            &[],
+        )
+        .await;
+        assert!(moved.passed());
+        let stamp = moved.commit.expect("still stamped");
+        assert!(
+            stamp.tree.is_none(),
+            "a pass over a moving tree kept a digest"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[tokio::test]
     async fn both_streams_reach_the_report() {
-        // Interleaved as they arrive, which is not the order they were written
-        // in — a pipe is block-buffered and a terminal is not, so stderr
-        // routinely lands first. Both being *there* is the property; claiming
-        // an order would be claiming something the operating system does not
-        // promise, and a test that asserts it passes until it does not.
+        // Both present; the order is not asserted, since the OS does not
+        // promise one.
         let report = run(
             "check",
             &["echo on-stdout; echo on-stderr >&2".into()],
             &dir(),
             Duration::from_secs(10),
             1,
+            &[],
         )
         .await;
         let out = &report.commands[0].output_tail;
@@ -438,6 +524,7 @@ mod tests {
             &dir(),
             Duration::from_millis(300),
             1,
+            &[],
         )
         .await;
         assert!(report.commands[0].timed_out());
@@ -453,6 +540,7 @@ mod tests {
             &dir(),
             Duration::from_millis(200),
             1,
+            &[],
         )
         .await;
         assert_eq!(report.commands.len(), 1, "the gate stops at the timeout");
@@ -461,15 +549,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_gate_that_times_out_still_says_what_it_saw() {
-        // The failure where the output matters most produced none of it: the
-        // reading future was dropped with the timeout, so a suite that hung in
-        // one test reported "killed after 600s" and nothing else.
+        // A timed-out gate still reports what the command printed.
         let report = run(
             "check",
             &["echo 'running test auth::login'; sleep 30".into()],
             &dir(),
             Duration::from_millis(400),
             1,
+            &[],
         )
         .await;
         assert!(report.commands[0].timed_out());
@@ -482,10 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_that_is_not_ascii_survives_the_chunk_boundary() {
-        // The pipe is read in 8 KiB chunks and a multi-byte character does not
-        // care where those land. Decoding per chunk put a replacement character
-        // in the middle of one — in the failing line handed back to the agent,
-        // which is the one string here that has to be exact.
+        // A multi-byte character straddling an 8 KiB read boundary must survive.
         let padding = "x".repeat(8 * 1024 - 1);
         let report = run(
             "check",
@@ -493,6 +577,7 @@ mod tests {
             &dir(),
             Duration::from_secs(10),
             1,
+            &[],
         )
         .await;
         let out = &report.commands[0].output_tail;
@@ -512,9 +597,32 @@ mod tests {
             &dir(),
             Duration::from_secs(5),
             1,
+            &[],
         )
         .await;
         assert!(!report.passed());
+    }
+
+    #[tokio::test]
+    async fn a_declared_variable_reaches_every_command() {
+        // The shared cache variable must reach the gate, or it builds cold.
+        let report = run(
+            "check",
+            &["echo \"seen=$CARGO_TARGET_DIR\"".into()],
+            &dir(),
+            Duration::from_secs(10),
+            1,
+            &[("CARGO_TARGET_DIR".into(), PathBuf::from("/shared/cargo"))],
+        )
+        .await;
+        assert!(report.passed());
+        assert!(
+            report.commands[0]
+                .output_tail
+                .contains("seen=/shared/cargo"),
+            "{}",
+            report.commands[0].output_tail
+        );
     }
 
     #[test]

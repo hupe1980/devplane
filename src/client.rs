@@ -1,12 +1,16 @@
-//! The CLI's view of the daemon.
-//!
-//! Every command in the terminal is a client of the same API the browser uses.
-//! That is deliberate: one surface to keep working, and anything a person can
-//! see they can also script with `--json`.
+//! The CLI's view of the host: every terminal command is a client of the same
+//! API the browser uses, so anything a person can see they can script with
+//! `--json`.
 
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
 
+/// The one sentence for *nothing is running*, shared by every command that
+/// needs a host.
+pub const NO_HOST: &str =
+    "no host is running — start one with `devplane serve`, or `devplane open` for the workbench";
+
+#[derive(Clone)]
 pub struct Client {
     base: String,
     token: String,
@@ -15,32 +19,27 @@ pub struct Client {
 
 /// What a failed request means, in a sentence a person can act on.
 ///
-/// **404 is the interesting one and it almost never means what it says.** A
-/// route this binary asks for is a route this binary has; a daemon that does
-/// not is an older build — which the version check cannot catch between
-/// releases, because an unreleased tree changes routes without changing its
-/// version number. Two builds of `0.5.0` are the ordinary case while somebody
-/// is working on it, and *404 Not Found* sends them looking for a feature that
-/// is right there.
+/// A 404 almost always means the host is a different build of the same
+/// version (unreleased trees change routes without a version bump), not that
+/// the thing asked for is missing.
 fn explain_status(path: &str, status: reqwest::StatusCode) -> String {
     match status {
         reqwest::StatusCode::NOT_FOUND => format!(
-            "{path} returned 404 — this binary knows that route, so the running daemon is \
-             probably an older build of it. `devplane stop` and run the command again."
+            "{path} returned 404 — this binary knows that route, so the running host is \
+             probably an older build of it. `devplane quit` and run the command again."
         ),
         reqwest::StatusCode::UNAUTHORIZED => format!(
             "{path} returned 401 — the token in ~/.devplane/token is not the one the running \
-             daemon started with. `devplane stop` and run the command again."
+             host started with. `devplane quit` and run the command again."
         ),
         other => format!("{path} returned {other}"),
     }
 }
 
 impl Client {
-    /// Connects to a running daemon.
+    /// Connects to the host the record names, without asking whether it answers.
     pub fn connect() -> Result<Self> {
-        let info = crate::config::read_daemon_info()?
-            .context("no daemon is running — start one with `devplane serve`")?;
+        let info = crate::config::read_host()?.context(NO_HOST)?;
         Ok(Self {
             base: info.base_url(),
             token: crate::config::load_or_create_token()?,
@@ -48,45 +47,22 @@ impl Client {
         })
     }
 
-    /// Connects, starting a daemon first if none is running.
-    ///
-    /// Every client command does this, so the daemon is something the user
-    /// never has to think about: the first `devplane ls` after a reboot starts
-    /// the observer that should have been running all along.
-    pub async fn connect_or_start() -> Result<Self> {
-        if let Ok(c) = Self::connect() {
-            match c.version().await {
-                Some(v) if v == env!("CARGO_PKG_VERSION") => return Ok(c),
-                // A daemon from a previous install. Every command would then
-                // hit routes it does not have and report 404 as if the feature
-                // were missing — which is exactly what happened for two
-                // releases. Restart it; the store and the spool survive.
-                Some(v) => {
-                    eprintln!(
-                        "devplane: the running daemon is v{v} and this is v{}; restarting it",
-                        env!("CARGO_PKG_VERSION")
-                    );
-                    c.stop_and_wait().await;
-                }
-                None => {}
-            }
+    /// Connects to a running host, or says there is none. Nothing is started
+    /// by asking: the error names the command that starts one.
+    pub async fn connect_running() -> Result<Self> {
+        let c = Self::connect()?;
+        match c.version().await {
+            Some(v) if v == env!("CARGO_PKG_VERSION") => Ok(c),
+            Some(v) => bail!(
+                "the running host is v{v} and this is v{}. `devplane quit`, then start it again.",
+                env!("CARGO_PKG_VERSION")
+            ),
+            None => bail!("{NO_HOST}"),
         }
-        crate::daemonise::spawn_detached()?;
-        for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if let Ok(c) = Self::connect()
-                && c.healthy().await
-            {
-                return Ok(c);
-            }
-        }
-        bail!("started a daemon but it did not become ready; try `devplane serve` to see why")
     }
 
-    /// The running daemon's version, or `None` when nothing healthy answers.
-    ///
-    /// `/healthz` says `ok <version>`; a daemon old enough to say only `ok`
-    /// reports as `0.0.0`, which is older than anything and gets restarted.
+    /// The running host's version, or `None` when nothing healthy answers.
+    /// A host that says only `ok` reports as `0.0.0`, which matches nothing.
     pub async fn version(&self) -> Option<String> {
         let text = self
             .http
@@ -104,12 +80,14 @@ impl Client {
         (words.next() == Some("ok")).then(|| words.next().unwrap_or("0.0.0").to_string())
     }
 
-    /// Asks the daemon to stop and waits for its port to go quiet. Falls back
-    /// to a signal for a daemon too old to have the route.
-    async fn stop_and_wait(&self) {
+    /// Asks the host to stop and waits for its port to go quiet.
+    ///
+    /// Only a request, carrying the bearer token. There is no signal fallback:
+    /// a pid from a file may belong to another process by now.
+    pub async fn stop_and_wait(&self) {
         let _ = self
             .http
-            .post(format!("{}/api/shutdown", self.base))
+            .post(format!("{}/api/quit", self.base))
             .bearer_auth(&self.token)
             .timeout(std::time::Duration::from_millis(1000))
             .send()
@@ -117,23 +95,9 @@ impl Client {
         for _ in 0..30 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if !self.healthy().await {
-                crate::config::clear_daemon_info().ok();
                 return;
             }
         }
-        #[cfg(unix)]
-        if let Ok(Some(info)) = crate::config::read_daemon_info() {
-            unsafe {
-                libc::kill(info.pid as i32, libc::SIGTERM);
-            }
-            for _ in 0..30 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                if !self.healthy().await {
-                    break;
-                }
-            }
-        }
-        crate::config::clear_daemon_info().ok();
     }
 
     pub async fn healthy(&self) -> bool {
@@ -174,31 +138,14 @@ impl Client {
         res.json().await.with_context(|| format!("decoding {path}"))
     }
 
-    /// POSTs a body and returns the decoded answer, including error bodies:
-    /// the daemon explains refusals in JSON, and swallowing that to raise a
-    /// status code would lose the explanation.
+    /// POSTs a body and returns the decoded answer, including error bodies,
+    /// because the host explains refusals in JSON.
     pub async fn post_json<T: DeserializeOwned>(
         &self,
         path: &str,
         body: &serde_json::Value,
     ) -> Result<T> {
         self.post_json_inner(path, body, None).await
-    }
-
-    /// The same, with a deadline of its own.
-    ///
-    /// **For the one call that is meant to take a while**: a held permission,
-    /// where the daemon is waiting for a person and the hook is waiting for the
-    /// daemon. The client's own timeout has to outlast the hold, or the hook
-    /// gives up on a daemon that is still waiting and the person's answer
-    /// arrives nowhere.
-    pub async fn post_json_within<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &serde_json::Value,
-        within: std::time::Duration,
-    ) -> Result<T> {
-        self.post_json_inner(path, body, Some(within)).await
     }
 
     async fn post_json_inner<T: DeserializeOwned>(
@@ -223,15 +170,8 @@ impl Client {
             .with_context(|| format!("reading the answer to {path}"))?;
         match serde_json::from_str::<T>(&text) {
             Ok(v) => Ok(v),
-            // **A refusal the daemon explained in JSON has already returned
-            // above.** What reaches here is a body that is not JSON at all —
-            // and on a failed request that is a plain-text reason, which is the
-            // most useful thing there is to say.
-            //
-            // It used to be decoded anyway, so `devplane answer <typo>` met a
-            // 404 whose body was `no such ask`, failed to parse it, and printed
-            // a serde error, an internal route and the loopback port. A person
-            // who mistyped an id got the plumbing.
+            // A failed request whose body is not JSON carries a plain-text
+            // reason; show it rather than a serde error and an internal route.
             Err(_) if !status.is_success() => {
                 let said = text.trim();
                 match said.is_empty() {

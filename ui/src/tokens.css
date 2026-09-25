@@ -1,95 +1,84 @@
-/* Devplane's colour palette, and nothing else.
+/* Devplane's colour palette, and only colours: `tests/tokens.rs` computes a
+ * contrast ratio from every token here. Scales and reset are in `base.css`.
+ * Every text colour is held to 4.5:1 on every surface, in both themes.
  *
- * **Only colours live here**, because `tests/tokens.rs` reads every token in
- * this file and computes a contrast ratio from it — a `--space-3: 12px` in here
- * would be a length handed to a luminance function. The scales, the reset and
- * the base element styles are in `base.css`.
+ * Roles, beside each value, read by the check:
  *
- * Every value is computed, contrast-checked and colour-blindness-validated, and
- * two real defects were found by that validator on its first run.
- *
- * **The check computes rather than compares.** It held these values against the
- * hand-written page's until that page was deleted at the switch; what it never
- * did was compare them to a *reference*, which is why it survived the page and
- * why the palette can be improved. Every colour, in both themes, is held to its
- * floor against every surface it sits on — a new colour to the same standard as
- * an old one. What is gone is only the requirement that it be the same colour.
- *
- * The three blocks repeat rather than share, which is explained where it happens.
+ *   surface  a background other things sit on
+ *   line     a separator between things; decorative, no floor
+ *   edge     the boundary of a control; held to 3:1
+ *   text     carries words; held to 4.5:1 against every surface
  */
-
-/* Every token declares its own role, beside its own value, because the check
-     in `tests/tokens.rs` reads them from here rather than from a copy. A list
-     of approved pairs kept somewhere else goes stale the first time somebody
-     adds a token and forgets its row — which is exactly how this page came to
-     promise AA contrast while `--faint` sat at 3.2:1 dark and 2.9:1 light,
-     carrying the two numbers a person scans most.
-
-       surface  a background other things sit on
-       line     a separator between things; decorative, no floor
-       edge     the boundary of a control; held to 3:1, because an input
-                whose edge you cannot see is a control you cannot find
-       text     carries words; held to 4.5:1 against every surface
-
-     `line` and `edge` were one token until the check above was first run and
-     reported it at 1.2:1. Raising the separator to 3:1 would have made every
-     row boundary shout, which is the two-visual-weights rule broken to satisfy
-     a floor that never applied to it. Two tokens, two obligations.  */
-  :root {
-    color-scheme: light dark;
-    --bg: #fbfbfa;      /* surface */
-    --panel: #fff;      /* surface */
-    --line: #e6e4e0;    /* line */
-    --edge: #918b83;    /* edge */
-    --ink: #1c1b19;     /* text */
-    --dim: #6f6b66;     /* text */
-    --faint: #726c64;   /* text */
-    --work: #2d6cdf;    /* text */
-    --wait: #8a7000;    /* text */
-    --fail: #c0392b;    /* text */
-    --done: #1f7a4d;    /* text */
-    --accent: #1c1b19;  /* text */
-    font-synthesis: none;
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;      /* surface */
+  --panel: #f7f7f8;   /* surface */
+  --side: #f3f3f5;    /* surface */
+  --chrome: #e9e9ec;  /* surface */
+  --raise: #ececef;   /* surface */
+  --select: #dde8fb;  /* surface */
+  --add-bg: #e3f5e8;  /* surface */
+  --del-bg: #fbe6e4;  /* surface */
+  --line: #e3e3e7;    /* line */
+  --edge: #7c7f88;    /* edge */
+  --ink: #1d1e22;     /* text */
+  --dim: #4f525a;     /* text */
+  --faint: #5f626b;   /* text */
+  --accent: #1f5fd1;  /* text */
+  --work: #1f5fd1;    /* text */
+  --wait: #7a5d00;    /* text */
+  --fail: #b3261e;    /* text */
+  --done: #17703f;    /* text */
+  --add: #146c38;     /* text */
+  --del: #a4251c;     /* text */
+  font-synthesis: none;
+}
+/* System preference is the default; `lib/theme.svelte.ts` sets `data-theme`
+   when a person chooses. The two dark blocks cannot share a selector, so they
+   repeat, and the check fails when they drift. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1b1c20;      /* surface */
+    --panel: #212227;   /* surface */
+    --side: #17181b;    /* surface */
+    --chrome: #121315;  /* surface */
+    --raise: #26272d;   /* surface */
+    --select: #262f40;  /* surface */
+    --add-bg: #16291f;  /* surface */
+    --del-bg: #2e1a1c;  /* surface */
+    --line: #2c2d33;    /* line */
+    --edge: #7b7e8a;    /* edge */
+    --ink: #e7e7ea;     /* text */
+    --dim: #aeb0b8;     /* text */
+    --faint: #9699a3;   /* text */
+    --accent: #79aeff;  /* text */
+    --work: #79aeff;    /* text */
+    --wait: #e6b84c;    /* text */
+    --fail: #f58a78;    /* text */
+    --done: #62d394;    /* text */
+    --add: #7fe0a3;     /* text */
+    --del: #ff9e94;     /* text */
   }
-  /* The system preference is the **default**, not the only say. A person who
-     works in a light editor and wants a dark board is not overridden by their
-     operating system, and a person who has expressed no preference still gets
-     the one their system implies.
-
-     `:root[data-theme="dark"]` repeats the block rather than sharing it,
-     because a media query and an attribute cannot be one selector. The check
-     in `tests/tokens.rs` reads both and fails when they drift.
-
-     `lib/theme.svelte.ts` is what sets the attribute, and it removes it rather
-     than writing `system` — the media query is what answers then, and a third
-     value would be one every selector has to know to ignore. */
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #16161a;      /* surface */
-      --panel: #1c1c21;   /* surface */
-      --line: #2b2b32;    /* line */
-      --edge: #6b6b76;    /* edge */
-      --ink: #e8e6e3;     /* text */
-      --dim: #9b968f;     /* text */
-      --faint: #8b857c;   /* text */
-      --work: #6ea8ff;    /* text */
-      --wait: #e3b341;    /* text */
-      --fail: #f0715f;    /* text */
-      --done: #57c98a;    /* text */
-      --accent: #e8e6e3;  /* text */
-    }
-  }
-  :root[data-theme="dark"] {
-      --bg: #16161a;      /* surface */
-      --panel: #1c1c21;   /* surface */
-      --line: #2b2b32;    /* line */
-      --edge: #6b6b76;    /* edge */
-      --ink: #e8e6e3;     /* text */
-      --dim: #9b968f;     /* text */
-      --faint: #8b857c;   /* text */
-      --work: #6ea8ff;    /* text */
-      --wait: #e3b341;    /* text */
-      --fail: #f0715f;    /* text */
-      --done: #57c98a;    /* text */
-      --accent: #e8e6e3;  /* text */
-    }
+}
+:root[data-theme="dark"] {
+  --bg: #1b1c20;      /* surface */
+  --panel: #212227;   /* surface */
+  --side: #17181b;    /* surface */
+  --chrome: #121315;  /* surface */
+  --raise: #26272d;   /* surface */
+  --select: #262f40;  /* surface */
+  --add-bg: #16291f;  /* surface */
+  --del-bg: #2e1a1c;  /* surface */
+  --line: #2c2d33;    /* line */
+  --edge: #7b7e8a;    /* edge */
+  --ink: #e7e7ea;     /* text */
+  --dim: #aeb0b8;     /* text */
+  --faint: #9699a3;   /* text */
+  --accent: #79aeff;  /* text */
+  --work: #79aeff;    /* text */
+  --wait: #e6b84c;    /* text */
+  --fail: #f58a78;    /* text */
+  --done: #62d394;    /* text */
+  --add: #7fe0a3;     /* text */
+  --del: #ff9e94;     /* text */
+}

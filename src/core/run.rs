@@ -9,22 +9,10 @@ use std::path::PathBuf;
 
 /// The permission mode a watched session is running in, as its vendor reports it.
 ///
-/// **This is the one thing a person with six repositories cannot find out
-/// today**, and it is the first slice of the seat: not *what was decided
-/// without you*, which measured as everything, but *which of my projects is
-/// deciding without me at all*.
-///
-/// Six values because the vendor documents six. The one labelled **Manual** in
-/// the interface arrives on the wire as `default`, never as `manual`, which is
-/// exactly the sort of detail that makes a hand-rolled string comparison wrong
-/// in a way nobody notices.
-///
-/// [`Self::Unrecognised`] carries the text rather than collapsing into
-/// `Default`. A mode this build has never heard of is a mode whose supervision
-/// properties are unknown, and reading it as the vendor's *most* supervised
-/// value is the widening-by-silence failure this project keeps finding in
-/// itself: the screen would say `default` about a session running something
-/// stricter or looser, and nothing would be wrong anywhere.
+/// The mode labelled Manual arrives on the wire as `default`, never `manual`.
+/// [`Self::Unrecognised`] keeps unknown text rather than collapsing into
+/// `Default`: an unknown mode has unknown supervision, and reading it as the
+/// most supervised value would widen by silence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
@@ -34,8 +22,7 @@ pub enum PermissionMode {
     Plan,
     /// Edits go through without asking. Other tools still ask.
     AcceptEdits,
-    /// **A classifier decides**, not a person. The built-in starting mode on
-    /// Pro, Max and Team, which is the whole reason this type exists.
+    /// A classifier decides, not a person. The default on Pro, Max and Team.
     Auto,
     /// Nothing is asked.
     DontAsk,
@@ -85,11 +72,8 @@ impl PermissionMode {
         }
     }
 
-    /// Whether a person is in the loop for an ordinary tool call.
-    ///
-    /// `None` for a mode this build does not recognise — **not `false`**. The
-    /// question "is anybody supervising this" has three answers and the third
-    /// is *we do not know*, which is the one a row has to be able to show.
+    /// Whether a person is in the loop for an ordinary tool call. `None` (not
+    /// `false`) for an unrecognised mode: the honest answer is *unknown*.
     pub fn asks_a_person(&self) -> Option<bool> {
         match self {
             Self::Default | Self::Plan => Some(true),
@@ -105,9 +89,8 @@ impl PermissionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
-    /// Started elsewhere — a terminal, the VS Code extension, the desktop app.
-    /// Devplane can show and focus it and decide permissions by policy, but
-    /// cannot type into it.
+    /// Started elsewhere (terminal, IDE, desktop app). Devplane can show it and
+    /// decide permissions by policy, but cannot type into it.
     Observed,
     /// An ACP session Devplane owns. Full control.
     Driven,
@@ -125,11 +108,8 @@ impl RunMode {
     }
 }
 
-/// Lifecycle of a run.
-///
-/// `Waiting` is the state the whole product exists for: it is the only one that
-/// costs the human something. It is entered from `Notification` matchers that
-/// fire when the agent is genuinely blocked.
+/// Lifecycle of a run. `Waiting` is the only state that costs a person
+/// something.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
@@ -140,23 +120,44 @@ pub enum RunState {
     Completed,
     Failed,
     Stopped,
-    /// Devplane stopped this run, because the daemon was shutting down.
-    ///
-    /// Distinct from `Stopped`, which is a person, and from `Lost`, which is a
-    /// process that was expected and not found. Here the cause is known and it
-    /// is us — and it is never `Completed`, because the work did not finish.
+    /// Devplane stopped this run because the host was shutting down. Not
+    /// `Stopped` (a person), not `Lost` (cause unknown), never `Completed`.
     Interrupted,
     /// Recorded as alive, but reconciliation could not find it.
     Lost,
 }
 
-/// What an agent's own session listing says about one session.
-///
-/// **A roster, never an attention signal.** ACP v1's `SessionInfo` carries
-/// `sessionId`, `cwd`, `additionalDirectories`, `title` and `updatedAt` — and
-/// **no state field**, in v1 or in v2's draft. So a listing can fill a gap and
-/// can never say that a session is waiting for somebody; the cross-vendor
-/// *blocked on a human* signal is still only v2's `requires_action`.
+/// How a message to a run reaches it. ACP takes one prompt per session at a
+/// time, so a message sent mid-turn waits for the turn to end rather than
+/// interrupting it; it is recorded the moment it is sent either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    Queued,
+    Sent,
+}
+
+impl Delivery {
+    /// Queued while a turn is under way — starting, working, or waiting on a
+    /// person mid-turn; sent otherwise.
+    pub fn of(state: &RunState) -> Self {
+        match state {
+            RunState::Starting | RunState::Working | RunState::Waiting(_) => Delivery::Queued,
+            _ => Delivery::Sent,
+        }
+    }
+
+    pub fn says(self) -> &'static str {
+        match self {
+            Delivery::Queued => "queued — delivered when the current turn ends",
+            Delivery::Sent => "sent",
+        }
+    }
+}
+
+/// What an agent's own session listing says about one session. A roster, never
+/// an attention signal: ACP's `SessionInfo` has no state field, so a listing
+/// can never say a session is waiting for somebody.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedSession {
     /// The id the agent knows this conversation by.
@@ -164,12 +165,8 @@ pub struct ListedSession {
     pub title: Option<String>,
 }
 
-/// How long after its last activity a session is still part of the working set.
-///
-/// A working day, near enough: a session you touched this morning is still
-/// yours to finish, and one quiet since yesterday is an editor tab. It is a
-/// judgement rather than a measurement, which is why it is one constant with
-/// one name rather than a setting nobody would tune.
+/// How long after its last activity a session is still part of the working set:
+/// roughly a working day. A judgement, not a setting.
 pub const IN_PLAY_SECONDS: i64 = 6 * 3600;
 
 impl RunState {
@@ -196,32 +193,22 @@ impl RunState {
         )
     }
 
-    /// Whether a person is being waited on.
-    ///
-    /// Every `Waiting` except `Idle`, including a reason the provider named and
-    /// this code does not model: the roster reports `waitingFor` only while a
-    /// session is waiting, so a value we do not recognise is still somebody
-    /// being waited on. Listing known-good is the wrong default for a signal
-    /// whose vocabulary the vendor extends.
+    /// Whether a person is being waited on: every `Waiting` except `Idle` and
+    /// `Job`, including reasons this code does not model, since the vendor
+    /// extends that vocabulary.
     pub fn needs_human(&self) -> bool {
         matches!(self, RunState::Waiting(w) if !matches!(w, WaitingFor::Idle | WaitingFor::Job))
     }
 
     /// Whether the session is waiting on a command it started rather than on a
-    /// person. Kept separate from [`needs_human`](Self::needs_human) because
-    /// the two answers differ: nothing is owed, and the row still belongs on
-    /// the board for as long as the job runs.
+    /// person: nothing is owed, but the row stays on the board while it runs.
     pub fn waits_on_a_job(&self) -> bool {
         matches!(self, RunState::Waiting(WaitingFor::Job))
     }
 }
 
-/// One entry of an agent's plan for the turn.
-///
-/// What it intends to do, and how far it has got. Structured and low-volume,
-/// which is what makes it the one part of a driven agent's output that belongs
-/// on the board itself rather than behind a transcript view: "what is it about
-/// to do" answered without reading a word of prose.
+/// One entry of an agent's plan for the turn: what it intends to do and how
+/// far it has got.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
     pub content: String,
@@ -241,54 +228,46 @@ pub struct ToolCall {
     pub tool: String,
     pub at: Timestamp,
     pub ok: Option<bool>,
-    /// What the tool was asked to do, kept only while the call is in flight.
-    ///
-    /// **`BlockedOn::input` claimed to carry this and never did**: every
-    /// construction site in the reducer wrote `None`, so the one consumer — the
-    /// rule offered on a permission item — was dead for every session the
-    /// product watches rather than drives. A field nothing fills is worse than
-    /// a missing one, because the code above it reads as working.
-    ///
-    /// Dropped the moment the call finishes, so this is one input per in-flight
-    /// call rather than a log.
+    /// What the tool was asked to do; dropped the moment the call finishes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<serde_json::Value>,
+    /// The protocol's id, where the source had one; the finish is matched on
+    /// it rather than on the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 
-/// A tool call that was refused, and by what.
-///
-/// `by` is the same string the decision log records — `policy:Bash(git push *)`
-/// when a project rule matched, `claude` when the vendor's own auto mode
-/// refused, `human` when a person did — so an item raised from these can say
-/// *which* gate is stopping the work rather than only that something is.
+/// A tool call that was refused, and by what. `by` is the decision log's string
+/// (`policy:Bash(git push *)`, `claude`, `human`), so an item can name the gate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Refusal {
     pub tool: String,
     pub by: String,
+    /// What the rule said, when it said anything.
+    #[serde(default)]
+    pub reason: Option<String>,
     pub at: Timestamp,
 }
 
-/// Running totals for a run. Cost and tokens come from OpenTelemetry, which is
-/// the only documented per-request channel; the context gauge is derived from
-/// the last request's input tokens rather than a running sum, because the
-/// context window is a level, not a total.
-// `default` on the struct: a run row is a projection of the event log, kept so
-// the board is on screen before a replay finishes, and a field added in a later
-// build must not make every row an earlier build wrote unreadable — fourteen
-// were, silently, until `doctor` was asked.
+/// Running totals for a run. Cost and tokens come from OpenTelemetry; the
+/// context gauge uses the last request's input tokens, since context is a
+/// level, not a total.
+// `default` on the struct: a field added later must not make rows an earlier
+// build wrote unreadable.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RunTotals {
     pub cost_usd: f64,
+    /// Whether any channel (telemetry or status line) has stated a cost.
+    /// `api_requests` counts only telemetry, so it cannot answer this.
+    #[serde(default)]
+    pub cost_reported: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub api_requests: u64,
-    /// Turns this run has completed.
-    ///
-    /// Counted at the turn boundary rather than from `api_requests`: a driven
-    /// run streams several usage updates within one turn, so counting those
-    /// would make a turn bound fire far too early.
+    /// Turns completed, counted at the turn boundary: a driven run streams
+    /// several usage updates per turn.
     pub turns: u64,
     pub tool_calls: u64,
     pub errors: u64,
@@ -296,24 +275,16 @@ pub struct RunTotals {
     pub last_context_tokens: u64,
     /// The model's window, when known, so a percentage can be shown.
     pub context_window: Option<u64>,
-    /// Percentage reported directly by the status line, when the shim is on.
-    /// Preferred over the derived figure because it is the provider's own.
+    /// Percentage from the status line; preferred over the derived figure.
     pub reported_context_percent: Option<f64>,
-    /// How much of a subscription rate-limit window is used, and which window.
-    ///
-    /// The status line is the only channel that carries this, which is why the
-    /// shim exists. It was parsed, put on an event, and then dropped by the
-    /// reducer — so the `rate_limit` inbox kind, the threshold beside it and
-    /// half the argument for installing the shim at all were a feature nothing
-    /// implemented.
+    /// How much of a subscription rate-limit window is used. Only the status
+    /// line carries this.
     #[serde(default)]
     pub rate_limit_percent: Option<f64>,
-    /// `five_hour`, `seven_day` or `spend_limit`: which window is under
-    /// pressure.
+    /// `five_hour`, `seven_day` or `spend_limit`.
     #[serde(default)]
     pub rate_limit_window: Option<String>,
-    /// When that window resets, in Unix epoch seconds — what makes the
-    /// percentage actionable.
+    /// When that window resets, in Unix epoch seconds.
     #[serde(default)]
     pub rate_limit_resets_at: Option<i64>,
     /// Lines the session added and removed, as the provider counts them.
@@ -339,6 +310,7 @@ impl RunTotals {
 
     pub fn apply(&mut self, usage: &ApiUsage) {
         self.cost_usd += usage.cost_usd;
+        self.cost_reported = true;
         self.input_tokens += usage.input_tokens;
         self.output_tokens += usage.output_tokens;
         self.cache_read_tokens += usage.cache_read_tokens;
@@ -353,9 +325,8 @@ impl RunTotals {
     }
 }
 
-/// The context window of a model, by name. Only the families we can recognise;
-/// an unknown model yields `None` and the gauge says "unknown" rather than
-/// inventing a denominator.
+/// The context window of a model, by name; `None` for an unknown model rather
+/// than an invented denominator.
 pub fn context_window_for_model(model: &str) -> Option<u64> {
     let m = model.to_ascii_lowercase();
     if m.contains("[1m]") || m.contains("-1m") {
@@ -375,12 +346,8 @@ pub struct Run {
     pub project_id: Option<ProjectId>,
     /// The agent that is running: `claude`, or an ACP registry id.
     pub agent: String,
-    /// The command line that started it, for a run Devplane drives.
-    ///
-    /// Recorded because the id alone is not always enough to start the agent
-    /// again: `devplane dispatch --agent /path/to/my-agent` resolves to the id
-    /// `custom`, which names nothing in the registry. Without the command, such
-    /// a run could be observed and never resumed.
+    /// The command line that started a driven run. Needed to resume one whose
+    /// agent id is `custom`, which names nothing in the registry.
     #[serde(default)]
     pub agent_command: Option<String>,
     pub mode: RunMode,
@@ -390,75 +357,42 @@ pub struct Run {
     pub worktree: Option<PathBuf>,
     pub branch: Option<String>,
     pub model: Option<String>,
-    /// The Claude Code release **this session** is running.
-    ///
-    /// Only the status line reports it, so it is absent without the shim.
-    ///
-    /// It existed for one question — how far past the gate's measured baseline
-    /// this session had drifted — and that baseline was deleted with the claim
-    /// it protected. What it is still for is smaller and honest: `doctor`
-    /// reports how many live sessions are telling us what they run, because
-    /// *nothing is reporting* and *nothing is wrong* are different answers.
+    /// The Claude Code release this session runs, from the status line only.
+    /// `doctor` counts sessions reporting it: *nothing reporting* is not
+    /// *nothing wrong*.
     #[serde(default)]
     pub claude_version: Option<String>,
-    /// The permission mode this session last reported, and when we first saw
-    /// it at that value.
-    ///
-    /// **Observed, never subscribed.** No hook announces a mode change, so the
-    /// timestamp is *when Devplane first heard this mode*, which is at best the
-    /// person's next prompt after they switched. Anything on screen has to say
-    /// "seen" rather than "since", because "in auto since 09:14" would be a
-    /// claim about a moment nothing here witnessed.
+    /// The permission mode this session last reported, and when Devplane first
+    /// saw it. No hook announces a mode change, so surfaces say "seen", never
+    /// "since".
     pub permission_mode: Option<PermissionMode>,
     pub permission_mode_seen: Option<Timestamp>,
-    /// A clock this session's own environment put on its questions.
-    ///
-    /// Per session, because `CLAUDE_AFK_TIMEOUT_MS` is per session: it
-    /// overrides the settings files and turns auto-continue on even where they
-    /// say `never`.
+    /// A clock this session's environment put on its questions. Per session:
+    /// `CLAUDE_AFK_TIMEOUT_MS` overrides the settings files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_clock: Option<crate::core::clock::QuestionClock>,
-    /// Questions this session asked that nobody answered.
-    ///
-    /// **The agent moving on used to erase the row.** A watched session's
-    /// question puts the run in `Waiting(Question)` with a `blocked_on`; the
-    /// next tool call clears both, because the agent is working again. So the
-    /// question left the inbox, and *the person answered it* and *the agent
-    /// gave up on it* produced byte-identical state — the product's second
-    /// obligation failing silently, in the one place it is derivable.
+    /// Questions this session asked that nobody answered. The next tool call
+    /// clears `blocked_on`, so without this *answered* and *given up on* would
+    /// be indistinguishable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abandoned_questions: Vec<AbandonedQuestion>,
     /// How many fell off the end of that bounded list.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub abandoned_dropped: u32,
-    /// When the environment was read, and **`None` means it never was**.
-    ///
-    /// *Not read* and *read, nothing set* are different facts and must never
-    /// share a sentence — the distinction the roster already makes between
-    /// *not probed* and *not supported*. A date because a fact about a machine
-    /// with no date on it is the row this project has been wrong about most.
+    /// When the environment was read; `None` means never. *Not read* and
+    /// *read, nothing set* are different facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question_clock_read: Option<Timestamp>,
-    /// The mode an **ACP agent** declared for this session, in the agent's own
-    /// spelling.
-    ///
-    /// Kept apart from `permission_mode` on purpose. That one is a vendor's
-    /// documented mode, read from a named settings file, with an authority
-    /// behind it. This one is a string an agent chose, and the two are only
-    /// superficially the same question — presenting them under one heading
-    /// would assert an equivalence no specification supports.
+    /// The mode an ACP agent declared, in its own spelling. Kept apart from
+    /// `permission_mode`, a documented vendor mode: no spec makes them equivalent.
     pub agent_mode: Option<String>,
     pub agent_mode_seen: Option<Timestamp>,
     /// OpenTelemetry's `app.entrypoint`: which surface started this session.
     pub entrypoint: Option<String>,
     /// A name the provider gave the session, when it has one.
     pub name: Option<String>,
-    /// The id the *agent* knows this conversation by, for a driven run.
-    ///
-    /// Distinct from `id`, which is Devplane's, and from `session_id`, which
-    /// for an observed session is the provider's. This is the one an agent will
-    /// accept on `session/resume`, so it is what makes a run survive a restart
-    /// of the daemon rather than only a row about it.
+    /// The id the agent knows a driven run by: what `session/resume` accepts,
+    /// so the run survives a host restart.
     #[serde(default)]
     pub agent_session: Option<String>,
     pub pid: Option<u32>,
@@ -472,76 +406,77 @@ pub struct Run {
     pub blocked_on: Option<BlockedOn>,
     /// Recent tool calls, newest last, capped.
     pub recent_tools: Vec<ToolCall>,
-    /// Tool calls refused in this run, and the most recent refusal.
-    ///
-    /// Counted because a refused agent does not stop, it tries something else —
-    /// so a rule that is too tight and one that is working look identical, and
-    /// the difference shows up on the bill. See `AttentionKind::Refused`.
+    /// Tool calls refused in this run. A refused agent tries something else,
+    /// so a too-tight rule is only visible as a count. See `AttentionKind::Refused`.
     #[serde(default)]
     pub refusals: u64,
     #[serde(default)]
     pub last_refusal: Option<Refusal>,
-    /// What the agent says it is going to do, where it reports a plan. Replaced
-    /// wholesale on each update, because the protocol sends the whole list.
+    /// The agent's reported plan, replaced wholesale on each update.
     #[serde(default)]
     pub plan: Vec<PlanStep>,
     /// Live subagents by id.
     pub subagents: BTreeMap<String, Option<String>>,
     /// A one-line summary of what the run is doing.
     pub summary: Option<String>,
-    /// Set when a stall has already been recorded for the current quiet
-    /// period, so one silent night is one event rather than one a minute.
+    /// Set once a stall is recorded for the current quiet period, so one
+    /// silent night is one event.
     #[serde(default)]
     pub stall_noticed: bool,
-    /// Whether this session has ever told us anything itself.
-    ///
-    /// A session discovered in the roster is a process that exists. That is not
-    /// the same as a session somebody is using: an editor tab left open for
-    /// three days is also a process that exists. Until a hook, telemetry or a
-    /// live status arrives, the run is dormant and stays out of the way.
+    /// Whether this session has ever told us anything itself. A roster entry
+    /// alone may be an idle editor tab, so the run stays dormant until then.
     #[serde(default)]
     pub reporting: bool,
-    /// When a hook last spoke about this session, if one ever has.
-    ///
-    /// **It decides whose word counts about the state.** A hook reports an
-    /// event at the moment it happens and carries the reason — which tool,
-    /// which question, which request id to answer by. The roster reports a
-    /// coarse sample two seconds late. Where both exist the hook wins, and
-    /// where only the roster exists it must be believed rather than consulted
-    /// once and then ignored, which is what it was.
+    /// When a hook last spoke about this session. Where a hook has spoken its
+    /// word on state wins over the roster's late, coarse sample; otherwise the
+    /// roster is believed.
     #[serde(default)]
     pub last_hook_at: Option<Timestamp>,
-    /// Whether this session has ever produced an event that *is* activity — a
-    /// hook, a telemetry record, a turn of a driven run.
-    ///
-    /// Not the same question as [`reporting`](Self::reporting), and conflating
-    /// the two put a contradiction on the screen: the roster sets `reporting`
-    /// when it gives a session a status, so a machine with no hooks installed
-    /// had a session the board showed as `busy` and the inbox showed as
-    /// *"No activity for 519 min"*. There had been no activity because there
-    /// was no channel carrying any — which is a fact about the installation,
-    /// not about the session.
-    ///
-    /// The quiet clock only means something for a session that would have said
-    /// so, which is what this flag answers.
+    /// Whether this session ever produced an event that *is* activity (hook,
+    /// telemetry, driven turn). Unlike [`reporting`](Self::reporting), which
+    /// the roster sets, this is what makes the quiet clock meaningful.
     #[serde(default)]
     pub activity_seen: bool,
-    /// Which of this run's inbox items are hidden, and until when.
-    ///
-    /// Per *kind*, not per run: "not this one, not now" is a thought about the
-    /// thing on screen, and a blanket snooze on the run swallowed whatever
-    /// arrived next — including the permission request that is the one item
-    /// this product exists to deliver. See [`Snoozed`](crate::core::attention::Snoozed).
+    /// Which of this run's inbox items are hidden, and until when. Per kind,
+    /// so a snooze never swallows the next permission request.
     #[serde(default)]
     pub snoozed: crate::core::attention::Snoozed,
+    /// The tasks Devplane sent this run. `None` means nothing was ever sent,
+    /// never an empty list standing in for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent: Option<Vec<crate::core::spec::SentTask>>,
+    /// What the specification said when this run last closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<Observed>,
+    /// Files this run's editing tool calls named, repository-relative, in
+    /// first-seen order. Read as calls start, so refused edits are included.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wrote: Vec<String>,
+    /// The `seq` of the last stored event folded into this run. Projection is
+    /// at-least-once and reducers count, so events at or below it are skipped.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub last_seq: i64,
 }
 
-/// A question an agent asked and then moved past.
-///
-/// **Not answerable, and the type says so by having nowhere to put an answer.**
-/// The tool call is over; offering a button would be offering something no
-/// route can deliver, which is the defect the driven ask was built to avoid and
-/// would be a worse version of here.
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
+}
+
+/// The specification as the host read it when a run closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Observed {
+    /// Of the folder the person edits; `None` when it was not there.
+    pub fingerprint: Option<String>,
+    /// The keys of every ticked task in the task file, as the run left it.
+    pub ticked: Vec<String>,
+    /// The newest document's modification time.
+    pub changed_at: Option<Timestamp>,
+    /// When this was taken — the run's close, for the counts.
+    pub at: Timestamp,
+}
+
+/// A question an agent asked and then moved past. Not answerable: the tool call
+/// is over, so the type has nowhere to put an answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
@@ -558,6 +493,22 @@ pub struct AbandonedQuestion {
     /// What the agent did instead, where that is the next thing it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_on_to: Option<String>,
+    pub ended_by: EndedBy,
+}
+
+/// How a question came to be abandoned: derived from hook events, or asserted
+/// by the vendor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub enum EndedBy {
+    /// Derived: another tool call started while the question stood.
+    MovedOn,
+    /// Derived: the session ended with the question still open.
+    SessionEnded,
+    /// Asserted by the vendor, e.g. OpenCode's `question.rejected`.
+    VendorRejected,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -572,39 +523,25 @@ pub struct BlockedOn {
     /// Set when this can be answered from Devplane.
     #[serde(default)]
     pub request_id: Option<String>,
-    /// The durable ask, when there is one.
-    ///
-    /// **The token a surface offers, and `request_id` is not.** A request id
-    /// means something only to the connection that issued it; this one is what
-    /// an answer is addressed to from any surface at any later time, including
-    /// after the process that asked has gone.
+    /// The durable ask: what a surface addresses an answer to. Unlike
+    /// `request_id`, it outlives the connection that asked.
     #[serde(default)]
     pub ask: Option<crate::core::AskId>,
     pub tool: Option<String>,
     pub input: Option<serde_json::Value>,
     /// What the run will accept as an answer, with the ids the protocol needs.
     pub options: Vec<Choice>,
-    /// The whole form, where the agent asked several questions at once or
-    /// offered a free-text box. `options` is the first question flattened for
-    /// surfaces that show one line; this is what an answer is validated
-    /// against.
+    /// The whole form, for several questions or free text; answers are
+    /// validated against it. `options` is its first question flattened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub form: Option<serde_json::Value>,
     pub since: Timestamp,
 }
 
 impl Run {
-    /// Fills what an agent's own session listing knows and this run does not.
-    ///
-    /// **It may only fill gaps, and the precedence rule is the whole of it.**
-    /// A listing is the agent's view of its own history; the run is what
-    /// Devplane has *observed*, and an observation outranks a catalogue. So a
-    /// title arrives only where there is none, and **no state is touched at
-    /// all** — `SessionInfo` carries none, so there is nothing to take, and a
-    /// listing that appeared to say a session was idle would be inventing it.
-    ///
-    /// Whitespace is refused rather than stored: a title of three spaces
-    /// renders as a name that is not there, which is worse than the id.
+    /// Fills a missing name from the agent's own session listing. Observation
+    /// outranks the listing: only gaps are filled, state is never touched, and
+    /// a blank title is refused.
     pub fn enrich_from_listing(&mut self, listed: &ListedSession) -> bool {
         if self.agent_session.as_deref() != Some(listed.agent_session.as_str()) {
             return false;
@@ -632,8 +569,7 @@ impl Run {
             agent_command: None,
             mode,
             state: RunState::Starting,
-            // Unknown until a hook that carries it arrives. `PreToolUse` is
-            // not one of them, whatever it feels like it should be.
+            // Unknown until a hook carrying it arrives (`PreToolUse` does not).
             permission_mode: None,
             permission_mode_seen: None,
             question_clock: None,
@@ -665,6 +601,38 @@ impl Run {
             reporting: false,
             activity_seen: false,
             snoozed: Default::default(),
+            sent: None,
+            observed: None,
+            wrote: Vec::new(),
+            last_seq: 0,
+        }
+    }
+
+    /// Records a file an editing tool call named, relative to where the run
+    /// works. An absolute path under that directory loses the prefix; one
+    /// outside it is kept whole, where it can match no file of the change.
+    pub fn note_written(&mut self, tool: &str, input: &serde_json::Value) {
+        if !matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+            return;
+        }
+        let Some(raw) = ["file_path", "notebook_path", "path"]
+            .iter()
+            .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
+        else {
+            return;
+        };
+        let path = std::path::Path::new(raw);
+        let rel = match path.is_absolute() {
+            true => [self.worktree.as_ref(), Some(&self.cwd)]
+                .into_iter()
+                .flatten()
+                .find_map(|root| path.strip_prefix(root).ok())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| raw.to_string()),
+            false => raw.trim_start_matches("./").to_string(),
+        };
+        if !rel.is_empty() && !self.wrote.contains(&rel) {
+            self.wrote.push(rel);
         }
     }
 
@@ -678,29 +646,13 @@ impl Run {
         (Timestamp::now() - self.last_activity_at).get_seconds()
     }
 
-    /// Whether this run belongs in the working set: something is happening,
-    /// somebody is being asked for something, or it went wrong or quiet
-    /// recently enough to still be today's business.
-    ///
-    /// The distinction matters at scale, and getting it wrong is not a matter
-    /// of taste. This read `|| self.reporting`, which is true of every session
-    /// the roster ever gave a status to — so a machine with one session in
-    /// play showed **thirty-eight rows**, twenty-five of them editor tabs
-    /// reading "waiting for a prompt" since Tuesday. A board that lists the
-    /// inventory answers no question at all.
-    ///
-    /// Two things never age out, because both are somebody waiting: a session
-    /// asking for something, and a session doing something. Everything else —
-    /// idle, failed, lost — is today's business for [`IN_PLAY_SECONDS`] and
-    /// history afterwards, counted rather than listed (`--all` lists them).
+    /// Whether this run belongs in the working set. A session asking for
+    /// something, working, or waiting on a job never ages out; anything else
+    /// that reported, failed or was lost stays for [`IN_PLAY_SECONDS`] and is
+    /// then counted rather than listed (`--all` lists it).
     pub fn is_active(&self) -> bool {
         if self.state.needs_human()
             || matches!(self.state, RunState::Working | RunState::Starting)
-            // **A running job is something happening**, so it never ages out.
-            // Without this a four-hour test suite drops off the board after
-            // six, and the session most worth watching is the one that
-            // vanishes — the person comes back to a finished run they were
-            // never shown.
             || self.state.waits_on_a_job()
         {
             return true;
@@ -721,10 +673,19 @@ impl Run {
         }
     }
 
-    /// Whether anything about this run is currently hidden. The board's
-    /// marker; the inbox asks per kind instead.
-    pub fn is_snoozed(&self) -> bool {
-        self.snoozed.any()
+    /// The one sentence every surface shows about the tasks this run carries.
+    /// A watched run says it has none rather than guessing from the diff.
+    pub fn sent_says(&self) -> String {
+        match (&self.sent, self.mode) {
+            (Some(sent), _) => match sent.len() {
+                1 => "sent 1 task".to_string(),
+                n => format!("sent {n} tasks"),
+            },
+            (None, RunMode::Observed) => {
+                "watched, not dispatched by Devplane — it carries no task edges".to_string()
+            }
+            (None, _) => "no tasks were sent to this run".to_string(),
+        }
     }
 }
 
@@ -732,19 +693,13 @@ impl Run {
 mod permission_mode_tests {
     use super::PermissionMode;
 
-    /// **`default` is the one labelled Manual, and `manual` is not a value.**
-    ///
-    /// The vendor's reference says so in a sentence buried in a table: *"The
-    /// mode labeled Manual arrives as `default`, never as `manual`, so scripts
-    /// that match `default` keep working."* A matcher written from the visible
-    /// interface instead of the wire would miss every supervised session.
+    /// `default` is the one labelled Manual; `manual` is not a wire value.
     #[test]
     fn the_wire_spelling_is_the_vendors_and_manual_is_not_one() {
         assert_eq!(PermissionMode::parse("default"), PermissionMode::Default);
         assert_eq!(PermissionMode::Default.label(), "manual");
         assert_eq!(PermissionMode::Default.as_str(), "default");
-        // `manual` on the wire would be a value the vendor does not send, so
-        // it is kept rather than helpfully mapped onto `Default`.
+        // Kept verbatim, not mapped onto `Default`.
         assert!(matches!(
             PermissionMode::parse("manual"),
             PermissionMode::Unrecognised(_)
@@ -760,12 +715,7 @@ mod permission_mode_tests {
         ));
     }
 
-    /// **A mode nobody here has heard of is not "supervised".**
-    ///
-    /// The whole class of bug this project keeps finding in itself is a widening
-    /// that nothing reports. Collapsing an unknown mode into `Default` would put
-    /// the most-supervised label on a session running something else entirely,
-    /// and no test anywhere would fail. So the third answer exists.
+    /// An unknown mode is not "supervised": it answers neither yes nor no.
     #[test]
     fn an_unknown_mode_answers_neither_yes_nor_no() {
         assert_eq!(PermissionMode::Default.asks_a_person(), Some(true));
@@ -782,8 +732,6 @@ mod permission_mode_tests {
         );
     }
 
-    /// Every value survives the round trip, so a mode is never silently
-    /// rewritten on its way through the store.
     #[test]
     fn every_mode_round_trips_through_its_wire_spelling() {
         for raw in [
@@ -799,9 +747,6 @@ mod permission_mode_tests {
         }
     }
 
-    /// No two modes read the same on screen. A label collision would make two
-    /// different supervision states indistinguishable in the one place the
-    /// distinction is the entire point.
     #[test]
     fn no_two_modes_share_a_label() {
         let all = [
@@ -824,31 +769,23 @@ mod permission_mode_tests {
     }
 }
 
-/// What one agent said it could do, the last time Devplane started it.
-///
-/// Capabilities are advertised per agent at `initialize`, so this is a fact
-/// about *that* agent at *that* version, with a date on it.
-///
-/// **Absence is *not probed*, never *not supported*.** An agent nobody has
-/// started has no record at all.
+/// What one agent advertised at `initialize` the last time Devplane started it,
+/// dated. A missing record means *not probed*, never *not supported*.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentCapabilityRecord {
-    /// What was actually run. Keyed on this rather than a friendly name because
-    /// two registry entries can point at one binary, and a rename must not read
-    /// as a new agent.
+    /// What was actually run; keyed on this because two registry entries can
+    /// share one binary.
     pub command: String,
     /// What the agent calls itself, where it says.
     pub agent_name: Option<String>,
     /// `session/resume` — continue without replaying.
     pub resume: bool,
-    /// `session/load` — continue *with* a replay. An agent may have either, and
-    /// GitHub Copilot advertises this one and not `resume`.
+    /// `session/load` — continue *with* a replay (Copilot has only this one).
     pub load_session: bool,
     /// `session/list` — the agent can enumerate its own sessions.
     pub list_sessions: bool,
-    /// Whether the agent declared a session mode. Not a capability flag: the
-    /// protocol has none for modes, and what is observable is whether the
-    /// session response carried one.
+    /// Whether the session response carried a mode; the protocol has no
+    /// capability flag for modes.
     pub declares_modes: bool,
     /// Whether the agent advertised any authentication method.
     pub needs_auth: bool,

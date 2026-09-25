@@ -4,34 +4,25 @@ use crate::core::ids::ProjectId;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// A registered repository.
-///
-/// Registration is deliberate: a project must be trusted before Devplane will
-/// ever spawn an agent in it, because a headless Claude run executes the
-/// repository's own hooks and MCP servers with no dialog.
+/// A registered repository. It must be trusted before Devplane spawns an agent
+/// in it: a headless run executes the repository's own hooks and MCP servers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
     pub root: PathBuf,
-    /// Trusted projects may host driven and background runs. Untrusted ones are
-    /// observe-only, which is still the whole of M0.
+    /// Trusted projects may host driven and background runs; untrusted ones
+    /// are observe-only.
     pub trusted: bool,
-    /// Repository URL, when the remote is known. Used to correlate
-    /// OpenTelemetry's `vcs.repository.url.full` to a project without a path
-    /// lookup.
+    /// Correlates OpenTelemetry's `vcs.repository.url.full` without a path lookup.
     pub repo_url: Option<String>,
     /// Discovered rather than registered: a session appeared in this directory.
     pub auto_discovered: bool,
 }
 
 impl Project {
-    /// The `owner/name` slug, where the remote is a recognisable forge URL.
-    ///
-    /// What a `claude-cli://open?repo=` link needs: the slug resolves to
-    /// whichever clone the person clicking actually has, which is the whole
-    /// reason a link is worth more than a path. Handles both the
-    /// `https://host/owner/name(.git)` and `git@host:owner/name(.git)` forms.
+    /// The `owner/name` slug a `claude-cli://open?repo=` link needs, from an
+    /// `https://host/owner/name(.git)` or `git@host:owner/name(.git)` remote.
     pub fn repo_slug(&self) -> Option<String> {
         let url = self.repo_url.as_deref()?.trim_end_matches('/');
         let rest = match url.split_once("://") {
@@ -42,8 +33,7 @@ impl Project {
         };
         let rest = rest.strip_suffix(".git").unwrap_or(rest);
         let (owner, name) = rest.split_once('/')?;
-        // Anything deeper is not a slug, and guessing at one would build a
-        // link that opens the wrong thing.
+        // Anything deeper is not a slug; guessing would open the wrong thing.
         (!owner.is_empty() && !name.is_empty() && !name.contains('/'))
             .then(|| format!("{owner}/{name}"))
     }
@@ -63,19 +53,15 @@ impl Project {
         }
     }
 
-    /// Whether a path belongs to this project. A worktree under
-    /// `.claude/worktrees/` counts as the project it was created from, which is
-    /// what makes five worktrees of one repository one row on the board.
+    /// Whether a path belongs to this project, including worktrees under
+    /// `.claude/worktrees/`.
     pub fn contains(&self, path: &Path) -> bool {
         path.starts_with(&self.root)
     }
 }
 
-/// Finds the checkout a path sits in by walking up to the nearest `.git`.
-///
-/// A linked worktree has a `.git` *file* rather than a directory, so both are
-/// accepted: this answers "which checkout", and [`main_checkout_for`] answers
-/// "which repository owns it".
+/// The checkout a path sits in: the nearest `.git`, file or directory. See
+/// [`main_checkout_for`] for which repository owns it.
 pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(dir) = cur {
@@ -87,26 +73,12 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Maps a worktree back to the repository that owns it.
-///
-/// Two conventions, because there are two ways a worktree gets made and a
-/// human does not think of them as different things:
-///
-/// * Claude Code's — and Devplane's — `<repo>/.claude/worktrees/<name>`, which
-///   is a pure string question;
-/// * anything `git worktree add` produced, which can be anywhere on the disk.
-///   Its `.git` is a *file* reading `gitdir: <repo>/.git/worktrees/<name>`, so
-///   the owner is recoverable without running git — which matters, because the
-///   answer is needed on the synchronous hook a session is blocked on.
-///
-/// Getting the second one wrong is not cosmetic. The repository's
-/// `devplane.toml` is found from this, so a worktree that resolves to itself
-/// is a worktree where the project's `never_auto` rules and its gates silently
-/// do not apply.
+/// Maps a worktree back to the repository that owns it:
+/// `<repo>/.claude/worktrees/<name>` by its path, or a `git worktree add`
+/// checkout by its verified `.git` file, without running git.
+/// A worktree resolving to itself would escape the owner's `devplane.toml`.
 pub fn main_checkout_for(path: &Path) -> Option<PathBuf> {
-    // Both separators, because this is the one string comparison in the
-    // product that decides whether five checkouts of a repository are five
-    // projects or one, and on Windows the path arrives with backslashes.
+    // Both separators: on Windows the path arrives with backslashes.
     let s = path.to_string_lossy().replace('\\', "/");
     if let Some(idx) = s.find("/.claude/worktrees/") {
         return Some(PathBuf::from(&s[..idx]));
@@ -114,11 +86,8 @@ pub fn main_checkout_for(path: &Path) -> Option<PathBuf> {
     linked_worktree_owner(path)
 }
 
-/// The repository a linked worktree belongs to, read out of its `.git` file.
-///
-/// A bounded read of one small local file — the same exception `config` and
-/// `policy_cache` take, and for the same reason: it is the only way to answer
-/// the question without spawning git, which this half may not do.
+/// The repository a linked worktree belongs to, read out of its `.git` file:
+/// a bounded read of two small files, since this half may not spawn git.
 fn linked_worktree_owner(start: &Path) -> Option<PathBuf> {
     let checkout = find_repo_root(start)?;
     let dot_git = checkout.join(".git");
@@ -126,60 +95,87 @@ fn linked_worktree_owner(start: &Path) -> Option<PathBuf> {
         // The main checkout of a repository is not a worktree of anything.
         return None;
     }
-    let text = std::fs::read_to_string(&dot_git).ok()?;
-    let target = text
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("gitdir:"))?;
-    let git_dir = PathBuf::from(target.trim());
-
-    // `<repo>/.git/worktrees/<name>` → `<repo>`. Checked segment by segment
-    // rather than by trimming a substring, so a repository that happens to live
-    // in a directory called `worktrees` is not mistaken for one.
-    let name_parent = git_dir.parent()?;
-    if name_parent.file_name()? != "worktrees" {
-        return None;
-    }
-    let common = name_parent.parent()?;
-    if common.file_name()? != ".git" {
-        return None;
-    }
-    Some(common.parent()?.to_path_buf())
+    verified_owner(&dot_git)
 }
 
-/// The directory whose `devplane.toml` governs a path: the repository that
-/// owns it, or the checkout itself when it owns nothing.
-///
-/// One function, because five call sites spelling out the same `or_else` chain
-/// is five places for the worktree case to be forgotten in — and it was.
-///
-/// **The last clause is a fallback and not a third convention.** A directory
-/// with no git above it used to have no rules at all, however plainly a
-/// `devplane.toml` was sitting in it — so `devplane check` read the file and
-/// printed its rules while `devplane explain`, in the same directory, answered
-/// `undecided` and never mentioned it. Two commands disagreeing about one file
-/// is worse than either answer.
-///
-/// Inside a repository the root still wins, even if a nested directory carries
-/// its own `devplane.toml`: making the *nearest* file win would silently move
-/// authority for every existing checkout, in a direction nobody could predict
-/// from the outside. This only reaches a path that has no repository above it.
-pub fn governing_root(path: &Path) -> Option<PathBuf> {
-    main_checkout_for(path)
-        .or_else(|| find_repo_root(path))
-        .or_else(|| find_config_root(path))
+/// The owner a linked worktree's `.git` file names, only when git agrees.
+/// An agent can edit that file, so it is honoured only when the owner's
+/// `.git/worktrees/<name>/gitdir` points back at this checkout; otherwise it
+/// names nobody, and an agent cannot choose which rules govern it.
+fn verified_owner(dot_git: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(dot_git).ok()?;
+    let git_dir = PathBuf::from(
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix("gitdir:"))?
+            .trim(),
+    );
+    // `<repo>/.git/worktrees/<name>` → `<repo>`, checked segment by segment.
+    let worktrees = git_dir.parent()?;
+    if worktrees.file_name()? != "worktrees" || worktrees.parent()?.file_name()? != ".git" {
+        return None;
+    }
+    let back = std::fs::read_to_string(git_dir.join("gitdir")).ok()?;
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if canonical(Path::new(back.trim())) != canonical(dot_git) {
+        return None;
+    }
+    Some(worktrees.parent()?.parent()?.to_path_buf())
 }
 
-/// The nearest ancestor holding a `devplane.toml`, for a path with no
-/// repository above it.
-fn find_config_root(start: &Path) -> Option<PathBuf> {
-    let mut cur = Some(start);
-    while let Some(dir) = cur {
-        if dir.join(crate::core::config::CONFIG_FILE).is_file() {
-            return Some(dir.to_path_buf());
+/// A path as the filesystem names it: its longest existing ancestor resolved
+/// through every link, the not-yet-existing rest appended unchanged. One
+/// repository is one project whatever spelling reached it (`/tmp` is
+/// `/private/tmp` on macOS), including worktrees not created yet.
+pub fn named(path: &Path) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut cur = path;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(cur) {
+            return tail.iter().rev().fold(real, |acc, part| acc.join(part));
         }
-        cur = dir.parent();
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_os_string());
+                cur = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
-    None
+}
+
+/// The directory whose `devplane.toml` governs a path; the one resolver every
+/// surface asks.
+///
+/// * `<root>/.claude/worktrees/<name>` is governed by `<root>`.
+/// * A linked worktree elsewhere is governed by its owner when
+///   [`verified_owner`] verifies; otherwise the walk continues upward, so a
+///   forged `.git` file yields the machine-wide rules, never its own.
+/// * Inside a repository the root wins over a nested `devplane.toml`; the
+///   nearest file governs only a path with no repository above it.
+pub fn governing_root(path: &Path) -> Option<PathBuf> {
+    let resolved = named(path);
+    let path = resolved.as_path();
+    let text = path.to_string_lossy().replace('\\', "/");
+    if let Some(idx) = text.find("/.claude/worktrees/") {
+        return Some(PathBuf::from(&text[..idx]));
+    }
+    let mut config_root = None;
+    let mut cur = Some(path);
+    while let Some(d) = cur {
+        let dot_git = d.join(".git");
+        if dot_git.is_dir() {
+            return Some(d.to_path_buf());
+        }
+        if dot_git.is_file() {
+            if let Some(owner) = verified_owner(&dot_git) {
+                return Some(owner);
+            }
+        } else if config_root.is_none() && d.join(crate::core::config::CONFIG_FILE).is_file() {
+            config_root = Some(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    config_root
 }
 
 /// Whether a path is a checkout that some other repository owns.
@@ -213,9 +209,8 @@ mod tests {
 
     use super::*;
 
-    /// Builds `<tmp>/main` with a linked worktree `<tmp>/feature` beside it,
-    /// the way `git worktree add ../feature` leaves them — without running git,
-    /// so the test says what the layout is rather than trusting a version of it.
+    /// `<tmp>/main` with a linked worktree `<tmp>/feature`, laid out as
+    /// `git worktree add ../feature` would, without running git.
     fn linked_worktree(tag: &str) -> (PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!("vp-wt-{tag}-{}", std::process::id()));
         let main = base.join("main");
@@ -227,17 +222,17 @@ mod tests {
             format!("gitdir: {}/.git/worktrees/feature\n", main.display()),
         )
         .unwrap();
+        // The back-reference git writes; without it the pointer is not believed.
+        std::fs::write(
+            main.join(".git/worktrees/feature/gitdir"),
+            format!("{}\n", feature.join(".git").display()),
+        )
+        .unwrap();
         (main, feature)
     }
 
     #[test]
     fn a_linked_worktree_resolves_to_the_repository_that_owns_it() {
-        // `git worktree add` is how most worktrees on a real machine were made,
-        // and its output can be anywhere on the disk — there is no string in
-        // the path to recognise. Before this, such a checkout resolved to
-        // itself: its own project row on the board, its own trust decision, and
-        // a `devplane.toml` at the real root whose `never_auto` rules and
-        // gates silently did not apply to work happening inside it.
         let (main, feature) = linked_worktree("owner");
         assert_eq!(main_checkout_for(&feature).as_deref(), Some(main.as_path()));
         assert_eq!(governing_root(&feature).as_deref(), Some(main.as_path()));
@@ -264,8 +259,9 @@ mod tests {
         let (main, _) = linked_worktree("main");
         assert_eq!(main_checkout_for(&main), None);
         assert!(!is_worktree(&main));
-        // It still governs itself.
-        assert_eq!(governing_root(&main).as_deref(), Some(main.as_path()));
+        // Canonicalized: the temporary directory is behind a link on macOS.
+        let named = std::fs::canonicalize(&main).unwrap();
+        assert_eq!(governing_root(&main).as_deref(), Some(named.as_path()));
         std::fs::remove_dir_all(main.parent().unwrap()).ok();
     }
 
@@ -281,13 +277,25 @@ mod tests {
 
     #[test]
     fn a_repository_living_under_a_directory_called_worktrees_is_not_mistaken_for_one() {
-        // The `gitdir:` tail is checked segment by segment for this reason: a
-        // substring test would read `/home/me/worktrees/api/.git` as a link.
+        // A substring test would read `/home/me/worktrees/api/.git` as a link.
         let base = std::env::temp_dir().join(format!("vp-wt-plain-{}", std::process::id()));
         let repo = base.join("worktrees").join("api");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         assert_eq!(main_checkout_for(&repo), None);
-        assert_eq!(governing_root(&repo).as_deref(), Some(repo.as_path()));
+        let named = std::fs::canonicalize(&repo).unwrap();
+        assert_eq!(governing_root(&repo).as_deref(), Some(named.as_path()));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_path_not_yet_on_disk_is_named_under_its_real_ancestor() {
+        // An existing repository and its not-yet-created worktree share a spelling.
+        let base = std::env::temp_dir().join(format!("vp-named-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let real = std::fs::canonicalize(&base).unwrap();
+        let later = base.join(".claude/worktrees/not-yet");
+        assert_eq!(super::named(&later), real.join(".claude/worktrees/not-yet"));
+        assert_eq!(super::named(&base), real);
         std::fs::remove_dir_all(&base).ok();
     }
 }

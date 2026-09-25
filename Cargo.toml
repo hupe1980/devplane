@@ -1,7 +1,7 @@
 [package]
 name = "devplane"
-description = "Records who decided, when nobody asked you — a person, a rule, a classifier, a timer, or nobody — across every project and every coding agent on your machine. Local-first, one binary, and it never approves a tool call."
-version = "0.9.0"
+description = "The desktop workbench for spec-driven agentic development. Write the spec, dispatch any ACP agent, verify against your own gates, and keep the record of who decided what while you were not looking. One binary, local-first, no account."
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -11,15 +11,11 @@ authors = ["hupe1980"]
 readme = "README.md"
 keywords = ["ai", "agents", "claude-code", "developer-tools", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
-# The crate root is the repository root, so the published package is named
-# explicitly rather than taking the site, the scripts and the CI with it.
-# `ui/` is named file by file rather than as a directory: it is a node project
-# now, and `/ui` swept 1 460 files of `node_modules` into the package.
+# Explicit so the package leaves out the site, scripts, CI and `ui/node_modules`.
 include = [
   "/src",
   "/build.rs",
-  # The built interface, not its sources: `build.rs` embeds `ui/dist` and reads
-  # nothing else. The map is left out — four times the bundle, loaded by nothing.
+  # The built interface only (what `build.rs` embeds); no source map.
   "/ui/dist/*.html",
   "/ui/dist/*.js",
   "/ui/dist/*.css",
@@ -30,8 +26,7 @@ include = [
   "/LICENSE-APACHE",
 ]
 
-# One crate, at the repository root. `tests/purity.rs` enforces the rule a
-# second one would have: nothing in `src/core/` may reach the outside world.
+# One crate; `tests/purity.rs` keeps `src/core/` free of I/O instead.
 [workspace]
 
 [lib]
@@ -42,43 +37,48 @@ path = "src/lib.rs"
 name = "devplane"
 path = "src/main.rs"
 
-# The fixture the protocol suite drives: a real agent process speaking real ACP,
-# rather than a vendor's, so `cargo test` needs no subscription and no network.
+# The ACP agent the conformance suite drives: no subscription, no network.
 [[example]]
 name = "echo_agent"
 
-# The interface's wire types are **generated** from the Rust shapes rather than
-# hand-written beside them, because a second copy of a wire format is a second
-# thing to keep true — and the one that drifts is always the copy.
-#
-# Optional and off by default, so it contributes **nothing** to the shipped
-# binary: `scripts/deps-count.sh` measures `cargo tree --edges normal`, which
-# does not traverse a feature nobody enabled. It is turned on by the one test
-# that writes the bindings, and by CI.
+# `typescript` generates the interface's wire types; off by default, so it adds
+# nothing to the shipped binary or the dependency count.
 [features]
 default = []
 typescript = ["dep:ts-rs"]
+# The desktop app. Off by default so `cargo install devplane` links no WebKit.
+app = [
+  "dep:tauri",
+  "dep:tauri-build",
+  "dep:tauri-plugin-notification",
+  "dep:tauri-plugin-global-shortcut",
+  "dep:tauri-plugin-deep-link",
+  "dep:tauri-plugin-single-instance",
+  "dep:tauri-plugin-opener",
+]
 
 [dependencies]
 ts-rs = { version = "12", optional = true, features = ["no-serde-warnings"] }
+# The window loads the host's page over loopback; no Tauri IPC on the data path.
+tauri = { version = "2.11", optional = true, features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = { version = "2", optional = true }
+tauri-plugin-global-shortcut = { version = "2", optional = true }
+tauri-plugin-deep-link = { version = "2", optional = true }
+# `deep-link` so a second launch hands its URL to the app already running.
+tauri-plugin-single-instance = { version = "2", optional = true, features = ["deep-link"] }
+tauri-plugin-opener = { version = "2", optional = true }
 agent-client-protocol = "2.2"
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
 clap = { version = "4", features = ["derive", "env"] }
-# The completion scripts are generated from the same `clap::Command` the help
-# screen renders, so a command that exists is a command that completes and a
-# hidden one is neither documented nor offered. The alternative is three
-# hand-written scripts that go stale the first time a subcommand is added.
+# Shell completions generated from the same `clap::Command` as the help.
 clap_complete = "4"
 dirs = "7"
 futures-util = "0.3"
 jiff = { version = "0.2", features = ["serde"] }
-# Three calls, none of which touches an agent — the protocol crate owns those
-# process groups: `setsid` to detach the daemon, `kill(pid, 0)` to ask whether
-# an observed process still exists, and `kill(-pid, SIGKILL)` for a timed-out
-# gate and its whole group. Already in the tree via `sqlx` and `dirs`.
+# `kill(pid, 0)` liveness probes and killing a timed-out gate's process group.
 libc = "0.2"
-# The client only ever talks to 127.0.0.1, so no TLS stack is linked at all.
+# Loopback only, so no TLS stack.
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 rmcp = { version = "3.4.0", features = ["server", "transport-io"] }
 serde = { version = "1", features = ["derive"] }
@@ -91,6 +91,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
+# Used by `build.rs` only under the `app` feature.
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
 [profile.release]
 lto = "thin"
 strip = true
@@ -99,30 +103,17 @@ strip = true
 [profile.dist]
 inherits = "release"
 
-# Artifacts, checksums and the shell installer. No macOS signing: `dist` signs
-# Windows only, which is why `site/content/docs/install.md` documents `curl`
-# rather than the releases page.
+# `dist` signs Windows only, so the install docs recommend `curl` on macOS.
 [workspace.metadata.dist]
 cargo-dist-version = "0.32.0"
 ci = ["github"]
-# Unscoped: `npm-package` defaults to the crate's name, which is the name held
-# on npm.
+# The npm package takes the crate's (unscoped) name.
 installers = ["shell", "npm"]
-# npm publishes through trusted publishing, as crates.io already does here — no
-# registry token is stored in this repository.
-#
-# The `npm` job in `release.yml` is **hand-written**: `dist` generates one with
-# no `permissions:` block, Node 20.x and `NODE_AUTH_TOKEN`. OIDC needs
-# `id-token: write`, npm 11.5.1+ and Node 22.14.0+, and no `--provenance` — it
-# attaches the attestation itself.
+# npm uses trusted publishing (OIDC, no stored token); the `npm` job in
+# `release.yml` is hand-written because dist's generated one cannot do OIDC.
 publish-jobs = ["npm"]
-# musl rather than gnu so one Linux artifact runs everywhere. `libsqlite3-sys`
-# is C, so a musl build needs a musl C toolchain. dist renames a plain `musl`
-# target to `musl-static` and offers it for `linux-gnu` and `linux-musl-dynamic`
-# as well, which is what makes one Linux build reach every Linux user.
-#
-# `x86_64-apple-darwin` cross-compiles from the Apple Silicon runner with
-# nothing but `rustup target add` — the C in `libsqlite3-sys` included.
+# Static musl so one Linux artifact runs everywhere; x86_64 macOS cross-compiles
+# from the Apple Silicon runner.
 targets = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",
@@ -133,7 +124,5 @@ targets = [
 # A pull request plans the release without building it.
 pr-run-mode = "plan"
 install-updater = false
-# `.github/workflows/release.yml` is hand-written rather than generated by
-# `dist init`, so dist must not refuse to build over the difference. The cost is
-# that the workflow's matrix repeats `targets` above; a test holds them equal.
+# `release.yml` is hand-written; its matrix repeats `targets` and a test holds them equal.
 allow-dirty = ["ci"]

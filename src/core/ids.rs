@@ -1,5 +1,4 @@
-//! Identifiers. Every id is a newtype so that a project id can never be passed
-//! where a run id is meant.
+//! Newtype identifiers, so a project id can never be passed where a run id is meant.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -9,9 +8,7 @@ macro_rules! string_id {
         #[doc = $doc]
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(transparent)]
-        // `transparent` on the wire, so it is a string on the wire, and the
-        // generated TypeScript says so rather than inventing a wrapper object
-        // the interface would then have to unwrap.
+        // A plain string on the wire and in the generated TypeScript.
         #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
         #[cfg_attr(
             feature = "typescript",
@@ -73,24 +70,27 @@ string_id!(
      session was gone."
 );
 string_id!(
-    BatchId,
-    "One person's intent, sent once, to many targets. The reviewable unit of a \
-     fan-out: six runs from one prompt are not six things to review, they are \
-     one thing that happened six times."
-);
-string_id!(
-    WorkId,
+    ChangeId,
     "One unit of work: durable across sessions, and the thing a branch, a \
      worktree and a set of gates belong to."
 );
 
+string_id!(
+    ReportId,
+    "A finding one project filed about another. Minted `rp-…` when it is \
+     filed, so it reads as what it is wherever it is pasted."
+);
+
+impl ReportId {
+    /// A fresh id. Uuid v7, so ordering by id is ordering by filing time.
+    pub fn mint() -> Self {
+        Self(format!("rp-{}", uuid::Uuid::now_v7().simple()))
+    }
+}
+
 impl ProjectId {
-    /// Derives a project id from a filesystem path.
-    ///
-    /// The path is used as given, minus a trailing separator. No normalisation
-    /// and no symlink resolution happen here — a caller that needs two spellings
-    /// of the same directory to agree must canonicalise first, which every
-    /// caller that registers a project does.
+    /// The path as given, minus a trailing separator. No normalisation or
+    /// symlink resolution: callers that register a project canonicalise first.
     pub fn from_path(path: &std::path::Path) -> Self {
         Self(path.to_string_lossy().trim_end_matches('/').to_string())
     }
@@ -102,8 +102,7 @@ impl RunId {
     }
 }
 
-/// A monotonically increasing event id. Uuid v7 so that ordering by id is
-/// ordering by time, which is what every query wants.
+/// Uuid v7, so ordering by id is ordering by time.
 pub fn new_event_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }

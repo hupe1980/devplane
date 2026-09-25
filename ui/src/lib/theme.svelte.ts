@@ -1,15 +1,5 @@
-// Light or dark, and who decided.
-//
-// **Three states, not two.** The system preference is the default and not the
-// only say: a person who works in a light editor and wants a dark board is not
-// overridden by their operating system, and a person who has never expressed a
-// preference still gets the one their system implies. `system` is therefore a
-// real value rather than the absence of one.
-//
-// The choice is kept in `localStorage` because it is a per-viewer convenience:
-// it never needs to reach another device, another person or the daemon, and a
-// board that failed to load because storage was blocked would be worse than one
-// that forgets which theme you picked.
+// Light, dark or system (the default). The choice is a per-viewer
+// convenience, kept in `localStorage` and forgotten if storage is blocked.
 
 const KEY = "devplane_theme";
 
@@ -29,17 +19,14 @@ export function theme() {
 
   function apply(next: Theme) {
     state.choice = next;
-    // `system` removes the attribute rather than setting a third value: the
-    // stylesheet's media query is what answers then, and an attribute saying
-    // "system" would be a value every selector has to know to ignore.
+    // `system` removes the attribute, so the stylesheet's media query answers.
     if (next === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", next);
     try {
       if (next === "system") localStorage.removeItem(KEY);
       else localStorage.setItem(KEY, next);
     } catch {
-      // A private window with site data blocked. The theme still applies for
-      // this tab; only remembering it fails, and that is not worth an error.
+      // Storage blocked: the theme still applies, it is just not remembered.
     }
   }
 
@@ -47,9 +34,7 @@ export function theme() {
     state,
     /// Called once at start-up to put the stored choice back on the document.
     restore: () => apply(state.choice),
-    /// Cycles system → light → dark → system, which keeps the control to one
-    /// button. A three-way segmented control is more discoverable and costs
-    /// three times the width in a header that has a job to do.
+    /// Cycles system → light → dark → system, so the control is one button.
     cycle: () => apply(state.choice === "system" ? "light" : state.choice === "light" ? "dark" : "system"),
   };
 }

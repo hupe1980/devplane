@@ -3,10 +3,7 @@
 /**
  * Whether the person's answer reached the agent, and how.
  *
- * **Recorded separately from the answer itself, because they are different
- * facts and the gap between them is the whole feature.** An answer written
- * down at 09:00 and delivered at 14:00 to a resumed session is a success; an
- * answer written down and never delivered is a different thing entirely, and
- * collapsing the two would let this product claim a delivery it never made.
+ * Whether the person's answer reached the agent, and how. Kept separate from
+ * the answer: recorded-but-undelivered must never read as delivered.
  */
 export type AskDelivery = "live" | "resumed" | { "undeliverable": { because: string, } };

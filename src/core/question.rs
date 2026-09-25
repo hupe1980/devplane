@@ -1,28 +1,10 @@
 //! A question an agent asked the person, and the person's answer to it.
 //!
-//! **This is not a permission.** A permission asks whether an action is
-//! allowed; a question asks which of several things the person wants, and no
-//! rule can answer it. The two arrive on different channels and only one of
-//! them has a policy: `session/request_permission` carries the first and
-//! `elicitation/create` carries this.
-//!
-//! **The shape here was measured, not read.** The vendor's hook documentation
-//! describes a different payload entirely — the one a `PreToolUse` hook sees —
-//! and the ACP adapter renders the same tool as a *form elicitation* whose
-//! schema carries option descriptions, several questions at once, and a
-//! free-text box that the hook shape has no room for. Every field below came off
-//! the wire on 2026-09-19 against `claude-agent-acp@0.76`, and the fixture in
-//! the tests is that capture byte for byte.
-//!
-//! Two properties of the adapter's own answer-folding decide the API, and both
-//! are the opposite of the obvious guess:
-//!
-//! * **A typed custom answer beats the selection.** If the person writes in the
-//!   *Other* box, that is the answer, whatever radio button is also set.
-//! * **Declining is not refusing.** The adapter turns a decline into
-//!   *answered, with no answers* — the agent proceeds having asked and heard
-//!   nothing, which is the exact failure this product exists to prevent. The
-//!   refusal that stops the call is **cancel**. Nothing here may ever decline.
+//! Not a permission: no rule can answer it, and it arrives as an
+//! `elicitation/create` form (shape captured from `claude-agent-acp`), not
+//! `session/request_permission`. A typed custom answer beats the selection, and
+//! the adapter turns a decline into "answered, with no answers" — so the refusal
+//! that stops the call is cancel, and nothing here may ever decline.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,22 +16,19 @@ pub struct Choice {
     pub value: String,
     /// What the person reads.
     pub label: String,
-    /// The agent's own sentence about what this option means, where it wrote
-    /// one. Rendered, never summarised: it is the difference between *Drop it*
-    /// and *Drop it — removes the legacy route*.
+    /// The agent's own description of this option; rendered, never summarised.
     pub detail: Option<String>,
 }
 
 /// One question, with everything the person needs to answer it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
-    /// The schema property this answer goes back under — `question_0`.
+    /// The schema property this answer goes back under, e.g. `question_0`.
     pub field: String,
-    /// The agent's own heading for it.
     pub title: String,
     pub options: Vec<Choice>,
-    /// The free-text field, where the agent offered one. **A product that
-    /// renders only `options` is showing a smaller question than was asked.**
+    /// The free-text field, where the agent offered one; rendering only
+    /// `options` shows a smaller question than was asked.
     pub custom_field: Option<String>,
 }
 
@@ -57,16 +36,9 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ask {
     pub session_id: String,
-    /// The agent's id for the call, where it bridged one.
-    ///
-    /// **Optional, and the fixture is why.** The Claude adapter sends it
-    /// because it is rendering a *tool call* as a form; an elicitation that did
-    /// not come from a tool has nothing to put here, and the protocol does not
-    /// require it. Requiring it made `parse` reject such a question outright —
-    /// so a question with no tool behind it was dropped as unrenderable, which
-    /// is the failure this whole module exists to prevent, one layer down.
+    /// The agent's id for the call, where it bridged one. Optional: an
+    /// elicitation not from a tool call has none, and is still a question.
     pub tool_call_id: Option<String>,
-    /// The question as the agent phrased it.
     pub message: String,
     pub questions: Vec<Question>,
 }
@@ -89,12 +61,8 @@ fn str_of(v: &Value, k: &str) -> Option<String> {
 
 impl Ask {
     /// Reads an `elicitation/create` payload, or `None` if it is not a question
-    /// this can present.
-    ///
-    /// **`None` is a real answer and must not be treated as an error.** The
-    /// same method carries elicitations from MCP servers, which have their own
-    /// shapes; one this cannot render is one to hand back untouched rather than
-    /// to guess at.
+    /// this can present. `None` is not an error: MCP servers use the same method
+    /// with their own shapes, which are handed back untouched.
     pub fn parse(v: &Value) -> Option<Ask> {
         if v.get("mode").and_then(Value::as_str) != Some("form") {
             return None;
@@ -181,9 +149,7 @@ impl Ask {
             };
             match chosen {
                 Chosen::Option(v) => {
-                    // Only an option the agent offered. Anything else is this
-                    // product inventing an answer, which is the one thing it
-                    // may never do.
+                    // Only an option the agent offered; never invent an answer.
                     if q.options.iter().any(|o| &o.value == v) {
                         out.insert(q.field.clone(), Value::String(v.clone()));
                     }
@@ -207,8 +173,7 @@ impl Ask {
 mod tests {
     use super::*;
 
-    /// The 2026-09-19 capture, byte for byte. Every expectation below is about
-    /// what the adapter actually sent, not about what its documentation says.
+    /// A captured adapter payload, byte for byte.
     fn captured() -> Value {
         serde_json::json!({
           "mode": "form",
@@ -248,8 +213,6 @@ mod tests {
 
     #[test]
     fn an_options_own_description_survives() {
-        // The field the first data model had no room for. Losing it renders
-        // "Drop it" where the agent wrote "Drop it — removes the legacy route".
         let a = Ask::parse(&captured()).unwrap();
         assert_eq!(
             a.questions[0].options[1].detail.as_deref(),
@@ -316,12 +279,6 @@ mod tests {
         );
     }
 
-    /// A question with no tool call behind it is still a question.
-    ///
-    /// Found by the fixture: it sends the captured payload without a
-    /// `toolCallId`, because it is not bridging a tool — and `parse` rejected
-    /// the whole thing, so a perfectly renderable question was reported as one
-    /// this client could not show.
     #[test]
     fn a_question_from_no_tool_call_is_still_a_question() {
         let mut v = captured();
@@ -333,8 +290,8 @@ mod tests {
 
     #[test]
     fn an_elicitation_this_cannot_render_is_handed_back_rather_than_guessed_at() {
-        // MCP servers use the same method with their own shapes. `None` means
-        // "not mine", and must never become an empty question.
+        // `None` means "not mine", and must never become an empty question.
+
         assert!(Ask::parse(&serde_json::json!({ "mode": "url" })).is_none());
         assert!(
             Ask::parse(&serde_json::json!({

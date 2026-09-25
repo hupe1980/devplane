@@ -1,9 +1,7 @@
 //! Finding the `claude` binary.
 //!
-//! It is routinely not on `PATH`. The VS Code extension ships its own copy and
-//! never installs one, so a developer can have four Claude Code versions on the
-//! machine, twenty sessions running, and no `claude` command in a shell. An
-//! observer that gave up there would be useless on exactly the setup it is for.
+//! It is routinely not on `PATH`: the VS Code extension ships its own copy
+//! and installs none.
 
 use std::path::PathBuf;
 
@@ -24,8 +22,8 @@ pub fn claude_binary() -> Option<PathBuf> {
         if local.is_file() {
             return Some(local);
         }
-        // The VS Code extension's bundled copy. Several versions coexist, so
-        // take the newest by name — the versions sort lexically within a major.
+        // The VS Code extension's bundled copies: newest by name (versions
+        // sort lexically within a major).
         if let Some(p) = newest_extension_binary(&home.join(".vscode/extensions")) {
             return Some(p);
         }
@@ -72,8 +70,7 @@ mod tests {
 
     #[test]
     fn an_explicit_override_wins_when_it_exists() {
-        // The override must still point at something: a stale variable should
-        // fall through to discovery rather than disabling the poller.
+        // A stale override falls through to discovery.
         unsafe { std::env::set_var("DEVPLANE_CLAUDE_BIN", "/definitely/not/here") };
         let found = claude_binary();
         unsafe { std::env::remove_var("DEVPLANE_CLAUDE_BIN") };

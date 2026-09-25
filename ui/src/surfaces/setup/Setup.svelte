@@ -1,189 +1,256 @@
 <script lang="ts">
-  // What is configured, and why there is nothing to edit.
-  //
-  // **A person who came looking for a settings form deserves an answer rather
-  // than a missing button.** Every value here is a file: Devplane reads them
-  // and never writes them, because the rules are committed and reviewed like
-  // code — and an agent on this machine runs as the same user, so a route that
-  // edited them would be reachable by the party they exist to bound.
-  //
-  // **It fetches, and until 2026-09-21 it did not.** Its `select` returned
-  // `{}`, so the component rendered its own defaults and told every reader
-  // *"Nothing is configured for this project yet"* — on a machine with hooks
-  // installed, telemetry running and gates declared. A surface that renders a
-  // false statement is worse than one that is missing: the missing one sends
-  // somebody to the CLI, and this one answered their question wrongly.
-  import { onMount } from "svelte";
+  // What is configured on this machine: Devplane, its agent, your rules, and
+  // each project. Read-only: each section names the file it read and the
+  // command that changes it.
   import { api } from "../../lib/api";
+  import Props from "../../lib/ui/Props.svelte";
+  import Grid, { type Column } from "../../lib/ui/Grid.svelte";
+  import Icon from "../../lib/ui/Icon.svelte";
+  import Pill from "../../lib/ui/Pill.svelte";
+  import Empty from "../../lib/ui/Empty.svelte";
 
-  type Connect = {
-    settings_path?: string;
-    hooks_installed?: string[];
-    telemetry_endpoint?: string | null;
-    telemetry_is_ours?: boolean;
-    allowlist_blocks_us?: boolean;
-    gate_is_stale?: boolean;
-  };
   type ProjectRow = {
     id: string;
     name: string;
     root: string;
     trusted: boolean;
     config?: { path: string; exists: boolean };
-    verified?: boolean;
+    declares_gates?: boolean;
     error?: string;
   };
   type Setup = {
     machine?: { version?: string; home?: string; database?: string };
     provider?: { name?: string; because?: string; vendor_supervision?: boolean };
-    connect?: Connect | null;
+    connect?: {
+      settings_path?: string;
+      hooks_installed?: string[];
+      telemetry_endpoint?: string | null;
+      telemetry_is_ours?: boolean;
+    } | null;
     machine_policy?: { path?: string; exists?: boolean; deny?: string[]; ask?: string[]; error?: string } | null;
     projects?: ProjectRow[];
   };
 
   let data = $state<Setup | null>(null);
   let failed = $state("");
-
-  onMount(async () => {
-    try {
-      data = await api<Setup>("/api/setup");
-    } catch (e) {
-      failed = e instanceof Error ? e.message : String(e);
-    }
+  $effect(() => {
+    let live = true;
+    api<Setup>("/api/setup")
+      .then((r) => {
+        if (live) data = r;
+      })
+      .catch((e) => {
+        if (live) failed = e instanceof Error ? e.message : String(e);
+      });
+    return () => {
+      live = false;
+    };
   });
 
   const hooks = $derived(data?.connect?.hooks_installed ?? []);
-  const projects = $derived(data?.projects ?? []);
   const policy = $derived(data?.machine_policy ?? null);
+  let selected = $state<string | null>(null);
+  const columns: Column<ProjectRow>[] = [
+    { key: "name", label: "Project", width: 180, sort: (r) => r.name },
+    { key: "trusted", label: "Trusted", width: 110, sort: (r) => (r.trusted ? 0 : 1) },
+    { key: "gates", label: "Gates", width: 130, sort: (r) => (r.declares_gates ? 0 : 1) },
+    { key: "config", label: "devplane.toml", width: 150 },
+    { key: "root", label: "Where", mono: true },
+  ];
 </script>
 
-<section aria-labelledby="setup-head">
-  <h2 id="setup-head">What is configured</h2>
-
+<div class="page">
+  <h1>Setup</h1>
   {#if failed}
-    <p class="empty" role="status">Devplane could not say what is configured: {failed}</p>
+    <Empty icon="alert" title="Devplane could not say what is configured" body={failed} />
   {:else if !data}
-    <p class="empty">Reading the files…</p>
+    <p class="quiet">Reading the files…</p>
   {:else}
-    <h3>This machine</h3>
-    <dl>
-      <dt>version</dt>
-      <dd>{data.machine?.version ?? "unknown"}</dd>
-      {#if data.machine?.home}<dt>home</dt><dd><code>{data.machine.home}</code></dd>{/if}
-      {#if data.provider?.name}
-        <dt>provider</dt>
-        <!-- The sentence is the daemon's: whether a vendor supervision surface
-             exists at all is a fact about somebody's subscription, and a page
-             that worded it would be guessing about their plan. -->
-        <dd>{data.provider.name}{#if data.provider.because} — {data.provider.because}{/if}</dd>
-      {/if}
-    </dl>
+    <div class="grid">
+      <section class="card">
+        <h2><Icon name="settings" size={14} /> This machine</h2>
+        <Props
+          rows={[
+            { label: "Version", value: data.machine?.version ?? null, missing: "unknown" },
+            { label: "Home", value: data.machine?.home ?? null, mono: true },
+            { label: "Record", value: data.machine?.database ?? null, mono: true },
+            { label: "Sessions from", value: data.provider?.name ? `${data.provider.name}${data.provider.because ? ` — ${data.provider.because}` : ""}` : null },
+          ]}
+        />
+      </section>
 
-    <h3>Your agent</h3>
-    {#if !data.connect}
-      <p class="empty">
-        No agent settings file was found. <code>devplane connect claude</code> writes one.
-      </p>
-    {:else}
-      <dl>
-        <dt>settings</dt>
-        <dd><code>{data.connect.settings_path}</code></dd>
-        <dt>hooks</dt>
-        <dd>
-          {#if hooks.length === 0}
-            none installed — <code>devplane connect claude</code>
-          {:else}
-            {hooks.join(", ")}
-          {/if}
-        </dd>
-        <dt>telemetry</dt>
-        <dd>
-          {#if !data.connect.telemetry_endpoint}
-            not exporting
-          {:else if data.connect.telemetry_is_ours}
-            to Devplane
-          {:else}
-            to somebody else's collector — left alone
-          {/if}
-        </dd>
-      </dl>
-      <!-- Two states that look like working and are not. Both are the same
-           failure shape: the hooks are installed and decide nothing. -->
-      {#if data.connect.allowlist_blocks_us}
-        <p class="warn">
-          An <code>allowedHttpHookUrls</code> list is set and does not cover loopback, so every
-          hook Devplane installed is silently disabled.
-        </p>
-      {/if}
-      {#if data.connect.gate_is_stale}
-        <p class="warn">
-          These hooks were installed before the gate became two events, so prohibitions do not
-          reach a session in auto mode. <code>devplane connect claude</code> again.
-        </p>
-      {/if}
-    {/if}
+      <section class="card">
+        <h2><Icon name="agent" size={14} /> Your agent</h2>
+        {#if !data.connect}
+          <p class="quiet">No agent settings file was found. <code>devplane connect claude</code> writes the hooks, and <code>devplane disconnect claude</code> removes exactly what it wrote.</p>
+        {:else}
+          <Props
+            rows={[
+              { label: "Settings", value: data.connect.settings_path ?? null, mono: true },
+              { label: "Hooks", value: hooks.length ? hooks.join(", ") : null, missing: "none installed — devplane connect claude" },
+              {
+                label: "Telemetry",
+                value: !data.connect.telemetry_endpoint ? "not exporting" : data.connect.telemetry_is_ours ? "to Devplane" : "to somebody else's collector — left alone",
+              },
+            ]}
+          />
+        {/if}
+      </section>
 
-    <h3>Machine-wide rules</h3>
-    {#if !policy || !policy.exists}
-      <p class="empty">
-        No <code>policy.toml</code>. Rules live in each project's <code>devplane.toml</code>.
-      </p>
-    {:else if policy.error}
-      <p class="warn">{policy.path} will not parse: {policy.error}</p>
-    {:else}
-      <dl>
-        <dt>file</dt>
-        <dd><code>{policy.path}</code></dd>
-        {#if (policy.deny ?? []).length > 0}<dt>never</dt><dd>{(policy.deny ?? []).join(" · ")}</dd>{/if}
-        {#if (policy.ask ?? []).length > 0}<dt>always ask</dt><dd>{(policy.ask ?? []).join(" · ")}</dd>{/if}
-      </dl>
-    {/if}
+      <section class="card wide">
+        <h2><Icon name="shield" size={14} /> Rules for every project</h2>
+        {#if !policy || !policy.exists}
+          <p class="quiet">No <code>~/.devplane/policy.toml</code>. Rules live in each project's <code>devplane.toml</code>; a rule you want everywhere goes in that file, in the same shape.</p>
+        {:else if policy.error}
+          <p class="fail"><Icon name="alert" size={13} /> {policy.path} will not parse — every gated call asks until it does: {policy.error}</p>
+        {:else}
+          <p class="file"><code>{policy.path}</code></p>
+          <div class="rules">
+            <div>
+              <h3>Never</h3>
+              {#each policy.deny ?? [] as r (r)}<code class="rule deny">{r}</code>{:else}<span class="quiet">none</span>{/each}
+            </div>
+            <div>
+              <h3>Always ask</h3>
+              {#each policy.ask ?? [] as r (r)}<code class="rule ask">{r}</code>{:else}<span class="quiet">none</span>{/each}
+            </div>
+          </div>
+        {/if}
+      </section>
+    </div>
 
-    <h3>Projects ({projects.length})</h3>
-    {#if projects.length === 0}
-      <p class="empty">
-        No project is registered yet. <code>devplane trust .</code> in a repository adds it.
-      </p>
-    {:else}
-      <ul role="list">
-        {#each projects as p (p.id)}
-          <li>
-            <b>{p.name}</b>
-            <code class="path">{p.root}</code>
-            {#if !p.trusted}<span class="warn">not trusted</span>{/if}
-            {#if p.error}
-              <span class="warn">its devplane.toml will not parse: {p.error}</span>
-            {:else if !p.config?.exists}
-              <span class="dim">no devplane.toml</span>
-            {:else if p.verified === false}
-              <span class="dim">declares no checks — nothing is verified</span>
-            {:else if p.verified}
-              <span class="ok">gates declared</span>
-            {/if}
-          </li>
+    <section class="projects">
+      <h2><Icon name="folder" size={14} /> Projects <span>{data.projects?.length ?? 0}</span></h2>
+      {#if (data.projects ?? []).length === 0}
+        <p class="quiet">None registered. A project is registered the first time an agent works in it, or with <code>devplane trust &lt;path&gt;</code>.</p>
+      {:else}
+        <div class="frame">
+          <Grid id="setup-projects" {columns} rows={data.projects ?? []} key={(r) => r.id} bind:selected label="projects" dense>
+            {#snippet cell(r, c)}
+              {#if c.key === "name"}<b>{r.name}</b>
+              {:else if c.key === "trusted"}<Pill word={r.trusted ? "trusted" : "not trusted"} as={r.trusted ? "none" : "wait"} />
+              {:else if c.key === "gates"}{#if r.error}<span class="fail">unreadable</span>{:else if r.declares_gates}<span class="ok">declared</span>{:else}<span class="quiet">none declared</span>{/if}
+              {:else if c.key === "config"}{r.config?.exists ? "present" : "absent"}
+              {:else}{r.root}{/if}
+            {/snippet}
+          </Grid>
+        </div>
+        {#each (data.projects ?? []).filter((p) => p.error) as p (p.id)}
+          <p class="fail"><Icon name="alert" size={13} /> {p.name}: {p.error}</p>
         {/each}
-      </ul>
-    {/if}
+      {/if}
+    </section>
   {/if}
-
-  <p class="foot">
-    Every value here is a file. Devplane reads them and never writes them: the rules are
-    committed and reviewed like code, and an agent on this machine runs as you.
-  </p>
-</section>
+</div>
 
 <style>
-  h2 { font-size: 1rem; margin: 0 0 .3rem; }
-  h3 { font-size: .85rem; color: var(--dim); margin: .9rem 0 .2rem; font-weight: 600; }
-  dl { display: grid; grid-template-columns: max-content 1fr; gap: .15rem .8rem; margin: .3rem 0; }
-  dt { color: var(--dim); font-size: .82rem; }
-  dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-  ul { list-style: none; margin: .2rem 0; padding: 0; }
-  li { display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; padding: .1rem 0; }
-  .path { color: var(--dim); font-size: .82rem; overflow-wrap: anywhere; }
-  .dim, .empty, .foot { color: var(--dim); }
-  .warn { color: var(--wait); }
-  .ok { color: var(--done); }
-  .foot { font-size: .82rem; margin-top: .9rem; max-width: 70ch; }
-  .empty { max-width: 70ch; }
+  .page {
+    padding: var(--s-4) var(--s-5) var(--s-6);
+    display: grid;
+    gap: var(--s-4);
+    max-width: 90rem;
+  }
+  h1 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+    gap: var(--s-3);
+  }
+  .card {
+    padding: var(--s-3) var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--panel);
+    display: grid;
+    gap: var(--s-2);
+    align-content: start;
+  }
+  .card.wide {
+    grid-column: 1 / -1;
+  }
+  h2 {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    font-size: var(--t-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--faint);
+  }
+  h2 span {
+    font-weight: 400;
+  }
+  h3 {
+    margin: 0 0 var(--s-2);
+    font-size: var(--t-xs);
+    color: var(--dim);
+  }
+  .rules {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--s-4);
+  }
+  .rules > div {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-1);
+    align-content: start;
+  }
+  .rules h3 {
+    flex-basis: 100%;
+  }
+  .rule {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+    padding: 0.1rem 0.45rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    background: var(--bg);
+  }
+  .rule.deny {
+    color: var(--fail);
+  }
+  .rule.ask {
+    color: var(--wait);
+  }
+  .projects {
+    display: grid;
+    gap: var(--s-2);
+  }
+  .frame {
+    height: min(50vh, 26rem);
+    display: flex;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  code {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+  }
+  .file {
+    margin: 0;
+  }
+  .quiet {
+    color: var(--faint);
+    font-size: var(--t-sm);
+    margin: 0;
+  }
+  .fail {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--fail);
+    font-size: var(--t-sm);
+    margin: 0;
+  }
+  /* A declared gate is a promise, not a pass: not the verified green. */
+  .ok {
+    color: var(--ink);
+  }
 </style>

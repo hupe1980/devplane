@@ -1,52 +1,22 @@
 //! A question an agent put to a person, as a row that outlives the process
-//! that asked it.
-//!
-//! The asking state used to live in a map on a live connection, so it survived
-//! the person leaving for the day and not a daemon restart: the run, the agent
-//! and the question died together and the inbox said *"Nothing needs you"*.
-//!
-//! The five properties durable-execution systems converged on, and where each
-//! one lives here:
-//!
-//! | Property | Here |
-//! |---|---|
-//! | the asking state persists **outside** the asking process | this row, in `asks` |
-//! | the wait costs nothing | a deadline is a column a sweep reads, not a task per ask |
-//! | a **durable deadline** giving it a defined end | [`Deadline`], opt-in, naming the file that set it |
-//! | resume is idempotent, by an **opaque token** | [`AskId`]; [`Ask::answer`] refuses the second answer |
-//! | the answer is durable **before** the effect | the caller writes the row, then delivers ([`Delivery`]) |
-//!
-//! **None of those systems records who ended an unanswered request.** An ask
-//! here ends with an authority on the row — a person, a timer with its duration
-//! and the file that set it, or nobody.
-//!
-//! Two refusals: nothing here invents an answer, and nothing here invents a
-//! deadline. [`Deadline::Never`] is the default because it is what the vendor
-//! does, and a product whose argument is that vendors end your questions on
-//! clocks you did not set may not ship one.
+//! that asked it. The row is the asking state; a deadline is a column a sweep
+//! reads; [`AskId`] is the opaque token answers are addressed by; the answer is
+//! written before it is delivered ([`Delivery`]). Every ending records its
+//! authority — a person, a timer naming the file that set it, or nobody.
+//! Nothing here invents an answer or a deadline: [`Deadline::Never`] is the default.
 
 use crate::core::ids::{AskId, ProjectId, RunId};
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
-/// What kind of thing was asked, which decides how it is answered and never how
-/// it waits.
-///
-/// Not a shade of the same thing: a **permission** asks whether an action is
-/// allowed, so a grant or a refusal is what the options mean however the agent
-/// spells them; a
-/// **question** asks which of several things the person wants, and no rule can
-/// answer it. They arrive on different protocol channels — `session/request_permission`
-/// and `elicitation/create` — and only one of them has a policy.
+/// What was asked: a **permission** (is this action allowed — `session/request_permission`,
+/// which policy can answer) or a **question** (which thing does the person want —
+/// `elicitation/create`, which no rule can answer). Decides how it is answered, never how it waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-// **Renamed on the wire, because the wire has one namespace and Rust has
-// modules.** `ask::Kind` and `batch::Kind` are unambiguous here and both
-// exported a file called `Kind.ts`, so whichever generated last silently
-// replaced the other — the interface would have compiled against a type
-// describing the wrong thing entirely. Caught by the guard that compares the
-// checked-in types to the Rust shapes.
+// Renamed on the wire: ts-rs exports one flat namespace, and two `Kind.ts`
+// files would silently overwrite each other.
 #[cfg_attr(
     feature = "typescript",
     ts(rename = "AskKind", export, export_to = "wire/")
@@ -73,18 +43,9 @@ impl Kind {
     }
 }
 
-/// How long an unanswered ask may wait.
-///
-/// **`Never` is the default and is not a placeholder.** It is what the agent's
-/// own vendor does, it is what a terminal does when it shows a dialog and
-/// nobody is at the desk, and it is the only setting under which this product's
-/// argument survives contact with its own code: a question that ends on a clock
-/// nobody chose is the thing [`DIRECTION`](https://hupe1980.github.io/devplane)
-/// §1 indicts four vendors for.
-///
-/// A project that wants a bound sets one, and then the row that ends the ask
-/// names the duration **and the file it came from**, because *a timer* without
-/// *whose timer* is the same non-answer as *the daemon decided*.
+/// How long an unanswered ask may wait. `Never` is the default, deliberately:
+/// a question must not end on a clock its owner did not choose. A project that
+/// sets a bound gets a row naming the duration and the file it came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -93,40 +54,19 @@ impl Kind {
     ts(rename = "AskDeadline", export, export_to = "wire/")
 )]
 pub enum Deadline {
-    /// It waits. The run shows as waiting on a person for as long as that is
-    /// true, which is a fact rather than a failure.
+    /// It waits; the run shows as waiting on a person.
     #[default]
     Never,
-    /// Seconds a question may wait **while somebody could have answered it**,
-    /// set by a project's `devplane.toml`. Counted from [`Ask::clock_starts`],
-    /// not from `asked_at`: a daemon that was down was not showing anybody the
-    /// question, so that time is not part of the wait.
+    /// Seconds a question may wait while somebody could have answered it, set
+    /// in `devplane.toml`. Counted from [`Ask::clock_starts`], not `asked_at`.
     After(u32),
 }
 
 impl Deadline {
-    /// When this ask stops being answerable, if ever — counted from the moment
-    /// it was **reachable by a person**, which is not always the moment it was
-    /// asked.
-    ///
-    /// **A deadline bounds how long a question waits for somebody who could
-    /// have answered it.** While the daemon is down there is no board, no
-    /// inbox and no notification: the question is not in front of anybody, so
-    /// the clock is not running. Counting wall-clock time from `asked_at`
-    /// instead meant that a project with any deadline set had every waiting
-    /// question killed within a minute of the next start — a laptop closed at
-    /// 17:00 with a `10m` deadline came back at 09:00 to a row reading *"a
-    /// clock refused it after 10m"*, about ten minutes nobody was given.
-    ///
-    /// That is [`Ended::Timer`] writing a sentence that is not true, in the
-    /// product whose whole argument is that a question must not end on a clock
-    /// its owner did not get to run against. It also silently contradicted the
-    /// durable ask: *a daemon that was stopped leaves the ask open and
-    /// answerable* was false for every project that set a deadline.
-    ///
-    /// The bias is deliberate and is the one this codebase always takes: a
-    /// restart **extends** the wait rather than shortening it, because guessing
-    /// that somebody is not needed when they are is the expensive mistake.
+    /// When this ask stops being answerable, counted from when it became
+    /// reachable by a person. While the host is down nobody can see the
+    /// question, so the clock does not run: a restart extends the wait and
+    /// never shortens it, and [`Ended::Timer`] never claims time nobody was given.
     pub fn at(self, answerable_since: Timestamp) -> Option<Timestamp> {
         match self {
             Deadline::Never => None,
@@ -136,11 +76,8 @@ impl Deadline {
         }
     }
 
-    /// What a surface says about it, in the person's own terms.
-    ///
-    /// **The sentence for `Never` is the one that has to be exactly right**,
-    /// because it is the answer to *"what happens if I ignore this?"* — and the
-    /// two wrong answers are *"nothing"* and *"the agent decides"*.
+    /// What a surface says about it. The `Never` sentence answers *"what happens
+    /// if I ignore this?"* and must say neither "nothing" nor "the agent decides".
     pub fn says(self) -> String {
         match self {
             Deadline::Never => "it waits — nothing answers this but you".to_string(),
@@ -161,8 +98,7 @@ pub fn humanise(secs: u32) -> String {
     }
 }
 
-/// `4h`, `30m`, `90s`, `never` — and nothing else, because a format that
-/// guesses is one that eventually guesses wrong about somebody's timeout.
+/// `4h`, `30m`, `90s`, `never` — nothing else; the format does not guess.
 pub fn parse_deadline(s: &str) -> Option<Deadline> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("never") {
@@ -170,9 +106,7 @@ pub fn parse_deadline(s: &str) -> Option<Deadline> {
     }
     let (digits, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit())?);
     let n: u32 = digits.parse().ok()?;
-    // A zero would mean "end it the instant it is asked", which is not a
-    // deadline, it is a refusal to ask — and a refusal wearing a timer's name
-    // is exactly the disguise this module exists to strip off.
+    // Zero would be a refusal to ask disguised as a deadline.
     if n == 0 {
         return None;
     }
@@ -186,10 +120,6 @@ pub fn parse_deadline(s: &str) -> Option<Deadline> {
 }
 
 /// How an ask stopped waiting, and on whose authority.
-///
-/// **Three, and the third is the one the product is named for.** Every system
-/// that lets a request expire has the first two; the row that says *nobody
-/// decided this and here is what was asked* is the one nothing else writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -198,35 +128,33 @@ pub fn parse_deadline(s: &str) -> Option<Deadline> {
     ts(rename = "AskEnded", export, export_to = "wire/")
 )]
 pub enum Ended {
-    /// A person answered. The one authority in this product that is known
-    /// rather than inferred.
+    /// A person answered.
     Person,
-    /// A deadline the project set ran out. Carries what it was and where it
-    /// came from, because a timer with no owner reads as the product having
-    /// decided.
+    /// A person stopped the run before answering: their act, not an answer.
+    Stopped,
+    /// A project deadline ran out; carries the duration and where it was set.
     Timer { after: u32, set_by: String },
-    /// The run ended, the daemon stopped, or the agent cancelled the call
+    /// The run ended, the host stopped, or the agent cancelled the call
     /// before anybody answered.
     Nobody { because: String },
 }
 
 impl Ended {
-    /// The authority column's spelling, which is the same vocabulary the
-    /// decision log uses because they are the same fact.
+    /// The authority column's spelling, shared with the decision log.
     pub fn authority(&self) -> &'static str {
         match self {
-            Ended::Person => "person",
+            Ended::Person | Ended::Stopped => "person",
             Ended::Timer { .. } => "timer",
             Ended::Nobody { .. } => "nobody",
         }
     }
 
-    /// One sentence, and no two of these read alike — a person has to be able
-    /// to tell *you answered it* from *a clock did* from *nobody did* without
-    /// opening a transcript.
+    /// One sentence, distinct per ending, so *you* / *a clock* / *nobody* can
+    /// be told apart without a transcript.
     pub fn says(&self) -> String {
         match self {
             Ended::Person => "you answered it".to_string(),
+            Ended::Stopped => "you stopped the run before answering".to_string(),
             Ended::Timer { after, set_by } => format!(
                 "a clock refused it after {} — set in {set_by}",
                 humanise(*after)
@@ -238,11 +166,8 @@ impl Ended {
 
 /// Whether the person's answer reached the agent, and how.
 ///
-/// **Recorded separately from the answer itself, because they are different
-/// facts and the gap between them is the whole feature.** An answer written
-/// down at 09:00 and delivered at 14:00 to a resumed session is a success; an
-/// answer written down and never delivered is a different thing entirely, and
-/// collapsing the two would let this product claim a delivery it never made.
+/// Whether the person's answer reached the agent, and how. Kept separate from
+/// the answer: recorded-but-undelivered must never read as delivered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -251,16 +176,12 @@ impl Ended {
     ts(rename = "AskDelivery", export, export_to = "wire/")
 )]
 pub enum Delivery {
-    /// Straight down the connection the ask arrived on. The ordinary case.
+    /// Straight down the connection the ask arrived on.
     Live,
-    /// The agent that asked was gone, so its session was resumed and the
-    /// person's own words were delivered into it. **Said out loud on every
-    /// surface**: the agent's turn had ended, so this is the answer arriving as
-    /// a new message rather than as a reply, and a reader who is not told that
-    /// would reasonably assume otherwise.
+    /// The asking agent was gone, so its session was resumed and the answer
+    /// delivered as a new message. Every surface says so.
     Resumed,
-    /// Recorded and not delivered: the agent cannot be resumed, or resuming it
-    /// failed. The answer is still the person's and is still on the record.
+    /// Recorded and not delivered: the agent cannot be resumed, or resuming failed.
     Undeliverable { because: String },
 }
 
@@ -282,13 +203,9 @@ impl Delivery {
     }
 }
 
-/// One thing an agent asked a person, and everything that became of it.
-///
-/// **The id is an opaque token and that is deliberate.** It is what a person
-/// answers by, from any surface, at any later time — Restate calls the same
-/// thing an awakeable, Temporal a signal id, Inngest a match. Addressing an
-/// answer by *session* was what made an answer undeliverable the moment the
-/// session was gone.
+/// One thing an agent asked a person, and everything that became of it. The id
+/// is an opaque token a person answers by from any surface at any later time —
+/// never the session, which may be gone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
@@ -297,18 +214,13 @@ pub struct Ask {
     pub kind: Kind,
     pub run: RunId,
     pub project: Option<ProjectId>,
-    /// The protocol's own id for the in-flight request. Only meaningful while
-    /// the connection that carried it is alive, which is exactly why it is not
-    /// the key.
+    /// The protocol's in-flight request id; only meaningful while its connection
+    /// lives, which is why it is not the key.
     pub request_id: String,
     /// What the agent asked, as the agent wrote it.
     pub message: String,
-    /// The options and form, untouched. Rendered, never summarised.
-    ///
-    /// Typed as `unknown` on the wire rather than given a shape here: it
-    /// carries whatever the agent asked, in the agent's own schema, and
-    /// inventing a TypeScript type for it would be this product claiming to
-    /// know the shape of somebody else's question.
+    /// The options and form, untouched. `unknown` on the wire: it is the agent's
+    /// own schema, not ours to type.
     #[cfg_attr(feature = "typescript", ts(type = "unknown"))]
     pub payload: serde_json::Value,
     #[cfg_attr(feature = "typescript", ts(type = "string"))]
@@ -322,11 +234,7 @@ pub struct Ask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", ts(type = "string | null"))]
     pub answered_at: Option<Timestamp>,
-    /// Which surface it came from — `cli`, `board`, `mcp`.
-    ///
-    /// *Who answered this?* has to be answerable without opening a transcript,
-    /// and an answer is the one record in this product whose authority is
-    /// **known** rather than inferred.
+    /// Which surface answered — `cli`, `board`, `mcp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -339,10 +247,6 @@ pub struct Ask {
 }
 
 /// What an agent asked, as the caller hands it over.
-///
-/// A struct rather than six positional arguments: `new(id, kind, run, request,
-/// message, payload, at, deadline)` is a call nobody can read and two of whose
-/// arguments are strings that would swap silently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asked {
     pub kind: Kind,
@@ -357,9 +261,8 @@ pub struct Asked {
 /// What went wrong when somebody tried to answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refused {
-    /// Somebody already answered it. **Not an error the caller invented**: it
-    /// is the idempotency guarantee doing its job, and it carries what the
-    /// first answer was so the second surface can show it rather than a failure.
+    /// Somebody already answered; carries the first answer so the second
+    /// surface can show it. This is the idempotency guarantee, not a failure.
     AlreadyAnswered { at: Timestamp, from: Option<String> },
     /// A clock or an ending closed it before this answer arrived.
     AlreadyEnded(Ended),
@@ -408,22 +311,14 @@ impl Ask {
         self.ended.is_none()
     }
 
-    /// When this ask's clock starts: when it was asked, or when a person could
-    /// next have reached it, whichever is **later**.
-    ///
-    /// `reachable_since` is the moment the surfaces came back — in the daemon,
-    /// its own start time. An ask asked while the daemon was up is unaffected,
-    /// because `asked_at` is then the later of the two.
+    /// When this ask's clock starts: the later of `asked_at` and
+    /// `reachable_since` (when the surfaces came back, i.e. host start).
     pub fn clock_starts(&self, reachable_since: Timestamp) -> Timestamp {
-        self.asked_at.max(reachable_since)
+        crate::core::reduce::facts::clock_starts(self.asked_at, reachable_since)
     }
 
-    /// Whether this ask has passed a deadline as of `now`, given when it last
-    /// became reachable by a person.
-    ///
-    /// A pure question about three timestamps, which is what lets the sweep be
-    /// a query rather than a timer task per waiting ask — the second of the
-    /// five properties. See [`Deadline::at`] for why the third one is here.
+    /// Whether this ask has passed its deadline as of `now`. Pure, so the sweep
+    /// is a query rather than a timer per ask.
     pub fn is_overdue(&self, now: Timestamp, reachable_since: Timestamp) -> bool {
         self.is_open()
             && self
@@ -432,18 +327,9 @@ impl Ask {
                 .is_some_and(|d| now >= d)
     }
 
-    /// Records a person's answer, once.
-    ///
-    /// **Idempotent by construction and the second caller is told what the
-    /// first one chose.** Two surfaces answering at the same moment is the
-    /// ordinary case, not the edge: the board is open on a phone and the
-    /// terminal is open on the desk. One of them wins, the other is told who
-    /// did, and the agent hears the answer exactly once.
-    ///
-    /// **It does not deliver anything**, and it is written to be called before
-    /// delivery is attempted — a crash between *answered* and *acted* has to
-    /// replay as answered, never as *ask again*, because asking twice looks
-    /// like caution and is a lost answer.
+    /// Records a person's answer, once. Concurrent answers from two surfaces
+    /// are ordinary: one wins, the other is told who did. Does not deliver —
+    /// call it before delivery so a crash replays as *answered*, never *ask again*.
     pub fn answer(
         &mut self,
         answer: serde_json::Value,
@@ -451,10 +337,8 @@ impl Ask {
         at: Timestamp,
     ) -> Result<(), Refused> {
         if let Some(e) = &self.ended {
-            // An answer that arrives after a person already answered is a
-            // duplicate; one that arrives after a clock closed it is a loss,
-            // and they are told apart because only the second is somebody's
-            // answer going nowhere.
+            // A duplicate after a person's answer vs. a loss after a clock
+            // closed it: only the second is an answer going nowhere.
             return Err(match (e, self.answered_at) {
                 (Ended::Person, Some(at)) => Refused::AlreadyAnswered {
                     at,
@@ -480,10 +364,8 @@ impl Ask {
     }
 
     /// What became of it, in one sentence, with the delivery when there was one.
-    ///
-    /// Six settled outcomes have to be distinguishable from one another and
-    /// from silence, and this is the one place that sentence is composed so two
-    /// surfaces cannot word it differently.
+    /// What became of it, in one sentence — composed only here so surfaces
+    /// cannot word it differently.
     pub fn outcome(&self) -> String {
         match (&self.ended, &self.delivery) {
             (None, _) => match self.deadline {
@@ -492,9 +374,7 @@ impl Ask {
             },
             (Some(Ended::Person), Some(d)) => format!("{} · {}", Ended::Person.says(), d.says()),
             (Some(Ended::Person), None) => {
-                // Answered and not yet delivered is a real and momentary state,
-                // and it is the one a crash lands in. Saying so is how the next
-                // reader knows the answer was not lost.
+                // Answered, not yet delivered: the state a crash lands in.
                 "you answered it · not delivered yet".to_string()
             }
             (Some(e), _) => e.says(),
@@ -525,8 +405,6 @@ mod tests {
         )
     }
 
-    /// The default is the vendor's default, and the product's argument depends
-    /// on it: *with the default, questions wait until you answer them*.
     #[test]
     fn nothing_ends_an_ask_by_default() {
         let a = ask();
@@ -536,8 +414,6 @@ mod tests {
         assert_eq!(a.outcome(), "waiting for you");
     }
 
-    /// The answer to *"what happens if you ignore this?"* may not be "nothing"
-    /// and may not be "the agent decides".
     #[test]
     fn the_sentence_about_being_ignored_names_the_only_two_outcomes() {
         assert_eq!(
@@ -564,7 +440,6 @@ mod tests {
         assert_eq!(humanise(90), "90s");
     }
 
-    /// A zero deadline is a refusal to ask wearing a timer's name.
     #[test]
     fn a_zero_deadline_is_refused_rather_than_accepted_as_immediate() {
         assert_eq!(parse_deadline("0s"), None);
@@ -600,47 +475,30 @@ mod tests {
         );
     }
 
-    /// **The clock does not run while nobody can be reached.**
-    ///
-    /// A laptop closed at 17:00 with a question waiting and a `10m` deadline
-    /// came back at 09:00 the next morning to a row reading *"a clock refused
-    /// it after 10m"* — about ten minutes the person was never given. That is
-    /// this product ending a question on a clock its owner never got to run
-    /// against, which is the charge it makes against four vendors.
-    ///
-    /// It also contradicted the durable ask outright: *a daemon that was
-    /// stopped leaves the ask open and answerable* was false for every project
-    /// that set a deadline, and nothing anywhere said so.
+    /// The clock does not run while nobody can be reached.
     #[test]
-    fn a_deadline_does_not_run_while_the_daemon_is_down() {
+    fn a_deadline_does_not_run_while_the_host_is_down() {
         let mut a = ask();
         a.asked_at = at("2026-09-20T17:00:00Z");
         a.deadline = Deadline::After(600);
 
-        // Asked at 17:00, daemon stopped at 17:01, restarted at 09:00.
+        // Asked at 17:00, host stopped at 17:01, restarted at 09:00.
         let restarted = at("2026-09-21T09:00:00Z");
 
-        // Sixteen hours of wall clock have passed and the ask is **not**
-        // overdue: it has been reachable for one minute.
+        // Sixteen hours of wall clock, but reachable for one minute.
         assert!(
             !a.is_overdue(at("2026-09-21T09:01:00Z"), restarted),
             "a restart must not retroactively expire a question nobody could reach"
         );
-        // The person gets the whole window the project asked for, from the
-        // moment the surfaces came back.
         assert!(!a.is_overdue(at("2026-09-21T09:09:59Z"), restarted));
         assert!(a.is_overdue(at("2026-09-21T09:10:00Z"), restarted));
 
-        // And an ask raised while the daemon was already up is unaffected,
-        // because `asked_at` is then the later of the two.
+        // An ask raised while the host was up is unaffected.
         a.asked_at = at("2026-09-21T09:30:00Z");
         assert!(!a.is_overdue(at("2026-09-21T09:39:59Z"), restarted));
         assert!(a.is_overdue(at("2026-09-21T09:40:00Z"), restarted));
     }
 
-    /// The clock only ever moves the deadline **later**, which is the direction
-    /// the doubt has to go: guessing that somebody is not needed, when they
-    /// are, is the expensive mistake.
     #[test]
     fn a_restart_can_only_extend_a_wait_never_shorten_it() {
         let mut a = ask();
@@ -654,7 +512,7 @@ mod tests {
             assert_eq!(
                 a.clock_starts(reachable),
                 a.asked_at,
-                "a daemon that started before the ask changes nothing"
+                "a host that started before the ask changes nothing"
             );
         }
         assert_eq!(
@@ -663,8 +521,6 @@ mod tests {
         );
     }
 
-    /// Two surfaces, one answer, and the loser is told who won rather than
-    /// being handed a failure.
     #[test]
     fn the_same_ask_is_answered_exactly_once_however_many_surfaces_try() {
         let mut a = ask();
@@ -691,8 +547,6 @@ mod tests {
         assert_eq!(a.answered_from.as_deref(), Some("board"));
     }
 
-    /// An answer arriving after a clock closed it is a *loss*, not a duplicate,
-    /// and the person is told which.
     #[test]
     fn an_answer_after_a_clock_closed_it_reads_differently_from_a_duplicate() {
         let mut a = ask();
@@ -711,8 +565,7 @@ mod tests {
         assert!(a.answer.is_none(), "a refused answer is not recorded");
     }
 
-    /// The ending is written once. A run that dies after a person answered may
-    /// not overwrite *who answered* with *nobody did*.
+    /// A run that dies after a person answered may not overwrite the ending.
     #[test]
     fn a_run_ending_cannot_overwrite_a_person_who_already_answered() {
         let mut a = ask();
@@ -728,8 +581,6 @@ mod tests {
         assert_eq!(a.ended.as_ref().unwrap().authority(), "person");
     }
 
-    /// Answered and undelivered is a state, and it is the one a crash between
-    /// *approved* and *acted* lands in.
     #[test]
     fn answered_but_undelivered_says_so_rather_than_claiming_a_delivery() {
         let mut a = ask();
@@ -745,8 +596,6 @@ mod tests {
         assert!(a.outcome().contains("recorded, not delivered"));
     }
 
-    /// No two settled outcomes read alike, which is what lets a person tell
-    /// them apart without opening a transcript.
     #[test]
     fn every_ending_has_its_own_sentence() {
         let endings = [
@@ -769,8 +618,6 @@ mod tests {
         assert_eq!(authorities, ["person", "timer", "nobody"]);
     }
 
-    /// The wire spellings are asked of serde rather than reconstructed from
-    /// `Debug`, which is the standing rule for anything that crosses a boundary.
     #[test]
     fn the_wire_spellings_are_what_serde_writes() {
         for k in [Kind::Permission, Kind::Question] {

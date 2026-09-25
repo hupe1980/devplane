@@ -1,63 +1,45 @@
-//! A fake ACP agent, for testing the client.
+//! A fake ACP agent for testing the client offline and deterministically.
+//! Build with `cargo build --example echo_agent`.
 //!
-//! Devplane's job is to drive other people's agents, and every interesting bug
-//! lives at that seam. Testing it against a real agent would mean a network, a
-//! subscription and a bill on every `cargo test`, so the suite drives this one
-//! instead: it speaks the protocol, streams text, calls a tool, and asks for
-//! permission — the whole shape of a turn, deterministically and offline.
-//!
-//! The prompt text selects the behaviour, so one fixture covers every case:
+//! The prompt text selects the behaviour:
 //!
 //! | Prompt contains | What the agent does                       |
 //! |-----------------|-------------------------------------------|
 //! | `permission`    | asks for permission before finishing      |
-//! | `question`      | asks the **person** a question and waits for the answer |
+//! | `question`      | asks the person a question and waits for the answer |
 //! | `question2`     | asks two questions in one form            |
 //! | `unrenderable`  | sends an elicitation no client can render as a question |
-//! | `tool`          | reports a tool call                       |
+//! | `tool`          | reports a tool call: pending, running, completed |
+//! | `plan`          | reports a two-step plan                   |
 //! | `fail`          | ends the turn with a refusal              |
-//! | `criticise`     | writes the findings file it was asked to  |
 //! | `expensive`     | reports a cumulative cost of $100         |
-//! | `slow`          | works until cancelled, then stops properly |
+//! | `slow`          | runs until cancelled, then stops properly |
+//! | `slowish`       | as `slow`, for three seconds, then ends the turn itself |
+//! | `write-file <path>` | writes `<path>` under its directory and reports it as an `Edit` call |
 //! | anything else   | streams the prompt back and ends the turn |
 //!
-//! Every prompt it hears is also appended to `.devplane/heard.log` in the
-//! session's working directory, so a test can assert what an agent was told —
-//! which the event log cannot answer, because prompt text is never stored.
+//! Every prompt is appended to `.devplane/heard.log` in the session's working
+//! directory (prompt text is never stored in the event log), and `DEVPLANE_RUN`
+//! is written to `.devplane/run.id`.
 //!
-//! **The question shapes are a capture, not an invention.** A real agent's
-//! question does not arrive as a permission request: the Claude adapter renders
-//! its `AskUserQuestion` tool as an `elicitation/create` **form**, and only when
-//! the client declares `elicitation.form`. The schema below — `question_0` with
-//! a `oneOf`, each branch carrying `const`, `title` and `description`, plus a
-//! `question_0_custom` free-text field marked with `_askUserQuestionCustomAnswer`
-//! — is what `claude-agent-acp@0.76` put on the wire on 2026-09-19, copied
-//! field for field. Inventing a plausible shape here would make every test
-//! below a statement about this file rather than about the product.
-//!
-//! **And it only asks when the client says it can render one**, which is the
-//! behaviour that cost a day to find: before Devplane declared the capability,
-//! the tool was withheld and the agent asked in prose with nobody told.
-//!
-//! An ACP agent owns stdout for JSON-RPC, so anything diagnostic goes to stderr.
+//! The question schema copies what `claude-agent-acp` sends: an
+//! `elicitation/create` form, only when the client declares `elicitation.form`.
+//! Stdout is JSON-RPC; diagnostics go to stderr.
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, InitializeRequest,
     InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind, PromptRequest,
-    PromptResponse, RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse,
-    SessionCapabilities, SessionId, SessionMode, SessionModeId, SessionModeState,
-    SessionNotification, SessionResumeCapabilities, SessionUpdate, StopReason, TextContent,
-    ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields, UsageUpdate,
+    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
+    PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptRequest, PromptResponse,
+    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+    SessionId, SessionMode, SessionModeId, SessionModeState, SessionNotification,
+    SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallId,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
 use agent_client_protocol::{Agent, Client, Result, Stdio};
 
-/// Whether the client said it can render a form elicitation.
-///
-/// **The whole question path hangs off this.** A real agent withholds its
-/// question tool from a client that did not declare `elicitation.form`, and
-/// asks in prose instead — which looks, from the outside, exactly like an agent
-/// that had nothing to ask.
+/// Whether the client declared `elicitation.form`; without it a real agent
+/// asks in prose instead.
 static CAN_RENDER_FORMS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// An `elicitation/create` in the shape the Claude adapter emits.
@@ -88,16 +70,8 @@ fn one_of(title: &str, options: &[(&str, &str)]) -> serde_json::Value {
 /// The working directory the client gave this session.
 static CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
-/// Sessions the client has asked to stop.
-///
-/// **`session/cancel` is a notification, not JSON-RPC cancellation**, so the
-/// library's `Responder::cancellation` never fires for it and an agent has to
-/// track it itself — which is the whole reason this fixture models it. The
-/// client sends the notification, waits a grace period for the turn to end with
-/// `stop_reason: cancelled`, and tears the connection down if it does not. Until
-/// this existed nothing exercised the acknowledging half: every fixture turn
-/// finished instantly, so the client's cancel path could only ever be measured
-/// by its timeout.
+/// Sessions the client has asked to stop. `session/cancel` is a notification,
+/// not JSON-RPC cancellation, so the agent must track it itself.
 static CANCELLED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn cancel(session: String) {
@@ -112,14 +86,8 @@ fn is_cancelled(session: &str) -> bool {
         .any(|s| s == session)
 }
 
-/// Where this fixture remembers a session, and how many turns it has heard.
-///
-/// **On disk, deliberately.** A real resumable agent persists its conversations
-/// — that is what lets `session/resume` survive the agent process exiting — and
-/// an in-memory map would make the fixture unable to model the only case resume
-/// exists for: the daemon restarted, so every agent it had started is gone.
-/// The turn count is the cheap fact a test can check: a resumed session
-/// continues its own count, a fresh one says `turn 1`.
+/// Where a session's turn count is kept. On disk, so resume survives the agent
+/// process exiting, as with a real agent.
 fn session_file(session: &str) -> Option<std::path::PathBuf> {
     let root = CWD.lock().expect("cwd").clone()?;
     Some(root.join(".devplane").join(format!("session-{session}")))
@@ -174,14 +142,8 @@ async fn main() -> Result<()> {
         .name("echo-agent")
         .on_receive_request(
             async move |init: InitializeRequest, responder, _cx| {
-                // **Remember whether this client can be asked a question.** A
-                // real agent gates its question tool on exactly this, and a
-                // client that declares nothing gets prose instead — the failure
-                // this fixture exists to be able to reproduce offline.
-                // `DEVPLANE_ECHO_NO_FORMS=1` makes the fixture an agent whose
-                // question tool is withheld whatever the client declares — the
-                // state every agent was in before Devplane declared the
-                // capability, and the one a real one cannot be put back into.
+                // `DEVPLANE_ECHO_NO_FORMS=1` withholds the question tool
+                // whatever the client declares.
                 CAN_RENDER_FORMS.store(
                     std::env::var_os("DEVPLANE_ECHO_NO_FORMS").is_none()
                         && init
@@ -192,19 +154,10 @@ async fn main() -> Result<()> {
                             .is_some(),
                     std::sync::atomic::Ordering::SeqCst,
                 );
-                // **Two ways to continue a session, advertised separately.**
-                // `session/resume` continues without replaying; `session/load`
-                // continues *with* a replay, and an agent may have either.
-                // GitHub Copilot advertises `loadSession` and not `resume`, and
-                // a client that checks only for `resume` refuses to continue a
-                // conversation that agent is willing to continue.
-                //
-                // `DEVPLANE_ECHO_NO_RESUME=1` makes this fixture that agent,
-                // so the fallback is exercised rather than described.
+                // `DEVPLANE_ECHO_NO_RESUME=1` advertises only `loadSession`
+                // (as GitHub Copilot does), exercising the client's fallback.
                 let load_only = std::env::var_os("DEVPLANE_ECHO_NO_RESUME").is_some();
-                // `DEVPLANE_ECHO_NEEDS_AUTH=1` makes the fixture an agent that
-                // has to be signed into, so the client's handling of that can
-                // be tested without one that really does.
+                // `DEVPLANE_ECHO_NEEDS_AUTH=1`: an agent that requires sign-in.
                 let auth = if std::env::var_os("DEVPLANE_ECHO_NEEDS_AUTH").is_some() {
                     vec![agent_client_protocol::schema::v1::AuthMethod::Agent(
                         agent_client_protocol::schema::v1::AuthMethodAgent::new(
@@ -235,10 +188,8 @@ async fn main() -> Result<()> {
         )
         .on_receive_request(
             async move |req: NewSessionRequest, responder, _cx| {
-                // An ACP agent is told its working directory in the protocol,
-                // not by being spawned in one — the client's own process cwd is
-                // none of its business. Remembering it here is what makes the
-                // fixture behave like a real agent.
+                // ACP gives the working directory in the protocol, not the
+                // process cwd.
                 *CWD.lock().expect("cwd") = Some(req.cwd.clone());
                 if std::env::var_os("DEVPLANE_ECHO_NEEDS_AUTH").is_some() {
                     return responder.respond_with_error(
@@ -246,19 +197,12 @@ async fn main() -> Result<()> {
                             .data("authentication required"),
                     );
                 }
-                // A *new* id every time, so a test can tell a resumed session
-                // from one that was quietly started again. With a fixed id the
-                // two are indistinguishable, and a test that cannot tell them
-                // apart cannot check the thing resume exists for.
+                // A new id every time, so a resumed session is distinguishable
+                // from a restarted one.
                 let id = mint_session();
                 open_session(&id);
-                // `DEVPLANE_ECHO_MODE=<id>` makes the fixture an agent that
-                // declares a session mode, so the cross-vendor half of *which
-                // sessions decide without you* can be exercised against
-                // something rather than described. The id is arbitrary on
-                // purpose: an ACP mode is a string the agent chooses, and a
-                // fixture that only ever said `default` would quietly suggest
-                // the vendor's vocabulary is the protocol's.
+                // `DEVPLANE_ECHO_MODE=<id>` declares a session mode. The id is
+                // arbitrary: an ACP mode is whatever string the agent chooses.
                 let resp = NewSessionResponse::new(SessionId::new(id));
                 let resp = match std::env::var("DEVPLANE_ECHO_MODE") {
                     Ok(m) if !m.is_empty() => resp.modes(SessionModeState::new(
@@ -273,12 +217,8 @@ async fn main() -> Result<()> {
         )
         .on_receive_request(
             async move |req: ResumeSessionRequest, responder, _cx| {
-                // A session this process has never opened cannot be resumed,
-                // and saying so is the point: the client must surface that
-                // rather than opening a new conversation under the same run.
-                // The directory first: it is where this fixture keeps its
-                // sessions, so it has to be known before asking whether the
-                // session is one of them.
+                // An unknown session is an error the client must surface. Set
+                // the directory first: sessions are stored there.
                 *CWD.lock().expect("cwd") = Some(req.cwd.clone());
                 let id = req.session_id.to_string();
                 if !knows(&id) {
@@ -292,10 +232,7 @@ async fn main() -> Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            // `session/load`, the other way to continue. Same bookkeeping as
-            // resume; the difference a client cares about is that a real agent
-            // replays the conversation here, which is why the client suppresses
-            // the replay it already has written down.
+            // `session/load`: like resume, but a real agent replays history.
             async move |req: LoadSessionRequest, responder, _cx| {
                 *CWD.lock().expect("cwd") = Some(req.cwd.clone());
                 let id = req.session_id.to_string();
@@ -311,8 +248,7 @@ async fn main() -> Result<()> {
         )
         .on_receive_notification(
             async move |note: CancelNotification, _cx| {
-                // Fire-and-forget by design: the client is not waiting on a
-                // reply here, it is waiting for the *turn* to end properly.
+                // The client waits for the turn to end, not for a reply.
                 cancel(note.session_id.to_string());
                 Ok(())
             },
@@ -320,10 +256,8 @@ async fn main() -> Result<()> {
         )
         .on_receive_request(
             async move |req: PromptRequest, responder, connection| {
-                // The work runs off the handler. An ACP handler that awaits a
-                // round trip to its counterpart blocks the pump that would read
-                // the reply, which deadlocks the pair — the permission request
-                // below is exactly that shape.
+                // Off the handler: awaiting a round trip (the permission
+                // request) inside it would block the pump and deadlock.
                 let worker = connection.clone();
                 connection.spawn(async move { serve_prompt(req, responder, worker).await })
             },
@@ -333,32 +267,8 @@ async fn main() -> Result<()> {
         .await
 }
 
-/// The path a pipeline told this agent to write its findings to.
-///
-/// The instruction is `write what you found to \`<path>\``, appended by
-/// Devplane rather than by the project's template, so the fixture can take it
-/// literally.
-fn findings_path(text: &str) -> Option<String> {
-    let rest = text.split_once("write what you found to `")?.1;
-    let path = rest.split_once('`')?.0;
-    (!path.is_empty()).then(|| path.to_string())
-}
-
-/// Answers one `session/prompt`, whatever happens while producing the answer.
-///
-/// **Every path through this function replies to the client**, and that is the
-/// whole reason it is split in two. The protocol library is explicit that
-/// dropping a responder for an individual request *"does not automatically send
-/// a reply"*, so an early exit leaves the client waiting for a `PromptResponse`
-/// that never comes — the same deadlock the handler above spawns a task to
-/// avoid, arrived at from the other side.
-///
-/// The trap is that an early exit does not have to look like one. The turn body
-/// sends six notifications and awaits a permission round trip, and **every `?`
-/// among them is a `return`**: a failed `send_notification` is harmless because
-/// nobody is left to wait, but the permission request can fail while the client
-/// is very much alive. So the body hands back a `StopReason` or an error, and
-/// the reply happens here, once.
+/// Answers one `session/prompt` on every path, including errors: a dropped
+/// responder sends no reply, so an early `?` would leave the client waiting.
 async fn serve_prompt(
     req: PromptRequest,
     responder: agent_client_protocol::Responder<PromptResponse>,
@@ -395,24 +305,17 @@ async fn take_turn(
         )
     };
 
-    // The turn number is what proves a resume continued the conversation
-    // rather than starting a new one: a fresh session says `turn 1`.
+    // A fresh session says `turn 1`; a resumed one continues its count.
     let turn = turns_for(&req.session_id.to_string());
     connection.send_notification(say(format!("echo: {text} [turn {turn}]")))?;
 
-    // Devplane never stores prompt text — telemetry is redacted and stays
-    // that way — so a test cannot ask the event log what an agent was told.
-    // This fixture writes it down instead, in the session's own directory,
-    // which is the only way to prove that what one step found reaches the
-    // step that has to act on it.
+    // Prompt text is never stored by Devplane, so record it here for tests.
     if let Some(root) = CWD.lock().expect("cwd").clone() {
         let log = root.join(".devplane/heard.log");
         if let Some(parent) = log.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        // Appended rather than read-modify-written: two sessions sharing
-        // one working directory would otherwise each write back a copy of
-        // what they read, and the later write would drop the other's turn.
+        // Append, so sessions sharing a directory don't drop each other's turns.
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -421,11 +324,17 @@ async fn take_turn(
         {
             write!(f, "{text}\n---\n").ok();
         }
+        // The run id as the agent's shell would see it.
+        if let Some(run) = std::env::var_os("DEVPLANE_RUN") {
+            std::fs::write(
+                root.join(".devplane/run.id"),
+                run.to_string_lossy().as_bytes(),
+            )
+            .ok();
+        }
     }
 
-    // ACP reports usage as a running total for the session, and the cost
-    // field is optional — an agent that never sends one can never be
-    // stopped by a budget, which is exactly why the fixture sends one.
+    // ACP usage is a running session total; cost is optional.
     if text.contains("expensive") {
         connection.send_notification(SessionNotification::new(
             req.session_id.clone(),
@@ -436,6 +345,7 @@ async fn take_turn(
     }
 
     if text.contains("tool") {
+        // Pending, then updates under the same id without repeating the title.
         connection.send_notification(SessionNotification::new(
             req.session_id.clone(),
             SessionUpdate::ToolCall(ToolCall::new(
@@ -443,45 +353,76 @@ async fn take_turn(
                 "cargo test --workspace".to_string(),
             )),
         ))?;
+        for status in [ToolCallStatus::InProgress, ToolCallStatus::Completed] {
+            connection.send_notification(SessionNotification::new(
+                req.session_id.clone(),
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    ToolCallId::new("t1"),
+                    ToolCallUpdateFields::new().status(status),
+                )),
+            ))?;
+        }
     }
 
-    // A reviewing step in a pipeline is told, in its prompt, where to write what
-    // it found. Playing that role honestly — reading the path out of the
-    // instruction rather than having it hard-coded — is what makes the fixture a
-    // test of the mechanism and not of itself.
-    //
-    // Only ever under the directory the client named. A default of "wherever
-    // this process happens to be" wrote test litter into the source tree, which
-    // is exactly the bug a real agent would have.
-    if text.contains("criticise")
-        && let Some(path) = findings_path(&text)
+    if text.contains("plan") {
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::Plan(Plan::new(vec![
+                PlanEntry::new(
+                    "read the failing test",
+                    PlanEntryPriority::High,
+                    PlanEntryStatus::Completed,
+                ),
+                PlanEntry::new(
+                    "fix the cause",
+                    PlanEntryPriority::High,
+                    PlanEntryStatus::InProgress,
+                ),
+            ])),
+        ))?;
+    }
+
+    // Writes the file for real and reports an `Edit` call. `write-file`, not
+    // `write`, because prompts use that word.
+    if let Some(rest) = text.split_once("write-file ").map(|(_, r)| r)
+        && let Some(path) = rest.split_whitespace().next()
         && let Some(root) = CWD.lock().expect("cwd").clone()
     {
-        let file = root.join(&path);
+        let file = root.join(path);
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&file, "the error path is not covered by a test\n").ok();
-        connection.send_notification(say(format!("wrote findings to {}", file.display())))?;
+        std::fs::write(&file, "// written by the echo agent\n").ok();
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ToolCall(
+                ToolCall::new(ToolCallId::new("w1"), format!("Edit {path}"))
+                    .kind(ToolKind::Edit)
+                    .raw_input(serde_json::json!({ "file_path": file.to_string_lossy() })),
+            ),
+        ))?;
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("w1"),
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+        ))?;
     }
 
-    // A turn long enough to be interrupted. Everything else here finishes in
-    // microseconds, which makes the client's cancel handshake unobservable: the
-    // turn is always over before the notification arrives.
+    // A turn long enough to be cancelled.
     if text.contains("slow") {
         let id = req.session_id.to_string();
-        // Comfortably longer than the client's cancel grace period, which is
-        // five seconds: if this ceiling were the shorter of the two, the turn
-        // would end on its own while the client was still waiting and the test
-        // would pass without the cancel ever being acknowledged. Bounded all
-        // the same, so a fixture nobody cancels cannot hang a suite.
-        const CEILING: usize = 30 * 100;
-        for _ in 0..CEILING {
+        // 30 s outlasts the client's 5 s cancel grace yet cannot hang a suite;
+        // `slowish` ends itself after 3 s, enough for a mid-turn message.
+        let ceiling: usize = if text.contains("slowish") {
+            3 * 100
+        } else {
+            30 * 100
+        };
+        for _ in 0..ceiling {
             if is_cancelled(&id) {
-                // The protocol's half of the bargain. A turn that just stops
-                // leaves the client waiting out its grace period and then
-                // tearing the connection down — which is what "the agent did
-                // not acknowledge the cancel" means on the other side.
+                // Acknowledge the cancel, or the client waits out its grace.
                 return Ok(StopReason::Cancelled);
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -489,9 +430,7 @@ async fn take_turn(
     }
 
     if text.contains("permission") {
-        // The client must answer this before the turn can end, which is exactly
-        // the blocking path worth testing — and the one `?` here that can fail
-        // with the client still listening.
+        // Blocks the turn until the client answers.
         let answer = connection
             .send_request(RequestPermissionRequest::new(
                 req.session_id.clone(),
@@ -515,13 +454,14 @@ async fn take_turn(
             .block_task()
             .await?;
         connection.send_notification(say(format!("permission outcome: {:?}", answer.outcome)))?;
+        // A cancelling client answers `cancelled`; stop and say so.
+        if is_cancelled(&req.session_id.to_string()) {
+            return Ok(StopReason::Cancelled);
+        }
     }
 
     if text.contains("question") || text.contains("unrenderable") {
-        // Only if the client said it can show one. A client that declared no
-        // capability gets prose — the real failure this fixture exists to
-        // reproduce, and the reason `asks_nothing_when_the_client_cannot_render`
-        // is a test rather than a comment.
+        // A client that cannot render forms gets prose, as from a real agent.
         if !CAN_RENDER_FORMS.load(std::sync::atomic::Ordering::SeqCst) {
             connection.send_notification(say(
                 "`AskUserQuestion` isn't available in this session — asking in plain text instead."
@@ -529,8 +469,7 @@ async fn take_turn(
             ))?;
         } else {
             let schema = if text.contains("unrenderable") {
-                // A form with no options: legitimate for an MCP server, and not
-                // a question this client can present.
+                // A valid form with no options: not presentable as a question.
                 serde_json::json!({ "type": "object",
                     "properties": { "name": { "type": "string", "title": "Your name" } } })
             } else if text.contains("question2") {

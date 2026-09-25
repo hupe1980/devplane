@@ -1,16 +1,9 @@
-//! A driven session: an ACP agent Devplane owns.
-//!
-//! The protocol's client API is shaped around one connection that lives for as
-//! long as the conversation, so a driven run is an actor: a task that owns the
-//! connection, takes commands on a channel, and emits events on another. The
-//! daemon never touches the connection, which is what keeps the reducer free of
-//! protocol types and the protocol free of daemon locks.
-//!
-//! The part worth reading twice is the permission handler. It runs inside the
-//! connection task, and it has to block that task until a human — or a policy —
-//! answers, because the agent is waiting on the response. Every request is
-//! therefore registered with a one-shot channel and a deadline, so a question
-//! nobody answers times out into a refusal rather than wedging the session.
+//! A driven session: an ACP agent Devplane owns, run as an actor — a task
+//! that owns the connection, takes commands on one channel and emits events on
+//! another, so the reducer never sees protocol types. The permission handler
+//! parks each request on a one-shot channel and waits off the connection task
+//! until a person answers, the project's deadline sweeps it, or the session
+//! stops (which answers every parked request with *cancelled* first).
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::StopReason;
@@ -32,43 +25,18 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 
 use super::agent::AgentSpec;
 
-// A `PERMISSION_TIMEOUT` of six hundred seconds lived here until 2026-09-20,
-// and deleting it is the point rather than a tidy-up.
-//
-// It refused a permission nobody had answered after ten minutes, in the
-// person's name, on a number nobody chose, and no surface said it had happened
-// — the decision row was the only trace and `devplane audit` was the only way
-// to find it. That is the trade this product indicts four vendors for, shipped
-// here; and the vendor it mirrors most closely is stricter than this was, since
-// Claude Code's own question timer is off by default and "permission prompts,
-// including plan approval, never auto-resolve on idle".
-//
-// What replaces it is a deadline a **project** sets, in its own `devplane.toml`,
-// defaulting to `never`, swept by the daemon against a durable row, and ending
-// with an authority that names the duration and the file it came from.
-// `core::ask` holds that; this connection now waits.
+// There is no permission timeout here: the only clock that ends a wait is a
+// deadline the project sets in its own `devplane.toml` (default `never`),
+// swept by the host in `core::ask`.
 
 /// How long a cancelled turn has to acknowledge before the connection — and
 /// with it the agent's process group — is torn down anyway.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
-/// What the daemon can ask a driven session to do.
-///
-/// Permission answers are deliberately absent: the connection task is blocked
-/// inside the handler waiting for one, so a command it could only read *after*
-/// the handler returned would deadlock the pair. [`Session::decide`] answers the
-/// waiting task directly instead.
-#[derive(Debug)]
-pub enum Command {
-    /// Send a prompt and run the turn to completion.
-    Prompt(String),
-}
-
 /// What a driven session reports.
 ///
-/// Deliberately its own type rather than the domain's: the protocol's
-/// vocabulary is richer than the board needs, and mapping at the boundary keeps
-/// the reducer from growing a dependency on a protocol version.
+/// Its own type rather than the domain's, so the reducer does not depend on a
+/// protocol version.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcpEvent {
     /// The agent is up and the session exists.
@@ -80,17 +48,14 @@ pub enum AcpEvent {
     Text(String),
     /// A chunk of the agent's reasoning.
     Thought(String),
-    /// The agent's plan for the turn: what it intends to do, and how far it has
-    /// got. Low-volume and structured, which is the opposite of the transcript
-    /// and exactly what a supervisor wants — "what is it about to do" answered
-    /// without reading a word of prose.
+    /// The agent's plan for the turn: what it intends to do, and how far it
+    /// has got.
     Plan(Vec<PlanStep>),
     /// A tool call started or changed.
     Tool {
         call: ToolRequest,
         /// `pending`, `in_progress`, `completed`, `failed`. Absent when the
-        /// update carried no status — content streaming in, usually — and an
-        /// update with nothing to say is not reported at all.
+        /// update carried no status.
         status: Option<String>,
     },
     /// The agent wants permission. Answer it with [`Session::decide`].
@@ -102,21 +67,15 @@ pub enum AcpEvent {
     /// The agent asked the person a question. Answer it with
     /// [`Session::answer`].
     ///
-    /// Not a permission: no rule can answer *which of these do you want*, and
-    /// it arrives on a different protocol method.
+    /// Not a permission: no rule can answer it, and it arrives on a different
+    /// protocol method.
     QuestionAsked {
         request_id: String,
         ask: crate::core::question::Ask,
     },
-    /// What the agent advertised at `initialize`, measured rather than assumed.
-    ///
-    /// **Carries no command**, because the session does not know how it was
-    /// started — the caller has the spec and keys the record with it.
-    ///
-    /// Emitted once per connection, after the handshake and before anything is
-    /// asked of the agent. Every field is a runtime fact about *that* agent at
-    /// *that* version, which is the whole reason it is recorded with a date
-    /// rather than written into a table by hand.
+    /// What the agent advertised at `initialize`, emitted once per connection
+    /// after the handshake. Carries no command: the caller keys the record
+    /// with the spec it launched.
     Capabilities {
         agent_name: Option<String>,
         resume: bool,
@@ -124,51 +83,24 @@ pub enum AcpEvent {
         list_sessions: bool,
         needs_auth: bool,
     },
-    /// What the agent says its own sessions are.
-    ///
-    /// **Only where the agent advertises `session/list`**, and only as a
-    /// roster: v1's `SessionInfo` carries no state field, so this can fill a
-    /// gap — a title where Devplane has none — and can never say that a session
-    /// is waiting for somebody. Asked once, after the handshake, because it is
-    /// a catalogue rather than a signal and polling it would be the second
-    /// roster on a machine that already has one.
+    /// What the agent says its own sessions are, where it advertises
+    /// `session/list`. Asked once; a roster that can fill a missing title but
+    /// never says a session is waiting.
     SessionsListed {
         sessions: Vec<crate::core::run::ListedSession>,
     },
-    /// The agent says which mode it is now in.
-    ///
-    /// **The agent's own string, and never one of the vendor's four.** An ACP
-    /// session mode is an identifier the agent declares; there is no
-    /// cross-vendor vocabulary for it, and nothing in the specification maps it
-    /// onto Claude Code's `default`/`acceptEdits`/`plan`/`bypassPermissions`.
-    /// Presenting it as one of those would assert an equivalence no
-    /// specification supports — in the one product whose argument is that an
-    /// authority is recorded rather than inferred.
+    /// The agent says which mode it is now in: the agent's own identifier,
+    /// never mapped onto Claude Code's modes, since no specification defines
+    /// that equivalence.
     ModeChanged { mode: String },
     /// The agent asked something over the question channel that Devplane could
-    /// not render, so it was cancelled.
-    ///
-    /// Reported rather than swallowed: Devplane told the agent it could show a
-    /// form, and a case where it cannot is a gap in this product, not a
-    /// non-event. The alternative is an agent that asked and gave up with
-    /// nobody ever knowing it asked.
+    /// not render, so it was cancelled — reported, because the agent was told
+    /// a form could be shown.
     QuestionUnrenderable { what: String },
     /// A question was cancelled without being answered — the session ended, or
-    /// somebody stopped the run. Reported so the inbox stops offering an answer
-    /// that can no longer be delivered.
-    ///
-    /// **There was a `PermissionExpired` beside this one and it is gone.** It
-    /// was emitted by the six-hundred-second `PERMISSION_TIMEOUT` deleted above,
-    /// and deleting the clock left the variant declared, matched in `driven.rs`,
-    /// and constructed by nothing — a handler that could never run, writing a
-    /// decision row reading *"nobody answered within ten minutes"* about a rule
-    /// this product no longer has. An expiry now comes from the project's own
-    /// deadline and is swept against the durable `asks` row, which is a
-    /// different path entirely.
+    /// somebody stopped the run — so the inbox stops offering an answer.
     QuestionCancelled { request_id: String },
-    /// Usage the agent reported for the session. Unlike the Claude-specific
-    /// channels, the protocol reports the window size too, so the context
-    /// gauge needs no table of model names.
+    /// Usage the agent reported for the session, window size included.
     Usage {
         cost_usd: Option<f64>,
         context_tokens: Option<u64>,
@@ -182,11 +114,8 @@ pub enum AcpEvent {
 
 impl AcpEvent {
     /// Whether this is a fragment of the conversation itself, rather than a
-    /// fact about where the session got to.
-    ///
-    /// Used to suppress a `session/load` replay: the prose is already written
-    /// down, while a plan, a usage total or a tool call is state rather than
-    /// speech and is idempotent to see again.
+    /// fact about where the session got to. Used to suppress a `session/load`
+    /// replay; state events are idempotent to see again.
     pub fn is_conversation(&self) -> bool {
         matches!(self, AcpEvent::Text(_) | AcpEvent::Thought(_))
     }
@@ -200,18 +129,13 @@ pub struct PlanStep {
     pub status: String,
 }
 
-/// What an agent is asking to do, in the protocol's own terms.
-///
-/// The title is prose for a human. Everything else is what a *rule* needs: the
-/// kind says whether this reads, edits, executes or fetches; `raw_input` is the
-/// arguments the agent actually chose; `locations` are the absolute paths it
-/// named. Carrying the title alone would mean evaluating every tool call as a
-/// shell command whose text is prose — under which `Bash(rm -rf *)` protects a
-/// driven run only by coincidence and `Read(.env)` protects nothing.
+/// What an agent is asking to do, in the protocol's own terms. The title is
+/// prose for a human; the kind, `raw_input` and `locations` are what a rule
+/// evaluates.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolRequest {
-    /// The protocol's id for this call. The identity a start and a finish are
-    /// correlated on; a title is not one, and an update may not repeat it.
+    /// The protocol's id for this call, which a start and a finish are
+    /// correlated on.
     pub id: String,
     /// Human-readable, and the only field that is always populated.
     pub title: String,
@@ -225,15 +149,10 @@ pub struct ToolRequest {
 }
 
 impl ToolRequest {
-    /// This call in the vocabulary the permission policy speaks, or `None`.
-    ///
-    /// The protocol sends no tool *name* — that field is unstable — so the
-    /// classification comes from the kind the agent declared and, failing that,
-    /// from the shape of its arguments. Both are facts about the call; the
-    /// title is prose and is never matched against.
-    ///
-    /// `None` means the call cannot be classified, and no rule can honestly be
-    /// said to cover it: the policy is skipped and a person is asked.
+    /// This call in the policy's vocabulary. The protocol sends no stable tool
+    /// name, so this comes from the declared kind or, failing that, the shape
+    /// of the arguments — never the title. `None` means no rule covers it: the
+    /// policy is skipped and a person is asked.
     pub fn policy_subject(&self) -> Option<(&'static str, serde_json::Value)> {
         let field = |k: &str| {
             self.raw_input
@@ -287,39 +206,38 @@ pub struct PermissionOption {
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>;
 
-/// Waiting questions. Separate from [`Pending`] because an answer is not an
-/// option id: it is a map of fields to what the person chose or typed, and
-/// squeezing it through the permission channel would mean encoding one as the
-/// other and decoding it wrong exactly once.
+/// Waiting questions. Separate from [`Pending`] because an answer is a map of
+/// fields to what the person chose or typed, not an option id.
 type Asked = Arc<Mutex<HashMap<String, oneshot::Sender<Option<serde_json::Value>>>>>;
 
-/// A handle on a running agent.
+/// A handle on a running agent. Prompts go down a channel; answers reach the
+/// waiting handler directly, because the connection task is parked inside it
+/// and a queued command would deadlock the pair.
 #[derive(Debug, Clone)]
 pub struct Session {
-    commands: mpsc::Sender<Command>,
+    prompts: mpsc::Sender<String>,
     pending: Pending,
     asked: Asked,
-    /// Raised by [`Session::stop`]. Separate from the command channel because
-    /// stopping has to reach a session that is *busy*, and the command loop is
-    /// not reading while a turn is in flight.
+    /// Raised by [`Session::stop`]. Separate from the prompt channel, which
+    /// is not read while a turn is in flight.
     stop: Arc<Notify>,
+    /// Why the caller stopped it, read back at the end to tell a person's stop
+    /// from the host's own.
+    stopped_because: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Session {
     /// Sends a prompt. Returns once the command is queued, not once the turn
     /// is done — the turn's progress arrives as events.
     pub async fn prompt(&self, text: impl Into<String>) -> anyhow::Result<()> {
-        self.commands
-            .send(Command::Prompt(text.into()))
+        self.prompts
+            .send(text.into())
             .await
             .map_err(|_| anyhow::anyhow!("the session has ended"))
     }
 
     /// Answers a permission request. `None` refuses it.
     pub async fn decide(&self, request_id: &str, option_id: Option<String>) -> anyhow::Result<()> {
-        // Answer the waiting task directly rather than through the command
-        // channel: the connection task is blocked inside the handler, so a
-        // command it can only read after the handler returns would deadlock.
         let sender = self.pending.lock().await.remove(request_id);
         match sender {
             Some(tx) => {
@@ -332,11 +250,9 @@ impl Session {
 
     /// Answers a question the agent asked.
     ///
-    /// `None` cancels it. **There is deliberately no way to *decline*:** the
-    /// adapter turns a decline into *answered, with no answers*, so the agent
-    /// proceeds having asked and heard nothing — which is the failure this
-    /// whole feature exists to prevent, reachable through a button somebody
-    /// would have called "dismiss".
+    /// `None` cancels it. There is no way to *decline*: the adapter turns a
+    /// decline into *answered, with no answers*, and the agent proceeds on
+    /// nothing.
     pub async fn answer(
         &self,
         request_id: &str,
@@ -354,75 +270,69 @@ impl Session {
 
     /// Asks the session to end.
     ///
-    /// Effective mid-turn: the connection sends ACP `session/cancel`, which the
-    /// protocol requires an agent to answer with `stop_reason: cancelled`, and
-    /// then tears the connection down — which is what kills the agent's process
-    /// group. A session that could only be stopped between turns would leave a
-    /// model running, and spending, for as long as it felt like.
+    /// Effective mid-turn: sends ACP `session/cancel`, then tears the connection
+    /// down, which kills the agent's process group.
     pub fn stop(&self) {
         self.stop.notify_waiters();
-        // A session that has not started a turn yet is parked on the command
+        // A session that has not started a turn yet is parked on the prompt
         // channel rather than on the notify, so wake that too.
         self.stop.notify_one();
     }
 
-    /// Whether the session is still accepting commands.
+    /// [`Session::stop`], with the caller's reason kept for whoever reads the
+    /// ending.
+    pub fn stop_because(&self, why: &str) {
+        *self.stopped_because.lock().expect("stop reason") = Some(why.to_string());
+        self.stop();
+    }
+
+    /// The reason given to [`Session::stop_because`], if one was.
+    pub fn stopped_because(&self) -> Option<String> {
+        self.stopped_because.lock().expect("stop reason").clone()
+    }
+
+    /// Whether the session is still accepting prompts.
     pub fn is_live(&self) -> bool {
-        !self.commands.is_closed()
+        !self.prompts.is_closed()
     }
 }
 
 /// Starts an agent and returns a handle plus its event stream.
 ///
-/// The agent is spawned by the protocol crate, as the leader of its own process
-/// group, with a guard that kills that group when the connection is torn down.
-/// Devplane never signals an agent itself; its part is to tear the connection
-/// down, which [`Session::stop`] does and [`crate::daemon::AppState::shutdown`]
-/// does for all of them at once.
+/// The protocol crate spawns it as the leader of its own process group, killed
+/// when the connection is torn down ([`Session::stop`],
+/// [`crate::host::AppState::shutdown`]). Returning from `main` does not drop
+/// those tasks, so shutdown must tear connections down explicitly.
 ///
-/// That distinction is load-bearing. The process does **not** die simply
-/// because this one exits: a daemon that returns from `main` never drops those
-/// tasks, so the guard never runs and every agent it started re-parents to init
-/// and keeps spending.
+/// `env` (the project's declared build environment) is set over the host's.
 pub async fn spawn(
     spec: &AgentSpec,
     cwd: PathBuf,
+    env: &[(String, PathBuf)],
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
-    connect(spec, cwd, None).await
+    connect(spec, cwd, None, env).await
 }
 
-/// Starts the agent and continues an existing conversation instead of opening
-/// a new one.
-///
-/// The difference is the whole reason `agent_session` is recorded. A pipeline
-/// interrupted by a daemon restart has a worktree with half-finished work in
-/// it; starting a *new* session there would pay a second time to rediscover
-/// what the first one already knew, and would do it without the context that
-/// produced the code it is looking at.
-///
-/// **Two ways to continue a session, advertised separately.**
-/// `session/resume` continues without replaying history;
-/// `session/load` (`agentCapabilities.loadSession`) continues with it. Resume
-/// is preferred where offered — Devplane already holds the transcript, so a
-/// replay only duplicates it. GitHub Copilot offers load and not resume.
-///
-/// An agent with neither is refused rather than downgraded to a new session:
-/// silently opening a fresh conversation and calling it a resume is the kind of
-/// lie this product exists to not tell.
+/// Starts the agent and continues an existing conversation, so a change
+/// interrupted by a restart keeps its context. Prefers `session/resume` (no
+/// replay) over `session/load` (`agentCapabilities.loadSession`); an agent
+/// with neither is refused rather than silently given a fresh session.
 pub async fn resume(
     spec: &AgentSpec,
     cwd: PathBuf,
     agent_session: String,
+    env: &[(String, PathBuf)],
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
-    connect(spec, cwd, Some(agent_session)).await
+    connect(spec, cwd, Some(agent_session), env).await
 }
 
 async fn connect(
     spec: &AgentSpec,
     cwd: PathBuf,
     resuming: Option<String>,
+    env: &[(String, PathBuf)],
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(32);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<String>(32);
     let (ev_tx, ev_rx) = mpsc::channel::<AcpEvent>(1024);
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let asked: Asked = Arc::new(Mutex::new(HashMap::new()));
@@ -430,23 +340,36 @@ async fn connect(
 
     let agent = AcpAgent::from_str(&spec.command)
         .map_err(|e| anyhow::anyhow!("cannot start `{}`: {e}", spec.command))?;
+    // The protocol crate spawns the process, so the variables go through its
+    // configuration.
+    let agent = if env.is_empty() {
+        agent
+    } else {
+        AcpAgent::new(
+            agent.into_config().envs(
+                env.iter()
+                    .map(|(k, v)| (k.clone(), v.to_string_lossy().into_owned())),
+            ),
+        )
+    };
 
     let session = Session {
-        commands: cmd_tx,
+        prompts: cmd_tx,
         pending: pending.clone(),
         asked: asked.clone(),
         stop: stop.clone(),
+        stopped_because: Arc::new(std::sync::Mutex::new(None)),
     };
+    let pending_for_run = pending.clone();
+    let asked_for_run = asked.clone();
 
     let ev_for_notify = ev_tx.clone();
     let ev_for_perm = ev_tx.clone();
     let pending_for_perm = pending.clone();
     let ev_for_ask = ev_tx.clone();
     let asked_for_ask = asked.clone();
-    // `session/load` replays the conversation, as ordinary notifications
-    // arriving before the response. Devplane already holds that transcript, so
-    // taking the replay too would write every sentence down twice — the same
-    // reasoning that drops `user_message_chunk`.
+    // `session/load` replays the conversation before its response; the
+    // transcript is already held, so the replayed prose is dropped.
     let replaying = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let replaying_for_notify = replaying.clone();
 
@@ -458,10 +381,8 @@ async fn connect(
                 async move |notification: SessionNotification, _cx| {
                     let replaying = replaying_for_notify.load(std::sync::atomic::Ordering::Relaxed);
                     for event in map_update(notification.update) {
-                        // Only the conversation is suppressed. A plan, a usage
-                        // update or a tool call replayed here still says
-                        // something true about where the session got to, and
-                        // none of them is written down twice.
+                        // Only the conversation is suppressed; state
+                        // updates still say something true.
                         if replaying && event.is_conversation() {
                             continue;
                         }
@@ -473,10 +394,9 @@ async fn connect(
             )
             .on_receive_request(
                 async move |request: RequestPermissionRequest, responder, cx| {
-                    // Waiting happens off the handler. A human may take ten
-                    // minutes to answer, and a handler that blocks stops the
-                    // connection reading anything else for that long — which
-                    // includes the reply it is waiting for.
+                    // Waiting happens off the handler, which would
+                    // otherwise stop the connection reading the very reply it
+                    // waits for.
                     let events = ev_for_perm.clone();
                     let pending = pending_for_perm.clone();
                     cx.spawn(async move {
@@ -512,6 +432,10 @@ async fn connect(
                     ev_tx.clone(),
                     stop,
                     replaying,
+                    Parked {
+                        pending: pending_for_run,
+                        asked: asked_for_run,
+                    },
                 )
                 .await
             })
@@ -527,9 +451,9 @@ async fn connect(
 
 /// What an agent said about signing in, as a sentence for a person.
 ///
+///
 /// `auth/login` is not implemented: a login belongs in the agent's own
-/// terminal, where its device codes and browser redirects already work. So the
-/// useful thing to do with `authMethods` is repeat it when it matters.
+/// terminal, so this repeats the advertised `authMethods`.
 fn describe_auth(methods: &[agent_client_protocol::schema::v1::AuthMethod]) -> Option<String> {
     if methods.is_empty() {
         return None;
@@ -547,25 +471,42 @@ fn describe_auth(methods: &[agent_client_protocol::schema::v1::AuthMethod]) -> O
     ))
 }
 
-/// The body of the connection: initialise, open a session, then serve commands
-/// until the daemon stops asking.
+/// The requests an agent is waiting on an answer to.
+struct Parked {
+    pending: Pending,
+    asked: Asked,
+}
+
+impl Parked {
+    /// Answers everything still waiting with *cancelled*. The protocol
+    /// requires it before a cancel: a blocked agent cannot acknowledge one.
+    async fn cancel_all(&self) {
+        for (_, tx) in self.pending.lock().await.drain() {
+            let _ = tx.send(None);
+        }
+        for (_, tx) in self.asked.lock().await.drain() {
+            let _ = tx.send(None);
+        }
+    }
+}
+
+/// The body of the connection: initialise, open a session, then serve prompts
+/// until the host stops asking.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     connection: ConnectionTo<Agent>,
     cwd: PathBuf,
     resuming: Option<String>,
-    mut commands: mpsc::Receiver<Command>,
+    mut prompts: mpsc::Receiver<String>,
     events: mpsc::Sender<AcpEvent>,
     stop: Arc<Notify>,
-    // Set while `session/load` is replaying a conversation, so the replay is
-    // not written down a second time.
+    // Set while `session/load` replays, so the replay is not recorded twice.
     replaying: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    parked: Parked,
 ) -> agent_client_protocol::Result<()> {
-    // **Declaring this is what makes an agent able to ask a question at all.**
-    // The Claude adapter offers its `AskUserQuestion` tool only to a client that
-    // says it can render a form elicitation, and Devplane declared no
-    // capabilities at all until 2026-09-19 — so the tool was withheld, the agent
-    // asked in prose, and the run went idle with nothing raised. Measured, not
-    // read: the adapter's own source gates on `clientCapabilities.elicitation.form`.
+    // Declaring form elicitation is what lets an agent ask a question: the
+    // Claude adapter offers `AskUserQuestion` only to a client with
+    // `clientCapabilities.elicitation.form`.
     let init = connection
         .send_request(
             InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
@@ -577,9 +518,8 @@ async fn run(
         .block_task()
         .await?;
 
-    // **Measured before anything is asked of the agent.** What it supports is
-    // advertised here and nowhere else, and a record written after a session
-    // exists would miss an agent whose session creation fails.
+    // Recorded before anything is asked, so an agent whose session creation
+    // fails is still recorded.
     let _ = events
         .send(AcpEvent::Capabilities {
             agent_name: init.agent_info.as_ref().map(|i| i.name.clone()),
@@ -594,15 +534,8 @@ async fn run(
         })
         .await;
 
-    // **The roster, where the agent has one.** Asked once, after the handshake
-    // and before anything is asked of the agent, under the rule the capability
-    // record already states: a runtime fact about *that* agent at *that*
-    // version, never a property of this product.
-    //
-    // Errors are dropped on purpose. A listing is enrichment — an agent that
-    // advertises the method and then refuses it leaves the run exactly as
-    // observation found it, which is the correct outcome and not a failure
-    // worth ending a session over.
+    // The roster, where the agent has one: asked once, after the handshake.
+    // Errors are dropped — a listing is enrichment, not worth ending a session.
     if init.agent_capabilities.session_capabilities.list.is_some() {
         let listed = connection
             .send_request(agent_client_protocol::schema::v1::ListSessionsRequest::default())
@@ -621,19 +554,14 @@ async fn run(
                 let _ = events.send(AcpEvent::SessionsListed { sessions }).await;
             }
         }
-        // **One page, deliberately.** The response is cursor-paged, and the
-        // question this answers — *does the agent know a name for the session
-        // in front of me* — is answered by the page the session is on or not at
-        // all. Walking every page of somebody's history to fill a title is a
-        // cost with no reader.
+        // One page: the session in front of us is on it or it is not.
     }
 
     let mut initial_mode: Option<String> = None;
     let session_id = match resuming {
         Some(previous) => {
-            // Checked before it is attempted: an agent that supports neither
-            // answers with an error, and the caller would then have to decide
-            // whether the work was continued or silently restarted.
+            // Checked up front, so a missing capability is a refusal rather
+            // than an ambiguous error.
             let can_resume = init
                 .agent_capabilities
                 .session_capabilities
@@ -655,8 +583,7 @@ async fn run(
                     .await;
                 return Ok(());
             }
-            // `resume` first where it exists: it continues without replaying,
-            // and Devplane already holds the transcript.
+            // `resume` first where it exists: it does not replay.
             let sid = agent_client_protocol::schema::v1::SessionId::new(previous.clone());
             if !can_resume {
                 replaying.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -681,11 +608,8 @@ async fn run(
             match resumed {
                 Ok(()) => agent_client_protocol::schema::v1::SessionId::new(previous),
                 Err(e) => {
-                    // The session is gone from the agent's side — expired, or
-                    // the agent keeps nothing across process restarts. Saying
-                    // so is the useful answer; starting a fresh conversation
-                    // under the same run would be a restart wearing a resume's
-                    // name.
+                    // The session is gone from the agent's side. Say so,
+                    // rather than restarting under a resume's name.
                     let _ = events
                         .send(AcpEvent::Ended {
                             error: Some(format!("that session could not be continued: {e}")),
@@ -702,24 +626,16 @@ async fn run(
                 .await
             {
                 Ok(r) => {
-                    // **The mode a session starts in, which no update reports.**
-                    // `current_mode_update` fires when a mode *changes*, so an
-                    // agent that starts in one mode and stays there would never
-                    // be reported at all — and that is the case the surface
-                    // most wants: a session nobody is supervising, sitting in
-                    // the mode it began in.
+                    // The mode a session starts in: `current_mode_update`
+                    // fires only on a change, so the initial mode is reported
+                    // here.
                     initial_mode = r.modes.as_ref().map(|m| m.current_mode_id.to_string());
                     r.session_id
                 }
                 Err(e) => {
-                    // An agent that needs signing in advertises `authMethods`
-                    // at initialize, often with the literal command to run.
-                    // Repeating it beats a raw protocol error, which makes a
-                    // login look like a broken integration.
-                    //
-                    // The message says *may*: the presence of those methods
-                    // means authentication exists here, not that this error was
-                    // an authentication failure. Guessing that is inference.
+                    // An agent that needs signing in advertises `authMethods`,
+                    // often with the command to run. The message says *may*:
+                    // the methods existing does not make this an auth failure.
                     let hint = describe_auth(&init.auth_methods);
                     let _ = events
                         .send(AcpEvent::Ended {
@@ -737,82 +653,75 @@ async fn run(
 
     let _ = events
         .send(AcpEvent::Ready {
-            // `Display` renders the protocol value; `Debug` would wrap it in
-            // the type name, and an id that round-trips as `SessionId("x")`
-            // is an id the agent does not recognise.
+            // `Display`, not `Debug`, which would wrap it as
+            // `SessionId("x")`.
             session_id: session_id.to_string(),
             agent_name: init.agent_info.as_ref().map(|i| i.name.clone()),
         })
         .await;
 
-    // After `Ready`, because the run has to exist before anything can be
-    // recorded against it.
+    // After `Ready`, so the run exists to record against.
     if let Some(mode) = initial_mode {
         let _ = events.send(AcpEvent::ModeChanged { mode }).await;
     }
 
     loop {
-        let command = tokio::select! {
-            // Biased so a stop that arrives with a queued prompt wins: the
-            // caller asked for the session to end, not for one more turn.
+        let text = tokio::select! {
+            // Biased so a stop wins over a queued prompt.
             biased;
             _ = stop.notified() => break,
-            c = commands.recv() => match c {
-                Some(c) => c,
+            p = prompts.recv() => match p {
+                Some(p) => p,
                 None => break,
             },
         };
 
-        match command {
-            Command::Prompt(text) => {
-                let turn = connection
-                    .send_request(PromptRequest::new(
-                        session_id.clone(),
-                        vec![ContentBlock::Text(TextContent::new(text))],
-                    ))
-                    .block_task();
-                tokio::pin!(turn);
+        let turn = connection
+            .send_request(PromptRequest::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new(text))],
+            ))
+            .block_task();
+        tokio::pin!(turn);
 
-                let response = tokio::select! {
-                    r = &mut turn => r,
-                    _ = stop.notified() => {
-                        // The protocol requires the agent to answer a cancel
-                        // with `stop_reason: cancelled`, so ask properly and
-                        // give it a moment before tearing the connection down.
-                        let _ = connection.send_notification(CancelNotification::new(
-                            session_id.clone(),
-                        ));
-                        match tokio::time::timeout(CANCEL_GRACE, &mut turn).await {
-                            Ok(r) => r,
-                            Err(_) => {
-                                tracing::debug!("agent did not acknowledge the cancel");
-                                break;
-                            }
-                        }
-                    }
-                };
-
-                match response {
-                    Ok(r) => {
-                        let cancelled = r.stop_reason == StopReason::Cancelled;
-                        let _ = events
-                            .send(AcpEvent::TurnEnded {
-                                stop_reason: stop_reason_name(r.stop_reason).to_string(),
-                            })
-                            .await;
-                        if cancelled {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = events
-                            .send(AcpEvent::Ended {
-                                error: Some(e.to_string()),
-                            })
-                            .await;
+        let response = tokio::select! {
+            r = &mut turn => r,
+            _ = stop.notified() => {
+                // Pending requests first, then the cancel: an agent blocked
+                // on a permission cannot answer `stop_reason: cancelled`.
+                parked.cancel_all().await;
+                let _ = connection.send_notification(CancelNotification::new(
+                    session_id.clone(),
+                ));
+                match tokio::time::timeout(CANCEL_GRACE, &mut turn).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        tracing::debug!("agent did not acknowledge the cancel");
                         break;
                     }
                 }
+            }
+        };
+
+        match response {
+            Ok(r) => {
+                let cancelled = r.stop_reason == StopReason::Cancelled;
+                let _ = events
+                    .send(AcpEvent::TurnEnded {
+                        stop_reason: stop_reason_name(r.stop_reason).to_string(),
+                    })
+                    .await;
+                if cancelled {
+                    break;
+                }
+            }
+            Err(e) => {
+                let _ = events
+                    .send(AcpEvent::Ended {
+                        error: Some(e.to_string()),
+                    })
+                    .await;
+                break;
             }
         }
     }
@@ -822,9 +731,7 @@ async fn run(
 }
 
 /// The wire name of a stop reason.
-///
-/// Spelled out rather than lowercased from `Debug`: `MaxTurnRequests` would
-/// become `maxturnrequests`, and the daemon matches on these.
+/// Spelled out rather than lowercased from `Debug`: the host matches on these.
 fn stop_reason_name(r: StopReason) -> &'static str {
     match r {
         StopReason::EndTurn => "end_turn",
@@ -864,35 +771,21 @@ async fn ask(
         })
         .await;
 
-    // **It waits.** Not for ten minutes, not for a number in this file: until a
-    // person answers, until the project's own deadline sweeps it, or until the
-    // connection goes away. Those are the only three things that end it and
-    // each of them has a name on it.
+    // It waits — until a person answers, the project's deadline sweeps it, or
+    // the connection goes away.
     let answer = rx.await;
     pending.lock().await.remove(&request_id);
 
-    // An `Err` is the sender being dropped: the daemon is tearing this session
-    // down, or a deadline sweep closed the ask and released the wait. Either
-    // way the ending has already been recorded by whoever did it, with its own
-    // authority — so nothing is invented here and nothing is announced twice.
-    // The agent is told no, which is the only safe thing to say when the answer
-    // is that there is no longer anybody to ask.
+    // An `Err` is the sender dropped: teardown or a deadline sweep, which has
+    // already recorded the ending with its own authority. The agent is told no.
     answer.unwrap_or_default()
 }
 
-/// Publishes a question and waits — with no timeout — for the person.
+/// Publishes a question and waits — with no timeout — for the person. The
+/// wait is off the handler, so the connection keeps reading.
 ///
-/// **No timeout is the feature, and since 2026-09-20 it is the rule on both
-/// channels rather than a distinction between them.** Neither a permission nor
-/// a question has a safe default, and inventing one is the thing this product
-/// refuses to do — so both wait, and the only clock that ever ends either is
-/// one a project wrote down for itself. The wait happens off the handler, so a
-/// question left overnight does not stop the connection reading anything else.
-///
-/// **Cancel, never decline.** `decline` is folded by the adapter into
-/// *answered, with no answers*, so the agent proceeds as though it had asked and
-/// been told nothing. `cancel` stops the call instead, which is the honest
-/// outcome when there is no answer to give.
+/// Cancel, never decline: the adapter folds `decline` into *answered, with no
+/// answers*, whereas `cancel` stops the call.
 async fn ask_person(
     events: &mpsc::Sender<AcpEvent>,
     asked: &Asked,
@@ -903,14 +796,9 @@ async fn ask_person(
         .as_ref()
         .and_then(crate::core::question::Ask::parse)
     else {
-        // The same method carries elicitations from MCP servers, in shapes this
-        // cannot render. Guessing at one would put words in somebody's mouth,
-        // so it is cancelled — **and said out loud**.
-        //
-        // Cancelling silently is the exact failure this whole feature exists to
-        // prevent: an agent asked a person something, a person was never told,
-        // and the only trace was the agent giving up. Devplane declared it could
-        // render a form; where it turns out it cannot, that is news.
+        // The same method carries MCP-server elicitations in shapes this
+        // cannot render. They are cancelled, and reported rather than silently
+        // dropped.
         let _ = events
             .send(AcpEvent::QuestionUnrenderable {
                 what: serde_json::to_value(request)
@@ -941,9 +829,8 @@ async fn ask_person(
     asked.lock().await.remove(&request_id);
 
     match answered {
-        // The protocol's own content type rather than raw JSON: converting here
-        // means a shape the schema would reject fails at the boundary, where it
-        // can still be turned into a cancel, instead of on the wire.
+        // The protocol's content type rather than raw JSON, so a shape the
+        // schema rejects fails here, where it can still become a cancel.
         Ok(Some(content)) => match serde_json::from_value::<
             std::collections::BTreeMap<
                 String,
@@ -968,8 +855,7 @@ async fn ask_person(
 }
 
 /// The wire name of a permission option kind, spelled out for the same reason
-/// as [`stop_reason_name`]: `AllowOnce` lowercased is `allowonce`, and a policy
-/// that matched on that would be matching on an accident.
+/// as [`stop_reason_name`].
 fn option_kind_name(k: agent_client_protocol::schema::v1::PermissionOptionKind) -> &'static str {
     use agent_client_protocol::schema::v1::PermissionOptionKind as K;
     match k {
@@ -1023,10 +909,8 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
             },
             status: wire(&t.status),
         }],
-        // An update with no status is content streaming in — the tool's output
-        // arriving a line at a time. Reporting it as a tool call would count one
-        // per chunk, and blank the board's summary, because an update need not
-        // repeat the title.
+        // No status means content streaming in; reporting it would count one
+        // call per chunk and blank the title.
         SessionUpdate::ToolCallUpdate(t) if t.fields.status.is_none() => Vec::new(),
         SessionUpdate::ToolCallUpdate(t) => vec![AcpEvent::Tool {
             call: ToolRequest {
@@ -1046,10 +930,8 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
             status: t.fields.status.as_ref().and_then(wire),
         }],
         SessionUpdate::UsageUpdate(u) => vec![AcpEvent::Usage {
-            // The protocol reports cost in whatever currency the agent bills
-            // in. Only dollars are carried through, because the board adds the
-            // figures up and a total that silently mixes currencies is worse
-            // than one that admits it does not know.
+            // Only dollars are carried through: the board sums the figures,
+            // and must not mix currencies.
             cost_usd: u
                 .cost
                 .as_ref()
@@ -1067,28 +949,21 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
                 })
                 .collect(),
         )],
-        // The user's own message, replayed when a session is resumed. Devplane
-        // records what it sent at the moment it sends it, so taking this too
-        // would write every prompt down twice.
+        // The user's own message, replayed on resume — already recorded when
+        // sent.
         SessionUpdate::UserMessageChunk(_) => Vec::new(),
-        // **The cross-vendor answer to *which sessions decide without you*.**
-        // `devplane modes` reads one vendor's settings files; this is the same
-        // question asked of any agent that speaks the protocol.
+        // The cross-vendor answer to *which sessions decide without you*.
         SessionUpdate::CurrentModeUpdate(m) => vec![AcpEvent::ModeChanged {
             mode: m.current_mode_id.to_string(),
         }],
-        // Command lists are real and nothing consumes them yet. An event the
-        // product does nothing with is noise in the log.
+        // Command lists are not consumed yet.
         _ => Vec::new(),
     }
 }
 
 /// The wire name of a protocol enum, asked of serde rather than reconstructed.
 ///
-/// A protocol value crossing a boundary is never derived from `Debug`.
-/// Lowercasing it and re-inserting underscores agrees with the wire format for
-/// `InProgress` and stops agreeing at the first variant spelled differently;
-/// serde already holds the answer, because serde is what put it there.
+/// Never derived from `Debug`: serde is what put it on the wire.
 fn wire<T: serde::Serialize>(value: &T) -> Option<String> {
     match serde_json::to_value(value).ok()? {
         serde_json::Value::String(s) => Some(s),
@@ -1111,34 +986,18 @@ mod tests {
     async fn a_decision_for_nothing_is_an_error_not_a_panic() {
         let (tx, _rx) = mpsc::channel(1);
         let s = Session {
-            commands: tx,
+            prompts: tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
             asked: Arc::new(Mutex::new(HashMap::new())),
             stop: Arc::new(Notify::new()),
+            stopped_because: Arc::new(std::sync::Mutex::new(None)),
         };
         assert!(s.decide("nope", Some("x".into())).await.is_err());
     }
 
-    #[tokio::test]
-    async fn an_unanswered_permission_refuses_rather_than_hanging() {
-        // The real timeout is ten minutes; the mechanism is what is tested.
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, _rx) = oneshot::channel::<Option<String>>();
-        pending.lock().await.insert("r1".into(), tx);
-
-        let answer = tokio::time::timeout(Duration::from_millis(10), async {
-            let (_tx2, rx2) = oneshot::channel::<Option<String>>();
-            rx2.await
-        })
-        .await;
-        assert!(answer.is_err(), "a timeout is a refusal, not a hang");
-    }
-
     #[test]
     fn protocol_enums_use_their_wire_names_not_a_debug_string() {
-        // The names on the far side of this boundary are matched on by string,
-        // and serde is what put them on the wire — so serde is what is asked,
-        // rather than a transformation of `Debug` that happens to agree.
+        // Matched on by string downstream, so serde is asked.
         use agent_client_protocol::schema::v1::{ToolCallStatus, ToolKind};
         assert_eq!(
             wire(&ToolCallStatus::InProgress).as_deref(),
@@ -1163,10 +1022,11 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let s = Session {
-            commands: tx,
+            prompts: tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
             asked: Arc::new(Mutex::new(HashMap::new())),
             stop: Arc::new(Notify::new()),
+            stopped_because: Arc::new(std::sync::Mutex::new(None)),
         };
         assert!(s.prompt("hello").await.is_err());
     }
@@ -1177,14 +1037,8 @@ mod capability_tests {
     use super::*;
 
     /// The one line that decides whether an agent can ask a question at all.
-    ///
-    /// Until 2026-09-19 Devplane sent no client capabilities, and the Claude
-    /// adapter withheld its question tool for exactly that reason — the agent
-    /// asked in prose instead and the run went idle with nothing raised. The
-    /// adapter gates on `clientCapabilities.elicitation.form`, so this asserts
-    /// the wire shape rather than the builder call: a rename upstream that kept
-    /// the method and changed the JSON would pass a test written the other way
-    /// and silently take the feature away again.
+    /// The Claude adapter gates on `clientCapabilities.elicitation.form`, so
+    /// this asserts the wire shape rather than the builder call.
     #[test]
     fn the_initialize_request_says_it_can_render_a_question() {
         let init = InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
@@ -1212,20 +1066,18 @@ mod answer_tests {
         (Arc::new(Mutex::new(m)), rx)
     }
 
-    /// Two tabs, or a phone and a laptop, answering at once.
-    ///
-    /// The winner is whoever takes the waiter out of the map; the loser is told
-    /// there is no question waiting, which is a **normal outcome** rather than
-    /// an error to show. The alternative — both answers reaching the agent — is
-    /// the one bug this feature cannot afford.
+    /// Two tabs answering at once: whoever takes the waiter wins; the loser is
+    /// told no question is waiting — a normal outcome. Both answers reaching
+    /// the agent is the bug this prevents.
     #[tokio::test]
     async fn an_answer_is_delivered_exactly_once() {
         let (asked, rx) = waiting();
         let s = Session {
-            commands: mpsc::channel(1).0,
+            prompts: mpsc::channel(1).0,
             pending: Arc::new(Mutex::new(HashMap::new())),
             asked: asked.clone(),
             stop: Arc::new(Notify::new()),
+            stopped_because: Arc::new(std::sync::Mutex::new(None)),
         };
         let first = s
             .answer("q1", Some(serde_json::json!({"question_0": "a"})))
@@ -1243,20 +1095,17 @@ mod answer_tests {
         );
     }
 
-    /// There is deliberately no `decline`.
-    ///
-    /// The adapter folds a decline into *answered, with no answers*, so the
-    /// agent proceeds having asked and heard nothing. A "dismiss" button would
-    /// be that failure with a friendly name on it, so the only two things that
-    /// can happen to a question are an answer and a cancel.
+    /// There is no `decline`: the adapter folds it into *answered, with no
+    /// answers*, so a question can only be answered or cancelled.
     #[tokio::test]
     async fn nothing_can_answer_a_question_with_nothing() {
         let (asked, rx) = waiting();
         let s = Session {
-            commands: mpsc::channel(1).0,
+            prompts: mpsc::channel(1).0,
             pending: Arc::new(Mutex::new(HashMap::new())),
             asked,
             stop: Arc::new(Notify::new()),
+            stopped_because: Arc::new(std::sync::Mutex::new(None)),
         };
         // `None` is the cancel path, and the waiter must read it as a cancel
         // rather than as an empty answer.

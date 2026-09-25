@@ -1,17 +1,26 @@
+import { bind, onAction } from "../../lib/keys";
+import { go } from "../../lib/route";
 import { register } from "../../lib/surfaces";
-import Plan from "./Plan.svelte";
+import List from "./List.svelte";
+import Doc from "./Doc.svelte";
+
+bind({ surface: "global", combo: "g s", action: "go-specs", label: "go to the specifications" });
+onAction("go-specs", () => {
+  go("#plan");
+  return true;
+});
 
 register({
   id: "plan",
-  title: "Plans",
-  heading: "What each project is working to",
+  icon: "spec",
+  title: "Specifications",
+  heading: "Specifications",
   band: "happening",
   order: 3,
-  ports: [],
-  // Read on open rather than on the two-second poll: it walks every in-flight
-  // work's specification folder on disk, which is not a thing to do twice a
-  // second for a page nobody has open.
+  // Read on open, not on the poll: it walks specification folders on disk.
   reads: ["/api/specs"],
+  tab: (_feed, focus) => focus.split("/").filter(Boolean).pop() ?? "Specification",
   select: () => ({}),
-  component: Plan,
+  side: List,
+  component: Doc,
 });

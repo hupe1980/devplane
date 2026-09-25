@@ -1,71 +1,56 @@
 //! Runs Devplane owns, over the Agent Client Protocol.
 //!
-//! An observed session is something Devplane watches; a driven one is
-//! something it can answer. The difference on the board is one word, which is
-//! the point — the same run, the same inbox, the same project grouping,
-//! whether the session was started here or in somebody's terminal.
-//!
-//! The policy engine is shared deliberately: "what may an agent do here" is a
-//! property of the project, not of how the agent was launched. Sharing it means
-//! speaking its vocabulary rather than approximating it, so a permission
-//! request is matched on the tool kind the agent declared and the arguments it
-//! chose — never on its human-readable title. See
-//! [`crate::acp::ToolRequest::policy_subject`].
+//! An observed session is one Devplane watches; a driven one is one it can
+//! answer. Both share the board, the inbox and the policy engine: a permission
+//! request is matched on the tool kind and arguments the agent declared, never
+//! its title (see [`crate::acp::ToolRequest::policy_subject`]).
 
 use crate::acp::{AcpEvent, AgentSpec, Session};
 use crate::core::Verdict;
 use crate::core::event::{ApiUsage, Choice, Event, Source, WaitingFor};
 use crate::core::ids::RunId;
 use crate::core::run::RunMode;
-use crate::daemon::Shared;
+use crate::host::Shared;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
-/// Starts an agent for a piece of work, **without prompting it**.
+/// Starts an agent for a change, **without prompting it**.
 ///
-/// The separation is the point, and it is load-bearing. A prompt sent from
-/// inside `dispatch` goes out before the caller has put this run into
-/// `works` and `work_of_run`; an agent that answers quickly then ends its turn
-/// before those maps can answer for it, `work::on_turn_ended` looks the run up,
-/// finds nothing, and returns — leaving the work in `Implement` for ever with
-/// its gates never run. That is the one failure the verified-done loop exists
-/// to prevent, and it was reproducible by widening the window to 1.5s.
-///
-/// So a work-bound caller gets a run it must register first and prompt second,
-/// and there is no parameter here with which to do it in the wrong order.
-pub async fn dispatch_for_work(
+/// The caller must register the run in `changes` and `change_of_run` before
+/// prompting; otherwise a fast turn end reaches `change::on_turn_ended` before
+/// the run is known and the change's gates never run.
+pub async fn dispatch_for_change(
     state: &Shared,
     spec: &AgentSpec,
     cwd: PathBuf,
-    work: &crate::core::WorkId,
+    change: &crate::core::ChangeId,
+    sent: Vec<crate::core::spec::SentTask>,
 ) -> Result<RunId> {
-    start(state, spec, cwd, None, Some(work)).await
+    start(state, spec, cwd, None, Some(change), sent).await
 }
 
-/// Starts an agent on an ad-hoc prompt, with no piece of work behind it.
-///
-/// Safe to prompt inline: there is no Work row whose absence a turn end could
-/// fall through.
+/// Starts an agent on an ad-hoc prompt, with no change behind it; safe to
+/// prompt inline.
 pub async fn dispatch(
     state: &Shared,
     spec: &AgentSpec,
     cwd: PathBuf,
     prompt: Option<String>,
+    sent: Vec<crate::core::spec::SentTask>,
 ) -> Result<RunId> {
-    start(state, spec, cwd, prompt, None).await
+    start(state, spec, cwd, prompt, None, sent).await
 }
 
-/// Starts an agent and registers it as a run.
-///
-/// Every path that starts an agent comes through here, which is where the trust
-/// gate belongs. Putting it only in `work::start` left `dispatch` as a way
-/// around it — a check that one caller can skip is not a check.
+/// Starts an agent and registers it as a run. Every start comes through here,
+/// so the trust and capacity checks cannot be skipped.
 async fn start(
     state: &Shared,
     spec: &AgentSpec,
     cwd: PathBuf,
     prompt: Option<String>,
-    for_work: Option<&crate::core::WorkId>,
+    for_change: Option<&crate::core::ChangeId>,
+    // Recorded on the run before any prompt reaches the agent.
+    sent: Vec<crate::core::spec::SentTask>,
 ) -> Result<RunId> {
     if !cwd.is_dir() {
         anyhow::bail!("{} is not a directory", cwd.display());
@@ -74,16 +59,26 @@ async fn start(
         .canonicalize()
         .with_context(|| format!("resolving {}", cwd.display()))?;
     require_trust(state, &cwd).await?;
-    require_capacity(state, &cwd, for_work).await?;
+    require_capacity(state, &cwd, for_change).await?;
+    // Resolved before spawning, so an unfillable placeholder refuses by name.
+    let prompt = match prompt {
+        Some(text) => Some(
+            resolve_prompt(state, &cwd, &text, &sent)
+                .await
+                .map_err(cannot_send)?,
+        ),
+        None => None,
+    };
     let keep_transcript = transcripts_wanted(&cwd);
-    // Read this daemon's own group-leading children either side of the spawn.
-    // The one that appears is the agent, and it is recorded so that a daemon
-    // **killed** rather than stopped leaves enough behind to find what it
-    // abandoned (`observe::procs`). Purely additive: if the reading fails, or
-    // two dispatches race closely enough to be ambiguous, nothing is recorded
-    // and everything else works exactly as before.
+    // Minted before the spawn (the agent is told it, see `agent_env`) so the
+    // board has a row immediately. The group-leading children are read either
+    // side of the spawn to record the agent's pid, so a killed host leaves
+    // enough behind to find it (`observe::procs`); if ambiguous, nothing is
+    // recorded.
+    let run_id = RunId::new(format!("acp-{}", uuid::Uuid::now_v7().simple()));
     let before = crate::observe::procs::own_group_leading_children();
-    let (session, events) = crate::acp::spawn(spec, cwd.clone())
+    let env = agent_env(state, for_change, &run_id).await;
+    let (session, events) = crate::acp::spawn(spec, cwd.clone(), &env)
         .await
         .with_context(|| format!("starting {}", spec.id))?;
     let agent_pid = crate::observe::procs::one_new_child(
@@ -91,26 +86,17 @@ async fn start(
         &crate::observe::procs::own_group_leading_children(),
     );
 
-    // The run id is minted here rather than taken from the agent: the board
-    // needs a row the moment the process starts, and the agent's own session id
-    // only arrives after its handshake.
-    let run_id = RunId::new(format!("acp-{}", uuid::Uuid::now_v7().simple()));
-
     state
         .ingest_as(
             run_id.clone(),
-            Source::Daemon,
+            Source::Host,
             Event::SessionStarted {
                 cwd: cwd.clone(),
                 source: Some("dispatch".into()),
                 model: None,
                 entrypoint: Some(format!("acp:{}", spec.id)),
-                // **Read, and there is nothing to find.** Devplane spawned this
-                // agent, so it knows the environment it was given, and a test
-                // asserts nothing in this tree ever sets the variable. A driven
-                // run's questions are durable `asks` rows that wait; the
-                // vendor's own dialog — which is what that clock closes — is not
-                // what asks here.
+                // Devplane set the environment and never sets the vendor's
+                // question timer; a driven run's questions are durable asks.
                 question_clock: None,
                 clock_read: true,
             },
@@ -127,7 +113,7 @@ async fn start(
         state
             .ingest_as(
                 run_id.clone(),
-                Source::Daemon,
+                Source::Host,
                 Event::AgentProcessSpawned { pid },
                 crate::core::RunHint {
                     cwd: Some(cwd.clone()),
@@ -135,6 +121,18 @@ async fn start(
                     agent: spec.id.clone(),
                     agent_command: Some(spec.command.clone()),
                 },
+            )
+            .await;
+    }
+    // Recorded only when the dispatch named tasks; never inferred.
+    if !sent.is_empty() {
+        state
+            .ingest(
+                run_id.clone(),
+                Source::Host,
+                Event::TasksSent { tasks: sent },
+                Some(cwd.clone()),
+                RunMode::Driven,
             )
             .await;
     }
@@ -155,16 +153,43 @@ async fn start(
     Ok(run_id)
 }
 
-/// Continues a run whose agent is gone, against the same agent-side session.
+/// The environment an agent Devplane starts is given: its run id in
+/// [`RUN_ENV`], so `devplane report` reads an origin the host set rather than
+/// one the model typed, plus its change's build-cache variables.
+async fn agent_env(
+    state: &Shared,
+    for_change: Option<&crate::core::ChangeId>,
+    run: &RunId,
+) -> Vec<(String, PathBuf)> {
+    let mut env = cache_env(state, for_change).await;
+    env.push((RUN_ENV.to_string(), PathBuf::from(run.as_str())));
+    env
+}
+
+/// The variable every agent Devplane starts carries its run id in.
+pub const RUN_ENV: &str = "DEVPLANE_RUN";
+
+/// The build-cache environment a change's project declared, so the agent
+/// builds into the same cache as the setup command and gates. Read from the
+/// governing checkout, never the worktree; empty without a change.
+async fn cache_env(
+    state: &Shared,
+    for_change: Option<&crate::core::ChangeId>,
+) -> Vec<(String, PathBuf)> {
+    let Some(id) = for_change else {
+        return Vec::new();
+    };
+    match crate::change::governing_config(state, id).await {
+        Ok((root, config)) => crate::core::caches::env_for(&root, &config.workspace.share),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Continues a run whose agent is gone (e.g. after a host restart), against
+/// the same agent-side session.
 ///
-/// The case this exists for is a daemon restart. The Work row, the branch and
-/// the worktree all survive one; the agent process does not, and until now the
-/// only honest thing the inbox could say was that the work was interrupted.
-///
-/// Deliberately not automatic on startup. Resuming spends money and runs an
-/// agent in a repository, and doing either because a machine rebooted is a
-/// decision nobody made — so the inbox offers it and a person (or `devplane
-/// work resume`) takes it.
+/// Never automatic: resuming spends money and runs an agent, so the inbox
+/// offers it and a person (or `devplane change resume`) takes it.
 pub async fn resume(state: &Shared, run: &RunId) -> Result<RunId> {
     let (agent_id, agent_command, agent_session, cwd, live) = {
         let world = state.world.lock().await;
@@ -185,19 +210,16 @@ pub async fn resume(state: &Shared, run: &RunId) -> Result<RunId> {
     }
     let agent_session = agent_session.context(
         "that run never got as far as the agent naming its session, so there is nothing to \
-         resume — start the work again instead",
+         resume — start the change again instead",
     )?;
 
-    // The same gates a first dispatch goes through. A restart is not a reason
-    // to skip the trust check or the project's parallelism limit.
+    // A resume goes through the same trust and capacity checks as a start.
     require_trust(state, &cwd).await?;
-    let work = state.work_of_run.lock().await.get(run).cloned();
-    require_capacity(state, &cwd, work.as_ref()).await?;
+    let change = state.change_of_run.lock().await.get(run).cloned();
+    require_capacity(state, &cwd, change.as_ref()).await?;
 
-    // The id first, so a registry agent picks up whatever version is pinned
-    // today; the recorded command second, which is the only thing that can
-    // start an agent dispatched by path — its id is the placeholder `custom`
-    // and names nothing.
+    // By id first, so a registry agent gets today's pinned version; otherwise
+    // the recorded command, for an agent started by path (id `custom`).
     let spec = crate::acp::resolve(&agent_id, &state.agents)
         .or_else(|| {
             agent_command
@@ -209,7 +231,8 @@ pub async fn resume(state: &Shared, run: &RunId) -> Result<RunId> {
         })?;
     let keep_transcript = transcripts_wanted(&cwd);
 
-    let (session, events) = crate::acp::resume(&spec, cwd.clone(), agent_session.clone())
+    let env = agent_env(state, change.as_ref(), run).await;
+    let (session, events) = crate::acp::resume(&spec, cwd.clone(), agent_session.clone(), &env)
         .await
         .with_context(|| format!("resuming {}", spec.id))?;
 
@@ -240,8 +263,7 @@ async fn say(
     text: String,
     keep_transcript: bool,
 ) -> Result<()> {
-    // Recorded before it is sent, so a transcript that is read back starts
-    // with the ask rather than with the answer to something invisible.
+    // Recorded before it is sent, so a transcript starts with the ask.
     if keep_transcript {
         state
             .ingest_message(crate::core::Message::new(
@@ -254,11 +276,8 @@ async fn say(
     session.prompt(text).await
 }
 
-/// Registers a live session and starts the one pump that belongs to it.
-///
-/// Shared by the first dispatch and by a resume, because a resumed run has to
-/// reach the board through exactly the same path — a second copy of this is a
-/// second place for the two to drift.
+/// Registers a live session and starts its pump. Shared by start and resume,
+/// so both reach the board by the same path.
 async fn register(
     state: &Shared,
     run_id: &RunId,
@@ -279,30 +298,24 @@ async fn register(
     let pump_cwd = cwd.to_path_buf();
     let pump_session = session;
     tokio::spawn(async move {
-        let pump = tokio::sync::Mutex::new(Pump {
+        let mut pump = Pump {
             keep_transcript,
             ..Pump::default()
-        });
+        };
         while let Some(event) = events.recv().await {
             handle(
                 &pump_state,
                 &pump_run,
                 &pump_cwd,
                 &pump_session,
-                &pump,
+                &mut pump,
                 event,
             )
             .await;
         }
-        // **A fallback, not a second ending.** An agent that dies without
-        // saying so closes the channel and never sends `Ended`, and this is the
-        // only thing that records the stop. But `Ended` normally *does* arrive,
-        // and this block then ingested a second `SessionEnded` over the top of
-        // it — which, before the `interrupted` arm existed, silently promoted a
-        // just-recorded interruption back to `completed`.
-        //
-        // So it fires only where there is still something live to end, and it
-        // ends it the way the teardown would.
+        // Fallback for an agent that died without sending `Ended`. Only fires
+        // if the run is still live, so it never overwrites an ending already
+        // recorded (e.g. `interrupted` with `completed`).
         let still_live = {
             let w = pump_state.world.lock().await;
             w.run(&pump_run).is_some_and(|r| r.state.is_live())
@@ -315,43 +328,213 @@ async fn register(
             pump_state
                 .ingest(
                     pump_run.clone(),
-                    Source::Daemon,
+                    Source::Host,
                     Event::SessionEnded { reason },
                     Some(pump_cwd),
                     RunMode::Driven,
                 )
                 .await;
         }
-        // **Last, so that an empty `sessions` map means every pump has
-        // finished writing.** This used to be the first thing the pump did on
-        // the way out, which made the map say *drained* while the final
-        // `SessionEnded` was still in flight — and `shutdown()` reads this map
-        // to decide when it is safe to return.
+        // Last, so an empty `sessions` map means every pump finished writing;
+        // `shutdown()` waits on that.
         pump_state.sessions.lock().await.remove(&pump_run);
     });
 }
 
-/// Whether this repository keeps what its agents say.
+/// Fills a prompt's placeholders from what this host knows about `cwd`'s
+/// project, or names those it could not fill.
 ///
-/// Read once at dispatch rather than per chunk: a policy question asked on
-/// every syllable is a file read on every syllable, and a setting that changes
-/// halfway through a turn would leave half a conversation on disk.
+/// The one place a prompt is resolved, so a preflight shows what is sent.
+/// `sent` tasks go where the template names `{tasks}`, or are appended under
+/// *Tasks:*.
+pub async fn resolve_prompt(
+    state: &Shared,
+    cwd: &Path,
+    text: &str,
+    sent: &[crate::core::spec::SentTask],
+) -> Result<String, Vec<crate::core::context::Unresolved>> {
+    use crate::core::context::{Field, Value};
+    let root = crate::core::project::governing_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let project = crate::core::ProjectId::from_path(&root);
+    let mut ctx = context_for(state, &project, &root).await;
+    let block = crate::core::spec::tasks_block(sent);
+    if !sent.is_empty() {
+        ctx = ctx.with(
+            Field::Tasks,
+            Value::new(block.clone(), jiff::Timestamp::now()),
+        );
+    }
+    let out = crate::core::context::resolve(text, &ctx)?;
+    let out = if sent.is_empty() || crate::core::context::names(text, Field::Tasks) {
+        out
+    } else {
+        format!("{}\n\nTasks:\n{block}\n", out.trim_end())
+    };
+    Ok(crate::core::context::with_stop_and_say(&out))
+}
+
+/// A prompt refused before anything started: the placeholders it names that
+/// nothing could fill. Typed, so a route can answer it as the caller's error.
+#[derive(Debug)]
+pub struct CannotSend(pub Vec<crate::core::context::Unresolved>);
+
+impl std::fmt::Display for CannotSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the prompt cannot be sent: {}",
+            self.0
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    }
+}
+
+impl std::error::Error for CannotSend {}
+
+/// The refusal a caller hands back when a prompt cannot be sent.
+pub(crate) fn cannot_send(problems: Vec<crate::core::context::Unresolved>) -> anyhow::Error {
+    anyhow::Error::new(CannotSend(problems))
+}
+
+/// What one project can answer, read off disk and the world (`core::context`
+/// only resolves). A member with nothing behind it is absent, and the resolver
+/// refuses on it rather than filling in an empty string.
+pub async fn context_for(
+    state: &Shared,
+    project: &crate::core::ProjectId,
+    root: &Path,
+) -> crate::core::context::Context {
+    use crate::core::context::{Context, Field, Value};
+    let now = jiff::Timestamp::now();
+    // A project-wide prompt belongs to no change, so it has no answered reports.
+    let mut ctx = Context::default().with(
+        Field::Reports,
+        Value::new(crate::core::context::NO_REPORTS, now),
+    );
+
+    {
+        let w = state.world.lock().await;
+        if let Some(p) = w.project(project) {
+            ctx = ctx.with(Field::Project, Value::new(p.name.clone(), now));
+        }
+    }
+
+    if let Ok(st) = crate::git::status(root).await {
+        // Absent when the repository has no branch yet.
+        if let Some(b) = st.branch.clone() {
+            ctx = ctx.with(Field::Branch, Value::new(b, now));
+        }
+        // A sentence, because the prompt tells an agent a fact.
+        ctx = ctx.with(
+            Field::Dirty,
+            Value::new(
+                match st.changed_files + st.untracked_files > 0 {
+                    true => "the worktree has uncommitted changes",
+                    false => "the worktree is clean",
+                },
+                now,
+            ),
+        );
+    }
+    // The declared base branch where there is one, as merge checks read it.
+    let base = match crate::core::ProjectConfig::load(root)
+        .ok()
+        .and_then(|c| c.project.base_branch)
+    {
+        Some(b) => b,
+        None => crate::git::base_branch(root).await,
+    };
+    ctx = ctx.with(Field::BaseBranch, Value::new(base, now));
+    if let Ok(cfg) = crate::core::ProjectConfig::load(root) {
+        // The same plan reader the surfaces use, so the counts agree.
+        let changes = state.changes.lock().await;
+        let in_flight = changes
+            .values()
+            .filter(|w| w.project_id == *project && !w.is_settled())
+            .find_map(|w| w.spec.as_deref());
+        if let Some(spec) = in_flight {
+            let plan = crate::core::spec::Plan::read(root, spec, &cfg.spec.open_questions);
+            ctx = ctx.with(Field::PlanPath, Value::new(plan.path.clone(), now));
+            if let Some(p) = plan.progress {
+                ctx = ctx.with(Field::PlanOpen, Value::new(p.open().to_string(), now));
+            }
+            if plan.open_questions > 0 {
+                ctx = ctx.with(
+                    Field::PlanQuestions,
+                    Value::new(plan.open_questions.to_string(), now),
+                );
+            }
+        }
+    }
+
+    // The last gate failures, as the stored report reduced them.
+    {
+        let changes = state.changes.lock().await;
+        if let Some((failures, at)) = changes
+            .values()
+            .filter(|w| w.project_id == *project)
+            .filter_map(|w| w.last_gate().map(|g| (g, w.updated_at)))
+            .filter(|(g, _)| !g.passed())
+            .max_by_key(|(_, at)| *at)
+            .map(|(g, at)| {
+                let f: Vec<String> = g
+                    .commands
+                    .iter()
+                    .flat_map(|c| c.failures.iter().cloned())
+                    .collect();
+                (f, at)
+            })
+            && !failures.is_empty()
+        {
+            ctx = ctx.with(Field::GateFailures, Value::new(failures.join("\n"), at));
+        }
+    }
+
+    if let Ok(rows) = state.store.decisions(None, 1).await
+        && let Some(d) = rows.first()
+    {
+        ctx = ctx.with(
+            Field::LastDecision,
+            Value::new(format!("{} {}", d.outcome, d.subject), d.at),
+        );
+        ctx = ctx.with(Field::LastAuthority, Value::new(d.authority.as_str(), d.at));
+    }
+
+    // A question an agent asked that nobody answered.
+    {
+        let w = state.world.lock().await;
+        if let Some(q) = w
+            .runs()
+            .filter(|r| r.project_id.as_ref() == Some(project))
+            .flat_map(|r| r.abandoned_questions.iter())
+            .max_by_key(|q| q.abandoned_at)
+        {
+            ctx = ctx.with(
+                Field::UnansweredQuestion,
+                Value::new(q.question.clone(), q.abandoned_at),
+            );
+        }
+    }
+
+    ctx
+}
+
+/// Whether this repository keeps what its agents say. Read once at dispatch,
+/// so a setting changed mid-turn cannot leave half a conversation on disk.
 fn transcripts_wanted(cwd: &Path) -> bool {
     let root = crate::core::project::governing_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     crate::core::ProjectConfig::load(&root)
         .map(|c| c.transcripts.keep)
-        // A file that will not parse has already been refused elsewhere; the
-        // safe reading of "we could not tell" is the default, not silence.
+        // An unparseable file is reported elsewhere; default to keeping.
         .unwrap_or(true)
 }
 
-/// Refuses unless somebody has said this directory is theirs.
-///
-/// A headless agent runs the repository's own hooks and MCP servers with no
-/// dialog of its own, so the decision has to be deliberate and once. A worktree
-/// inherits the trust of the repository that owns it: trusting a project and
-/// then being asked again for each of its checkouts would teach people to say
-/// yes without reading.
+/// Refuses unless somebody has trusted this directory's project. A headless
+/// agent runs the repository's own hooks and MCP servers with no dialog, so
+/// trust is explicit; a worktree inherits its repository's trust.
 pub async fn require_trust(state: &Shared, cwd: &Path) -> Result<()> {
     let root = crate::core::project::governing_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     let id = crate::core::ProjectId::from_path(&root);
@@ -371,17 +554,12 @@ pub async fn require_trust(state: &Shared, cwd: &Path) -> Result<()> {
     )
 }
 
-/// Refuses when a project already has as many agents running as it allows.
-///
-/// `max_parallel_runs` exists because five agents in one repository is rarely
-/// five times the work: they collide on the same files, they multiply the
-/// permission prompts, and each one costs money whether or not it was a good
-/// idea. The limit is the project's own, because only it knows how much
-/// parallelism its tests and its ports can take.
+/// Refuses when a project already has as many agents running as its
+/// `max_parallel_runs` allows.
 async fn require_capacity(
     state: &Shared,
     cwd: &Path,
-    for_work: Option<&crate::core::WorkId>,
+    for_change: Option<&crate::core::ChangeId>,
 ) -> Result<()> {
     let root = crate::core::project::governing_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
 
@@ -393,17 +571,11 @@ async fn require_capacity(
     };
 
     let id = crate::core::ProjectId::from_path(&root);
-    let work_of_run = state.work_of_run.lock().await.clone();
+    let change_of_run = state.change_of_run.lock().await.clone();
     let live = {
         let w = state.world.lock().await;
-        // Distinct *pieces of work*, not runs.
-        //
-        // Two things the limit must not count. Sessions the user started
-        // themselves: three editor tabs would refuse every dispatch on a
-        // project set to two. And the steps of one chain, which share a worktree
-        // and run one after another — they are not the colliding agents the
-        // limit exists to prevent, and counting them refuses step three of a
-        // three-step pipeline under a limit of two.
+        // Counts distinct changes among driven/background runs: sessions the
+        // user started are not counted, and one change's runs share a slot.
         let mut seen = std::collections::HashSet::new();
         w.runs()
             .filter(|r| {
@@ -413,12 +585,10 @@ async fn require_capacity(
                 ) && r.project_id.as_ref() == Some(&id)
                     && r.state.is_live()
             })
-            .filter(|r| match work_of_run.get(&r.id) {
-                // The work asking for this step already holds its slot — the
-                // step it is leaving is part of the same unit, not a rival for
-                // it.
-                Some(work) if Some(work) == for_work => false,
-                Some(work) => seen.insert(work.to_string()),
+            .filter(|r| match change_of_run.get(&r.id) {
+                // The change asking already holds its slot.
+                Some(change) if Some(change) == for_change => false,
+                Some(change) => seen.insert(change.to_string()),
                 // A bare `dispatch` is its own unit.
                 None => seen.insert(r.id.to_string()),
             })
@@ -426,7 +596,7 @@ async fn require_capacity(
     };
     if live >= limit {
         anyhow::bail!(
-            "{} already has {live} piece(s) of work with an agent in them and allows \
+            "{} already has {live} change(s) with an agent in them and allows \
              {limit}. Finish one, or raise max_parallel_runs in devplane.toml.",
             root.display()
         );
@@ -435,6 +605,10 @@ async fn require_capacity(
 }
 
 /// Sends a prompt to a driven run.
+///
+/// Reports its change filed that were answered since it last heard are
+/// appended (unless the prompt carries them via `{reports}`) and marked told
+/// once the prompt has gone, so each verdict arrives once.
 pub async fn prompt(state: &Shared, run: &RunId, text: String) -> Result<()> {
     let session = state
         .sessions
@@ -443,10 +617,32 @@ pub async fn prompt(state: &Shared, run: &RunId, text: String) -> Result<()> {
         .get(run)
         .cloned()
         .context("that run is not one Devplane drives")?;
+    let change = state.change_of_run.lock().await.get(run).cloned();
+    let owed = match &change {
+        Some(c) => crate::reports::owed(state, c).await,
+        None => Vec::new(),
+    };
+    let fresh: Vec<&String> = owed
+        .iter()
+        .map(|(_, p)| p)
+        .filter(|p| !text.contains(p.as_str()))
+        .collect();
+    let text = match fresh.is_empty() {
+        true => text,
+        false => format!(
+            "{}\n\nWhat became of reports this change filed about other projects:\n\n{}\n",
+            text.trim_end(),
+            fresh
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ),
+    };
     state
         .ingest(
             run.clone(),
-            Source::Daemon,
+            Source::Host,
             Event::PromptSubmitted {
                 chars: text.chars().count(),
             },
@@ -454,12 +650,8 @@ pub async fn prompt(state: &Shared, run: &RunId, text: String) -> Result<()> {
             RunMode::Driven,
         )
         .await;
-    // Including a gate's failures handed back: "why did it try that" is
-    // answered by what it was told, and that was the one thing not written down.
-    //
-    // The repository's setting is read once per turn here rather than carried
-    // on the run: a turn is a rare event, and a flag on the domain type would
-    // be a storage policy living in the state machine.
+    // Kept in the transcript, including handed-back gate failures. The
+    // repository's setting is read per turn rather than stored on the run.
     let dir = {
         let w = state.world.lock().await;
         w.run(run).map(|r| r.working_dir().clone())
@@ -473,15 +665,20 @@ pub async fn prompt(state: &Shared, run: &RunId, text: String) -> Result<()> {
             ))
             .await;
     }
-    session.prompt(text).await
+    session.prompt(text).await?;
+    if let Some(c) = &change
+        && !owed.is_empty()
+    {
+        let ids: Vec<crate::core::ReportId> = owed.into_iter().map(|(id, _)| id).collect();
+        crate::reports::told(state, c, &ids).await;
+    }
+    Ok(())
 }
 
 /// What a caller asked for when answering a permission request.
 ///
-/// `Allow`/`Deny` are resolved against the options the agent actually offered,
-/// because ACP option ids belong to the agent: one names its option `allow`,
-/// another `proceed_once`. A caller that had to know the id would be a caller
-/// that guesses, and a wrong guess is a rejected answer and a wedged session.
+/// `Allow`/`Deny` are resolved against the options the agent offered, because
+/// ACP option ids belong to the agent (`allow`, `proceed_once`, ...).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Allow,
@@ -492,15 +689,11 @@ pub enum Decision {
 
 impl Decision {
     /// Reads `{ "decision": "allow" }`, or `{ "option_id": "…" }` for an exact
-    /// choice. Nothing at all is a refusal — which is also what an unanswered
-    /// request becomes when it times out.
+    /// choice. Nothing at all is a refusal.
     pub fn parse(decision: Option<&str>, option_id: Option<String>) -> Self {
         if let Some(id) = option_id {
-            // **The two ids this product publishes itself mean what they say.**
-            // A held permission offers `allow` and `deny`; leaving them as an
-            // opaque `Option` sent them through [`Self::label`], which answers
-            // `allow` for anything that is not literally `Deny` — so pressing
-            // *Deny* recorded an allow.
+            // The ids Devplane publishes for a held permission mean what they
+            // say, rather than going through `Option`'s unresolved label.
             return match id.as_str() {
                 "allow" => Decision::Allow,
                 "deny" => Decision::Deny,
@@ -521,14 +714,9 @@ impl Decision {
         }
     }
 
-    /// What this decision is called in the record.
-    ///
-    /// **`Option` has no answer here and must not be given a flattering one.**
-    /// It used to fall through to `allow`, so an option the caller named by id
-    /// was recorded as an approval whatever it meant — including an option the
-    /// agent published as a refusal. What an agent's own option means is a
-    /// property of the option, not of this enum, so the caller that holds the
-    /// offered list resolves it and this returns `None`.
+    /// What this decision is called in the record. `Option` returns `None`:
+    /// what an agent's option means is resolved from the offered list, never
+    /// assumed to be `allow`.
     fn label(&self) -> Option<&'static str> {
         match self {
             Decision::Deny => Some("deny"),
@@ -538,30 +726,18 @@ impl Decision {
     }
 }
 
-/// Whether an option the agent offered is a **standing** grant or refusal
-/// rather than a one-off — `allow_always` and `reject_always` in the protocol.
-///
-/// This matters more than it looks. A standing grant lives inside the *agent's*
-/// session: every later call it covers is approved without a request ever
-/// reaching Devplane again. Recording it as a plain "allow" would make the
-/// decision log answer "why did that command run without anybody being asked?"
-/// with silence — which is the one question this product exists to answer. So
-/// the outcome says which it was, and the reason says what it means.
+/// Whether an offered option is a standing grant or refusal (`allow_always`,
+/// `reject_always`). A standing grant approves later calls inside the agent
+/// with no request reaching Devplane, so the record must say so.
 fn standing(kind: Option<&str>) -> bool {
     matches!(kind, Some("allow_always") | Some("reject_always"))
 }
 
-/// Answers an outstanding permission request.
-/// Delivers a person's answer to a question a driven run asked.
+/// Delivers a person's answer to a question down a live connection. Reached
+/// only through [`answer_ask`], so the answer is recorded first.
 ///
-/// The form the agent sent is re-read from the run rather than trusted from the
-/// caller: the content that goes back must match the schema the agent
-/// published, and the only copy of that schema this process can vouch for is
-/// the one it recorded when the question arrived. A caller naming a field or an
-/// option the agent never offered gets it dropped, not forwarded.
-/// Delivers an answer down a live connection. Reached only through
-/// [`answer_ask`], because an answer that has not been written down first is one
-/// a crash can lose.
+/// The form is re-read from the run as recorded when the question arrived;
+/// fields or options the agent never offered are dropped.
 async fn answer_question(
     state: &Shared,
     run: &RunId,
@@ -599,12 +775,8 @@ async fn answer_question(
     }
     session.answer(request_id, Some(content.clone())).await?;
 
-    // **Who answered, recorded at the moment it happens.** This is the
-    // one row in the ledger whose authority is *known* rather than inferred:
-    // everything else Devplane can say about who decided something is derived
-    // from what did or did not arrive, and this is a person having typed. The
-    // reason carries what they chose, because "somebody answered" without the
-    // answer is a row nobody can check.
+    // The one ledger row whose authority is known rather than inferred; the
+    // reason carries what was chosen.
     let chose = content
         .as_object()
         .map(|o| {
@@ -626,16 +798,26 @@ async fn answer_question(
             .for_run(run),
         )
         .await;
+    // The answer clears the block; a turn that ends without a tool call would
+    // otherwise leave the run waiting on an answered question.
+    state
+        .ingest(
+            run.clone(),
+            Source::Host,
+            Event::QuestionAnswered {
+                action: "accept".into(),
+            },
+            None,
+            RunMode::Driven,
+        )
+        .await;
     Ok(())
 }
 
 // ── Answering by token ──────────────────────────────────────────────────────
 //
-// Everything below addresses an ask by its own opaque id rather than by the
-// session that happens to be holding it. That is the fourth of the five
-// durable-execution properties and the one that decides whether the other four
-// are worth anything: an answer addressed to a session is undeliverable the
-// moment the session is gone, which is the state every restart leaves behind.
+// Everything below addresses an ask by its own opaque id, not by the session
+// holding it, so an answer survives the session being gone (a restart).
 
 /// What a person chose, as it crosses from a surface into the record.
 #[derive(Debug, Clone)]
@@ -646,36 +828,192 @@ pub enum Answer {
     Question(Vec<(String, crate::core::question::Chosen)>),
 }
 
-/// Records a person's answer to an ask, then tries to deliver it.
+/// One question's answer, as a surface posts it: an option the agent
+/// offered, or the person's own words, under the field it was asked as.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldAnswer {
+    pub field: String,
+    #[serde(default)]
+    pub option: Option<String>,
+    #[serde(default)]
+    pub custom: Option<String>,
+}
+
+impl FieldAnswer {
+    fn chosen(&self) -> Result<crate::core::question::Chosen, String> {
+        match (&self.custom, &self.option) {
+            (Some(t), _) if !t.trim().is_empty() => {
+                Ok(crate::core::question::Chosen::Custom(t.clone()))
+            }
+            (_, Some(o)) => Ok(crate::core::question::Chosen::Option(o.clone())),
+            _ => Err(format!(
+                "say what the answer to `{}` is: an option the agent offered, or your own words",
+                self.field
+            )),
+        }
+    }
+}
+
+/// What a surface said, turned into an [`Answer`] the row can take — or the
+/// sentence saying why it cannot.
 ///
-/// **In that order, and the order is the feature.** A crash between *answered*
-/// and *delivered* then replays as answered rather than as ask-again, and two
-/// surfaces racing each other is harmless: the first wins, the second is told
-/// who did, and the agent hears one answer.
+/// The one parser for every surface (API and host-less `devplane answer`): a
+/// permission with nothing said is refused, and an option must be one the
+/// request offered.
+pub fn parse_answer(
+    ask: &crate::core::ask::Ask,
+    decision: Option<&str>,
+    option: Option<String>,
+    custom: Option<String>,
+    field: Option<String>,
+    answers: &[FieldAnswer],
+) -> Result<Answer, String> {
+    match ask.kind {
+        crate::core::ask::Kind::Permission => {
+            // Nothing said is malformed, not a deny: `Decision::parse` fails
+            // closed, which is right for a gate and wrong for a person.
+            if decision.is_none() && option.is_none() {
+                return Err(
+                    "say what the answer is: `decision` of \"allow\" or \"deny\", or \
+                            `option` naming one the agent offered"
+                        .into(),
+                );
+            }
+            if let Some(id) = option.as_deref() {
+                let offered: Vec<String> = ask
+                    .payload
+                    .get("options")
+                    .and_then(|o| o.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|o| o.get("id").and_then(|i| i.as_str()))
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !offered.is_empty() && !offered.iter().any(|o| o == id) {
+                    return Err(format!(
+                        "`{id}` is not one of the answers this request offers ({}). An answer has \
+                         to name something that was asked.",
+                        offered.join(", ")
+                    ));
+                }
+            }
+            Ok(Answer::Permission(Decision::parse(decision, option)))
+        }
+        crate::core::ask::Kind::Question => {
+            // A form answers every field; a single question is a one-field form.
+            let mut chosen: Vec<(String, crate::core::question::Chosen)> = Vec::new();
+            for a in answers {
+                chosen.push((a.field.clone(), a.chosen()?));
+            }
+            if chosen.is_empty() {
+                let field = field.unwrap_or_else(|| "question_0".into());
+                let one = FieldAnswer {
+                    field,
+                    option,
+                    custom,
+                };
+                chosen.push((one.field.clone(), one.chosen()?));
+            }
+            Ok(Answer::Question(chosen))
+        }
+    }
+}
+
+/// Records a person's answer with no host to deliver it.
 ///
-/// Delivery is reported separately ([`Delivery`](crate::core::ask::Delivery)),
-/// because *recorded and delivered later into a resumed session* and *recorded
-/// and never delivered* are different outcomes and only one may be claimed.
-pub async fn answer_ask(
-    state: &Shared,
+/// For a held permission the row is the delivery (the hook polls it). Anything
+/// else is recorded as the person's and marked undelivered; a host can deliver
+/// it into a resumed session later.
+pub async fn answer_without_host(
+    store: &crate::store::Store,
     ask_id: &str,
     answer: Answer,
     from: &str,
 ) -> Result<crate::core::ask::Ask> {
-    use crate::core::ask::Ended;
+    use crate::core::ask::Delivery;
 
-    let mut ask = state
-        .store
+    // The answerer's own process: refuse an allow from inside an agent session.
+    if allows(&answer)
+        && let Some(var) = crate::hook::agent_session()
+    {
+        bail!("{}", crate::hook::refuse_self_answer(var));
+    }
+    // Close holds whose hook is gone, so answering one says so.
+    crate::record::end_orphaned_holds(store).await;
+    let mut ask = store
         .ask(ask_id)
         .await?
         .with_context(|| format!("no ask with id `{ask_id}`"))?;
+    let recorded = recorded_answer(&answer);
+    if let Err(refused) = ask.answer(recorded.clone(), from, jiff::Timestamp::now()) {
+        anyhow::bail!("{}", refused.says());
+    }
+    let delivery = if ask.request_id.is_empty() {
+        // A held permission: the hook is waiting on this very row.
+        Delivery::Live
+    } else {
+        Delivery::Undeliverable {
+            because: "no host is running to deliver it; a host delivers it when the run is \
+                      resumed"
+                .into(),
+        }
+    };
+    ask.delivery = Some(delivery.clone());
+    // Only onto an open row; a surface that answered in between wins.
+    if !store.close_ask(&ask).await? {
+        bail!("{}", lost_the_race(store, ask_id, recorded, from).await);
+    }
+    store
+        .append_decision(
+            &crate::core::Decision::new(
+                crate::core::Authority::Person,
+                match ask.kind {
+                    crate::core::ask::Kind::Permission => "agent:tool.use",
+                    crate::core::ask::Kind::Question => "agent:question",
+                },
+                ask.message.clone(),
+                "answered",
+            )
+            .because(format!("answered from the {from} — {}", delivery.says()))
+            .for_run(&ask.run),
+        )
+        .await?;
+    Ok(ask)
+}
 
-    // What the person chose, in the shape the record keeps. Composed before the
-    // idempotency check so that a second answer is refused having been fully
-    // understood rather than half-parsed.
-    let recorded = match &answer {
-        // `allow` or `deny` where the caller said one; the option's own id
-        // otherwise, so the held-permission path reads a value it published.
+/// Whether an answer could let a call through: any permission answer but a
+/// plain refusal. An option is counted as allowing, because what an agent's
+/// own option means is the agent's to say.
+fn allows(answer: &Answer) -> bool {
+    matches!(answer, Answer::Permission(d) if !matches!(d, Decision::Deny))
+}
+
+/// Why an answer that lost a compare-and-set was not recorded: the row as the
+/// winner left it, in the sentence [`Ask::answer`](crate::core::ask::Ask::answer)
+/// uses for a second answer.
+async fn lost_the_race(
+    store: &crate::store::Store,
+    ask_id: &str,
+    recorded: serde_json::Value,
+    from: &str,
+) -> String {
+    match store.ask(ask_id).await {
+        Ok(Some(mut now)) => match now.answer(recorded, from, jiff::Timestamp::now()) {
+            Err(refused) => refused.says(),
+            Ok(()) => "the question changed while it was being answered; try again".into(),
+        },
+        _ => format!("no ask with id `{ask_id}`"),
+    }
+}
+
+/// What the person chose, in the shape the record keeps: `allow`/`deny` where
+/// the caller said one, the option's own id otherwise, so the held-permission
+/// path reads a value it published.
+fn recorded_answer(answer: &Answer) -> serde_json::Value {
+    match answer {
         Answer::Permission(d) => match d.label() {
             Some(l) => serde_json::json!({ "permission": l }),
             None => serde_json::json!({ "permission": d.option_id() }),
@@ -691,21 +1029,53 @@ pub async fn answer_ask(
                 })
                 .collect::<Vec<_>>()
         }),
-    };
+    }
+}
 
-    if let Err(refused) = ask.answer(recorded, from, jiff::Timestamp::now()) {
-        // Not an error the caller made. The guarantee held, and the second
-        // surface is told what the first one chose rather than being handed a
-        // failure it cannot act on.
+/// Records a person's answer to an ask, then tries to deliver it.
+///
+/// Recorded first, so a crash replays as answered and racing surfaces are
+/// harmless: the first wins, the second is told who did. Delivery is reported
+/// separately ([`Delivery`](crate::core::ask::Delivery)): delivered live,
+/// into a resumed session, or never.
+pub async fn answer_ask(
+    state: &Shared,
+    ask_id: &str,
+    answer: Answer,
+    from: &str,
+) -> Result<crate::core::ask::Ask> {
+    use crate::core::ask::Ended;
+
+    // Close holds whose hook is gone, so answering one says so.
+    crate::record::end_orphaned_holds(&state.store).await;
+    let mut ask = state
+        .store
+        .ask(ask_id)
+        .await?
+        .with_context(|| format!("no ask with id `{ask_id}`"))?;
+
+    // Composed first, so a second answer is refused fully understood.
+    let recorded = recorded_answer(&answer);
+
+    if let Err(refused) = ask.answer(recorded.clone(), from, jiff::Timestamp::now()) {
+        // A second answer: told what the first one chose.
         anyhow::bail!("{}", refused.says());
     }
-    // **Durable before the effect.** Everything after this line may fail; none
-    // of it may lose what the person said.
-    state.store.save_ask(&ask).await?;
+    // Durable before the effect, and only onto an open row; nothing after this
+    // may lose what the person said.
+    if !state.store.close_ask(&ask).await? {
+        bail!(
+            "{}",
+            lost_the_race(&state.store, ask_id, recorded, from).await
+        );
+    }
 
     let delivery = deliver(state, &ask, answer).await;
     ask.delivery = Some(delivery.clone());
-    state.store.save_ask(&ask).await?;
+    state
+        .store
+        .set_ask_delivery(ask.id.as_str(), &delivery)
+        .await?;
 
     state
         .record(
@@ -723,18 +1093,13 @@ pub async fn answer_ask(
         )
         .await;
 
-    // The ending is already `person`; this is only the log catching up with a
-    // row that was written first.
+    // The row already records `person`; this only catches the log up.
     debug_assert!(matches!(ask.ended, Some(Ended::Person)));
     Ok(ask)
 }
 
-/// Gets the person's answer to the agent, by whatever route is still open.
-///
-/// Three outcomes and each is named rather than collapsed into success: the
-/// connection that asked is still there; the agent is gone but its session can
-/// be resumed; or neither, in which case the answer stays recorded and the row
-/// says plainly that nobody received it.
+/// Gets the person's answer to the agent: down the live connection, into a
+/// resumed session, or not at all — in which case the row says nobody got it.
 async fn deliver(
     state: &Shared,
     ask: &crate::core::ask::Ask,
@@ -742,6 +1107,11 @@ async fn deliver(
 ) -> crate::core::ask::Delivery {
     use crate::core::ask::Delivery;
 
+    // A held permission has no protocol request: the hook polls this row, so
+    // the row is the delivery.
+    if ask.request_id.is_empty() {
+        return Delivery::Live;
+    }
     let live = state.sessions.lock().await.contains_key(&ask.run);
     if live {
         let sent = match answer {
@@ -756,17 +1126,10 @@ async fn deliver(
         };
     }
 
-    // The agent that asked is gone — a restart, a crash, a `devplane stop` —
-    // but its session is on the vendor's disk and the protocol can continue it.
-    //
-    // **A new message, not a reply**, because the turn that asked ended with the
-    // process. Every surface says so, and so does the text handed over.
-    //
-    // One case is deliberately not guarded, having been looked at: a `kill -9`
-    // leaves the agent running and blocked on a dead pipe, so resuming puts a
-    // second agent on that session. The leaked one can never receive another
-    // prompt, and refusing delivery on a worktree match would trade a real
-    // answer for a hypothetical conflict.
+    // The agent is gone but its session is on the vendor's disk: resume it and
+    // send the answer as a new message (the asking turn died with the process).
+    // Not guarded: after `kill -9` the old agent is stuck on a dead pipe and
+    // can never receive another prompt.
     match resume(state, &ask.run).await {
         Err(e) => Delivery::Undeliverable {
             because: format!("the agent could not be resumed: {e}"),
@@ -783,13 +1146,8 @@ async fn deliver(
     }
 }
 
-/// What a resumed agent is told, which is the person's own answer and a sentence
-/// saying when it was given.
-///
-/// **Devplane writes exactly one sentence of its own here** — the frame — and
-/// never a word of the answer. Composing an answer is the one thing this product
-/// may not do, and the line between *carrying somebody's words* and *speaking
-/// for them* is the whole of it.
+/// What a resumed agent is told: one framing sentence from Devplane and the
+/// person's own answer, never words composed on their behalf.
 fn resumed_answer_text(ask: &crate::core::ask::Ask) -> String {
     let chosen = ask
         .answer
@@ -826,7 +1184,7 @@ fn resumed_answer_text(ask: &crate::core::ask::Ask) -> String {
 }
 
 /// Delivers a permission decision down a live connection. Reached only through
-/// [`answer_ask`], for the same reason.
+/// [`answer_ask`].
 async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -> Result<()> {
     let session = state
         .sessions
@@ -866,19 +1224,7 @@ async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -
     };
 
     let option = match &want {
-        // **An id the agent never offered is refused, not recorded as an
-        // allow.**
-        //
-        // `Decision::Option(id)` labels as `allow` for any id that is not
-        // literally `Deny`, because for a driven run the id is supposed to be
-        // one the agent published and the agent's own protocol decides what it
-        // means. Nothing checked that supposition: a caller passing
-        // `{"option":"maybe"}` — a typo, an id read off a stale row, a client
-        // guessing — had **an allow written to the decision log under their
-        // name**, for a call nobody approved.
-        //
-        // Found by an absence check on a neighbouring feature, asserting that
-        // nothing but a recorded human selection can produce an approval.
+        // An id the agent never offered is refused, never recorded as an allow.
         Decision::Option(id) => {
             if !offered.is_empty() && !offered.iter().any(|o| o.id.as_deref() == Some(id.as_str()))
             {
@@ -896,16 +1242,13 @@ async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -
         }
         Decision::Allow => match choose(true) {
             Some(id) => Some(id),
-            // The agent offered no way to say yes. Refusing is the only honest
-            // answer; inventing an id would be rejected by the agent anyway.
+            // No option means allow; an invented id would be rejected anyway.
             None => anyhow::bail!("that request offers nothing that means allow"),
         },
-        // A refusal needs no id: the protocol treats an absent choice as
-        // cancelled, which is the safe end of the range.
+        // No id is the protocol's cancelled, the safe end.
         Decision::Deny => choose(false),
     };
-    // What the chosen option actually was, which is not always what was asked
-    // for: a caller may pass an exact id read off the inbox item.
+    // The chosen option's kind; a caller may have passed an exact id.
     let chosen_kind = option.as_ref().and_then(|id| {
         offered
             .iter()
@@ -913,22 +1256,15 @@ async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -
             .and_then(|o| o.kind.clone())
     });
     let is_standing = standing(chosen_kind.as_deref());
-    // **The option's own meaning decides, and `allow` is never the fallback.**
-    //
-    // A caller naming an offered option by id reaches here with
-    // `Decision::Option`, which cannot say what it meant. The agent published
-    // the meaning as the option's `kind`; reading it is the only honest answer,
-    // and defaulting to `allow` when it cannot be read is how a refusal got
-    // written down as an approval.
+    // The option's own `kind` decides what an `Option` meant; `allow` is never
+    // the fallback.
     let decision = match (is_standing, want.label(), chosen_kind.as_deref()) {
         (true, Some("deny"), _) | (true, _, Some("reject_always")) => "reject_always",
         (true, _, _) => "allow_always",
         (false, Some(l), _) => l,
         (false, None, Some(k)) if k.starts_with("reject") => "deny",
         (false, None, Some(_)) => "allow",
-        // An offered option with no kind at all. The agent said nothing about
-        // what it means, so neither does the record: `chosen` names the option
-        // and claims nothing about whether it was a yes.
+        // An option with no kind: the record names it and claims nothing.
         (false, None, None) => "chosen",
     };
     session.decide(request_id, option).await?;
@@ -943,33 +1279,31 @@ async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -
     let mut record = crate::core::Decision::new(
         crate::core::Authority::Person,
         "agent:tool.use",
-        subject,
+        subject.clone(),
         decision,
     )
     .for_run(run);
     if is_standing {
-        // The log has to say this out loud, because it is the one decision
-        // whose consequences Devplane will not see. Everything this grant
-        // covers from here on is approved inside the agent, and no later row
-        // will appear to explain it.
+        // A standing grant's later effects happen inside the agent, unseen,
+        // so the log says so explicitly.
         record = record.because(
             "a standing choice made by a person: the agent applies it to later matching calls itself, and Devplane sees no request for those",
         );
     }
     state.record(record).await;
 
-    // Recording the decision is what takes the item out of the inbox. Waiting
-    // for the agent's next move instead would leave an answered question on
-    // screen until it happened to do something — and if the answer was "no",
-    // that might be never.
+    // The decision takes the item out of the inbox now, not on the agent's
+    // next move (which after a "no" may never come).
     state
         .ingest(
             run.clone(),
-            Source::Daemon,
+            Source::Host,
             Event::PermissionDecided {
-                tool: String::new(),
+                tool: subject,
                 decision: decision.into(),
                 by: "human".into(),
+                reason: None,
+                context: None,
             },
             None,
             RunMode::Driven,
@@ -978,10 +1312,8 @@ async fn decide(state: &Shared, run: &RunId, request_id: &str, want: Decision) -
     Ok(())
 }
 
-/// Whether Devplane still has a session it can prompt for this run.
-///
-/// Asked before offering anything that needs one, because an inbox button that
-/// cannot do what it says is the one failure a control plane cannot afford.
+/// Whether Devplane still has a session it can prompt for this run, asked
+/// before offering anything that needs one.
 pub async fn is_live(state: &Shared, run: &RunId) -> bool {
     state
         .sessions
@@ -992,8 +1324,34 @@ pub async fn is_live(state: &Shared, run: &RunId) -> bool {
         .unwrap_or(false)
 }
 
-/// Stops a driven run.
+/// Stops a driven run because a person asked. The session is flagged so the
+/// pump ends the run as `stopped` and closes its asks under the person's name.
 pub async fn stop(state: &Shared, run: &RunId) -> Result<()> {
+    let session = state.sessions.lock().await.remove(run);
+    let Some(s) = session else {
+        anyhow::bail!("that run is not one Devplane drives");
+    };
+    // No turn end will record what the specification said, so do it here.
+    crate::change::observe_spec(state, run).await;
+    state
+        .record(
+            crate::core::Decision::new(
+                crate::core::Authority::Person,
+                "run:stop",
+                run.to_string(),
+                "stopped",
+            )
+            .because("a person stopped the run")
+            .for_run(run),
+        )
+        .await;
+    s.stop_because(STOPPED_BY_PERSON);
+    Ok(())
+}
+
+/// Ends a driven run the change has moved past. Nobody decided anything: the
+/// step finished and the chain no longer needs its agent.
+pub async fn retire(state: &Shared, run: &RunId) -> Result<()> {
     let session = state.sessions.lock().await.remove(run);
     match session {
         Some(s) => {
@@ -1004,12 +1362,13 @@ pub async fn stop(state: &Shared, run: &RunId) -> Result<()> {
     }
 }
 
-/// What to call a tool call on the board.
-///
-/// The policy vocabulary where the call can be put in it — `Bash`, `Read`,
-/// `Edit`, `WebFetch` — because that is the word the rule that governs it is
-/// written in, and a board that names the call one thing while the audit log
-/// names it another is two boards. The agent's own title otherwise.
+/// What [`stop`] tells the session, and what the pump reads back to end the
+/// run as a person's doing.
+const STOPPED_BY_PERSON: &str = "stopped";
+
+/// What to call a tool call on the board: the policy vocabulary (`Bash`,
+/// `Edit`, ...) where the call maps into it, so the board and the audit log
+/// agree; the agent's title otherwise.
 fn tool_label(call: &crate::acp::ToolRequest) -> String {
     match call.policy_subject() {
         Some((tool, _)) => tool.to_string(),
@@ -1023,18 +1382,15 @@ fn tool_label(call: &crate::acp::ToolRequest) -> String {
 struct Pump {
     cost: f64,
     transcript: crate::core::Coalescer,
-    /// Whether this repository wants what its agents say written down. Decided
-    /// once, when the agent starts, so that editing `devplane.toml` mid-turn
-    /// cannot half-record a conversation.
+    /// Tool calls in flight by protocol id, with the label their row opened
+    /// under; updates need not repeat the title.
+    open_calls: std::collections::HashMap<String, String>,
+    /// Whether this repository keeps transcripts, fixed when the agent starts.
     keep_transcript: bool,
 }
 
-/// The option to answer a permission request with: the exact kind if the agent
-/// offers it, otherwise any option of the same family.
-///
-/// Never a literal id. ACP option ids belong to the agent — one calls it
-/// `allow`, another `proceed_once` — so a hard-coded string works against a
-/// fixture and against nothing else.
+/// The option to answer a permission request with: the exact kind if offered,
+/// otherwise any of the same family. Never a literal id; ids are the agent's.
 fn pick(
     options: &[crate::acp::PermissionOption],
     exact: &str,
@@ -1047,17 +1403,10 @@ fn pick(
         .cloned()
 }
 
-/// Translates one protocol event, applying policy to permission requests.
-/// Ends the fragment being joined and records it.
-///
-/// Called whenever the sentence is over: a tool call, the turn ending, the
-/// session ending. Without it the last thing an agent said would sit in memory
-/// until it happened to say something else.
-async fn flush_transcript(state: &Shared, run: &RunId, pump: &tokio::sync::Mutex<Pump>) {
-    let fragment = {
-        let mut p = pump.lock().await;
-        p.transcript.take().filter(|_| p.keep_transcript)
-    };
+/// Ends the fragment being joined and records it; called at every sentence
+/// boundary (tool call, turn end, session end).
+async fn flush_transcript(state: &Shared, run: &RunId, pump: &mut Pump) {
+    let fragment = pump.transcript.take().filter(|_| pump.keep_transcript);
     if let Some((role, text)) = fragment {
         state
             .ingest_message(crate::core::Message::new(run.clone(), role, text))
@@ -1066,19 +1415,10 @@ async fn flush_transcript(state: &Shared, run: &RunId, pump: &tokio::sync::Mutex
 }
 
 /// Records one fragment, if this repository keeps them.
-async fn keep(
-    state: &Shared,
-    run: &RunId,
-    pump: &tokio::sync::Mutex<Pump>,
-    role: crate::core::Role,
-    chunk: &str,
-) {
-    let ready = {
-        let mut p = pump.lock().await;
-        match p.keep_transcript {
-            true => p.transcript.push(role, chunk),
-            false => None,
-        }
+async fn keep(state: &Shared, run: &RunId, pump: &mut Pump, role: crate::core::Role, chunk: &str) {
+    let ready = match pump.keep_transcript {
+        true => pump.transcript.push(role, chunk),
+        false => None,
     };
     if let Some((role, text)) = ready {
         state
@@ -1089,15 +1429,10 @@ async fn keep(
 
 /// Writes down what an agent just asked, before anything else happens.
 ///
-/// **The row is the question; everything else on this path is a projection.**
-/// Run state can be replayed from the event log and the inbox is derived from
-/// run state, but nothing anywhere can re-derive *what somebody was asked* —
-/// so this is written first and a failure to write it is loud rather than
-/// swallowed: a write a promise rests on may not be answered with `.ok()`, and
-/// this is the promise the product is named for.
-///
-/// The deadline comes from the project's own `devplane.toml` and is
-/// [`Never`](crate::core::ask::Deadline::Never) unless it says otherwise.
+/// The ask row is the only thing that cannot be re-derived (run state and the
+/// inbox are projections), so it is written first and a failure is loud. The
+/// deadline comes from the project's `devplane.toml`, else
+/// [`Never`](crate::core::ask::Deadline::Never).
 async fn persist_ask(
     state: &Shared,
     run: &RunId,
@@ -1127,13 +1462,9 @@ async fn persist_ask(
     .in_project(project);
 
     if let Err(e) = state.store.save_ask(&ask).await {
-        // A question that could not be written down is a question that will be
-        // lost on the next restart, and the person needs to know that *now*
-        // rather than discovering an empty inbox later.
+        // An unrecorded question is lost on restart: say so now.
         tracing::error!(error = %e, run = %run, "could not write down what the agent asked");
-        // Where `doctor` reads it: a recorded diagnostic is a displayed one,
-        // and a failure written nowhere is the same as no failure handling at
-        // all.
+        // Recorded where `doctor` reads it.
         let _ = state
             .store
             .record_channel("asks", 0, Some(&e.to_string()))
@@ -1144,33 +1475,25 @@ async fn persist_ask(
 }
 
 /// Ends one ask on the project's own clock: the agent is told, the row is
-/// written, and the person is shown.
-///
-/// **All three, because the version that did only the middle one is what this
-/// replaced.** A permission nobody answered used to be refused after ten
-/// minutes by a constant in this crate; the decision row was written and no
-/// surface mentioned it, so a call refused in somebody's name was discoverable
-/// only by running `devplane audit` and knowing to look. A clock that ends a
-/// question is a decision taken on your behalf, which is the one class of event
-/// this product exists to put in front of you.
-pub(crate) async fn expire(
-    state: &Shared,
-    ask: &crate::core::ask::Ask,
-    ended: &crate::core::ask::Ended,
-) {
-    // The agent first. It is blocked on an answer that is never coming, and
-    // telling it *no* is the only honest thing left to say — the same direction
-    // the old timeout chose, now with a name on it.
+/// written, and the person is shown. A clock ending a question is a decision
+/// taken on someone's behalf, so it must be visible, not just logged.
+pub async fn expire(state: &Shared, ask: &crate::core::ask::Ask, ended: &crate::core::ask::Ended) {
+    // Tell the blocked agent *no*, with its own reject option. `None` is the
+    // protocol's *cancelled*, which the Claude adapter treats as an aborted
+    // turn, and is recorded as that.
+    let reject = reject_option(&ask.payload);
+    let permission_outcome = match reject {
+        Some(_) => "deny",
+        None => "cancelled",
+    };
     if let Some(session) = state.sessions.lock().await.get(&ask.run).cloned() {
         match ask.kind {
             crate::core::ask::Kind::Permission => {
-                let _ = session.decide(&ask.request_id, None).await;
+                let _ = session.decide(&ask.request_id, reject.clone()).await;
             }
             crate::core::ask::Kind::Question => {
-                // `None` is *cancel*, never *decline*: the adapter folds a
-                // decline into "answered, with no answers", which is the agent
-                // proceeding on nothing — the exact failure this feature
-                // exists to prevent, reached through the politer word.
+                // `None` is *cancel*, never *decline*: the adapter reads a
+                // decline as "answered with nothing" and the agent proceeds.
                 let _ = session.answer(&ask.request_id, None).await;
             }
         }
@@ -1186,7 +1509,7 @@ pub(crate) async fn expire(
                 },
                 ask.message.clone(),
                 match ask.kind {
-                    crate::core::ask::Kind::Permission => "deny",
+                    crate::core::ask::Kind::Permission => permission_outcome,
                     crate::core::ask::Kind::Question => "unanswered",
                 },
             )
@@ -1195,20 +1518,15 @@ pub(crate) async fn expire(
         )
         .await;
 
-    // `Source::Daemon` says **which process observed this**, not whose clock it
-    // was: the sweep produced the event, rather than the agent reporting it, and
-    // a surface reading the source has to be able to tell those apart.
-    //
-    // The comment here used to say *because this is Devplane's own clock* — the
-    // reasoning of the hard-coded ten-minute refusal that was deleted with the
-    // clock itself. Devplane has no clock. The authority for this ending is the
-    // **project's** timer, it is on the decision row above with the duration and
-    // the file that set it, and it is deliberately not derivable from the source.
+    // `Source::Host` names the process that observed this, not whose clock it
+    // was; the authority (the project's timer) is on the decision row above.
     let event = match ask.kind {
         crate::core::ask::Kind::Permission => Event::PermissionDecided {
-            tool: String::new(),
-            decision: "deny".into(),
+            tool: ask.message.clone(),
+            decision: permission_outcome.into(),
             by: "timer".into(),
+            reason: None,
+            context: None,
         },
         crate::core::ask::Kind::Question => Event::QuestionEnded {
             request_id: ask.request_id.clone(),
@@ -1217,7 +1535,7 @@ pub(crate) async fn expire(
     state
         .ingest(
             ask.run.clone(),
-            crate::core::Source::Daemon,
+            crate::core::Source::Host,
             event,
             None,
             crate::core::RunMode::Driven,
@@ -1225,11 +1543,24 @@ pub(crate) async fn expire(
         .await;
 }
 
-/// Closes every ask still open on one run, with an authority on each.
-///
-/// Never overwrites an ending, so a person who answered a moment before the run
-/// died keeps the credit for it — `Ask::end` enforces that and this is only the
-/// caller of it.
+/// The option a recorded permission request offered for refusing, by id: the
+/// exact `reject_once` where the agent has it, any reject otherwise.
+fn reject_option(payload: &serde_json::Value) -> Option<String> {
+    let offered: Vec<Choice> = payload
+        .get("options")
+        .cloned()
+        .and_then(|o| serde_json::from_value(o).ok())
+        .unwrap_or_default();
+    offered
+        .iter()
+        .find(|o| o.kind.as_deref() == Some("reject_once"))
+        .or_else(|| offered.iter().find(|o| o.is_reject()))
+        .and_then(|o| o.id.clone())
+}
+
+/// Closes every ask still open on one run, with an authority on each. Never
+/// overwrites an ending (`Ask::end` enforces it), so a person who just answered
+/// keeps the credit.
 async fn end_open_asks(state: &Shared, run: &RunId, ended: crate::core::ask::Ended) {
     let open = match state.store.open_asks().await {
         Ok(a) => a,
@@ -1241,19 +1572,16 @@ async fn end_open_asks(state: &Shared, run: &RunId, ended: crate::core::ask::End
     let now = jiff::Timestamp::now();
     for mut ask in open.into_iter().filter(|a| &a.run == run) {
         ask.end(ended.clone(), now);
-        if let Err(e) = state.store.save_ask(&ask).await {
+        // Only onto a row still open.
+        if let Err(e) = state.store.close_ask(&ask).await {
             tracing::error!(error = %e, ask = %ask.id, "could not close an ask");
         }
     }
 }
 
-/// The deadline this repository sets for an unanswered ask.
-///
-/// **Absent means it waits**, which is both the default and the only honest
-/// reading of an absent setting. A value that will not parse is treated as
-/// `never` too — the same direction, and the file's own `check` command is
-/// where a typo is reported, because ending somebody's question early on the
-/// strength of a misspelling is the one outcome this must not produce.
+/// The deadline this repository sets for an unanswered ask. Absent or
+/// unparseable means it waits: a typo must never end a question early
+/// (`check` reports it).
 fn deadline_for(cwd: &Path) -> crate::core::ask::Deadline {
     let root = crate::core::project::governing_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     crate::core::ProjectConfig::load(&root)
@@ -1262,21 +1590,19 @@ fn deadline_for(cwd: &Path) -> crate::core::ask::Deadline {
         .unwrap_or(crate::core::ask::Deadline::Never)
 }
 
-/// What was run for this run, where it was recorded.
-///
-/// Recorded at spawn so that a daemon **killed** rather than stopped leaves
-/// enough behind to find the agents it abandoned; reused here because it is
-/// also the only stable key for *which agent this is*.
+/// The command that started this run, recorded at spawn; the stable key for
+/// which agent this is.
 async fn agent_command(state: &Shared, run: &RunId) -> Option<String> {
     state.world.lock().await.run(run)?.agent_command.clone()
 }
 
+/// Translates one protocol event, applying policy to permission requests.
 async fn handle(
     state: &Shared,
     run: &RunId,
     cwd: &Path,
     session: &Session,
-    pump: &tokio::sync::Mutex<Pump>,
+    pump: &mut Pump,
     event: AcpEvent,
 ) {
     let ingest = |e: Event| {
@@ -1285,18 +1611,15 @@ async fn handle(
         let cwd = cwd.to_path_buf();
         async move {
             state
-                .ingest(run, Source::Daemon, e, Some(cwd), RunMode::Driven)
+                .ingest(run, Source::Host, e, Some(cwd), RunMode::Driven)
                 .await;
         }
     };
 
     match event {
-        // **The cross-vendor half of *which sessions decide without you*.**
-        // `devplane modes` reads Claude Code's settings files; this is the same
-        // question answered by any agent that speaks the protocol.
+        // The cross-vendor source for which sessions decide without you.
         AcpEvent::ModeChanged { mode } => {
-            // Observed at session creation rather than at `initialize`, so it
-            // amends the capability record rather than being part of it.
+            // Seen at session creation, so it amends the capability record.
             if let Some(cmd) = agent_command(state, run).await
                 && let Err(e) = state.store.note_agent_declares_modes(&cmd).await
             {
@@ -1305,10 +1628,7 @@ async fn handle(
             ingest(Event::AgentModeSeen { mode }).await;
         }
 
-        // **A roster fills gaps and may not contradict what was observed.**
-        // `SessionInfo` carries no state, so there is nothing here that could
-        // move a run's state even if this wanted to — the enrichment is the
-        // pure rule's, and it refuses anything that is not a gap.
+        // A roster only fills gaps: `SessionInfo` carries no state.
         AcpEvent::SessionsListed { sessions } => {
             for listed in sessions {
                 ingest(Event::SessionListed {
@@ -1326,10 +1646,7 @@ async fn handle(
             list_sessions,
             needs_auth,
         } => {
-            // **Keyed on what was actually run.** The session does not know how
-            // it was started; the run does, because the command is recorded at
-            // spawn so a killed daemon leaves enough behind to find what it
-            // abandoned.
+            // Keyed on the command recorded at spawn.
             if let Some(command) = agent_command(state, run).await {
                 let record = crate::core::AgentCapabilityRecord {
                     command,
@@ -1361,19 +1678,15 @@ async fn handle(
                 clock_read: true,
             })
             .await;
-            // The id the agent will answer `session/resume` on. It was being
-            // dropped here, which is why a daemon restart could only ever offer
-            // to start the work again from nothing.
+            // The id the agent answers `session/resume` on.
             ingest(Event::AgentSessionOpened {
                 agent_session: session_id,
             })
             .await;
         }
 
-        // A driven run has no window of its own, so this *is* its transcript.
-        // The chunks are joined into fragments rather than stored one row per
-        // syllable, and they never enter the event log: run state is a pure
-        // reduction over that log, and a sentence reduces to nothing.
+        // A driven run's transcript, joined into fragments and kept out of the
+        // event log (run state is a reduction over it).
         AcpEvent::Text(chunk) | AcpEvent::Thought(chunk) if chunk.is_empty() => {
             let _ = chunk;
         }
@@ -1382,61 +1695,53 @@ async fn handle(
             keep(state, run, pump, crate::core::Role::Thought, &chunk).await
         }
 
-        // What the agent intends, and how far it has got. Structured and
-        // low-volume, so unlike the prose it belongs on the board itself.
+        // Structured and low-volume, so it belongs on the board.
         AcpEvent::Plan(steps) => {
             flush_transcript(state, run, pump).await;
-            state
-                .set_plan(
-                    run,
-                    steps
-                        .into_iter()
-                        .map(|s| crate::core::PlanStep {
-                            content: s.content,
-                            status: s.status,
-                        })
-                        .collect(),
-                )
-                .await;
+            ingest(Event::PlanUpdated {
+                steps: steps
+                    .into_iter()
+                    .map(|s| crate::core::PlanStep {
+                        content: s.content,
+                        status: s.status,
+                    })
+                    .collect(),
+            })
+            .await;
         }
 
         // A tool call ends the sentence before it.
         AcpEvent::Tool { call, status } => {
             flush_transcript(state, run, pump).await;
-            // The title is what a person reads; the arguments are what the
-            // board summarises and what a rule was matched against, so they go
-            // on the event rather than a `null` that made every driven tool
-            // call look like a bare tool name.
-            let label = tool_label(&call);
-            let input = call.raw_input.clone().unwrap_or(serde_json::Value::Null);
-            match status.as_deref() {
-                Some("completed") => {
-                    ingest(Event::ToolFinished {
-                        tool: label,
-                        ok: true,
-                        duration_ms: None,
-                    })
-                    .await
-                }
-                Some("failed") => {
-                    ingest(Event::ToolFinished {
-                        tool: label,
-                        ok: false,
-                        duration_ms: None,
-                    })
-                    .await
-                }
-                // A driven agent speaks the protocol, which has no field for
-                // where a server's definition came from. Absent, which reads
-                // differently from a source nobody understood.
-                _ => {
-                    ingest(Event::ToolStarted {
-                        tool: label,
-                        input,
-                        server_source: None,
-                    })
-                    .await
-                }
+            // The protocol upserts by id, and updates need not repeat the
+            // title: the row opens once under the first label and closes on id.
+            let terminal = matches!(
+                status.as_deref(),
+                Some("completed" | "failed" | "cancelled")
+            );
+            let known = pump.open_calls.contains_key(&call.id);
+            if !known {
+                // Labelled for people; the arguments are what rules matched.
+                let label = tool_label(&call);
+                pump.open_calls.insert(call.id.clone(), label.clone());
+                ingest(Event::ToolStarted {
+                    tool: label,
+                    input: call.raw_input.clone().unwrap_or(serde_json::Value::Null),
+                    // The protocol does not say where a server came from.
+                    server_source: None,
+                    agent_id: None,
+                    call_id: Some(call.id.clone()),
+                })
+                .await;
+            }
+            if terminal && let Some(label) = pump.open_calls.remove(&call.id) {
+                ingest(Event::ToolFinished {
+                    tool: label,
+                    ok: status.as_deref() == Some("completed"),
+                    duration_ms: None,
+                    call_id: Some(call.id),
+                })
+                .await;
             }
         }
 
@@ -1446,12 +1751,8 @@ async fn handle(
             options,
         } => {
             let title = call.title.clone();
-            // The same rules that answer a hook answer this, in the same
-            // vocabulary: the kind the agent declared, and the arguments it
-            // actually passed. A call Devplane cannot classify is one no rule
-            // can honestly be said to cover, so nothing auto-decides it and a
-            // person is asked — which is the direction that is safe to be
-            // wrong in.
+            // The same rules and vocabulary as a hook. A call that cannot be
+            // classified is left to a person.
             let verdict = match call.policy_subject() {
                 Some((tool, input)) => state.policy.restrictive(cwd, tool, &input),
                 None => Verdict::Undecided,
@@ -1481,22 +1782,18 @@ async fn handle(
                         tool: title,
                         decision: "deny".into(),
                         by: format!("policy:{rule}"),
+                        reason: None,
+                        context: None,
                     })
                     .await;
                     return;
                 }
-                // The project asked to be asked. Same outcome as no rule at
-                // all — a person decides — and the rule is named in the log.
-                // `Unresolved` lands here too: a driven run's permission
-                // request is already on its way to a person, so the escalation
-                // has nowhere to go and the value is the recorded reason.
+                // Ask, Unresolved and Undecided all go to a person: a driven
+                // permission request already is one.
                 Verdict::Ask { .. } | Verdict::Unresolved { .. } | Verdict::Undecided => {}
             }
 
-            // Nobody's rule covers it, so a human decides. Unlike an observed
-            // session, this one can actually be answered from the inbox — and
-            // the answer has to name one of *these* ids, which is why they are
-            // carried through rather than guessed at the far end.
+            // A person decides, from the inbox, naming one of these option ids.
             let choices: Vec<Choice> = options
                 .into_iter()
                 .map(|o| Choice {
@@ -1505,9 +1802,7 @@ async fn handle(
                     kind: Some(o.kind),
                 })
                 .collect();
-            // **The row first, and the event second.** Everything below this
-            // line is a projection that can be rebuilt; the ask cannot. It is
-            // the one thing on this path nothing else on the machine knows.
+            // The ask row first; everything after it is a rebuildable projection.
             let token = persist_ask(
                 state,
                 run,
@@ -1524,6 +1819,7 @@ async fn handle(
                 ask: token.map(|t| t.0),
                 options: choices,
                 call: None,
+                context: None,
             })
             .await;
         }
@@ -1533,23 +1829,16 @@ async fn handle(
             context_tokens,
             context_window,
         } => {
-            // The protocol reports running totals for the session; the reducer
-            // adds up per-request figures. Only the delta belongs here, so the
-            // pump remembers what it last saw — without which a driven run
-            // showed `$0.00` for ever, which is the one number people check.
+            // The protocol reports session running totals; the reducer adds
+            // per-request figures, so only the delta is ingested.
             let (cost_delta, tokens) = {
-                let mut seen = pump.lock().await;
                 let cost = cost_usd.unwrap_or(0.0);
-                let delta = (cost - seen.cost).max(0.0);
-                seen.cost = seen.cost.max(cost);
+                let delta = (cost - pump.cost).max(0.0);
+                pump.cost = pump.cost.max(cost);
                 (delta, context_tokens.unwrap_or(0))
             };
-            // `used` is the *level* of the context window, not a per-request
-            // count, so it is reported as one. Putting it in `input_tokens`
-            // made `RunTotals::apply` add successive window levels together,
-            // and a driven run's token total grew roughly with the square of
-            // its length — a number on the board that was not wrong about a
-            // detail but meant nothing at all.
+            // `used` is the window's level, not a per-request count, so it is
+            // reported as a level rather than summed as `input_tokens`.
             ingest(Event::ApiRequest {
                 usage: ApiUsage {
                     model: None,
@@ -1575,14 +1864,14 @@ async fn handle(
                 }
                 _ => ingest(Event::TurnEnded).await,
             }
-            // The agent has stopped. If this run is doing a piece of work, that
-            // is the moment its claim gets checked.
-            crate::work::on_turn_ended(state, run).await;
+            // Check the change's claim off this task, so a slow gate does not
+            // queue the agent's next events.
+            let state = state.clone();
+            let run = run.clone();
+            tokio::spawn(async move { crate::change::on_turn_ended(&state, &run).await });
         }
 
-        // The agent asked the person something. Not a permission: no rule can
-        // answer it, so nothing here consults one — it goes straight to the
-        // person, and waits.
+        // Not a permission: no rule consults it; it goes to the person.
         AcpEvent::QuestionAsked { request_id, ask } => {
             let options = ask
                 .questions
@@ -1618,14 +1907,13 @@ async fn handle(
             .await;
         }
 
-        // Devplane said it could render a form and then could not. The agent has
-        // already been told no; the person is told too, because an agent that
-        // asked and gave up with nobody knowing is this feature's whole subject.
+        // A form Devplane cannot render: the agent was told no, and the person
+        // is told too.
         AcpEvent::QuestionUnrenderable { what } => {
             state
                 .record(
                     crate::core::Decision::new(
-                        crate::core::Authority::Daemon,
+                        crate::core::Authority::Devplane,
                         "agent:question",
                         run.to_string(),
                         "unrenderable",
@@ -1642,37 +1930,28 @@ async fn handle(
             .await;
         }
 
-        // Nobody answered and the call was cancelled, or the run ended under it.
-        // Recorded because the inbox has to stop offering an answer that can no
-        // longer be delivered.
+        // Cancelled or ended under it: the inbox stops offering an answer.
         AcpEvent::QuestionCancelled { request_id } => {
             ingest(Event::QuestionEnded { request_id }).await;
         }
 
         AcpEvent::Ended { error } => {
             flush_transcript(state, run, pump).await;
-            // **A question dies with its run, and must not be swallowed by the
-            // word `completed`.** Measured 2026-09-19: stopping the daemon
-            // killed the agent under a waiting question, and the run came back
-            // reading `completed` with an empty inbox — which is the failure
-            // this feature exists to prevent, wearing the one word the whole
-            // product distrusts. Recorded first, so the ending cannot overwrite
-            // it.
-            // **Who killed this agent decides whether its question is still
-            // owed an answer**, and both cases arrive here as the same closed
-            // connection. A turn that ended on its own leaves a question
-            // nobody can answer any more. A daemon that was stopped leaves one
-            // that is perfectly answerable: the vendor's session is on disk,
-            // the protocol continues it, and the person's answer can still be
-            // delivered into it — so the ask stays **open** and the inbox goes
-            // on offering it after the restart.
+            // A waiting question must not end under `completed`. If the host
+            // is tearing down, the vendor session can be resumed, so the ask
+            // stays open and answerable after the restart; otherwise its asks
+            // are closed first so the ending cannot overwrite them.
             let tearing_down = state.tearing_down.load(std::sync::atomic::Ordering::SeqCst);
+            let by_person = session.stopped_because().as_deref() == Some(STOPPED_BY_PERSON);
             if !tearing_down {
                 end_open_asks(
                     state,
                     run,
-                    crate::core::ask::Ended::Nobody {
-                        because: "the run ended before anybody answered".into(),
+                    match by_person {
+                        true => crate::core::ask::Ended::Stopped,
+                        false => crate::core::ask::Ended::Nobody {
+                            because: "the run ended before anybody answered".into(),
+                        },
                     },
                 )
                 .await;
@@ -1685,20 +1964,26 @@ async fn handle(
                     .and_then(|b| b.request_id.clone())
             };
             if let Some(request_id) = unanswered.filter(|_| !tearing_down) {
+                // Nobody decided, unless a person stopped the run under it.
+                let (authority, because) = match by_person {
+                    true => (
+                        crate::core::Authority::Person,
+                        "a person stopped the run without answering",
+                    ),
+                    false => (
+                        crate::core::Authority::Nobody,
+                        "the run ended before anybody answered",
+                    ),
+                };
                 state
                     .record(
                         crate::core::Decision::new(
-                            // **Nobody decided.** This is the row the whole
-                            // product exists to be able to write, and it said
-                            // `daemon` — Devplane taking the blame for a
-                            // question it faithfully delivered and nobody
-                            // answered.
-                            crate::core::Authority::Nobody,
+                            authority,
                             "agent:question",
                             request_id.clone(),
                             "unanswered",
                         )
-                        .because("the run ended before anybody answered")
+                        .because(because)
                         .for_run(run),
                     )
                     .await;
@@ -1706,16 +1991,17 @@ async fn handle(
             }
             match error {
                 Some(e) => ingest(Event::TurnFailed { message: e }).await,
-                // **The daemon stopping is not the agent finishing**, and the
-                // same closed connection arrives here for both. Measured
-                // 2026-09-20: a run that was `Working` when `devplane` was
-                // stopped came back from the store reading `completed` — this
-                // line, via the reducer's catch-all — which is the sentence
-                // three paragraphs above saying the feature exists to prevent
-                // exactly that, defeated by the code underneath it.
+                // A host stopping is not the agent finishing: `interrupted`,
+                // never `completed`.
                 None if tearing_down => {
                     ingest(Event::SessionEnded {
                         reason: Some("interrupted".into()),
+                    })
+                    .await
+                }
+                None if by_person => {
+                    ingest(Event::SessionEnded {
+                        reason: Some(STOPPED_BY_PERSON.into()),
                     })
                     .await
                 }

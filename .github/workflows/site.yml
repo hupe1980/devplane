@@ -1,8 +1,4 @@
 # Builds the documentation site and publishes it to GitHub Pages.
-#
-# `zola build` fails on a broken internal link, so a page that references one
-# that does not exist never reaches the site — which is the failure a static
-# generator is uniquely able to catch and a reviewer is uniquely bad at.
 name: site
 
 on:

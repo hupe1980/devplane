@@ -1,25 +1,21 @@
 <script lang="ts">
-  // Search tool calls, questions and errors across every session.
-  //
-  // **Prompt and response text is deliberately absent.** Devplane never turns
-  // on the telemetry flags that would carry it, so this searches what the
-  // machine actually recorded — commands, questions, summaries — and says so,
-  // rather than returning nothing for a phrase somebody remembers typing.
+  // Search every session's tool calls, questions and errors. It says that
+  // prompts and replies are never recorded, so cannot be found.
   import { api } from "../../lib/api";
-  import { clip } from "../../lib/text";
+  import Grid, { type Column } from "../../lib/ui/Grid.svelte";
+  import Icon from "../../lib/ui/Icon.svelte";
+  import Empty from "../../lib/ui/Empty.svelte";
 
   type Hit = { run_id: string; at: string; text: string };
-
-  /// The query arrives in the address, because the field that starts a search
-  /// is in the chrome and this surface is where its results land.
   let { q = "" }: { q?: string } = $props();
 
   let query = $state("");
   let hits = $state<Hit[]>([]);
   let ran = $state(false);
+  let busy = $state(false);
   let said = $state("");
+  let selected = $state<string | null>(null);
 
-  // Follows the address: a link to a search is a link somebody can send.
   $effect(() => {
     if (q && q !== query) {
       query = q;
@@ -28,53 +24,117 @@
   });
 
   async function run() {
-    const q = query.trim();
-    if (!q) return;
+    const want = query.trim();
+    if (!want) return;
+    busy = true;
+    hits = [];
     try {
-      const r = await api<{ hits?: Hit[] }>(`/api/search?q=${encodeURIComponent(q)}`);
+      const r = await api<{ hits?: Hit[] }>(`/api/search?q=${encodeURIComponent(want)}`);
       hits = r.hits ?? [];
       ran = true;
       said = "";
     } catch (e) {
-      said = `that did not land: ${e instanceof Error ? e.message : String(e)}`;
+      said = `The search did not run: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      busy = false;
     }
   }
+  const columns: Column<Hit>[] = [
+    { key: "at", label: "When", width: 150, sort: (h) => h.at, mono: true },
+    { key: "run", label: "Session", width: 150, mono: true },
+    { key: "text", label: "What matched" },
+  ];
 </script>
 
-<section aria-labelledby="search-head">
-  <h2 id="search-head">Search every session</h2>
-
-  <form onsubmit={(e) => { e.preventDefault(); void run(); }}>
-    <input type="search" bind:value={query} aria-label="search" placeholder="a command, a question, an error" />
-    <button type="submit">search</button>
+<div class="page">
+  <h1 class="sr-only">Search every session</h1>
+  <form class="bar" onsubmit={(e) => { e.preventDefault(); void run(); }}>
+    <label class="field">
+      <Icon name="search" size={15} />
+      <input type="search" bind:value={query} aria-label="search every session" placeholder="A command, a question, an error" />
+    </label>
+    <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
   </form>
+  <p class="note">Tool calls, questions and errors from every session. Prompts and replies are never recorded, so they are never found.</p>
+  {#if said}<p class="fail">{said}</p>{/if}
 
-  <p class="said" role="status" aria-live="polite">{said}</p>
-
-  {#if ran && hits.length === 0}
-    <!-- A result, not a blank — and it says what is *not* searched, because a
-         person looking for a prompt they typed would otherwise conclude the
-         search is broken. -->
-    <p class="empty">
-      Nothing matched <b>{clip(query, 40)}</b>. Prompts and replies are not searched: Devplane
-      never records them.
-    </p>
+  {#if ran && hits.length === 0 && !busy}
+    <Empty icon="search" title="Nothing matched" body={`Nothing any session recorded contains “${query.trim()}”.`} />
   {:else if hits.length > 0}
-    <ul role="list">
-      {#each hits as h, hi (hi)}
-        <li><code>{clip(h.run_id, 8)}</code> <span>{clip(h.text, 120)}</span></li>
-      {/each}
-    </ul>
+    <div class="frame">
+      <Grid id="search" {columns} rows={hits} key={(h) => h.run_id + h.at + h.text} bind:selected label="matches">
+        {#snippet cell(h, c)}
+          {#if c.key === "at"}{new Date(h.at).toLocaleString()}
+          {:else if c.key === "run"}<a href={`#why/${encodeURIComponent(h.run_id)}`}>{h.run_id.slice(0, 14)}</a>
+          {:else}<span class="t">{h.text}</span>{/if}
+        {/snippet}
+      </Grid>
+    </div>
   {/if}
-</section>
+</div>
 
 <style>
-  h2 { font-size: 1rem; margin: 0 0 .3rem; }
-  form { display: flex; gap: .3rem; }
-  input { flex: 1; max-width: 30rem; font: inherit; padding: .25rem .35rem;
-          background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
-  ul { list-style: none; margin: .4rem 0 0; padding: 0; }
-  li { display: flex; gap: .6rem; padding: .1rem 0; }
-  .said, .empty { color: var(--dim); }
-  .empty { max-width: 60ch; }
+  .page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: var(--s-4) var(--s-5);
+    gap: var(--s-3);
+    box-sizing: border-box;
+  }
+  .bar {
+    display: flex;
+    gap: var(--s-2);
+    max-width: 48rem;
+  }
+  .field {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    padding: 0 var(--s-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    color: var(--faint);
+  }
+  .field:focus-within {
+    border-color: var(--accent);
+  }
+  .field input {
+    flex: 1;
+    border: 0;
+    box-shadow: none;
+    background: none;
+    color: var(--ink);
+    font: inherit;
+    padding: 0.45rem 0;
+    outline: none;
+  }
+  .note {
+    margin: 0;
+    font-size: var(--t-xs);
+    color: var(--faint);
+  }
+  .fail {
+    margin: 0;
+    color: var(--fail);
+    font-size: var(--t-sm);
+  }
+  .frame {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .t {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+  }
 </style>

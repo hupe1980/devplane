@@ -4,24 +4,17 @@ import type { Progress } from "./Progress";
 import type { Question } from "./Question";
 
 /**
- * A specification as a surface needs it: the outline, how far it has moved,
- * and what it says it has not answered.
- *
- * **Composed here rather than by each caller**, because the two counts on it
- * are also the two the done certificate stamps, and a second place deriving
- * them is a second place to get the `checklists/` rule or the `tasks.md` rule
- * wrong. `SpecStamp` and this both read one [`Spec`]; a test asserts they
- * agree for one folder at one commit.
+ * A specification as a surface needs it: outline, progress, open questions.
+ * Composed here, from the same [`Spec`] as `SpecStamp`, so the certificate and
+ * the surfaces cannot count differently.
  */
 export type Plan = { 
 /**
- * As the work named it, relative to the project root.
+ * As the change named it, relative to the project root.
  */
 path: string, 
 /**
- * **False when the work names a specification that is not there**, which
- * is a finding rather than a blank — the certificate has recorded it since
- * the certificate shipped, and nothing has ever shown it.
+ * False when the named specification is not there — a finding.
  */
 present: boolean, 
 /**
@@ -29,29 +22,18 @@ present: boolean,
  */
 files: number, 
 /**
- * `None` where there is no task list. See [`Progress`].
+ * `None` where there is no task list.
  */
 progress: Progress | null, 
 /**
- * **Which bound this reading hit**, where it hit one.
- *
- * The walk stops at three levels and the question lines are capped. A
- * caller that reaches either gets a shorter answer, and a shorter answer
- * that does not say it is short is a figure nobody can check. `None` means
- * the whole specification was read.
+ * Which bound this reading hit, if any; `None` means all of it was read.
  */
 truncated: string | null, 
 /**
- * Bounded, because a folder can carry any number and a ranked inbox may
- * not be flooded by one project. The count is on [`Self::open_questions`].
+ * Bounded; the full count is [`Self::open_questions`].
  */
 questions: Array<Question>, open_questions: number, 
 /**
- * The headings, in path order. No tool's section names are recognised.
+ * The headings, in reading order.
  */
-outline: Array<Heading>, 
-/**
- * Of every document under the folder. `None` when there is nothing to
- * fingerprint.
- */
-fingerprint: string | null, };
+outline: Array<Heading>, fingerprint: string | null, };

@@ -1,19 +1,10 @@
-//! The background-session roster, from `claude agents --json`.
+//! The session roster, from `claude agents --json`.
 //!
-//! Claude's own daemon supervises background sessions: it restarts them,
-//! stops them when idle and owns their worktrees. For those runs its roster is
-//! authoritative, so Devplane polls it rather than inferring state from hooks
-//! that may have been missed while the daemon was down.
-//!
-//! It is also, and more importantly, the **discovery** channel. The command
-//! lists every live session on the machine, interactive ones included, with its
-//! pid, working directory, session id and name. That is what makes the board
-//! useful the moment Devplane is installed: sessions appear before a single
-//! hook has fired, and a session that never does anything still shows up.
-//!
-//! And it is the reconciliation source at startup: a run the database believes
-//! is working, that the roster does not list and whose process is gone, is
-//! lost — not working.
+//! Authoritative for background sessions, which Claude's own daemon
+//! supervises; hooks go quiet exactly when a session is blocked. It is also
+//! the discovery channel (every live session, interactive included, appears
+//! before any hook fires) and the startup reconciliation source: a "working"
+//! run that is unlisted and whose process is gone is lost.
 
 use crate::core::event::Event;
 use serde::Deserialize;
@@ -30,8 +21,8 @@ pub struct AgentRow {
     /// The short id used by `claude attach`, `logs` and `stop`.
     #[serde(default)]
     pub id: Option<String>,
-    /// The full session UUID, used by `claude --resume`. Absent until the
-    /// session has one, which is why runs key on it only when present.
+    /// The full session UUID, used by `claude --resume`; absent until the
+    /// session has one.
     #[serde(default, rename = "sessionId")]
     pub session_id: Option<String>,
     #[serde(default)]
@@ -50,24 +41,21 @@ pub struct AgentRow {
 }
 
 impl AgentRow {
-    /// The id to key a run on. The session UUID when the row has one, because
-    /// that is what hooks and telemetry report; the short id otherwise, so a
-    /// session that has not got a UUID yet is still on the board.
+    /// The id to key a run on: the session UUID when present (what hooks and
+    /// telemetry report), else the short id.
     pub fn run_key(&self) -> Option<String> {
         self.session_id.clone().or_else(|| self.id.clone())
     }
 
     pub fn to_event(&self) -> Event {
         Event::RosterSeen {
-            // The roster does not know; the poller fills this in from the
-            // process table before the event is reduced.
+            // Filled from the process table by the poller before reducing.
             jobs: None,
             kind: self.kind.clone().unwrap_or_else(|| "interactive".into()),
-            // Only a background row carries a state the provider's daemon owns.
-            // Inventing one for an interactive row would let a poll overwrite
-            // what that session's own hooks reported.
+            // Only a background row carries a state the provider owns; an
+            // invented state would overwrite what hooks reported.
             state: if self.is_background() {
-                Some(self.state.clone().unwrap_or_else(|| "working".into()))
+                self.state.clone()
             } else {
                 None
             },
@@ -82,9 +70,8 @@ impl AgentRow {
 
     /// Whether the provider's own daemon supervises this session.
     ///
-    /// Both kinds belong on the board; the distinction is who is authoritative
-    /// about the state. A background session is owned by the Claude daemon; an
-    /// interactive one speaks for itself through its hooks.
+    /// Decides who is authoritative about state: the Claude daemon for a
+    /// background session, the hooks for an interactive one.
     pub fn is_background(&self) -> bool {
         self.kind.as_deref() != Some("interactive")
     }
@@ -93,8 +80,7 @@ impl AgentRow {
 /// Parses the roster. A malformed row is skipped rather than failing the poll:
 /// one unparseable session must not blank the board.
 pub fn parse(body: &[u8]) -> Vec<AgentRow> {
-    // The command prints an array; tolerate an object wrapper in case it grows
-    // one, since a poller that breaks on a wrapper breaks silently.
+    // The command prints an array; tolerate an object wrapper too.
     let v: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
@@ -138,8 +124,7 @@ mod tests {
 
     #[test]
     fn a_row_keys_on_the_session_uuid_when_it_has_one() {
-        // Hooks and telemetry report the UUID; keying on the short id would
-        // create a second row for the same session.
+        // Keying on the short id would create a second row for the session.
         let rows = parse(SAMPLE.as_bytes());
         assert_eq!(
             rows[0].run_key().as_deref(),
@@ -149,12 +134,11 @@ mod tests {
     }
 
     #[test]
-    fn interactive_rows_are_listed_but_not_owned_by_the_daemon() {
+    fn interactive_rows_are_listed_but_not_owned_by_the_provider() {
         let rows = parse(SAMPLE.as_bytes());
         assert!(rows[0].is_background());
         assert!(!rows[2].is_background());
-        // An interactive row still becomes an event — that is how the board
-        // fills up before any hook fires — but it carries no state.
+        // An interactive row still becomes an event, carrying no state.
         match rows[2].to_event() {
             Event::RosterSeen { state, kind, .. } => {
                 assert_eq!(state, None);
@@ -166,9 +150,8 @@ mod tests {
 
     #[test]
     fn a_real_roster_row_parses() {
-        // Captured verbatim from `claude agents --json` on a developer machine
-        // running Claude Code 2.1.270, including the `status` field that only
-        // appears for some sessions.
+        // Captured from `claude agents --json` (Claude Code 2.1.270),
+        // including the `status` field only some sessions carry.
         let rows = parse(
             br#"[{"pid":10274,"cwd":"/Users/x/matter-kit","kind":"interactive",
                   "startedAt":1789290021018,
@@ -182,6 +165,16 @@ mod tests {
             rows[0].run_key().as_deref(),
             Some("fd247e6f-b3fa-4711-b3d0-83689154449e")
         );
+    }
+
+    /// A background row with no `state` reports none, never `working`.
+    #[test]
+    fn a_background_row_with_no_state_invents_none() {
+        let rows = parse(br#"[{"cwd":"/a","kind":"background","id":"x1"}]"#);
+        match rows[0].to_event() {
+            Event::RosterSeen { state, .. } => assert_eq!(state, None),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -1,57 +1,24 @@
-//! Resolving the policy that governs a directory.
-//!
-//! A permission rule belongs to the project it protects. `Bash(pnpm test *)`
-//! is safe in the repository whose tests that runs and meaningless in the one
-//! next to it, so a single global rule set is the wrong shape. Offering a
-//! `[policy]` section and then not resolving it is worse than not offering one.
-//!
-//! The constraint that shapes everything here is latency. This is consulted on
-//! the synchronous hook that Claude Code blocks on while it decides whether to
-//! show a dialog, so a lookup has to cost microseconds. Reading a file per
-//! check would not; caching without noticing edits would mean a rule someone
-//! just wrote does nothing until the daemon restarts. So: cache, keyed by
-//! repository, invalidated by the file's modification time, re-checked at most
-//! once a second.
+//! Resolving the policy that governs a directory: the machine-wide file plus
+//! the governing project's `devplane.toml`, a deny in either winning. The
+//! project file is cached by root and re-read when its bytes change (checked
+//! at most once a second). A file that will not load fails closed as
+//! [`Policy::unloadable`]; there are no "previous rules" to keep.
 
 use crate::core::policy::Context;
-// The repository whose rules govern a directory. One definition, shared with
-// the board and the dispatcher: a worktree governed by one of them and not the
-// others is a worktree where the rules a person wrote quietly do not apply.
-use crate::core::project::governing_root as repo_root_of;
 use crate::core::{Policy, ProjectConfig, Verdict};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 thread_local! {
-    /// What this thread has resolved **during the current evaluation**, and to
-    /// what.
-    ///
-    /// One entry was enough while every rule asked about the same file. It is
-    /// not any more: a deny rule now also resolves its own leading literal
-    /// segments, so that a rule naming a symlinked directory meets a command
-    /// naming the real one. Those prefixes differ per rule, so a
-    /// single-entry memo thrashes and the cost goes back to one syscall per
-    /// rule — on the hook a session is blocked on.
-    ///
-    /// Cleared at the start of every evaluation rather than invalidated, which
-    /// keeps the guarantee the single entry used to give for free: an answer
-    /// is never reused across calls, so a symlink re-pointed between two tool
-    /// calls is seen. Within one call it is a race no cache size fixes, and
-    /// the answer to that is the sandbox.
-    static LAST_REAL: RefCell<HashMap<PathBuf, Option<PathBuf>>> =
-        RefCell::new(HashMap::new());
+    /// Cleared per evaluation so a symlink re-pointed between calls is seen.
+    static LAST_REAL: RefCell<HashMap<PathBuf, Option<PathBuf>>> = RefCell::new(HashMap::new());
 }
 
-/// Where a path really points when that is somewhere else, memoised for the
-/// length of one evaluation.
-///
-/// Both tests happen here rather than in the matcher, which would repeat them
-/// per rule. `canonicalize` fails for a file that does not exist — the ordinary
-/// case for the target of a write — and a path resolving to itself is `None`
-/// too, since it has only one spelling either way.
+/// Where a path really points, if elsewhere; memo bounded because the rule set
+/// is attacker-supplied text.
 fn realpath(p: &Path) -> Option<PathBuf> {
     LAST_REAL.with(|cell| {
         if let Some(answer) = cell.borrow().get(p) {
@@ -61,9 +28,6 @@ fn realpath(p: &Path) -> Option<PathBuf> {
         RESOLVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let answer = std::fs::canonicalize(p).ok().filter(|r| r != p);
         let mut memo = cell.borrow_mut();
-        // A rule set is attacker-supplied, so the memo is bounded
-        // rather than trusted to stay small. Past the bound it stops growing;
-        // the calls beyond it pay a syscall each and still get right answers.
         if memo.len() < 256 {
             memo.insert(p.to_path_buf(), answer.clone());
         }
@@ -71,97 +35,47 @@ fn realpath(p: &Path) -> Option<PathBuf> {
     })
 }
 
-/// Forget what the last evaluation resolved.
-///
-/// Called at the start of each one, so an answer is never reused across tool
-/// calls and a symlink re-pointed between two of them is seen.
 fn forget_resolved() {
     LAST_REAL.with(|cell| cell.borrow_mut().clear());
 }
 
-/// How many times the filesystem has actually been asked, as opposed to the
-/// memo answering.
-///
-/// A counter rather than a stopwatch. The property that matters is *one syscall
-/// per evaluation, whatever the rule count*, and a wall-clock assertion for it
-/// would fold in the cache lookup and the gitignore matching, be flaky on a
-/// loaded machine, and fail for reasons that have nothing to do with symlinks —
-/// which is exactly what the first version of the test did.
+/// Filesystem lookups, as opposed to memo hits.
 #[cfg(test)]
 pub(crate) static RESOLVED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Serialises the tests that read the counters below.
-///
-/// **A process-global counter in a threaded suite measures the suite.** Both
-/// counters here are `static`, `cargo test` runs this binary's tests in
-/// parallel, and any other test that evaluates a policy moves them — so a test
-/// that passes alone fails in the run, which is the same flakiness the
-/// stopwatch had, one level down. Every test that reads a counter takes this
-/// first.
+/// Serialises the tests that read the counters.
 #[cfg(test)]
 pub(crate) static COUNTED: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// How many times a project's `devplane.toml` has actually been parsed.
-///
-/// The same argument as [`RESOLVED`], applied to the other thing this cache
-/// exists to avoid. *Ten thousand lookups must not become ten thousand file
-/// reads* was asserted with a stopwatch — `each < 200µs` — which measures the
-/// machine: it passed alone and failed inside the full suite at 205µs, for a
-/// reason that has nothing to do with caching. The lesson was already written
-/// four lines above this one and had been applied to one of the two tests.
 #[cfg(test)]
 pub(crate) static PARSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// How often the file is re-checked for edits. Short enough that a rule takes
-/// effect while you are still looking at the terminal.
 const RECHECK: Duration = Duration::from_secs(1);
 
-/// What a project's config says, once compiled. Both pieces come from the same
-/// file, so they are read, cached and invalidated together.
 #[derive(Debug, Clone, Default)]
 struct Rules {
     policy: Policy,
-    /// `[policy] stall_timeout`, in seconds. `None` means the project has not
-    /// said, and the machine-wide setting decides.
     stall_seconds: Option<i64>,
+    hold: Option<Duration>,
 }
 
 #[derive(Debug)]
 struct Entry {
     rules: Rules,
-    /// The config file's modification time when it was read; `None` when there
-    /// was no file, so one appearing is noticed too.
-    mtime: Option<SystemTime>,
+    /// The file's bytes when it was read; `None` when there was no file.
+    text: Option<Vec<u8>>,
     checked: Instant,
-    /// Set when the file would not load. Keeping the previous rules is the
-    /// right behaviour — a typo must not read as permission — but it is only
-    /// half an answer, because after a restart there are no previous rules to
-    /// keep and the project's `never_auto` list is silently gone. So the fact
-    /// is recorded and `devplane doctor` says it out loud.
-    error: Option<String>,
 }
 
-/// Policies by repository, plus the global fallback.
+/// Policies by repository, plus the machine-wide fallback.
 #[derive(Debug)]
 pub struct PolicyCache {
-    /// Applies everywhere, from `~/.devplane/policy.toml`.
     global: Policy,
-    /// Where that file lives. A rule spelled `Read(/secrets/**)` anchors at the
-    /// file it was written in, so the machine-wide set and a project's set
-    /// resolve the same pattern to different directories — which is the trap
-    /// Claude Code's own documentation calls out, and it can only be got right
-    /// by knowing where each set came from.
+    /// What a single leading slash anchors to in the machine-wide file.
     global_root: PathBuf,
-    /// The user's home, for `~/`-anchored rules. Read once: this is consulted
-    /// on the hook a session is blocked on, and an environment lookup per check
-    /// is a syscall per check.
     home: Option<PathBuf>,
     projects: Mutex<HashMap<PathBuf, Entry>>,
 }
 
 impl PolicyCache {
-    /// `global_root` is the directory the machine-wide rules were read from —
-    /// `~/.devplane` — and `home` the user's home directory.
     pub fn new(global: Policy, global_root: PathBuf, home: Option<PathBuf>) -> Self {
         Self {
             global,
@@ -171,73 +85,59 @@ impl PolicyCache {
         }
     }
 
-    /// A cache with nothing but a project's own rules. **Tests only**, where
-    /// there is no home directory to read and none should be invented.
-    ///
-    /// Not for a command a person runs: `devplane explain` used this and so
-    /// answered without the machine-wide rules, which meant the surface built
-    /// to say *what would the gate decide* could say `allow` for a call
-    /// `~/.devplane/policy.toml` denies. [`Self::from_disk`] is what a command
-    /// uses.
+    #[cfg(test)]
     pub fn for_projects_only() -> Self {
         Self::new(Policy::default(), PathBuf::from("/"), None)
     }
 
-    /// The rules this machine actually enforces: the machine-wide file plus
-    /// whatever each project adds.
-    ///
-    /// **One evaluator for every surface.** The daemon, `devplane explain` and
-    /// the `command` hook all build the gate this way, so a verdict cannot
-    /// depend on which of the three was asked. It used to: two of them read the
-    /// machine-wide file and one did not.
-    ///
-    /// A machine-wide file that will not parse yields no machine-wide rules and
-    /// says so through `error`. The projects' own rules still apply — refusing
-    /// to answer at all would take every project's prohibitions down with one
-    /// typo in a file they do not control.
+    /// The machine-wide file plus whatever each project adds. An unloadable
+    /// machine-wide file (or missing home) is [`Policy::unloadable`]; the error
+    /// is also returned for surfaces that print it.
     pub fn from_disk() -> (Self, Option<String>) {
-        let Ok(home) = crate::config::home() else {
-            return (Self::for_projects_only(), None);
-        };
-        let global_root = home.clone();
         let user_home = dirs::home_dir();
-        match crate::core::GlobalConfig::load(&home) {
-            Ok(g) => (Self::new(g.policy(), global_root, user_home), None),
-            Err(e) => (
-                Self::new(Policy::default(), global_root, user_home),
-                Some(e.to_string()),
-            ),
-        }
+        let (global, root) = global_policy();
+        let error = global.load_error().map(str::to_string);
+        (Self::new(global, root, user_home), error)
     }
 
-    /// Decides one tool call, for an agent working in `dir`.
-    ///
-    /// Deny wins across every rule set and in either direction: a project
-    /// cannot soften what the machine forbids, and the machine cannot soften a
-    /// project's deny. Then ask, then — for a command line the matcher could
-    /// not read while a prohibition about what runs was in force —
-    /// [`Verdict::Unresolved`].
-    ///
-    /// **There used to be two of these.** `evaluate` was *the full verdict* and
-    /// this was *the prohibitions only*, from the days when a third answer was
-    /// `allow`; after that was deleted the two functions had byte-identical
-    /// bodies and the caller still chose between them by hook event, with a
-    /// comment explaining a difference that was not there. One evaluator, one
-    /// answer, and the hook event decides only how the answer is *replied* to
-    /// (`crate::observe::hook`).
+    /// Deny across both rule sets, then ask, then unresolved — so neither the
+    /// project nor the machine can soften what the other forbids.
     pub fn restrictive(&self, dir: &Path, tool: &str, input: &serde_json::Value) -> Verdict {
         forget_resolved();
-        let project = self.for_dir(dir).map(|r| r.policy);
-        let source = repo_root_of(dir).unwrap_or_else(|| dir.to_path_buf());
-        restrictive_over(&self.sets(dir, &source, project.as_ref()), tool, input)
+        let home = self.home.as_deref();
+        let dir = canonical(dir);
+        let project = self.for_dir(&dir);
+        let mut sets: Vec<(&Policy, Context<'_>)> = Vec::with_capacity(2);
+        if let Some((root, rules)) = &project {
+            sets.push((
+                &rules.policy,
+                Context::at(&dir)
+                    .with_home(home)
+                    .with_source(root)
+                    .with_realpath(realpath),
+            ));
+        }
+        sets.push((
+            &self.global,
+            Context::at(&dir)
+                .with_home(home)
+                .with_source(&self.global_root)
+                .with_realpath(realpath),
+        ));
+        let verdicts: Vec<Verdict> = sets
+            .iter()
+            .map(|(p, ctx)| p.restrictive(ctx, tool, input))
+            .collect();
+        for want in ["deny", "ask", "unresolved"] {
+            if let Some(v) = verdicts.iter().find(|v| v.as_str() == want) {
+                return v.clone();
+            }
+        }
+        Verdict::Undecided
     }
 
-    /// The rules from the machine-wide file alone, for a call naming no
-    /// directory.
-    ///
-    /// Evaluating a payload with no `cwd` against `"."` would use the
-    /// *daemon's* working directory, letting whichever repository it happened to
-    /// start in answer for a session somewhere else.
+    /// The machine-wide rules alone, for a call naming no directory (never this
+    /// process's cwd, which may be another repository).
     pub fn restrictive_global_only(&self, tool: &str, input: &serde_json::Value) -> Verdict {
         forget_resolved();
         let ctx = Context::at(&self.global_root)
@@ -246,97 +146,8 @@ impl PolicyCache {
         self.global.restrictive(&ctx, tool, input)
     }
 
-    /// The rule sets that govern `dir`, each paired with the directory it was
-    /// written in — because that is what a single leading slash anchors to.
-    /// Both see the same working directory, which is what `Read(.env)` is
-    /// relative to.
-    fn sets<'a>(
-        &'a self,
-        dir: &'a Path,
-        source: &'a Path,
-        project: Option<&'a Policy>,
-    ) -> Vec<(&'a Policy, Context<'a>)> {
-        let home = self.home.as_deref();
-        let mut out: Vec<(&Policy, Context<'_>)> = Vec::with_capacity(2);
-        if let Some(p) = project {
-            out.push((
-                p,
-                Context::at(dir)
-                    .with_home(home)
-                    .with_source(source)
-                    .with_realpath(realpath),
-            ));
-        }
-        out.push((
-            &self.global,
-            Context::at(dir)
-                .with_home(home)
-                .with_source(&self.global_root)
-                .with_realpath(realpath),
-        ));
-        out
-    }
-}
-
-/// Deny then ask, across every rule set, each stage completed before the next
-/// begins — so a project's file cannot answer a call the machine-wide file
-/// asked to be asked about, any more than it may answer one the machine forbids.
-fn restrictive_over(
-    sets: &[(&Policy, Context<'_>)],
-    tool: &str,
-    input: &serde_json::Value,
-) -> Verdict {
-    let verdicts: Vec<Verdict> = sets
-        .iter()
-        .map(|(p, ctx)| p.restrictive(ctx, tool, input))
-        .collect();
-    for v in &verdicts {
-        if let Verdict::Deny { rule } = v {
-            return Verdict::Deny { rule: rule.clone() };
-        }
-    }
-    for v in &verdicts {
-        if let Verdict::Ask { rule } = v {
-            return Verdict::Ask { rule: rule.clone() };
-        }
-    }
-    // **Last, because a named rule is always the better answer.** If any set
-    // could not read the command line while holding a prohibition about what
-    // runs, the call goes to a person — but only after every set has had the
-    // chance to answer it with a rule, so "the machine-wide file denies this"
-    // is never replaced by "the project could not read it".
-    for v in &verdicts {
-        if let Verdict::Unresolved { why } = v {
-            return Verdict::Unresolved { why: why.clone() };
-        }
-    }
-    Verdict::Undecided
-}
-
-impl PolicyCache {
-    /// Decides a call that names no directory.
-    ///
-    /// Evaluating a payload without a `cwd` against `"."` would use the
-    /// *daemon's* working directory, letting whichever repository it was started
-    /// in answer for a session somewhere else. There is no honest project answer
-    /// without a directory, so the machine-wide rules decide alone.
-    /// The rule to paste so this call is never asked about again.
-    ///
-    /// **The context is built the way a verdict's is**, and that is the point
-    /// rather than a detail. `core::offer` refuses any rule that does not
-    /// decide the call, and a replay anchored somewhere the real evaluation is
-    /// not would be checking a different question — a rule spelled
-    /// `Read(/secrets/**)` means one directory in a project file and another in
-    /// the machine-wide one.
-    ///
-    /// So the anchor follows the **destination**: a call inside a registered
-    /// project is answered by that project's `devplane.toml`, anchored at its
-    /// root, and everything else by `~/.devplane/policy.toml`, anchored at the
-    /// directory that file lives in.
-    ///
-    /// `others` are the calls that would **also** interrupt. Filtering them is
-    /// the caller's, because it needs the event log and this side may not have
-    /// one.
+    /// The allow rule to paste into the agent's own settings so this call is
+    /// not asked about again, replayed in the context a verdict would use.
     pub fn offer_for(
         &self,
         dir: &Path,
@@ -346,34 +157,19 @@ impl PolicyCache {
         project_root: Option<&Path>,
     ) -> Result<crate::core::offer::RuleOffer, crate::core::offer::NoOffer> {
         forget_resolved();
-        // **Where a grant goes now that Devplane does not evaluate one.**
-        //
-        // This named an allow list in Devplane's own file until 2026-09-18,
-        // when Devplane stopped approving anything: approving a call would
-        // mean claiming the vendor would have approved it too. The key was
-        // left inert for a while and is now gone, because a suggestion
-        // pointing at a key that no longer answers is worse than no suggestion
-        // — somebody pastes it, nothing changes, and the next identical call
-        // interrupts them again.
-        //
-        // So the rule goes where it is enforced: the agent's own settings.
-        // Devplane composes the narrowest text that covers the call and hands
-        // it over; it still writes nothing, for the reason it never did.
-        let (source, dest) = match project_root {
+        let (source, file) = match project_root {
             Some(root) => (
                 root.to_path_buf(),
-                crate::core::offer::Destination {
-                    file: root.join(".claude/settings.json").display().to_string(),
-                    section: crate::core::offer::ALLOW_KEY.into(),
-                },
+                root.join(".claude/settings.json").display().to_string(),
             ),
             None => (
                 self.global_root.clone(),
-                crate::core::offer::Destination {
-                    file: "~/.claude/settings.json".to_string(),
-                    section: crate::core::offer::ALLOW_KEY.into(),
-                },
+                "~/.claude/settings.json".to_string(),
             ),
+        };
+        let dest = crate::core::offer::Destination {
+            file,
+            section: crate::core::offer::ALLOW_KEY.into(),
         };
         let ctx = Context::at(dir)
             .with_source(&source)
@@ -382,134 +178,133 @@ impl PolicyCache {
         crate::core::offer::compose(tool, input, &ctx, others, &dest)
     }
 
-    /// How long a run working in `dir` may be quiet before it has stalled.
-    ///
-    /// A project that has not said returns `None`, and the caller keeps its own
-    /// number — a repository should have to opt into a different threshold, not
-    /// inherit one by accident.
     pub fn stall_seconds(&self, dir: &Path) -> Option<i64> {
-        self.for_dir(dir)?.stall_seconds
+        self.for_dir(&canonical(dir))?.1.stall_seconds
     }
 
-    /// The rules for a directory, loading or refreshing as needed.
-    fn for_dir(&self, dir: &Path) -> Option<Rules> {
-        let root = repo_root_of(dir)?;
-        let path = root.join(crate::core::config::CONFIG_FILE);
+    /// How long a permission in `dir` may be held for a person, if the project
+    /// said. An unloadable file holds nothing.
+    pub fn hold(&self, dir: &Path) -> Option<Duration> {
+        self.for_dir(&canonical(dir))?.1.hold
+    }
 
-        let mut cache = self.projects.lock().ok()?;
+    /// Whether any rule in force at `dir` speaks about `tool` (or a file there
+    /// would not load); what an unreadable payload is judged against.
+    pub fn speaks_about(&self, dir: Option<&Path>, tool: &str) -> bool {
+        let project = dir.and_then(|d| self.for_dir(&canonical(d)));
+        self.global.speaks_about(tool) || project.is_some_and(|(_, r)| r.policy.speaks_about(tool))
+    }
+
+    pub fn is_empty_at(&self, dir: Option<&Path>) -> bool {
+        let project = dir.and_then(|d| self.for_dir(&canonical(d)));
+        self.global.is_empty() && project.is_none_or(|(_, r)| r.policy.is_empty())
+    }
+
+    /// The governing root and its rules. A directory outside every root gets
+    /// no project rules; the machine-wide rules decide alone.
+    fn for_dir(&self, dir: &Path) -> Option<(PathBuf, Rules)> {
+        let mut cache = self.projects.lock().unwrap_or_else(|e| e.into_inner());
+        let known = cache
+            .keys()
+            .filter(|r| dir.starts_with(r))
+            .max_by_key(|r| r.as_os_str().len())
+            .cloned();
+        let root =
+            known.or_else(|| crate::core::project::governing_root(dir).map(|r| canonical(&r)))?;
+        let path = root.join(crate::core::config::CONFIG_FILE);
         if let Some(entry) = cache.get(&root)
             && entry.checked.elapsed() < RECHECK
         {
-            return Some(entry.rules.clone());
+            return Some((root, entry.rules.clone()));
         }
-
-        let mtime = std::fs::metadata(&path)
-            .ok()
-            .and_then(|m| m.modified().ok());
+        // The file is small: its bytes are the identity, not its mtime.
+        let text = std::fs::read(&path).ok();
         if let Some(entry) = cache.get_mut(&root) {
-            if entry.mtime == mtime {
-                // Unchanged: bump the clock so the next check is free again.
+            if entry.text == text {
                 entry.checked = Instant::now();
-                return Some(entry.rules.clone());
+                return Some((root, entry.rules.clone()));
             }
             tracing::info!(project = %root.display(), "policy reloaded");
         }
-
         #[cfg(test)]
         PARSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (rules, error) = match ProjectConfig::load(&root) {
-            Ok(c) => (
-                Rules {
-                    policy: c.policy(),
-                    stall_seconds: c.policy.stall_timeout.map(|d| d.as_secs() as i64),
-                },
-                None,
-            ),
+        let rules = match ProjectConfig::load(&root) {
+            Ok(c) => Rules {
+                policy: c.policy(),
+                stall_seconds: c.policy.stall_timeout.map(|d| d.as_secs() as i64),
+                // A hold that will not parse is no hold: `devplane check`
+                // names it, and holding for an unintended time is worse.
+                hold: c.questions.hold().ok().flatten().map(|h| h.0),
+            },
             Err(e) => {
-                // A malformed file must not silently become "no rules": that
-                // would turn a typo in a deny rule into permission.
-                tracing::warn!(project = %root.display(), error = %e, "keeping the previous policy");
-                (
-                    cache
-                        .get(&root)
-                        .map(|e| e.rules.clone())
-                        .unwrap_or_default(),
-                    Some(e.to_string()),
-                )
+                tracing::warn!(project = %root.display(), error = %e, "the policy would not load; every call is asked");
+                Rules {
+                    policy: Policy::unloadable(e.to_string()),
+                    ..Rules::default()
+                }
             }
         };
-
         cache.insert(
             root.clone(),
             Entry {
                 rules: rules.clone(),
-                mtime,
+                text,
                 checked: Instant::now(),
-                error,
             },
         );
-        Some(rules)
+        Some((root, rules))
     }
 
     /// Projects whose `devplane.toml` would not load, with the reason.
-    ///
-    /// Reported rather than only logged. The previous rules are kept, which is
-    /// the safe half; the unsafe half is that a daemon restarted against a
-    /// broken file has no previous rules, so the repository's `never_auto` list
-    /// is gone and nothing on screen says so.
     pub fn broken(&self) -> Vec<(PathBuf, String)> {
-        let Ok(cache) = self.projects.lock() else {
-            return Vec::new();
-        };
+        let cache = self.projects.lock().unwrap_or_else(|e| e.into_inner());
         cache
             .iter()
-            .filter_map(|(root, e)| e.error.clone().map(|msg| (root.clone(), msg)))
+            .filter_map(|(root, e)| {
+                e.rules
+                    .policy
+                    .load_error()
+                    .map(|msg| (root.clone(), msg.to_string()))
+            })
             .collect()
     }
 
-    /// Forgets everything, so the next check reads from disk.
     pub fn clear(&self) {
-        if let Ok(mut c) = self.projects.lock() {
-            c.clear();
-        }
+        self.projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
-/// The repository a directory belongs to, resolving a Claude Code worktree back
-/// to the checkout that owns it so both are governed by one rule set.
+/// The path as the filesystem knows it, so `.`, `..` and a symlinked parent
+/// cannot make one directory look like another to the prefix test below.
+fn canonical(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// The machine-wide rules and the directory they anchor to. A missing home is
+/// unloadable, not "no rules", or an unset `HOME` would switch them all off.
+pub fn global_policy() -> (Policy, PathBuf) {
+    let home = match crate::config::home() {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                Policy::unloadable(format!("the machine-wide policy.toml: {e}")),
+                PathBuf::from("/"),
+            );
+        }
+    };
+    match crate::core::GlobalConfig::load(&home) {
+        Ok(g) => (g.policy(), home),
+        Err(e) => (Policy::unloadable(e.to_string()), home),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn a_project_sets_its_own_stall_timeout() {
-        // Twelve minutes of silence is a hung agent in one repository and a
-        // test suite running in another. The project decides.
-        let dir = repo("stall", "[policy]\nstall_timeout = \"12m\"\n");
-        let cache = PolicyCache::for_projects_only();
-        assert_eq!(cache.stall_seconds(&dir), Some(720));
-    }
-
-    #[test]
-    fn a_project_that_says_nothing_keeps_the_machines_timeout() {
-        // `None`, not a default of its own: inheriting a threshold by accident
-        // is how a run gets called stalled for doing its job.
-        let dir = repo("stall-silent", "[policy]\nnever_auto = [\"Read(.env)\"]\n");
-        let cache = PolicyCache::for_projects_only();
-        assert_eq!(cache.stall_seconds(&dir), None);
-    }
-
-    #[test]
-    fn a_worktree_stalls_on_its_repositorys_timeout() {
-        // Work happens in `.claude/worktrees/<name>`, which has no config file
-        // of its own and must not therefore lose the one that governs it.
-        let dir = repo("stall-wt", "[policy]\nstall_timeout = \"90s\"\n");
-        let wt = dir.join(".claude/worktrees/fix-login");
-        std::fs::create_dir_all(&wt).unwrap();
-        let cache = PolicyCache::for_projects_only();
-        assert_eq!(cache.stall_seconds(&wt), Some(90));
-    }
 
     fn repo(tag: &str, policy: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("vp-pol-{tag}-{}", std::process::id()));
@@ -521,123 +316,115 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn a_projects_own_rules_decide_its_agents() {
-        // The thing that was broken: `[policy]` in devplane.toml did nothing.
-        let dir = repo("own", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
-        let cache = PolicyCache::for_projects_only();
-        assert!(matches!(
-            cache.restrictive(&dir, "Bash", &json!({"command": "pnpm test -- --run"})),
-            Verdict::Undecided
-        ));
-        assert!(matches!(
-            cache.restrictive(&dir, "Bash", &json!({"command": "rm -rf node_modules"})),
-            Verdict::Deny { .. }
-        ));
-        std::fs::remove_dir_all(&dir).ok();
+    fn sh(cmd: &str) -> serde_json::Value {
+        json!({"command": cmd})
     }
 
     #[test]
-    fn one_projects_rules_do_not_govern_another() {
-        let a = repo("a", "[policy]\nnever_auto = [\"Bash(pnpm test *)\"]\n");
-        let b = repo("b", "");
+    fn a_project_sets_its_own_stall_timeout_and_a_worktree_inherits_it() {
+        let dir = repo("stall", "[policy]\nstall_timeout = \"12m\"\n");
         let cache = PolicyCache::for_projects_only();
-        // The space before `*` is significant, as it is in Claude Code's own
-        // rules: `pnpm test *` covers `pnpm test -- --run` and not `pnpm testx`.
-        let cmd = json!({"command": "pnpm test -- --run"});
+        assert_eq!(cache.stall_seconds(&dir), Some(720));
+        let wt = dir.join(".claude/worktrees/fix-login");
+        std::fs::create_dir_all(&wt).unwrap();
+        assert_eq!(cache.stall_seconds(&wt), Some(720));
+        let silent = repo("stall-silent", "[policy]\nnever_auto = [\"Read(.env)\"]\n");
+        assert_eq!(
+            cache.stall_seconds(&silent),
+            None,
+            "inheriting a threshold by accident is how a run gets called stalled for doing its job"
+        );
+    }
+
+    #[test]
+    fn a_projects_own_rules_decide_its_agents_and_not_its_neighbours() {
+        let a = repo("own-a", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let b = repo("own-b", "");
+        let cache = PolicyCache::for_projects_only();
+        assert_eq!(
+            cache.restrictive(&a, "Bash", &sh("pnpm test -- --run")),
+            Verdict::Undecided
+        );
         assert!(matches!(
-            cache.restrictive(&a, "Bash", &cmd),
+            cache.restrictive(&a, "Bash", &sh("rm -rf node_modules")),
             Verdict::Deny { .. }
         ));
         assert_eq!(
-            cache.restrictive(&b, "Bash", &cmd),
-            Verdict::Undecided,
-            "a rule belongs to the repository it protects"
+            cache.restrictive(&b, "Bash", &sh("rm -rf node_modules")),
+            Verdict::Undecided
         );
-        std::fs::remove_dir_all(&a).ok();
-        std::fs::remove_dir_all(&b).ok();
     }
 
     #[test]
-    fn deny_wins_in_both_directions() {
-        // Neither file can soften the other. A project asking to be asked does
-        // not downgrade a machine-wide refusal, and a machine that only asks
-        // does not downgrade a project's refusal.
-        //
-        // This used to be written with allow lists on both sides. Devplane has
-        // no allow list any more — it refuses and defers — so the property is
-        // now `ask` against `deny` rather than `allow` against `deny`, and it
-        // is the same property: the more restrictive of the two decides.
+    fn deny_wins_in_both_directions_and_ask_reaches_from_either_file() {
         let dir = repo("deny", "[policy]\nalways_ask = [\"Bash(git push *)\"]\n");
-        let global = Policy::rules(&["Bash(git push *)".into()], &[]);
-        let cache = PolicyCache::new(global, PathBuf::from("/"), None);
+        let cache = PolicyCache::new(
+            Policy::rules(&["Bash(git push *)".into()], &[]),
+            PathBuf::from("/"),
+            None,
+        );
         assert!(matches!(
-            cache.restrictive(&dir, "Bash", &json!({"command": "git push origin main"})),
+            cache.restrictive(&dir, "Bash", &sh("git push origin main")),
             Verdict::Deny { .. }
         ));
-
         let dir2 = repo("deny2", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
-        let cache2 = PolicyCache::new(Policy::rules(&[], &[]), PathBuf::from("/"), None);
+        let cache2 = PolicyCache::new(
+            Policy::rules(&[], &["Bash(ls *)".into()]),
+            PathBuf::from("/"),
+            None,
+        );
         assert!(matches!(
-            cache2.restrictive(&dir2, "Bash", &json!({"command": "ls -la"})),
+            cache2.restrictive(&dir2, "Bash", &sh("ls -la")),
             Verdict::Deny { .. }
         ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&dir2).ok();
+        let dir3 = repo("askglobal", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let cache3 = PolicyCache::new(
+            Policy::rules(&[], &["Bash(git push *)".into()]),
+            PathBuf::from("/"),
+            None,
+        );
+        assert!(matches!(
+            cache3.restrictive(&dir3, "Bash", &sh("git push --force")),
+            Verdict::Ask { .. }
+        ));
+        assert!(
+            matches!(
+                cache3.restrictive(&dir3, "Bash", &sh("$(x)")),
+                Verdict::Unresolved { .. }
+            ),
+            "the machine's rule constrains the tool here too"
+        );
     }
 
     #[test]
-    fn a_worktree_is_governed_by_the_repository_that_owns_it() {
-        // Otherwise every isolated checkout would silently lose the project's
-        // rules at the moment an agent starts working in one.
-        let root = repo("wt", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
-        let wt = root.join(".claude/worktrees/feature-a");
-        std::fs::create_dir_all(&wt).unwrap();
-        let cache = PolicyCache::for_projects_only();
-        assert!(matches!(
-            cache.restrictive(&wt, "Bash", &json!({"command": "rm -rf /"})),
-            Verdict::Deny { .. }
-        ));
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn an_agent_cannot_widen_its_own_rules_from_the_branch_it_is_working_on() {
-        // The whole point of the split. An agent works in a worktree and may
-        // edit every file in it, `devplane.toml` included — so the rules are
-        // read from the checkout that *owns* the worktree, which is the copy on
-        // the trunk that a person reviewed. If they were read from the worktree,
-        // "delete the deny rule, then do the thing" would be a two-step escape
-        // from any prohibition in the file.
+    fn an_agent_cannot_widen_its_rules_from_the_worktree_it_works_in() {
         let root = repo("escalate", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
         let wt = root.join(".claude/worktrees/feature-a");
         std::fs::create_dir_all(&wt).unwrap();
-        // The agent rewrites the rules on its branch to drop exactly the
-        // refusal the repository wrote.
         std::fs::write(
             wt.join(crate::core::config::CONFIG_FILE),
             "[policy]\nnever_auto = []\n",
         )
         .unwrap();
-
         let cache = PolicyCache::for_projects_only();
         assert!(
             matches!(
-                cache.restrictive(&wt, "Bash", &json!({"command": "rm -rf /"})),
+                cache.restrictive(&wt, "Bash", &sh("rm -rf /")),
                 Verdict::Deny { .. }
             ),
             "the owning checkout's rules decide, not the branch's"
         );
-        std::fs::remove_dir_all(&root).ok();
+        // Nor by spelling the directory differently.
+        let dotted = wt.join("sub/..");
+        std::fs::create_dir_all(wt.join("sub")).unwrap();
+        assert!(matches!(
+            cache.restrictive(&dotted, "Bash", &sh("rm -rf /")),
+            Verdict::Deny { .. }
+        ));
     }
 
     #[test]
-    fn a_linked_worktree_is_governed_by_its_repository_too() {
-        // `git worktree add ../feature` puts the checkout anywhere on the disk
-        // and leaves a `.git` *file* behind. Walking up to the nearest `.git`
-        // stopped there and called it a repository of its own — so the
-        // project's `never_auto` list silently did not apply to any work
-        // happening inside it.
+    fn a_linked_worktree_is_governed_by_its_repository_only_when_git_agrees() {
         let root = repo("linked", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
         let wt = root
             .parent()
@@ -645,171 +432,149 @@ mod tests {
             .join(format!("vp-pol-linked-wt-{}", std::process::id()));
         std::fs::remove_dir_all(&wt).ok();
         std::fs::create_dir_all(&wt).unwrap();
-        std::fs::create_dir_all(root.join(".git/worktrees/feature")).unwrap();
+        let private = root.join(".git/worktrees/feature");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", private.display())).unwrap();
         std::fs::write(
-            wt.join(".git"),
-            format!("gitdir: {}/.git/worktrees/feature\n", root.display()),
+            private.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
         )
         .unwrap();
-
         let cache = PolicyCache::for_projects_only();
         assert!(
             matches!(
-                cache.restrictive(&wt, "Bash", &json!({"command": "rm -rf /"})),
+                cache.restrictive(&wt, "Bash", &sh("rm -rf /")),
                 Verdict::Deny { .. }
             ),
             "a linked worktree inherits the repository's rules"
         );
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&wt).ok();
-    }
-    /// An ask rule reaches a call in either file.
-    ///
-    /// **This used to test that an ask outranked an allow beside it**, which was
-    /// the vendor's own precedence rule mirrored here. There is no allow list
-    /// any more, so what is left of the property is the half that still exists:
-    /// a project's `always_ask` puts the call in front of a person.
-    #[test]
-    fn an_ask_rule_reaches_a_call_in_either_file() {
-        let dir = repo("ask", "[policy]\nalways_ask = [\"Bash(git push *)\"]\n");
-        let cache = PolicyCache::for_projects_only();
-        assert!(
-            matches!(
-                cache.restrictive(&dir, "Bash", &json!({"command": "git push --force"})),
-                Verdict::Ask { .. }
-            ),
-            "an ask rule has to reach the call"
-        );
-    }
 
-    #[test]
-    fn a_project_that_says_nothing_inherits_what_the_machine_asked_to_be_asked() {
-        // A project file that does not mention a command must not read as
-        // consent to it: the machine's `always_ask` still reaches a call made
-        // inside a project that has rules of its own about other things.
-        let dir = repo("askglobal", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
-        let cache = PolicyCache::new(
-            Policy::rules(&[], &["Bash(git push *)".into()]),
-            std::path::PathBuf::from("/"),
+        // A rewritten `.git` is not believed: the back-reference disagrees.
+        let lax = repo("linked-lax", "");
+        std::fs::create_dir_all(lax.join(".git/worktrees/feature")).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", lax.join(".git/worktrees/feature").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            wt.join(crate::core::config::CONFIG_FILE),
+            "[policy]\nnever_auto = []\n",
+        )
+        .unwrap();
+        cache.clear();
+        let global = PolicyCache::new(
+            Policy::rules(&["Bash(rm -rf *)".into()], &[]),
+            PathBuf::from("/"),
             None,
         );
+        assert!(
+            matches!(
+                global.restrictive(&wt, "Bash", &sh("rm -rf /")),
+                Verdict::Deny { .. }
+            ),
+            "the machine-wide rules still apply"
+        );
         assert!(matches!(
-            cache.restrictive(&dir, "Bash", &json!({"command": "git push --force"})),
-            Verdict::Ask { .. }
+            global.restrictive(&wt, "Bash", &sh("rm -rf /")),
+            Verdict::Deny { .. }
         ));
-        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            global.stall_seconds(&wt),
+            None,
+            "and the forged checkout's own file is not read"
+        );
+        std::fs::remove_dir_all(&wt).ok();
     }
 
     #[test]
-    fn an_edit_takes_effect_without_a_restart() {
-        // The verdict has to *change*. Written with two rules that both left
-        // the call undecided, this asserted nothing about reloading at all.
+    fn an_edit_takes_effect_and_a_broken_file_asks_about_everything() {
         let dir = repo("edit", "[policy]\nnever_auto = []\n");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(
-            cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"})),
+            cache.restrictive(&dir, "Bash", &sh("ls -la")),
             Verdict::Undecided
         );
-
         std::fs::write(
             dir.join(crate::core::config::CONFIG_FILE),
             "[policy]\nnever_auto = [\"Bash(ls *)\"]\n",
         )
         .unwrap();
-        // The cache re-checks on a timer; clearing is what a settings change
-        // does, and proves the reload path rather than the clock.
         cache.clear();
         assert!(matches!(
-            cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"})),
+            cache.restrictive(&dir, "Bash", &sh("ls -la")),
             Verdict::Deny { .. }
         ));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_broken_file_keeps_the_rules_it_had() {
-        // A typo in a deny rule must never read as "no rules".
-        let dir = repo("broken", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
-        let cache = PolicyCache::for_projects_only();
-        assert!(matches!(
-            cache.restrictive(&dir, "Bash", &json!({"command": "rm -rf x"})),
-            Verdict::Deny { .. }
-        ));
-
         std::fs::write(
             dir.join(crate::core::config::CONFIG_FILE),
             "[policy]\nnever_autoo = [",
         )
         .unwrap();
-        cache.clear();
-        // Nothing was ever loaded for this root after clearing, so the safe
-        // answer is the empty policy. Devplane has no way to say yes at all
-        // now, so what this holds is that a cleared cache does not resurrect a
-        // stale prohibition either.
-        assert_eq!(
-            cache.restrictive(&dir, "Bash", &json!({"command": "rm -rf x"})),
-            Verdict::Undecided
+        std::thread::sleep(RECHECK);
+        match cache.restrictive(&dir, "Read", &json!({"file_path": "x"})) {
+            Verdict::Unresolved { why } => assert!(
+                why.contains(crate::core::config::CONFIG_FILE),
+                "the reason names the file: {why}"
+            ),
+            v => panic!("a typo must not read as no rules: {v:?}"),
+        }
+        assert_eq!(cache.broken().len(), 1);
+        // And a fresh process — which is what every hook is — sees the same.
+        let fresh = PolicyCache::for_projects_only();
+        assert!(matches!(
+            fresh.restrictive(&dir, "Bash", &sh("ls -la")),
+            Verdict::Unresolved { .. }
+        ));
+        assert_eq!(fresh.hold(&dir), None);
+        // A machine-wide deny still wins over a broken project file.
+        let machine = PolicyCache::new(
+            Policy::rules(&["Bash(ls *)".into()], &[]),
+            PathBuf::from("/"),
+            None,
         );
-        std::fs::remove_dir_all(&dir).ok();
+        assert!(matches!(
+            machine.restrictive(&dir, "Bash", &sh("ls -la")),
+            Verdict::Deny { .. }
+        ));
     }
 
     #[test]
     fn a_directory_outside_any_repository_falls_back_to_the_global_rules() {
-        let cache = PolicyCache::new(Policy::rules(&[], &[]), PathBuf::from("/"), None);
+        let cache = PolicyCache::new(
+            Policy::rules(&["Bash(rm *)".into()], &[]),
+            PathBuf::from("/"),
+            None,
+        );
         assert!(matches!(
-            cache.restrictive(Path::new("/"), "Read", &json!({})),
-            Verdict::Undecided
+            cache.restrictive(Path::new("/"), "Bash", &json!({"command": "rm x"})),
+            Verdict::Deny { .. }
         ));
+        assert_eq!(
+            cache.restrictive(Path::new("/nowhere/at/all"), "Read", &json!({})),
+            Verdict::Undecided
+        );
     }
 
-    /// **Ten thousand lookups must not become ten thousand file reads**, which
-    /// is what this test has always said in its first comment and did not
-    /// assert. It measured `elapsed / 10_000 < 200µs` — a stopwatch, on a
-    /// threaded suite — so it passed alone and failed at 205µs under load, for
-    /// a reason that has nothing to do with caching.
-    ///
-    /// The counter beside it already carried the argument: *a counter rather
-    /// than a stopwatch… a wall-clock assertion would be flaky on a loaded
-    /// machine and fail for reasons that have nothing to do with the property*.
-    /// That reasoning was written for `RESOLVED` and applied to one of the two
-    /// tests in this module.
     #[test]
     fn repeated_checks_are_cheap() {
         use std::sync::atomic::Ordering;
         let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
-        // This runs on the hook Claude Code blocks on.
         let dir = repo("fast", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
         let cache = PolicyCache::for_projects_only();
-
-        cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"}));
+        cache.restrictive(&dir, "Bash", &sh("ls -la"));
         PARSED.store(0, Ordering::Relaxed);
         for _ in 0..10_000 {
-            cache.restrictive(&dir, "Bash", &json!({"command": "ls -la"}));
+            cache.restrictive(&dir, "Bash", &sh("ls -la"));
         }
-        // **`RECHECK` is a second**, so a slow run may legitimately re-stat and
-        // re-read once or twice. What must not happen is a read per lookup.
         let parsed = PARSED.load(Ordering::Relaxed);
         assert!(
             parsed <= 4,
-            "ten thousand lookups parsed the config {parsed} times; the cache is not caching"
+            "ten thousand lookups parsed the config {parsed} times"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_path_check_asks_the_filesystem_once_per_distinct_path() {
-        // The symlink rules mean a path rule asks the filesystem where things
-        // really are, and this runs on the hook a session is blocked on.
-        //
-        // The property used to be *one syscall per evaluation, whatever the
-        // rule count*, and it was true while the only path resolved was the
-        // file. It is no longer, and saying so is the point of rewriting this
-        // test rather than relaxing it: a deny rule also resolves its own
-        // leading literal segments, so that a rule naming a symlinked
-        // directory meets a command naming the real one. Ten rules with
-        // ten different prefixes name eleven different paths, and eleven
-        // different paths cost eleven questions. What the memo buys is that
-        // **the same path is never asked about twice in one call**.
         use std::sync::atomic::Ordering;
         let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
         let distinct: String = (0..10)
@@ -823,9 +588,6 @@ mod tests {
         std::fs::write(&file, "x").ok();
         let cache = PolicyCache::for_projects_only();
         let call = json!({"file_path": file.to_str().unwrap()});
-
-        // Warm the config cache. The memo is cleared by `evaluate` itself, so
-        // the count starts cold whatever the warm-up left.
         cache.restrictive(&dir, "Read", &call);
         RESOLVED.store(0, Ordering::Relaxed);
         cache.restrictive(&dir, "Read", &call);
@@ -834,11 +596,7 @@ mod tests {
             11,
             "one for the file, one for each distinct rule prefix"
         );
-        std::fs::remove_dir_all(&dir).ok();
 
-        // Ten rules that name the **same** prefix cost one question, not ten.
-        // That is the memo doing its job, and it is what keeps a realistic
-        // rule set — many rules under one protected directory — cheap.
         let same: String = (0..10)
             .map(|i| format!("  \"Read(secrets/deep/x{i}/**)\",\n"))
             .collect();
@@ -856,28 +614,14 @@ mod tests {
             RESOLVED.load(Ordering::Relaxed) <= 11,
             "ten rules under one prefix must not cost more than ten questions"
         );
-
-        // And the cost stays inside the thing this module exists for: the hook a
-        // session waits on. A counter cannot say that, so this is the one
-        // wall-clock assertion here — **and it is a ceiling, which means it is
-        // set where only a regression trips it.**
-        //
-        // It was 250ms and it flaked: a hundred evaluations inside a parallel
-        // suite on a loaded machine is not a measurement of this code, which is
-        // the argument `RESOLVED`'s own doc comment makes four hundred lines
-        // up. A budget wearing a ceiling's clothes fails for reasons that have
-        // nothing to do with the property, and the cost of that is the next
-        // person reaching for `--no-fail-fast` instead of reading it.
         let started = std::time::Instant::now();
         for _ in 0..100 {
             cache.restrictive(&dir, "Read", &call);
         }
         assert!(
             started.elapsed() < Duration::from_secs(2),
-            "a hundred evaluations over ten path rules took {:?} — something here has become \
-             accidentally quadratic, which is the only thing this bound is for",
+            "{:?}",
             started.elapsed()
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

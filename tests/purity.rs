@@ -1,33 +1,11 @@
-//! The one architectural rule in this crate, enforced rather than written down.
-//!
-//! `src/core/` may not reach the outside world: no `async fn`, no `.await`, no
-//! async runtime, no database, no HTTP. Three of the product's claims rest on
-//! that and on nothing else:
-//!
-//! * the board is rebuildable, because run state is a pure
-//!   `(Run, Event) -> Run` that can be replayed;
-//! * the inbox is correct after a restart, because it is derived and never
-//!   stored;
-//! * the permission policy cannot fail open, because it cannot wait on
-//!   anything — it runs on the synchronous hook a Claude Code session is
-//!   blocked on.
-//!
-//! This was a separate crate, and the manifest enforced it by simply not
-//! linking those dependencies: stronger in principle, because it covers names
-//! nobody thought to list. In practice it was a second manifest and a second
-//! crates.io publish for one binary, which is the same objection that deleted
-//! the other six library crates, and consistency is worth more here than the
-//! last few percent of rigour. The check below covers every way the rule breaks
-//! that anybody has actually written.
-//!
-//! The one thing deliberately allowed is a **synchronous** read of a small
-//! local file, in `config` and `policy_cache`. That is bounded in a way a
-//! network call is not, and it is how a project's rules are read on the hook.
+//! Source-scan guards for the crate's structural rules. The first: `src/core/`
+//! may not reach the outside world (no async, runtime, database, HTTP or
+//! spawning), so run state replays, the inbox is derived, and the policy cannot
+//! fail open. A synchronous read of a small local file is allowed.
 
 use std::path::Path;
 
-/// What may not appear in `src/core/`, and the sentence explaining why — because
-/// a failing test that only names a token teaches nobody the rule.
+/// Tokens banned in `src/core/`, each with the reason a failure prints.
 const BANNED: &[(&str, &str)] = &[
     (
         "async fn",
@@ -65,18 +43,19 @@ fn the_pure_half_cannot_reach_the_outside_world() {
     let mut files = 0;
     let mut broken = Vec::new();
 
-    for entry in std::fs::read_dir(&dir).expect("src/core exists") {
-        let path = entry.expect("readable").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
+    // Walked recursively: nested modules are the pure half too.
+    for path in walk(&dir.to_string_lossy()) {
+        let path = Path::new(&path);
         files += 1;
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let source = std::fs::read_to_string(&path).expect("readable");
+        let name = path
+            .strip_prefix(&dir)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let source = std::fs::read_to_string(path).expect("readable");
 
         for (line_no, line) in source.lines().enumerate() {
-            // Comments say what the rule is and quote what it forbids; they are
-            // not the code the rule is about.
+            // Comments may quote what the rule forbids.
             let code = line.split("//").next().unwrap_or("");
             for (token, why) in BANNED {
                 if code.contains(token) {
@@ -103,8 +82,7 @@ fn the_pure_half_cannot_reach_the_outside_world() {
 
 #[test]
 fn the_check_would_notice() {
-    // A guard that cannot fail is a guard nobody should trust. This asserts the
-    // matcher itself, so the test above means something.
+    // Proves the matcher itself can fail.
     let sample = "pub async fn evaluate(&self) { self.fetch().await }";
     let hits: Vec<&str> = BANNED
         .iter()
@@ -114,14 +92,8 @@ fn the_check_would_notice() {
     assert_eq!(hits, ["async fn", ".await"]);
 }
 
-/// No user-facing string carries a collapsed line continuation.
-///
-/// Rust's `\` at the end of a line eats the newline *and* the indentation after
-/// it, which is how every long message here is written. Lose the backslash and
-/// the string keeps the indentation: it compiles, it passes every test that
-/// checks what it *says*, and it reaches a person as
-/// `…a prefix rule would                  approve whatever…`. Only visible by
-/// running the command, which is why it is worth a check.
+/// No string literal carries a run of spaces between words, which is what a
+/// `\` line continuation leaves behind when the backslash is dropped.
 #[test]
 fn no_message_carries_a_collapsed_line_continuation() {
     let mut bad = Vec::new();
@@ -155,11 +127,8 @@ fn no_message_carries_a_collapsed_line_continuation() {
             if trimmed.starts_with("//") {
                 continue;
             }
-            // The signature is a gap of six or more spaces **between two
-            // words**, inside a string literal. That is what a lost `\` leaves
-            // behind and it is not what anything else looks like: a column
-            // layout puts its spaces before a `{}` or at the start of the
-            // string, and a deliberately indented second line follows a `\n`.
+            // A lost `\` leaves six or more spaces between two words inside a
+            // literal; column layouts and `\n`-indented lines don't.
             let bytes = line.as_bytes();
             for (i, _) in line.match_indices("      ") {
                 let before = &line[..i];
@@ -168,23 +137,8 @@ fn no_message_carries_a_collapsed_line_continuation() {
                 let next = line[i..].bytes().find(|b| *b != b' ').unwrap_or(b'"');
                 let word_then_word = (prev.is_ascii_alphanumeric() || b",.;:-".contains(&prev))
                     && next.is_ascii_lowercase();
-                // **There is no exemption for a run after `\n`, and there used
-                // to be.**
-                //
-                // It allowed anything under ten spaces, on the reasoning that a
-                // continuation indented by two or four is deliberate. That
-                // reasoning is sound and the exemption was still useless: this
-                // check only fires on a run of **six or more**, so a deliberate
-                // two- or four-space indent never reaches it. All the exemption
-                // could ever do was wave through runs of six to nine — and it
-                // did, for a message in `devplane ls` that shipped with a
-                // newline and nine spaces in the middle of a sentence.
-                //
-                // Measured before removing it: every `\n`-plus-spaces run in
-                // `src/` is either two or four spaces, or a `.join("\n   ")`
-                // whose spaces end at the closing quote and are already
-                // excluded by `word_then_word`. Nothing legitimate was relying
-                // on it.
+                // No exemption after `\n`: deliberate indents are two or four
+                // spaces, below the threshold.
                 if inside_literal && word_then_word {
                     bad.push(format!("{}:{}", path.display(), n + 1));
                     break;
@@ -201,37 +155,10 @@ fn no_message_carries_a_collapsed_line_continuation() {
     );
 }
 
-/// **Principle II, enforced where it now actually lives.**
-///
-/// The constitution says Devplane originates no approval and may carry one:
-/// nothing it can produce on its own — from a rule, a clock, a default or a
-/// model — may approve anything, and the single exception is a person's answer
-/// to a question an agent asked, which cannot exist without that person having
-/// answered.
-///
-/// That used to be enforced by a sentence with no mechanism: *"the hook never
-/// answers allow"*. It was true, and it became insufficient the day a second
-/// channel could say yes. This asserts the shape that makes the principle
-/// structural rather than careful:
-///
-/// * **the policy engine still cannot express an approval** — no `Allow`
-///   variant, so no rule, cache or matcher can produce one however it is
-///   called; and
-/// * **the one place that can is downstream of a delivered answer** — the
-///   accept is constructed in exactly one function, and that function's only
-///   source of content is the channel a person's answer arrives on.
-///
-/// A source scan rather than a behavioural test on purpose, for the reason the
-/// rest of this file is one: a behavioural test proves the paths somebody
-/// thought to exercise, and the rule has to hold for the ones nobody did.
-///
-/// **Three of the four assertions below were watched failing; the `Verdict` one
-/// cannot be, and that is worth saying rather than implying otherwise.** Adding
-/// an `Allow` variant to try it makes every `match` on `Verdict` non-exhaustive,
-/// so the crate stops compiling before any test runs — the compiler enforces
-/// that half more strongly than this ever could. The assertion stays because it
-/// costs nothing and names the rule where somebody reading the enum will look,
-/// but the load-bearing guards here are the other three.
+/// The policy engine cannot express an approval (no `Allow` in `Verdict`), and
+/// the only accept is built in the function that waits for a person's answer.
+/// An `Allow` variant would break exhaustive matches before this runs, so the
+/// session assertions are the load-bearing ones.
 #[test]
 fn nothing_can_approve_except_a_person_who_answered() {
     let policy = std::fs::read_to_string("src/core/policy.rs").expect("policy.rs");
@@ -247,9 +174,8 @@ fn nothing_can_approve_except_a_person_who_answered() {
          $1,756-$3,511 a month to learn"
     );
 
-    // The accept exists in exactly one place, and that place reads the answer
-    // channel. Two would mean a second way to say yes, which is how the first
-    // version of this rule was lost.
+    // Exactly one accept, inside the answer channel: a second would be a
+    // second way to say yes.
     let session = std::fs::read_to_string("src/acp/session.rs").expect("session.rs");
     let accepts = session.matches("ElicitationAction::Accept").count();
     assert_eq!(
@@ -274,18 +200,8 @@ fn nothing_can_approve_except_a_person_who_answered() {
     );
 }
 
-/// **Nothing in the question path writes to anybody's settings.**
-///
-/// A question arrives, is shown, and is answered — and none of that may touch a
-/// permission file, a settings file or a rule table. The reason is the one
-/// behind every refusal in this product: an agent on this machine runs as the
-/// same user and can read the token the page uses, so a route that edits the
-/// file governing agents is reachable by the party the file exists to bound.
-///
-/// Asserted over the source rather than by running, because the failure it
-/// guards against is a *new* write appearing on a path nobody thought to
-/// exercise. The behavioural half — that a whole answered round trip leaves
-/// `git status` clean — is the quickstart's, and a person runs it.
+/// Nothing in the question path writes a file or edits settings: an agent runs
+/// as the same user and could reach any such route.
 #[test]
 fn the_question_path_writes_no_settings() {
     let question = std::fs::read_to_string("src/core/question.rs").expect("question.rs");
@@ -302,7 +218,7 @@ fn the_question_path_writes_no_settings() {
         );
     }
 
-    // And the answer route composes the reply, never a rule.
+    // The answer route composes the reply, never a rule.
     let driven = std::fs::read_to_string("src/driven.rs").expect("driven.rs");
     let answer = driven
         .split("pub async fn answer")
@@ -318,22 +234,8 @@ fn the_question_path_writes_no_settings() {
     }
 }
 
-/// **A permission answer nobody made may not become a refusal.**
-///
-/// `Decision::parse(None, None)` answers `Deny` — *fail closed*, which is the
-/// right rule for a **gate** deciding with no person present and the wrong one
-/// for a **person's answer**, where the honest reading is that nothing was said.
-///
-/// The difference was not academic. The board posted `{"choice":"allow"}`;
-/// `AnswerBody` has no `choice` field and rejected nothing it did not
-/// understand, so **pressing *allow* recorded a deny** — under the person's
-/// name, on the product whose entire claim is recording who decided what, while
-/// the surface said *"answered — on the record and on its way to the agent"*.
-///
-/// The CLI had always refused this before sending. Refusing it at the route as
-/// well is what turns the next wiring mistake into a 400 instead of a wrong
-/// decision, and `deny_unknown_fields` is what makes the mistake itself
-/// impossible to post.
+/// A permission answer naming neither a decision nor an option is refused, not
+/// read as `Deny`: fail-closed suits a gate, not a person's answer.
 #[test]
 fn a_permission_answer_that_says_nothing_is_refused_rather_than_read_as_deny() {
     let api = std::fs::read_to_string("src/api.rs").expect("api.rs");
@@ -351,52 +253,36 @@ fn a_permission_answer_that_says_nothing_is_refused_rather_than_read_as_deny() {
          the board came to record a deny"
     );
 
-    let handler = api
-        .split("async fn answer_ask")
+    // `parse_answer` is the one parser every surface's answer goes through.
+    let driven = std::fs::read_to_string("src/driven.rs").expect("driven.rs");
+    let parser = driven
+        .split("pub fn parse_answer(")
         .nth(1)
-        .and_then(|s| s.split("\nasync fn ").next())
-        .expect("answer_ask");
-    let permission = handler
+        .and_then(|s| s.split("\npub ").next())
+        .expect("parse_answer");
+    let permission = parser
         .split("Kind::Permission")
         .nth(1)
         .and_then(|s| s.split("Kind::Question").next())
         .expect("the permission arm");
+    let refuses = permission.find("return Err(");
+    let parses = permission.find("Decision::parse(decision");
     assert!(
-        permission.contains("BAD_REQUEST"),
-        "the permission arm of `answer_ask` reaches `Decision::parse` without first refusing an \
+        matches!((refuses, parses), (Some(r), Some(p)) if r < p),
+        "the permission arm of `parse_answer` reaches `Decision::parse` without first refusing an \
          answer that named neither a decision nor an option. `parse` maps nothing to `Deny`, so \
          that path records a refusal nobody chose"
     );
 
-    // And the sentence a person meets says what to send, because this is the
-    // failure a mis-wired surface produces.
+    // The refusal tells a mis-wired caller what to send.
     assert!(
         permission.contains("say what the answer is"),
         "the refusal does not tell the caller what to send"
     );
 }
 
-/// **Every way a question can end reads differently, and none of them reads as
-/// nothing having happened.**
-///
-/// The specification asked for six distinguishable outcomes. Three of the six
-/// described the `defer` mechanism — a paused session swept off disk, a call
-/// deferred alongside other work, a pending tool gone on resume — and cannot
-/// occur on the channel a question actually takes. What is left is three, and
-/// they are the ones a person meets:
-///
-/// * a person answered, and what they chose;
-/// * the run ended before anybody answered;
-/// * the agent asked in a form Devplane could not show.
-///
-/// The property that matters is not that there are three. It is that **no two
-/// share a sentence** and none is empty — because the failure this guards
-/// against is somebody reusing one reason for two outcomes, which makes them
-/// indistinguishable in the one place a person goes to find out what happened,
-/// while every test still passes.
-///
-/// Asserted over the source because the alternative needs a signed-in agent and
-/// real money for a property that is a fact about four string literals.
+/// Each way a question ends (answered, run ended, unshowable form) has its own
+/// non-empty sentence, so the log shows which one happened.
 #[test]
 fn a_question_ends_in_a_sentence_that_says_which_ending_it_was() {
     let driven = std::fs::read_to_string("src/driven.rs").expect("driven.rs");
@@ -427,8 +313,7 @@ fn a_question_ends_in_a_sentence_that_says_which_ending_it_was() {
         }
     }
 
-    // An answer says *what* was chosen. "Somebody answered" without the answer
-    // is a row nobody can check, which is the one property the decision log has.
+    // An answer records what was chosen, not only that somebody answered.
     assert!(
         driven.contains(r#""a person answered: {chose}""#),
         "the answer's own content left the reason, so the log records that somebody answered \
@@ -436,27 +321,13 @@ fn a_question_ends_in_a_sentence_that_says_which_ending_it_was() {
     );
 }
 
-/// **A question from a session Devplane did not start cannot be answered,
-/// asserted at the channel rather than at the surface.**
-///
-/// The inbox already declines to offer a control for one
-/// (`a_question_devplane_cannot_answer_says_where_it_can_be`), and that is a
-/// property of a *rendering*. This is the property underneath it: there is no
-/// route to the answer path at all for a run Devplane does not drive, so a
-/// caller who constructs the request by hand — a script, a future surface,
-/// somebody with `curl` and the token — gets the same refusal as the page.
-///
-/// It matters because the two guards fail in opposite directions. A surface
-/// that forgets the rule offers a button that does nothing; a *channel* that
-/// forgets it would deliver an answer into a session whose dialog belongs to
-/// somebody else's window.
+/// The answer channel itself refuses a run Devplane did not start, so a caller
+/// with `curl` and the token gets the same refusal as the page.
 #[test]
 fn only_a_run_devplane_drives_can_have_a_question_answered() {
     let driven = std::fs::read_to_string("src/driven.rs").expect("driven.rs");
 
-    // Delivery has exactly two routes and each has to refuse a run Devplane did
-    // not start. `deliver` chooses between them, so the check lives there —
-    // before either is taken — and the two functions underneath check again.
+    // `deliver` must check the run before taking either route.
     let deliver = driven
         .split("async fn deliver(")
         .nth(1)
@@ -474,8 +345,7 @@ fn only_a_run_devplane_drives_can_have_a_question_answered() {
         "an answer is sent before the run is checked to be one Devplane drives"
     );
 
-    // And the resumed route, which is the one that exists because the session
-    // may be gone. It goes through `resume`, whose own refusal is the same one.
+    // The resumed route goes through `resume`, which refuses the same way.
     assert!(
         deliver.contains("resume(state, &ask.run)"),
         "the route for a run whose agent has gone must go through `resume`"
@@ -490,41 +360,16 @@ fn only_a_run_devplane_drives_can_have_a_question_answered() {
         "resume stopped refusing a session Devplane merely watches"
     );
 
-    // The refusal underneath both, which is what a caller with `curl` and the
-    // token meets.
+    // The shared refusal a direct caller meets.
     assert!(
         driven.contains("that run is not one Devplane drives"),
         "the refusal lost its sentence; a caller is told nothing about why"
     );
 }
 
-/// **Every public function in this crate has a caller.**
-///
-/// The inverse of every other guard in this repository, and the only one that
-/// looks for *code with no claim* rather than a claim with no code. The rule it
-/// mirrors — a documented trigger with no code is a lie the documentation tells
-/// for you — has a twin nobody had written down: a function with no caller is a
-/// rule stated where nothing reads it, and the danger is not the dead bytes. It is
-/// that somebody writes the rule again, somewhere impure, and the two copies
-/// drift.
-///
-/// That is exactly what happened to the fan-out. `core::batch::order` and
-/// `members_of` held the rule *what needs you first, then what failed* and had
-/// no production caller at all, while `api::render_batch` inlined the same
-/// filter and the same `sort_by_key` — so the tested copy decided nothing and
-/// the deciding copy was untested.
-///
-/// A helper only tests need is not exempt; it is the case this exists to find.
-/// Something that genuinely belongs to one module is called by that module,
-/// and this counts those.
-///
-/// **It scanned `src/core/` only, for the whole of its life, and the rule it
-/// states is not about purity.** The reasoning above is that the danger is a
-/// second copy written *somewhere impure* — which is everywhere this guard was
-/// not looking. Widened to the crate on 2026-09-20, it found `api::content_type_of`:
-/// the function that says what the built interface bundle is served as, beside
-/// a bundle that is embedded in the binary and routed by nothing. Six lines
-/// stating a rule, in the file that would have to read it, unread.
+/// Every public function in the crate has a non-test caller. An unread rule
+/// tends to get rewritten elsewhere and the copies drift; a helper only tests
+/// need counts as dead.
 #[test]
 fn nothing_in_this_crate_is_a_rule_with_no_reader() {
     let mut defined: Vec<(String, String)> = Vec::new();
@@ -534,11 +379,7 @@ fn nothing_in_this_crate_is_a_rule_with_no_reader() {
         let text = std::fs::read_to_string(&entry).expect("source");
         let prod = production(&text);
         {
-            // **A `#[cfg(test)]` block is not production code, and its readers
-            // are the test modules this guard strips.** Counting them would
-            // report every test-only helper as dead while its callers sat two
-            // lines away — the guard being loudly wrong about the one case it
-            // cannot see, which is how a guard gets switched off.
+            // Skip `#[cfg(test)]` items: their callers are the stripped test modules.
             let mut in_test_only = false;
             let mut depth = 0i32;
             for line in prod.lines() {
@@ -582,24 +423,16 @@ fn nothing_in_this_crate_is_a_rule_with_no_reader() {
 
     let mut orphans: Vec<String> = Vec::new();
     for (name, home) in &defined {
-        // Reached by name shapes this cannot see: trait methods, operator
-        // impls, constructors.
-        // Reached by name shapes this cannot see: trait methods, operator
-        // impls, constructors, and serde's own contract — a `#[serde(with =
-        // "…")]` attribute names the *module*, never `serialize`.
+        // Reached in ways this scan can't see: traits, constructors, serde.
         if matches!(
             name.as_str(),
             "new" | "default" | "fmt" | "from" | "parse" | "serialize" | "deserialize"
-                // Entry points and trait obligations the crate never calls by
-                // name: the binary's own, and the ACP client's handlers, which
-                // the protocol crate invokes through `dyn Client`.
+                // The binary's entry point.
                 | "main"
         ) {
             continue;
         }
-        // Whole-word, so a function passed by reference — `map(gate_down_item)`
-        // — counts as the reader it is. The first version of this guard looked
-        // for `name(` and reported four such uses as dead.
+        // Whole-word, so a function passed by reference counts as used.
         let uses: usize = bodies
             .iter()
             .map(|(file, body)| {
@@ -622,14 +455,8 @@ fn nothing_in_this_crate_is_a_rule_with_no_reader() {
     );
 }
 
-/// Everything above the file's own `#[cfg(test)] mod`, with comments removed.
-///
-/// **The module marker at column zero, not the first `#[cfg(test)]` anywhere.**
-/// A `#[cfg(test)]` on a struct field sits at an indent in the middle of a file,
-/// and splitting on the first one truncated `policy_cache.rs` at line 60 —
-/// which made this guard report four live functions as dead the first time it
-/// ran. Comments go because a doc comment naming a function is a mention and
-/// not a reader.
+/// Source before the file's column-zero `#[cfg(test)] mod`, comments blanked:
+/// a doc comment naming a function is a mention, not a reader.
 fn production(text: &str) -> String {
     let cut = text.find("\n#[cfg(test)]\nmod ").unwrap_or(text.len());
     text[..cut]
@@ -660,17 +487,7 @@ fn words(body: &str, name: &str) -> usize {
     n
 }
 
-/// The declaration lines for `name`, which are not uses of it.
-/// How many times this file *defines* `name`, so its own signature is not
-/// counted as a reader of itself.
-///
-/// **The boundary after the name is load-bearing and was missing.** This was a
-/// substring search, so `pub fn draft_links` counted as a definition of
-/// `draft_link` — two definitions, two occurrences, and the live function came
-/// out with zero readers. No such prefix pair existed while the guard only read
-/// `src/core/`; widening it to the crate produced the false positive within a
-/// minute, which is the argument for running a widened check against a known
-/// answer before believing its list.
+/// How many times this file defines `name`, so its signature is not a use.
 fn defs(body: &str, name: &str) -> usize {
     let mut n = 0;
     for prefix in ["pub fn ", "pub const fn ", "pub async fn "] {
@@ -678,8 +495,7 @@ fn defs(body: &str, name: &str) -> usize {
         let mut from = 0;
         while let Some(i) = body[from..].find(&needle) {
             let end = from + i + needle.len();
-            // A definition is the name followed by its parameter list or its
-            // generics — never by another identifier character.
+            // Require a boundary so `draft_links` doesn't define `draft_link`.
             if !body[end..]
                 .chars()
                 .next()
@@ -710,23 +526,14 @@ fn walk(dir: &str) -> Vec<String> {
     out
 }
 
-/// **The Spec Kit gate adds no second permission surface, and this is how that
-/// stays true.**
-///
-/// The set of things that can approve, deny or defer a tool call is the most
-/// important short list in this product, and the pressure to extend it comes
-/// from features exactly like this one: a hook that already knows something
-/// about a repository, fires at a useful moment, and would be *so easy* to let
-/// answer a permission on somebody's behalf. It reports an exit code. If these
-/// names ever appear in its path, the reason will have been a good one, and the
-/// feature will still have become a decider.
+/// The Spec Kit gate reports an exit code and never names permission
+/// vocabulary, so it cannot become a second decider.
 #[test]
 fn the_speckit_gate_never_becomes_a_second_decider() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    // The two command bodies, cut out of the file they share with everything
-    // else — the rule is about this feature, not about `src/cli/work.rs`.
-    let cli = std::fs::read_to_string(root.join("src/cli/work.rs")).expect("the CLI");
+    // The two command bodies, cut from the file they share.
+    let cli = std::fs::read_to_string(root.join("src/cli/change.rs")).expect("the CLI");
     let mut bodies = Vec::new();
     for name in ["pub async fn cmd_gate_run", "pub fn cmd_speckit_install"] {
         let start = cli
@@ -768,9 +575,7 @@ fn the_speckit_gate_never_becomes_a_second_decider() {
 
     let mut found = Vec::new();
     for (where_, body) in &bodies {
-        // Prose in this repository explains the refusal by naming it, and a
-        // guard that cannot tell an explanation from a call would forbid saying
-        // why. Comments and doc comments are the explanation; code is not.
+        // Comments may name the refusal to explain it; only code is checked.
         let code: String = body
             .lines()
             .filter(|l| {
@@ -793,27 +598,8 @@ fn the_speckit_gate_never_becomes_a_second_decider() {
     );
 }
 
-/// **Every variant of the protocol event enum is constructed somewhere.**
-///
-/// The no-reader guard above looks at functions. This looks at the other shape
-/// the same defect takes, and it is the shape that survived a deletion: when
-/// the hard-coded six-hundred-second permission timeout was removed, its event
-/// variant was not. `AcpEvent::PermissionExpired` stayed declared, stayed
-/// matched in `driven.rs`, and was constructed by nothing — a handler that
-/// could never run, writing a decision row reading *"nobody answered within ten
-/// minutes"* about a rule this product had just deleted and now indicts other
-/// people for having.
-///
-/// Nothing caught it. `cargo` does not, because the enum is `pub` and a `pub`
-/// variant of a library crate is never dead code to the compiler. The function
-/// guard does not, because a variant is not a function. And every match on it
-/// was exhaustive, so the arm read as coverage.
-///
-/// **A match arm is a reader, not a constructor**, which is the whole
-/// distinction: this counts only the places the variant is *built*. The enum is
-/// the boundary between the protocol crate and this one — everything an agent
-/// can say arrives through it — so a variant nobody builds is a sentence about
-/// agents that no agent can cause.
+/// Every `AcpEvent` variant is constructed somewhere. A `pub` variant is never
+/// dead to the compiler, and a match arm is a reader, not a constructor.
 #[test]
 fn every_protocol_event_can_actually_happen() {
     let home = std::fs::read_to_string("src/acp/session.rs").expect("session.rs");
@@ -840,8 +626,7 @@ fn every_protocol_event_can_actually_happen() {
         variants.len()
     );
 
-    // Where an event may be built: the session that translates the protocol,
-    // and the fixture agent that stands in for a real one.
+    // Where an event may be built, including the fixture agent in `examples/`.
     let sources: String = walk("src")
         .into_iter()
         .chain(walk("examples"))
@@ -851,11 +636,7 @@ fn every_protocol_event_can_actually_happen() {
 
     let mut unbuildable = Vec::new();
     for v in &variants {
-        // **The arrow is what tells an arm from a construction**, not the
-        // brace: `AcpEvent::V { field } =>` and `AcpEvent::V { field: x }` are
-        // the same characters up to the payload. So look forward from each
-        // mention and see which comes first — a `=>` means this one is being
-        // matched, a `;` or a `)` means the expression ended and it was built.
+        // A `=>` before `;`/`)` means a match arm; otherwise it was built.
         let built = sources
             .match_indices(&format!("AcpEvent::{v}"))
             .any(|(i, _)| {
@@ -877,19 +658,8 @@ fn every_protocol_event_can_actually_happen() {
     );
 }
 
-/// **Nothing in this tree ever sets the vendor's question timer.**
-///
-/// `CLAUDE_AFK_TIMEOUT_MS` decides how long a person gets to answer their own
-/// agent's question, and reading it is the whole of feature `019`. Writing it
-/// would be this product putting a clock on somebody's attention — the trade it
-/// indicts four vendors for, and the one it has already shipped twice by
-/// accident and deleted twice.
-///
-/// So the read is allowed in exactly the two places that do it, and the
-/// vocabulary of writing is banned outright. The same shape as the fan-out's
-/// absence check, for the same reason: a default that can be configured away is
-/// not a guarantee, and a prohibition retrofitted after somebody has added the
-/// convenience is a prohibition that loses.
+/// `CLAUDE_AFK_TIMEOUT_MS` is read but never set: setting it would put a clock
+/// on a person's own questions.
 #[test]
 fn nothing_here_ever_sets_the_vendors_question_timer() {
     let mut writers = Vec::new();
@@ -903,7 +673,6 @@ fn nothing_here_ever_sets_the_vendors_question_timer() {
             if !line.contains("CLAUDE_AFK") {
                 continue;
             }
-            // Setting it, in any of the shapes that would.
             for bad in ["set_var", "env(\"CLAUDE_AFK", ".env(", "export "] {
                 if line.contains(bad) {
                     writers.push(format!("{entry}:{}: {}", i + 1, t.trim()));
@@ -917,9 +686,8 @@ fn nothing_here_ever_sets_the_vendors_question_timer() {
          and never writes it: {writers:?}"
     );
 
-    // And the countdown variable is cosmetic — when the on-screen countdown
-    // appears — in the person's own terminal. Reading it would be this product
-    // taking an interest in something that is not its business.
+    // `CLAUDE_AFK_COUNTDOWN_MS` is cosmetic and belongs to the person's
+    // terminal; it is never read.
     let all: String = walk("src")
         .into_iter()
         .map(|f| std::fs::read_to_string(&f).expect("source"))
@@ -939,45 +707,21 @@ fn nothing_here_ever_sets_the_vendors_question_timer() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The question clock, read through its type and never key by key
-// ---------------------------------------------------------------------------
-
-/// **The CLI talks to its own API and used to read it with string keys.**
-///
-/// `devplane modes` reached for `c.get("file")` — a field renamed to
-/// `where_set` three passes earlier — and `unwrap_or("")` printed a blank line
-/// where the settings path belongs. So a person was told a clock was answering
-/// their questions and never told where to change it, and every test passed,
-/// because no test asserted on the location and the fallback is a valid string.
-///
-/// The fix is not a corrected key. Both structs live in **this crate**: the API
-/// serialises [`ClockLine`] and the CLI can deserialise the same type, which
-/// makes a rename a compile error instead of a blank line. This asserts the
-/// clock path stays that way.
-///
-/// An absence check, because that is the only way an absence stays true — and
-/// this one fails the moment somebody adds a *reasonable* convenience: one
-/// `.get("says")` to avoid a clone.
+/// The CLI reads the modes response through shared types, never `.get("…")`
+/// on JSON, so a renamed field is a compile error rather than a blank line.
 #[test]
 fn the_clock_is_never_read_out_of_json_by_hand() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let whole = std::fs::read_to_string(root.join("src/cli/inbox.rs")).expect("src/cli/inbox.rs");
 
-    // **Comments are stripped before the check, and the first run is why.**
-    // It fired on the comment that *documents* the defect it is guarding
-    // against — the same shape as the npm guard in `concepts-check.sh` firing
-    // on files that were quoting a stale claim in order to retire it. A guard
-    // that cannot tell a description of the bug from the bug reads every
-    // post-mortem as a regression.
+    // Comments stripped: they may describe the defect this guards against.
     let text: String = whole
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Every field of `ClockLine`. Reading any of them by name out of a
-    // `serde_json::Value` is the defect, whatever the name happens to be today.
+    // Every `ClockLine` field.
     for field in [
         "after",
         "immediate",
@@ -986,8 +730,7 @@ fn the_clock_is_never_read_out_of_json_by_hand() {
         "says",
         "chosen_by_the_person",
         "answers_for_you",
-        // The name the defect was actually spelled with, kept so the exact
-        // regression cannot come back under its own name.
+        // A former field name, so that exact regression stays caught.
         "file",
     ] {
         let by_hand = format!(".get(\"{field}\")");
@@ -999,23 +742,13 @@ fn the_clock_is_never_read_out_of_json_by_hand() {
         );
     }
 
-    // And the positive half: it does deserialise a type. An absence check alone
-    // passes on a file that dropped the feature entirely.
-    //
-    // **The clock arrives inside the envelope now**, so naming `ClockLine` here
-    // is no longer the evidence — `core::world::Modes` holds it, and that is
-    // the one type this surface deserialises. Asserting the old name would fail
-    // on the fix that made it unnecessary.
+    // Positive half: it deserialises `world::Modes`, which carries the clock.
     assert!(
         text.contains("world::Modes"),
         "the modes rendering must go through the shared type, which carries the clock"
     );
 
-    // **The whole answer, not only the clock inside it.** The clock was typed
-    // and the envelope around it was not, so thirty-one lookups remained — and
-    // one of them asked for `unreported`, a field no version of this endpoint
-    // has ever served. It read zero for ever: one of the three sentences never
-    // printed, and the guard on the reassuring one became `0 < total`.
+    // Every `Modes` field too.
     for field in [
         "projects",
         "sessions",
@@ -1038,38 +771,23 @@ fn the_clock_is_never_read_out_of_json_by_hand() {
     }
 }
 
-/// **A vendor is a row, not an `if`.**
-///
-/// The whole cross-vendor claim is that support is a table with a date on each
-/// row, re-read against the vendor's own documentation — and `devplane doctor`
-/// prints exactly that. A handler that compares an agent id to a string literal
-/// is the same fact in a second place, where nothing dates it and nothing
-/// reports it: `agent != "claude"` decided which sessions could show an
-/// abandoned question, inside an API handler, for the life of the feature.
-///
-/// So the vendor names live in `core::vendors` and nowhere else. This is an
-/// absence check because that is the only way an absence stays true, and it
-/// fails the moment somebody adds the *reasonable* convenience — one
-/// comparison, to special-case the vendor they happen to be testing.
+/// Vendor-specific behaviour lives in `core::vendors`, never in a surface
+/// comparing an agent id.
 #[test]
 fn no_surface_branches_on_which_vendor_it_is() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    // Every file that renders or serves, and none of the observation adapters:
-    // `observe/copilot.rs` and `observe/hook.rs` are a vendor's own channel by
-    // definition, and naming it there is what an adapter is.
+    // Surfaces only; observation adapters are vendor-specific by definition.
     let surfaces = [
         "src/api.rs",
         "src/cli/board.rs",
         "src/cli/inbox.rs",
-        "src/cli/work.rs",
+        "src/cli/change.rs",
         "src/cli/admin.rs",
         "src/render.rs",
     ];
 
-    // The spellings that would be a branch on identity. `"claude"` as a *value*
-    // — an agent to launch, a registry id — is not one, so this looks for the
-    // shape of a comparison rather than for the word.
+    // The shape of a comparison, not the word: `"claude"` as a value is fine.
     let branches = [
         r#"== "claude""#,
         r#"!= "claude""#,
@@ -1110,44 +828,28 @@ fn no_surface_branches_on_which_vendor_it_is() {
     );
 }
 
-/// **A reassuring sentence may not be printed over no evidence.**
-///
-/// *Every session that has reported asks you* is guarded by `unreported <
-/// total`, so that a machine where nothing has reported does not get the green
-/// line. The CLI read `unreported` from a key the API never sent, so the guard
-/// was `0 < total` — true whenever anything is live — and the green line was
-/// reachable with zero sessions having said anything at all.
-///
-/// This asserts the field exists on both sides, which is what makes the guard
-/// mean what it says.
+/// `unreported`, which guards the reassuring modes line, exists on the type and
+/// is filled by the handler.
 #[test]
 fn every_figure_the_modes_surface_guards_on_is_one_the_api_sends() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let world = std::fs::read_to_string(root.join("src/core/world.rs")).expect("world");
-    let api = std::fs::read_to_string(root.join("src/api.rs")).expect("api");
+    let api = std::fs::read_to_string(root.join("src/view.rs")).expect("view");
 
     // The type carries it…
     assert!(
         world.contains("pub unreported: usize"),
         "core::world::Modes has no `unreported`, which the CLI guards the reassuring line on"
     );
-    // …and the handler fills it. A field on the type that the handler never
-    // sets is `Default` on the wire, which is the same zero by another route.
+    // …and the handler fills it; an unset field serialises as zero.
     assert!(
         api.contains("unreported: projects.iter().map(|p| p.unreported).sum()"),
         "/api/modes does not sum `unreported`, so the guard on the reassuring line reads zero"
     );
 }
 
-/// **`never` is one of the setting's four documented values and is its
-/// default**, so a clock that does not answer has to be tellable from a clock
-/// that does — and from no clock at all.
-///
-/// Until 2026-09-21 every string in the settings file became a duration, so
-/// `askUserQuestionTimeout: "never"` rendered as *"a never timer … after that,
-/// whatever is selected is submitted"*: false, about the default, in the
-/// direction of alarm, and worst when an administrator had deployed it as
-/// hardening.
+/// A `never` question clock renders as not answering, distinct from both an
+/// answering clock and no clock.
 #[test]
 fn a_clock_that_does_not_answer_is_not_rendered_as_one_that_does() {
     use devplane::core::clock::{After, ClockLine, QuestionClock, Source};
@@ -1184,25 +886,13 @@ fn a_clock_that_does_not_answer_is_not_rendered_as_one_that_does() {
     assert!(!line(After::Never, Source::User).answers_for_you);
 }
 
-/// **Nothing in the inbox's ordering reads a model's opinion.**
-///
-/// Ranking by how important a model thinks something is would be the thirteenth
-/// principle in a new costume: the ordering is level, then decorrelation, then
-/// age, and every one of those is a function of trusted inputs. A relevance
-/// score is the one change that would make this surface unexplainable — a
-/// person cannot ask why a row is where it is if the answer is an embedding.
-///
-/// An absence check, because that is the only way an absence stays true. It
-/// fails the moment somebody adds a *reasonable* improvement: a confidence
-/// field on an item, a similarity sort, a "probably urgent" weight.
+/// The inbox ordering (level, decorrelation, age) never reads a model's score.
 #[test]
 fn the_inbox_never_orders_by_what_a_model_thinks() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let whole = std::fs::read_to_string(root.join("src/core/attention.rs")).expect("attention.rs");
 
-    // Comments are stripped: this file *discusses* the refusal at length, and
-    // a guard that cannot tell the rule from its violation reads every
-    // explanation as a breach.
+    // Comments stripped: this file discusses the refusal.
     let code: String = whole
         .lines()
         .filter(|l| {
@@ -1238,23 +928,11 @@ fn the_inbox_never_orders_by_what_a_model_thinks() {
     );
 }
 
-/// **The rule-coverage path writes nothing, and cannot grow a way to.**
-///
-/// This is the whole of the feature rather than a safeguard on it. An agent on
-/// this machine runs as the same user as the daemon and can read the bearer
-/// token, so a route that edited a permission file would be reachable by the
-/// party the file exists to bound — and writing into the *vendor's* settings
-/// would be strictly worse, because that is the file its own enforcement reads.
-///
-/// So the refusal is structural: there is no write, and the absence is proved
-/// over the source rather than promised in a comment. The convenience somebody
-/// would reasonably add — *it already knows the file and the text, why not put
-/// it there* — is exactly what this fails on.
+/// The rule-coverage path has no file write: an agent holding the token could
+/// reach it, and it must never edit a permission file.
 #[test]
 fn the_rule_coverage_path_writes_nothing_anywhere() {
-    // Every file the feature is made of. The reader lives in the API because it
-    // touches a disk; the decision is pure. Both are covered, because the
-    // write would most naturally be added next to the read.
+    // Both the pure decision and the CLI; a write would sit next to the read.
     const BANNED: &[(&str, &str)] = &[
         ("fs::write", "writing a file"),
         ("File::create", "creating one"),
@@ -1278,9 +956,8 @@ fn the_rule_coverage_path_writes_nothing_anywhere() {
         }
     }
 
-    // The route, sliced out of the API so the check is about this path rather
-    // than about a file that legitimately writes elsewhere.
-    let api = std::fs::read_to_string("src/api.rs").expect("api.rs");
+    // The disk reader, sliced out so writes elsewhere in the file don't count.
+    let api = std::fs::read_to_string("src/view.rs").expect("view.rs");
     let reader = api
         .split("fn read_rules(")
         .nth(1)
@@ -1294,20 +971,15 @@ fn the_rule_coverage_path_writes_nothing_anywhere() {
         );
     }
     // And it is the only function of the feature that opens anything at all.
-    let route = api
-        .split("async fn rules(")
-        .nth(1)
-        .expect("the /api/rules route");
+    let route = api.split("pub fn rules(").nth(1).expect("the rules view");
     let route = &route[..route.find("\n}\n").expect("the end of the route")];
     assert!(
         !route.contains("std::fs"),
-        "the `/api/rules` route reaches the filesystem directly. Reading belongs in `read_rules`, \
+        "the rules view reaches the filesystem directly. Reading belongs in `read_rules`, \
          where one check can cover it."
     );
 
-    // **No apply-to-all, in any surface or flag.** The measured result says the
-    // obvious next step is as likely to hurt as help, so offering the button
-    // would be taking a side the evidence does not support.
+    // No apply-to-all flag: the evidence doesn't support one.
     let cli_mod = std::fs::read_to_string("src/cli/mod.rs").expect("cli/mod.rs");
     for shape in ["apply_all", "apply-to-all", "--all", "everywhere"] {
         let near = cli_mod
@@ -1322,4 +994,328 @@ fn the_rule_coverage_path_writes_nothing_anywhere() {
              was their content rather than their presence."
         );
     }
+}
+
+/// Every read of a stored gate report either checks it against the current
+/// tree or names the commit it ran against; none reports passed with neither.
+#[test]
+fn every_read_of_a_stored_gate_report_is_honest_about_its_tree() {
+    /// `(file, what reads it, how it is honest)`
+    const SITES: &[(&str, &str, &str)] = &[
+        (
+            "src/core/change.rs",
+            "Completion::of",
+            "checks currency via facts::still_current",
+        ),
+        (
+            "src/view.rs",
+            "ChangeView::of",
+            "names the commit as GateView::ran_at",
+        ),
+        (
+            "src/change.rs",
+            "the pull-request body",
+            "names the commit in ## Verification",
+        ),
+        (
+            "src/core/certificate.rs",
+            "the certificate",
+            "names the commit; a historical claim",
+        ),
+        (
+            "src/core/attention.rs",
+            "the inbox",
+            "reads only a failure, and a stale failure still happened",
+        ),
+        (
+            "src/driven.rs",
+            "the prompt context",
+            "reads only a failure, and a stale failure still happened",
+        ),
+    ];
+
+    let mut readers = 0;
+    for (file, _, _) in SITES {
+        let src = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{file}: {e}"));
+        readers += src.matches("last_gate()").count();
+    }
+    assert!(
+        readers >= SITES.len(),
+        "the declared sites no longer read a stored gate report — this guard would pass vacuously"
+    );
+
+    // Every file that reads one must be declared here.
+    for path in walk("src") {
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !src.contains("last_gate()") {
+            continue;
+        }
+        let path = path.replace('\\', "/");
+        assert!(
+            SITES.iter().any(|(f, _, _)| *f == path),
+            "{path} reads a stored gate report and is not declared in this guard. \
+             Say how it is honest about the tree — check currency, or name the commit."
+        );
+    }
+
+    // And the two surfaces that name a commit must actually carry it.
+    let api = std::fs::read_to_string("src/view.rs").unwrap();
+    assert!(
+        api.contains("ran_at"),
+        "GateView stopped carrying the commit it ran against"
+    );
+    let work = std::fs::read_to_string("src/change.rs").unwrap();
+    assert!(
+        work.contains("Against commit"),
+        "the pull-request body stopped naming the tree its verification describes"
+    );
+}
+
+/// A cost never received renders as unknown, never as `$0.00` or the `-` of a
+/// free session.
+#[test]
+fn a_cost_that_was_never_received_is_not_rendered_as_an_amount() {
+    let board = std::fs::read_to_string("src/cli/board.rs").expect("board.rs");
+    assert!(
+        board.contains("cost_unknown"),
+        "the board stopped distinguishing a missing cost from a zero one"
+    );
+
+    // No formatted zero cost anywhere; comments stripped since they quote it.
+    let mut checked = 0;
+    for path in walk("src") {
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let code: String = src
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        checked += 1;
+        assert!(
+            !code.contains("$0.00"),
+            "{path} renders a literal $0.00 — a cost nobody received is unknown, not nothing"
+        );
+    }
+    assert!(
+        checked > 0,
+        "no sources read — this guard would pass vacuously"
+    );
+}
+
+/// `devplane quit` reads and says what it will end before stopping the host.
+/// Checked in source because stdout order cannot show it.
+#[test]
+fn what_a_quit_ends_is_said_before_it_ends_it() {
+    let src = std::fs::read_to_string("src/cli/mod.rs").expect("cli/mod.rs");
+    let quit = src
+        .find("async fn cmd_quit")
+        .expect("`cmd_quit` is gone; update this guard or delete it");
+    let body = &src[quit..];
+    let stops = body
+        .find("stop_and_wait()")
+        .expect("`cmd_quit` no longer stops anything; update this guard");
+    // The sentence is `Quitting::says`.
+    let told = body[..stops].find(".says()");
+    assert!(
+        told.is_some(),
+        "`cmd_quit` asks the host to stop before it has said what that ends. \
+         A person cannot consent to what they were not told."
+    );
+    // The inventory must be read before the stop too.
+    let read = body[..stops].find("/api/quitting");
+    assert!(
+        read.is_some(),
+        "`cmd_quit` reads what it would stop only after stopping it"
+    );
+}
+
+/// State words and glyphs are spelled once in `ChangeState` and mirrored by the
+/// interface's state table; no other file spells one.
+#[test]
+fn the_six_state_words_are_spelled_once_and_the_table_carries_them() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let core = std::fs::read_to_string(root.join("src/core/change.rs")).expect("core::change");
+    let arms = |body: &str| -> Vec<String> {
+        core.split(body)
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .unwrap_or("")
+            .lines()
+            .filter_map(|l| l.split("=> \"").nth(1))
+            .filter_map(|r| r.split('"').next())
+            .map(str::to_string)
+            .collect()
+    };
+    let words = arms("pub fn as_str(self) -> &'static str {");
+    let glyphs = arms("pub fn glyph(self) -> &'static str {");
+    assert_eq!(
+        words,
+        [
+            "drafted",
+            "isolated",
+            "in flight",
+            "verified",
+            "offered",
+            "archived"
+        ],
+        "the six states changed under this guard"
+    );
+    assert_eq!(glyphs.len(), 6, "every state has a glyph");
+
+    // The interface's one table pairs each word with the host's glyph.
+    let table = std::fs::read_to_string(root.join("ui/src/lib/State.svelte")).expect("the table");
+    for (word, glyph) in words.iter().zip(&glyphs) {
+        assert!(
+            table.contains(&format!("glyph: \"{glyph}\", word: \"{word}\"")),
+            "the state table does not pair `{word}` with `{glyph}`"
+        );
+    }
+
+    // Nowhere else spells one; `verified` is also a gate word, so it is skipped.
+    let mut offenders = Vec::new();
+    let mut stack = vec![root.join("ui/src"), root.join("src/cli")];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.ends_with("wire") {
+                    continue;
+                }
+                stack.push(p);
+                continue;
+            }
+            let is_source = p
+                .extension()
+                .is_some_and(|x| x == "ts" || x == "svelte" || x == "rs");
+            if !is_source || p.ends_with("State.svelte") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            for word in ["drafted", "isolated", "in flight", "offered", "archived"] {
+                if text.contains(&format!("\"{word}\"")) {
+                    offenders.push(format!("{}: \"{word}\"", p.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a state word is spelled outside the one table: {offenders:?}"
+    );
+}
+
+/// A report's finding and evidence are read only through `Report::quoted`, so
+/// they always render attributed and quoted. The store is exempt.
+#[test]
+fn a_reports_finding_is_read_only_where_it_is_quoted() {
+    let allowed = ["src/core/report.rs", "src/store.rs"];
+    let mut scanned = 0;
+    let mut offenders = Vec::new();
+    for file in walk("src") {
+        let text = std::fs::read_to_string(&file).expect("source");
+        if !text.contains("report::") && !text.contains("mod report") {
+            continue;
+        }
+        scanned += 1;
+        if allowed.iter().any(|a| file.ends_with(a)) {
+            continue;
+        }
+        let prod = production(&text);
+        for (n, line) in prod.lines().enumerate() {
+            for field in [".finding", ".evidence"] {
+                let hit = line.match_indices(field).any(|(i, _)| {
+                    !line[i + field.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                });
+                if hit {
+                    offenders.push(format!("{file}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        scanned >= 6,
+        "the scan found {scanned} files that use reports, so it is not reading the crate"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a report's finding or evidence is read outside `Report::quoted` — render it through \
+         that, or it can reach somebody unquoted: {offenders:?}"
+    );
+}
+
+/// `gh issue create` appears once, in `reports::open`, reached only from the
+/// route behind `devplane report open` and the window's button.
+#[test]
+fn nothing_writes_to_a_forge_but_a_persons_open() {
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let mut sites = Vec::new();
+    for file in walk("src") {
+        let prod = squash(&production(
+            &std::fs::read_to_string(&file).expect("source"),
+        ));
+        let n = prod.matches("\"issue\",\"create\"").count() + prod.matches("issuecreate").count();
+        if n > 0 {
+            sites.push((file, n, prod));
+        }
+    }
+    assert_eq!(
+        sites
+            .iter()
+            .map(|(f, n, _)| (f.as_str(), *n))
+            .collect::<Vec<_>>(),
+        [("src/reports.rs", 1)],
+        "`gh issue create` must be written exactly once, in `reports::open`"
+    );
+    let (_, _, body) = &sites[0];
+    let open_at = body.find("pubasyncfnopen(").expect("reports::open exists");
+    let create_at = body.find("\"issue\",\"create\"").expect("the call");
+    let next_fn = body[open_at + 1..]
+        .find("pubasyncfn")
+        .map(|i| open_at + 1 + i)
+        .unwrap_or(body.len());
+    assert!(
+        (open_at..next_fn).contains(&create_at),
+        "the one forge write is not inside `reports::open`"
+    );
+
+    // Its callers: the route, and nothing else.
+    let mut callers = Vec::new();
+    for file in walk("src") {
+        let prod = production(&std::fs::read_to_string(&file).expect("source"));
+        if prod.contains("reports::open(") {
+            callers.push(file.clone());
+        }
+    }
+    assert_eq!(
+        callers,
+        ["src/api.rs"],
+        "reports::open is reached from somewhere but its route"
+    );
+    let api = production(&std::fs::read_to_string("src/api.rs").expect("api"));
+    assert_eq!(
+        api.matches("reports::open(").count(),
+        1,
+        "reports::open is called from more than one place in the API"
+    );
+    // And the route is named by the person's command and nothing else in src.
+    let mut named = Vec::new();
+    for file in walk("src") {
+        let prod = production(&std::fs::read_to_string(&file).expect("source"));
+        if prod.contains("/open\"") && prod.contains("reports/") {
+            named.push(file);
+        }
+    }
+    named.sort();
+    assert_eq!(
+        named,
+        ["src/api.rs", "src/cli/report.rs"],
+        "the open route is called from somewhere but `devplane report open`"
+    );
 }

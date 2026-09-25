@@ -5,19 +5,12 @@ use crate::render::{BOLD, DIM, clip, level_marker, paint};
 use crate::{client, render};
 use anyhow::Result;
 
-/// How wide a detail line is printed.
-///
-/// **A display width, and the only one.** It used to be a second clip on top of
-/// one the reducer had already applied at eighty characters — so the number here
-/// never fired and the number that did was in the wrong layer entirely.
+/// How wide a detail line is printed; the only clip applied to it.
 const DETAIL_WIDTH: usize = 100;
 
 pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
-    // **The narrowing goes to the daemon**, which is what makes the board and
-    // this command narrow identically: one computation, beside the fold, for
-    // the reason the fold is there. Two surfaces each implementing *contains,
-    // case-insensitive* agree until one of them is changed.
+    let c = crate::local::Reader::open().await?;
+    // Narrowing is done by the host, so the board and this command agree.
     let mut path = String::from("/api/inbox?read=true");
     if let Some(p) = project {
         path.push_str(&format!("&project={}", crate::core::text::url_escape(p)));
@@ -25,8 +18,7 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
     if needs_you {
         path.push_str("&needs_you=true");
     }
-    // **Running the command is reading it.** The output goes to somebody's
-    // screen, which is the whole of what the boundary measures.
+    // `read=true`: running the command counts as a look for the boundary.
     let body = raw(&c, &path).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&body)?);
@@ -39,11 +31,8 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    // **The boundary, above everything.** One hairline saying how long it has
-    // been, and nothing at all where there is no previous look — there is no
-    // *last* to be since, and a line reading `0m` would be inventing one.
-    // The boundary belongs to the whole machine, so it does not render over a
-    // narrowed list either — the close it belongs to is already absent there.
+    // The "since you last looked" line: absent when there was no previous
+    // look, and on a narrowed list (the host omits `close` there).
     if let Some(since) = close.get("since_last_look").and_then(|v| v.as_str()) {
         println!(
             "{}",
@@ -58,19 +47,25 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         serde_json::from_value(body.get("inhibited").cloned().unwrap_or_default())
             .unwrap_or_default();
 
-    // **Deserialised, not read key by key.** A field the type does not have is
-    // a compile error; a field the API stops sending is `unwrap_or(0)` for
-    // ever, and the one time this repository read an envelope by hand it asked
-    // for a key no version of the endpoint had ever served.
+    // Deserialised, not read key by key, so a renamed field fails to compile.
     let narrowed: Option<crate::core::attention::Narrowed> =
         serde_json::from_value(body.get("narrowed").cloned().unwrap_or_default()).unwrap_or(None);
+    let snoozed = body.get("snoozed").and_then(|v| v.as_u64()).unwrap_or(0);
+    if snoozed > 0 {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!("{snoozed} snoozed — `devplane snooze <id> --minutes 0` brings one back")
+            )
+        );
+    }
+
     let left_out = narrowed.as_ref().map_or(0, |n| n.count);
     let no_such = narrowed.as_ref().is_some_and(|n| n.no_such_project);
 
-    // **Three empty states, because they are three different facts.** A
-    // narrowing that matched no project, a project with nothing waiting, and a
-    // machine with nothing waiting are not the same answer — and told the same
-    // way, a typo reads as good news.
+    // Three empty states: no such project, nothing waiting in it, nothing
+    // waiting anywhere. Told alike, a typo would read as good news.
     if items.is_empty() && folded.is_empty() && inhibited.is_empty() {
         if no_such {
             let known: Vec<String> = narrowed
@@ -88,8 +83,6 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
             return Ok(());
         }
         if project.is_some() || needs_you {
-            // *Nothing needs you here* is not *nothing needs you*, and the
-            // count is what makes the difference sayable.
             println!("Nothing needs you here.");
             if left_out > 0 {
                 println!(
@@ -106,31 +99,14 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         return Ok(());
     }
     for i in &items {
-        // **The word carries it, the colour only helps** (the design system says so,
-        // and the rule is stated there). Red and amber cannot be told apart
-        // under deuteranopia at any usable lightness, so nothing in this product
-        // may be distinguishable by colour alone — and *new since you last
-        // looked* is exactly the distinction somebody scanning at 09:00 needs.
-        //
-        // Absent, not blank, where there is no boundary: a machine with no
-        // previous look marks nothing, because there is nothing to be new to.
+        // The word carries "new", colour only helps: red and amber are not
+        // distinguishable under deuteranopia.
         let fresh = match i.new_to_you {
             true => format!(" {}", paint(render::GREEN, "new")),
             false => String::new(),
         };
-        // **Where it came from and how long it has waited.**
-        //
-        // This row printed the level, the title and the kind — so a flat list
-        // across every project named no project, and a list whose stated order
-        // is *level, then age* showed no age. A question waiting nineteen hours
-        // and one raised eight minutes ago were the same row. The board carried
-        // both all along, which is the tell: two surfaces over one payload, and
-        // only one of them reading it.
-        //
-        // Dim and after the kind, because they are what a reader scans *by*
-        // rather than what they read first — and absent rather than blank where
-        // there is nothing to say: `gate_down` is about the machine and belongs
-        // to no project.
+        // Project and age, dim and after the kind; absent where there is none
+        // (`gate_down` belongs to no project).
         let where_from = match &i.project_name {
             Some(p) if !p.is_empty() => format!(" {}", paint(DIM, p)),
             _ => String::new(),
@@ -154,23 +130,11 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
             fresh
         );
         if let Some(d) = &i.detail {
-            // **Per line, and indented per line.** A detail is prose an agent
-            // or this product wrote and several kinds write more than one line
-            // of it; clipping the whole thing as if it were one string cut the
-            // `gate_down` row mid-path on its second line and left the third
-            // hard against the margin, so the most alarming item in the inbox
-            // was also the least readable one.
-            // **A clipped line says where the rest of it is.** The reducer used
-            // to shorten a tool call to eighty characters before any surface saw
-            // it, so a stalled command ended in an ellipsis and the remainder
-            // existed nowhere. The whole string reaches here now, and this is
-            // the layer that shortens — which means this is also the layer that
-            // owes the reader a way to the rest of it.
+            // Clipped and indented per line; a clipped line points to the
+            // command that shows the whole of it.
             let mut clipped = false;
             for line in d.lines() {
-                // A blank line in the middle keeps its blank; five spaces
-                // followed by nothing is trailing whitespace somebody's diff
-                // will complain about and nobody can see.
+                // A blank line stays blank, without trailing whitespace.
                 match line.trim().is_empty() {
                     true => println!(),
                     false => {
@@ -181,11 +145,9 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
                 }
             }
             if clipped {
-                // Naming the command rather than the flag: `--json` is the
-                // machine's answer and `devplane show` is the person's.
-                let whole = match (i.run_id.as_deref(), i.work_id.as_deref()) {
+                let whole = match (i.run_id.as_deref(), i.change_id.as_deref()) {
                     (Some(r), _) if !r.is_empty() => format!("devplane show {r}"),
-                    (_, Some(w)) if !w.is_empty() => format!("devplane work show {w}"),
+                    (_, Some(w)) if !w.is_empty() => format!("devplane change show {w}"),
                     _ => "devplane inbox --json".to_string(),
                 };
                 println!(
@@ -194,22 +156,15 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
                 );
             }
         }
-        // Why there is no yes-or-no, where there is not — the same sentence the
-        // board shows, from the same field.
+        // Why there is no yes-or-no, where there is not — the board's sentence.
         if let Some(where_to) = &i.answer_in {
             println!("     {}", paint(DIM, where_to));
         }
         for (n, o) in i.options.iter().enumerate() {
             println!("     {}. {}", n + 1, o.label);
         }
-        // The rule to paste, and where. A pattern only where this machine has
-        // seen enough of the family to have a count behind it — being
-        // interrupted once says this command needed a decision and says
-        // nothing about the shape of the ones like it.
-        //
-        // **Printed, never written.** The rules are committed files reviewed
-        // like code, and an agent here runs as the same user, so the handover
-        // is a paste and that is the whole of it.
+        // The rule to paste, and where. Printed, never written: rules are
+        // committed files reviewed like code.
         if let Some(o) = &i.offer {
             let scope = match o.basis {
                 crate::core::offer::Basis::Family => {
@@ -236,15 +191,13 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         } else if let Some(no) = &i.no_offer {
             println!("     {}", paint(DIM, &no.sentence));
         }
-        // A work item has no run of its own once the agent is gone, and
-        // printing `run ` followed by nothing helps nobody.
-        let subject = match (i.work_id.as_deref(), i.run_id.as_deref()) {
-            (Some(w), _) => format!("work {}", clip(w, 14)),
+        // A change has no run of its own once the agent is gone.
+        let subject = match (i.change_id.as_deref(), i.run_id.as_deref()) {
+            (Some(w), _) => format!("change {}", clip(w, 14)),
             (None, Some(r)) if !r.is_empty() => format!("run {}", clip(r, 12)),
             _ => String::new(),
         };
-        // An item about the machine has neither a subject nor an action, and
-        // `     · ` is a line that says nothing and looks like a bug.
+        // A machine-wide item has neither subject nor action: print nothing.
         let trailer = match (subject.is_empty(), i.actions.is_empty()) {
             (true, true) => String::new(),
             (true, false) => i.actions.join(", "),
@@ -257,22 +210,39 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         if let Some(url) = &i.url {
             println!("     {}", paint(DIM, url));
         }
-        // The one action whose command a person cannot guess, spelled out for
-        // the same reason `decide` is: it is offered exactly when it will work.
+        // The one action whose command a person cannot guess.
         if i.actions.iter().any(|a| a == "resume")
-            && let Some(w) = &i.work_id
+            && let Some(w) = &i.change_id
         {
-            println!("     {}", paint(DIM, &format!("devplane work resume {w}")));
+            println!(
+                "     {}",
+                paint(DIM, &format!("devplane change resume {w}"))
+            );
         }
-        // Spell out the command only when Devplane can actually run it. For a
-        // session it merely watches there is nothing to answer from here, and
-        // printing a command that would fail is worse than printing none.
-        //
-        // **One command for both kinds now**, because the ask knows which it
-        // is. There used to be two, chosen here by guessing from `kind` — and
-        // the question branch printed the option's *label* where the protocol
-        // wanted its *value*, which worked against the captured fixture and
-        // against no real agent at all.
+        if let Some(r) = &i.report {
+            let says = match i.actions.iter().any(|a| a == "open_draft") {
+                true => format!("devplane report show {r} · open {r} | discard {r}"),
+                false => format!(
+                    "devplane report start {r} | reject {r} --reason … | defer {r} --reason …"
+                ),
+            };
+            println!("     {}", paint(DIM, &says));
+        }
+        if i.actions
+            .iter()
+            .any(|a| a == "tell_run" || a == "accept_drift")
+            && let (Some(w), Some(r)) = (&i.change_id, i.run_id.as_deref())
+        {
+            println!(
+                "     {}",
+                paint(
+                    DIM,
+                    &format!("devplane change drift {w} --run {r} --accept | --tell")
+                )
+            );
+        }
+        // Printed only when Devplane can deliver the answer; a watched session
+        // has nothing to answer from here.
         if let Some(ask) = &i.ask {
             println!(
                 "     {}",
@@ -281,8 +251,7 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         }
     }
 
-    // **What was folded, and what it is of.** Nothing is hidden: each row says
-    // the kind, the project and the count, and names the command that opens it.
+    // What was folded: kind, project and count, and the command that opens it.
     if !folded.is_empty() {
         println!();
         for f in &folded {
@@ -308,8 +277,7 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         );
     }
 
-    // Symptoms counted on the row that explains them. Printed under the list
-    // rather than beside each cause, because the cause is already in it.
+    // Symptoms counted on the row that explains them, under the list.
     if !inhibited.is_empty() {
         println!();
         for s in &inhibited {
@@ -328,9 +296,7 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         }
     }
 
-    // **A narrowed list says how many it is not showing.** This product is sold
-    // on one page for everything; a page that quietly became a filter has
-    // broken that promise, and the only defence is saying so every time.
+    // A narrowed list always says how many it is not showing.
     if left_out > 0 {
         let where_: Vec<String> = narrowed
             .as_ref()
@@ -355,63 +321,12 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
 }
 
 pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+    let c = crate::local::Reader::open().await?;
     let v = raw(&c, &format!("/api/attention?days={days}")).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    // **The seat's own number, printed before the per-kind table.**
-    //
-    // `kinds` answers *is the inbox worth reading*; this answers *is anything
-    // reaching you at all*. Different denominators, and only the second can
-    // say the product is not working.
-    //
-    // **The measurement and the citation are visually separate and that is the
-    // whole design.** The paper this idea came from defines vacuous oversight
-    // over residual risk, needing an error rate Devplane cannot observe; the
-    // ratio is one input to that model. So the first line is a fact this
-    // product owns end to end, and anything about a threshold is marked as
-    // somebody else's result with its identifier attached.
-    if let Some(o) = v.get("oversight").filter(|o| !o.is_null()) {
-        let n = |k: &str| o.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
-        if let Some(sentence) = o.get("sentence").and_then(|s| s.as_str()) {
-            let (answered, total) = (n("answered"), n("total"));
-            // Red only when nothing at all reached a person. A low ratio is
-            // not a failing grade — this product does not grade — but nought
-            // of a large number is the one case worth the contrast.
-            let colour = if answered == 0 && total > 0 {
-                render::RED
-            } else {
-                BOLD
-            };
-            println!("{}", paint(colour, sentence));
-            if n("asked") == 0 && n("unattended") > 0 {
-                // Only when the attention log agrees. This sentence once
-                // printed above a table showing sixty-nine raised permissions,
-                // because the two numbers came from different tables.
-                println!(
-                    "{}",
-                    paint(
-                        DIM,
-                        "Not one of them was put in front of you: every session here \
-                         is in a mode that decides on its own. `devplane modes` says which."
-                    )
-                );
-            }
-            println!(
-                "{}",
-                paint(
-                    DIM,
-                    "There is no threshold for this ratio on its own. The published \
-                     criterion (arXiv:2607.28317) is over residual risk and needs an \
-                     error rate nothing here can observe; this is the count, not a verdict."
-                )
-            );
-            println!();
-        }
-    }
-
     let empty = serde_json::Map::new();
     let kinds = v.get("kinds").and_then(|k| k.as_object()).unwrap_or(&empty);
     if kinds.is_empty() {
@@ -453,19 +368,14 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
             n(st, "elsewhere"),
             n(st, "open"),
         );
-        // A kind nobody has resolved yet and a kind everybody ignores are
-        // opposite facts; they must not print the same — and the daemon is
-        // where that rule lives. This recomputed the ratio *and* the rule from
-        // the raw counts, which is one rule in two places and only one of them
-        // tested.
+        // "Nobody resolved it yet" and "everybody ignores it" differ; the host
+        // computes `acted_share`, so the rule lives in one place.
         let share = match st.get("acted_share").and_then(|s| s.as_f64()) {
             Some(f) => format!("{:.0}%", 100.0 * f),
             None => paint(DIM, "—"),
         };
-        // **How often this kind was summarised rather than listed**, and how
-        // often that turned out to be wrong. A kind always folded and never
-        // acted on is one nobody needed as a row; a kind folded and then acted
-        // on once opened is one the fold was standing in front of.
+        // How often this kind was folded, and how often it was then acted on:
+        // the latter is a fold that stood in the way.
         let folded = n(st, "folded");
         let wrongly = n(st, "folded_then_acted");
         let f = match folded {
@@ -491,15 +401,9 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
              wrongly = folded, then acted on once opened — the fold was in the way",
         )
     );
-    // **Said only when it is true.** How often an agent asks is a property of
-    // the model — implicit escalation thresholds differ markedly by family and
-    // the models' own confidence is miscalibrated per family — so a `raised`
-    // column spanning two vendors is two escalation policies added together.
-    // The ratio beside it is about the person and is unaffected; the count is
-    // not, and a reader comparing weeks deserves to know which is which.
-    //
-    // A caveat printed on every run is a caveat nobody reads, so a machine with
-    // one vendor never sees this line.
+    // Ask frequency is a property of the model, so a `raised` count spanning
+    // vendors mixes escalation policies. Said only when more than one vendor
+    // is present.
     let agents: Vec<&str> = v["agents"]
         .as_array()
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
@@ -520,27 +424,14 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_say(run: &str, prompt: String) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
-    let v: serde_json::Value = c
-        .post_json(
-            &format!("/api/runs/{run}/prompt"),
-            &serde_json::json!({ "text": prompt }),
-        )
-        .await?;
-    match v.get("error").and_then(|e| e.as_str()) {
-        Some(e) => anyhow::bail!("{e}"),
-        None => println!("{}", paint(DIM, "sent")),
-    }
-    Ok(())
-}
-
 pub async fn cmd_snooze(id: &str, minutes: i64, json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
-    // Work and runs snooze separately, and the inbox lists both — so the id a
-    // person copied off it decides which, rather than making them know. Work
-    // ids are the ones this product mints, and they say so.
-    let what = if id.starts_with("w-") { "work" } else { "runs" };
+    let c = client::Client::connect_running().await?;
+    // Change ids (`c-…`) snooze the change; anything else is a run.
+    let what = if id.starts_with("c-") {
+        "changes"
+    } else {
+        "runs"
+    };
     let v: serde_json::Value = c
         .post(&format!("/api/{what}/{id}/snooze?minutes={minutes}"))
         .await?;
@@ -557,13 +448,8 @@ pub async fn cmd_snooze(id: &str, minutes: i64, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Answers something an agent asked, by the ask's own token.
-///
-/// **One command for both kinds.** There were two — `decide` for a permission
-/// and `answer` for a question — and a person had to know which protocol
-/// channel a thing had arrived on before they could reply to it. The row knows;
-/// the caller says what the person chose, and the daemon validates it against
-/// the row.
+/// Answers something an agent asked, by the ask's own token. The host
+/// validates the choice against the ask, whether permission or question.
 pub async fn cmd_answer(
     ask: &str,
     allow: bool,
@@ -578,15 +464,22 @@ pub async fn cmd_answer(
              --custom '<your words>'"
         );
     }
-    let c = client::Client::connect_or_start().await?;
+    // An agent may not answer its own permission: `--allow`, or an option
+    // without a field, from inside an agent session is refused. `--deny` and
+    // question answers go through. See `crate::hook::refuse_self_answer`.
+    let allowing = allow || (option.is_some() && field.is_none() && !deny);
+    if allowing && let Some(var) = crate::hook::agent_session() {
+        anyhow::bail!("{}", crate::hook::refuse_self_answer(var));
+    }
+    let c = crate::local::Reader::open().await?;
     let decision = match (allow, deny) {
         (true, _) => Some("allow"),
         (_, true) => Some("deny"),
         _ => None,
     };
-    let v: serde_json::Value = c
-        .post_json(
-            &format!("/api/asks/{ask}/answer"),
+    let v = c
+        .answer(
+            ask,
             &serde_json::json!({
                 "decision": decision,
                 "option": option,
@@ -598,10 +491,8 @@ pub async fn cmd_answer(
         .await?;
     match v.get("error").and_then(|e| e.as_str()) {
         Some(e) => anyhow::bail!("{e}"),
-        // **What became of it, not just "answered".** Whether the answer
-        // reached a waiting agent, went into a resumed session, or is recorded
-        // and undelivered is the difference between the feature working and the
-        // feature having been polite about failing.
+        // The outcome: delivered to a waiting agent, into a resumed session,
+        // or recorded and undelivered.
         None => println!(
             "{}  {}",
             paint(render::GREEN, "answered"),
@@ -618,7 +509,7 @@ pub async fn cmd_answer(
 
 /// Everything an agent has asked, and what became of each one.
 pub async fn cmd_asks(json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+    let c = crate::local::Reader::open().await?;
     let v = raw(&c, "/api/asks").await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -635,10 +526,8 @@ pub async fn cmd_asks(json: bool) -> Result<()> {
         .filter_map(|a| a.as_str())
         .collect();
 
-    // **The empty state is two sentences, not one.** *Nothing was abandoned*
-    // and *this vendor has no channel for it* are different facts, and printing
-    // the first while meaning the second is a silence reading as a claim — the
-    // defect the board's own empty state was written for, one surface further along.
+    // "Nothing was abandoned" and "this vendor has no channel for it" are
+    // different facts; `blindness` prints the second.
     let blindness = || {
         if blind.is_empty() {
             return;
@@ -699,9 +588,8 @@ pub async fn cmd_asks(json: bool) -> Result<()> {
         );
     }
 
-    // **The questions nobody answered**, from sessions Devplane only watches.
-    // Ordered newest first and never ranked by anything the agent authored:
-    // ranking these by importance means a model reading them.
+    // Questions nobody answered in watched sessions, newest first and never
+    // ranked by anything the agent wrote.
     if !abandoned.is_empty() {
         println!();
         println!(
@@ -731,14 +619,7 @@ pub async fn cmd_asks(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Which projects are deciding without you.
-///
-/// **The one surface the 2026-09-19 measurement left standing.** Forty-nine
-/// consecutive tool calls across four sessions put nothing in front of a
-/// person, so a ledger of *what was decided without you* is a transcript of
-/// everything. *Which of my repositories is in `auto`, and since when we knew*
-/// is one short list, and nothing on this machine could answer it.
-/// `1 item` / `2 items`, because a count in a sentence has to agree with it.
+/// `1 item` / `2 items`.
 fn plural_items(n: usize) -> &'static str {
     match n {
         1 => "item",
@@ -746,45 +627,29 @@ fn plural_items(n: usize) -> &'static str {
     }
 }
 
+/// Which projects are deciding without you, and what clock answers for you.
 pub async fn cmd_modes(json: bool) -> Result<()> {
-    let c = client::Client::connect_or_start().await?;
+    let c = crate::local::Reader::open().await?;
     let v = raw(&c, "/api/modes").await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    // **Deserialised into the type the API serialises, never read key by key.**
-    // This block took the answer apart with thirty-one `.get("key")` lookups,
-    // and one of them asked for `unreported` — a field no version of this
-    // endpoint has ever served. `unwrap_or(0)` made it zero, which killed one
-    // of the three sentences outright and turned the guard on the reassuring
-    // one into `0 < total`: always true. A key that is not in the type is a
-    // compile error now.
+    // Deserialised into the API's own type, so a missing field fails to compile.
     let m: crate::core::world::Modes = serde_json::from_value(v).map_err(|e| {
-        anyhow::anyhow!("the daemon's answer did not match what this build expects: {e}")
+        anyhow::anyhow!("the host's answer did not match what this build expects: {e}")
     })?;
     let projects = &m.projects;
-    // **Before the sessions, because it is true of all of them.** A timer that
-    // answers a question in somebody's name is the same kind of fact as a
-    // session running unsupervised, and it is the one this machine cannot
-    // discover any other way: the vendor's own settings UI hides the row while
-    // managed settings set it.
-    // **Deserialised into the type the API serialised, never read key by key.**
-    // This block used to reach for `c.get("file")` — a field renamed to
-    // `where_set` three passes earlier — and `unwrap_or("")` printed a blank
-    // line where the path belongs, so a person was told a clock was set and
-    // never told where to change it. A rename is a compile error now.
+    // The machine-wide question clock first: it applies to every session, and
+    // managed settings can set it where the vendor's UI hides it.
     if let Some(c) = m.question_clock.as_ref() {
         println!(
             "{}",
             match (c.answers_for_you, c.chosen_by_the_person) {
-                // **`never` is not an alarm and not a finding — it is somebody
-                // having said no.** Printed because it was written down, dim
-                // because nothing about it needs acting on.
+                // `never` is somebody having said no: dim, nothing to act on.
                 (false, _) => paint(DIM, &c.says),
                 (true, true) => paint(DIM, &c.says),
-                // Somebody else set a clock on this person's attention. That is
-                // the row this whole product exists to be able to show.
+                // Somebody else set a clock on this person's attention.
                 (true, false) => paint(render::YELLOW, &c.says),
             }
         );
@@ -799,22 +664,15 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
         let name = p.name.as_deref().unwrap_or("(no project)");
         println!("\n{}", paint(BOLD, name));
         for s in &p.sessions {
-            // Three outcomes, three colours, and the third is not the second.
-            // A mode nobody here recognises is not "supervised" and it is not
-            // "unsupervised" either — it is a question, and it prints as one.
+            // A mode this build does not recognise is neither supervised nor
+            // unsupervised; it prints as a question.
             let (label, colour) = match (s.label.as_deref(), s.asks_a_person) {
                 (Some(l), Some(false)) => (l.to_string(), render::RED),
                 (Some(l), Some(true)) => (l.to_string(), render::GREEN),
                 (Some(l), None) => (format!("{l} (unknown to this build)"), render::YELLOW),
-                // **A fourth case, and it is not "unknown to this build".** An
-                // ACP agent declares its own mode as a string of its choosing.
-                // There is no cross-vendor vocabulary for it and nothing maps
-                // it onto the four a vendor documents, so **no `asks_a_person`
-                // can be derived from it** — and it is attributed to the agent
-                // rather than printed as though a settings file said it.
-                //
-                // Not coloured as an alarm: a mode this build cannot classify
-                // is a fact about the protocol, not a finding about the person.
+                // An ACP agent's self-declared mode: no vendor vocabulary maps
+                // it, so no `asks_a_person` is derived, and it is attributed to
+                // the agent. Not an alarm.
                 (None, _) if s.agent_mode.as_deref().is_some_and(|m| !m.is_empty()) => (
                     format!(
                         "{} (the agent's own mode)",
@@ -822,13 +680,12 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
                     ),
                     DIM,
                 ),
-                // Not a gap: the hook that fires on every tool call carries no
-                // mode, so a session can be busy and genuinely not have said.
+                // The per-tool-call hook carries no mode, so a busy session may
+                // genuinely not have said.
                 (None, _) => ("not reported yet".to_string(), DIM),
             };
             let who = s.name.clone().unwrap_or_else(|| clip(&s.run, 8));
-            // "seen", never "since": nothing announces a mode change, so this
-            // is when Devplane first heard it at this value.
+            // "seen", not "since": nothing announces a mode change.
             let seen = s
                 .seen
                 .as_deref()
@@ -841,25 +698,16 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
                 paint(colour, &label),
                 seen
             );
-            // **The session's own clock, under the mode it belongs to.**
-            // `CLAUDE_AFK_TIMEOUT_MS` overrides the settings files and turns
-            // auto-continue on even where they say `never`, so this is the one
-            // line that can contradict the machine-wide one above — and the
-            // person who needs it is the one whose file says `never`.
-            //
-            // Silence where nothing is set, deliberately: a caveat printed on
-            // every row is a caveat nobody reads.
+            // The session's own clock: `CLAUDE_AFK_TIMEOUT_MS` overrides the
+            // settings files, so it can contradict the machine-wide line.
+            // Silent where nothing is set.
             if let Some(c) = s.question_clock.as_ref() {
                 println!(
                     "  {:<22}{}",
                     "",
                     paint(
-                        // Red for the session that answers instantly, because
-                        // that is the one state where *a question waits for
-                        // you* is untrue right now. Yellow where a clock
-                        // answers at all. Dim for `never`, which is a session
-                        // whose questions wait — the reassuring case, and one
-                        // that was painted as an alarm until 2026-09-21.
+                        // Red: answers instantly. Yellow: a clock answers.
+                        // Dim: `never`, so questions wait.
                         match (c.immediate, c.answers_for_you) {
                             (true, _) => render::RED,
                             (false, true) => render::YELLOW,
@@ -879,10 +727,8 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
     let (total, unsup, unknown, unreported) = (m.sessions, m.unsupervised, m.unknown, m.unreported);
     let unread = m.clock_unread;
     println!();
-    // **Three sentences, because there are three facts.** Counting a session
-    // that has not spoken as one running an exotic mode made sixteen idle
-    // editors look like a security incident — found by running this against a
-    // real machine, which is the only way it could have been found.
+    // Unsupervised, unknown and unreported are three facts and three
+    // sentences; a silent session is not an exotic mode.
     if unsup > 0 {
         println!(
             "{}",
@@ -917,13 +763,8 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
             )
         );
     }
-    // **The reassuring sentence, and it may not be printed over a clock.**
-    // *Every session that has reported asks you* is about the permission mode,
-    // and a session whose questions a timer closes is one where nobody is asked
-    // whatever its mode says. Printing both — which is what this did on the
-    // first run of the feature that reads the timer — is the surface
-    // contradicting itself on one screen, and a person who catches that is
-    // right to stop believing the rest of it.
+    // The reassuring sentence is about permission mode, so it is withheld
+    // whenever a clock can answer for the person.
     let clocked = projects
         .iter()
         .flat_map(|p| p.sessions.iter())
@@ -947,12 +788,8 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
             )
         );
     }
-    // **The coverage of the clock reading, and it is not the same fact as
-    // *nothing is set*.** The environment can only be read by the hook that
-    // runs as a child of the session, so a session that started before
-    // `devplane connect` has no reading at all — and a surface that stayed
-    // silent about those would be saying *your questions wait for you* about
-    // sessions it has never looked at. Printed only when there are some.
+    // Sessions started before `devplane connect` have no clock reading, which
+    // is not the same as "nothing set". Printed only when there are some.
     if unread > 0 {
         println!(
             "{}",
@@ -980,36 +817,19 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
 }
 
 /// The command that answers one inbox item, spelled so that it runs.
-///
-/// **Pure, and separate from the printing, because it has been wrong twice.**
-/// It printed `devplane decide` for a question, which fails with *"no permission
-/// request is waiting"*; and then it printed the option's **label** where the
-/// protocol wants its **value**, which is equal in the captured fixture and in
-/// nothing else — so it passed every test and failed against real agents.
-///
-/// A command this product prints is a promise that it works, and the two ways
-/// of breaking that promise are now pinned by tests rather than by a comment
-/// asking the next person to be careful.
+/// Separate from printing so the tests below pin it.
 fn answer_command(ask: &str, kind: &str, options: &[crate::core::Choice]) -> String {
     match (kind, options.first().and_then(|o| o.id.as_deref())) {
         // The option's own id — the schema's `const`, not its `title`.
         ("question", Some(first)) => format!("devplane answer {ask} --option '{first}'"),
-        // A question with no options is answered in prose; there is nothing to
-        // pick, and offering `--option` would be offering an empty list.
+        // A question with no options is answered in prose.
         ("question", None) => format!("devplane answer {ask} --custom '<your words>'"),
-        // A permission means a grant or a refusal however the agent spells its
-        // options, so the shorthand is honest here and only here.
+        // A permission is a grant or refusal however the agent spells options.
         _ => format!("devplane answer {ask} --allow"),
     }
 }
 
-/// The empty state.
-///
-/// **Longer than the list it replaces, on purpose.** A clear inbox is the one
-/// moment a person has attention to spare, and the measured cost of making them
-/// go and reconstruct the day themselves is 101.4 s against 45.4 s for being
-/// told at a boundary. Every sentence here is the daemon's; this renders and
-/// composes nothing.
+/// The empty state. Every sentence is the host's; this only lays them out.
 fn render_close(close: &serde_json::Value) {
     println!("{}", paint(render::GREEN, "Clear."));
 
@@ -1060,9 +880,7 @@ mod tests {
         }
     }
 
-    /// The bug this exists for: the **id**, never the label. An agent whose
-    /// option reads *Keep it* and answers to `keep_route` is the ordinary case
-    /// everywhere except the fixture.
+    /// The option's id, never its label: they differ for real agents.
     #[test]
     fn a_question_is_answered_with_the_option_the_agent_will_accept() {
         let cmd = answer_command(
@@ -1077,16 +895,14 @@ mod tests {
         );
     }
 
-    /// The older bug, in the same two lines: a question is not a permission and
-    /// `--allow` on one is a command that fails.
+    /// A question is not a permission; `--allow` on one fails.
     #[test]
     fn a_question_is_never_answered_with_a_permission_shorthand() {
         assert!(!answer_command("a1", "question", &[choice("x", "X")]).contains("--allow"));
         assert!(answer_command("a1", "permission", &[]).contains("--allow"));
     }
 
-    /// An agent that offered no options asked something wider than a list, and
-    /// a command offering a choice from an empty list is one that cannot run.
+    /// No options means an open question: nothing to pick from.
     #[test]
     fn a_question_with_nothing_to_pick_is_answered_in_prose() {
         let cmd = answer_command("a1", "question", &[]);
@@ -1094,8 +910,7 @@ mod tests {
         assert!(!cmd.contains("--option"), "{cmd}");
     }
 
-    /// An option a provider's own dialog owns carries no id, and Devplane
-    /// cannot answer it. It must not be offered as a pick.
+    /// An option owned by a provider's own dialog has no id and is not offered.
     #[test]
     fn an_option_with_no_id_is_not_offered_as_a_choice() {
         let unanswerable = Choice {
@@ -1107,9 +922,7 @@ mod tests {
         assert!(cmd.contains("--custom"), "{cmd}");
     }
 
-    /// Every command this function can produce names the ask and nothing else.
-    /// Addressing by run or by protocol request is what made an answer
-    /// undeliverable the moment the session was gone.
+    /// Every command is addressed by the ask, which outlives the session.
     #[test]
     fn every_command_is_addressed_by_the_ask() {
         for (kind, opts) in [

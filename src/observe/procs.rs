@@ -1,20 +1,11 @@
-//! The process table, read once, for the one question nothing else answers:
-//! **is an agent Devplane started still running with nobody talking to it?**
+//! The process table, read for one question: is an agent Devplane started
+//! still running with nobody talking to it?
 //!
-//! A graceful stop tears every agent's process group down. A `SIGKILL`, a
-//! crash, an OOM or a power cut gives the daemon no chance: the agent
-//! re-parents to pid 1, keeps its process group, and blocks on a stdout nobody
-//! is reading — holding a worktree, and still spending if it was mid-turn. For
-//! a product whose sentence is *what happened without you*, a model burning
-//! money with no row anywhere is the worst bug available.
-//!
-//! One `ps`, run at most twice per daemon lifetime. `/proc` is Linux-only and
-//! would need a second path for macOS anyway.
-//!
-//! **It never kills anything**, and not out of squeamishness: the agent may be
-//! *mid-write*, finishing a long command whose output it is about to put in the
-//! worktree. A tool that killed it on sight would destroy work to tidy up after
-//! itself. The row says what is running, where, and how to end it.
+//! After a `SIGKILL`, crash or power cut the agent re-parents to pid 1, keeps
+//! its process group and blocks on an unread stdout, holding a worktree and
+//! possibly spending. One `ps` (portable, unlike `/proc`), at most twice per
+//! host lifetime. It never kills: the agent may be mid-write. The row says what
+//! is running, where, and how to end it.
 
 use std::collections::HashSet;
 
@@ -24,65 +15,31 @@ pub struct Proc {
     pub pid: u32,
     pub ppid: u32,
     /// The process group. An agent is spawned as its own group leader, so for
-    /// one of ours this equals `pid` — which is most of what identifies it.
+    /// one of ours this equals `pid`.
     pub pgid: u32,
     pub command: String,
 }
 
 impl Proc {
-    /// Whether this process leads its own group, which every agent the
-    /// protocol crate spawns does and almost nothing else on a developer's
-    /// machine does by accident.
+    /// Whether this process leads its own group, which every spawned agent
+    /// does and almost nothing else does by accident.
     pub fn is_group_leader(&self) -> bool {
         self.pid == self.pgid
     }
 
     /// Whether this looks like the agent that was recorded.
     ///
-    /// Pid reuse is the risk and this is the mitigation. A pid on a busy
-    /// machine comes round again, and acting on a stale one would mean naming
-    /// somebody's shell as a leaked agent. Three things have to agree: the pid,
-    /// that it still leads its own group, and that its command line still
-    /// contains the agent's own command. Two of the three are cheap
-    /// coincidences; all three together are not.
+    /// Guards against pid reuse: the pid, group leadership and the agent's
+    /// command in the command line must all agree.
     pub fn looks_like_agent(&self, agent_command: &str) -> bool {
         self.is_group_leader() && !agent_command.is_empty() && self.command.contains(agent_command)
     }
 }
 
-/// Whether `pid` is a Devplane daemon, as far as the process table can say.
-///
-/// `Some(true)` it is, `Some(false)` the pid belongs to something else, and
-/// `None` the process table could not be read — which is *not* the same as
-/// *no*, and the caller has to decide which way to be wrong.
-///
-/// **Liveness alone is the wrong question.** `daemon.json` outlives a daemon
-/// that was killed, and the pid gets reused — so a guard that asks only whether
-/// *something* is alive at that number refuses to start for ever, naming
-/// somebody else's process. [`Proc::looks_like_agent`] takes the same care for
-/// the same reason.
-///
-/// Matched on the command rather than on group leadership: a daemon started
-/// from a shell is not its own group leader.
-pub fn is_daemon(pid: u32) -> Option<bool> {
-    let table = snapshot();
-    if table.is_empty() {
-        return None;
-    }
-    let Some(p) = table.iter().find(|p| p.pid == pid) else {
-        // The table was read and the pid is not in it: gone, definitively.
-        return Some(false);
-    };
-    // The binary's own name, so a rename cannot leave this matching nothing.
-    Some(p.command.contains(env!("CARGO_PKG_NAME")))
-}
-
 /// Every process on the machine, or an empty list when it cannot be read.
 ///
-/// **Absence is not emptiness, and the caller is the one that knows what to do
-/// about it** — but there is exactly one caller and for it the two coincide: a
-/// `ps` that will not run means *no leak can be reported*, never *there is no
-/// leak*, and reporting nothing is the honest outcome either way.
+/// A `ps` that will not run means no leak can be reported, never that there
+/// is none; reporting nothing is honest either way.
 #[cfg(unix)]
 pub fn snapshot() -> Vec<Proc> {
     let out = std::process::Command::new("ps")
@@ -100,17 +57,15 @@ pub fn snapshot() -> Vec<Proc> {
 
 #[cfg(not(unix))]
 pub fn snapshot() -> Vec<Proc> {
-    // No process-group semantics to reason about, and the guard this backs up
-    // is `#[cfg(unix)]` in the protocol crate too. Reporting nothing is
-    // correct rather than unimplemented.
+    // No process-group semantics here, and the guard this backs is
+    // `#[cfg(unix)]` in the protocol crate too.
     Vec::new()
 }
 
 /// Splits `ps` output into rows.
 ///
-/// Separated from [`snapshot`] so the parsing is testable without a machine
-/// state: the three numeric columns are fixed-width-ish and the command is
-/// everything after them, spaces and all.
+/// Separate from [`snapshot`] for testing: three numeric columns, then the
+/// command with its spaces.
 fn parse(text: &str) -> Vec<Proc> {
     text.lines()
         .filter_map(|line| {
@@ -118,8 +73,7 @@ fn parse(text: &str) -> Vec<Proc> {
             let pid = it.next()?.parse().ok()?;
             let ppid = it.next()?.parse().ok()?;
             let pgid = it.next()?.parse().ok()?;
-            // The rest of the line, with its original spacing thrown away —
-            // this is matched with `contains`, never re-executed.
+            // Spacing is lost; this is only matched with `contains`.
             let command = it.collect::<Vec<_>>().join(" ");
             Some(Proc {
                 pid,
@@ -133,11 +87,8 @@ fn parse(text: &str) -> Vec<Proc> {
 
 /// The pids of this process's own children that lead their own groups.
 ///
-/// Used twice around a spawn, and the difference is the agent that was just
-/// started. Restricted to group leaders because that is what the protocol
-/// crate makes an agent and because it drops the ordinary short-lived children
-/// this daemon shells out for — `git`, `gh`, a gate command — which inherit
-/// this process's group and would otherwise show up as candidates.
+/// Diffed around a spawn to find the new agent. Group leaders only, which
+/// drops the short-lived `git`/`gh`/gate children that share our group.
 pub fn own_group_leading_children() -> HashSet<u32> {
     let me = std::process::id();
     snapshot()
@@ -149,23 +100,18 @@ pub fn own_group_leading_children() -> HashSet<u32> {
 
 /// The single child that appeared between two readings, if it is unambiguous.
 ///
-/// **`None` when two appeared**, which is the honest answer rather than a
-/// guess: two dispatches racing would otherwise have a one-in-two chance of
-/// attributing each other's agent, and a leaked-process row naming the wrong
-/// worktree is worse than no row. The cost of `None` is that this daemon
-/// cannot report a leak for that one run, which is exactly where it was
-/// before this module existed.
+/// `None` when two appeared: racing starts could otherwise swap agents, and a
+/// row naming the wrong worktree is worse than none.
 pub fn one_new_child(before: &HashSet<u32>, after: &HashSet<u32>) -> Option<u32> {
     let mut new = after.difference(before);
     let first = new.next().copied()?;
     new.next().is_none().then_some(first)
 }
 
-/// Agents this daemon recorded that are still running with nobody attached.
+/// Agents this host recorded that are still running with nobody attached.
 ///
-/// Every one of these is a process that was started by a previous daemon,
-/// survived its death, and cannot be reached: its stdio was that daemon's
-/// pipes. It will never make progress and will never be answered.
+/// Each was started by a previous host and survived it; its stdio was that
+/// host's pipes, so it will never be answered.
 pub fn leaked(recorded: &[(u32, String)]) -> Vec<Proc> {
     if recorded.is_empty() {
         return Vec::new();
@@ -184,35 +130,6 @@ pub fn leaked(recorded: &[(u32, String)]) -> Vec<Proc> {
 #[cfg(test)]
 mod tests {
 
-    /// **A live pid is not a running daemon**, and the guard that believed it
-    /// could refuse to start for ever after a `SIGKILL` left `daemon.json`
-    /// behind and the pid came round again.
-    #[cfg(unix)]
-    #[test]
-    fn a_pid_that_is_not_ours_is_not_a_daemon() {
-        // pid 1 is launchd or init: always alive, never Devplane. It is also
-        // the case that proves this cannot be answered with `kill(pid, 0)`.
-        match is_daemon(1) {
-            Some(false) => {}
-            Some(true) => panic!("pid 1 is init, not a Devplane daemon"),
-            // A machine whose process table cannot be read answers `None`, and
-            // the caller refuses rather than guessing. Nothing to assert.
-            None => {}
-        }
-        // This test binary's own command carries the crate name, so it is the
-        // positive control. Guarded on actually finding ourselves in the table:
-        // `ps` is a snapshot taken under whatever load the suite is running, and
-        // asserting on a row that may not have been captured would trade a real
-        // check for an intermittent one.
-        let me = std::process::id();
-        if snapshot().iter().any(|p| p.pid == me) {
-            assert_eq!(
-                is_daemon(me),
-                Some(true),
-                "our own process should match the crate name"
-            );
-        }
-    }
     use super::*;
 
     fn rows() -> Vec<Proc> {
@@ -244,17 +161,15 @@ mod tests {
         let agent = &r[1];
         assert!(agent.looks_like_agent("claude-agent-acp"));
 
-        // Same pid, but it is no longer a group leader: a child inside somebody
-        // else's group, which an agent this crate spawned never is.
+        // Same pid, no longer a group leader: not one of ours.
         let child = &r[2];
         assert!(!child.is_group_leader());
         assert!(!child.looks_like_agent("cargo"));
 
-        // Pid came round again and is now something else entirely. This is the
-        // failure the command match prevents, and without it this function
-        // would name a stranger's process as a leaked agent.
+        // The pid came round again as something else; the command match
+        // stops this naming a stranger's process.
         assert!(!agent.looks_like_agent("codex"));
-        // And an empty recorded command matches nothing rather than everything.
+        // An empty recorded command matches nothing rather than everything.
         assert!(!agent.looks_like_agent(""));
     }
 
@@ -271,8 +186,7 @@ mod tests {
             None,
             "two dispatches raced, so neither is attributed rather than one being guessed"
         );
-        // A child that went away between the readings does not make the
-        // difference negative or the answer wrong.
+        // A child gone between readings does not skew the difference.
         assert_eq!(
             one_new_child(&before, &[2, 9].into_iter().collect()),
             Some(9)
@@ -299,17 +213,12 @@ mod tests {
 
 /// Whether a process is a command an agent started for a tool call.
 ///
-/// **Deliberately narrow, and the direction of the narrowness is the point.**
-/// Every provider spawns a tool-call command as a shell with `-c`; almost
-/// nothing else a session owns looks like that. A false positive here is the
-/// expensive mistake — it would mark a session that genuinely wants a prompt as
-/// busy, and a person who is the blocker would never be told — so anything this
-/// cannot recognise is counted as *not a job*, which leaves the board saying
-/// exactly what it says today.
+/// Deliberately narrow: providers spawn tool calls as a shell with `-c`. A
+/// false positive would mark a session that needs a person as busy, so
+/// anything unrecognised is not a job.
 fn is_tool_command(command: &str) -> bool {
-    // The shell-snapshot path is the provider's own fingerprint and needs no
-    // guessing. The generic form catches the same call under a config
-    // directory this does not know the name of.
+    // The shell-snapshot path is the provider's own fingerprint; the generic
+    // form catches it under an unknown config directory.
     if command.contains("shell-snapshots/") {
         return true;
     }
@@ -326,10 +235,9 @@ fn is_tool_command(command: &str) -> bool {
 
 /// How many commands each of the given sessions is running right now.
 ///
-/// One `ps`, answering for every session at once, because the question is
-/// asked about all of them on the same poll. Sessions with nothing running are
-/// present with a zero — **a checked zero is a different fact from an absent
-/// one**, and the caller distinguishes them.
+/// One `ps` for every session on the poll. Sessions with nothing running get
+/// a zero: a checked zero differs from an absent one. Only for sessions no
+/// hook speaks for — a connected session reports `background_tasks` itself.
 #[cfg(unix)]
 pub fn running_jobs(session_pids: &[u32]) -> std::collections::HashMap<u32, u32> {
     jobs_from(&snapshot(), session_pids)
@@ -341,8 +249,7 @@ pub fn running_jobs(session_pids: &[u32]) -> std::collections::HashMap<u32, u32>
     std::collections::HashMap::new()
 }
 
-/// Separated from [`running_jobs`] so the counting is testable against a fixed
-/// process table rather than whatever this machine happens to be doing.
+/// Separate from [`running_jobs`] so counting is testable on a fixed table.
 fn jobs_from(procs: &[Proc], session_pids: &[u32]) -> std::collections::HashMap<u32, u32> {
     let wanted: HashSet<u32> = session_pids.iter().copied().collect();
     let mut out: std::collections::HashMap<u32, u32> = wanted.iter().map(|p| (*p, 0)).collect();
@@ -367,9 +274,8 @@ mod job_tests {
         }
     }
 
-    /// The bug this exists for, as the process table showed it: a session the
-    /// roster called `idle` with a test suite running under it for 37 minutes,
-    /// beside four genuinely idle sessions with no children at all.
+    /// A session reported `idle` with a test suite running under it, beside
+    /// genuinely idle sessions with no children.
     #[test]
     fn a_session_running_a_test_suite_is_told_apart_from_one_that_wants_a_prompt() {
         let table = vec![
@@ -390,9 +296,8 @@ mod job_tests {
         );
     }
 
-    /// **A session nobody asked about is absent, not zero.** The caller turns
-    /// a zero into *the job finished*; inventing one for a session that was
-    /// never in the list would clear a block on no evidence.
+    /// A session nobody asked about is absent, not zero: a zero clears a
+    /// block.
     #[test]
     fn only_the_sessions_asked_about_are_answered_for() {
         let table = vec![proc(200, 100, "/bin/sh -c make test")];
@@ -401,9 +306,8 @@ mod job_tests {
         assert_eq!(jobs.get(&999), Some(&0));
     }
 
-    /// Everything that is not recognisably a tool call is counted as none of
-    /// them, because the cost of guessing wrong runs the other way: a person
-    /// who is the blocker would stop being told so.
+    /// Anything not recognisably a tool call counts as none: guessing wrong
+    /// would hide that a person is the blocker.
     #[test]
     fn nothing_unrecognised_is_counted_as_a_job() {
         assert!(is_tool_command(
@@ -411,8 +315,7 @@ mod job_tests {
         ));
         assert!(is_tool_command("/bin/sh -c cargo test"));
         assert!(is_tool_command("bash -c make"));
-        // A language server, an MCP server, an editor helper: all plausible
-        // children of a session, none of them a command it is waiting on.
+        // Language servers, MCP servers, editor helpers: not awaited commands.
         assert!(!is_tool_command("node /path/to/mcp-server.js"));
         assert!(!is_tool_command("/usr/bin/python3 -m something"));
         assert!(!is_tool_command("/bin/zsh -i"));

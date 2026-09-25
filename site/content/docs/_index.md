@@ -1,14 +1,13 @@
 +++
 title = "Documentation"
-description = "Install Devplane, see what needs you across every project on your machine, and make “done” mean your project’s own checks passed."
+description = "Install Devplane, start a change against a spec, and make “done” mean your own gate passed against the tree as it stands."
 sort_by = "weight"
 template = "section.html"
 page_template = "page.html"
 +++
 
-Devplane is one binary. It watches the agent sessions already running on your machine, drives new
-ones over a documented protocol, and refuses to call work finished until the commands your
-repository committed agree that it is.
+Devplane is the desktop workbench for spec-driven agentic development. Write the spec, dispatch any
+ACP agent, verify against your own gates, and keep the record of who decided what while you were not
+looking. One binary, local-first.
 
-Start with the [quickstart](/docs/quickstart/) — about five minutes, and the first step needs no
-configuration at all.
+Start with the [quickstart](@/docs/quickstart.md), then take [the workbench](@/docs/workbench.md) tour.

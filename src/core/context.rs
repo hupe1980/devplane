@@ -1,70 +1,58 @@
 //! What a prompt may say about the project it is going to.
 //!
-//! # Why this is not a template engine
-//!
-//! Every prompt library in the field is a text snippet manager, because a
-//! snippet manager is all any of them can be: none of them is also watching the
-//! session, the gate and the repository. **A prompt that can say *the gate
-//! failed on these three tests* and mean it is a different object from one that
-//! says *fix the failing tests*.**
-//!
-//! That is the whole feature, and it needs no language. A **closed set** of
-//! named values, one pass, no loops and no conditionals. The moment an engine
-//! appears, this product owns a language as well as a format, and the argument
-//! against owning a format applies unchanged.
-//!
-//! # The failure to design against is the empty string
-//!
-//! **A placeholder that cannot be resolved refuses.** Never an empty string,
-//! never the literal text, never a silent omission — a confidently wrong prompt
-//! sent to an agent is worse than a refused one, and it is the direction every
-//! templating system in existence defaults to.
-//!
-//! # And where it may be written
-//!
-//! `.devplane/prompts/` is Devplane's own portable form and may carry these. A
-//! vendor's `SKILL.md` is **never scanned**: it is passed through byte for byte
-//! and takes values as arguments, which is what its `argument-hint` is for.
-//! Templating somebody else's file is owning their format.
+//! A closed set of named values substituted in one pass — no loops, no
+//! conditionals, no engine. A placeholder that cannot be resolved refuses:
+//! never an empty string, never the literal text. Only prompts a person types
+//! are resolved; a vendor's `SKILL.md` is passed through byte for byte.
 
 use std::fmt;
 
-/// The most a resolved prompt may grow to.
-///
-/// A plan's outline or a flood of gate failures can dwarf the prompt that
-/// carries them. Bounded, and a truncation **says what it dropped** rather than
-/// quietly shortening somebody's instructions.
+/// The most one resolved value may grow to; a truncation says what it dropped.
 pub const MAX_VALUE: usize = 4_000;
 
-/// Everything a prompt may name.
-///
-/// **Closed, and adding a member is a change with a reason.** Each one must
-/// resolve from state this daemon already holds for that project; a member that
-/// needed a new reader is a new reader, and belongs in its own change.
+/// Everything a prompt may name. Closed: each member must resolve from state
+/// already held for the project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Field {
     Project,
     Branch,
     BaseBranch,
     Dirty,
-    /// The specification the in-flight work names.
     PlanPath,
-    /// How many boxes are still unticked.
     PlanOpen,
-    /// How many lines the project's own words mark unresolved.
     PlanQuestions,
-    /// What the last gate actually failed on, already reduced to the lines that
-    /// matter by the same extractor the gate report uses.
+    /// Reduced by the same extractor the gate report uses.
     GateFailures,
-    /// The last decision and, separately, on whose authority.
     LastDecision,
     LastAuthority,
-    /// A question an agent asked that nobody answered.
     UnansweredQuestion,
+    /// One `- <text>` line each; bound only when some were chosen, so naming it
+    /// with none refuses rather than sending an empty block.
+    Tasks,
+    /// Never refuses: none resolved is stated as [`NO_REPORTS`].
+    Reports,
+}
+
+pub const NO_REPORTS: &str = "no reports have been resolved for this change";
+
+/// The last sentence of every sent prompt: a sanctioned way to say *I cannot*,
+/// so a stuck agent does not make the checks pass by editing or skipping them.
+pub const STOP_AND_SAY: &str = "If the specification cannot be satisfied, stop and say so \
+plainly rather than making the checks pass another way.";
+
+/// `prompt`, ending with [`STOP_AND_SAY`] exactly once.
+pub fn with_stop_and_say(prompt: &str) -> String {
+    let body = without_stop_and_say(prompt);
+    format!("{}\n\n{STOP_AND_SAY}\n", body.trim_end())
+}
+
+/// `prompt` without [`STOP_AND_SAY`] — for where the prompt is shown to a
+/// person as the change's description, such as a pull request body.
+pub fn without_stop_and_say(prompt: &str) -> String {
+    prompt.replace(STOP_AND_SAY, "").trim_end().to_string()
 }
 
 impl Field {
-    /// Every member, so nothing enumerates them by hand.
     pub const ALL: &'static [Field] = &[
         Field::Project,
         Field::Branch,
@@ -77,6 +65,8 @@ impl Field {
         Field::LastDecision,
         Field::LastAuthority,
         Field::UnansweredQuestion,
+        Field::Tasks,
+        Field::Reports,
     ];
 
     /// What a prompt writes between the braces.
@@ -94,10 +84,11 @@ impl Field {
             Field::LastDecision => "decision.last",
             Field::LastAuthority => "decision.authority",
             Field::UnansweredQuestion => "question.unanswered",
+            Field::Tasks => "tasks",
+            Field::Reports => "reports",
         }
     }
 
-    /// What `devplane` prints when somebody asks what a prompt may say.
     #[must_use]
     pub fn about(self) -> &'static str {
         match self {
@@ -105,13 +96,15 @@ impl Field {
             Field::Branch => "the branch the worktree is on",
             Field::BaseBranch => "what the project branches from",
             Field::Dirty => "whether the worktree has uncommitted changes",
-            Field::PlanPath => "the specification the work in flight names",
+            Field::PlanPath => "the specification the change in flight names",
             Field::PlanOpen => "how many of its boxes are still unticked",
             Field::PlanQuestions => "how many lines it marks unresolved",
             Field::GateFailures => "what the last gate failed on",
             Field::LastDecision => "the last decision recorded here",
             Field::LastAuthority => "on whose authority it was taken",
             Field::UnansweredQuestion => "a question an agent asked and nobody answered",
+            Field::Tasks => "the tasks this dispatch sends, one line each",
+            Field::Reports => "what became of the reports this change filed about other projects",
         }
     }
 
@@ -120,12 +113,7 @@ impl Field {
     }
 }
 
-/// One value, and **when it was true**.
-///
-/// A gate that has not run, a plan nobody is working to, a decision from last
-/// week: a value with no time on it reads as current, and a prompt that tells
-/// an agent about last Tuesday's failures in the present tense is worse than
-/// one that says nothing.
+/// One value and when it was true — an undated value reads as current.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Value {
     pub text: String,
@@ -141,9 +129,7 @@ impl Value {
     }
 }
 
-/// What one target can answer.
-///
-/// Built by the caller that has the disk; this module resolves and never reads.
+/// What one target can answer. Built by the caller; this module never reads.
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     values: std::collections::BTreeMap<Field, Value>,
@@ -163,10 +149,10 @@ impl Context {
 /// Why a prompt could not be resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unresolved {
-    /// A name outside the closed set.
     NoSuchField(String),
-    /// A member of the set with nothing behind it for this target.
     NothingToSay(Field),
+    /// Its own refusal: the fix is choosing tasks, not changing the project.
+    NoTasksSelected,
 }
 
 impl fmt::Display for Unresolved {
@@ -187,19 +173,16 @@ impl fmt::Display for Unresolved {
                 field.name(),
                 field.about()
             ),
+            Unresolved::NoTasksSelected => {
+                write!(f, "`{{tasks}}` — no tasks were selected for this dispatch")
+            }
         }
     }
 }
 
-/// Fills a portable prompt's placeholders, or says which it could not.
-///
-/// **One pass.** A resolved value that happens to contain the syntax is not
-/// re-scanned: a gate failure carrying `{project}` in its text is a failure
-/// message, not an instruction.
-///
-/// **A placeholder inside a fenced block is left alone**, because a prompt that
-/// documents this mechanism would otherwise rewrite its own example — the same
-/// argument the specification reader already makes one delimiter larger.
+/// Fills a prompt's placeholders, or lists every one it could not. One pass:
+/// resolved values are not re-scanned. Fenced blocks are left alone so a
+/// documented example is not rewritten.
 pub fn resolve(template: &str, ctx: &Context) -> Result<String, Vec<Unresolved>> {
     let mut out = String::with_capacity(template.len());
     let mut problems: Vec<Unresolved> = Vec::new();
@@ -243,14 +226,12 @@ fn resolve_line(line: &str, ctx: &Context, out: &mut String, problems: &mut Vec<
             continue;
         }
         let Some(end) = b[i + 1..].iter().position(|&c| c == '}').map(|p| i + 1 + p) else {
-            // An unclosed brace is a brace. Prose is allowed to contain one.
             out.push(b[i]);
             i += 1;
             continue;
         };
         let name: String = b[i + 1..end].iter().collect();
-        // A brace around something that is not a name is prose too: `{1}`,
-        // `{"a": 1}`, a JSON example in an instruction.
+        // `{1}`, `{"a": 1}`: braces around a non-name are prose.
         if name.is_empty()
             || !name
                 .chars()
@@ -263,6 +244,7 @@ fn resolve_line(line: &str, ctx: &Context, out: &mut String, problems: &mut Vec<
         match Field::parse(&name) {
             None => problems.push(Unresolved::NoSuchField(name)),
             Some(field) => match ctx.get(field) {
+                None if field == Field::Tasks => problems.push(Unresolved::NoTasksSelected),
                 None => problems.push(Unresolved::NothingToSay(field)),
                 Some(v) => out.push_str(&clip(&v.text)),
             },
@@ -271,7 +253,21 @@ fn resolve_line(line: &str, ctx: &Context, out: &mut String, problems: &mut Vec<
     }
 }
 
-/// Bounded, and a truncation says what it dropped.
+/// Whether a template places `field` itself, outside fenced blocks — so a
+/// caller that would otherwise append a block knows not to.
+pub fn names(template: &str, field: Field) -> bool {
+    let want = format!("{{{}}}", field.name());
+    let mut fenced = false;
+    template.lines().any(|line| {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            fenced = !fenced;
+            return false;
+        }
+        !fenced && line.contains(&want)
+    })
+}
+
 fn clip(s: &str) -> String {
     if s.chars().count() <= MAX_VALUE {
         return s.to_string();
@@ -284,6 +280,17 @@ fn clip(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stop_sentence_ends_a_prompt_exactly_once() {
+        let once = with_stop_and_say("Do the thing.");
+        assert!(once.trim_end().ends_with(STOP_AND_SAY));
+        assert_eq!(once.matches(STOP_AND_SAY).count(), 1);
+        let twice = with_stop_and_say(&once);
+        assert_eq!(twice.matches(STOP_AND_SAY).count(), 1);
+        assert_eq!(without_stop_and_say(&once), "Do the thing.");
+        assert_eq!(STOP_AND_SAY.matches(". ").count(), 0, "one sentence");
+    }
 
     fn at() -> jiff::Timestamp {
         "2026-09-23T10:00:00Z".parse().unwrap()
@@ -298,7 +305,51 @@ mod tests {
             )
     }
 
-    /// **The whole feature in one assertion.**
+    #[test]
+    fn a_template_may_place_the_tasks_and_refuses_when_none_were_chosen() {
+        let with = ctx().with(
+            Field::Tasks,
+            Value::new("- T001 do it\n- T002 test it", at()),
+        );
+        let out = resolve("Do these:\n{tasks}\n", &with).expect("bound");
+        assert!(out.contains("- T001 do it\n- T002 test it"));
+
+        let err = resolve("Do these:\n{tasks}\n", &ctx()).unwrap_err();
+        assert_eq!(err, [Unresolved::NoTasksSelected]);
+        assert!(
+            err[0]
+                .to_string()
+                .contains("no tasks were selected for this dispatch"),
+            "{}",
+            err[0]
+        );
+
+        assert!(names("Do {tasks} now", Field::Tasks));
+        assert!(!names("Do the work", Field::Tasks));
+        assert!(
+            !names("```\n{tasks}\n```\n", Field::Tasks),
+            "a fenced example is not a placement"
+        );
+        assert_eq!(Field::parse("tasks"), Some(Field::Tasks));
+    }
+
+    #[test]
+    fn the_reports_field_carries_what_it_is_given_and_says_so_when_empty() {
+        let quiet = ctx().with(Field::Reports, Value::new(NO_REPORTS, at()));
+        let out = resolve("Since last time: {reports}", &quiet).expect("bound");
+        assert!(out.ends_with(NO_REPORTS), "{out}");
+        let told = ctx().with(
+            Field::Reports,
+            Value::new(
+                "Report rp-1 to core-lib — rejected\n> reason: by design",
+                at(),
+            ),
+        );
+        let out = resolve("{reports}", &told).expect("bound");
+        assert!(out.contains("> reason: by design"), "{out}");
+        assert_eq!(Field::parse("reports"), Some(Field::Reports));
+    }
+
     #[test]
     fn a_prompt_can_say_what_the_gate_actually_failed_on() {
         let out = resolve(
@@ -311,11 +362,6 @@ mod tests {
         assert!(!out.contains('{'), "a placeholder survived: {out}");
     }
 
-    /// **An unresolved placeholder refuses, and names which.**
-    ///
-    /// Never an empty string, never the literal text, never a silent omission.
-    /// A confidently wrong prompt sent to an agent is worse than a refused one,
-    /// and it is the direction every templating system defaults to.
     #[test]
     fn a_placeholder_with_nothing_behind_it_refuses() {
         let e = resolve("In {project}: {plan.open} boxes", &ctx())
@@ -326,9 +372,6 @@ mod tests {
         assert!(says.contains("none right now"), "{says}");
     }
 
-    /// **The absence test, over every member of the closed set.**
-    ///
-    /// Nothing may reach an agent as an empty string or as the literal text.
     #[test]
     fn no_member_of_the_set_can_reach_an_agent_unresolved() {
         for f in Field::ALL {
@@ -343,7 +386,6 @@ mod tests {
         }
     }
 
-    /// A name outside the set is refused and the set is named.
     #[test]
     fn a_name_nobody_defined_is_refused_with_the_list() {
         let e = resolve("{cost.today}", &ctx()).expect_err("not a field");
@@ -354,7 +396,6 @@ mod tests {
         }
     }
 
-    /// **One pass.** A value that contains the syntax is not re-scanned.
     #[test]
     fn a_value_carrying_the_syntax_is_not_substituted_again() {
         let c = Context::default().with(Field::Project, Value::new("weird-{branch}-name", at()));
@@ -365,7 +406,6 @@ mod tests {
         );
     }
 
-    /// **A placeholder inside a fenced block is documentation.**
     #[test]
     fn a_fenced_example_is_left_alone() {
         let t = "Use it like this:\n```\n{project}\n```\nand here: {project}";
@@ -377,7 +417,6 @@ mod tests {
         assert!(out.ends_with("and here: payments-api"), "{out}");
     }
 
-    /// Braces that are not placeholders are prose.
     #[test]
     fn prose_containing_braces_is_not_a_template() {
         for t in ["a {1} b", r#"{"key": 1}"#, "unclosed { here", "{}", "{A}"] {
@@ -386,7 +425,6 @@ mod tests {
         }
     }
 
-    /// **Bounded, and a truncation says what it dropped.**
     #[test]
     fn a_very_large_value_is_bounded_and_says_so() {
         let huge = "x".repeat(MAX_VALUE + 500);
@@ -400,7 +438,6 @@ mod tests {
         );
     }
 
-    /// Every field has a name and a sentence, or the refusal cannot be read.
     #[test]
     fn every_field_is_nameable_and_explainable() {
         let mut names = std::collections::BTreeSet::new();
@@ -416,8 +453,6 @@ mod tests {
         }
     }
 
-    /// Several problems are all reported, not just the first — a person fixing
-    /// a prompt wants the list rather than one round trip per placeholder.
     #[test]
     fn every_problem_is_reported_at_once() {
         let e =
@@ -430,22 +465,8 @@ mod tests {
 mod refusals {
     use super::*;
 
-    /// **A vendor's artefact is never scanned**, and this is the absence that
-    /// says so.
-    ///
-    /// `.devplane/prompts/` is Devplane's own portable form and may carry
-    /// placeholders. A `SKILL.md` is the vendor's: it passes through byte for
-    /// byte and takes values as arguments, which is what its `argument-hint` is
-    /// for. Templating somebody else's file is owning their format, which is
-    /// the thing the library exists not to do.
-    ///
-    /// Held here as a property of the **module** rather than of a call site:
-    /// nothing in this file knows what a skill is, so nothing in it can
-    /// substitute into one.
-    /// **Comments are stripped before the check**, for the third time in this
-    /// repository. A guard that reads a file for a forbidden word matches the
-    /// paragraph explaining why the word is forbidden — so it fails on a
-    /// correct file and can only be satisfied by deleting its own reasoning.
+    /// Production code with comments stripped, so a guard does not match the
+    /// comment explaining why a word is forbidden.
     fn code_only() -> String {
         include_str!("context.rs")
             .split("#[cfg(test)]")
@@ -472,12 +493,6 @@ mod refusals {
         }
     }
 
-    /// **Nothing here writes**, so an artefact's digest cannot change.
-    ///
-    /// The library's central refusal is that a `SKILL.md` in it is byte
-    /// identical to the one in the repository, and the digest proves it. The
-    /// strongest form of that guarantee is that the substitution path has no
-    /// way to write at all.
     #[test]
     fn nothing_on_this_path_can_write_a_file() {
         let code = code_only();
@@ -490,18 +505,12 @@ mod refusals {
         }
     }
 
-    /// **No loops, no conditionals, no expressions.**
-    ///
-    /// A closed set of names, resolved once. The moment an engine appears this
-    /// product owns a language as well as a format, and the argument against
-    /// owning a format applies unchanged.
     #[test]
     fn the_syntax_is_a_name_and_nothing_else() {
         let c = Context::default().with(
             Field::Project,
             Value::new("p", "2026-09-23T10:00:00Z".parse().unwrap()),
         );
-        // Anything that looks like an expression is prose.
         for t in [
             "{#if project}x{/if}",
             "{project | upper}",

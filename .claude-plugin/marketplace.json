@@ -1,14 +1,21 @@
 {
   "name": "devplane",
-  "description": "Devplane: records who decided, when nobody asked you — across every project and every agent on your machine.",
-  "owner": { "name": "hupe1980", "url": "https://github.com/hupe1980" },
+  "description": "Devplane — the desktop workbench for spec-driven agentic development.",
+  "owner": {
+    "name": "hupe1980",
+    "url": "https://github.com/hupe1980"
+  },
   "plugins": [
     {
       "name": "devplane",
       "source": "./plugin",
       "description": "Ask Devplane what is happening across every project on this machine — read-only.",
       "category": "productivity",
-      "tags": ["agents", "supervision", "observability"]
+      "tags": [
+        "agents",
+        "spec-driven",
+        "verification"
+      ]
     }
   ]
 }

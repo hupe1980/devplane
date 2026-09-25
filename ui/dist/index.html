@@ -4,11 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Devplane</title>
-    <!--
-      No font link, no CDN, no analytics. Nothing here reaches outside this
-      machine, in any build — `tests/ui_contract.rs` asserts it against the
-      served bytes rather than against this comment.
-    -->
+    <!-- Nothing reaches outside this machine; `tests/ui_bundle.rs` checks the served bytes. -->
     <script type="module" crossorigin src="/app.js"></script>
     <link rel="stylesheet" crossorigin href="/index.css">
   </head>

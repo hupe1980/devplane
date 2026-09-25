@@ -1,76 +1,25 @@
 //! The done certificate: evidence a reviewer can check without trusting this
-//! tool.
-//!
-//! # Why this is not an attestation
-//!
-//! Software supply chain already has a mature answer to *"can a third party
-//! believe this artifact was produced the way it claims?"* — in-toto statements
-//! carrying SLSA provenance, signed in a DSSE envelope. It is worth being
-//! precise about what that promises, because this looks like the same object and
-//! is not. SLSA's own specification says of the builder field that it
-//!
-//! > identifies the build platform that executed the invocation, which is
-//! > trusted to have correctly performed the operation
-//!
-//! and tells consumers they must accept only specific signer-builder pairs. A
-//! signature proves the attestation was not altered; it proves nothing about
-//! whether the claim inside it is true. **The producer is inside the trust
-//! boundary by construction.**
-//!
-//! This certificate does not ask to be believed. It names a commit and a set of
-//! commands so the reader runs them. The producer is outside the trust boundary
-//! because the producer's assertion is not load-bearing — the reader's own shell
-//! is. That is only possible because the domain is small: a gate is a handful of
-//! commands against a commit, not an entire build platform. Where SLSA must
-//! attest because re-running a build is infeasible, this can instruct, because
-//! re-running a gate is a paste.
-//!
-//! So the statement *shape* is borrowed — it costs four keys and puts this in a
-//! form anybody in that space already has a parser for — and the envelope and
-//! the signature are refused. A signature needs a key, a key needs a trust root,
-//! and a trust root needs an account, which this product does not have and does
-//! not want. Unsigned is also the honest position: signing would invite exactly
-//! the reading the artifact exists to avoid.
-//!
-//! # What it establishes
-//!
-//! That these commands ended as recorded against this commit. Not that the work
-//! is correct, not that the commands check the right things, and not that the
-//! record was never altered. The artifact says all of that in its own text,
-//! because a statement of limits that lives in documentation does not travel
-//! with a paste.
+//! tool. It borrows the in-toto statement shape but is deliberately unsigned:
+//! SLSA provenance asks the reader to trust the builder, whereas this names a
+//! commit and the gate commands so the reader re-runs them. It establishes only
+//! that these commands ended as recorded against this commit — not that the
+//! work is correct — and says so in its own text ([`LIMITS`]).
 
-use super::work::{CommandResult, CommitStamp, Completion, GateReport, Outcome, Reach, Work};
+use super::change::{Change, CommandResult, CommitStamp, Completion, GateReport, Outcome, Reach};
 
-/// The predicate type this emits. Versioned, because a consumer that cannot
-/// tell which shape it is holding is a consumer that guesses.
 /// Where a piece of evidence came from, in the OpenTelemetry GenAI conventions'
-/// own proposed vocabulary.
-///
-/// **The names are adopted rather than invented**, because somebody else is
-/// specifying this distinction and a private spelling of it would be one more
-/// thing for a reader to translate. The proposal is open rather than published,
-/// so the attribute travels under its own name and nothing here claims it is a
-/// standard yet.
-///
-/// The whole point is the **third** state. An origin that is not known is
-/// **absent**, never defaulted — because the only value anybody would default
-/// to is the flattering one, and a certificate that quietly upgrades *the agent
-/// said so* to *a check observed it* is the exact failure the document exists
-/// to prevent.
+/// proposed vocabulary (not yet a standard). An unknown origin is absent, never
+/// defaulted — the default would be the flattering one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    /// A gate transcript: commands this tool ran, with the exit codes they
-    /// ended on. Re-derivable by a reviewer who does not trust this tool.
+    /// A gate transcript: commands this tool ran and their exit codes;
+    /// re-derivable by a reviewer.
     ExternallyObserved,
-    /// The agent's own account of what it did. Carried as a **claim**, never as
-    /// a predicate — measured at a 1.7 % base rate of agentic pull requests
-    /// whose description asserts changes that were not implemented.
+    /// The agent's own account of what it did: a claim, never a predicate.
     SelfReported,
 }
 
 impl Origin {
-    /// The attribute's key, as the conventions spell it.
     pub const KEY: &'static str = "gen_ai.evidence.origin";
 
     #[must_use]
@@ -82,19 +31,14 @@ impl Origin {
     }
 }
 
+/// The predicate type this emits, versioned.
 pub const PREDICATE_TYPE: &str = "https://devplane.dev/DoneCertificate/v1";
-/// The in-toto statement type, so the outer envelope is recognisable.
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 
-/// The artifact's hard ceiling. A certificate nobody will read is not evidence,
-/// and "bounded" with no number attached is not a requirement anybody can check.
+/// The artifact's hard size ceiling.
 pub const MAX_BYTES: usize = 64 * 1024;
 
-/// How much of a command a page shows before it truncates.
-///
-/// The **copy** carries the whole thing; this is only what fits on a row. A
-/// certificate whose page and whose clipboard differ in anything but length
-/// would be two documents.
+/// How much of a command a page row shows; the copy carries the whole thing.
 pub const PAGE_COMMAND_CHARS: usize = 120;
 
 /// What the artifact claims, in its own words, so it travels with the paste.
@@ -102,13 +46,10 @@ pub const LIMITS: &str = "This is evidence that these commands ended as recorded
 commit. It is not evidence that the work is correct, that the commands check the right things, or \
 that the specification was satisfied. It is unsigned and detects change rather than forgery.";
 
-/// Every field a reader can check for themselves, named once so both renderings
-/// agree by construction rather than by discipline.
-///
-/// Two lists of which fields are checkable would be two homes for one fact, and
-/// the one that drifts is the one nobody is looking at.
+/// Every field a reader can check for themselves — one list shared by both renderings.
 pub const REDERIVABLE: &[&str] = &[
     "evidence.commit.commit",
+    "evidence.commit.tree",
     "evidence.commands[].command",
     "evidence.commands[].outcome",
     "specification.fingerprint",
@@ -116,75 +57,109 @@ pub const REDERIVABLE: &[&str] = &[
     "specification.tasks_total",
 ];
 
-/// The portable record of one piece of work's completion.
-///
-/// Assembled from a `Work` and never stored: export is a command, not a schema.
+/// The portable record of one change's completion. Assembled from a `Change`,
+/// never stored.
 pub struct Certificate<'a> {
-    pub work: &'a Work,
+    pub change: &'a Change,
     /// The gate run the basis points at, when it points at one.
     pub evidence: Option<&'a GateReport>,
-    /// How many gate runs there were in total.
     pub attempts: u32,
     /// The agent's own account, when the rules allow it to be shown at all.
     pub claim: Option<&'a str>,
+    /// The checks the change itself altered, read from its diff. `None` when
+    /// the worktree is gone — said, never rendered as *nothing altered*.
+    pub weakened: Option<Vec<super::review::Weakened>>,
 }
 
 impl<'a> Certificate<'a> {
-    /// Builds the certificate for a piece of work.
-    ///
-    /// The evidence is the run the **basis names**, not merely the last one. On
-    /// a work finished by hand after a failure those are the same report and it
-    /// does not matter; on a work whose basis points at attempt 2 of 4 it
-    /// matters a great deal, and picking "the last one" would quietly show a
-    /// different run from the one the completion rests on.
-    pub fn of(work: &'a Work, claim: Option<&'a str>) -> Self {
-        let evidence = match work.completion.as_ref().and_then(Completion::gate) {
-            Some((gate, attempt)) => work
+    /// Builds the certificate for a change. The evidence is the run the basis
+    /// names, not the latest; if that run is gone the evidence is absent (no
+    /// fallback to another run). With no basis yet, the latest `check` report.
+    pub fn of(change: &'a Change, claim: Option<&'a str>) -> Self {
+        let evidence = match change.completion.as_ref().and_then(Completion::gate) {
+            Some((gate, attempt)) => change
                 .gates
                 .iter()
-                .find(|g| g.gate == gate && g.attempt == attempt)
-                .or_else(|| work.last_gate()),
-            None => work.last_gate(),
+                .find(|g| g.gate == gate && g.attempt == attempt),
+            None => change.check_report(),
         };
         Self {
-            work,
+            change,
             evidence,
-            attempts: work.gates.len() as u32,
+            attempts: change.gates.len() as u32,
             claim,
+            weakened: None,
         }
     }
 
-    /// Whether this work is finished at all.
-    ///
-    /// Exporting unfinished work is a legitimate question with an honest
-    /// answer, so this is a branch in the rendering rather than an error.
+    /// Whether the basis names a gate run the record no longer holds.
+    pub fn basis_run_missing(&self) -> bool {
+        self.evidence.is_none()
+            && self
+                .change
+                .completion
+                .as_ref()
+                .and_then(Completion::gate)
+                .is_some()
+    }
+
+    /// The sentence saying why there is no evidence, when there is none.
+    fn no_evidence(&self) -> String {
+        match self.change.completion.as_ref().and_then(Completion::gate) {
+            Some((gate, attempt)) => format!(
+                "The basis names `{gate}` attempt {attempt}, and that run is no longer in the \
+                 record, so there is no evidence to show."
+            ),
+            None => "No gate ran, so there is no evidence to show.".into(),
+        }
+    }
+
+    /// The sentence about the checks the change itself altered.
+    pub fn weakened_says(&self) -> String {
+        match &self.weakened {
+            None => "Whether this change altered its own checks could not be read: its worktree \
+                     is gone."
+                .into(),
+            Some(w) => super::review::weakened_sentence(w).unwrap_or_else(|| {
+                "This change altered none of its checks: no skip marker added, no test file \
+                 deleted, no gate or CI definition edited."
+                    .into()
+            }),
+        }
+    }
+
+    /// A digest of the evidence's gate commands, in order.
+    pub fn commands_digest(&self) -> Option<String> {
+        let report = self.evidence?;
+        let mut h = super::hash::Rolling::new();
+        for c in &report.commands {
+            h.push_str(&c.command);
+        }
+        Some(h.hex())
+    }
+
+    /// Whether this change is finished. Unfinished is a rendering branch, not an error.
     pub fn is_finished(&self) -> bool {
-        self.work.completion.is_some()
+        self.change.completion.is_some()
     }
 
     /// The commands a reader runs to check this, in order.
-    ///
-    /// **This is the differentiator as data.** SLSA has nothing like it because
-    /// it cannot: re-running a build platform is not a paste.
     pub fn verification_steps(&self) -> Vec<String> {
         let mut out = Vec::new();
         let Some(report) = self.evidence else {
             return out;
         };
-        // **Where to get it, before what to do with it.** A commit with no
-        // repository beside it is an instruction nobody can follow, and the
-        // omission survived every test until somebody read the page.
-        // `checkable_by_others` is the predicate this page turns on and it
-        // lives on the stamp, where it is tested. The clone line asks for the
-        // remote; the sentence below asks the same question a second way, and
-        // the two used to be able to disagree.
+        // The clone line comes first — a commit with no repository is an
+        // instruction nobody can follow — and only when the stamp says the
+        // commit is checkable by others.
         if let Some(url) = report
             .commit
             .as_ref()
             .filter(|c| c.checkable_by_others())
             .and_then(|c| c.remote.as_deref())
         {
-            out.push(format!("git clone {url} && cd $(basename {url} .git)"));
+            let q = shell_quote(url);
+            out.push(format!("git clone {q} && cd \"$(basename {q} .git)\""));
         }
         if let Some(sha) = report.commit.as_ref().and_then(|c| c.commit.as_deref()) {
             out.push(format!("git checkout {sha}"));
@@ -194,9 +169,6 @@ impl<'a> Certificate<'a> {
     }
 
     /// Why a reader may not be able to follow those steps, if they cannot.
-    ///
-    /// A certificate that confidently instructs somebody to do something
-    /// impossible is worse than one that says nothing.
     pub fn verification_caveat(&self) -> Option<String> {
         let commit = self.evidence.and_then(|r| r.commit.as_ref())?;
         match (&commit.commit, &commit.reach) {
@@ -224,21 +196,15 @@ impl<'a> Certificate<'a> {
     }
 }
 
-/// How a command's outcome reads, and whether it is a verdict.
-///
-/// One function, so the document and the structured shape cannot describe one
-/// state two ways.
-pub fn outcome_sentence(c: &CommandResult, expect_fail: bool) -> String {
+/// One word for a POSIX shell. A remote URL is untrusted, and a pasted step
+/// must not run anything it smuggled in.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// How a command's outcome reads — one function for both renderings.
+pub fn outcome_sentence(c: &CommandResult) -> String {
     match &c.outcome {
-        // A reproduction inverts the meaning of an exit code, and printing
-        // "exit 1 — failed" for a successful reproduction is lying in the
-        // tidiest possible way.
-        Outcome::Exited { code } if expect_fail && *code != 0 => {
-            format!("exit {code} — the expected failure; this reproduced the problem")
-        }
-        Outcome::Exited { code } if expect_fail => {
-            format!("exit {code} — did NOT reproduce the problem, which is the failure here")
-        }
         Outcome::Exited { code } if *code == 0 => "exit 0".to_string(),
         Outcome::Exited { code } => format!("exit {code}"),
         Outcome::TimedOut { after_secs } => {
@@ -253,22 +219,39 @@ pub fn outcome_sentence(c: &CommandResult, expect_fail: bool) -> String {
 
 /// How the tree reads, where the commit is shown rather than in a footnote.
 pub fn commit_sentence(c: &CommitStamp) -> String {
-    let head = match &c.commit {
-        Some(sha) => format!("Commit `{sha}`"),
-        None => "No commit — this repository had no commits yet".to_string(),
+    // The tree is what the commands ran against; the commit is how a reviewer
+    // gets to it.
+    let head = match (&c.commit, &c.tree) {
+        (Some(sha), Some(tree)) => format!("Commit `{sha}`, working-tree digest `{tree}`"),
+        (Some(sha), None) => format!(
+            "Commit `{sha}`, working-tree digest not recorded — the tree moved while the gate \
+             ran, or could not be read, so this run cannot verify anything"
+        ),
+        (None, Some(tree)) => {
+            format!("No commit yet — this repository had none; working-tree digest `{tree}`")
+        }
+        (None, None) => "No commit — this repository had no commits yet".to_string(),
     };
     let branch = match &c.branch {
         Some(b) => format!(" on branch `{b}`"),
         None => " on a detached head".to_string(),
     };
-    let tree = match c.clean {
-        true => "Working tree: clean — this commit is what was checked.".to_string(),
+    let files = match c.clean {
+        true => "clean — this commit is what was checked".to_string(),
         false => format!(
-            "Working tree: **{} uncommitted or untracked file(s)** — this commit does NOT fully \
-             describe what was checked.",
+            "**{} uncommitted or untracked file(s)** — the commit alone does NOT describe what \
+             was checked; the digest does",
             c.changed_files
         ),
     };
+    let digest = match &c.tree {
+        Some(_) => "\nThe digest is git's tree of the files as they were, untracked ones included \
+                    and **ignored files excluded**; `git add -A && git write-tree` in a copy of \
+                    that tree re-derives it."
+            .to_string(),
+        None => String::new(),
+    };
+    let tree = format!("Working tree: {files}.{digest}");
     let origin = match &c.remote {
         Some(url) => format!("Repository: `{}`\n", url.replace(['\n', '\r'], " ")),
         None => String::new(),
@@ -284,19 +267,9 @@ pub fn commit_sentence(c: &CommitStamp) -> String {
     format!("{origin}{head}{branch}\n{tree}\n{reach}")
 }
 
-/// A fence long enough that the content cannot close it.
-///
-/// **This is the one place untrusted text could restructure the document.**
-/// Gate commands come from a project's committed configuration, titles from
-/// issues and models, output from whatever ran. In the structured shape the
-/// serialiser handles all of it; in Markdown nothing does it for you, and a
-/// command containing three backticks would end its own block and let the rest
-/// of somebody else's bytes be read as markup.
-///
-/// So the fence is chosen *against the content* rather than fixed and hoped
-/// for: one backtick longer than the longest run inside it, with a floor of
-/// three. The page solved the same problem with a type that made escaping
-/// structural; fencing by convention is that code before the fix.
+/// A fence one backtick longer than the longest run inside the content (min
+/// three), so untrusted commands, titles or output cannot close it and inject
+/// Markdown.
 fn fenced(content: &str) -> String {
     let longest = content
         .as_bytes()
@@ -308,11 +281,7 @@ fn fenced(content: &str) -> String {
     format!("{fence}\n{content}\n{fence}")
 }
 
-/// Untrusted text on one line of a table or a sentence.
-///
-/// Pipes would open a new cell and newlines would end the row, so both are
-/// neutralised. Backticks are left alone because the value is not being placed
-/// inside a code span.
+/// Untrusted text on one line of a table or sentence: pipes and newlines neutralised.
 fn inline(s: &str) -> String {
     s.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
@@ -328,9 +297,7 @@ fn code(s: &str) -> String {
         .unwrap_or(0);
     let t = "`".repeat(longest + 1);
     let body = flat.replace('|', "\\|");
-    // Padding only where it is needed: a backtick at either end would otherwise
-    // fuse with the delimiter. Adding it unconditionally is harmless to a
-    // renderer and noise to anybody reading the raw document.
+    // Pad only when a backtick at either end would fuse with the delimiter.
     match body.starts_with('`') || body.ends_with('`') {
         true => format!("{t} {body} {t}"),
         false => format!("{t}{body}{t}"),
@@ -349,43 +316,37 @@ impl Certificate<'_> {
     /// The document a reviewer reads, sized for a pull request body.
     pub fn markdown(&self) -> String {
         let mut o = String::new();
-        let w = self.work;
+        let w = self.change;
 
         o.push_str(&format!("# Done certificate — {}\n\n", inline(&w.title)));
 
         let Some(basis) = w.completion.as_ref() else {
-            // Exporting unfinished work is a fair question, and the honest
-            // answer is where it is — not an error, and not a certificate.
+            // Unfinished: say where it is — not an error, not a certificate.
             o.push_str(&format!(
-                "**This work is not finished.** It is at `{}`.\n\n",
-                w.phase.as_str()
+                "**This change is not finished.** It is {}.\n\n",
+                where_it_is(w)
             ));
             if let Some(g) = self.evidence {
                 o.push_str(&format!("Its last gate said: {}\n\n", inline(&g.summary())));
             } else {
                 o.push_str("No gate has run.\n\n");
             }
+            o.push_str(&format!("{}\n\n", inline(&self.weakened_says())));
             o.push_str("There is no completion to certify yet.\n");
             return o;
         };
 
         o.push_str(&format!("**Basis:** {}\n\n", basis.headline()));
-        if !basis.is_checked() {
-            o.push_str(
-                "> Nothing was checked by this tool for this completion. Read the basis \
-                        above before reading anything below as a pass.\n\n",
-            );
+        if let Some(note) = basis.unchecked_note() {
+            o.push_str(&format!("> {note}\n\n"));
         }
 
         o.push_str("## What was checked\n\n");
         match self.evidence {
-            None => o.push_str("No gate ran, so there is no evidence to show.\n\n"),
+            None => o.push_str(&format!("{}\n\n", self.no_evidence())),
             Some(report) => {
-                // **Where the predicate came from**, named rather than implied.
-                // A gate transcript is observed by something the agent does not
-                // control, which is the whole of why it may stand as evidence
-                // at all — and the claim below carries the other value, so a
-                // reader is never left inferring which is which.
+                // Name the origin: a gate transcript is observed by something
+                // the agent does not control; the claim below carries the other value.
                 o.push_str(&format!(
                     "`{}: {}`\n\n",
                     Origin::KEY,
@@ -402,13 +363,16 @@ impl Certificate<'_> {
                     o.push_str(&format!(
                         "| {} | {} | {:.1}s | {} · `{}` |\n",
                         code(&c.command),
-                        inline(&outcome_sentence(c, report.expect_fail)),
+                        inline(&outcome_sentence(c)),
                         c.duration_ms as f64 / 1000.0,
                         bytes_phrase(c.output_bytes),
                         c.output_digest,
                     ));
                 }
                 o.push('\n');
+                if let Some(d) = self.commands_digest() {
+                    o.push_str(&format!("Gate commands digest: `{d}`.\n\n"));
+                }
                 if report.commands.iter().any(|c| c.output_bytes > 0) {
                     o.push_str(
                         "Output shown anywhere below is a **tail**; the byte counts above say how \
@@ -417,6 +381,8 @@ impl Certificate<'_> {
                 }
             }
         }
+
+        o.push_str(&format!("{}\n\n", inline(&self.weakened_says())));
 
         let steps = self.verification_steps();
         if !steps.is_empty() {
@@ -443,20 +409,18 @@ impl Certificate<'_> {
                     f
                 )),
                 None => o.push_str(&format!(
-                    "The work says it answers {} and there was no such file or folder.\n\n",
+                    "The change says it answers {} and there was no such file or folder.\n\n",
                     code(&spec.path)
                 )),
             }
-            // **The plan changed under the work**, which a reviewer re-deriving
-            // this verdict needs before anything else on this page: they would
-            // otherwise re-derive it against a document the work never saw, and
-            // get a different answer for a reason nothing here explains.
-            if self.work.plan_drifted(spec.fingerprint.as_deref()) == Some(true) {
+            // The plan moved under the change: a reviewer re-deriving the verdict
+            // against today's document would get a different answer.
+            if self.change.plan_drifted(spec.fingerprint.as_deref()) == Some(true) {
                 o.push_str(&format!(
-                    "> **The specification changed while this work was running.** It was `{}` when \
-                     the work started and `{}` when the gate ran. The agent read one document and \
+                    "> **The specification changed while this change was running.** It was `{}` when \
+                     the change started and `{}` when the gate ran. The agent read one document and \
                      you are reading another; both may be correct.\n\n",
-                    self.work.spec_at_start.as_deref().unwrap_or("unknown"),
+                    self.change.spec_at_start.as_deref().unwrap_or("unknown"),
                     spec.fingerprint.as_deref().unwrap_or("unknown"),
                 ));
             }
@@ -484,9 +448,7 @@ impl Certificate<'_> {
 
         if let Some(claim) = self.claim {
             o.push_str("## The agent's claim\n\n");
-            // The same distinction the statement carries, in the document a
-            // person reads — so the two renderings cannot say different things
-            // about where the same sentence came from.
+            // The same origin marker the statement carries.
             o.push_str(&format!(
                 "`{}: {}`\n\n",
                 Origin::KEY,
@@ -520,10 +482,9 @@ impl Certificate<'_> {
     /// The structured shape, as an in-toto statement.
     pub fn json(&self) -> serde_json::Value {
         use serde_json::json;
-        let w = self.work;
+        let w = self.change;
         let commit = self.evidence.and_then(|r| r.commit.as_ref());
-        // `subject` is what the statement is *about*. A commit is exactly the
-        // kind of thing it is for.
+        // `subject` is what the statement is about: the commit.
         let subject = match commit.and_then(|c| c.commit.as_deref()) {
             Some(sha) => json!([{ "name": w.title, "digest": { "gitCommit": sha } }]),
             None => json!([{ "name": w.title, "digest": {} }]),
@@ -533,31 +494,26 @@ impl Certificate<'_> {
             "subject": subject,
             "predicateType": PREDICATE_TYPE,
             "predicate": {
-                "work": { "id": w.id, "title": w.title, "phase": w.phase.as_str(),
+                "change": { "id": w.id, "title": w.title, "state": w.current_state().as_str(),
                           "branch": w.branch },
                 "completion": w.completion,
                 "evidence": self.evidence.map(|r| json!({
-                    // **Where this came from, under the name somebody else is
-                    // specifying it with.** A gate transcript is observed by
-                    // something the agent does not control, which is the whole
-                    // of why it may be a predicate.
+                    // Observed by something the agent does not control.
                     Origin::KEY: Origin::ExternallyObserved.as_str(),
                     "gate": r.gate,
                     "at": r.at,
                     "attempt": r.attempt,
                     "attempts": self.attempts,
-                    "expect_fail": r.expect_fail,
                     "passed": r.passed(),
                     "commit": r.commit,
                     "commands": r.commands,
+                    "commands_digest": self.commands_digest(),
                 })),
+                "basis_run_missing": self.basis_run_missing(),
+                "checks_altered": self.weakened,
                 "specification": self.evidence.and_then(|r| r.spec.clone()),
-                // **The agent's account, marked as the agent's account.** An
-                // object rather than a string so the origin rides with it: a
-                // bare field beside an evidence block that carries one is a
-                // reader's invitation to assume they are the same kind of
-                // thing. Absent entirely where the agent said nothing, because
-                // *nothing said* is not *said, and self-reported*.
+                // An object so the origin rides with the text; absent entirely
+                // when the agent said nothing.
                 "agent_claim": self.claim.map(|text| json!({
                     Origin::KEY: Origin::SelfReported.as_str(),
                     "text": text,
@@ -573,48 +529,19 @@ impl Certificate<'_> {
         })
     }
 
-    /// **The certificate as a page renders it, with every sentence already
-    /// written.**
-    ///
-    /// The surface computes nothing. Not a style rule: the certificate is the
-    /// one artifact in this product whose whole value is that a reviewer can
-    /// re-derive it, and a page that assembled its own wording would be a
-    /// second place the same completion gets described — with no guard able to
-    /// notice the two had drifted.
-    ///
-    /// **Four bases, and each renders.** *No gate was declared* is the one that
-    /// used to come out as an empty block, which reads as *nothing to show*
-    /// when it means *this project never said what done means*.
+    /// The certificate as a page renders it, every sentence already written, so
+    /// no surface can word the same completion differently.
     pub fn page(&self) -> serde_json::Value {
         use serde_json::json;
 
-        let Some(basis) = self.work.completion.as_ref() else {
-            // **Done with no basis is its own answer, and it is not *unfinished*.**
-            // A piece of work that reached `Done` before completions were
-            // recorded has a real completion nobody wrote down — saying *this
-            // is not finished* about it would be false, and rendering an empty
-            // certificate would be worse: a reader takes a blank evidence block
-            // for *nothing was checked* when it means *nobody kept the record*.
-            if self.work.phase == crate::core::work::Phase::Done {
-                return json!({
-                    "finished": true,
-                    "basis": "the evidence was not recorded — this work was finished before \
-                              Devplane kept one, so what was checked cannot be reconstructed",
-                    "checked": false,
-                    "unchecked": "There is no record of what was checked for this completion. \
-                                  It is not evidence that nothing was, and it is not evidence \
-                                  that anything was.",
-                    "no_evidence": "No gate run is recorded against this work.",
-                    "limits": LIMITS,
-                });
-            }
+        let Some(basis) = self.change.completion.as_ref() else {
             return json!({
                 "finished": false,
-                // Not an error and not a certificate. A reader asking about
-                // unfinished work gets where it is.
-                "unfinished": format!("This work is not finished. It is at `{}`.",
-                                      self.work.phase.as_str()),
+                // Where an unfinished change is — not an error.
+                "unfinished": format!("This change is not finished. It is {}.",
+                                      where_it_is(self.change)),
                 "last_gate": self.evidence.map(|g| g.summary()),
+                "checks_altered": self.weakened_says(),
             });
         };
 
@@ -622,26 +549,18 @@ impl Certificate<'_> {
             "finished": true,
             "basis": basis.headline(),
             "checked": basis.is_checked(),
-            // Present only where it applies, so a surface cannot render a
-            // reassurance and a warning in the same block.
-            "unchecked": (!basis.is_checked()).then_some(
-                "Nothing was checked by this tool for this completion. Read the basis \
-                 before reading anything below as a pass."
-            ),
+            // Present only where it applies.
+            "unchecked": basis.unchecked_note(),
             "evidence": self.evidence.map(|r| json!({
                 Origin::KEY: Origin::ExternallyObserved.as_str(),
                 "commit": r.commit.as_ref().map(commit_sentence),
-                // **Absent rather than a sentence**, because a gate that ran
-                // outside a repository is a different fact from one whose
-                // commit nobody recorded.
+                // Absent rather than a sentence: no repository is a different
+                // fact from an unrecorded commit.
                 "no_commit": r.commit.is_none().then_some(
                     "No commit was recorded — this gate did not run in a repository."
                 ),
                 "commands": r.commands.iter().map(|c| json!({
-                    // **Verbatim.** A reformatted command is one a reviewer
-                    // cannot paste, which is the whole differentiator: the
-                    // others hand you a verdict and this hands you the
-                    // commands.
+                    // Verbatim, so a reviewer can paste it.
                     "command": c.command,
                     "shown": crate::core::text::clip(&c.command, PAGE_COMMAND_CHARS),
                     "truncated": c.command.chars().count() > PAGE_COMMAND_CHARS,
@@ -651,69 +570,64 @@ impl Certificate<'_> {
                     "output_bytes": c.output_bytes,
                 })).collect::<Vec<_>>(),
             })),
-            "no_evidence": self.evidence.is_none().then_some(
-                "No gate ran, so there is no evidence to show."
-            ),
+            "no_evidence": self.evidence.is_none().then(|| self.no_evidence()),
+            "commands_digest": self.commands_digest(),
+            "checks_altered": self.weakened_says(),
             "claim": self.claim.map(|text| json!({
                 Origin::KEY: Origin::SelfReported.as_str(),
                 "text": text,
                 "caveat": "The agent\u{2019}s own account, shown beside the outcomes and never in \
                            place of them. Nothing here grades it against the evidence.",
             })),
-            // **A position, not a gap.** `signed: false` on its own reads as
-            // something missing to anybody who has shipped attestations; with
-            // the flag beside it, it reads as a decision somebody can reverse.
+            // Unsigned is a position, stated beside the flag; no signing option exists.
             "signing": {
                 "signed": false,
                 "says": "Unsigned on purpose — a signature would attest that this tool wrote \
-                         this, which is not the claim. Pass `--sign` if your reviewer needs one.",
+                         this, which is not the claim.",
             },
             "limits": LIMITS,
             "rederivable": REDERIVABLE,
         })
     }
 
-    /// The document, held to the ceiling.
-    ///
-    /// Shrinks what it shows rather than refusing, and says that it did — a
-    /// certificate that silently drops evidence is the failure this whole
-    /// feature is arranged against.
+    /// The document, held to [`MAX_BYTES`]: truncates and says so, naming the
+    /// command that gives the whole record.
     pub fn markdown_bounded(&self) -> String {
         let full = self.markdown();
         if full.len() <= MAX_BYTES {
             return full;
         }
-        let keep = MAX_BYTES.saturating_sub(TRUNCATION_NOTE.len() + 1);
+        let note = format!(
+            "\n---\n\n**This certificate was truncated to fit its size limit.** What is above is \
+             incomplete. Read the structured form for the whole record: `devplane change export {} \
+             --json`.",
+            self.change.id.as_str()
+        );
+        let keep = MAX_BYTES.saturating_sub(note.len() + 1);
         let mut cut = keep;
         while cut > 0 && !full.is_char_boundary(cut) {
             cut -= 1;
         }
-        format!("{}\n{TRUNCATION_NOTE}", &full[..cut])
+        format!("{}\n{note}", &full[..cut])
     }
 }
 
-const TRUNCATION_NOTE: &str = "\n---\n\n**This certificate was truncated to fit its size limit.** \
-What is above is incomplete. Read the structured form for the whole record.";
+/// Where an unfinished change is: its state, and what it waits on.
+fn where_it_is(change: &Change) -> String {
+    let state = change.current_state();
+    match change
+        .waiting
+        .as_ref()
+        .map(crate::core::change::Waiting::says)
+    {
+        Some(waiting) => format!("{} {} — {waiting}", state.glyph(), state.as_str()),
+        None => format!("{} {}", state.glyph(), state.as_str()),
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_reproduction_never_reads_as_a_failure() {
-        let c = CommandResult {
-            command: "cargo test repro".into(),
-            outcome: Outcome::Exited { code: 1 },
-            duration_ms: 1,
-            output_tail: String::new(),
-            output_bytes: 0,
-            output_digest: String::new(),
-            failures: Vec::new(),
-        };
-        let s = outcome_sentence(&c, true);
-        assert!(s.contains("reproduced the problem"), "{s}");
-        assert!(!s.contains("failed"), "{s}");
-    }
 
     #[test]
     fn the_four_outcomes_read_differently() {
@@ -742,7 +656,7 @@ mod tests {
                 ..base.clone()
             };
             assert!(
-                seen.insert(outcome_sentence(&c, false)),
+                seen.insert(outcome_sentence(&c)),
                 "two outcomes produced the same sentence"
             );
         }

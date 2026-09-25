@@ -1,13 +1,7 @@
-//! `devplane.toml` — the project's own definition of done.
-//!
-//! It lives in the repository and is committed, which is the whole point: the
-//! commands that decide whether work is finished are the project's, reviewed
-//! like anything else, and never something an agent wrote for itself.
-//!
-//! Every field has a default, so a repository with no file at all still works:
-//! the gates are empty, no rule auto-decides anything, and Devplane behaves
-//! exactly as it does today. Configuration buys automation, it is not the price
-//! of entry.
+//! `devplane.toml` — the project's own definition of done, committed and
+//! reviewed like any other code, never written by an agent for itself. Every
+//! field has a default, so a repository with no file still works: no gates, and
+//! no rule decides anything on anyone's behalf.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,11 +22,18 @@ pub struct ProjectConfig {
     pub transcripts: Transcripts,
     pub github: GitHub,
     pub spec: SpecSection,
-    /// What happens to a question nobody answers. Nothing, unless this says so.
     pub questions: Questions,
-    /// Declared chains of agent runs, keyed by the Work kind they serve
-    /// (`quick`, `chore`, `bug`, `feature`) or by any name for a standing one.
-    pub pipelines: BTreeMap<String, Pipeline>,
+    pub review: Review,
+    pub reports: Reports,
+}
+
+/// `[reports]`: projects whose reports are also handed to this project's live
+/// agent as quoted, attributed text (they still reach the person's inbox). Off
+/// by default; `"*"` is refused, because somebody must choose each name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Reports {
+    pub deliver_from: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -41,19 +42,19 @@ pub struct Project {
     pub name: Option<String>,
     /// What worktrees branch from. Discovered from the repository when unset.
     pub base_branch: Option<String>,
-    /// The agent `devplane work start` uses when none is named.
+    /// The agent `devplane change start` uses when none is named.
     pub default_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Workspace {
-    /// Run once in a new worktree, before the agent starts. A fresh checkout
-    /// has no `node_modules` and no `.env`; an agent that has to work that out
-    /// for itself wastes a turn discovering it.
+    /// Run once in a new worktree, before the agent starts.
     pub setup: Option<String>,
-    /// Gitignored files to copy in, in the spirit of `.worktreeinclude`.
-    pub include: Vec<String>,
+    /// Build caches shared between this project's changes, by ecosystem name
+    /// from `caches::ECOSYSTEMS`; an unknown name is refused. Files to copy
+    /// into a fresh tree belong in `.worktreeinclude`, not here.
+    pub share: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,48 +67,21 @@ pub struct Gates {
     pub timeout: Duration,
     pub on_fail: OnFail,
     /// How many times failures are handed back to the agent before a human is
-    /// asked. Bounded because an agent and a gate can argue indefinitely, and
-    /// each round costs real money.
+    /// asked; bounded because each round costs money.
     pub max_feedback_rounds: u32,
-    /// Gates a pipeline step can ask for by name, beyond the default `check`.
+    /// Gates run only by name (`devplane gate run --name <name>`). They never
+    /// make a change verified: that is `check` alone.
     pub named: BTreeMap<String, NamedGate>,
 }
 
-/// A gate that is not the Definition of Done.
-///
-/// The one that earns its keep is a reproduction: for a bug, the check that
-/// *should fail* before the fix is what proves the bug was real. So a gate
-/// carries what it expects, and a command that succeeds when failure was the
-/// point is a failed gate.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A suite a person can run by name; never decides whether a change is done.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NamedGate {
-    /// Commands that must all meet `expect`.
     pub run: Vec<String>,
-    pub expect: Expect,
     /// Overrides the project's gate timeout.
     #[serde(default, with = "humantime_opt")]
     pub timeout: Option<Duration>,
-}
-
-impl Default for NamedGate {
-    fn default() -> Self {
-        Self {
-            run: Vec::new(),
-            expect: Expect::Pass,
-            timeout: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Expect {
-    #[default]
-    Pass,
-    /// The commands must fail. A reproduction that passes has not reproduced
-    /// anything.
-    Fail,
 }
 
 impl Default for Gates {
@@ -122,178 +96,6 @@ impl Default for Gates {
     }
 }
 
-/// A declared chain of agent runs.
-///
-/// "Start Claude to implement, then start an agent to check it" is only worth
-/// having if it is written down in the repository rather than improvised per
-/// session: the same chain, on every piece of work of that kind, with the
-/// human in the places the project chose.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Pipeline {
-    pub steps: Vec<Step>,
-}
-
-/// One step of a pipeline: an agent doing something, or a person.
-///
-/// `{ human = "merge" }` and `{ role = "review", … }` read better in TOML than
-/// a `type` discriminator would, so the shape decides which it is.
-///
-/// Deserialised by hand rather than with `#[serde(untagged)]`. Untagged reports
-/// every mistake as *"data did not match any variant of untagged enum Step"* —
-/// a step with a typo, a missing `prompt` and a step that is simply not a step
-/// all produce that one sentence, and a person reading it learns nothing about
-/// which of forty lines is wrong.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
-pub enum Step {
-    /// Suspends the pipeline until a person releases it.
-    Human(HumanStep),
-    Role(RoleStep),
-}
-
-impl Step {
-    /// What this step is called — the role, or what the person is asked for.
-    pub fn name(&self) -> &str {
-        match self {
-            Step::Human(h) => &h.human,
-            Step::Role(r) => &r.role,
-        }
-    }
-}
-
-/// The shape a step is read through, so every mistake gets its own sentence.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StepFields {
-    #[serde(default)]
-    human: Option<String>,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default)]
-    gate: Option<String>,
-    #[serde(default)]
-    findings: Option<Findings>,
-}
-
-impl<'de> Deserialize<'de> for Step {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let f = StepFields::deserialize(d)?;
-        match (f.human, f.role) {
-            (Some(_), Some(role)) => Err(D::Error::custom(format!(
-                "step `{role}` sets both `human` and `role`; a step is one or the other"
-            ))),
-            (Some(human), None) => {
-                if f.prompt.is_some() || f.gate.is_some() || f.findings.is_some() {
-                    return Err(D::Error::custom(format!(
-                        "human step `{human}` also sets `prompt`, `gate` or \
-                         `findings`; a person is asked, not prompted"
-                    )));
-                }
-                Ok(Step::Human(HumanStep { human }))
-            }
-            (None, Some(role)) => Ok(Step::Role(RoleStep {
-                prompt: f
-                    .prompt
-                    .ok_or_else(|| D::Error::custom(format!("step `{role}` has no `prompt`")))?,
-                role,
-                agent: f.agent,
-                gate: f.gate,
-                findings: f.findings,
-            })),
-            (None, None) => Err(D::Error::custom(
-                "a pipeline step needs either `role = \"…\"` (an agent) or \
-                 `human = \"…\"` (a person)",
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HumanStep {
-    /// What the person is being asked to do: `merge`, `spec_review`, …
-    pub human: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RoleStep {
-    /// What this step is for: `implement`, `review`, `verify`. Also the name
-    /// `back_to` refers to.
-    pub role: String,
-    /// The agent that does it. `any` — and the default — take the project's
-    /// `default_agent`.
-    ///
-    /// Naming a *different* vendor for review is worth doing when the reviewer
-    /// is at least as strong as the implementer, and actively harmful when it is
-    /// not: a controlled study of 116 tasks found Claude reviewing Codex drafts
-    /// raised the pass rate from 71.6 % to 89.7 %, while Codex reviewing Claude
-    /// drafts *lowered* it from 91.4 % to 82.8 % (arXiv:2607.21656). Which is
-    /// why `findings` requires a gate: see [`ProjectConfig::validate`].
-    #[serde(default)]
-    pub agent: Option<String>,
-    /// A prompt template in `.devplane/prompts/<name>.md`, or the text itself
-    /// when no such file exists.
-    pub prompt: String,
-    /// A gate that must pass before the pipeline moves on: `check`, or a name
-    /// from `[gates.named]`.
-    #[serde(default)]
-    pub gate: Option<String>,
-    /// What to do when this step reports findings.
-    #[serde(default)]
-    pub findings: Option<Findings>,
-}
-
-/// How a reviewing step sends work back.
-///
-/// The reviewer writes its findings to a file in the worktree rather than
-/// announcing them in prose. Prose has to be parsed and can be wrong in ways
-/// that are invisible; a file is either there or it is not, a human can read
-/// it, and it is the same evidence the next agent is handed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Findings {
-    /// The role to return to. Must name an earlier step.
-    pub back_to: String,
-    /// How many times. Exhaustion asks a human; it never loops forever.
-    #[serde(default = "one")]
-    pub max: u32,
-    /// Where the reviewer writes them, relative to the worktree.
-    #[serde(default = "findings_file")]
-    pub file: String,
-    /// Words that make a finding worth returning the work for.
-    ///
-    /// Empty — the default — means every finding counts, which is what a
-    /// reviewer writing prose produces. It exists for the *graded* reporters:
-    /// every spec-driven tool in the field ships a consistency checker that
-    /// grades what it finds and then hands the decision back, so a step whose
-    /// prompt is one of those needs a line saying which grades stop the work.
-    ///
-    /// **The words are the project's, never Devplane's.** `CRITICAL` and
-    /// `HIGH` are Spec Kit's vocabulary; another tool grades differently and a
-    /// third will rename its levels next month. Holding a table of somebody
-    /// else's nouns is the mistake this project refuses everywhere else, so the
-    /// repository writes the words it means and the matching is
-    /// case-insensitive and per line.
-    ///
-    /// A findings file with no matching line is *nothing found*: the step
-    /// passes, exactly as an empty file does.
-    #[serde(default)]
-    pub only: Vec<String>,
-}
-
-fn one() -> u32 {
-    1
-}
-fn findings_file() -> String {
-    ".devplane/findings.md".into()
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnFail {
@@ -306,23 +108,10 @@ pub enum OnFail {
     Ignore,
 }
 
-/// Whether to keep what driven agents say in this repository.
-///
-/// On by default, and the reasoning is worth stating because the project is
-/// otherwise careful about what it stores. A run Devplane drives has no window
-/// of its own: without its transcript the board can say a tool ran and not one
-/// word about why, which makes `dispatch` a black box. The text is already in
-/// the process — the protocol streams it to us — so discarding it was never a
-/// privacy measure, it was an unbuilt feature.
-///
-/// It is still a repository's decision, because an agent's prose can quote
-/// something it read, and `[workspace] include` deliberately copies `.env` into
-/// the worktree it works in. Off means nothing is written down and the
-/// transcript views say so; it does not stop the agent reading anything.
-///
-/// Sessions Devplane merely *watches* are unaffected either way: the
-/// documented channels carry no prose, which is why `focus` is the honest
-/// action for them.
+/// Whether to keep what driven agents say. On by default: a driven run has no
+/// window of its own, so without its transcript nobody can see why it acted.
+/// Still the repository's choice, because an agent's prose can quote what it
+/// read (`.env` included). Watched sessions carry no prose either way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Transcripts {
@@ -335,64 +124,21 @@ impl Default for Transcripts {
     }
 }
 
-/// What a piece of work may cost before somebody is asked about it.
-///
-/// The loops are already bounded by *count* — `max_feedback_rounds` and a
-/// findings `max` — and that stops an agent and a test suite arguing for ever.
-/// It does not stop one turn going a long way on its own, which is the other
-/// way an afternoon becomes expensive.
-///
-/// **A ceiling only bites when the agent reports what it spent.** ACP makes the
-/// cost field optional, so an agent that never sends one is never stopped by
-/// this, and Devplane says so rather than implying a guard it does not have:
-/// `devplane check` warns when a budget is set, and `devplane work show`
-/// prints the cost so far or "not reported".
-/// What happens to a question nobody answers.
-///
-/// **The default is that nothing happens to it, and that is the whole
-/// section.** A product whose argument is that vendors end your questions on
-/// clocks you never set does not get to ship a clock you never set — so the
-/// only way an ask here ever ends on a timer is a project writing one down,
-/// and the row that ends it then names the duration *and this file*.
-///
-/// It is per project rather than global for the same reason the fan-out dial
-/// is: a setting somebody chose once and forgot is a setting that decides
-/// things nobody is thinking about. A repository that runs unattended
-/// overnight can bound its own waits; the one you are sitting in front of does
-/// not have to.
-///
-/// **Devplane's own ten-minute refusal is gone.** Until 2026-09-20 a permission
-/// request nobody answered was denied after six hundred seconds by a constant
-/// in this crate, with no surface saying so — which is the trade this product
-/// indicts four vendors for, shipped here, and aggravated by the fact that the
-/// vendor it mirrors refuses to apply its own question timer to permission
-/// prompts at all.
+/// What happens to a question nobody answers: by default, nothing. An ask only
+/// ends on a timer the project wrote down here, and the row that ends it names
+/// the duration and this file. Per project, so an unattended repository can
+/// bound its waits without bounding everyone's.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Questions {
-    /// `never` (the default), or a duration like `30m`, `4h`, `90s`.
-    ///
-    /// An unparseable value is a configuration error rather than a silent
-    /// fallback: the difference between `4h` and a typo is the difference
-    /// between a bounded wait and an unbounded one, and guessing which the
-    /// author meant is how a supervision tool ends a question nobody meant it
-    /// to end.
+    /// `never` (the default), or a duration like `30m`, `4h`, `90s`. An
+    /// unparseable value is a configuration error, never a guessed duration.
     pub deadline: Option<String>,
-    /// How long a permission on a **watched** session may be held for you.
-    ///
-    /// **Absent means no hold at all**, which is the behaviour this product
-    /// shipped with: the vendor's own dialog appears at once and the only offer
-    /// Devplane can make is *raise its window*. Set it and a permission your
-    /// own `always_ask` rules matched waits this long for an answer from the
-    /// inbox, the board or your phone before the dialog appears.
-    ///
-    /// `true` means [`Hold::DEFAULT`]. A duration — `10s`, `45s` — names its
-    /// own, up to [`Hold::CEILING`].
-    ///
-    /// An unparseable or over-long value is a configuration error rather than a
-    /// silent fallback, for the reason `deadline` is: the difference between
-    /// `30s` and a typo is the difference between a bounded hold and an agent
-    /// frozen for as long as the vendor will wait.
+    /// How long a permission on a watched session that matched `always_ask`
+    /// waits for an answer from the inbox, board or phone before the vendor's
+    /// dialog appears. Absent means no hold. `true` means [`Hold::DEFAULT`];
+    /// a duration names its own, up to [`Hold::CEILING`]. An unparseable or
+    /// over-long value is a configuration error.
     pub hold: Option<toml::Value>,
 }
 
@@ -402,36 +148,22 @@ pub struct Questions {
 pub struct Hold(pub Duration);
 
 impl Hold {
-    /// What `hold = true` means.
-    ///
-    /// **Thirty seconds.** The vendor allows 600, and a bound that long would
-    /// leave an agent frozen for ten minutes because somebody's phone was in a
-    /// pocket. Thirty is enough to unlock a phone once a notification has
-    /// arrived and cheap enough to lose on an unattended run.
+    /// What `hold = true` means: long enough to unlock a phone after a
+    /// notification, short enough not to freeze an unattended run.
     pub const DEFAULT: Duration = Duration::from_secs(30);
 
-    /// The most a project may ask for.
-    ///
-    /// **Under the vendor's own 600 s**, because a hold that outlives the
-    /// hook's timeout is a hold whose lapse is the vendor cancelling the
-    /// process rather than this product standing down — and the two look
-    /// different from inside the session.
+    /// The most a project may ask for. Under the vendor's 600 s hook timeout,
+    /// so a hold lapses by Devplane standing down, not by the vendor killing
+    /// the hook.
     pub const CEILING: Duration = Duration::from_secs(120);
 }
 
-/// [`Hold::CEILING`] in milliseconds, for the wire.
-///
-/// **Clamped on both sides.** The hook applies the project's value and the
-/// daemon applies this, because a bound enforced in one process is a bound an
-/// older binary walks past — and the failure is an agent frozen for as long as
-/// whoever wrote the payload asked for.
+/// [`Hold::CEILING`] in milliseconds.
 pub const HOLD_CEILING_MS: u64 = Hold::CEILING.as_millis() as u64;
 
 impl Questions {
-    /// The hold this project declares, and nothing where it declares none.
-    ///
-    /// `Ok(None)` is *no hold*, which is the default and is not an error.
-    /// `Err` carries the sentence `devplane check` prints.
+    /// The declared hold; `Ok(None)` is no hold. `Err` is the sentence
+    /// `devplane check` prints.
     pub fn hold(&self) -> Result<Option<Hold>, String> {
         let Some(v) = self.hold.as_ref() else {
             return Ok(None);
@@ -462,11 +194,8 @@ impl Questions {
         }
     }
 
-    /// The deadline this project sets, and nothing where it sets none.
-    ///
-    /// Returns `None` for an unparseable value so the caller can report it as a
-    /// problem; `Deadline::Never` is what an absent setting means and the two
-    /// are never conflated.
+    /// `None` for an unparseable value; an absent setting is
+    /// `Deadline::Never`, never conflated with it.
     pub fn deadline(&self) -> Option<crate::core::ask::Deadline> {
         match self.deadline.as_deref() {
             None => Some(crate::core::ask::Deadline::Never),
@@ -475,87 +204,49 @@ impl Questions {
     }
 }
 
+/// What a change may cost before somebody is asked about it. The dollar
+/// ceiling only bites when the agent reports cost (optional in ACP), so
+/// `devplane check` warns when it is the only bound.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Budget {
-    /// Applies to any kind that names no figure of its own.
-    pub default_usd: Option<f64>,
-    pub quick_usd: Option<f64>,
-    pub chore_usd: Option<f64>,
-    pub bug_usd: Option<f64>,
-    pub feature_usd: Option<f64>,
-    /// How many agent turns one piece of work may take.
-    ///
-    /// **The bound that always fires.** A ceiling in dollars only bites when
-    /// the agent reports what it spent, which is optional twice over: the
-    /// protocol marks the cost field optional, and the OpenTelemetry GenAI
-    /// conventions have no notion of money at all. Turns are counted here, from
-    /// events Devplane saw itself, so they bind every agent.
+    /// What one change may spend, in US dollars, as its agent reports it.
+    pub usd: Option<f64>,
+    /// How many agent turns one change may take. Counted from events Devplane
+    /// saw itself, so it binds every agent.
     pub max_turns: Option<u32>,
-    /// How long one piece of work may run, in the same duration spelling the
-    /// rest of the file uses (`45m`, `2h`).
-    ///
-    /// The other always-observable axis, and the one that catches the failure
-    /// turns do not: a single turn that goes a very long way. Measured from
-    /// when the work started, not from the last turn — a chain that has been
-    /// going for three hours is a chain somebody should look at whether or not
-    /// it is making progress.
+    /// How long one change may run (`45m`, `2h`), measured from its start.
+    /// Also always observable, and catches one very long turn.
     #[serde(default, with = "humantime_opt", rename = "max_runtime")]
     pub max_runtime: Option<Duration>,
 }
 
 impl Budget {
-    /// Whether this project bounds a piece of work by something it can always
-    /// observe, rather than only by what an agent chooses to report.
+    /// Whether a bound exists that does not depend on agent-reported cost.
     pub fn has_observable_bound(&self) -> bool {
         self.max_turns.is_some() || self.max_runtime.is_some()
     }
 
-    /// The ceiling for a kind of work, if the project set one.
-    pub fn for_kind(&self, kind: &str) -> Option<f64> {
-        let named = match kind {
-            "quick" => self.quick_usd,
-            "chore" => self.chore_usd,
-            "bug" => self.bug_usd,
-            "feature" => self.feature_usd,
-            _ => None,
-        };
-        named.or(self.default_usd).filter(|c| *c > 0.0)
+    /// The dollar ceiling; zero means none.
+    pub fn ceiling_usd(&self) -> Option<f64> {
+        self.usd.filter(|c| *c > 0.0)
     }
 
     pub fn is_set(&self) -> bool {
-        [
-            self.default_usd,
-            self.quick_usd,
-            self.chore_usd,
-            self.bug_usd,
-            self.feature_usd,
-        ]
-        .iter()
-        .any(Option::is_some)
+        self.usd.is_some()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitHub {
-    /// Open a pull request when the gates pass. Off by default: pushing a
-    /// branch is the first thing Devplane does that other people can see.
+    /// Open a pull request when the gates pass. Off by default: pushing is
+    /// the first thing Devplane does that other people can see.
     pub pull_request: bool,
-    /// Open it as a draft. A pull request that looks finished summons
-    /// reviewers, and work a machine just finished has not been read by anyone.
+    /// Open it as a draft, since nobody has read the work yet.
     pub draft: bool,
-    /// Issues carrying this label are offered as work.
+    /// Issues carrying this label are offered as changes.
     pub ready_label: Option<String>,
-    // `squash` lived here for the life of the project: parsed, defaulted to
-    // true, printed in the configuration reference and on the documentation
-    // site, and read by nothing. It belonged to merge-when-green, which is not
-    // built. This file's own rule is that every key in it is read by the code
-    // and that a designed-but-unbuilt key never appears in a reference, because
-    // `deny_unknown_fields` means one such key fails the *whole* file and takes
-    // the repository's permission rules down with it. Unbuilt work lives in the
-    // roadmap; it does not live here as a field somebody can set and watch do
-    // nothing.
 }
 
 impl Default for GitHub {
@@ -568,68 +259,175 @@ impl Default for GitHub {
     }
 }
 
-/// How to read the specification a piece of work names.
-///
-/// **One key, and it holds the project's words rather than this tool's.** The
-/// spec-driven frameworks disagree on almost everything — the folder layout,
-/// the requirement identifiers and the section names all differ, and all of
-/// them are still moving. So nothing here recognises a section: the outline is
-/// the Markdown headings, the progress is the `- [ ]` boxes they do share, and
-/// the rest is the repository's to name.
+/// How to read the specification a change names, in the project's own words.
+/// No framework's sections are recognised: the outline is the Markdown
+/// headings, progress is the `- [ ]` boxes, and the rest is declared here.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpecSection {
-    /// Words that mark a question the specification has not answered yet.
-    ///
-    /// `NEEDS CLARIFICATION` is Spec Kit's spelling, `TBD` is everybody's, and
-    /// the next tool will have a third — which is why the list is empty by
-    /// default and the repository writes what it means. Matched
-    /// case-insensitively, per line, exactly as a reviewer's findings are.
+    /// Words that mark an unanswered question (e.g. `NEEDS CLARIFICATION`,
+    /// `TBD`). Empty by default; matched case-insensitively, per line.
     pub open_questions: Vec<String>,
-    /// Where this repository keeps its plans, relative to the project root.
-    ///
-    /// **The same rule as `open_questions`, one field over: the project says,
-    /// and this tool has no default.** Spec Kit writes `specs/`, Kiro writes
-    /// `.kiro/specs/`, OpenSpec writes `openspec/changes/`, and plenty of
-    /// repositories write a folder somebody named themselves. Guessing at one
-    /// would be modelling a methodology, which the reader opens by refusing to
-    /// do; guessing at the *newest* one inside it would be worse, because it is
-    /// wrong the moment somebody works on an older feature.
-    ///
-    /// **Absent means the Plans page lists nothing for this project**, and says
-    /// *not configured* rather than *nothing* — which is the distinction the
-    /// page was missing: it was correct and empty on every real machine,
-    /// because it could only ever show a plan a piece of Devplane Work already
-    /// named.
+    /// Where this repository keeps its plans, relative to the root. No
+    /// default: layouts differ, and guessing would model a methodology.
+    /// Absent, the Plans page says *not configured* rather than *nothing*.
     pub plans: Option<String>,
+    /// Requirement-identifier prefixes; a token is a prefix followed by
+    /// digits, and one appearing in a heading and a task line is an edge.
+    /// Absent, the defaults are `FR-`, `NFR-`, `SC-`, `REQ-`, `US-`, `AC-`;
+    /// setting it replaces them. A prefix may not contain a digit (bare `1.2`
+    /// matches versions too), so write `["Req "]` to match `Req 12`.
+    /// Case-sensitive.
+    pub tokens: Option<Vec<String>>,
 }
 
 impl SpecSection {
-    /// The immediate children of the plans directory, in path order.
-    ///
-    /// **A listing, not a guess.** Each is a plan this repository has; which
-    /// one anybody is working to is a separate question, answered only by a
-    /// piece of Work naming it.
+    /// The immediate children of the plans directory, in path order. Which
+    /// one is being worked to is answered only by a change naming it.
     pub fn plan_paths(&self, root: &std::path::Path) -> Vec<String> {
         let Some(dir) = self.plans.as_deref() else {
             return Vec::new();
         };
-        let joined = root.join(dir);
-        if !crate::core::policy::within(root, &joined) {
-            return Vec::new();
+        crate::core::spec::changes(root, &crate::core::spec::Detected::plain(dir))
+            .into_iter()
+            .map(|c| c.path)
+            .collect()
+    }
+
+    /// The recognised layouts present, plus the one `plans` declares unless a
+    /// recognised layout already covers that root. Empty means
+    /// [`crate::core::spec::NO_LAYOUT`].
+    pub fn layouts(&self, root: &std::path::Path) -> Vec<crate::core::spec::Detected> {
+        let mut out = crate::core::spec::detect(root);
+        if let Some(dir) = self.plans.as_deref() {
+            let plain = crate::core::spec::Detected::plain(dir);
+            if !out.iter().any(|d| d.root == plain.root) {
+                out.push(plain);
+            }
         }
-        let Ok(entries) = std::fs::read_dir(&joined) else {
-            return Vec::new();
+        out
+    }
+
+    /// The configured token shapes, or the defaults. An invalid prefix is
+    /// dropped here and reported by `devplane check`.
+    pub fn token_shapes(&self) -> Vec<crate::core::spec::TokenShape> {
+        match self.tokens.as_deref() {
+            Some(list) if !list.is_empty() => list
+                .iter()
+                .filter_map(|p| crate::core::spec::TokenShape::new(p).ok())
+                .collect(),
+            _ => crate::core::spec::TokenShape::defaults(),
+        }
+    }
+
+    /// The edges of one change, under this repository's own shapes.
+    pub fn trace(&self, change: &crate::core::spec::ChangeFolder) -> crate::core::spec::Trace {
+        crate::core::spec::edges(change, &self.token_shapes())
+    }
+
+    /// What in `[spec]` parses but cannot do what it says. An invalid token
+    /// prefix is an error, so a declared notation never silently draws nothing.
+    fn problems(&self) -> Vec<Problem> {
+        let mut out = Vec::new();
+        match self.tokens.as_deref() {
+            Some([]) => out.push(Problem::error(
+                "[spec] tokens".into(),
+                "is empty, which matches nothing; leave the key out for the defaults".into(),
+            )),
+            Some(list) => {
+                for prefix in list {
+                    if let Err(why) = crate::core::spec::TokenShape::new(prefix) {
+                        out.push(Problem::error("[spec] tokens".into(), why));
+                    }
+                }
+            }
+            None => {}
+        }
+        out
+    }
+}
+
+/// `[review]` — the reading order and the test mapping, both declared, never
+/// inferred: `*_test.rs` is not a test until the project says so.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Review {
+    /// Absent, the change is read in path order and shown as unordered.
+    pub roles: Option<Roles>,
+    /// Absent, there is no coverage column — not the same as *not covered*.
+    pub covers: Option<Vec<Covers>>,
+}
+
+/// The six roles, in the order a change is read. A file takes the first
+/// role whose patterns match it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Roles {
+    pub shared: Vec<String>,
+    pub logic: Vec<String>,
+    pub security: Vec<String>,
+    pub integration: Vec<String>,
+    pub wiring: Vec<String>,
+    pub tests: Vec<String>,
+}
+
+impl Roles {
+    /// Each role's name as spelled in the file, with its patterns, in order.
+    pub fn named(&self) -> [(&'static str, &[String]); 6] {
+        [
+            ("shared", &self.shared),
+            ("logic", &self.logic),
+            ("security", &self.security),
+            ("integration", &self.integration),
+            ("wiring", &self.wiring),
+            ("tests", &self.tests),
+        ]
+    }
+}
+
+/// One declared test-to-source relationship.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Covers {
+    /// Also matched against the gate commands to name the one that runs it.
+    pub test: String,
+    /// Gitignore syntax.
+    pub paths: Vec<String>,
+}
+
+impl Review {
+    /// What in `[review]` parses but cannot do what it says: a pattern that
+    /// matches nothing (blank, comment, bare `!`), or a mapping with no paths,
+    /// which would switch the coverage column on and mark every file uncovered.
+    fn problems(&self) -> Vec<Problem> {
+        let mut out = Vec::new();
+        let unreadable = |p: &str| {
+            p.contains('\n') || crate::core::worktreeinclude::Patterns::parse(p).is_empty()
         };
-        let mut out: Vec<String> = entries
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                (!name.starts_with('.')).then(|| format!("{}/{name}", dir.trim_end_matches('/')))
-            })
-            .collect();
-        out.sort();
+        if let Some(roles) = &self.roles {
+            for (role, patterns) in roles.named() {
+                for p in patterns.iter().filter(|p| unreadable(p)) {
+                    out.push(Problem::error(
+                        format!("[review.roles] {role}"),
+                        format!("has `{p}`, which is not a pattern — it would match nothing"),
+                    ));
+                }
+            }
+        }
+        for c in self.covers.as_deref().unwrap_or_default() {
+            if c.paths.is_empty() {
+                out.push(Problem::error(
+                    "[[review.covers]]".into(),
+                    format!("`{}` names no paths, so it covers nothing", c.test),
+                ));
+            }
+            for p in c.paths.iter().filter(|p| unreadable(p)) {
+                out.push(Problem::error(
+                    "[[review.covers]]".into(),
+                    format!("`{}` has `{p}`, which is not a pattern", c.test),
+                ));
+            }
+        }
         out
     }
 }
@@ -639,29 +437,18 @@ impl SpecSection {
 pub struct PolicySection {
     /// Rules that refuse a permission request.
     pub never_auto: Vec<String>,
-    /// Rules that always put the call in front of a person.
-    ///
-    /// Claude Code's third list, so an `ask` rule moved over from
-    /// `settings.json` has somewhere to go. Evaluated after `never_auto`.
+    /// Rules that always put the call in front of a person (Claude Code's
+    /// `ask` list). Evaluated after `never_auto`.
     pub always_ask: Vec<String>,
-    /// How many runs may work on this project at once.
     pub max_parallel_runs: Option<usize>,
     /// How long a working run may produce nothing before it is called stalled.
-    ///
-    /// Per project, because the number is a statement about the work: a
-    /// repository whose test suite takes twelve minutes stalls at a different
-    /// threshold from one that answers in seconds, and a single machine-wide
-    /// number has to be wrong for one of them. Unset falls back to the global
-    /// setting.
+    /// Per project because suites differ; unset uses the global setting.
     #[serde(default, with = "humantime_opt")]
     pub stall_timeout: Option<Duration>,
 }
 
-/// The machine-wide rules, from `~/.devplane/policy.toml`.
-///
-/// The same `[policy]` shape a project writes, so a rule can be moved between
-/// the two files by cutting and pasting it — and read by the same TOML parser,
-/// so a comment or a multi-line array means what it looks like.
+/// The machine-wide rules, from `~/.devplane/policy.toml`, in the same
+/// `[policy]` shape a project writes so rules can be pasted between them.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalConfig {
@@ -669,10 +456,8 @@ pub struct GlobalConfig {
 }
 
 impl GlobalConfig {
-    /// Reads `<home>/policy.toml`. A missing file means no rule decides
-    /// anything on the user's behalf, which is the right default; a malformed
-    /// one is an error, because a typo in a deny rule must never read as
-    /// permission.
+    /// Reads `<home>/policy.toml`. Missing means no rules; malformed is an
+    /// error, because a typo in a deny rule must never read as permission.
     pub fn load(home: &Path) -> Result<Self, ConfigError> {
         let path = home.join("policy.toml");
         let text = match std::fs::read_to_string(&path) {
@@ -702,11 +487,8 @@ impl GlobalConfig {
 }
 
 impl ProjectConfig {
-    /// Reads the configuration for a repository root.
-    ///
-    /// A missing file is not an error — most repositories will never have one.
-    /// A malformed file *is*: silently falling back to defaults would mean a
-    /// typo in a deny rule quietly removes the rule.
+    /// Reads the configuration for a repository root. Missing is the default;
+    /// malformed is an error, so a typo never silently removes a deny rule.
     pub fn load(root: &Path) -> Result<Self, ConfigError> {
         let path = root.join(CONFIG_FILE);
         let text = match std::fs::read_to_string(&path) {
@@ -714,8 +496,17 @@ impl ProjectConfig {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(ConfigError::Io(path.display().to_string(), e.to_string())),
         };
-        toml::from_str(&text)
-            .map_err(|e| ConfigError::Parse(path.display().to_string(), e.to_string()))
+        Self::parse(&text).map_err(|e| ConfigError::Parse(path.display().to_string(), e))
+    }
+
+    /// Parses a file's text, naming any removed key.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        if let Ok(table) = text.parse::<toml::Table>()
+            && let Some(why) = removed_key(&table)
+        {
+            return Err(why);
+        }
+        toml::from_str(text).map_err(|e| explain_unknown(&e))
     }
 
     /// The compiled permission policy.
@@ -727,25 +518,28 @@ impl ProjectConfig {
         !self.gates.check.is_empty()
     }
 
-    /// Everything in this file that parses but cannot do what it says.
-    ///
-    /// A configuration file gets three chances to be wrong. It can fail to
-    /// parse, which TOML reports. It can be malformed in a way the types accept
-    /// — a `back_to` naming a step that does not exist. And it can be *dangerous
-    /// in a way only the domain knows*, which is what most of this is.
-    ///
-    /// Checked when work starts and by `devplane check`, so the answer arrives
-    /// before an agent has been paid to discover it.
+    /// Everything in this file that parses but cannot do what it says. Checked
+    /// when a change starts and by `devplane check`, before an agent is paid.
     pub fn validate(&self) -> Vec<Problem> {
-        let mut out = Vec::new();
-        let named: Vec<&str> = self.gates.named.keys().map(String::as_str).collect();
+        self.problems(None)
+    }
 
-        // A deadline that will not parse is an **error**, not a default. It is
-        // the one setting in this file that ends somebody's question on their
-        // behalf, and a typo in it is the difference between a bounded wait and
-        // an unbounded one. Devplane leaves the wait unbounded — the safe
-        // direction — and says the file is wrong rather than guessing which
-        // duration was meant.
+    /// [`Self::validate`], also flagging a `deliver_from` naming an
+    /// unregistered project.
+    pub fn validate_against(&self, registered: &[String]) -> Vec<Problem> {
+        self.problems(Some(registered))
+    }
+
+    fn problems(&self, registered: Option<&[String]>) -> Vec<Problem> {
+        let mut out = Vec::new();
+        for what in
+            crate::core::report::deliver_from_problems(&self.reports.deliver_from, registered)
+        {
+            out.push(Problem::error("[reports] deliver_from".into(), what));
+        }
+
+        // An unparseable deadline is an error: the wait stays unbounded (the
+        // safe direction) rather than guessing which duration was meant.
         if self.questions.deadline().is_none() {
             out.push(Problem::error(
                 "[questions] deadline".into(),
@@ -765,109 +559,8 @@ impl ProjectConfig {
                 ));
             }
         }
-        if self.gates.check.is_empty() && !self.pipelines.is_empty() {
-            out.push(Problem::warning(
-                "[gates] check".into(),
-                "is empty, so `gate = \"check\"` in a pipeline cannot pass".into(),
-            ));
-        }
-
-        for (pname, pipeline) in &self.pipelines {
-            let at = |s: &str| format!("[pipelines.{pname}] {s}");
-            if pipeline.steps.is_empty() {
-                out.push(Problem::error(
-                    at("steps"),
-                    "is empty, so work of this kind would finish before it started".into(),
-                ));
-                continue;
-            }
-
-            // Steps are addressed by name — `back_to`, and the cursor a running
-            // pipeline carries — so two of a name is an ambiguity the chain
-            // resolves silently and wrongly.
-            let mut seen: Vec<&str> = Vec::new();
-            for step in &pipeline.steps {
-                let name = step.name();
-                if seen.contains(&name) {
-                    out.push(Problem::error(
-                        at(name),
-                        "appears twice; steps are addressed by name".into(),
-                    ));
-                }
-                seen.push(name);
-            }
-
-            let gate_of = |name: &str| -> Option<&str> {
-                pipeline.steps.iter().find_map(|s| match s {
-                    Step::Role(r) if r.role == name => r.gate.as_deref(),
-                    _ => None,
-                })
-            };
-
-            for (i, step) in pipeline.steps.iter().enumerate() {
-                let Step::Role(role) = step else { continue };
-                if let Some(gate) = &role.gate
-                    && gate != "check"
-                    && !named.contains(&gate.as_str())
-                {
-                    out.push(Problem::error(
-                        at(&role.role),
-                        format!("asks for gate `{gate}`, which no `[gates.named]` declares"),
-                    ));
-                }
-
-                let Some(f) = &role.findings else { continue };
-                let target = seen.iter().position(|s| *s == f.back_to);
-                match target {
-                    None => out.push(Problem::error(
-                        at(&role.role),
-                        format!(
-                            "sends findings back to `{}`, which is not a step",
-                            f.back_to
-                        ),
-                    )),
-                    Some(t) if t >= i => out.push(Problem::error(
-                        at(&role.role),
-                        format!(
-                            "sends findings back to `{}`, which is not earlier",
-                            f.back_to
-                        ),
-                    )),
-                    Some(_) => {}
-                }
-                if f.max == 0 {
-                    out.push(Problem::warning(
-                        at(&role.role),
-                        "has `max = 0`, so its findings are never acted on".into(),
-                    ));
-                }
-
-                // The rule the evidence asks for. A reviewer that can send work
-                // back, with nothing re-checking the result, can only move the
-                // code — and not always forwards: reviewing across vendors
-                // raises the pass rate when the reviewer is the stronger model
-                // and *lowers* it when it is not (arXiv:2607.21656, 91.4 % →
-                // 82.8 % for the weaker direction). A gate on the step that
-                // owns the code is what makes the loop safe in both directions.
-                if gate_of(&f.back_to).is_none() {
-                    out.push(Problem::error(
-                        at(&role.role),
-                        format!(
-                            "sends findings back to `{}`, which declares no `gate`. \
-                             A review loop with nothing re-checking the result can make \
-                             the code worse as easily as better — give `{}` a gate",
-                            f.back_to, f.back_to
-                        ),
-                    ));
-                }
-            }
-        }
-
-        // A permission rule that cannot work is the most dangerous thing a
-        // configuration file can contain, because the failure is silent and, on
-        // the deny side, silence reads as permission. Claude Code reports these
-        // in its own startup dialog; there is no reason for the file that
-        // mirrors its syntax to be quieter about them.
+        // A deny rule that cannot work fails silently, and silence reads as
+        // permission, so these are reported like Claude Code's own startup check.
         for (problem, what) in self.policy().problems() {
             let where_ = "[policy]".to_string();
             out.push(match problem {
@@ -876,14 +569,11 @@ impl ProjectConfig {
             });
         }
 
-        // The warning is about the *money* axis only, and only when it is the
-        // whole bound. A project that also sets `max_turns` or `max_runtime`
-        // has a guard that always fires, and telling it otherwise would be the
-        // kind of warning people learn to ignore.
+        // Warn only when the dollar ceiling is the whole bound.
         if self.budget.is_set() && !self.budget.has_observable_bound() {
             out.push(Problem::warning(
                 "[budget]".into(),
-                "a `_usd` ceiling only stops work whose agent reports what it spent, which \
+                "a `usd` ceiling only stops work whose agent reports what it spent, which \
                  the protocol makes optional and the GenAI telemetry conventions cannot \
                  express at all. Add `max_turns` or `max_runtime`, which are counted here \
                  and bind every agent"
@@ -891,39 +581,91 @@ impl ProjectConfig {
             ));
         }
 
-        for pattern in &self.workspace.include {
-            let p = Path::new(pattern);
-            if p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir) {
+        out.extend(self.spec.problems());
+        out.extend(self.review.problems());
+
+        // An unknown cache name is an error listing the known ones.
+        for name in &self.workspace.share {
+            if crate::core::caches::lookup(name).is_none() {
                 out.push(Problem::error(
-                    "[workspace] include".into(),
-                    format!("`{pattern}` leaves the repository and will not be copied"),
+                    "[workspace] share".into(),
+                    format!(
+                        "`{name}` is not an ecosystem this can share a cache for; the known \
+                         names are {}",
+                        crate::core::caches::known_names()
+                            .iter()
+                            .map(|n| format!("`{n}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
                 ));
             }
         }
+
+        // The base branch is spliced into git argument lists and arrives with
+        // somebody else's code, so an invalid name never reaches a command line.
+        if let Some(base) = &self.project.base_branch
+            && let Err(why) = valid_branch_name(base)
+        {
+            out.push(Problem::error(
+                "[project] base_branch".into(),
+                format!("`{base}` is not a branch name: {why}"),
+            ));
+        }
         out
     }
+}
 
-    /// The pipeline that governs a kind of work, if the project declared one.
-    pub fn pipeline_for(&self, kind: &str) -> Option<&Pipeline> {
-        self.pipelines.get(kind).filter(|p| !p.steps.is_empty())
+/// Whether git would accept `name` as a branch, by the documented rules of
+/// `git check-ref-format --branch`. Pure, because `core/` may not spawn.
+pub fn valid_branch_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("it is empty".into());
     }
+    if name.starts_with('-') {
+        return Err("it starts with `-`, which git reads as an option".into());
+    }
+    if name == "@" {
+        return Err("`@` alone is not a branch name".into());
+    }
+    if name.contains("..") {
+        return Err("it contains `..`".into());
+    }
+    if name.contains("@{") {
+        return Err("it contains `@{`".into());
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| c.is_control() || *c == ' ' || "~^:?*[\\".contains(*c))
+    {
+        return Err(format!("it contains {c:?}, which git reserves"));
+    }
+    if name.ends_with('/') || name.ends_with('.') {
+        return Err("it ends with `/` or `.`".into());
+    }
+    for part in name.split('/') {
+        if part.is_empty() {
+            return Err("it has an empty path component (`//`, or a leading `/`)".into());
+        }
+        if part.starts_with('.') {
+            return Err(format!("the component `{part}` starts with `.`"));
+        }
+        if part.ends_with(".lock") {
+            return Err(format!("the component `{part}` ends with `.lock`"));
+        }
+    }
+    Ok(())
+}
 
-    /// The commands and expectation behind a gate name.
-    ///
-    /// `check` is the Definition of Done and always resolves; anything else has
-    /// to be declared, and asking for a gate that does not exist is an error
-    /// rather than a silent pass — an empty gate that reads as success is the
-    /// failure this layer exists to prevent.
-    pub fn gate_named(&self, name: &str) -> Option<(Vec<String>, Expect, Duration)> {
+impl ProjectConfig {
+    /// The commands and timeout behind a gate name. `check` always resolves;
+    /// an undeclared name is `None`, never an empty gate that passes.
+    pub fn gate_named(&self, name: &str) -> Option<(Vec<String>, Duration)> {
         if name == "check" {
-            return Some((self.gates.check.clone(), Expect::Pass, self.gates.timeout));
+            return Some((self.gates.check.clone(), self.gates.timeout));
         }
         let g = self.gates.named.get(name)?;
-        Some((
-            g.run.clone(),
-            g.expect,
-            g.timeout.unwrap_or(self.gates.timeout),
-        ))
+        Some((g.run.clone(), g.timeout.unwrap_or(self.gates.timeout)))
     }
 }
 
@@ -942,19 +684,10 @@ fn human(d: Duration) -> String {
 }
 
 impl ProjectConfig {
-    /// This file read back: what it will actually do, and everything in it that
-    /// cannot do what it says.
-    ///
-    /// One derivation, for the same reason the inbox has one: `devplane check`
-    /// and the board answering "what is configured here" from two different
-    /// projections is how a terminal and a browser end up disagreeing about a
-    /// repository's own rules.
-    ///
-    /// The rules are listed in **evaluation order** — deny, then ask, then
-    /// allow — because that order is the thing most likely to surprise, and
-    /// beside them the three findings a person cannot get by reading the file:
-    /// a rule that covers nothing, a rule that grants more than it reads as
-    /// granting, and a path denied for reading that is still writable.
+    /// This file read back: what it will do and what cannot work. One
+    /// derivation shared by `devplane check` and the board, so they agree.
+    /// Rules are in evaluation order, beside the findings reading the file
+    /// cannot give: unused rules, overbroad ones, and half-protected paths.
     pub fn describe(&self) -> serde_json::Value {
         use serde_json::json;
         let policy = self.policy();
@@ -981,27 +714,9 @@ impl ProjectConfig {
                 "named": self.gates.named.iter().map(|(name, g)| json!({
                     "name": name,
                     "run": g.run,
-                    // A reproduction gate is the one whose *failure* is the
-                    // pass, and a list of commands that does not say so reads
-                    // as exactly backwards.
-                    "expect": match g.expect { Expect::Fail => "fail", Expect::Pass => "pass" },
                     "timeout": g.timeout.map(human),
                 })).collect::<Vec<_>>(),
             },
-            "pipelines": self.pipelines.iter().map(|(name, p)| json!({
-                "name": name,
-                "steps": p.steps.iter().map(|s| match s {
-                    Step::Human(h) => json!({"kind": "human", "name": h.human}),
-                    Step::Role(r) => json!({
-                        "kind": "role",
-                        "name": r.role,
-                        "agent": r.agent,
-                        "gate": r.gate,
-                        "back_to": r.findings.as_ref().map(|f| f.back_to.clone()),
-                        "max": r.findings.as_ref().map(|f| f.max),
-                    }),
-                }).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
             "policy": {
                 "deny": rules(policy.deny_rules()),
                 "ask": rules(policy.ask_rules()),
@@ -1014,16 +729,9 @@ impl ProjectConfig {
                 "half_protected": policy.half_protected_paths(),
             },
             "budget": {
-                "default_usd": self.budget.default_usd,
-                "quick_usd": self.budget.quick_usd,
-                "chore_usd": self.budget.chore_usd,
-                "bug_usd": self.budget.bug_usd,
-                "feature_usd": self.budget.feature_usd,
+                "usd": self.budget.usd,
                 "max_turns": self.budget.max_turns,
                 "max_runtime": self.budget.max_runtime.map(human),
-                // A ceiling in dollars binds only an agent that reports what it
-                // spent, so whether this project bounds work by something
-                // always observable is a fact about the file worth stating.
                 "has_observable_bound": self.budget.has_observable_bound(),
             },
             "github": {
@@ -1031,23 +739,79 @@ impl ProjectConfig {
                 "draft": self.github.draft,
                 "ready_label": self.github.ready_label,
             },
-            "workspace": {"setup": self.workspace.setup, "include": self.workspace.include},
+            "workspace": {"setup": self.workspace.setup, "share": self.workspace.share},
             "spec": {"open_questions": self.spec.open_questions},
             "transcripts": {"keep": self.transcripts.keep},
+            "review": {"roles": self.review.roles, "covers": self.review.covers},
+            "reports": {"deliver_from": self.reports.deliver_from},
             "problems": self.validate(),
         })
     }
 }
 
+/// A removed key, named with what to do instead. `deny_unknown_fields` already
+/// refuses it, but an unknown-field error reads as a typo.
+fn removed_key(t: &toml::Table) -> Option<String> {
+    if t.contains_key("pipelines") {
+        return Some(
+            "`[pipelines]` was removed in 0.10: a change is one agent in its own tree and the \
+             project's `[gates] check`. Delete the section"
+                .into(),
+        );
+    }
+    if let Some(named) = t
+        .get("gates")
+        .and_then(|g| g.get("named"))
+        .and_then(|n| n.as_table())
+    {
+        for (name, gate) in named {
+            if gate.get("expect").is_some() {
+                return Some(format!(
+                    "`[gates.named.{name}] expect` was removed in 0.10: a named gate passes \
+                     when its commands exit zero, and reproduction gates are gone. Delete the \
+                     key, and write the command so that success means what you want"
+                ));
+            }
+        }
+    }
+    if let Some(budget) = t.get("budget").and_then(|b| b.as_table()) {
+        for key in [
+            "default_usd",
+            "quick_usd",
+            "chore_usd",
+            "bug_usd",
+            "feature_usd",
+        ] {
+            if budget.contains_key(key) {
+                return Some(format!(
+                    "`[budget] {key}` was removed in 0.10: change kinds are gone, so there is \
+                     one ceiling — write `usd` instead"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The parse error, with the retired `include` key pointed at its replacement.
+fn explain_unknown(e: &toml::de::Error) -> String {
+    let text = e.to_string();
+    if text.contains("unknown field `include`") {
+        return "`[workspace] include` is gone — write the paths to `.worktreeinclude` at the \
+                repository root (gitignore syntax), which Claude Code reads too"
+            .into();
+    }
+    text
+}
+
 /// Something in a configuration file that parses but cannot work.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Problem {
-    /// Where it is, in the file's own words: `[pipelines.feature] review`.
+    /// Where it is, in the file's own words: `[gates.named.slow]`.
     #[serde(rename = "where")]
     pub where_: String,
     pub what: String,
-    /// An error makes the file unusable for the thing it configures; a warning
-    /// is something that will surprise somebody later.
+    /// Error rather than warning.
     pub fatal: bool,
 }
 
@@ -1142,10 +906,7 @@ mod humantime {
                 'd' => 86_400,
                 _ => return None,
             };
-            // Checked, because this parses a file from a repository. `999999999d`
-            // is not a timeout anybody means, and overflowing on it panics a
-            // debug build and silently wraps to a *short* one in release —
-            // which would turn a gate timeout into an instant failure.
+            // Checked: an overflow would wrap to a short timeout in release.
             total = n.checked_mul(unit).and_then(|v| total.checked_add(v))?;
         }
         // A bare number is seconds, which is what someone writing `30` means.
@@ -1163,72 +924,144 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_pipeline_reads_as_a_chain_of_roles_and_people() {
-        let c: ProjectConfig = toml::from_str(
-            r#"
-[pipelines.feature]
-steps = [
-  { role = "implement", agent = "claude", prompt = "implement", gate = "check" },
-  { role = "review",    agent = "codex",  prompt = "review", findings = { back_to = "implement", max = 2 } },
-  { human = "merge" },
-]
-"#,
-        )
-        .unwrap();
-        let p = c.pipeline_for("feature").expect("declared");
-        assert_eq!(p.steps.len(), 3);
+    fn a_delivery_list_names_its_sources_or_is_refused() {
+        let off = ProjectConfig::default();
+        assert!(
+            off.reports.deliver_from.is_empty(),
+            "delivery is off by default"
+        );
 
-        let Step::Role(first) = &p.steps[0] else {
-            panic!("the first step is an agent's")
-        };
-        assert_eq!(first.gate.as_deref(), Some("check"));
+        let star: ProjectConfig = toml::from_str("[reports]\ndeliver_from = [\"*\"]\n").unwrap();
+        let p = star.validate();
+        let hit = p
+            .iter()
+            .find(|p| p.where_ == "[reports] deliver_from")
+            .expect("the wildcard is named");
+        assert!(hit.fatal && hit.what.contains("any project"), "{hit}");
 
-        let Step::Role(second) = &p.steps[1] else {
-            panic!("so is the second")
-        };
-        let f = second.findings.as_ref().expect("it sends work back");
-        assert_eq!(f.back_to, "implement");
-        assert_eq!(f.max, 2);
-        // Defaulted rather than required: a pipeline should be writable in
-        // three lines, and the path only matters when someone wants it moved.
-        assert_eq!(f.file, ".devplane/findings.md");
+        let blank: ProjectConfig = toml::from_str("[reports]\ndeliver_from = [\"\"]\n").unwrap();
+        assert!(blank.validate().iter().any(|p| p.fatal));
 
-        // A step with `human` is a person, never mistaken for a role.
-        assert!(matches!(&p.steps[2], Step::Human(h) if h.human == "merge"));
+        let named: ProjectConfig =
+            toml::from_str("[reports]\ndeliver_from = [\"api\", \"billing\"]\n").unwrap();
+        assert!(
+            named.validate().is_empty(),
+            "without the registry, a name is a name"
+        );
+        let against = named.validate_against(&["api".into(), "web".into()]);
+        assert_eq!(against.len(), 1, "{against:?}");
+        assert!(against[0].what.contains("`billing`"), "{}", against[0]);
+
+        let typo = toml::from_str::<ProjectConfig>("[reports]\ndeliver_to = [\"api\"]\n");
+        assert!(
+            typo.is_err(),
+            "an unknown key fails the file rather than doing nothing"
+        );
     }
 
     #[test]
-    fn a_pipeline_with_no_steps_is_not_a_pipeline() {
-        // Otherwise declaring `[pipelines.feature]` and forgetting the steps
-        // would start work that immediately claims to be finished.
-        let c: ProjectConfig = toml::from_str("[pipelines.feature]\nsteps = []\n").unwrap();
-        assert!(c.pipeline_for("feature").is_none());
+    fn review_roles_and_covers_are_read_as_declared() {
+        let c: ProjectConfig = toml::from_str(
+            r#"
+[review.roles]
+shared   = ["src/types/**"]
+security = ["src/auth/**"]
+
+[[review.covers]]
+test  = "tests/auth.rs"
+paths = ["src/auth/**"]
+"#,
+        )
+        .unwrap();
+        let roles = c.review.roles.as_ref().expect("declared");
+        assert_eq!(roles.shared, ["src/types/**"]);
+        assert!(roles.logic.is_empty(), "an undeclared role is empty");
+        let covers = c.review.covers.as_deref().expect("declared");
+        assert_eq!(covers[0].test, "tests/auth.rs");
+        assert!(c.validate().iter().all(|p| !p.where_.contains("review")));
+        let none = ProjectConfig::default();
+        assert!(none.review.roles.is_none() && none.review.covers.is_none());
+    }
+
+    #[test]
+    fn a_review_pattern_that_reads_as_nothing_names_its_role() {
+        let c: ProjectConfig =
+            toml::from_str("[review.roles]\nlogic = [\"src/**\", \"# not a pattern\"]\n").unwrap();
+        let p = c.validate();
+        let hit = p
+            .iter()
+            .find(|p| p.where_ == "[review.roles] logic")
+            .expect("the role is named");
+        assert!(hit.fatal && hit.what.contains("# not a pattern"), "{hit}");
+    }
+
+    #[test]
+    fn a_mapping_with_no_paths_is_an_error() {
+        let c: ProjectConfig =
+            toml::from_str("[[review.covers]]\ntest = \"tests/a.rs\"\npaths = []\n").unwrap();
+        assert!(
+            c.validate().iter().any(|p| p.fatal
+                && p.where_ == "[[review.covers]]"
+                && p.what.contains("tests/a.rs"))
+        );
+    }
+
+    #[test]
+    fn review_refuses_a_key_it_does_not_know() {
+        for text in [
+            "[review]\norder = []\n",
+            "[review.roles]\nimportant = [\"src/**\"]\n",
+            "[[review.covers]]\ntest = \"t\"\npaths = [\"a\"]\nweight = 2\n",
+        ] {
+            assert!(toml::from_str::<ProjectConfig>(text).is_err(), "{text}");
+        }
     }
 
     #[test]
     fn a_gate_that_is_not_declared_is_not_a_pass() {
-        // Asking for a gate nobody wrote must fail loudly. A missing gate that
-        // reads as success is the exact failure this layer exists to prevent.
         let c: ProjectConfig = toml::from_str("[gates]\ncheck = [\"cargo test\"]\n").unwrap();
         assert!(c.gate_named("check").is_some());
         assert!(c.gate_named("repro-fails-on-base").is_none());
     }
 
     #[test]
-    fn a_reproduction_gate_says_it_expects_to_fail() {
+    fn a_named_gate_is_read_with_its_own_timeout() {
         let c: ProjectConfig = toml::from_str(
             r#"
-[gates.named.repro]
-run = ["cargo test --test repro"]
-expect = "fail"
+[gates.named.slow]
+run = ["cargo test --test slow"]
 timeout = "90s"
 "#,
         )
         .unwrap();
-        let (cmds, expect, timeout) = c.gate_named("repro").expect("declared");
-        assert_eq!(cmds, vec!["cargo test --test repro".to_string()]);
-        assert_eq!(expect, Expect::Fail);
+        let (cmds, timeout) = c.gate_named("slow").expect("declared");
+        assert_eq!(cmds, vec!["cargo test --test slow".to_string()]);
         assert_eq!(timeout, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn a_removed_key_is_refused_by_name_with_what_to_do() {
+        for (text, key) in [
+            (
+                "[pipelines.feature]\nsteps = []\n",
+                "`[pipelines]` was removed",
+            ),
+            (
+                "[gates.named.repro]\nrun = [\"x\"]\nexpect = \"fail\"\n",
+                "`[gates.named.repro] expect` was removed",
+            ),
+            (
+                "[budget]\nfeature_usd = 5\n",
+                "`[budget] feature_usd` was removed",
+            ),
+            (
+                "[budget]\ndefault_usd = 5\n",
+                "`[budget] default_usd` was removed",
+            ),
+        ] {
+            let err = ProjectConfig::parse(text).expect_err(text);
+            assert!(err.contains(key), "{text}\n produced: {err}");
+        }
     }
 
     fn parse(toml_text: &str) -> ProjectConfig {
@@ -1236,141 +1069,93 @@ timeout = "90s"
     }
 
     #[test]
-    fn a_step_that_is_wrong_says_which_step_and_why() {
-        // `#[serde(untagged)]` reported every one of these as "data did not
-        // match any variant of untagged enum Step", which tells a reader
-        // nothing about which of forty lines to look at.
-        let cases = [
-            (
-                r#"[pipelines.f]
-steps = [{ role = "review" }]"#,
-                "`review` has no `prompt`",
-            ),
-            (
-                r#"[pipelines.f]
-steps = [{ agent = "claude", prompt = "go" }]"#,
-                "needs either",
-            ),
-            (
-                r#"[pipelines.f]
-steps = [{ role = "review", human = "merge", prompt = "x" }]"#,
-                "both",
-            ),
-            (
-                r#"[pipelines.f]
-steps = [{ human = "merge", prompt = "x" }]"#,
-                "a person is asked",
-            ),
-            (
-                r#"[pipelines.f]
-steps = [{ role = "review", prompt = "x", gates = "check" }]"#,
-                "gates",
-            ),
-        ];
-        for (text, expected) in cases {
-            let err = toml::from_str::<ProjectConfig>(text)
-                .expect_err(text)
-                .to_string();
-            assert!(err.contains(expected), "{text}\n produced: {err}");
-        }
+    fn an_empty_named_gate_is_named() {
+        let c = parse("[gates]\ncheck = [\"cargo test\"]\n[gates.named.empty]\nrun = []\n");
+        let all: Vec<String> = c.validate().iter().map(|p| p.to_string()).collect();
+        assert!(all.join("\n").contains("empty"), "{all:?}");
     }
 
     #[test]
-    fn a_review_loop_with_nothing_re_checking_it_is_refused() {
-        // The evidence: reviewing across vendors raises the pass rate when the
-        // reviewer is the stronger model and lowers it when it is not
-        // (arXiv:2607.21656). A loop that can send work back with no gate on
-        // the step that owns the code can therefore make it worse, quietly.
-        let c = parse(
-            r#"
-[pipelines.feature]
-steps = [
-  { role = "implement", prompt = "implement" },
-  { role = "review", prompt = "review", findings = { back_to = "implement" } },
-]
-"#,
-        );
-        let problems = c.validate();
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.fatal && p.what.contains("no `gate`")),
-            "{problems:?}"
-        );
-
-        // With a gate on the implementing step, the loop is checked and fine.
-        let ok = parse(
-            r#"
-[gates]
-check = ["cargo test"]
-[pipelines.feature]
-steps = [
-  { role = "implement", prompt = "implement", gate = "check" },
-  { role = "review", prompt = "review", findings = { back_to = "implement" } },
-  { human = "merge" },
-]
-"#,
-        );
-        assert!(ok.validate().is_empty(), "{:?}", ok.validate());
-    }
-
-    #[test]
-    fn the_mistakes_a_pipeline_can_make_are_named() {
-        let c = parse(
-            r#"
-[gates]
-check = ["cargo test"]
-[gates.named.empty]
-run = []
-[pipelines.feature]
-steps = [
-  { role = "implement", prompt = "x", gate = "nope" },
-  { role = "implement", prompt = "y", gate = "check" },
-  { role = "review", prompt = "z", findings = { back_to = "verify", max = 0 } },
-]
-[workspace]
-include = ["../../.ssh/id_rsa"]
-"#,
-        );
+    fn a_cache_share_names_an_ecosystem_the_table_has_or_is_refused_by_name() {
+        let c = parse("[workspace]\nshare = [\"npm\"]\n");
         let found: Vec<String> = c.validate().iter().map(|p| p.to_string()).collect();
         let all = found.join("\n");
-        for expected in [
-            "no `[gates.named]` declares", // gate = "nope"
-            "appears twice",               // two `implement` steps
-            "is not a step",               // back_to = "verify"
-            "never acted on",              // max = 0
-            "empty",                       // [gates.named.empty]
-            "leaves the repository",       // include
-        ] {
-            assert!(all.contains(expected), "missing `{expected}` in:\n{all}");
-        }
+        assert!(all.contains("`npm`"), "{all}");
+        assert!(all.contains("`cargo`"), "the known names are listed: {all}");
+        assert!(c.validate().iter().any(|p| p.fatal));
+        assert!(
+            parse("[workspace]\nshare = [\"cargo\"]\n")
+                .validate()
+                .is_empty()
+        );
     }
 
     #[test]
-    fn a_findings_loop_may_only_point_backwards() {
-        let c = parse(
-            r#"
-[gates]
-check = ["cargo test"]
-[pipelines.feature]
-steps = [
-  { role = "review", prompt = "z", findings = { back_to = "fix" } },
-  { role = "fix", prompt = "x", gate = "check" },
-]
-"#,
-        );
-        assert!(
-            c.validate().iter().any(|p| p.what.contains("not earlier")),
-            "a loop forwards is a chain that never ends"
-        );
+    fn the_retired_include_key_is_refused_naming_the_file_to_write_instead() {
+        let dir = tempdir("include-gone");
+        std::fs::write(dir.join(CONFIG_FILE), "[workspace]\ninclude = [\".env\"]\n").unwrap();
+        let err = ProjectConfig::load(&dir).unwrap_err().to_string();
+        assert!(err.contains(".worktreeinclude"), "{err}");
+        assert!(err.contains("`[workspace] include` is gone"), "{err}");
+    }
+
+    #[test]
+    fn a_base_branch_that_is_not_a_branch_name_is_refused_before_it_reaches_git() {
+        // `--output=/tmp/x` would be read by git as an option.
+        for bad in [
+            "--output=/tmp/x",
+            "-x",
+            "a..b",
+            "a b",
+            "main.lock",
+            "release/",
+            "a//b",
+            "a/.hidden",
+            "a~1",
+            "a^",
+            "a:b",
+            "a?",
+            "a*",
+            "a[b",
+            "a\\b",
+            "main.",
+            "@",
+            "a@{1}",
+            "tab\there",
+            "",
+        ] {
+            let why = valid_branch_name(bad).expect_err(bad);
+            assert!(!why.is_empty(), "{bad:?} refused with no reason");
+            let c = parse(&format!("[project]\nbase_branch = {bad:?}\n"));
+            assert!(
+                c.validate()
+                    .iter()
+                    .any(|p| p.fatal && p.where_.contains("base_branch")),
+                "`base_branch = {bad:?}` was accepted: {:?}",
+                c.validate()
+            );
+        }
+        for good in [
+            "main",
+            "master",
+            "release/1.x",
+            "feature-42",
+            "a.b",
+            "v1.0/rc",
+        ] {
+            assert_eq!(valid_branch_name(good), Ok(()), "{good}");
+            let c = parse(&format!("[project]\nbase_branch = {good:?}\n"));
+            assert!(
+                !c.validate()
+                    .iter()
+                    .any(|p| p.where_.contains("base_branch")),
+                "`{good}` is a branch name and was refused"
+            );
+        }
     }
 
     #[test]
     fn a_permission_rule_that_cannot_work_is_refused_before_an_agent_starts() {
-        // The most dangerous thing this file can contain, because the failure
-        // is silent and on the deny side silence reads as permission. Claude
-        // Code reports these in its own startup dialog; there is no reason for
-        // the file that mirrors its syntax to be quieter.
         let c = parse(
             r#"
 [policy]
@@ -1394,9 +1179,7 @@ never_auto = ["Write(src/**)", "Bash(command:rm *)", "mcp__github(create_issue)"
 
     #[test]
     fn the_rules_from_claude_codes_own_documentation_are_accepted() {
-        // The claim this file makes is that a rule moves between settings.json
-        // and here by cutting and pasting it. These are the spellings that
-        // documentation uses.
+        // Rules paste unchanged from settings.json.
         let c = parse(
             r#"
 [policy]
@@ -1407,19 +1190,12 @@ never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
     }
 
     #[test]
-    fn a_budget_is_per_kind_with_a_fallback() {
-        let c = parse("[budget]\ndefault_usd = 5\nfeature_usd = 25\n");
-        assert_eq!(c.budget.for_kind("feature"), Some(25.0));
-        assert_eq!(c.budget.for_kind("bug"), Some(5.0), "falls back");
-        assert_eq!(ProjectConfig::default().budget.for_kind("quick"), None);
-        // Zero is not a ceiling of nothing; it is somebody who meant "off".
-        assert_eq!(
-            parse("[budget]\ndefault_usd = 0\n")
-                .budget
-                .for_kind("quick"),
-            None
-        );
-        // And setting one says plainly what it can and cannot do.
+    fn a_budget_is_one_ceiling() {
+        let c = parse("[budget]\nusd = 5\n");
+        assert_eq!(c.budget.ceiling_usd(), Some(5.0));
+        assert_eq!(ProjectConfig::default().budget.ceiling_usd(), None);
+        // Zero means off.
+        assert_eq!(parse("[budget]\nusd = 0\n").budget.ceiling_usd(), None);
         assert!(
             c.validate()
                 .iter()
@@ -1430,11 +1206,7 @@ never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
 
     #[test]
     fn a_bound_that_always_fires_silences_the_warning_about_one_that_may_not() {
-        // The money axis cannot bind an agent that reports no cost, and the
-        // GenAI telemetry conventions have nowhere to report one. Turns and
-        // elapsed time are counted here, so a project that sets either has a
-        // guard that fires whatever the agent says.
-        let money_only = parse("[budget]\ndefault_usd = 10\n");
+        let money_only = parse("[budget]\nusd = 10\n");
         assert!(
             money_only
                 .validate()
@@ -1442,7 +1214,7 @@ never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
                 .any(|p| !p.fatal && p.what.contains("reports what it spent")),
             "a guard that may not fire must say so"
         );
-        let bounded = parse("[budget]\ndefault_usd = 10\nmax_turns = 60\n");
+        let bounded = parse("[budget]\nusd = 10\nmax_turns = 60\n");
         assert!(
             !bounded
                 .validate()
@@ -1466,16 +1238,8 @@ never_auto = ["Bash(git push *)", "Read(./.env)", "Read(secrets/**)", "mcp__*"]
             r#"
 [gates]
 check = ["cargo test"]
-[gates.named.repro]
-run = ["cargo test --test repro"]
-expect = "fail"
-[pipelines.bug]
-steps = [
-  { role = "reproduce", prompt = "repro", gate = "repro" },
-  { role = "fix", prompt = "fix", gate = "check" },
-  { role = "review", agent = "any", prompt = "review", findings = { back_to = "fix", max = 1 } },
-  { human = "merge" },
-]
+[gates.named.slow]
+run = ["cargo test --test slow"]
 "#,
         );
         assert_eq!(c.validate(), vec![]);
@@ -1486,7 +1250,6 @@ steps = [
         let c = ProjectConfig::load(Path::new("/definitely/not/here")).unwrap();
         assert!(!c.has_gates());
         assert_eq!(c.gates.max_feedback_rounds, 2);
-        // And no rule decides anything on the user's behalf.
         assert!(c.policy.never_auto.is_empty());
         assert_eq!(c.policy.stall_timeout, None);
     }
@@ -1504,7 +1267,7 @@ default_agent = "claude"
 
 [workspace]
 setup = "pnpm install --frozen-lockfile"
-include = [".env", ".env.local"]
+share = ["cargo"]
 
 [gates]
 check = ["pnpm typecheck", "pnpm test -- --run"]
@@ -1525,6 +1288,7 @@ ready_label = "devplane:ready"
         .unwrap();
         let c = ProjectConfig::load(&dir).unwrap();
         assert_eq!(c.project.name.as_deref(), Some("saas"));
+        assert_eq!(c.workspace.share, vec!["cargo".to_string()]);
         assert_eq!(c.gates.check.len(), 2);
         assert_eq!(c.gates.timeout, Duration::from_secs(600));
         assert_eq!(c.gates.max_feedback_rounds, 3);
@@ -1541,8 +1305,6 @@ ready_label = "devplane:ready"
 
     #[test]
     fn github_is_off_until_it_is_asked_for() {
-        // Pushing a branch is the first thing Devplane does that other people
-        // can see, so it is never a default.
         let c = ProjectConfig::default();
         assert!(!c.github.pull_request);
         assert!(c.github.draft, "and when it is on, it is a draft");
@@ -1550,8 +1312,7 @@ ready_label = "devplane:ready"
 
     #[test]
     fn a_typo_is_an_error_rather_than_a_silent_default() {
-        // A misspelled key in a deny list would otherwise remove the rule and
-        // say nothing, which is the worst possible way for a policy to fail.
+        // A misspelled deny key must not silently remove the rule.
         let dir = tempdir("typo");
         std::fs::write(
             dir.join(CONFIG_FILE),
@@ -1600,9 +1361,7 @@ ready_label = "devplane:ready"
         assert_eq!(parse("45"), Some(Duration::from_secs(45)));
         assert_eq!(parse("soon"), None);
         assert_eq!(parse(""), None);
-        // A figure no one means, out of a file that came with a repository.
-        // Unchecked, this panicked a debug build and wrapped in release — and a
-        // wrapped gate timeout is a gate that fails the instant it starts.
+        // Overflow is refused, not wrapped.
         assert_eq!(parse("999999999999999d"), None);
         assert_eq!(parse("99999999999999999999"), None);
     }
@@ -1622,22 +1381,12 @@ mod hold_tests {
         toml::from_str(toml_src).expect("a fixture parses")
     }
 
-    /// **Off by default, and that is the shipped behaviour.**
-    ///
-    /// A project that says nothing gets no hold, which means the vendor's own
-    /// dialog appears at once — exactly as it did before this existed.
     #[test]
     fn a_project_that_says_nothing_holds_nothing() {
         assert_eq!(cfg("").questions.hold(), Ok(None));
         assert_eq!(cfg("[questions]\nhold = false").questions.hold(), Ok(None));
     }
 
-    /// `true` means thirty seconds.
-    ///
-    /// The vendor allows 600, and a bound that long would leave an agent frozen
-    /// for ten minutes because somebody's phone was in a pocket. Thirty is
-    /// enough to unlock a phone once a notification has arrived and cheap
-    /// enough to lose on an unattended run.
     #[test]
     fn turning_it_on_without_a_duration_is_thirty_seconds() {
         assert_eq!(
@@ -1647,7 +1396,6 @@ mod hold_tests {
         assert_eq!(Hold::DEFAULT, Duration::from_secs(30));
     }
 
-    /// A named duration is taken, up to the ceiling.
     #[test]
     fn a_named_duration_is_taken() {
         for (src, secs) in [("10s", 10u64), ("45s", 45), ("2m", 120)] {
@@ -1661,19 +1409,9 @@ mod hold_tests {
         }
     }
 
-    /// **A value that will not parse is a problem, never a default.**
-    ///
-    /// The difference between `30s` and a typo is the difference between a
-    /// bounded hold and an agent frozen for as long as the vendor will wait,
-    /// and guessing which the author meant is how a supervision tool stalls a
-    /// session for reasons nobody remembers. The same rule the question
-    /// deadline already follows.
     #[test]
     fn a_value_that_will_not_parse_is_refused_and_leaves_no_hold() {
-        // `"30"` is **not** here: this file's own duration parser reads a bare
-        // number as seconds, and every other duration key in it does the same.
-        // Refusing it only here would make one key stricter than the rest for
-        // no reason a reader could guess.
+        // `"30"` is absent: a bare number is seconds, as for every duration key.
         for bad in ["\"soon\"", "\"0s\"", "12", "[]"] {
             let r = cfg(&format!("[questions]\nhold = {bad}")).questions.hold();
             assert!(r.is_err(), "`hold = {bad}` was accepted: {r:?}");
@@ -1685,11 +1423,6 @@ mod hold_tests {
         }
     }
 
-    /// **The ceiling is under the vendor's own.**
-    ///
-    /// A hold that outlives the hook's 600 s timeout is a hold whose lapse is
-    /// the vendor cancelling the process rather than this product standing
-    /// down, and the two look different from inside the session.
     #[test]
     fn a_hold_may_not_outlast_what_the_vendor_will_wait() {
         assert!(
@@ -1702,7 +1435,6 @@ mod hold_tests {
             r.unwrap_err().contains("as long as an agent may be held"),
             "the refusal does not say why"
         );
-        // And the wire bound agrees with the type's.
         assert_eq!(HOLD_CEILING_MS, Hold::CEILING.as_millis() as u64);
     }
 }

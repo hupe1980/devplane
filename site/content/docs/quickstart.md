@@ -1,10 +1,13 @@
 +++
 title = "Quickstart"
-description = "From nothing to a live board, a driven agent and a verified piece of work — in about five minutes."
+description = "From install to a verified change in about five minutes: see your sessions, open the workbench, start a change, and read what was decided."
 weight = 2
 [extra]
 group = "start"
 +++
+
+You need `devplane` [installed](@/docs/install.md) and at least one coding agent. Claude Code is the
+one Devplane watches best.
 
 ## 1. See what is already running
 
@@ -24,112 +27,61 @@ core-lib  ·  2 sessions
   ○ 4f         vscode     12%   $0.02  41m  waiting for a prompt
 ```
 
-No setup was needed for that: sessions are discovered from Claude Code's own roster.
-
-Rows are **grouped by project**, because that is the unit you think in — nine sessions on one
-repository are one line of context, not nine rows that differ by a hash. Sessions that have never
-reported anything are **counted, not listed**: a machine that has been running agents all week has
-editor tabs whose processes are still alive. One that starts asking for something joins the working
-set immediately.
+No setup and no host: sessions come from Claude Code's roster and `ls` reads the store directly.
 
 ```sh
-devplane ls --all           # including the quiet ones
-devplane ls --project saas  # one project; matches any part of the name
-devplane ls --needs-you     # only what is waiting on a human
+devplane ls --needs-you     # only what waits on a person
+devplane ls --project saas  # one project; any part of the name matches
 ```
 
-## 2. Add live state
+## 2. Connect your agent
 
-Discovery is free. Cost, context usage, blocking and the permission gate need Claude Code to talk to
-Devplane:
+Cost, context, questions and the permission gate need the agent's hooks:
 
 ```sh
-devplane connect claude
+devplane connect claude     # also: codex, copilot
+devplane doctor             # is anything arriving?
 ```
 
-This merges hook entries and OpenTelemetry variables into your **user** settings, keeping a backup,
-and removes exactly those entries again on `disconnect`. It never touches your prompts: the flags
-that would put prompt or response text into telemetry are never set.
+`connect` shows the diff to your **user** settings, keeps a backup, and writes when you confirm
+(`--yes` skips the question). The hooks decide and write to the store in their own process, so
+nothing needs to be running. `devplane disconnect claude` removes exactly what was added. See
+[Watching sessions](@/docs/observe.md).
 
-```sh
-devplane doctor    # is anything actually arriving?
-```
-
-See [Watching sessions](/docs/observe/) for what each channel provides.
-
-## 3. Open the board
+## 3. Open the workbench
 
 ```sh
 devplane open
 ```
 
-One page served from the daemon on loopback — no CDN, no account, nothing fetched. It updates live,
-groups by project, and puts what needs you at the top. It is a document rather than a canvas: every
-state has a word as well as a colour, the sections are lists, and one polite live region says how
-many things need you — so it reads aloud, and it survives being screenshotted in greyscale.
+With no host running, this terminal becomes the host until `ctrl-c`. `devplane serve` is the host
+without the browser; `devplane app` is the host in its own window.
 
-It opens on **Inbox**. The sidebar holds the rest, under the same four errands `devplane --help`
-sorts its commands into — so a heading names the errand and each item under it names the thing.
-
-| Errand | Surface | What |
-|---|---|---|
-| **What needs you** | **Inbox** | one list across every project, ordered by what is waiting |
-| | **Decisions** | what was decided for you, on whose authority, for one session or Work |
-| | **Finished work** | a finished Work's certificate, and one button that copies it |
-| **See what is happening** | **Sessions** | every session, grouped by project, with cost and context |
-| | **Plans** | what each project is working to: the specification its in-flight work names, how many boxes are still open, and which carry a question nobody answered |
-| **Start and steer work** | **Start an agent** | a prompt, the projects to send it to, and what would happen in each before anything is written |
-| | **Issues and PRs** | every open one, across every registered project |
-| **Set up a project** | **Setup** | this machine, and every repository's `devplane.toml` read back |
-| | **Library** | one row per prompt or skill, one column per repository, and which copy drifted |
-
-Each item is a noun; the heading above it is the question. The page it opens carries that question as
-its own heading. **A number beside an item says what is in it**, so an empty one reads as empty rather
-than broken.
-
-**Two surfaces are not in the sidebar, because neither is a place.** **Search** is the field at the top
-of it: a command, a question or an error across every session, with its results as their own page. And
-**Changes** — a Work's diff against its base branch — is reached from that Work, under *Finished work*.
-
-**Every action is a button, and there are no keyboard shortcuts.** A session row opens its decision
-log; the counts in a project heading open the lists behind them. A count you cannot open is a number
-telling you to go and look somewhere else.
-
-A permission also carries **the rule that stops it being asked again**, with the file to paste it
-into — see [Permissions](/docs/permissions/#which-rule-to-write-next). Nothing here writes it.
+It opens on the **Inbox**: what needs you across every project, most urgent first. `⌘K` finds
+anything; `?` lists the keys. [The workbench](@/docs/workbench.md) is the full tour.
 
 ## 4. Answer what needs you
 
 ```sh
 devplane inbox
+devplane answer <ask> --allow           # a permission
+devplane answer <ask> --option "Yes"    # a question, with one of the agent's options
 ```
 
-The inbox is derived from state, never stored, so it is correct after a restart. Every item carries
-at least one action, and every action is one the surface can actually perform — a permission on a
-session Devplane only *watches* offers **Focus**, because the dialog belongs to Claude Code and the
-honest thing to do is raise the window that has it. **Allow** and **deny** appear only on a session
-Devplane drives, which is the only kind it can answer for.
-
-A permission answer must name a decision or one of the agent's own options. One that names neither is
-refused as a bad request — it is never read as a deny.
-
-Where there is no yes-or-no, the row says why: a watched session has no request behind it that any
-surface could answer, so the only way in is the agent's own window.
+The id is the one `inbox` prints. It outlives the process that asked, so an answer given tomorrow
+still reaches the agent. For a session you started yourself, the inbox offers **Focus** (raise its
+window) unless the project sets [`[questions] hold`](@/docs/configuration.md#questions).
 
 ## 5. Make “done” mean something
 
-This is the part that earns the tool.
+In a repository of yours:
 
 ```sh
-cd ~/code/saas
-devplane trust .                  # once per repository
+devplane trust .
 ```
 
-Trust is deliberate: a headless agent runs *that repository's* own hooks and MCP servers without
-asking. The command lists them — and any unpinned MCP server, shell-granting skill or overbroad
-`[policy]` rule — before it asks.
-
-Write a definition of done:
+A headless agent runs the repository's own hooks and MCP servers without asking, so `trust` lists
+them and asks first. Then commit a definition of done:
 
 ```toml
 # devplane.toml
@@ -138,61 +90,49 @@ check = ["cargo clippy -- -D warnings", "cargo test"]
 ```
 
 ```sh
-devplane check                    # what will this file actually do?
-devplane work start "fix the flaky login test" --kind bug
+devplane check                                   # what this file will do
+devplane change start "fix the flaky login test"
+devplane watch <run>                             # follow the agent, like tail -f
+devplane change show <id>                        # state, cost, what the checks said
 ```
 
-`work start` makes an isolated checkout at `.claude/worktrees/<slug>` on its own branch, runs your
-setup command, copies the files you named, and puts an agent in it. **When the agent says it is
-finished, Devplane runs your commands.** Green means a person should look; red means the failures
-go back to that same session, bounded, and then you are asked — with the same failing lines the
-agent was handed.
+`change start` needs the host. It makes an isolated worktree on its own branch, starts an agent in it,
+and **runs your `check` when the agent says it is finished**. Red goes back to the same session a
+bounded number of times, then to you. Green against the tree as it stands is **verified**; touch a
+file and it is stale.
 
-An agent that claims success without earning it reaches `failed`, never `review`.
+The same prompt can go to several repositories; every refusal is reported before anything starts:
 
 ```sh
-devplane work list
-devplane work show <id>     # where it got to, what it cost, what the checks said
+devplane change start "bump the MSRV to 1.90" --project core-lib --project saas
 ```
 
-Next: [Verified done](/docs/verified-done/) in full.
+See [Verified done](@/docs/verified-done.md).
 
-## 6. See what GitHub is holding
+## 6. Review and offer it
 
 ```sh
-devplane issues
+devplane change review <id>     # weakened checks first, then files by risk
+devplane change offer <id>      # push and open a draft PR, or print the two commands
+devplane change export <id>     # the certificate, for the PR body
 ```
-
-```console
-as hupe1980 · what needs you first
-
-saas
-  ◆ #212   Login fails on Safari 17                       bug · assigned to you
-    https://github.com/acme/saas/issues/212
-  ○ #209   Document the rate limits                       docs
-    https://github.com/acme/saas/issues/209
-```
-
-Every open issue and pull request across every registered project, read through your own `gh`. On
-the board, the **github** surface holds the same two lists, and the counts in a project heading open them. `◆` is what
-is waiting on you — an issue assigned to you, a review requested from you, your own pull request
-that is red, contested, or approved and unmerged. Those are inbox items too.
-
-**Nothing here writes to GitHub.** Every action is a link.
 
 ## 7. Ask afterwards
 
 ```sh
-devplane audit
+devplane audit                # everything, newest first
+devplane audit --without-me   # only what a rule, a clock or nobody decided instead of you
 ```
 
 ```console
-2026-09-13T18:04:11 daemon  gh:pr.create     https://github.com/acme/app/pull/142
-                     ↳ gates passed; opened as a draft
-2026-09-13T17:58:40 policy  agent:tool.use   Bash: rm -rf /tmp/build
-                     ↳ refused by Bash(rm -rf *)
+2026-09-13T18:04:11 devplane  gate:run          saas · fix the flaky login test
+                      ↳ check passed
+2026-09-13T17:58:40 rule      agent:tool.use    Bash: rm -rf /tmp/build
+                      ↳ refused by Bash(rm -rf *)
 ```
 
-Every verdict names the rule or the check behind it. “Refused” is not an answer.
+Every decision names its authority (`person`, `rule`, `timer`, `nobody` or `devplane`) and the rule
+or check behind it. See [The decision log](@/docs/decisions.md).
 
-Every command takes `--json`, and every command starts the daemon if it is not already running.
+Every command takes `--json`. Reading works with nothing running; a command that starts, steers or
+answers a driven agent needs the host and says so.

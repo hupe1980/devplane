@@ -1,11 +1,6 @@
-//! `devplane gate run`: the verdict something outside this process relies on.
-//!
-//! The feature's whole contribution is an exit code and a sentence that a Spec
-//! Kit workflow reads back to an agent. Both are asserted here against real
-//! repositories, because the three ways this can go wrong — a failure that
-//! reads as a pass, an unchecked repository that reads as a pass, and an
-//! unreadable configuration that reads as either — are indistinguishable from
-//! success to anything that only looks at whether the command ran.
+//! `devplane gate run`: an exit code and a sentence a workflow relies on. A failure,
+//! an unchecked repository and an unreadable config must each be distinguishable
+//! from a pass.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -24,7 +19,7 @@ fn scratch(tag: &str, config: Option<&str>) -> PathBuf {
     dir
 }
 
-/// The command under test, as JSON — the shape the skill reads.
+/// The command's JSON output, as the skill reads it.
 fn gate_json(dir: &PathBuf) -> (serde_json::Value, i32) {
     let out = Command::new(env!("CARGO_BIN_EXE_devplane"))
         .args(["gate", "run", "--json", "--cwd"])
@@ -41,7 +36,7 @@ fn gate_json(dir: &PathBuf) -> (serde_json::Value, i32) {
     (value, code)
 }
 
-/// And as a person reads it, because the two must agree.
+/// The human-readable output, which must agree with the JSON.
 fn gate_text(dir: &PathBuf) -> (String, i32) {
     let out = Command::new(env!("CARGO_BIN_EXE_devplane"))
         .args(["gate", "run", "--cwd"])
@@ -58,8 +53,7 @@ fn gate_text(dir: &PathBuf) -> (String, i32) {
 
 #[test]
 fn a_failing_gate_names_the_command_and_what_it_exited_with() {
-    // "Checks failed" is not a verdict anybody can act on, and an agent told
-    // only that something failed will guess at which thing.
+    // The failing gate is named so an agent need not guess which one.
     let dir = scratch(
         "failing",
         Some("[gates]\ncheck = [\"sh -c 'exit 3'\"]\ntimeout = \"30s\"\n"),
@@ -82,10 +76,7 @@ fn a_failing_gate_names_the_command_and_what_it_exited_with() {
         "the failing command names itself: {only}"
     );
 
-    // **And what it exited with**, which is the half most likely to be dropped:
-    // the name alone tells a reader which command, and nothing about how it
-    // failed — a non-zero status, a timeout and a shell that could not start it
-    // are three different problems with three different next steps.
+    // And how it failed: status, timeout and spawn failure need different fixes.
     let rendered = serde_json::to_string(only).unwrap();
     assert!(
         rendered.contains('3'),
@@ -103,9 +94,8 @@ fn a_failing_gate_names_the_command_and_what_it_exited_with() {
 
 #[test]
 fn a_repository_with_no_gates_is_not_a_pass_and_never_says_passed() {
-    // This is the assertion the feature is most likely to lose, and losing it is
-    // exactly how *nothing was checked* comes to look verified to a workflow that
-    // only reads the exit code.
+    // Nothing checked must never read as verified to a caller that reads only the
+    // exit code.
     let nothing = scratch("nogates", None);
     let empty = scratch("emptygates", Some("[gates]\ncheck = []\n"));
 
@@ -137,8 +127,7 @@ fn a_repository_with_no_gates_is_not_a_pass_and_never_says_passed() {
 
 #[test]
 fn a_configuration_that_will_not_parse_reports_the_parsers_error_and_runs_nothing() {
-    // A file that cannot be read is not a file that approves — the same rule the
-    // permission path follows for a policy it could not parse.
+    // An unreadable file does not approve, as with an unparsable policy.
     let dir = scratch("broken", Some("[gates]\ncheck = [unclosed\n"));
     let (v, code) = gate_json(&dir);
 
@@ -150,8 +139,7 @@ fn a_configuration_that_will_not_parse_reports_the_parsers_error_and_runs_nothin
         "nothing was run, so no command result may be reported: {v}"
     );
 
-    // **The parser's own error, not a paraphrase of it.** The person has to fix
-    // a file, and the line number is the whole of the help.
+    // The parser's own error, with its line number.
     let error = v["error"].as_str().expect("the parser's error is carried");
     assert!(!error.is_empty());
     let (text, _) = gate_text(&dir);
@@ -160,20 +148,11 @@ fn a_configuration_that_will_not_parse_reports_the_parsers_error_and_runs_nothin
         "a person is shown the same error: {text}"
     );
 
-    // And the four states stay four: this one does not borrow `no_gates`'
-    // sentence, which would tell a reader the repository declared no checks
-    // when in fact it declared some that could not be read.
+    // Distinct from `no_gates`: gates were declared but could not be read.
     assert_ne!(v["summary"], gate_json(&scratch("cmp", None)).0["summary"]);
 }
 
-/// **A named gate could be declared, validated and listed — and only a pipeline
-/// step could run one.**
-///
-/// `[gates.named.x]` is checked by `devplane check`, printed by it, and
-/// reachable from a pipeline. Nothing on the CLI could ask for it, so a person
-/// who wrote one down had no way to try it before wiring a pipeline around it.
-/// That is a configuration key with no reader for its commonest use, which is
-/// the defect `devplane check` exists to complain about, pointed inward.
+/// A named gate is declared, validated by `devplane check`, listed, and run by name.
 #[test]
 fn a_named_gate_can_be_run_by_name() {
     let dir = scratch(
@@ -189,9 +168,8 @@ check = ["true"]
 [gates.named.docs]
 run = ["true"]
 
-[gates.named.mustfail]
+[gates.named.failing]
 run = ["false"]
-expect = "fail"
 "#,
         ),
     );
@@ -212,21 +190,19 @@ expect = "fail"
         "a declared named gate runs"
     );
 
-    // **`expect = "fail"` is honoured**, so a gate that did exactly what it was
-    // asked to do is not reported as a failure.
+    // A named gate whose command fails is a failed gate.
     assert!(
-        run(&["gate", "run", "--name", "mustfail"]).status.success(),
-        "a gate declared `expect = \"fail\"` passes when its command fails"
+        !run(&["gate", "run", "--name", "failing"]).status.success(),
+        "a named gate whose command fails does not pass"
     );
 
-    // **An undeclared gate is an error, never a silent pass.** An empty gate
-    // that reads as success is the failure this layer exists to prevent.
+    // An undeclared gate is an error, never a silent pass.
     let out = run(&["gate", "run", "--name", "nope"]);
     assert!(!out.status.success(), "an unknown gate must not pass");
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(said.contains("no such gate"), "{said}");
     assert!(
-        said.contains("docs") && said.contains("mustfail"),
+        said.contains("docs") && said.contains("failing"),
         "it names what is declared, so the person can see the spelling: {said}"
     );
 }

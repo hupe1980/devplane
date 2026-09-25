@@ -1,227 +1,130 @@
 +++
 title = "Security"
-description = "The trust model for software that approves tool calls, runs project commands and pushes to repositories."
+description = "The trust model: what stays on your machine, what guards the local API, where the permission gate fails closed, and what Devplane does not defend against."
 weight = 24
 [extra]
 group = "reference"
 +++
 
-Devplane is privileged software. It approves tool calls, runs commands your repository committed,
-and pushes branches. This page is the trust model, stated plainly, including what it does **not**
-defend against.
+Devplane refuses and defers tool calls, runs commands your repository committed, and pushes
+branches. This page is the trust model, including what it does **not** defend against.
 
 ## Nothing leaves the machine
 
-No account, no cloud relay, no service to run, and no telemetry of our own — no usage analytics and
-no crash reporting.
+No account, no cloud relay, no usage analytics, no crash reporting. The only network egress is
+GitHub through your own `gh` (opt-in, per repository) and the agents themselves, which talk to their
+providers as they do without Devplane.
 
-The daemon's only network egress is: GitHub through the `gh` CLI (opt-in, per repository), and the
-agent processes themselves, which talk to their own providers exactly as they do without Devplane.
+## Loopback plus a bearer token
 
-## Loopback is not an access control
+The host binds `127.0.0.1`, which any process running as you can reach. What separates it is the
+bearer token in `~/.devplane/token` (mode `0600`), required on every `/api` and `/devplane` request.
 
-Every listener binds `127.0.0.1`. That is necessary and not sufficient: **any process running as you
-can reach the port.** What actually separates Devplane from everything else on the machine is the
-bearer token in `~/.devplane/token`, mode `0600`, required on every request.
+- `/healthz` is the one open route: it names the version and is the liveness test.
+- The telemetry receiver needs the token too, because a forged observation corrupts the record.
+  `devplane connect claude` writes the endpoint and `OTEL_EXPORTER_OTLP_HEADERS` together;
+  `disconnect` removes both.
+- `devplane open` hands the token to the workbench once in the URL; the page removes it from the
+  address bar.
 
-One deliberate exception:
-
-- `/healthz` — proves the port is ours without revealing what is on it.
-
-**The telemetry endpoints are not an exception.** `devplane connect` writes the telemetry block only
-when you have no other collector configured, so there is exactly one place a credential can go: it
-sets `OTEL_EXPORTER_OTLP_HEADERS` to `Authorization=Bearer …` beside the endpoint, and
-`devplane disconnect` removes both. An open ingest would let any process running as you — and any
-page your browser loads — write session, cost and context records into the ledger this product keeps.
-The observations **are** the product, so a forged one is not a lesser problem than a forged command.
-
-If you point Claude Code at Devplane by hand, set both:
+To point Claude Code at Devplane by hand, set both:
 
 ```sh
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:7777/devplane/otel"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:47831/devplane/otel"
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/token)"
 ```
-
-The board is served unauthenticated because it is a static page containing no data; it cannot fetch
-any without the token your browser holds. `devplane open` hands that token over once in the URL and
-the page strips it from the address bar, so it does not end up in a screenshot or a bookmark.
 
 ## The trust gate
 
 ```sh
-devplane trust .
+devplane trust --dry-run ~/src/someone-elses-repo   # show, trust nothing
+devplane trust .                                    # show, then ask
+devplane trust --yes .                              # for a directory you wrote
 ```
 
-`devplane work start` and `devplane dispatch` both refuse an untrusted repository, and both go
-through the same check — a check one caller can skip is not a check.
+A headless agent runs **the repository's own hooks and MCP servers** with no dialog, so `devplane
+change start` refuses an untrusted repository. `trust` first shows every `command` hook and its
+event, every MCP server (unpinned ones named), every skill that pre-approves the shell, and every
+allow rule in the repository's agent settings that grants more than it looks like. A worktree
+inherits the trust of the checkout that owns it. Untrusted projects are still observed.
 
-The reason is specific: a headless agent runs **that repository's own hooks and MCP servers** with no
-dialog of its own. The decision to allow that has to be one somebody made deliberately, once, for
-that directory — so the command shows you what those are first. Every `command` hook and the event it
-fires on, every MCP server with the unpinned ones named, every skill whose front matter pre-approves
-the shell, and every rule in the repository's own `[policy]` that grants more than it looks like.
-`--dry-run` prints it and trusts nothing.
+## Where the permission gate fails closed
 
-It reports and refuses nothing, on purpose: a `PreToolUse` hook is a normal thing to ship, and a
-tool that graded repositories would teach you to stop reading.
+The rules are in [Permissions](@/docs/permissions.md). For security:
 
-A worktree inherits the trust of the checkout that owns it, because trusting a project and then
-being asked again for each of its checkouts teaches people to say yes without reading.
+- **Evaluation cannot fail open.** It is synchronous and in-process in the `devplane hook` command
+  hook; there is no "policy service unreachable" path, and no host has to be running.
+- **A broken policy file fails closed.** A `devplane.toml` or `~/.devplane/policy.toml` that will not
+  load sends every gated call to a person and raises a critical item until it loads.
+- **Auto mode is covered.** Prohibitions ride `PreToolUse`, which fires before every call in every
+  mode.
+- **The matcher is linear**, and a line past 65,536 characters is asked about rather than skipped.
+- **Nothing writes the rules.** No API route or button edits `[policy]`.
+- **Devplane never approves.** It refuses or defers.
+- **On GitHub Copilot** the HTTP hook fails open, so the gate there is a `command` hook too.
 
-Untrusted projects are observe-only, which is still the whole of the observer.
+**No hook can enforce its own presence**: a timed-out or uninstalled hook does not block. So
+`devplane doctor` probes the installed gate, and a running host does the same on a timer and raises a
+critical item when it stops answering. Codex skips a hook you have not approved in its own dialog;
+`devplane connect codex` says so.
 
-## Where the policy can fail open, and where it cannot
+## An agent cannot approve itself — mostly
 
-Prohibitions are enforced through **two** synchronous hooks, not one. `PermissionRequest` fires only
-when Claude Code is about to ask a human; `PreToolUse` fires before every tool call in every mode,
-which is the only way a `never_auto` rule reaches a session in **auto mode**, where a classifier
-approves routine calls and no prompt — and so no `PermissionRequest` — ever happens. `PreToolUse`
-carries a prohibition or nothing, never a grant: an allow there would skip the classifier as well as
-the prompt.
+`devplane answer --allow` is refused inside an agent session: when `CLAUDECODE`,
+`CLAUDE_CODE_SESSION_ID`, `DEVPLANE_RUN`, or a Codex or Copilot session variable is set. `--deny`
+still works.
 
-**Evaluation itself cannot fail open.** It is total, synchronous and in-process: there is no “policy
-service unreachable” path, and the build fails if anything in the pure half grows one. Given the
-call, the answer is always a verdict.
+**The limit:** the token in `~/.devplane/token` is readable by the agent's user, which is you. An
+agent that unsets those variables, or calls `/api/asks/<id>/answer` with the token, gets past the
+refusal. A `never_auto` rule on `Read(~/.devplane/**)` and `Bash(devplane answer *)` narrows the gap;
+it does not close it.
 
-**And the gate does not need the daemon.** It is a `command` hook — the `devplane` binary, reading
-the call on stdin and answering on stdout in about 26 ms — so a daemon that is stopped, crashed or
-not yet started costs you the *record* of a decision, never the decision. A decision taken with no
-daemon listening is appended to `~/.devplane/pending-decisions.jsonl` and written into the log at
-the next start, marked as filed late.
+## Gates and setup are project-authored
 
-**No hook can enforce its own presence**, and that is the vendor's design: a timed-out hook does not
-block, and the reference says plainly *"don't count on a stalled hook to act as a gate."* So
-detection is the defence. `devplane doctor` **runs** the installed gate with a probe call rather
-than checking a line exists in a settings file, and the daemon does the same on a timer and raises a
-critical `gate_down` item when it stops answering.
-
-A **`devplane.toml` that will not parse** is the same failure one repository wide: the last good
-rules are kept, and a daemon restarted against a broken file has none to keep, so that repository's
-`never_auto` list is simply gone. That raises a critical `config_broken` item naming the file and the
-parser's reason.
-
-**Nothing writes the rules back.** There is no API route and no button that edits `[policy]`, in a
-repository or in `~/.devplane/policy.toml`. An agent here runs as you and can read the bearer token,
-so a write path would be a widening path; the board's **setup** surface reads every file and offers
-nothing to save.
-
-*The rules cannot fail open; a channel can, and the channel is a local process.*
-
-**Devplane never approves a tool call.** `Verdict` has no `Allow` variant, so the type cannot express
-one. Answering *yes* on your agent's behalf would be a claim about somebody else's code; refusing and
-deferring claims nothing about anyone.
-
-The harder half is **silence**. A deny rule that matches nothing reads as protection and provides
-none, and nothing errors. So the rule syntax implements the published specification row by row, and
-the spellings that cannot work — a path rule on `Write`, an `mcp__` rule with brackets — are
-**refused** by `devplane check` rather than carried.
-
-And because reading a specification is not the same as agreeing with the product, the matcher is held
-to properties checked exhaustively rather than by example: a brute-force reference for its pattern
-matching, a soundness test for what it means for two wildcards to meet, a fuzzer asserting it never
-panics on anything an agent can type, and a counter holding it to one parse per command however many
-rules ask. See [Permissions](/docs/permissions/).
-
-A malformed `devplane.toml` keeps the rules it had. Because a process starting fresh has none to
-keep, both `devplane doctor` and `devplane explain` name the project whose rules are not in force
-rather than answering as though it simply had no rules.
-
-### On GitHub Copilot the same rules ride a different hook
-
-Copilot's HTTP `preToolUse` hook **fails open** — a timeout or a non-2xx reply falls through to its
-default permission flow — so the gate there runs as a `command` hook, which fails *closed*.
-
-Two consequences, both deliberate:
-
-- **If the daemon is not running, the hook says nothing and exits zero.** A fail-closed hook that
-  errored would deny every tool call on your machine while Devplane is stopped.
-- **A hook timeout is fail-open on every Copilot event**, administrator policy hooks included. A slow
-  Devplane there is not one that blocks the session; it is one that was not consulted.
-
-## The policy cannot be made slow by its subject
-
-The pattern is yours; the text it matches is a command an agent chose. Glob matching is **linear
-rather than backtracking**, because a matcher that goes exponential on `Bash(a*a*a*b)` is a denial of
-service against the synchronous hook a session is blocked on. Measured under 50 ms for a
-2 000-character command against ten wildcards.
-
-## Gates and setup commands are project-authored
-
-They come from the committed `devplane.toml`, never from an agent. They run as **children of the
-daemon**, never through the agent — letting the thing being checked choose the check is the one
-mistake this layer exists to avoid.
-
-Each runs in its own process group, so a timeout reaches the whole tree: killing only the shell would
-leave the second half of `a && b` running.
+Gates (`[gates]`) and setup (`[workspace] setup`) are read from the `devplane.toml` in the checkout
+that **owns** the worktree, never from the agent's branch. They run as children of the host, never
+through the agent, each in its own process group so a timeout kills the whole tree. The review leads
+with any check the change weakened. See [Verified done](@/docs/verified-done.md).
 
 ## Untrusted text is data
 
-Every agent-produced string is untrusted: never executed, never interpolated into a shell, rendered
-as text. The same goes for hook payloads and issue bodies.
+Every agent-produced string, hook payload and issue body is untrusted: never executed, never
+interpolated into a shell, rendered as text. An issue body reaches an agent marked as a report from
+someone else that may be wrong, and bounded in size. Strings passed to AppleScript for a
+notification are escaped.
 
-An issue's body reaches an agent **marked plainly as a report from someone else that may be wrong**,
-and bounded, so a thousand-line log cannot spend the context window before the agent has read any
-code. Text written by anyone on the internet is arriving at something that can run commands.
+## `.worktreeinclude` cannot leave the repository
 
-Strings that reach AppleScript for a notification are escaped, so a tool name cannot become script.
-
-## `[workspace] include` cannot leave the repository
-
-`include` takes repository-relative paths. The file naming them is **committed**, so it arrives with
-somebody else's code — from a fork, a pull request, a vendored dependency.
-
-Three ways out, all refused:
-
-- A path that spells its way out: `../../.ssh/id_rsa`, or any absolute path.
-- A **symlink** pointing out of the repository. Git tracks symlinks, so `config/local.env ->
-  ~/.ssh/id_rsa` is a file a repository can ship. The source is resolved, not just read.
-- Writing **through** a symlink already at the destination, which would reach any path on your disk.
-
-A symlink that stays inside the repository works normally: the rule is containment, not a ban on
-symlinks.
+A fresh worktree copies the ignored files the committed `.worktreeinclude` names. Refused: a path
+outside the checkout, a symlink pointing out of the repository (`config/local.env ->
+~/.ssh/id_rsa`), and writing through a symlink already at the destination.
 
 ## Telemetry stays local and redacted
 
-The receiver binds loopback only. Devplane never sets `OTEL_LOG_USER_PROMPTS`,
-`OTEL_LOG_ASSISTANT_RESPONSES` or `OTEL_LOG_TOOL_CONTENT`, so prompt and response text stays
-redacted. Account and email attributes are dropped at ingest.
-
-The environment block `connect` writes is shown before it is written and removed by `disconnect`. If
-a collector is already configured, `connect` refuses to override it.
+Devplane never sets `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_ASSISTANT_RESPONSES` or
+`OTEL_LOG_TOOL_CONTENT`, and drops account and email attributes at ingest. `connect` shows the
+environment block before writing it and does not override a collector you configured.
 
 ## Transcripts
 
-What a *driven* agent says is written to the same SQLite file as everything else, on your machine,
-behind the same `0600` token, and pruned on the same retention sweep. It is kept by default because
-such a run has no other window — and because the protocol streams the text to Devplane either way,
-so discarding it was never a privacy measure.
-
-It is still a repository's decision: `[transcripts] keep = false` writes nothing down, including the
-prompts Devplane itself sent. Sessions Devplane merely watches are unaffected, because the
-documented channels carry no prose at all.
+What a **driven** agent says is stored in `~/.devplane/devplane.db` and pruned on the same retention
+sweep. A repository can opt out with `[transcripts] keep = false`. Watched sessions carry no prose.
 
 ## Agent supply chain
 
-The five built-in agents are pinned to exact versions, and so is every `npx` package. Nothing
-auto-updates.
+The built-in agents and their `npx` packages are pinned to exact versions; nothing auto-updates.
+Agents you add in `~/.devplane/agents.toml` run exactly the command you wrote.
 
-Agents beyond those four are launch commands **you** write in `~/.devplane/agents.toml`. Devplane
-runs what is in that file and pins nothing on your behalf — a smaller trust surface than fetching a
-registry, but the pin is in your hands.
+## What this is not
 
-## What this deliberately is not
+- **Not a sandbox.** Agents run as you. Use the vendors' sandboxes; Devplane adds worktree isolation
+  and accountability. A `Bash` rule reads command text and cannot follow a program that decides at
+  run time what to execute.
+- **Not tamper-evident.** The [decision log](@/docs/decisions.md) is append-only in a local file, not
+  hash-chained. Anything with write access to your home directory can edit it.
 
-The decision log is **not tamper-evident**. Hash-chaining defends against an adversary with write
-access to the same machine as the agents themselves, which is not a threat model this product has —
-and claiming it would be worse than not having it.
+## Reporting a vulnerability
 
-Devplane does **not** sandbox agents. The vendors' own sandboxes and worktree isolation are what is
-used. And nothing here governs what an agent does: no software can make an external agent's `rm -rf`
-at-most-once from outside the process that runs it.
-
-## Reporting something
-
-Open an issue on [the repository](https://github.com/hupe1980/devplane). For anything you would
-rather not post publicly, use GitHub's private vulnerability reporting there.
-
-No external security review has happened. This page is a threat model, not an audit.
+Use GitHub's private vulnerability reporting on
+[the repository](https://github.com/hupe1980/devplane). No external security review has been done;
+this page is a threat model, not an audit.

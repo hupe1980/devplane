@@ -2,12 +2,8 @@
 import type { ClockSource } from "./ClockSource";
 
 /**
- * One clock, as a surface reads it.
- *
- * **The sentence is composed here and rendered nowhere.** A figure with two
- * homes rots in one of them, and this one has three readers — the CLI, the
- * board and `--json`. They get the words rather than the ingredients, which is
- * the rule `#vacuity` bought: the surface renders nothing it computes.
+ * One clock as a surface reads it: the sentence is composed here so the CLI,
+ * the board and `--json` render words, not ingredients.
  */
 export type ClockLine = { 
 /**
@@ -15,27 +11,16 @@ export type ClockLine = {
  */
 after: string, 
 /**
- * Whether questions are closed with no wait at all. A separate flag rather
- * than a string comparison, because a surface that colours on
- * `after == "immediately"` is one string away from silently never firing.
+ * Whether questions close with no wait. A flag, not a string compare on
+ * `after`, so a rename cannot silently disable it.
  */
 immediate: boolean, source: ClockSource, where_set: string, 
 /**
  * The whole sentence, which is what a surface prints.
  */
-says: string, 
+says: string, chosen_by_the_person: boolean, 
 /**
- * Whether the person at the keyboard chose this.
- */
-chosen_by_the_person: boolean, 
-/**
- * **Whether this clock answers for the person at all.**
- *
- * `false` only for `never`, and a surface that treats the presence of a
- * clock as the alarm condition is one value away from telling somebody
- * their questions are being auto-answered when they have explicitly said
- * the opposite. A flag rather than `after == "never"`, for the same reason
- * `immediate` is a flag: a string comparison is one rename from silently
- * never firing.
+ * Whether this clock answers for the person; `false` only for `never`.
+ * A flag for the same reason as `immediate`.
  */
 answers_for_you: boolean, };
