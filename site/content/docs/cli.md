@@ -222,7 +222,8 @@ agent says it is finished. Its state is `drafted`, `isolated`, `in flight`, `ver
 
 ```sh
 devplane change start "add rate limiting to /login"
-devplane change start --spec specs/001-password-reset --task REQ-3 "password reset"
+devplane change start --spec specs/001-password-reset --task REQ-3 \
+  "password reset"
 devplane change start --project api --project web "bump tokio to 1.40"
 ```
 
@@ -366,8 +367,10 @@ project's [`[reports] deliver_from`](@/docs/configuration.md#reports) names this
 | `devplane report discard <id>` | throw a GitHub draft away; nothing was sent |
 
 ```sh
-devplane report file --to core-lib --kind defect --title "client retries on 4xx" \
-  --finding "retry() does not check the status" --command "cargo test -p client" \
+devplane report file --to core-lib --kind defect \
+  --title "client retries on 4xx" \
+  --finding "retry() does not check the status" \
+  --command "cargo test -p client" \
   --output-file out.txt --path src/client.rs
 ```
 

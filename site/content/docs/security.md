@@ -39,7 +39,7 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/token)
 ```sh
 devplane trust --dry-run ~/src/someone-elses-repo   # show, trust nothing
 devplane trust .                                    # show, then ask
-devplane trust --yes .                              # for a directory you wrote
+devplane trust --yes .                              # a directory you wrote
 ```
 
 A headless agent runs **the repository's own hooks and MCP servers** with no dialog, so `devplane

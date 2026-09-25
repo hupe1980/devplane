@@ -24,11 +24,11 @@ so it runs in CI.
 [project]
 name          = "saas"
 base_branch   = "main"      # discovered from the repository when unset
-default_agent = "claude"    # what `devplane change start` uses without --agent
+default_agent = "claude"    # used by `change start` without --agent
 
 [workspace]
 setup = "pnpm install --frozen-lockfile"   # run once in a new worktree
-share = ["cargo"]                          # build caches shared between changes
+share = ["cargo"]                          # build caches shared by changes
 
 [gates]
 check   = ["pnpm typecheck", "pnpm lint", "pnpm test -- --run"]
@@ -73,7 +73,7 @@ test  = "tests/auth.rs"
 paths = ["src/auth/**"]
 
 [github]
-pull_request = true         # lets `devplane change offer` push and open the PR
+pull_request = true         # lets `change offer` push and open the PR
 draft        = true
 ready_label  = "devplane:ready"
 
@@ -151,7 +151,11 @@ makes a change verified; an undeclared name is an error. See [Verified done](@/d
 
 ```toml
 [policy]
-never_auto = ["Bash(rm -rf *)", "Read(./.env)", "WebFetch(domain:pastebin.com)"]
+never_auto = [
+  "Bash(rm -rf *)",
+  "Read(./.env)",
+  "WebFetch(domain:pastebin.com)",
+]
 always_ask = ["Bash(git push *)", "Bash(npm publish *)"]
 max_parallel_runs = 3
 ```
@@ -193,9 +197,9 @@ either way.
 
 ```toml
 [spec]
-plans          = "specs"      # Kiro: ".kiro/specs", OpenSpec: "openspec/changes"
+plans          = "specs"   # Kiro ".kiro/specs", OpenSpec "openspec/changes"
 open_questions = ["NEEDS CLARIFICATION"]
-tokens         = ["REQ-"]     # REQ-3 in a heading and in a task line is one edge
+tokens         = ["REQ-"]  # REQ-3 in heading and task line: one edge
 ```
 
 - `plans` has no default. Unset, the Specifications view says *not configured* for this project.
@@ -296,7 +300,7 @@ A file that will not load fails closed, like a broken `devplane.toml`.
 # ~/.devplane/app.toml
 [app]
 shortcut = "CmdOrCtrl+Shift+Space"   # the one global shortcut
-port     = 0                         # the port the in-process host binds; 0 picks a free one
+port     = 0                         # the host's port; 0 picks a free one
 ```
 
 A missing file means these defaults. A file that will not parse, or a shortcut that cannot be

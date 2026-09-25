@@ -11,16 +11,19 @@ carries that finding to the person who owns `core-lib`, with evidence and a chec
 answer goes back to the change on `api` that raised it.
 
 ```sh
-# as an agent does, in its shell (Devplane set DEVPLANE_RUN when it started the agent):
+# as an agent, in its shell (DEVPLANE_RUN set by Devplane):
 devplane report file --to core-lib --kind defect \
-  --title "client retries on 4xx" --finding "retry() does not check the status" \
+  --title "client retries on 4xx" \
+  --finding "retry() does not check the status" \
   --command "cargo test -p client" --output-file out.txt
 
-devplane report ls --to-me          # in core-lib: what is waiting for an answer
-devplane report start <id>          # a change in core-lib, with the report attached
+devplane report ls --to-me          # in core-lib: what awaits an answer
+devplane report start <id>          # a core-lib change, report attached
 devplane change offer <change>      # the report is answered as fixed
-devplane change show <api change>   # "Report … to core-lib — fixed in change …"
+devplane change show <api change>   # the answer, on the api change
 ```
+
+The last command shows "Report … to core-lib — fixed in change …".
 
 ## Rules
 
@@ -81,13 +84,15 @@ treat it as a claim to check*.
 ```sh
 devplane report ls [--to-me | --from-me | --all]
 devplane report show <id>
-devplane report start <id> [--agent <a>]      # a change in the target; the report is accepted
-devplane report reject <id> --reason <text>   # the filer is told why
+devplane report start <id> [--agent <a>]     # a change in the target
+devplane report reject <id> --reason <text>  # the filer is told why
 devplane report defer <id> --reason <text>
-devplane report fixed <id> [--reason <text>]  # fixed by hand
-devplane report open <id>                     # a GitHub draft: shows it, asks, runs your gh
-devplane report discard <id>                  # a GitHub draft: nothing was ever sent
+devplane report fixed <id> [--reason <text>] # fixed by hand
+devplane report open <id>                    # a GitHub draft: asks, runs gh
+devplane report discard <id>                 # a GitHub draft: never sent
 ```
+
+`report start` accepts the report. `report open` shows the draft and asks before it runs your `gh`.
 
 Offering or finishing a change started from a report answers it as **fixed**. Every answer is
 recorded on the change that raised the report, and that change's next turn is handed it once, quoted.

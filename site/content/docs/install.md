@@ -142,7 +142,7 @@ The default port is 47831 (`--port` or `DEVPLANE_PORT`).
 ## Uninstall
 
 ```sh
-devplane disconnect claude    # removes exactly the hooks and telemetry connect added
+devplane disconnect claude    # undoes exactly what connect added
 devplane disconnect codex
 devplane disconnect copilot   # deletes the one file it wrote
 devplane quit                 # stops the host and the agents it started

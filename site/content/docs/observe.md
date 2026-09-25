@@ -38,7 +38,7 @@ inbox` replay them in memory.
 ### Claude Code
 
 ```sh
-devplane connect claude      # shows the diff to ~/.claude/settings.json, then asks
+devplane connect claude      # diffs ~/.claude/settings.json, then asks
 devplane doctor              # is anything arriving?
 devplane disconnect claude   # removes exactly what connect added
 ```
@@ -83,9 +83,11 @@ Copilot publishes no roster, so a session appears once it does something.
 ### Codex
 
 ```sh
-devplane connect codex       # merges entries into ~/.codex/hooks.json ($CODEX_HOME if set)
+devplane connect codex       # merges entries into ~/.codex/hooks.json
 devplane disconnect codex    # picks exactly those back out
 ```
+
+With `$CODEX_HOME` set, the file is `$CODEX_HOME/hooks.json`.
 
 Codex hooks take Claude Code's payloads and answers, so the same `devplane hook` serves, registered
 as `devplane hook --vendor codex`. Ten of its twelve events are registered. No telemetry is
@@ -179,9 +181,9 @@ session that reported no mode shows as unknown. Devplane never sets a mode.
 ## GitHub
 
 ```sh
-devplane issues          # open issues across every registered project, what needs you first
-devplane issues --ready  # this repository's issues carrying [github] ready_label
-devplane prs             # open pull requests across every registered project
+devplane issues          # every project's open issues, what needs you first
+devplane issues --ready  # this repo's issues with [github] ready_label
+devplane prs             # every project's open pull requests
 ```
 
 A running host reads them through your own `gh` after it starts and every five minutes. *Needs you*

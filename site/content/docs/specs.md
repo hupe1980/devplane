@@ -35,7 +35,7 @@ Any other layout is one line of configuration:
 ```toml
 # devplane.toml
 [spec]
-plans          = "docs/plans"            # where this repository keeps its spec folders
+plans          = "docs/plans"  # where this repository keeps its specs
 open_questions = ["NEEDS CLARIFICATION", "TBD"]
 ```
 
@@ -68,10 +68,12 @@ $ devplane change show c-3f9a
 
 ```sh
 # every task line that cites the requirement token REQ-3
-devplane change start "reset: token expiry" --spec specs/001-password-reset --task REQ-3
+devplane change start "reset: token expiry" \
+  --spec specs/001-password-reset --task REQ-3
 
 # one exact line, file:line relative to the spec folder
-devplane change start "reset: email copy" --spec specs/001-password-reset --task tasks.md:14
+devplane change start "reset: email copy" \
+  --spec specs/001-password-reset --task tasks.md:14
 ```
 
 The selected lines travel in the prompt and on the run's record. A selector that matches nothing
@@ -105,11 +107,12 @@ If the spec folder is edited while an agent works from it, the inbox says so whe
 (*the specification changed 18m into run r-9f2 and the run never saw it*), with two answers:
 
 ```sh
-devplane change drift <id> --run r-9f2 --tell     # prompt the run with the changed files named
-devplane change drift <id> --run r-9f2 --accept   # the change now works to what the run saw
+devplane change drift <id> --run r-9f2 --tell     # tell it what changed
+devplane change drift <id> --run r-9f2 --accept   # work to what the run saw
 ```
 
-Either is recorded as your decision.
+`--tell` prompts the run with the changed files named; `--accept` makes the change work to what the
+run saw. Either is recorded as your decision.
 
 ## A spec tool's CLI is already a gate
 
@@ -129,11 +132,12 @@ Spec Kit's commands look in `.specify/extensions.yml` for hooks, and run and wai
 `optional: false`. Devplane's gate goes there:
 
 ```sh
-devplane speckit install              # writes .specify/extensions.yml, or prints the entry if one exists
+devplane speckit install              # writes .specify/extensions.yml
 devplane speckit install --dry-run    # print it, write nothing
 devplane gate run                     # what the hook runs
 ```
 
+If `.specify/extensions.yml` already exists, `speckit install` prints the entry instead.
 The hook goes on `after_implement` unless you pass `--event`. `speckit install` refuses when the
 repository declares no gate (declare `[gates] check` first, or pass `--anyway`), and when nothing
 defines the `devplane-gate` skill the hook resolves to: install the

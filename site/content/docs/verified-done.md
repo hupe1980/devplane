@@ -54,7 +54,7 @@ max_feedback_rounds = 2
 ```
 
 ```sh
-devplane check        # does it parse, does everything it names exist, is anything unsafe
+devplane check        # does it parse, does all it names exist, is it safe
 devplane gate run     # run check here, now, and exit on the verdict
 ```
 
@@ -126,8 +126,8 @@ Turns and runtime bind every agent; `usd` only an agent that reports cost. See
 ## Review before you merge
 
 ```sh
-devplane change review <id>               # by risk: the order [review] roles declares
-devplane change review <id> --by intent   # grouped by the run that wrote each file
+devplane change review <id>              # by risk, per [review] roles
+devplane change review <id> --by intent  # grouped by the run that wrote it
 ```
 
 The review leads with **checks weakened or changed** (added skip markers, deleted test files, edits
@@ -141,9 +141,9 @@ review.
 ## Offering, finishing, archiving
 
 ```sh
-devplane change offer <id>        # push and open the pull request, or print the two commands
-devplane change finish <id>       # accept it; records the basis, removes nothing
-devplane change archive <id>      # remove the worktree, keep the branch and the record
+devplane change offer <id>    # push and open the PR, or print the commands
+devplane change finish <id>   # accept; records the basis, removes nothing
+devplane change archive <id>  # remove the worktree; keep branch and record
 ```
 
 - **`offer`**: with `[github] pull_request = true` in your checkout, pushes and runs `gh pr create`
@@ -172,8 +172,8 @@ A branch you made by hand joins the same loop with `devplane change adopt <branc
 ## The done certificate
 
 ```sh
-devplane change export <id> > cert.md     # paste into the pull request
-devplane --json change export <id>        # the same facts as an in-toto statement
+devplane change export <id> > cert.md  # paste into the pull request
+devplane --json change export <id>     # same facts as an in-toto statement
 ```
 
 The Gates view's **Copy as markdown** gives the same bytes. The certificate names the repository, the

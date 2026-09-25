@@ -11,19 +11,21 @@ A session Devplane **watches** is one it can show you. A session it **drives**, 
 board and in the same inbox; for a driven run the project's `[policy]` rules decide first.
 
 ```sh
-devplane trust .                                         # once per repository
-devplane agents                                          # what can be driven
-devplane change start "add rate limiting to /login"      # Claude Code, in an isolated worktree
+devplane trust .                                     # once per repository
+devplane agents                                      # what can be driven
+devplane change start "add rate limiting to /login"  # Claude Code
 devplane change start --agent codex "review the auth change"
-devplane watch <run>                                     # follow what it says
+devplane watch <run>                                 # follow what it says
 devplane change prompt <change> "use the existing middleware"
-devplane answer <ask> --allow                            # the id `devplane inbox` prints
+devplane answer <ask> --allow                        # <ask>: from the inbox
 ```
+
+Each change runs in an isolated worktree. The `<ask>` id is the one `devplane inbox` prints.
 
 ## Trust comes first
 
 ```sh
-devplane trust --dry-run ../someone-elses-repo   # print what is there, trust nothing
+devplane trust --dry-run ../someone-elses-repo   # show it, trust nothing
 devplane trust .
 ```
 
@@ -122,7 +124,7 @@ session is never passed off as a resume. Resuming is never automatic: it spends 
 ## Handing over
 
 ```sh
-devplane attach <run>    # replaces this process with `claude --resume <session>`
+devplane attach <run>    # this process becomes `claude --resume <session>`
 devplane focus <run>     # raises the editor window that owns its directory
 ```
 

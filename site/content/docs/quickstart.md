@@ -65,7 +65,7 @@ anything; `?` lists the keys. [The workbench](@/docs/workbench.md) is the full t
 ```sh
 devplane inbox
 devplane answer <ask> --allow           # a permission
-devplane answer <ask> --option "Yes"    # a question, with one of the agent's options
+devplane answer <ask> --option "Yes"    # a question: one of its options
 ```
 
 The id is the one `inbox` prints. It outlives the process that asked, so an answer given tomorrow
@@ -90,10 +90,10 @@ check = ["cargo clippy -- -D warnings", "cargo test"]
 ```
 
 ```sh
-devplane check                                   # what this file will do
+devplane check             # what this file will do
 devplane change start "fix the flaky login test"
-devplane watch <run>                             # follow the agent, like tail -f
-devplane change show <id>                        # state, cost, what the checks said
+devplane watch <run>       # follow the agent, like tail -f
+devplane change show <id>  # state, cost, what the checks said
 ```
 
 `change start` needs the host. It makes an isolated worktree on its own branch, starts an agent in it,
@@ -104,7 +104,8 @@ file and it is stale.
 The same prompt can go to several repositories; every refusal is reported before anything starts:
 
 ```sh
-devplane change start "bump the MSRV to 1.90" --project core-lib --project saas
+devplane change start "bump the MSRV to 1.90" \
+  --project core-lib --project saas
 ```
 
 See [Verified done](@/docs/verified-done.md).
@@ -113,7 +114,7 @@ See [Verified done](@/docs/verified-done.md).
 
 ```sh
 devplane change review <id>     # weakened checks first, then files by risk
-devplane change offer <id>      # push and open a draft PR, or print the two commands
+devplane change offer <id>      # open a draft PR, or print the two commands
 devplane change export <id>     # the certificate, for the PR body
 ```
 
@@ -121,7 +122,7 @@ devplane change export <id>     # the certificate, for the PR body
 
 ```sh
 devplane audit                # everything, newest first
-devplane audit --without-me   # only what a rule, a clock or nobody decided instead of you
+devplane audit --without-me   # only what a rule, clock or nobody decided
 ```
 
 ```console

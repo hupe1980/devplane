@@ -472,6 +472,15 @@ kbd {
   &:hover::after, &:focus-visible::after { opacity: .7; }
 }
 
+// A screenshot is 1440px wide; in the text column it scales to fit.
+.doc img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.5rem 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+}
 .doc table {
   width: 100%;
   border-collapse: collapse;

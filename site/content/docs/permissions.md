@@ -34,8 +34,8 @@ Test a rule before you commit it:
 ```sh
 devplane explain 'pnpm test && rm -rf /'
 devplane explain --tool Read .env
-devplane explain --replay          # every call already observed, against the rules now
-devplane check                     # does devplane.toml parse, and is any rule refused
+devplane explain --replay  # every observed call against the current rules
+devplane check             # does devplane.toml parse; is any rule refused
 ```
 
 ## The syntax is Claude Code's
@@ -234,7 +234,7 @@ Devplane cannot approve, so it can only err toward a prompt:
 Some lines hide what they run:
 
 ```console
-$ devplane explain 'rm$IFS-rf node_modules'      # never_auto = ["Bash(rm *)"]
+$ devplane explain 'rm$IFS-rf node_modules'  # never_auto = ["Bash(rm *)"]
 ask — unreadable  Bash
         because the program is named by a variable the shell expands; `Bash(rm *)` constrains what Bash may run
 ```

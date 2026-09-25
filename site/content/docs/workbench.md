@@ -11,8 +11,8 @@ activity bar, a sidebar list, tabs, a bottom panel and a status bar. Nothing is 
 internet and nothing needs an account.
 
 ```sh
-devplane open     # in your browser; hosts in this terminal if nothing is running
-devplane app      # the same page in its own window (a build with --features app)
+devplane open     # in your browser
+devplane app      # in its own window (--features app)
 ```
 
 Press `?` anywhere to list the keys bound on the current surface.
