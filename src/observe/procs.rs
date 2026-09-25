@@ -66,6 +66,8 @@ pub fn snapshot() -> Vec<Proc> {
 ///
 /// Separate from [`snapshot`] for testing: three numeric columns, then the
 /// command with its spaces.
+// Only the Unix process-table reader calls this; tests exercise it everywhere.
+#[cfg(any(unix, test))]
 fn parse(text: &str) -> Vec<Proc> {
     text.lines()
         .filter_map(|line| {
@@ -216,6 +218,8 @@ mod tests {
 /// Deliberately narrow: providers spawn tool calls as a shell with `-c`. A
 /// false positive would mark a session that needs a person as busy, so
 /// anything unrecognised is not a job.
+// Only the Unix process-table reader calls this; tests exercise it everywhere.
+#[cfg(any(unix, test))]
 fn is_tool_command(command: &str) -> bool {
     // The shell-snapshot path is the provider's own fingerprint; the generic
     // form catches it under an unknown config directory.
@@ -250,6 +254,8 @@ pub fn running_jobs(session_pids: &[u32]) -> std::collections::HashMap<u32, u32>
 }
 
 /// Separate from [`running_jobs`] so counting is testable on a fixed table.
+// Only the Unix process-table reader calls this; tests exercise it everywhere.
+#[cfg(any(unix, test))]
 fn jobs_from(procs: &[Proc], session_pids: &[u32]) -> std::collections::HashMap<u32, u32> {
     let wanted: HashSet<u32> = session_pids.iter().copied().collect();
     let mut out: std::collections::HashMap<u32, u32> = wanted.iter().map(|p| (*p, 0)).collect();

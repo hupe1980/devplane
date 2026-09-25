@@ -94,8 +94,11 @@ jobs:
   # What the Windows release builds, on every push, so a Windows-only break
   # surfaces here and not at a tag. Build and clippy only: the test suite still
   # carries Unix assumptions.
-  windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
