@@ -52,12 +52,12 @@ shoot() { # file-name  hash  height  [light|dark]  [width]  [touch]
 change=$(printf '%s' "$rate" | grep -oE '"change_id": *"c-[0-9a-f]+"' | head -1 | grep -oE 'c-[0-9a-f]+')
 [ -n "$change" ] || { echo "make-board: the seed has no saas change" >&2; exit 1; }
 
-# The workbench at laptop size: a change, its review, the sessions,
+# Cropped to what each screen shows, at a width that stays legible scaled: a change, its review, the sessions,
 # what needs you, and the ledger.
-shoot workbench "change/$change" 900 dark 1440
-shoot review "review/$change" 900 dark 1440
-shoot sessions board 820 dark 1440
+shoot workbench "change/$change" 560 dark 1200
+shoot review "review/$change" 470 dark 1200
+shoot sessions board 560 dark 1200
 [ "${SHOTS:-all}" = board ] || {
-  shoot inbox inbox 760 dark 1440
-  shoot audit why 700 dark 1440
+  shoot inbox inbox 450 dark 1200
+  shoot audit why 400 dark 1200
 }
