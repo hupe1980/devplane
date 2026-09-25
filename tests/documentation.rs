@@ -289,8 +289,8 @@ fn every_key_a_project_can_set_is_in_the_reference() {
     );
 }
 
-/// The hand-written release workflow builds every target in `[workspace.metadata.dist]`;
-/// a missing one would silently drop out of the release.
+/// The release workflow and CI both build every target in `[workspace.metadata.dist]`:
+/// a missing one would silently drop out of the release, or first be built at a tag.
 #[test]
 fn the_release_workflow_builds_every_target_the_manifest_declares() {
     let manifest = std::fs::read_to_string(repo_root().join("Cargo.toml")).expect("Cargo.toml");
@@ -317,6 +317,21 @@ fn the_release_workflow_builds_every_target_the_manifest_declares() {
     assert_eq!(
         declared_sorted, built,
         "[workspace.metadata.dist] targets and the release.yml build matrix disagree"
+    );
+
+    // CI builds the same targets on every push, so a tag is never the first
+    // build of one.
+    let ci = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("ci.yml");
+    let mut ci_built: Vec<String> = ci
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("target: "))
+        .map(|t| t.trim().to_string())
+        .collect();
+    ci_built.sort();
+    ci_built.dedup();
+    assert_eq!(
+        declared_sorted, ci_built,
+        "[workspace.metadata.dist] targets and the ci.yml build matrix disagree"
     );
 }
 

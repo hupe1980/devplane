@@ -15,7 +15,7 @@ it, and nothing starts at login.
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 ```
 
-A prebuilt binary for macOS (Apple Silicon and Intel) and Linux. No Rust toolchain. On Windows, use
+A prebuilt binary for macOS (Apple Silicon) and Linux. No Rust toolchain. On Windows, use
 `npx` below.
 
 > [!IMPORTANT]

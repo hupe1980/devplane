@@ -15,7 +15,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A tag releases only a commit CI passed on. If CI is still running for it,
+  # this waits (up to 45 minutes); if it failed, was cancelled or never ran,
+  # nothing is built. A manual run only plans, so it skips this.
+  ci-green:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: CI passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          for _ in $(seq 1 90); do
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" \
+              --json status,conclusion,url --limit 1 --jq '.[0] // empty')
+            if [ -n "$run" ] && [ "$(jq -r .status <<<"$run")" = completed ]; then
+              conclusion=$(jq -r .conclusion <<<"$run")
+              echo "ci on $SHA: $conclusion — $(jq -r .url <<<"$run")"
+              [ "$conclusion" = success ] && exit 0
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "no finished ci run for $SHA after 45 minutes"
+          exit 1
+
   plan:
+    needs: ci-green
+    # Runs after a green gate, or alone on a manual plan (the gate is skipped).
+    if: always() && (needs.ci-green.result == 'success' || needs.ci-green.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,9 +83,6 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          # Cross-compiled on the Apple Silicon runner; no extra toolchain.
-          - os: macos-latest
-            target: x86_64-apple-darwin
           # Native ARM: `musl-gcc` only targets the host architecture.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
@@ -111,8 +140,22 @@ jobs:
       # Installers come from the manifest, not the binaries, so they build once.
       - name: Installers and checksums
         run: dist build --artifacts=global --output-format=json > dist-global.json
+      # This version's section of CHANGELOG.md, as the release notes.
+      - name: Release notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## " v "( |$)" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $version" >&2; exit 1; }
+          printf '\n**Install:** `curl -LsSf https://github.com/%s/releases/download/%s/devplane-installer.sh | sh`\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" >> notes.md
+      # A draft: nothing is announced until every channel below can follow it.
       # Regular files only: skip dist's staging directories and manifests.
-      - name: Publish
+      - name: Upload to a draft release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -121,21 +164,32 @@ jobs:
           while IFS= read -r f; do files+=("$f"); done \
             < <(find target/distrib -maxdepth 1 -type f ! -name '*.json')
           [ ${#files[@]} -gt 0 ] || { echo "no artifacts to publish"; exit 1; }
-          printf 'publishing %s\n' "${files[@]}"
-
+          printf 'uploading %s\n' "${files[@]}"
           # A re-run after a partial upload adds to the existing release.
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" --clobber "${files[@]}"
+            gh release edit "${GITHUB_REF_NAME}" --notes-file notes.md
           else
-            gh release create "${GITHUB_REF_NAME}" \
-              --title "${GITHUB_REF_NAME}" \
-              --notes "Install: \`curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh\`" \
-              "${files[@]}"
+            gh release create "${GITHUB_REF_NAME}" --draft \
+              --title "${GITHUB_REF_NAME}" --notes-file notes.md "${files[@]}"
           fi
+
+  # The release goes public once its artifacts are uploaded and crates.io has
+  # the crate. npm follows it: its package installs from the release's assets,
+  # so publishing it first would leave a window of 404s.
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [publish, crates-io]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   npm:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: publish
+    needs: github-release
     runs-on: ubuntu-latest
     permissions:
       # Trusted publishing via OIDC; no npm token is stored in the repository.

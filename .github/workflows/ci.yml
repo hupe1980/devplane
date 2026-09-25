@@ -91,13 +91,23 @@ jobs:
       - name: Test the app's host
         run: cargo test --locked --features app --test app
 
-  # What the Windows release builds, on every push, so a Windows-only break
-  # surfaces here and not at a tag. Build and clippy only: the test suite still
-  # carries Unix assumptions.
+  # Every target the release ships, built the way the release builds it, so a
+  # tag is never the first build of anything. A test holds this matrix equal to
+  # `[workspace.metadata.dist] targets`. Windows also runs clippy, which `test`
+  # does not cover there yet.
   build:
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-latest]
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -106,7 +116,15 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -114,9 +132,10 @@ jobs:
         shell: bash
         run: cd ui && npm ci && npm run build
       - name: Build
-        run: cargo build --locked
+        run: cargo build --locked --target ${{ matrix.target }}
       - name: Clippy
-        run: cargo clippy --locked -- -D warnings
+        if: runner.os == 'Windows'
+        run: cargo clippy --locked --target ${{ matrix.target }} -- -D warnings
 
   # Separate so a failure reads as "a dependency arrived", not "this commit is wrong".
   # Checks that need the gitignored concepts/ run via `just notes`, not here.

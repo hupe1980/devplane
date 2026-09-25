@@ -112,11 +112,9 @@ installers = ["shell", "npm"]
 # npm uses trusted publishing (OIDC, no stored token); the `npm` job in
 # `release.yml` is hand-written because dist's generated one cannot do OIDC.
 publish-jobs = ["npm"]
-# Static musl so one Linux artifact runs everywhere; x86_64 macOS cross-compiles
-# from the Apple Silicon runner.
+# Static musl so one Linux artifact runs everywhere. macOS is Apple Silicon only.
 targets = [
   "aarch64-apple-darwin",
-  "x86_64-apple-darwin",
   "aarch64-unknown-linux-musl",
   "x86_64-unknown-linux-musl",
   "x86_64-pc-windows-msvc",

@@ -8,6 +8,8 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Breaking
 
+- No prebuilt binary for Intel Macs: macOS is Apple Silicon only. `cargo install devplane` still
+  builds on Intel.
 - `devplane dispatch`, `batch`, `say`, `tail` and `library` are removed. Use `devplane change start "…" [--project X]…`
   (one prompt to several projects, every refusal reported before anything is created), `devplane change prompt`
   and `devplane watch [RUN]`.

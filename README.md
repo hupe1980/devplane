@@ -17,7 +17,7 @@ isolation is `git worktree`. Delete Devplane and the project still builds.
 ## Install
 
 ```sh
-# prebuilt binary: macOS (Apple Silicon and Intel) and Linux
+# prebuilt binary: macOS (Apple Silicon) and Linux
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 
 # any platform with Node, Windows included
