@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.." || exit 1
 TARGET=x86_64-unknown-linux-musl
 WANT_TOTAL=215
 WANT_ONLY_SQLX=28
-WANT_TOTAL_APP=416
+WANT_TOTAL_APP=414
 WANT_ONLY_SQLX_APP=16
 
 tree=$(mktemp)
@@ -30,7 +30,9 @@ count() {
   python3 - "$want_total" "$want_only" "$tree" "$label" <<'PY'
 import re, sys
 
-want_total, want_only = (int(x) for x in sys.argv[1:3])
+# `-` means print the figure without comparing it (see the app count below).
+compare = sys.argv[1] != "-"
+want_total, want_only = (int(x) for x in sys.argv[1:3]) if compare else (0, 0)
 label = sys.argv[4]
 rows = []
 for line in open(sys.argv[3]).read().splitlines():
@@ -71,6 +73,8 @@ print(f"  [{label}] package versions actually built    {len(total)}")
 print(f"  [{label}] reachable only through sqlx        {only_sqlx}")
 print(f"  [{label}] without sqlx                       {len(without)}")
 
+if not compare:
+    sys.exit(0)
 bad = 0
 for name, got, want in (("total", len(total), want_total),
                         ("only-sqlx", only_sqlx, want_only)):
@@ -83,6 +87,17 @@ PY
 
 rc=0
 count default "$WANT_TOTAL" "$WANT_ONLY_SQLX" || rc=1
-count app "$WANT_TOTAL_APP" "$WANT_ONLY_SQLX_APP" --features app || rc=1
-[ $rc -eq 0 ] && echo "deps-count: ok (matches the pinned figures)"
+# Proc-macros are built for the host, so `cargo tree` resolves their
+# dependencies against the host whatever `--target` says: Tauri's macros pull
+# in two more packages on macOS than on Linux. The app figures are Linux's —
+# what CI measures — and are compared only there; elsewhere they are printed
+# and the comparison is skipped by name rather than passed.
+if [ "$(uname -s)" = Linux ]; then
+  count app "$WANT_TOTAL_APP" "$WANT_ONLY_SQLX_APP" --features app || rc=1
+  [ $rc -eq 0 ] && echo "deps-count: ok (matches the pinned figures)"
+else
+  count app - - --features app || rc=1
+  echo "  [app] not compared: the pinned figures ($WANT_TOTAL_APP, $WANT_ONLY_SQLX_APP) are a Linux host's; this is $(uname -s)"
+  [ $rc -eq 0 ] && echo "deps-count: ok (default matches; app is compared on Linux)"
+fi
 exit $rc
