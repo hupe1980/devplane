@@ -3,10 +3,12 @@
 // result, where `bind()` throws naming the colliding pair. Output: `.ssr/`.
 
 import { build } from "vite";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
-const here = resolve(new URL(".", import.meta.url).pathname, "..");
+// `fileURLToPath`, not `URL.pathname`: on Windows the pathname is `/D:/…`, and
+// resolving it yields `D:\D:\…`.
+const here = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const out = resolve(here, ".ssr");
 
 await build({

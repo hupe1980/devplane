@@ -17,10 +17,10 @@ isolation is `git worktree`. Delete Devplane and the project still builds.
 ## Install
 
 ```sh
-# prebuilt binary: macOS (Apple Silicon and Intel), Linux, Windows
+# prebuilt binary: macOS (Apple Silicon and Intel) and Linux
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 
-# or without installing, if you have Node
+# any platform with Node, Windows included
 npx devplane ls
 
 # or from source (Rust 1.90+); add --features app for the desktop window
@@ -64,7 +64,7 @@ Enter or leave at any step. A session you started in a terminal is picked up at 
 branch you made by hand joins with `devplane change adopt`.
 
 ```sh
-devplane change start "password reset" --spec specs/001-password-reset --task REQ-3
+devplane change start "password reset" --spec specs/142-password-reset --task US1
 devplane change start "bump the MSRV to 1.90" --project core-lib --project saas
 devplane inbox
 devplane answer <ask> --deny
@@ -123,18 +123,11 @@ devplane explain 'pnpm test && rm -rf /'
 | **Claude Code** | hooks, telemetry, roster, status line | yes |
 | **GitHub Copilot** | hooks and telemetry, not proved end to end | yes |
 | **Codex** | hooks, not proved end to end; approve them in Codex's own dialog | yes |
-| **OpenCode** | its event feed, from a running `opencode serve` | yes |
+| **OpenCode** | its event feed from a running `opencode serve`, not proved end to end | yes |
 | **Gemini CLI** | no | yes |
 
 Any other ACP agent is one entry in `~/.devplane/agents.toml`. `devplane doctor` says what is watched
 on your machine.
-
-## Not built
-
-- **Grants**: an allow rule of your own, offered after you answer the same permission the same way
-  several times.
-- **Packaging**: the desktop window is a `cargo install --features app` build; there is no signed,
-  notarised app bundle.
 
 ## How it works
 
@@ -151,10 +144,10 @@ work with the host closed. `devplane --help` sorts the thirty-three commands int
 
 | Path | What |
 |---|---|
-| `src/core/` | types, the reducer, attention, permission policy, `devplane.toml` — no I/O |
+| `src/core/` | types, the reducer, attention, permission policy, `devplane.toml` — synchronous, no network, no database |
 | `src/` | the hook, the host, the HTTP API, the ACP client, gates, git, GitHub, SQLite, the CLI |
 | `ui/` | the workbench — Svelte, built to a bundle the binary embeds |
-| `tests/purity.rs` | fails the build if `src/core/` does I/O |
+| `tests/purity.rs` | fails the build if `src/core/` awaits, spawns, or reaches the network or the database |
 | `site/` | the documentation site (Zola) |
 
 ## Development

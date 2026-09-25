@@ -15,7 +15,8 @@ it, and nothing starts at login.
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 ```
 
-A prebuilt binary for macOS (Apple Silicon and Intel), Linux and Windows. No Rust toolchain.
+A prebuilt binary for macOS (Apple Silicon and Intel) and Linux. No Rust toolchain. On Windows, use
+`npx` below.
 
 > [!IMPORTANT]
 > **On macOS, use this rather than the releases page.** The binaries are not notarised, and macOS
@@ -27,7 +28,8 @@ A prebuilt binary for macOS (Apple Silicon and Intel), Linux and Windows. No Rus
 npx devplane ls
 ```
 
-Fetches the same prebuilt binary and runs it, against the same `~/.devplane/`. The npm package carries
+Fetches the prebuilt binary for your platform, Windows included, and runs it against the same
+`~/.devplane/`. The npm package carries
 a provenance attestation naming the workflow run and commit that built it.
 
 ## From source
