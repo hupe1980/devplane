@@ -159,7 +159,11 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
   const sum = board.summary;
   const bar = html(StatusBar, { items, projects: sum.projects, pulse: "live", bad: false, theme: "auto",
     cycleTheme: () => {}, help: () => {}, go: () => {} });
-  for (const want of [`${sum.working} working`, `${sum.needs_you} need you`, `${sum.projects} projects`])
+  // *Need you* is the inbox rows a person can answer here (the answer
+  // window's rule), not the sessions the board sees waiting.
+  const answerable = ((inbox as { items?: Array<{ ask?: string | null; options?: unknown[]; actions?: string[] }> }).items ?? [])
+    .filter((x) => !!x.ask || (x.options ?? []).length > 0 || (x.actions ?? []).some((a) => a !== "open" && a !== "snooze")).length;
+  for (const want of [`${sum.working} working`, `${answerable} need you`, `${sum.projects} projects`])
     if (!bar.includes(want)) fail(`the status bar does not say "${want}"`);
   if (/0 failed|0 asked/.test(bar)) fail("an empty bucket is a zero in the status bar rather than absent");
   if (surfaces().some((s) => (s.status?.(empty) ?? []).length > 0)) fail("the status bar counts before the feed arrived");
@@ -197,5 +201,11 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
   // Every key's action has a listener.
   const code = walk("../src/").filter((f) => /\.(svelte|ts)$/.test(f) && !f.includes("/wire/")).map((f) => source(f)).join("\n");
   const answered = new Set([...code.matchAll(/onAction\("([a-z-]+)"/g)].map((m) => m[1]));
-  for (const b of all()) if (!answered.has(b.action)) fail(`${b.combo} on ${b.surface} runs "${b.action}", which nothing answers`);
+  // The list keys are answered by `lib/cursor`, per surface that calls it.
+  const listActions = new Set([...source("../src/lib/cursor.ts").matchAll(/\bon\("([a-z-]+)"/g)].map((m) => m[1]));
+  const cursors = new Set([...code.matchAll(/cursor\(\{\s*scope:\s*"([a-z-]+)"/g)].map((m) => m[1]));
+  for (const b of all()) {
+    const ok = listActions.has(b.action) ? cursors.has(b.surface) : answered.has(b.action);
+    if (!ok) fail(`${b.combo} on ${b.surface} runs "${b.action}", which nothing answers`);
+  }
 }

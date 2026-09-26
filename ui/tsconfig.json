@@ -18,6 +18,8 @@
     "resolveJsonModule": true,
     "allowImportingTsExtensions": true,
     "noEmit": true,
+    "allowJs": true,
+    "checkJs": true,
     "types": [
       "vite/client"
     ]
@@ -25,6 +27,9 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.svelte",
+    "tests/**/*.ts",
+    "scripts/**/*.ts",
+    "scripts/**/*.mjs",
     "vite.config.ts"
   ]
 }

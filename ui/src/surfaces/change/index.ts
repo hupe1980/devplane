@@ -1,3 +1,4 @@
+import { isArchived } from "../../lib/State.svelte";
 import { register, phase } from "../../lib/surfaces";
 import { bind, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
@@ -27,9 +28,10 @@ register({
   order: 1,
   // `devplane://change/<id>` lands here on that change.
   link: "change",
+  // As many as the sidebar lists: archived changes are kept, not counted.
   count: (feed) => {
-    const b = feed.board as { changes?: unknown[] } | null;
-    return b?.changes?.length ?? null;
+    const b = feed.board as { changes?: Brief[] } | null;
+    return b?.changes ? b.changes.filter((c) => !isArchived(c.state)).length : null;
   },
   tab: (feed, focus) => briefs(feed).find((c) => c.id === focus)?.title ?? "Change",
   select: (feed, focus) => {

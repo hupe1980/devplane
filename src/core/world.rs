@@ -2,12 +2,10 @@
 //! Surfaces read this rather than reconstructing state from events; the
 //! reducer is pure and this struct is the only thing that mutates.
 
-use crate::core::attention::{
-    AttentionConfig, AttentionItem, Derived, items_for_run, run_items_at,
-};
+use crate::core::attention::{AttentionConfig, AttentionItem, Derived, run_items_at};
 use crate::core::event::{Event, EventEnvelope};
 use crate::core::ids::{ProjectId, RunId, SessionId};
-use crate::core::project::{Project, governing_root};
+use crate::core::project::Project;
 use crate::core::reduce;
 use crate::core::run::{Run, RunMode, RunState};
 use std::collections::BTreeMap;
@@ -31,6 +29,12 @@ pub struct Health<'a> {
     /// When these facts were first known — the host's start — so machine rows
     /// age from then rather than always reading as new.
     pub since: jiff::Timestamp,
+    /// The instant the whole inbox is derived as of, so two runs cannot
+    /// straddle a stall threshold and nothing here reads the clock.
+    pub now: jiff::Timestamp,
+    /// The `check` commands each project declares now, read by the caller;
+    /// a project missing here is judged without them.
+    pub checks: &'a [(ProjectId, Vec<String>)],
 }
 
 impl Default for Health<'_> {
@@ -41,6 +45,8 @@ impl Default for Health<'_> {
             unwritten: (0, 0, None),
             leaked_agents: &[],
             since: jiff::Timestamp::UNIX_EPOCH,
+            now: jiff::Timestamp::UNIX_EPOCH,
+            checks: &[],
         }
     }
 }
@@ -109,6 +115,30 @@ pub struct World {
     runs: BTreeMap<RunId, Run>,
     projects: BTreeMap<ProjectId, Project>,
     pub attention: AttentionConfig,
+    /// Where a directory's project root is. Answering reads the disk, so the
+    /// edge supplies it ([`World::new`] outside this module); the default is
+    /// the directory itself.
+    roots: Roots,
+    /// Each directory's root, asked once: the answer is file I/O, and an event
+    /// arrives on every tool call.
+    root_of: BTreeMap<PathBuf, PathBuf>,
+}
+
+/// The function that names a directory's project root, supplied from outside
+/// the pure half. `None` means the directory is its own root.
+#[derive(Clone, Copy)]
+pub struct Roots(pub fn(&Path) -> Option<PathBuf>);
+
+impl Default for Roots {
+    fn default() -> Self {
+        Self(|_| None)
+    }
+}
+
+impl std::fmt::Debug for Roots {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Roots")
+    }
 }
 
 /// What changed, so a subscriber can be told without diffing the whole world.
@@ -119,8 +149,12 @@ pub enum Changed {
 }
 
 impl World {
-    pub fn new() -> Self {
-        Self::default()
+    /// A world whose projects are resolved by `roots`.
+    pub fn with_roots(roots: Roots) -> Self {
+        Self {
+            roots,
+            ..Self::default()
+        }
     }
 
     pub fn runs(&self) -> impl Iterator<Item = &Run> {
@@ -135,7 +169,7 @@ impl World {
     /// prints — into a run. In order: the exact id, a unique id prefix, then a
     /// unique session name, whole or with its `<project>-` prefix stripped.
     /// Ambiguity names the candidates rather than picking one.
-    pub fn resolve_run(&self, needle: &str) -> Result<RunId, Ambiguous> {
+    pub fn resolve_run(&self, needle: &str, now: jiff::Timestamp) -> Result<RunId, Ambiguous> {
         if needle.is_empty() {
             return Err(Ambiguous::NotFound);
         }
@@ -157,7 +191,11 @@ impl World {
             _ => {
                 // The active ones first: a dormant tab from Tuesday sharing a
                 // prefix should not make today's session unaddressable.
-                let live: Vec<&Run> = found.iter().copied().filter(|r| r.is_active()).collect();
+                let live: Vec<&Run> = found
+                    .iter()
+                    .copied()
+                    .filter(|r| r.is_active_at(now))
+                    .collect();
                 if live.len() == 1 {
                     return Ok(live[0].id.clone());
                 }
@@ -190,18 +228,24 @@ impl World {
 
     /// The runs worth looking at: in play, or asking for something. Dormant
     /// editor tabs are left out.
-    pub fn working_set(&self) -> Vec<&Run> {
-        self.board().into_iter().filter(|r| r.is_active()).collect()
+    pub fn working_set(&self, now: jiff::Timestamp) -> Vec<&Run> {
+        self.board()
+            .into_iter()
+            .filter(|r| r.is_active_at(now))
+            .collect()
     }
 
     /// The inbox, derived fresh every time, with the machine-wide stall
     /// threshold. The host calls [`World::inbox_with_health`] instead.
-    pub fn inbox(&self) -> Vec<AttentionItem> {
+    pub fn inbox(&self, now: jiff::Timestamp) -> Vec<AttentionItem> {
         self.inbox_with_health(
             &[],
             &std::collections::BTreeSet::new(),
             &|_| None,
-            &Health::default(),
+            &Health {
+                now,
+                ..Health::default()
+            },
             Vec::new(),
             Vec::new(),
         )
@@ -223,12 +267,11 @@ impl World {
         // The same runs the board shows, so the surfaces agree; `is_active`
         // keeps every blocked run. One instant for the whole pass, so two runs
         // cannot straddle a stall threshold.
-        // TODO(purity): take `now` from the caller rather than the clock.
-        let now = jiff::Timestamp::now();
+        let now = health.now;
         let from_runs: Derived = self
             .runs
             .values()
-            .filter(|r| r.is_active())
+            .filter(|r| r.is_active_at(now))
             .map(|r| {
                 let stall = stall_for(r.working_dir()).unwrap_or(self.attention.stall_seconds);
                 run_items_at(r, &self.attention, stall, now)
@@ -244,7 +287,19 @@ impl World {
                         .and_then(|r| self.runs.get(r))
                         .is_some_and(|r| r.mode == RunMode::Driven && r.agent_session.is_some());
                 let repo = self.projects.get(&w.project_id).and_then(|p| p.repo_slug());
-                crate::core::attention::change_items_in(w, can_drive, can_resume, repo.as_deref())
+                let checks = health
+                    .checks
+                    .iter()
+                    .find(|(p, _)| *p == w.project_id)
+                    .map(|(_, c)| c.as_slice());
+                crate::core::attention::change_items_in(
+                    w,
+                    can_drive,
+                    can_resume,
+                    repo.as_deref(),
+                    checks,
+                    now,
+                )
             })
             .collect();
         let since = health.since;
@@ -380,9 +435,16 @@ impl World {
         if !path.is_absolute() {
             return None;
         }
-        // As the filesystem names it, so one directory is never two projects.
-        let path = crate::core::project::named(path);
-        let root = governing_root(&path).unwrap_or_else(|| path.clone());
+        // As the filesystem names it, so one directory is never two projects;
+        // asked once per directory, not once per event.
+        let root = match self.root_of.get(path) {
+            Some(root) => root.clone(),
+            None => {
+                let root = (self.roots.0)(path).unwrap_or_else(|| path.to_path_buf());
+                self.root_of.insert(path.to_path_buf(), root.clone());
+                root
+            }
+        };
 
         let id = ProjectId::from_path(&root);
         if self.projects.contains_key(&id) {
@@ -413,10 +475,7 @@ impl World {
 
         if !self.runs.contains_key(&env.run_id) {
             let session = SessionId::new(env.run_id.as_str());
-            let mut run = Run::new(session, cwd.clone(), hint.mode, &hint.agent);
-            run.started_at = env.at;
-            run.last_event_at = env.at;
-            run.last_activity_at = env.at;
+            let run = Run::new_at(session, cwd.clone(), hint.mode, &hint.agent, env.at);
             self.runs.insert(env.run_id.clone(), run);
         }
 
@@ -471,11 +530,18 @@ impl World {
     /// Hides the run's *current* inbox item kinds until `until`, or shows
     /// everything when `None`. A kind that appears later is shown
     /// ([`Snoozed`](crate::core::attention::Snoozed)).
-    pub fn snooze(&mut self, run: &RunId, until: Option<jiff::Timestamp>) -> bool {
+    pub fn snooze(
+        &mut self,
+        run: &RunId,
+        until: Option<jiff::Timestamp>,
+        now: jiff::Timestamp,
+        stall_seconds: i64,
+    ) -> bool {
         let Some(existing) = self.runs.get(run) else {
             return false;
         };
-        let kinds: Vec<_> = items_for_run(existing, &self.attention, self.attention.stall_seconds)
+        let kinds: Vec<_> = run_items_at(existing, &self.attention, stall_seconds, now)
+            .items
             .into_iter()
             .map(|i| i.kind)
             .collect();
@@ -571,7 +637,11 @@ impl World {
 
     /// Records that live runs whose process is gone have ended, and returns
     /// the events so the caller can persist them.
-    pub fn reconcile(&mut self, alive: &dyn Fn(&Run) -> bool) -> Vec<EventEnvelope> {
+    pub fn reconcile(
+        &mut self,
+        alive: &dyn Fn(&Run) -> bool,
+        now: jiff::Timestamp,
+    ) -> Vec<EventEnvelope> {
         let mut out = Vec::new();
         let ids: Vec<RunId> = self
             .runs
@@ -589,12 +659,13 @@ impl World {
             // One fact — the process is gone; the reducer decides from what the
             // run was doing whether that is `Lost` or merely stopped.
             {
-                let env = EventEnvelope::new(
+                let env = EventEnvelope::at(
                     id.clone(),
                     crate::core::event::Source::Host,
                     Event::Lost {
                         reason: "process not found at startup".into(),
                     },
+                    now,
                 );
                 if let Some(run) = self.runs.get_mut(&id) {
                     reduce::apply(run, &env);
@@ -617,7 +688,7 @@ impl World {
 
     /// The counts for the board header. They partition the runs:
     /// `working + needs_you + idle + failed + dormant == runs`.
-    pub fn summary(&self) -> BoardSummary {
+    pub fn summary(&self, now: jiff::Timestamp) -> BoardSummary {
         let mut s = BoardSummary {
             projects: self.projects.len(),
             runs: self.runs.len(),
@@ -626,7 +697,7 @@ impl World {
         for r in self.runs.values() {
             // Summed over every run, dormant included.
             s.cost_usd += r.totals.cost_usd;
-            if !r.is_active() {
+            if !r.is_active_at(now) {
                 s.dormant += 1;
                 continue;
             }
@@ -713,6 +784,10 @@ pub struct BoardSummary {
     /// Of those, the ones waiting on the person (see `ForgeCounts`).
     #[serde(default)]
     pub forge_needs_you: usize,
+    /// Projects whose last forge poll failed: their last good counts are
+    /// left out of the three above rather than passed off as current.
+    #[serde(default)]
+    pub forge_stale: usize,
     /// Questions and permissions still waiting on a person whose session is no
     /// longer running; filled by the host. Separate from `needs_you`, which
     /// partitions sessions, so an orphaned ask never reads as *0 need you*.
@@ -823,24 +898,39 @@ mod tests {
         );
 
         assert_eq!(
-            w.resolve_run("7c4f9a20-1111-2222-3333-444455556666")
-                .unwrap()
-                .as_str(),
+            w.resolve_run(
+                "7c4f9a20-1111-2222-3333-444455556666",
+                jiff::Timestamp::now()
+            )
+            .unwrap()
+            .as_str(),
             "7c4f9a20-1111-2222-3333-444455556666"
         );
         // A prefix, the way git takes a short sha.
         assert_eq!(
-            w.resolve_run("7c4f").unwrap().as_str(),
+            w.resolve_run("7c4f", jiff::Timestamp::now())
+                .unwrap()
+                .as_str(),
             "7c4f9a20-1111-2222-3333-444455556666"
         );
-        assert_eq!(w.resolve_run("7c").unwrap().as_str().len(), 36);
+        assert_eq!(
+            w.resolve_run("7c", jiff::Timestamp::now())
+                .unwrap()
+                .as_str()
+                .len(),
+            36
+        );
         // The label the board actually prints for a named session.
         assert_eq!(
-            w.resolve_run("a1").unwrap().as_str(),
+            w.resolve_run("a1", jiff::Timestamp::now())
+                .unwrap()
+                .as_str(),
             "0a1b2c3d-9999-8888-7777-666655554444"
         );
         assert_eq!(
-            w.resolve_run("repo-a1").unwrap().as_str(),
+            w.resolve_run("repo-a1", jiff::Timestamp::now())
+                .unwrap()
+                .as_str(),
             "0a1b2c3d-9999-8888-7777-666655554444"
         );
     }
@@ -851,15 +941,21 @@ mod tests {
         seed(&mut w, "abc111", None);
         seed(&mut w, "abc222", None);
         // Both are live, so neither wins on activity.
-        match w.resolve_run("abc") {
+        match w.resolve_run("abc", jiff::Timestamp::now()) {
             Err(Ambiguous::Several(ids)) => {
                 assert_eq!(ids.len(), 2);
                 assert!(ids.iter().any(|i| i == "abc111"));
             }
             other => panic!("expected an ambiguity, got {other:?}"),
         }
-        assert_eq!(w.resolve_run("zzz"), Err(Ambiguous::NotFound));
-        assert_eq!(w.resolve_run(""), Err(Ambiguous::NotFound));
+        assert_eq!(
+            w.resolve_run("zzz", jiff::Timestamp::now()),
+            Err(Ambiguous::NotFound)
+        );
+        assert_eq!(
+            w.resolve_run("", jiff::Timestamp::now()),
+            Err(Ambiguous::NotFound)
+        );
     }
 
     #[test]
@@ -872,8 +968,17 @@ mod tests {
             r.reporting = false;
             r.state = RunState::Idle;
         }
-        assert!(!w.run(&RunId::new("abc222")).unwrap().is_active());
-        assert_eq!(w.resolve_run("abc").unwrap().as_str(), "abc111");
+        assert!(
+            !w.run(&RunId::new("abc222"))
+                .unwrap()
+                .is_active_at(jiff::Timestamp::now())
+        );
+        assert_eq!(
+            w.resolve_run("abc", jiff::Timestamp::now())
+                .unwrap()
+                .as_str(),
+            "abc111"
+        );
     }
 
     /// Projection is at-least-once, and `turns` feeds the budget.
@@ -947,7 +1052,7 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Changed::ProjectDiscovered(_)))
         );
-        assert_eq!(w.summary().working, 1);
+        assert_eq!(w.summary(jiff::Timestamp::now()).working, 1);
     }
 
     #[test]
@@ -1012,7 +1117,7 @@ mod tests {
             ),
             RunHint::default(),
         );
-        let inbox = w.inbox();
+        let inbox = w.inbox(jiff::Timestamp::now());
         assert_eq!(inbox.len(), 2);
         // The question outranks the context warning: level first, then age.
         assert_eq!(inbox[0].kind, crate::core::AttentionKind::Question);
@@ -1059,7 +1164,10 @@ mod tests {
             a.run(&RunId::new("s1")).unwrap().state,
             b.run(&RunId::new("s1")).unwrap().state
         );
-        assert_eq!(a.inbox().len(), b.inbox().len());
+        assert_eq!(
+            a.inbox(jiff::Timestamp::now()).len(),
+            b.inbox(jiff::Timestamp::now()).len()
+        );
     }
 
     fn roster_row(status: Option<&str>, started_ms: i64) -> Event {
@@ -1092,9 +1200,13 @@ mod tests {
         );
 
         assert_eq!(w.runs().count(), 2, "both are still on the board");
-        let working: Vec<_> = w.working_set().iter().map(|r| r.id.clone()).collect();
+        let working: Vec<_> = w
+            .working_set(jiff::Timestamp::now())
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
         assert_eq!(working, vec![RunId::new("busy")]);
-        assert_eq!(w.summary().dormant, 1);
+        assert_eq!(w.summary(jiff::Timestamp::now()).dormant, 1);
     }
 
     #[test]
@@ -1109,9 +1221,9 @@ mod tests {
 
         let run = w.run(&RunId::new("old")).unwrap();
         assert!(
-            run.idle_seconds() > 47 * 3600,
+            run.idle_seconds_at(jiff::Timestamp::now()) > 47 * 3600,
             "expected roughly two days, got {}s",
-            run.idle_seconds()
+            run.idle_seconds_at(jiff::Timestamp::now())
         );
     }
 
@@ -1121,14 +1233,18 @@ mod tests {
         let long_ago =
             (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(72)).as_millisecond();
         w.apply(env("s1", roster_row(None, long_ago)), RunHint::default());
-        assert!(w.working_set().is_empty());
+        assert!(w.working_set(jiff::Timestamp::now()).is_empty());
 
         w.apply(
             env("s1", Event::tool_started("Bash", serde_json::json!({}))),
             RunHint::default(),
         );
-        assert_eq!(w.working_set().len(), 1, "a hook makes it real");
-        assert_eq!(w.summary().dormant, 0);
+        assert_eq!(
+            w.working_set(jiff::Timestamp::now()).len(),
+            1,
+            "a hook makes it real"
+        );
+        assert_eq!(w.summary(jiff::Timestamp::now()).dormant, 0);
     }
 
     #[test]
@@ -1150,8 +1266,8 @@ mod tests {
             ),
             RunHint::default(),
         );
-        assert_eq!(w.working_set().len(), 1);
-        assert_eq!(w.inbox().len(), 1);
+        assert_eq!(w.working_set(jiff::Timestamp::now()).len(), 1);
+        assert_eq!(w.inbox(jiff::Timestamp::now()).len(), 1);
     }
 
     #[test]
@@ -1161,10 +1277,13 @@ mod tests {
             env("s1", Event::tool_started("Bash", serde_json::json!({}))),
             RunHint::default(),
         );
-        let lost = w.reconcile(&|_| false);
+        let lost = w.reconcile(&|_| false, jiff::Timestamp::now());
         assert_eq!(lost.len(), 1);
         assert_eq!(w.run(&RunId::new("s1")).unwrap().state, RunState::Lost);
-        assert_eq!(w.inbox()[0].kind, crate::core::AttentionKind::Lost);
+        assert_eq!(
+            w.inbox(jiff::Timestamp::now())[0].kind,
+            crate::core::AttentionKind::Lost
+        );
     }
 
     /// A closed editor tab is not a loss.
@@ -1187,7 +1306,7 @@ mod tests {
         );
 
         // Neither process exists any more.
-        let events = w.reconcile(&|_| false);
+        let events = w.reconcile(&|_| false, jiff::Timestamp::now());
         assert_eq!(events.len(), 2);
 
         let idle = w.run(&RunId::new("idle-one")).unwrap();
@@ -1201,7 +1320,11 @@ mod tests {
         );
 
         // And only the loss reaches the inbox.
-        let kinds: Vec<_> = w.inbox().into_iter().map(|i| i.kind).collect();
+        let kinds: Vec<_> = w
+            .inbox(jiff::Timestamp::now())
+            .into_iter()
+            .map(|i| i.kind)
+            .collect();
         assert_eq!(kinds, [crate::core::AttentionKind::Lost]);
     }
 
@@ -1221,6 +1344,7 @@ mod tests {
                 &|_| None,
                 &Health {
                     broken_configs: &broken,
+                    now: jiff::Timestamp::now(),
                     ..Default::default()
                 },
                 Vec::new(),
@@ -1257,6 +1381,7 @@ mod tests {
                 &|_| None,
                 &Health {
                     broken_configs: &both,
+                    now: jiff::Timestamp::now(),
                     ..Default::default()
                 },
                 Vec::new(),
@@ -1271,6 +1396,7 @@ mod tests {
                 &|_| None,
                 &Health {
                     broken_configs: &both,
+                    now: jiff::Timestamp::now(),
                     ..Default::default()
                 },
                 Vec::new(),
@@ -1292,7 +1418,10 @@ mod tests {
                 &[],
                 &Default::default(),
                 &|_| None,
-                &Health::default(),
+                &Health {
+                    now: jiff::Timestamp::now(),
+                    ..Health::default()
+                },
                 Vec::new(),
                 Vec::new(),
             )
@@ -1308,6 +1437,7 @@ mod tests {
                 &Default::default(),
                 &|_| None,
                 &Health {
+                    now: jiff::Timestamp::now(),
                     unwritten: (3, 1, Some("database or disk is full")),
                     ..Default::default()
                 },
@@ -1339,6 +1469,7 @@ mod tests {
                 &Default::default(),
                 &|_| None,
                 &Health {
+                    now: jiff::Timestamp::now(),
                     unwritten: (9_001, 12, Some("database or disk is full")),
                     ..Default::default()
                 },
@@ -1356,6 +1487,7 @@ mod tests {
                 &Default::default(),
                 &|_| None,
                 &Health {
+                    now: jiff::Timestamp::now(),
                     unwritten: (1, 0, None),
                     ..Default::default()
                 },
@@ -1468,7 +1600,7 @@ mod tests {
         // Failed just now. The third is plain idle and was heard from a moment ago.
         w.runs.get_mut(&RunId::new("b")).unwrap().state = RunState::Failed;
 
-        let s = w.summary();
+        let s = w.summary(jiff::Timestamp::now());
         assert_eq!(s.runs, 3);
         assert_eq!(
             s.working + s.needs_you + s.idle + s.failed + s.dormant,
@@ -1506,14 +1638,26 @@ mod tests {
         }
 
         // Working never ages out either — it is doing something.
-        let ids: Vec<_> = w.working_set().iter().map(|r| r.id.to_string()).collect();
+        let ids: Vec<_> = w
+            .working_set(jiff::Timestamp::now())
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
         assert!(ids.contains(&"old-stall".to_string()));
         assert!(ids.contains(&"old-ask".to_string()));
 
         // But a *terminal* row from forty hours ago is off both surfaces.
         w.runs.get_mut(&RunId::new("old-stall")).unwrap().state = RunState::Lost;
-        assert!(!w.working_set().iter().any(|r| r.id.as_str() == "old-stall"));
-        let kinds: Vec<_> = w.inbox().into_iter().map(|i| i.kind).collect();
+        assert!(
+            !w.working_set(jiff::Timestamp::now())
+                .iter()
+                .any(|r| r.id.as_str() == "old-stall")
+        );
+        let kinds: Vec<_> = w
+            .inbox(jiff::Timestamp::now())
+            .into_iter()
+            .map(|i| i.kind)
+            .collect();
         assert!(!kinds.contains(&crate::core::AttentionKind::Lost));
         assert!(
             kinds.contains(&crate::core::AttentionKind::Permission),

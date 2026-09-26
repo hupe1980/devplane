@@ -1,58 +1,81 @@
 <script lang="ts">
-  // The agent working on this change: what it said, wrote and ran, beside a
-  // composer to steer it without stopping it. Stop is two presses: the first
+  // The agent working on this change: what it said, wrote and is running now,
+  // beside a composer to steer it without stopping it. Stop is two presses: the first
   // shows the host's sentence about what survives, the second stops.
   import { api } from "../../lib/api";
+  import { resource, failure } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
+  import type { Tone } from "../../lib/ui/Pill.svelte";
   import type { Detail } from "./types";
 
+  /// The run as `/api/runs/{id}` sends it — the host's own record, which has
+  /// no generated wire type. `state` is a word (`working`) or, for a wait, an
+  /// object naming what it waits on (`{ "waiting": "question" }`,
+  /// `{ "waiting": { "other": "sandbox request" } }`).
   type Run = {
     id: string;
     agent?: string;
-    state?: string;
+    state?: unknown;
     model?: string | null;
     wrote?: string[];
     recent_tools?: Array<{ tool: string; input?: { command?: string; file_path?: string } | null; ok?: boolean | null }>;
   };
+
+  /// A run's state as a word a person reads, and its colour family. A wait
+  /// names what it is waiting on and whether that is you.
+  function runState(s: unknown): { word: string; tone?: Tone } | null {
+    if (typeof s === "string") return { word: s.replace(/_/g, " ") };
+    if (s && typeof s === "object" && "waiting" in s) {
+      const w = (s as { waiting: unknown }).waiting;
+      if (w === "permission") return { word: "waiting on you — permission", tone: "wait" };
+      if (w === "question") return { word: "waiting on you — question", tone: "wait" };
+      if (w === "idle") return { word: "idle — waiting for the next turn", tone: "none" };
+      if (w === "job") return { word: "waiting on a command it started", tone: "work" };
+      if (w && typeof w === "object" && "other" in w) return { word: `waiting on you — ${String((w as { other: unknown }).other)}`, tone: "wait" };
+      return { word: "waiting on you", tone: "wait" };
+    }
+    return s == null ? null : { word: "in a state this page does not know", tone: "none" };
+  }
   type Message = { id: string; role: string; text: string; at?: string };
 
   let { d, run }: { d: Detail; run: string } = $props();
 
-  let detail = $state<Run | null>(null);
-  let messages = $state<Message[]>([]);
+  /// How many turns one read asks for; more exist when a read comes back full.
+  const LIMIT = 200;
+  /// How often a watched run is read again: there is no stream route, so the
+  /// conversation is polled while this view is open (and the page visible).
+  const EVERY_MS = 2_000;
+
+  const key = $derived(run);
+  const runRead = resource<Run>(() => (key ? `/api/runs/${encodeURIComponent(key)}` : null), {
+    every: EVERY_MS,
+    tell: () => `devplane show ${key}`,
+  });
+  const said_ = resource<Message[]>(() => (key ? `/api/runs/${encodeURIComponent(key)}/messages?limit=${LIMIT}` : null), {
+    every: EVERY_MS,
+    tell: () => `devplane show ${key}`,
+  });
+  const detail = $derived(runRead.data);
+  const messages = $derived(Array.isArray(said_.data) ? said_.data : []);
   let said = $state("");
   let draft = $state("");
   let sending = $state(false);
   let survives = $state("");
-
-  function load(want: string) {
-    let live = true;
-    api<Run>(`/api/runs/${encodeURIComponent(want)}`)
-      .then((r) => {
-        if (live) detail = r;
-      })
-      .catch(() => {});
-    api<Message[]>(`/api/runs/${encodeURIComponent(want)}/messages?limit=200`)
-      .then((r) => {
-        if (live) messages = Array.isArray(r) ? r : [];
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }
   $effect(() => {
-    const want = run;
-    detail = null;
-    messages = [];
+    void key;
     survives = "";
-    if (!want) return;
-    return load(want);
+    said = "";
   });
 
-  const commands = $derived(
-    (detail?.recent_tools ?? []).filter((t) => typeof t.input?.command === "string").map((t) => ({ cmd: t.input!.command!, ok: t.ok })),
+  const shownState = $derived(runState(detail?.state));
+  /// Tool calls still in flight. The host keeps what a call was asked to do
+  /// only until it finishes, so finished calls are not listed at all.
+  const running = $derived(
+    (detail?.recent_tools ?? [])
+      .filter((t) => t.ok == null)
+      .map((t) => ({ tool: t.tool, what: t.input?.command ?? t.input?.file_path ?? "" })),
   );
 
   async function send() {
@@ -66,9 +89,9 @@
       });
       draft = "";
       said = r?.says ?? "Sent.";
-      load(run);
+      void said_.reload();
     } catch (e) {
-      said = `That did not land: ${e instanceof Error ? e.message : String(e)}`;
+      said = `That did not land: ${failure(e).says}`;
     } finally {
       sending = false;
     }
@@ -78,7 +101,7 @@
       const r = await api<{ says?: string }>(`/api/runs/${encodeURIComponent(run)}/stop`);
       survives = r?.says ?? "Stopping ends this run.";
     } catch (e) {
-      said = `That did not land: ${e instanceof Error ? e.message : String(e)}`;
+      said = `That did not land: ${failure(e).says}`;
     }
   }
   async function stop() {
@@ -86,8 +109,9 @@
       await api(`/api/runs/${encodeURIComponent(run)}/stop`, { method: "POST" });
       survives = "";
       said = "Stopped.";
+      void runRead.reload();
     } catch (e) {
-      said = `That did not land: ${e instanceof Error ? e.message : String(e)}`;
+      said = `That did not land: ${failure(e).says}`;
     }
   }
   function keydown(e: KeyboardEvent) {
@@ -107,13 +131,19 @@
         <Icon name="agent" size={15} />
         <b>{detail?.agent ?? "agent"}</b>
         {#if detail?.model}<span class="quiet">{detail.model}</span>{/if}
-        {#if detail?.state}<Pill word={detail.state} />{/if}
+        {#if shownState}<Pill word={shownState.word} as={shownState.tone} />{/if}
         <code class="quiet">{run.slice(0, 18)}</code>
         {#if d.runs && d.runs.length > 1}<span class="quiet">· latest of {d.runs.length} runs</span>{/if}
       </header>
+      {#if said_.failure}<div class="fail"><Failed what="the conversation" failure={said_.failure} at={said_.at} stale={said_.data !== null} /></div>{/if}
+      {#if runRead.failure}<div class="fail"><Failed what="the run" failure={runRead.failure} at={runRead.at} stale={runRead.data !== null} /></div>{/if}
       <ol class="turns">
-        {#if messages.length === 0}
+        {#if said_.phase === "loading"}
+          <li class="quiet">reading…</li>
+        {:else if said_.data !== null && messages.length === 0}
           <li class="quiet">Nothing has been said yet.</li>
+        {:else if messages.length >= LIMIT}
+          <li class="quiet">Only {LIMIT} turns are shown here; <code>devplane show {run}</code> has every one.</li>
         {/if}
         {#each messages as m (m.id)}
           <li class="turn {m.role}">
@@ -148,13 +178,13 @@
     <aside class="record">
       <h2>Files written <span>{detail ? (detail.wrote?.length ?? 0) : ""}</span></h2>
       <ul>
-        {#each detail?.wrote ?? [] as f (f)}<li><Icon name="file" size={12} /><code>{f}</code></li>{:else}<li class="quiet">{detail ? "none yet" : "reading…"}</li>{/each}
+        {#each detail?.wrote ?? [] as f (f)}<li><Icon name="file" size={12} /><code>{f}</code></li>{:else}<li class="quiet">{detail ? "none yet" : runRead.failure ? "not read — see above" : "reading…"}</li>{/each}
       </ul>
-      <h2>Commands run <span>{detail ? commands.length : ""}</span></h2>
+      <h2>Running now <span>{detail ? running.length : ""}</span></h2>
       <ul>
-        {#each commands as c, i (i)}
-          <li class:bad={c.ok === false}><Icon name="terminal" size={12} /><code>{c.cmd}</code></li>
-        {:else}<li class="quiet">{detail ? "none yet" : "reading…"}</li>{/each}
+        {#each running as c, i (i)}
+          <li><Icon name="terminal" size={12} /><span>{c.tool}</span>{#if c.what}<code>{c.what}</code>{/if}</li>
+        {:else}<li class="quiet">{detail ? "no tool call in flight" : runRead.failure ? "not read — see above" : "reading…"}</li>{/each}
       </ul>
     </aside>
   </div>
@@ -182,6 +212,9 @@
     padding: var(--s-2) var(--s-3);
     border-bottom: 1px solid var(--line);
     font-size: var(--t-sm);
+  }
+  .fail {
+    padding: 0 var(--s-3);
   }
   .turns {
     list-style: none;
@@ -318,9 +351,6 @@
     font-size: var(--t-xs);
     color: var(--dim);
     min-width: 0;
-  }
-  .record li.bad {
-    color: var(--fail);
   }
   code {
     font-family: var(--mono);

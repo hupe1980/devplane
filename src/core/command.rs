@@ -12,6 +12,20 @@ pub struct Simple {
     pub redirects: Vec<Redirect>,
     /// The command's stdin is a heredoc or another command's stdout.
     pub fed: bool,
+    /// What the shell does to each argument, index for index with `args`.
+    pub kinds: Vec<ArgKind>,
+}
+
+/// Whether the reader knows an argument's final text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ArgKind {
+    #[default]
+    Literal,
+    /// An unquoted `*`, `?` or `[`: files on the disk decide the words.
+    Glob,
+    /// A parameter or command substitution, or a brace sequence: any number
+    /// of words of any text.
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +63,102 @@ const ELSEWHERE: &[&str] = &[
     "script",
 ];
 /// Programs that build a command line from their input.
-const BUILDERS: &[&str] = &["xargs", "parallel", "eval", "source", "."];
+/// `alias`, `trap`, `hash`, `enable` and `bind` make a later word run code.
+const BUILDERS: &[&str] = &[
+    "xargs", "parallel", "eval", "source", ".", "alias", "trap", "hash", "enable", "bind",
+];
+/// Builtins that evaluate an array subscript in an argument, and so run a
+/// command substitution inside it.
+const SUBSCRIPTING: &[&str] = &[
+    "[[",
+    "let",
+    "declare",
+    "typeset",
+    "local",
+    "export",
+    "readonly",
+    "read",
+    "printf",
+    "unset",
+    "test",
+    "[",
+    "mapfile",
+    "readarray",
+];
+/// How many wrappers the reader looks through; one more is a barrier.
+const MAX_WRAPPERS: usize = 8;
+
+/// Variables whose value a program runs (`GIT_SSH_COMMAND`, `PAGER`, …) or
+/// that change what runs (`LD_PRELOAD`, `BASH_ENV`). Not `PATH` or `IFS`:
+/// the program a rule names is matched by its basename wherever it is found,
+/// and an expansion `IFS` would split is already unknown to this reader.
+fn runs_its_value(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    matches!(
+        n.as_str(),
+        "VISUAL"
+            | "LD_PRELOAD"
+            | "LD_LIBRARY_PATH"
+            | "LD_AUDIT"
+            | "BASH_ENV"
+            | "PROMPT_COMMAND"
+            | "PS0"
+            | "PS1"
+            | "PS2"
+            | "PS4"
+            | "SHELLOPTS"
+            | "BASHOPTS"
+            | "GIT_EXTERNAL_DIFF"
+            | "GIT_EXEC_PATH"
+            | "GIT_DIR"
+            | "GIT_CONFIG"
+            | "GIT_TEMPLATE_DIR"
+            | "PYTHONSTARTUP"
+            | "PERL5OPT"
+            | "RUBYOPT"
+            | "ZDOTDIR"
+    ) || n.starts_with("DYLD_")
+        || n.starts_with("GIT_SSH")
+        || n.starts_with("GIT_CONFIG_")
+        || n.ends_with("_COMMAND")
+        || n.ends_with("EDITOR")
+        || n.ends_with("PAGER")
+        || n.ends_with("ASKPASS")
+}
+
+/// A `git -c key=value` whose value git runs.
+fn git_config_runs(pair: &str) -> bool {
+    let key = pair
+        .split_once('=')
+        .map_or(pair, |(k, _)| k)
+        .to_ascii_lowercase();
+    key.starts_with("alias.")
+        || key.starts_with("filter.")
+        || key.starts_with("pager.")
+        || key.starts_with("include")
+        || [
+            "pager",
+            "editor",
+            "sshcommand",
+            "fsmonitor",
+            "hookspath",
+            "external",
+            "textconv",
+            "program",
+            "helper",
+            "cmd",
+            "command",
+            "askpass",
+            // `core.gitProxy` runs; `http.proxy` names a host.
+            "gitproxy",
+            "exec",
+            "tool",
+            "receivepack",
+            "uploadpack",
+        ]
+        .iter()
+        .any(|k| key.contains(k))
+}
 /// Programs whose `-e`/`-c` take a pattern or a count, never a command line.
 const TEXT_TOOLS: &[&str] = &[
     "grep", "egrep", "fgrep", "rg", "ag", "ack", "sed", "wc", "cut", "echo", "printf", "tee",
@@ -121,6 +230,10 @@ const WRAPPERS: &[Wrapper] = &[
     Wrapper { name: "setsid", values: &[], plain: &["-c", "--ctty", "-f", "--fork", "-w", "--wait"],
         operands: 0, shell: &[], joins: false },
     Wrapper { name: "busybox", values: &[], plain: &[], operands: 0, shell: &[], joins: false },
+    // zsh precommand modifiers: the macOS shell Claude Code runs in.
+    Wrapper { name: "noglob", values: &[], plain: &[], operands: 0, shell: &[], joins: false },
+    Wrapper { name: "nocorrect", values: &[], plain: &[], operands: 0, shell: &[], joins: false },
+    Wrapper { name: "repeat", values: &[], plain: &[], operands: 1, shell: &[], joins: false },
     Wrapper { name: "caffeinate", values: &["-t", "-w"], plain: &["-d", "-i", "-m", "-s", "-u"],
         operands: 0, shell: &[], joins: false },
     Wrapper { name: "arch",
@@ -139,6 +252,74 @@ const WRAPPERS: &[Wrapper] = &[
         operands: 0, shell: &[], joins: false },
     Wrapper { name: "ltrace", values: &["-e", "-o", "-p", "-s", "-u", "-a", "-n", "-A", "-D", "-F", "-l", "-L", "-w"],
         plain: &["-b", "-c", "-C", "-f", "-h", "-i", "-r", "-S", "-t", "-tt", "-ttt", "-T", "-V"],
+        operands: 0, shell: &[], joins: false },
+    Wrapper { name: "gtimeout",
+        values: &["-s", "--signal", "-k", "--kill-after"],
+        plain: &["--preserve-status", "--foreground", "-v", "--verbose", "-f", "-p"],
+        operands: 1, shell: &[], joins: false },
+    Wrapper { name: "pkexec", values: &["--user"], plain: &["--disable-internal-agent", "--keep-cwd"],
+        operands: 0, shell: &[], joins: false },
+    Wrapper { name: "runuser",
+        values: &["-u", "--user", "-g", "--group", "-G", "--supp-group", "-w",
+                  "--whitelist-environment", "-s", "--shell"],
+        plain: &["-m", "-p", "--preserve-environment", "-f", "--fast", "-P", "--pty"],
+        operands: 0, shell: &["-c", "--command", "-l", "--login", "--session-command"], joins: false },
+    Wrapper { name: "unbuffer", values: &[], plain: &["-p"], operands: 0, shell: &[], joins: false },
+    Wrapper { name: "chrt",
+        values: &["-T", "--sched-runtime", "-P", "--sched-period", "-D", "--sched-deadline"],
+        plain: &["-a", "--all-tasks", "-b", "--batch", "-d", "--deadline", "-f", "--fifo", "-i",
+                 "--idle", "-o", "--other", "-r", "--rr", "-R", "--reset-on-fork", "-v", "--verbose",
+                 "-p", "--pid"],
+        operands: 1, shell: &[], joins: false },
+    Wrapper { name: "taskset",
+        values: &[], plain: &["-a", "--all-tasks", "-c", "--cpu-list", "-p", "--pid"],
+        operands: 1, shell: &[], joins: false },
+    Wrapper { name: "firejail", values: &[], plain: &["-q", "--quiet", "--noprofile", "--private"],
+        operands: 0, shell: &[], joins: false },
+    Wrapper { name: "valgrind", values: &[], plain: &["-q", "--quiet", "-v", "--verbose"],
+        operands: 0, shell: &[], joins: false },
+    Wrapper { name: "systemd-run",
+        values: &["-u", "--unit", "-p", "--property", "-M", "--machine", "-H", "--host",
+                  "--description", "--slice", "-E", "--setenv", "--uid", "--gid", "--nice",
+                  "-D", "--working-directory", "--on-active", "--on-calendar"],
+        plain: &["--user", "--system", "--scope", "-t", "--pty", "-P", "--pipe", "-q", "--quiet",
+                 "-G", "--collect", "-r", "--remain-after-exit", "--wait", "--no-block",
+                 "-d", "--same-dir"],
+        operands: 0, shell: &["-S", "--shell"], joins: false },
+    Wrapper { name: "unshare",
+        values: &["-S", "--setuid", "-G", "--setgid", "-R", "--root", "-w", "--wd",
+                  "--propagation", "--setgroups"],
+        plain: &["-m", "--mount", "-u", "--uts", "-i", "--ipc", "-n", "--net", "-p", "--pid",
+                 "-U", "--user", "-C", "--cgroup", "-T", "--time", "-f", "--fork", "-r",
+                 "--map-root-user", "-c", "--map-current-user", "--mount-proc", "--kill-child",
+                 "--keep-caps"],
+        operands: 0, shell: &[], joins: false },
+    Wrapper { name: "fakeroot", values: &["-l", "--lib", "--faked", "-s", "-i", "-b"],
+        plain: &["-u", "--unknown-is-real"], operands: 0, shell: &[], joins: false },
+    Wrapper { name: "rlwrap",
+        values: &["-C", "-D", "-e", "-f", "-g", "-H", "-l", "-M", "-O", "-p", "-P", "-q", "-S", "-s",
+                  "-t", "-w", "-z"],
+        plain: &["-A", "-a", "-c", "-i", "-n", "-N", "-o", "-r", "-R", "-U", "-v", "-W", "-m"],
+        operands: 0, shell: &[], joins: false },
+    Wrapper { name: "torsocks",
+        values: &["-u", "--user", "-p", "--pass", "-a", "--address", "-P", "--port"],
+        plain: &["-i", "--isolate", "-d", "--debug", "-q", "--quiet"],
+        operands: 0, shell: &[], joins: false },
+    Wrapper { name: "prlimit", values: &["-p", "--pid", "-o", "--output"],
+        plain: &["--noheadings", "--raw", "--verbose"], operands: 0, shell: &[], joins: false },
+    Wrapper { name: "setarch",
+        values: &[],
+        plain: &["-R", "--addr-no-randomize", "-B", "--32bit", "-F", "--fdpic-funcptrs", "-I",
+                 "--short-inode", "-L", "--addr-compat-layout", "-S", "--whole-seconds", "-T",
+                 "--sticky-timeouts", "-X", "--read-implies-exec", "-Z", "--mmap-page-zero",
+                 "-3", "--3gb", "-v", "--verbose"],
+        operands: 1, shell: &[], joins: false },
+    Wrapper { name: "sshpass", values: &["-p", "-f", "-d", "-P"], plain: &["-e", "-v"],
+        operands: 0, shell: &[], joins: false },
+    Wrapper { name: "xcrun",
+        values: &["--sdk", "--toolchain"],
+        plain: &["-v", "--verbose", "-l", "--log", "-n", "--no-cache", "-k", "--kill-cache",
+                 "-r", "--run"],
         operands: 0, shell: &[], joins: false },
     Wrapper { name: "watch",
         values: &["-n", "--interval", "-q", "--equexit"],
@@ -258,8 +439,8 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
         }
         match expand_braces(&w.text, &mut budget, 0) {
             Some(texts) => unfolded.extend(texts.into_iter().map(|text| Word {
+                brace: text.contains('{'),
                 text,
-                brace: false,
                 ..w.clone()
             })),
             None => {
@@ -297,14 +478,42 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
     while let Some(w) = words.first()
         && is_assignment(&w.text)
     {
+        exec_assignment(&w.text, &mut why);
         words = &words[1..];
+    }
+    // `x='a[$(rm -rf /)]'`: a subscript arithmetic will evaluate later —
+    // in an assignment, or handed to a builtin that evaluates a subscript;
+    // never in, say, a commit message.
+    let evaluates = words
+        .iter()
+        .find(|w| !is_assignment(&w.text))
+        .is_none_or(|w| SUBSCRIPTING.contains(&basename(&w.text)));
+    if unfolded.iter().any(|w| {
+        (w.text.contains("[$(") || w.text.contains("[`")) && (evaluates || is_assignment(&w.text))
+    }) {
+        first(
+            &mut why,
+            "a quoted command substitution sits in an array subscript, which arithmetic runs"
+                .into(),
+        );
     }
     let mut steps = 0;
     while let Some(w) = words.first() {
         let Some(wr) = WRAPPERS.iter().find(|x| x.name == basename(&w.text)) else {
             break;
         };
-        if w.expands || steps > 8 {
+        if w.expands {
+            break;
+        }
+        if steps >= MAX_WRAPPERS {
+            first(
+                &mut why,
+                format!(
+                    "more than {MAX_WRAPPERS} wrappers stand before the command, more than \
+                     this reader follows"
+                ),
+            );
+            words = &[];
             break;
         }
         steps += 1;
@@ -317,31 +526,51 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
         {
             break; // `command -v x` asks about a program and runs nothing
         }
-        while let Some(a) = rest.first() {
-            let t = a.text.as_str();
-            if name == "env" && (is_assignment(t) || t == "-") {
+        // Flags may also follow the operands (`flock file -c …`, `setarch
+        // x86_64 -R …`), so they are read again after them.
+        let mut ended = false;
+        for pass in 0..2 {
+            while !ended && let Some(a) = rest.first() {
+                let t = a.text.as_str();
+                if name == "env" && (is_assignment(t) || t == "-") {
+                    exec_assignment(t, &mut why);
+                    rest = &rest[1..];
+                    continue;
+                }
+                if t == "--" {
+                    rest = &rest[1..];
+                    ended = true;
+                    break;
+                }
+                if !t.starts_with('-') || t.len() < 2 {
+                    break;
+                }
                 rest = &rest[1..];
-                continue;
+                if name == "flock" && matches!(t, "-c" | "--command") && pass == 1 {
+                    // `flock file -c '…'` hands the line to `sh -c`.
+                    match rest.first() {
+                        Some(w) if !w.expands => nested = Some(w.text.clone()),
+                        _ => {}
+                    }
+                    rest = &[];
+                }
+                if !wrapper_flag(wr, t, &mut rest, &mut why) {
+                    first(
+                        &mut why,
+                        format!(
+                            "`{name} {t}` is a flag this reader does not know, so it cannot \
+                             tell where the command starts"
+                        ),
+                    );
+                }
             }
-            if t == "--" {
-                rest = &rest[1..];
-                break;
-            }
-            if !t.starts_with('-') || t.len() < 2 {
-                break;
-            }
-            rest = &rest[1..];
-            if !wrapper_flag(wr, t, &mut rest, &mut why) {
-                first(
-                    &mut why,
-                    format!(
-                        "`{name} {t}` is a flag this reader does not know, so it cannot tell \
-                         where the command starts"
-                    ),
-                );
+            if pass == 0 {
+                rest = rest.get(wr.operands..).unwrap_or(&[]);
+                if wr.operands == 0 {
+                    break;
+                }
             }
         }
-        rest = rest.get(wr.operands..).unwrap_or(&[]);
         if wr.joins {
             // `watch` hands its words to `sh -c`: they are a line.
             if rest.iter().any(|w| w.expands) {
@@ -381,6 +610,13 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
                     "the program is named by a pattern the shell matches against the disk".into(),
                 );
             }
+            // zsh's `=rm` is the path of `rm`, found on `PATH`.
+            if head.text.starts_with('=') && !head.quoted {
+                first(
+                    &mut why,
+                    "the program is named by a zsh `=` expansion".into(),
+                );
+            }
             if head.brace && head.text.contains('{') && head.text.contains('}') {
                 first(
                     &mut why,
@@ -389,6 +625,36 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
             }
             let program = basename(&head.text).to_ascii_lowercase();
             let args: Vec<String> = words[1..].iter().map(|w| w.text.clone()).collect();
+            let kinds: Vec<ArgKind> = words[1..].iter().map(Word::kind).collect();
+            if matches!(
+                program.as_str(),
+                "export" | "declare" | "typeset" | "local" | "readonly"
+            ) {
+                for a in &args {
+                    exec_assignment(a, &mut why);
+                }
+            }
+            if program == "git" {
+                let mut it = words[1..].iter();
+                while let Some(a) = it.next() {
+                    if a.text == "--config-env" || a.text.starts_with("--config-env=") {
+                        first(
+                            &mut why,
+                            "`git --config-env` takes a setting from the environment".into(),
+                        );
+                    }
+                    let pair = if a.text == "-c" {
+                        it.next().map(|v| v.text.as_str())
+                    } else {
+                        None
+                    };
+                    if let Some(pair) = pair
+                        && git_config_runs(pair)
+                    {
+                        first(&mut why, format!("`git -c {pair}` sets a command git runs"));
+                    }
+                }
+            }
             let literal = |i: usize| {
                 words
                     .get(i + 1)
@@ -425,7 +691,10 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
                         }
                     });
                 }
-            } else if BUILDERS.contains(&p) {
+            } else if BUILDERS.contains(&p)
+                || (matches!(p, "mapfile" | "readarray")
+                    && args.iter().any(|a| a.starts_with("-C")))
+            {
                 first(
                     &mut why,
                     format!("`{p}` runs a command line built from its arguments or input"),
@@ -500,6 +769,7 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
                 args,
                 redirects,
                 fed,
+                kinds,
             })
         }
     };
@@ -507,10 +777,12 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
         line.barrier = why;
     }
     line.commands.extend(simple);
-    if let Some(code) = nested
-        && depth < MAX_DEPTH
-    {
-        nest(line, &code, depth);
+    if let Some(code) = nested {
+        if depth < MAX_DEPTH {
+            nest(line, &code, depth);
+        } else if line.barrier.is_none() {
+            line.barrier = Some("a command line is nested deeper than this reader follows".into());
+        }
     }
 }
 
@@ -527,6 +799,10 @@ fn wrapper_flag(wr: &Wrapper, t: &str, rest: &mut &[Word], why: &mut Option<Stri
         }
     };
     shell(flag, why);
+    // These take every long option glued (`--tool=memcheck`, `--nofile=64`).
+    if glued && matches!(name, "valgrind" | "firejail" | "prlimit") {
+        return true;
+    }
     if wr.values.contains(&flag) {
         if !glued {
             *rest = rest.get(1..).unwrap_or(&[]);
@@ -620,6 +896,21 @@ fn nest(line: &mut Line, code: &str, depth: usize) {
     }
 }
 
+/// An assignment to a variable whose value runs is a barrier.
+fn exec_assignment(word: &str, why: &mut Option<String>) {
+    if !is_assignment(word) {
+        return;
+    }
+    let name = word.split_once('=').map_or(word, |(n, _)| n);
+    let name = name.strip_suffix('+').unwrap_or(name);
+    if runs_its_value(name) {
+        first(
+            why,
+            format!("`{name}` names a command or library something runs later"),
+        );
+    }
+}
+
 fn is_assignment(word: &str) -> bool {
     let Some((name, _)) = word.split_once('=') else {
         return false;
@@ -635,6 +926,18 @@ fn is_assignment(word: &str) -> bool {
 
 fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
+}
+
+impl Word {
+    fn kind(&self) -> ArgKind {
+        if self.expands || (self.brace && self.text.contains('{') && self.text.contains('}')) {
+            ArgKind::Unknown
+        } else if self.glob {
+            ArgKind::Glob
+        } else {
+            ArgKind::Literal
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -673,19 +976,20 @@ fn tokenize(text: &str) -> (Vec<Piece>, Option<String>) {
     };
     let mut cur = Word::default();
     let mut open = false;
-    let mut delimiters: Vec<String> = Vec::new();
-    let mut want_delimiter = false;
+    // Each heredoc opened on this line: its delimiter, and whether `<<-`
+    // strips leading tabs from the body's lines.
+    let mut delimiters: Vec<(String, bool)> = Vec::new();
+    let mut want_delimiter: Option<bool> = None;
     let mut i = 0;
     let flush = |cur: &mut Word,
                  open: &mut bool,
                  out: &mut Vec<Piece>,
-                 want: &mut bool,
-                 delims: &mut Vec<String>| {
+                 want: &mut Option<bool>,
+                 delims: &mut Vec<(String, bool)>| {
         if *open {
             let w = std::mem::take(cur);
-            if *want {
-                delims.push(w.text.trim_start_matches('-').to_string());
-                *want = false;
+            if let Some(dash) = want.take() {
+                delims.push((w.text.clone(), dash));
             }
             out.push(Piece::Word(w));
             *open = false;
@@ -779,6 +1083,50 @@ fn tokenize(text: &str) -> (Vec<Piece>, Option<String>) {
                 cur.text.extend(&b[i..end.min(b.len())]);
                 i = end + 1;
             }
+            '$' if next == Some('(')
+                && b.get(i + 2) == Some(&'(')
+                && arithmetic_end(&b, i + 3).is_some() =>
+            {
+                // `$((…))` is arithmetic: a number, unless it hides a command.
+                // `$((cmd) )` is not: it falls to the command substitution arm.
+                let end = arithmetic_end(&b, i + 3).unwrap_or(b.len());
+                let body: String = b[i + 3..end.min(b.len())].iter().collect();
+                if body.contains("$(") || body.contains('`') || body.contains('[') {
+                    note(&mut barrier, "an arithmetic expansion can run a command");
+                }
+                open = true;
+                cur.expands = true;
+                cur.text.extend(&b[i..(end + 2).min(b.len())]);
+                i = end + 2;
+            }
+            '(' if !open && next == Some('(') && arithmetic_end(&b, i + 2).is_some() => {
+                // `(( … ))`: arithmetic, where `<<` is a shift and no heredoc.
+                // `((cmd) )` and `((a);(b))` are not: the shell re-reads them
+                // as nested subshells, and so does the group arm below.
+                let end = arithmetic_end(&b, i + 2).unwrap_or(b.len());
+                let body: String = b[i + 2..end.min(b.len())].iter().collect();
+                if body.contains("$(") || body.contains('`') || body.contains('[') {
+                    note(&mut barrier, "an arithmetic command can run a command");
+                }
+                out.push(Piece::Break(false));
+                i = end + 2;
+            }
+            '(' if open && cur.glob && !cur.quoted => {
+                // zsh: `*(e:'…':)` is a glob qualifier, and `e` runs code.
+                note(
+                    &mut barrier,
+                    "a zsh glob qualifier can run a command for each file",
+                );
+                flush(
+                    &mut cur,
+                    &mut open,
+                    &mut out,
+                    &mut want_delimiter,
+                    &mut delimiters,
+                );
+                out.push(Piece::Break(false));
+                i += 1;
+            }
             '$' => {
                 if next == Some('(') {
                     note(
@@ -834,7 +1182,7 @@ fn tokenize(text: &str) -> (Vec<Piece>, Option<String>) {
                 out.push(Piece::Break(false));
                 i += 1;
                 // The bodies of every heredoc opened on the line just ended.
-                for d in delimiters.drain(..) {
+                for (d, dash) in delimiters.drain(..) {
                     loop {
                         let end = b[i..]
                             .iter()
@@ -843,7 +1191,12 @@ fn tokenize(text: &str) -> (Vec<Piece>, Option<String>) {
                             .unwrap_or(b.len());
                         let row: String = b[i..end].iter().collect();
                         i = (end + 1).min(b.len());
-                        if row.trim_start_matches('\t') == d || i >= b.len() {
+                        let row = if dash {
+                            row.trim_start_matches('\t')
+                        } else {
+                            row.as_str()
+                        };
+                        if row == d || i >= b.len() {
                             break;
                         }
                     }
@@ -884,7 +1237,7 @@ fn tokenize(text: &str) -> (Vec<Piece>, Option<String>) {
                 let (piece, len) = if rest.starts_with("<<<") {
                     (Piece::HereString, 3)
                 } else if rest.starts_with("<<-") || rest.starts_with("<<") {
-                    want_delimiter = true;
+                    want_delimiter = Some(rest.starts_with("<<-"));
                     (Piece::Heredoc, if rest.starts_with("<<-") { 3 } else { 2 })
                 } else if rest.starts_with("&>>") {
                     (Piece::Redirect(true), 3)
@@ -930,10 +1283,33 @@ fn tokenize(text: &str) -> (Vec<Piece>, Option<String>) {
     (out, barrier)
 }
 
+/// Where the `))` closing arithmetic that starts at `from` is. `None` when
+/// the body is not arithmetic: its first `)` at depth 0 is not followed by
+/// another `)` (bash and zsh then re-read `((` as two subshells), or it never
+/// closes.
+fn arithmetic_end(b: &[char], from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = from;
+    while i < b.len() {
+        match b[i] {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            ')' if b.get(i + 1) == Some(&')') => return Some(i),
+            ')' => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     Read,
     Write,
+    /// Named as an argument of a program this reader does not know the use
+    /// of: a restrictive `Read` treats it as read, `Edit` as a question.
+    Named,
 }
 
 /// How the line names the file. As the vendor does, a `Read` prohibition
@@ -1006,13 +1382,30 @@ pub fn file_targets(text: &str) -> Targets {
     }
 }
 
+/// Whether a program this reader does not see through may run one of its
+/// words as a command (`unbuffer rm -rf /`): anything not known to only print,
+/// test or match text.
+pub(crate) fn may_run_a_word(program: &str) -> bool {
+    !program.is_empty() && !INERT.contains(&program) && !TEXT_TOOLS.contains(&program)
+}
+
+/// Programs that never open the files their arguments name.
+const INERT: &[&str] = &[
+    "echo", "printf", "ls", "test", "[", "[[", "cd", "pushd", "which", "type",
+];
+
 pub(crate) fn targets_of(line: &Line) -> Vec<FileTarget> {
+    line.commands.iter().flat_map(command_targets).collect()
+}
+
+/// The files one simple command names, and how.
+pub(crate) fn command_targets(cmd: &Simple) -> Vec<FileTarget> {
     let mut out = Vec::new();
-    let mut push = |path: &str, access: Access, via: Via, subtree: bool| {
+    let mut push = |path: &str, access: Access, via: Via, subtree: bool, unknown: bool| {
         if path.is_empty() || path == "/dev/null" || path == "-" {
             return;
         }
-        let unresolvable = path.starts_with('~') || path.contains(['$', '*', '?', '[']);
+        let unresolvable = unknown || path.starts_with('~') || path.contains(['$', '*', '?', '[']);
         out.push(FileTarget {
             path: path.to_string(),
             access,
@@ -1021,21 +1414,23 @@ pub(crate) fn targets_of(line: &Line) -> Vec<FileTarget> {
             subtree,
         });
     };
-    for cmd in &line.commands {
+    {
         for r in &cmd.redirects {
             let access = if r.write { Access::Write } else { Access::Read };
-            push(&r.target, access, Via::Redirect, false);
+            push(&r.target, access, Via::Redirect, false, false);
         }
         let p = cmd.program.as_str();
+        let unknown = |i: usize| cmd.kinds.get(i) == Some(&ArgKind::Unknown);
         let recursive = cmd.args.iter().any(|a| {
             a == "--recursive"
                 || (a.starts_with('-') && !a.starts_with("--") && a.contains(['r', 'R']))
         });
-        let operands: Vec<&String> = {
+        let operands: Vec<(usize, &String)> = {
             let mut seen_end = false;
             cmd.args
                 .iter()
-                .filter(|a| {
+                .enumerate()
+                .filter(|(_, a)| {
                     if seen_end {
                         return true;
                     }
@@ -1048,12 +1443,12 @@ pub(crate) fn targets_of(line: &Line) -> Vec<FileTarget> {
                 .collect()
         };
         if p == "dd" {
-            for a in &cmd.args {
+            for (i, a) in cmd.args.iter().enumerate() {
                 if let Some(f) = a.strip_prefix("if=") {
-                    push(f, Access::Read, Via::Command, false);
+                    push(f, Access::Read, Via::Command, false, unknown(i));
                 }
                 if let Some(f) = a.strip_prefix("of=") {
-                    push(f, Access::Write, Via::Command, false);
+                    push(f, Access::Write, Via::Command, false, unknown(i));
                 }
             }
         } else if READERS.contains(&p) {
@@ -1061,25 +1456,69 @@ pub(crate) fn targets_of(line: &Line) -> Vec<FileTarget> {
                 PATTERN_FIRST.contains(&p)
                     && !cmd.args.iter().any(|a| a == "-e" || a == "--regexp"),
             );
-            for a in operands.iter().skip(skip) {
-                push(a, Access::Read, Via::Command, recursive);
+            for (i, a) in operands.iter().skip(skip) {
+                push(a, Access::Read, Via::Command, recursive, unknown(*i));
             }
         } else if WRITERS.contains(&p) {
-            for a in &operands {
-                push(a, Access::Write, Via::Command, recursive && p == "rm");
+            for (i, a) in &operands {
+                push(
+                    a,
+                    Access::Write,
+                    Via::Command,
+                    recursive && p == "rm",
+                    unknown(*i),
+                );
             }
         } else if COPIERS.contains(&p) {
-            if let Some((last, rest)) = operands.split_last() {
-                for a in rest {
-                    push(a, Access::Read, Via::Command, recursive);
+            // `mv` removes its sources, and so does `rsync --remove-source-files`:
+            // each source is written, whole directories included.
+            let removes = p == "mv"
+                || (p == "rsync" && cmd.args.iter().any(|a| a == "--remove-source-files"));
+            if let Some(((li, last), rest)) = operands.split_last() {
+                for (i, a) in rest {
+                    if removes {
+                        push(a, Access::Write, Via::Command, true, unknown(*i));
+                    } else {
+                        push(a, Access::Read, Via::Command, recursive, unknown(*i));
+                    }
                 }
-                push(last, Access::Write, Via::Command, false);
+                push(last, Access::Write, Via::Command, false, unknown(*li));
             }
         } else if CHANGERS.contains(&p) {
-            for a in operands.iter().skip(1) {
-                push(a, Access::Write, Via::Command, recursive);
+            for (i, a) in operands.iter().skip(1) {
+                push(a, Access::Write, Via::Command, recursive, unknown(*i));
+            }
+        } else if !p.is_empty() && !INERT.contains(&p) {
+            // A program whose use of its arguments is unknown (`base64 .env`,
+            // `git show HEAD:.env`, `curl -d @.env`): every spelling of a
+            // path in an argument is named, never guessed harmless.
+            for (i, a) in cmd.args.iter().enumerate() {
+                for form in named_forms(a) {
+                    push(form, Access::Named, Via::Command, recursive, unknown(i));
+                }
             }
         }
+    }
+    out
+}
+
+/// The spellings of a path an argument may carry: itself, `--flag=path`,
+/// `@path` and `rev:path`.
+fn named_forms(arg: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    if !arg.starts_with('-') {
+        out.push(arg);
+    }
+    if let Some((_, v)) = arg.split_once('=') {
+        out.push(v);
+    }
+    if let Some(v) = arg.strip_prefix('@') {
+        out.push(v);
+    }
+    if let Some((_, v)) = arg.split_once(':')
+        && !arg.contains("://")
+    {
+        out.push(v);
     }
     out
 }

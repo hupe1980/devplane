@@ -57,14 +57,17 @@ names what is showing, so a link opens the same view.
 
 Open a change from **Changes**, the palette, or a `devplane://change/<id>` link (in the app). The
 header shows the title, state, project, branch, spec folder and the gate standing in one sentence,
-for example *every declared gate exited zero against the tree as it stands*. The toolbar holds
-**Review**, **Run gates**, **Offer as pull request** (only when verified), **Finish**, **Archive**, and
-**Editor** / **Terminal** to open the worktree.
+for example *`check` exited zero against the working tree as it stands*. Beside the state, when the
+change's own diff weakened a check, the header reads **verified · 1 check weakened** — the same words
+in the Changes list, the palette, the Specifications page and the inbox. The toolbar holds **Review**,
+**Run gates**, **Offer as pull request** (only when verified), **Finish**, **Archive**, and **Editor** /
+**Terminal** to open the worktree. While a weakened row is unseen, Review is the primary action, and
+pressing Offer is refused with each unseen row named and a button that opens it.
 
 | View | What it shows |
 |---|---|
 | **Overview** | cards for gates, tasks, ledger and agent; the facts; the history; reports it filed |
-| **Tasks** | ticked and verified counts, tasks ticked but sent to nobody, requirements and the tasks citing them, spec drift with **Tell the run** / **Accept what it saw** |
+| **Tasks** | ticked and seen-by-a-passing-check counts, tasks ticked but sent to nobody, requirements and the tasks citing them, spec drift with **Tell the run** / **Accept what it saw** |
 | **Review** | the diff, below |
 | **Gates** | every gate run with its commands and exit codes, and the certificate with **Copy as markdown** |
 | **Ledger** | this change's decisions, filterable by authority |
@@ -79,8 +82,10 @@ Only *verified* is green. See [Verified done](@/docs/verified-done.md).
 A file tree beside a diff against the merge base, uncommitted and untracked files included.
 
 - **Checks weakened or changed** comes first when there is anything under it: an added skip marker, a
-  deleted test file, an edit to the gates' definition or to CI configuration. Each row says what it
-  matched.
+  removed assertion, a deleted test, a lint suppression, an edit to the gates, CI or a checker's
+  configuration ([the full list](@/docs/verified-done.md#review-before-you-merge)). Each row says what
+  it matched and whether you have read it; **I have read this** (or marking a hunk seen in that file)
+  records it, and an offer waits for every one.
 - Then the files in the order `[review] roles` declares (shared, logic, security, integration,
   wiring, tests), each with whether a declared test covers it. With no roles declared, files are in
   path order and the view says so.
@@ -93,14 +98,15 @@ A file tree beside a diff against the merge base, uncommitted and untracked file
 | `j` / `k` | next / previous hunk |
 | `n` / `p` | next / previous file |
 | `s` | mark the hunk seen |
-| `a` | accept the hunk |
 | `f` | request a fix: a prompt to the change's latest run, quoting the hunk |
 | `x` | expand this file's collapsed formatting-only hunks |
 | `v` | unified or side by side |
 | `1` / `2` | by risk / by intent |
 
-*Seen* and *accepted* are marks in this browser only; they are sent nowhere and decide nothing. The
-same pane is a change's Review view and `#review/<id>`. On the command line: `devplane change review
+*Seen* on a hunk is a mark in this browser only, keyed by the hunk's content, so a hunk the agent
+rewrites is unseen again; it is sent nowhere and decides nothing. Reading a weakened-check row is the
+one mark the host keeps, because an offer waits for it. The same pane is a change's Review view and
+`#review/<id>`. On the command line: `devplane change review
 <id> [--by intent]`.
 
 ## Sessions

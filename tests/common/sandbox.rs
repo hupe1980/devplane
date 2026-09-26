@@ -369,7 +369,7 @@ pub fn review_repo(tag: &str) -> PathBuf {
     );
     write(
         "tests/auth.rs",
-        "#[test]\nfn opens() {}\n\n#[test]\nfn refuses_empty() {}\n",
+        "#[test]\nfn opens() {}\n\n#[test]\nfn refuses_empty() { assert!(!auth::accepts(\"\")); }\n",
     );
     write(
         "README.md",

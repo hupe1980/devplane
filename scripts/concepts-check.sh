@@ -153,6 +153,31 @@ for d in $(grep -ho '\bD[0-9]\{3\}\b' $DOCS | sort -u); do
 done
 say "decisions" "$(echo "$ids" | wc -l | tr -d ' ') unique, all citations resolve"
 
+# A live specification may not cite a decision the ledger does not have: the
+# previous ledger was renumbered, and its ids now name different decisions.
+if [ -d "$root/specs" ]; then
+  spec_cites=$(find "$root/specs" -path "$root/specs/archive" -prune -o -name '*.md' -print \
+    | xargs grep -ho '\bD[0-9]\{3\}\b' 2>/dev/null | sort -u)
+  expect "decision ids cited by live specs" "$spec_cites" || true
+  for d in $spec_cites; do
+    echo "$ids" | grep -qx "$d" || { echo "a specification cites an unknown decision: $d"; fail=1; }
+  done
+  say "spec citations" "$(echo "$spec_cites" | grep -c . | tr -d ' ') decision ids cited by live specs, all resolve"
+fi
+
+# ---- the first figure compared to the code --------------------------------
+# STATE.md's version row must name the version Cargo.toml declares.
+cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
+expect "version in Cargo.toml" "$cargo_version" || true
+state_version=$(grep '^| Version |' STATE.md | grep -o '`[0-9][0-9.]*`' | head -1 | tr -d '`')
+expect "version in STATE.md" "$state_version" || true
+if [ "$cargo_version" != "$state_version" ]; then
+  echo "STATE.md says version $state_version; Cargo.toml says $cargo_version"
+  fail=1
+else
+  say "version" "STATE.md matches Cargo.toml: $cargo_version"
+fi
+
 # ---- every figure has one home --------------------------------------------
 # A number with a unit outside STATE.md must link to STATE.md or be a size the
 # document owns. Figures are read off STATE.md §1–§2, not typed here.

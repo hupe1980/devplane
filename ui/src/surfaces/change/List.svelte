@@ -2,9 +2,13 @@
   // The changes sidebar: every change grouped by project, its state as a word;
   // a pick opens as an editor tab. Reads `/api/changes` (the board's brief has
   // no project), again only when the board's ids or states move.
-  import { api } from "../../lib/api";
+  import { untrack } from "svelte";
+  import { resource } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
+  import Qualifier from "../../lib/Qualifier.svelte";
+  import type { Qualifier as Q } from "../../wire/Qualifier";
   import { run } from "../../lib/keys";
 
   type Brief = { id: string; state: string };
@@ -19,37 +23,31 @@
     archived_at?: string | null;
     updated_at?: string;
     counts_says?: string | null;
+    qualifier?: Q | null;
   };
 
   let {
     all = [],
     focus = "",
     open,
-  }: { all?: Brief[]; focus?: string; open: (id: string, pin?: boolean) => void } = $props();
+    /// Rows already read (the render harness); the host's read replaces them.
+    rows: planted = null,
+  }: { all?: Brief[]; focus?: string; open: (id: string, pin?: boolean) => void; rows?: Row[] | null } = $props();
 
-  let rows = $state<Row[] | null>(null);
-  let error = $state("");
+  const read = resource<Row[]>(() => "/api/changes", { tell: () => "devplane change list" });
+  const rows = $derived(Array.isArray(read.data) ? read.data : planted);
   let filter = $state("");
   let showArchived = $state(false);
 
   // Re-read when the board says the set or a state changed.
   const signature = $derived(all.map((b) => `${b.id}:${b.state}`).join("|"));
+  let lastSignature: string | null = null;
   $effect(() => {
-    void signature;
-    let live = true;
-    api<Row[]>("/api/changes")
-      .then((r) => {
-        if (live) {
-          rows = Array.isArray(r) ? r : [];
-          error = "";
-        }
-      })
-      .catch((e) => {
-        if (live) error = e instanceof Error ? e.message : String(e);
-      });
-    return () => {
-      live = false;
-    };
+    const sig = signature;
+    untrack(() => {
+      if (lastSignature !== null && sig !== lastSignature) void read.reload();
+      lastSignature = sig;
+    });
   });
 
   const name = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
@@ -80,18 +78,24 @@
     if (e.key === "ArrowDown" || e.key === "j") next = Math.min(flat.length - 1, i + 1);
     else if (e.key === "ArrowUp" || e.key === "k") next = Math.max(0, i - 1);
     else if (e.key === "Enter" && i !== -1) {
+      e.stopPropagation();
       open(flat[i].id, true);
       return;
     } else return;
+    // Taken here: the page's own j/k (the review's next hunk) must not also move.
     e.preventDefault();
+    e.stopPropagation();
     open(flat[next].id);
   }
+  const optionId = (id: string) => `change-row-${id.replace(/[^\w-]/g, "_")}`;
+  const active = $derived(visible.some((r) => r.id === focus) ? optionId(focus) : undefined);
 </script>
 
 <div class="list">
   <header>
     <span class="t">Changes</span>
-    <span class="n">{visible.length}</span>
+    <!-- No count until the list is read: an unread list has no size. -->
+    <span class="n">{rows === null ? "" : visible.length}</span>
     <button class="icon" title="Start a new change (Alt+N)" aria-label="start a new change" onclick={() => run("new-change", "change")}>
       <Icon name="plus" size={15} />
     </button>
@@ -101,9 +105,9 @@
     <input bind:value={filter} placeholder="Filter by title, branch, project, state" aria-label="filter the changes" />
   </label>
 
-  <div class="rows" role="listbox" aria-label="changes" tabindex="0" onkeydown={key}>
-    {#if error}
-      <p class="quiet fail">The changes could not be read: {error}</p>
+  <div class="rows" role="listbox" aria-label="changes" tabindex="0" onkeydown={key} aria-activedescendant={active}>
+    {#if read.failure}
+      <div class="fail"><Failed what="the changes" failure={read.failure} at={read.at} stale={read.data !== null} /></div>
     {:else if rows === null}
       {#each [0, 1, 2] as i (i)}<div class="skel"></div>{/each}
     {:else if rows.length === 0}
@@ -123,15 +127,22 @@
             <div
               class="row"
               role="option"
+              id={optionId(r.id)}
               tabindex="-1"
               aria-selected={r.id === focus}
               onclick={() => open(r.id)}
               ondblclick={() => open(r.id, true)}
-              onkeydown={() => {}}
+              onkeydown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  open(r.id, e.key === "Enter");
+                }
+              }}
             >
               <span class="title">{r.title || r.id}</span>
               <span class="meta">
-                <Pill word={r.state} />
+                <Pill word={r.state} /><Qualifier q={r.qualifier} />
                 {#if r.waiting_says}<span class="wait">{r.waiting_says}</span>{/if}
                 {#if r.in_place}<span class="dim">in place</span>{/if}
               </span>
@@ -295,9 +306,6 @@
     margin: var(--s-3) var(--s-4);
     font-size: var(--t-sm);
     color: var(--dim);
-  }
-  .quiet.fail {
-    color: var(--fail);
   }
   .link {
     border: 0;

@@ -142,7 +142,7 @@ fn verified_is_never_a_stored_value() {
     let work = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/core/change.rs"))
         .unwrap();
     assert!(
-        work.contains("pub fn of(change: &Change, project_declares_gates: bool"),
+        work.contains("pub fn of_at(\n        change: &Change,\n        declared: Declared<'_>,"),
         "the completion is derived by a function of the work and the tree"
     );
 }

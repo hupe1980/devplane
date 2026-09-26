@@ -88,11 +88,12 @@ devplane report start <id> [--agent <a>]     # a change in the target
 devplane report reject <id> --reason <text>  # the filer is told why
 devplane report defer <id> --reason <text>
 devplane report fixed <id> [--reason <text>] # fixed by hand
-devplane report open <id>                    # a GitHub draft: asks, runs gh
+devplane report open <id>                    # a GitHub draft: asks, then opens it
 devplane report discard <id>                 # a GitHub draft: never sent
 ```
 
-`report start` accepts the report. `report open` shows the draft and asks before it runs your `gh`.
+`report start` accepts the report. `report open` shows the draft and asks before it opens the issue
+under your GitHub sign-in (`devplane login github`).
 
 Offering or finishing a change started from a report answers it as **fixed**. Every answer is
 recorded on the change that raised the report, and that change's next turn is handed it once, quoted.

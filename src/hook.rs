@@ -6,8 +6,9 @@
 //! the store (spooled if it is locked or will not open). Fails closed: anything
 //! unreadable is answered *ask* wherever a rule is in force.
 
-use crate::core::{PolicyCache, Verdict};
+use crate::core::Verdict;
 use crate::observe::hook::{HookPayload, PermissionResponse, PreToolUseResponse};
+use crate::policy_cache::PolicyCache;
 use anyhow::Result;
 use serde_json::Value;
 use std::io::Write;
@@ -65,8 +66,38 @@ pub fn refuse_self_answer(var: &str) -> String {
 // The hook
 // ---------------------------------------------------------------------------
 
-/// `devplane hook`: one payload on stdin, one answer on stdout.
+/// Set once the payload is known to ask for a decision. A crash after that
+/// must refuse, never pass: to the vendor, any exit but 2 lets the call run.
+static DECIDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a crash in the hook exits with: 2 — the vendor's *blocked*, its
+/// stderr shown — while deciding; silence while observing, where a 2 would
+/// block a `Stop`.
+fn fail(why: &str) -> ! {
+    if DECIDING.load(std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("Devplane's gate failed, so the call is refused: {why}");
+        std::process::exit(2);
+    }
+    eprintln!("Devplane's hook failed: {why}");
+    std::process::exit(0);
+}
+
+/// `devplane hook`: one payload on stdin, one answer on stdout. A panic or an
+/// error fails closed while deciding (see [`fail`]).
 pub async fn run(
+    gate: Option<String>,
+    observe: Option<String>,
+    event: Option<String>,
+    vendor: Option<String>,
+) -> Result<()> {
+    std::panic::set_hook(Box::new(|info| fail(&info.to_string())));
+    if let Err(e) = answer_hook(gate, observe, event, vendor).await {
+        fail(&format!("{e:#}"));
+    }
+    Ok(())
+}
+
+async fn answer_hook(
     gate: Option<String>,
     observe: Option<String>,
     event: Option<String>,
@@ -103,6 +134,22 @@ pub async fn run(
         }
         _ => decide_claude(body.as_deref(), crate::core::event::Source::Hook).await,
     }
+}
+
+/// Why a call a person should decide is refused on Codex, whose hooks cannot
+/// ask one.
+fn codex_refusal(verdict: &Verdict) -> String {
+    let why = match verdict {
+        Verdict::Ask { rule } => format!("{rule} asks that a person decides this"),
+        Verdict::Unresolved { why } => {
+            format!("Devplane cannot tell whether a prohibition covers this: {why}")
+        }
+        _ => String::new(),
+    };
+    format!(
+        "{why}. Codex hooks cannot ask a person, so Devplane refuses it; run it yourself, \
+         or change the rule in your policy"
+    )
 }
 
 /// Writes the answer and flushes it, so the vendor has it before any store
@@ -148,6 +195,7 @@ async fn decide_claude(body: Option<&str>, source: crate::core::event::Source) -
         payload.hook_event_name.as_str(),
         "PreToolUse" | "PermissionRequest"
     );
+    DECIDING.store(deciding, std::sync::atomic::Ordering::SeqCst);
     if !deciding {
         // An observation: written down, and the answer is silence.
         answer("{}");
@@ -167,9 +215,17 @@ async fn decide_claude(body: Option<&str>, source: crate::core::event::Source) -
     // the full verdict applies and the project may hold it for a person.
     let mut held = None;
     if pre {
-        answer(&serde_json::to_string(
-            &crate::observe::hook::pre_tool_use_reply(&verdict),
-        )?);
+        let reply = match (&verdict, source) {
+            // Codex parses `ask` and does not honour it: it marks the hook
+            // failed and runs the call. A question Codex cannot put to a
+            // person is a refusal there, never a silent pass.
+            (
+                Verdict::Ask { .. } | Verdict::Unresolved { .. },
+                crate::core::event::Source::CodexHook,
+            ) => crate::observe::hook::PreToolUseResponse::deny(codex_refusal(&verdict)),
+            _ => crate::observe::hook::pre_tool_use_reply(&verdict),
+        };
+        answer(&serde_json::to_string(&reply)?);
     } else {
         // Only `ask` is held; a prohibition never softens into a question.
         if let (Verdict::Ask { .. }, Some(dir)) = (&verdict, &payload.cwd) {
@@ -276,6 +332,8 @@ async fn hold_for_a_person(
 async fn decide_copilot(body: Option<&str>) -> Result<()> {
     use crate::observe::copilot::{GateReply, HookPayload};
 
+    // The gate hook is only ever installed on `preToolUse`.
+    DECIDING.store(true, std::sync::atomic::Ordering::SeqCst);
     let cache = PolicyCache::from_disk().0;
     let parsed = body.map(serde_json::from_str::<HookPayload>);
     let Some(Ok(payload)) = parsed else {

@@ -50,10 +50,13 @@ const pane = (review: unknown) => html(Pane, { id: "", review });
   const marks = source("../src/surfaces/review/marks.ts");
   if (!/localStorage/.test(marks) || !/try \{/.test(marks)) fail("the review marks are not kept in the browser behind a try");
   if (/api\(|fetch\(/.test(marks)) fail("a review mark is sent somewhere");
-  for (const combo of ["j", "k", "n", "p", "s", "a", "f", "x", "v", "1", "2"]) {
+  for (const combo of ["j", "k", "n", "p", "s", "f", "x", "v", "1", "2"]) {
     const b = help("review").find((x) => x.combo === combo && x.surface === "review");
     if (!b || !b.label.trim()) fail(`the review does not bind ${combo} with a label`);
   }
+  // No second verdict in the browser: *seen* is the only mark.
+  if (help("review").some((x) => x.combo === "a" && x.surface === "review")) fail("the review still binds a to an accept mark");
+  if (/accepted/.test(marks)) fail("the review marks still know an accepted mark");
 }
 
 // ── The diff: numbers from the header, and split pairs removals with additions ─

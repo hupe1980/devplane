@@ -9,8 +9,8 @@ use crate::core::decision::Decision;
 use crate::core::diff::{Body, ChangeSet, Hunk, Kind};
 use crate::core::ids::RunId;
 use crate::core::run::{Run, RunMode};
-use crate::core::spec::SentTask;
 use crate::core::worktreeinclude::Patterns;
+use crate::spec::SentTask;
 use serde::{Deserialize, Serialize};
 
 /// Where being wrong is expensive, most expensive first. The order is fixed;
@@ -347,6 +347,24 @@ fn names_path(subject: &str, path: &str) -> bool {
     })
 }
 
+/// Which kind of alteration a weakened row is. Counted by kind, never scored:
+/// a skipped test and an edited CI workflow ask different questions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub enum WeakKind {
+    /// A check turned off, loosened or silenced: a skip marker, an assertion
+    /// removed or made to always pass, a tolerance changed, a suppression added.
+    Skip,
+    /// A test removed: its whole file, or a test inside a file that stays.
+    Deleted,
+    /// What *passing* means, edited: the gates, CI, a runner's, linter's or
+    /// coverage tool's configuration, a script a gate runs, or a failure
+    /// masked in one of those.
+    Gate,
+}
+
 /// One hunk or file that alters a check, with why. A signal from the diff
 /// text alone, never a verdict: it says what it matched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +373,134 @@ fn names_path(subject: &str, path: &str) -> bool {
 pub struct Weakened {
     pub path: String,
     pub why: String,
+    pub kind: WeakKind,
+    /// What it matched: the added or removed line, trimmed; the deleted path;
+    /// or, for an edit to a whole definition, a digest of its changed lines.
+    /// Part of a seen mark's key, so a different text is a different row.
+    pub matched: String,
+}
+
+/// What every surface says when a change's diff could not be read.
+pub const UNREADABLE: &str = "the diff could not be read";
+
+/// The rows a change's diff weakened, counted by kind, with how many no person
+/// has marked seen. Beside *verified* on every surface; derived from the same
+/// rows the review's first group shows, so the two cannot disagree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub struct Qualifier {
+    /// Rows of kind [`WeakKind::Skip`].
+    pub weakened: u32,
+    /// Rows of kind [`WeakKind::Deleted`].
+    pub deleted: u32,
+    /// Rows of kind [`WeakKind::Gate`].
+    pub gates_changed: u32,
+    /// Rows with no current seen mark.
+    pub unseen: u32,
+    /// *1 check weakened · 1 gate changed*, or empty when nothing was.
+    pub says: String,
+}
+
+impl Qualifier {
+    /// Pure: `seen` holds `(path, matched)` for every row a person marked.
+    pub fn of(rows: &[Weakened], seen: &std::collections::HashSet<(String, String)>) -> Self {
+        let count = |k: WeakKind| rows.iter().filter(|w| w.kind == k).count() as u32;
+        let mut q = Qualifier {
+            weakened: count(WeakKind::Skip),
+            deleted: count(WeakKind::Deleted),
+            gates_changed: count(WeakKind::Gate),
+            unseen: rows
+                .iter()
+                .filter(|w| !seen.contains(&(w.path.clone(), w.matched.clone())))
+                .count() as u32,
+            says: String::new(),
+        };
+        q.says = q.compose();
+        q
+    }
+
+    /// For a checkout whose diff could not be read: no counts, and a sentence
+    /// saying so, so *verified* never stands alone on an unread diff.
+    pub fn unreadable() -> Self {
+        Qualifier {
+            says: UNREADABLE.to_string(),
+            ..Qualifier::default()
+        }
+    }
+
+    /// Nothing weakened, deleted or changed.
+    pub fn is_empty(&self) -> bool {
+        self.weakened + self.deleted + self.gates_changed == 0
+    }
+
+    fn compose(&self) -> String {
+        let part = |n: u32, one: &str, many: &str| match n {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            n => Some(format!("{n} {many}")),
+        };
+        [
+            part(self.weakened, "check weakened", "checks weakened"),
+            part(self.deleted, "test deleted", "tests deleted"),
+            part(self.gates_changed, "gate changed", "gates changed"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
+}
+
+/// What the review of a change *ready to decide* would lead with, carried on
+/// its inbox row so the row never reads as calmer than the review. Hunks seen
+/// are the window's own marks, so the host sends only the total.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
+pub struct ReadyFacts {
+    pub qualifier: Qualifier,
+    /// Every hunk in the change.
+    pub hunks: u32,
+    /// Files no declared test covers; `None` when no mapping is declared.
+    pub not_covered: Option<u32>,
+    /// Hunks in files no dispatched task asked for; `None` when grouping by
+    /// task is unavailable.
+    pub not_asked_for: Option<u32>,
+    /// The two counts in words, or why each is unknown: *1 file covered by
+    /// nothing*, *no test mapping declared*.
+    pub says: Vec<String>,
+}
+
+impl ReadyFacts {
+    pub fn of(
+        qualifier: Qualifier,
+        hunks: u32,
+        not_covered: Option<u32>,
+        not_asked_for: Option<u32>,
+    ) -> Self {
+        let n = |n: u32, one: &str, many: &str| match n {
+            1 => format!("1 {one}"),
+            n => format!("{n} {many}"),
+        };
+        let says = vec![
+            match not_covered {
+                Some(c) => n(c, "file covered by nothing", "files covered by nothing"),
+                None => "no test mapping declared".into(),
+            },
+            match not_asked_for {
+                Some(c) => n(c, "hunk not asked for", "hunks not asked for"),
+                None => "not grouped by task".into(),
+            },
+        ];
+        ReadyFacts {
+            qualifier,
+            hunks,
+            not_covered,
+            not_asked_for,
+            says,
+        }
+    }
 }
 
 /// Markers that turn a test off or narrow a run. Matched in added lines only.
@@ -377,47 +523,363 @@ pub const SKIP_MARKERS: &[&str] = &[
     "@Ignore",
 ];
 
+/// Comments that silence a linter or a type checker. Matched in added lines
+/// of any file but prose, since documentation may name them.
+pub const SUPPRESSIONS: &[&str] = &[
+    "@ts-ignore",
+    "@ts-expect-error",
+    "@ts-nocheck",
+    "eslint-disable",
+    "# noqa",
+    "# type: ignore",
+    "#[allow(",
+    "#![allow(",
+    "//nolint",
+    "// nolint",
+    "pylint: disable",
+];
+
+/// What makes a failing step pass anyway. Matched in added lines of what
+/// defines the checks: CI, the gates, a script a gate runs.
+pub const MASKS: &[&str] = &[
+    "|| true",
+    "|| exit 0",
+    "continue-on-error: true",
+    "--skip",
+    "-k \"not",
+    "-k 'not",
+];
+
+/// Where a tolerance is written. A changed line carrying one is flagged; the
+/// value's direction is not read.
+const TOLERANCES: &[&str] = &[
+    "approx(",
+    "rel=",
+    "abs=",
+    "epsilon",
+    "places=",
+    "atol=",
+    "rtol=",
+    "delta=",
+    "toBeCloseTo(",
+    "assert_approx_eq",
+    "assertAlmostEqual",
+    "InDelta(",
+    "InEpsilon(",
+];
+
 /// Where tests live when the project declared no `tests` role.
 const TEST_DIRS: &[&str] = &["tests/", "test/", "__tests__/", "spec/"];
 
+/// A test file by its name, when the project declared no `tests` role.
+fn test_named(name: &str) -> bool {
+    (name.starts_with("test_") && name.ends_with(".py"))
+        || name.ends_with("_test.py")
+        || name.ends_with("_test.go")
+        || name.ends_with("_spec.rb")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+}
+
+/// Documentation, where a marker is a word about a check, not a check.
+fn is_prose(name: &str) -> bool {
+    [".md", ".mdx", ".rst", ".txt", ".adoc"]
+        .iter()
+        .any(|e| name.ends_with(e))
+}
+
 /// What defines the checks: a hunk here changes what *passing* means.
-fn defines_checks(path: &str) -> Option<&'static str> {
+fn defines_checks(path: &str) -> Option<String> {
     let name = path.rsplit('/').next().unwrap_or(path);
+    let s = |t: &str| Some(t.to_string());
     if path == "devplane.toml" {
-        Some("edits the gates' own definition (`devplane.toml`)")
+        s("edits the gates' own definition (`devplane.toml`)")
     } else if path.starts_with(".github/workflows/") {
-        Some("edits a CI workflow")
+        s("edits a CI workflow")
     } else if path == ".gitlab-ci.yml" {
-        Some("edits the CI definition (`.gitlab-ci.yml`)")
+        s("edits the CI definition (`.gitlab-ci.yml`)")
     } else if name == "pyproject.toml" {
-        Some("edits `pyproject.toml`, which configures the test runner")
+        s("edits `pyproject.toml`, which configures the test runner")
     } else if name == "conftest.py" {
-        Some("edits `conftest.py`, which configures the test run")
+        s("edits `conftest.py`, which configures the test run")
     } else if name.starts_with("jest.config.") || name.starts_with("vitest.config.") {
-        Some("edits the test runner's configuration")
+        s("edits the test runner's configuration")
+    } else if matches!(name, "justfile" | "Justfile" | ".justfile") {
+        Some(format!("edits `{name}`, whose recipes run the checks"))
+    } else if matches!(name, "Makefile" | "makefile" | "GNUmakefile") {
+        Some(format!("edits `{name}`, whose targets run the checks"))
+    } else if name == ".pre-commit-config.yaml" {
+        s("edits `.pre-commit-config.yaml`, which runs the checks before a commit")
+    } else if matches!(name, "tox.ini" | "setup.cfg" | "pytest.ini") {
+        Some(format!("edits `{name}`, which configures the test runner"))
+    } else if matches!(
+        name,
+        "clippy.toml" | ".clippy.toml" | "deny.toml" | "rustfmt.toml" | ".rustfmt.toml"
+    ) || name.starts_with(".eslintrc")
+        || name.starts_with("eslint.config.")
+    {
+        Some(format!("edits `{name}`, which configures a linter"))
+    } else if name.starts_with("tsconfig") && name.ends_with(".json") {
+        Some(format!("edits `{name}`, which configures the type checker"))
+    } else if matches!(name, "codecov.yml" | ".codecov.yml" | ".coveragerc") {
+        Some(format!("edits `{name}`, which configures coverage"))
     } else {
         None
     }
 }
 
-/// The checks a change weakened or changed, in path order: [`SKIP_MARKERS`]
-/// added, test files deleted, edits to what defines the checks, `package.json`
-/// `scripts`, `Cargo.toml` `[profile…]` tables.
-pub fn weakened(set: &ChangeSet, roles: Option<&Roles>) -> Vec<Weakened> {
+/// The files a declared gate command names, relative to the project root:
+/// `sh ./scripts/test.sh` names `scripts/test.sh`. Directories and flags are
+/// not files.
+fn files_gates_run(commands: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in commands {
+        for t in c.split_whitespace() {
+            let t = t.trim_matches(|c| c == '"' || c == '\'' || c == ';');
+            let t = t.strip_prefix("./").unwrap_or(t);
+            if t.is_empty()
+                || t.starts_with('-')
+                || t.ends_with('/')
+                || t.contains('=')
+                || t.contains('$')
+                || !(t.contains('/') || t.contains('.'))
+            {
+                continue;
+            }
+            if !out.iter().any(|o| o == t) {
+                out.push(t.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// A line that is a comment, so a pattern in it asserts nothing.
+fn commented(t: &str) -> bool {
+    t.starts_with("//")
+        || t.starts_with("/*")
+        || t.starts_with('*')
+        || (t.starts_with('#') && !t.starts_with("#["))
+}
+
+/// `needle` in `t` where it starts a word: `expect(` in `expect(x)`, not in
+/// Rust's `.expect("…")`.
+fn at_word(t: &str, needle: &str) -> bool {
+    t.match_indices(needle).any(|(at, _)| {
+        t[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.'))
+    })
+}
+
+/// A line that asserts something, in any of the common spellings.
+fn is_assertion(t: &str) -> bool {
+    if commented(t) {
+        return false;
+    }
+    t.starts_with("assert ")
+        || [
+            "assert!(",
+            "assert_eq!(",
+            "assert_ne!(",
+            "self.assert",
+        ]
+        .iter()
+        .any(|m| t.contains(m))
+        // Go's `t.Error`, never `result.Error`.
+        || [
+            "t.Error",
+            "t.Fatal",
+            "expect(",
+            "assert(",
+            "assert.",
+            "require.",
+            "assertEquals(",
+            "assertThat(",
+        ]
+        .iter()
+        .any(|m| at_word(t, m))
+}
+
+/// An assertion that cannot fail.
+fn is_trivial_assertion(t: &str) -> bool {
+    if commented(t) {
+        return false;
+    }
+    let squashed: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    let python = squashed
+        .strip_prefix("assertTrue")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with([',', ';', '#']));
+    python
+        || [
+            "assert(true)",
+            "assert!(true)",
+            "expect(true)",
+            "assertTrue(true)",
+            "assertTrue(True)",
+            "assert.ok(true)",
+            "assert.True(t,true)",
+            "assert1==1",
+            "expect(1).toBe(1)",
+        ]
+        .iter()
+        .any(|m| squashed.contains(m))
+}
+
+/// A line that declares a test.
+fn is_test_def(t: &str) -> bool {
+    [
+        "def test",
+        "async def test",
+        "func Test",
+        "#[test]",
+        // Spelled in two halves so the purity check, which reads the text of
+        // this module, does not take a string for a use of the runtime.
+        concat!("#[tokio", "::test"),
+        "@Test",
+        "it(",
+        "test(",
+    ]
+    .iter()
+    .any(|m| t.starts_with(m))
+}
+
+/// Words that make a line an oracle for [`hollow_tests`]: an assertion in any
+/// spelling, a helper named for one, or an expected failure. Broad on purpose —
+/// a helper called `check_total` is taken at its word, so a row here is a test
+/// with nothing in it that even looks like a check.
+const ORACLE_WORDS: &[&str] = &[
+    "assert", "expect", "verify", "should", "must", "check", "ensure", "require", "raise", "throw",
+    "panic", "fail", "snapshot", "t.error", "t.fatal",
+];
+
+/// Tests the diff adds whole — the declaration and at least one body line, all
+/// added — in which no line is an oracle. Returns each declaration, trimmed.
+/// A declaration added over an existing body (a rename) has no added body and
+/// is not read; a helper that asserts elsewhere is not followed, only named.
+fn hollow_tests(hunks: &[Hunk]) -> Vec<String> {
+    let oracle = |t: &str| {
+        let t = t.to_ascii_lowercase();
+        !commented(&t) && ORACLE_WORDS.iter().any(|w| t.contains(w))
+    };
+    let mut out = Vec::new();
+    for h in hunks {
+        let mut lines = h.lines.iter().peekable();
+        while let Some((kind, text)) = lines.next() {
+            let def = text.trim();
+            if *kind != Kind::Added || !is_test_def(def) {
+                continue;
+            }
+            // A Rust test is named by its `fn` line, not its attribute, so two in
+            // one file are two rows.
+            let mut name = def;
+            let mut body = 0usize;
+            let mut checks = oracle(def);
+            while let Some((k, t)) = lines.peek() {
+                if *k != Kind::Added || is_test_def(t.trim()) {
+                    break;
+                }
+                let t = t.trim();
+                if name.starts_with("#[") && !t.starts_with("#[") && t.contains("fn ") {
+                    name = t;
+                    // `fn opens() {}` and `fn opens() { run(); }` carry their
+                    // whole body — empty counts — on the `fn` line itself.
+                    if t.ends_with('}') {
+                        body += 1;
+                    }
+                } else if !t.is_empty()
+                    && !t.starts_with("#[")
+                    && !matches!(t, "{" | "}" | "});" | "})" | ")")
+                {
+                    body += 1;
+                }
+                checks |= oracle(t);
+                lines.next();
+            }
+            if body > 0 && !checks {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Removed lines matching `pred` that no added line matching it takes the
+/// place of, across the whole file. A line moved verbatim is not removed; past
+/// that, one added match replaces one removed match.
+fn unreplaced(hunks: &[Hunk], pred: fn(&str) -> bool) -> Vec<String> {
+    let lines = |k: Kind| -> Vec<String> {
+        hunks
+            .iter()
+            .flat_map(|h| h.lines.iter())
+            .filter(|(kind, _)| *kind == k)
+            .map(|(_, t)| t.trim().to_string())
+            .filter(|t| pred(t))
+            .collect()
+    };
+    let mut removed = lines(Kind::Removed);
+    let mut added = lines(Kind::Added);
+    removed.retain(|r| match added.iter().position(|a| a == r) {
+        Some(at) => {
+            added.remove(at);
+            false
+        }
+        None => true,
+    });
+    let excess = removed.len().saturating_sub(added.len());
+    removed.truncate(excess);
+    removed
+}
+
+/// A stable digest of a file's changed lines: an edit to a whole definition is
+/// seen as that edit, and a different edit is a different row.
+fn digest(hunks: &[Hunk]) -> String {
+    let mut h = crate::core::hash::Rolling::new();
+    for (k, t) in hunks.iter().flat_map(|h| h.lines.iter()) {
+        if *k != Kind::Context {
+            h.push_str(if *k == Kind::Added { "+" } else { "-" });
+            h.push_str(t);
+        }
+    }
+    format!("changed lines {}", h.hex())
+}
+
+/// The checks a change weakened or changed, in path order, each naming what it
+/// matched. Every marker is read in the change's own diff, so one already in
+/// the base never counts:
+///
+/// - **skip** — [`SKIP_MARKERS`] and [`SUPPRESSIONS`] added; in a test file, an
+///   assertion removed with none in its place, one that cannot fail added, a
+///   test added with no assertion in it, or a line carrying a tolerance changed;
+/// - **deleted** — a test file deleted, or a test removed from one that stays;
+/// - **gate** — an edit to what defines the checks (gates, CI, a runner's,
+///   linter's or coverage configuration, a file a declared gate command names,
+///   `package.json` `scripts`, `Cargo.toml` `[profile…]`), and [`MASKS`] added
+///   there.
+///
+/// `gate_commands` are the declared gates' commands, for the files they name.
+pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]) -> Vec<Weakened> {
     let tests = roles
         .filter(|r| !r.tests.is_empty())
         .map(|r| Patterns::parse(&r.tests.join("\n")));
     let under_tests = |path: &str| match &tests {
         Some(p) => p.matches(path),
-        None => TEST_DIRS
-            .iter()
-            .any(|d| path.starts_with(d) || path.contains(&format!("/{d}"))),
+        None => {
+            TEST_DIRS
+                .iter()
+                .any(|d| path.starts_with(d) || path.contains(&format!("/{d}")))
+                || test_named(path.rsplit('/').next().unwrap_or(path))
+        }
     };
+    let gate_files = files_gates_run(gate_commands);
     let mut out: Vec<Weakened> = Vec::new();
-    let mut push = |path: &str, why: String| {
+    let mut push = |path: &str, kind: WeakKind, why: String, matched: String| {
         let w = Weakened {
             path: path.to_string(),
             why,
+            kind,
+            matched,
         };
         if !out.contains(&w) {
             out.push(w);
@@ -426,38 +888,168 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>) -> Vec<Weakened> {
     for i in path_order(set) {
         let f = &set.files[i];
         let path = f.path.as_str();
-        if matches!(f.status, crate::core::diff::Status::Deleted) && under_tests(path) {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let deleted = matches!(f.status, crate::core::diff::Status::Deleted);
+        let test_file = under_tests(path);
+        if deleted && test_file {
             push(
                 path,
+                WeakKind::Deleted,
                 match tests {
                     Some(_) => "deletes a file under the declared `tests` role".into(),
                     None => "deletes a test file".into(),
                 },
+                path.to_string(),
             );
             continue;
         }
+        // A rename is a deletion to whatever looked for the old name: a test
+        // runner collecting `test_*.py`, or the file that configured the run.
+        if let crate::core::diff::Status::Renamed { from } = &f.status {
+            let from_name = from.rsplit('/').next().unwrap_or(from);
+            if under_tests(from) && (!test_file || (test_named(from_name) && !test_named(name))) {
+                push(
+                    path,
+                    WeakKind::Deleted,
+                    format!("moves a test file out of the test suite (from `{from}`)"),
+                    from.clone(),
+                );
+            }
+            let defined = defines_checks(from).is_some() || gate_files.iter().any(|g| g == from);
+            let defines_now =
+                defines_checks(path).is_some() || gate_files.iter().any(|g| g == path);
+            if defined && !defines_now {
+                push(
+                    path,
+                    WeakKind::Gate,
+                    format!(
+                        "renames `{from}`, which defines the checks, to a name nothing reads it by"
+                    ),
+                    from.clone(),
+                );
+            }
+        }
+        let defines = defines_checks(path).or_else(|| {
+            gate_files
+                .iter()
+                .any(|g| g == path)
+                .then(|| format!("edits `{path}`, which a declared gate runs"))
+        });
         let hunks = hunks_of(&f.body);
         for h in hunks {
             for (kind, text) in &h.lines {
                 if *kind != Kind::Added {
                     continue;
                 }
+                let t = text.trim();
+                // An ignored file is outside the working-tree digest and the
+                // diff: nothing a person reviews or a gate is verified on.
+                if name == ".gitignore"
+                    && !t.is_empty()
+                    && !t.starts_with('#')
+                    && !t.starts_with('!')
+                {
+                    push(
+                        path,
+                        WeakKind::Gate,
+                        "adds an ignore pattern — an ignored file is outside the digest and the \
+                         review"
+                            .into(),
+                        t.to_string(),
+                    );
+                }
                 if let Some(m) = SKIP_MARKERS.iter().find(|m| text.contains(**m)) {
-                    push(path, format!("adds a skip marker `{m}`"));
+                    push(
+                        path,
+                        WeakKind::Skip,
+                        format!("adds a skip marker `{m}`"),
+                        t.to_string(),
+                    );
+                }
+                if !is_prose(name)
+                    && let Some(m) = SUPPRESSIONS.iter().find(|m| text.contains(**m))
+                {
+                    push(
+                        path,
+                        WeakKind::Skip,
+                        format!("adds a lint or type suppression `{m}`"),
+                        t.to_string(),
+                    );
+                }
+                if test_file && is_trivial_assertion(t) {
+                    push(
+                        path,
+                        WeakKind::Skip,
+                        "adds an assertion that cannot fail".into(),
+                        t.to_string(),
+                    );
+                }
+                if (defines.is_some() || name == "package.json")
+                    && let Some(m) = MASKS.iter().find(|m| text.contains(**m))
+                {
+                    push(
+                        path,
+                        WeakKind::Gate,
+                        format!("masks a failing step with `{m}`"),
+                        t.to_string(),
+                    );
+                }
+            }
+            if test_file {
+                for (_, t) in h.lines.iter().filter(|(k, _)| *k == Kind::Added) {
+                    let changed = TOLERANCES.iter().find(|m| {
+                        t.contains(**m)
+                            && h.lines
+                                .iter()
+                                .any(|(k, r)| *k == Kind::Removed && r.contains(**m))
+                    });
+                    if let Some(m) = changed {
+                        push(
+                            path,
+                            WeakKind::Skip,
+                            format!("changes a tolerance `{m}`"),
+                            t.trim().to_string(),
+                        );
+                    }
                 }
             }
         }
-        if hunks.is_empty() && !matches!(f.status, crate::core::diff::Status::Deleted) {
+        if test_file && !deleted {
+            for t in unreplaced(hunks, is_assertion) {
+                push(
+                    path,
+                    WeakKind::Skip,
+                    "removes an assertion and adds none in its place".into(),
+                    t,
+                );
+            }
+            for t in unreplaced(hunks, is_test_def) {
+                push(
+                    path,
+                    WeakKind::Deleted,
+                    "removes a test and keeps the file".into(),
+                    t,
+                );
+            }
+            for t in hollow_tests(hunks) {
+                push(
+                    path,
+                    WeakKind::Skip,
+                    "adds a test with no assertion in it".into(),
+                    t,
+                );
+            }
+        }
+        if hunks.is_empty() && !deleted {
             // Binary or past the bound: can still define the checks.
-            if let Some(why) = defines_checks(path) {
-                push(path, why.to_string());
+            if let Some(why) = defines {
+                push(path, WeakKind::Gate, why, "not shown in the diff".into());
             }
             continue;
         }
-        if let Some(why) = defines_checks(path) {
-            push(path, why.to_string());
+        if let Some(why) = defines {
+            push(path, WeakKind::Gate, why, digest(hunks));
         }
-        let name = path.rsplit('/').next().unwrap_or(path);
         if name == "package.json"
             && hunks.iter().any(|h| {
                 h.lines.iter().any(|(k, t)| {
@@ -469,7 +1061,12 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>) -> Vec<Weakened> {
                 })
             })
         {
-            push(path, "edits the `scripts` of `package.json`".into());
+            push(
+                path,
+                WeakKind::Gate,
+                "edits the `scripts` of `package.json`".into(),
+                digest(hunks),
+            );
         }
         if name == "Cargo.toml"
             && hunks.iter().any(|h| {
@@ -479,7 +1076,12 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>) -> Vec<Weakened> {
                         .any(|(_, t)| t.trim_start().starts_with("[profile"))
             })
         {
-            push(path, "edits a `[profile]` table of `Cargo.toml`".into());
+            push(
+                path,
+                WeakKind::Gate,
+                "edits a `[profile]` table of `Cargo.toml`".into(),
+                digest(hunks),
+            );
         }
     }
     out
@@ -599,6 +1201,15 @@ mod tests {
     use super::*;
     use crate::core::diff::{FileChange, Status};
     use crate::core::ids::SessionId;
+
+    /// Go's `t.Error` asserts; a field called `Error` on anything else does not.
+    #[test]
+    fn a_go_error_field_is_not_an_assertion() {
+        assert!(is_assertion("t.Errorf(\"got %v\", x)"));
+        assert!(is_assertion("\tt.Fatal(err)"));
+        assert!(!is_assertion("if result.Error != nil {"));
+        assert!(!is_assertion("output.Fatal = true"));
+    }
 
     fn hunk(lines: &[(Kind, &str)]) -> Hunk {
         Hunk {

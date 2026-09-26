@@ -2,38 +2,47 @@
   // Every gate run against this change: each command, exit code, duration and
   // output (its own bytes), and the certificate a reviewer can re-run. The
   // newest attempt is open; older ones fold with their verdict showing.
-  import { api } from "../../lib/api";
+  import { untrack } from "svelte";
+  import { resource, copyText } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
+  import { blocks } from "../../lib/md";
+  import Inline from "../../lib/ui/Inline.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import { exit, took, ago, type Detail, type GateReport } from "./types";
 
-  let { d, id }: { d: Detail; id: string } = $props();
+  let {
+    d,
+    id,
+    /// A certificate already read (the render harness); the host's read replaces it.
+    certificate = null,
+  }: { d: Detail; id: string; certificate?: { finished: boolean; markdown?: string } | null } = $props();
 
   const attempts = $derived([...(d.gates ?? [])].reverse());
   let open = $state<Record<number, boolean>>({});
   const passed = (g: GateReport) => g.commands.every((c) => c.outcome.outcome === "exited" && c.outcome.code === 0);
 
-  let cert = $state<{ finished: boolean; markdown?: string } | null>(null);
+  const key = $derived(id);
+  const read = resource<{ finished: boolean; markdown?: string }>(
+    () => (key ? `/api/changes/${encodeURIComponent(key)}/certificate` : null),
+    { tell: () => `devplane change export ${key}` },
+  );
+  const cert = $derived(read.data ?? certificate);
   let said = $state("");
+  // A new attempt makes a new certificate: read it again when one lands.
+  const newest = $derived(d.gates?.[d.gates.length - 1]?.at ?? "");
+  let seenNewest: string | null = null;
   $effect(() => {
-    const want = id;
-    let live = true;
-    api<{ finished: boolean; markdown?: string }>(`/api/changes/${encodeURIComponent(want)}/certificate`)
-      .then((r) => {
-        if (live) cert = r;
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
+    const n = newest;
+    untrack(() => {
+      if (seenNewest !== null && n !== seenNewest) void read.reload();
+      seenNewest = n;
+    });
   });
   async function copy() {
     if (!cert?.markdown) return;
-    try {
-      await navigator.clipboard?.writeText(cert.markdown);
-      said = "Copied — paste it into the pull request.";
-    } catch {
-      said = `No clipboard here — run: devplane change export ${id}`;
-    }
+    said = (await copyText(cert.markdown))
+      ? "Copied — paste it into the pull request."
+      : `Nothing was copied — this page has no clipboard. Run: devplane change export ${key}`;
   }
 </script>
 
@@ -86,10 +95,21 @@
       {#if cert?.markdown}<button onclick={copy}><Icon name="file" size={13} /> Copy as markdown</button>{/if}
     </header>
     {#if said}<p class="said">{said}</p>{/if}
-    {#if !cert}
+    {#if !cert && read.failure}
+      <Failed what="the certificate" failure={read.failure} />
+    {:else if !cert}
       <p class="quiet">Reading…</p>
     {:else}
-      <pre class="md">{cert.markdown}</pre>
+      <!-- The host's markdown, rendered as text: inline code and emphasis, never literal markup. -->
+      <div class="md">
+        {#each blocks(cert.markdown) as b, bi (bi)}
+          {#if b.kind === "pre"}<pre>{b.text}</pre>
+          {:else if b.kind === "h"}<h3><Inline segs={b.segs} /></h3>
+          {:else if b.kind === "li"}<p class="li">• <Inline segs={b.segs} /></p>
+          {:else if b.kind === "row"}<p class="row"><Inline segs={b.segs} /></p>
+          {:else}<p><Inline segs={b.segs} /></p>{/if}
+        {/each}
+      </div>
     {/if}
   </section>
 </div>
@@ -236,6 +256,26 @@
   .md {
     max-height: 28rem;
     color: var(--ink);
+    font-family: inherit;
+    font-size: var(--t-sm);
+    white-space: normal;
+  }
+  .md h3 {
+    margin: 0 0 var(--s-2);
+    font-size: var(--t-sm);
+  }
+  .md p {
+    margin: 0 0 var(--s-2);
+  }
+  .md .row,
+  .md pre {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+    white-space: pre-wrap;
+  }
+  .md :global(code) {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
   }
   .said {
     color: var(--dim);

@@ -1,6 +1,7 @@
 // The other places: the forge, the ledger, reports, the answer window and the
 // quit question — and the rules every source in the interface keeps.
 import GithubList from "../../src/surfaces/github/GithubList.svelte";
+import GitHubPanel from "../../src/surfaces/setup/GitHubPanel.svelte";
 import Why from "../../src/surfaces/why/Why.svelte";
 import ReportList from "../../src/surfaces/reports/ReportList.svelte";
 import Answer from "../../src/surfaces/answer/Answer.svelte";
@@ -23,13 +24,66 @@ import { fail, html, source, walk } from "../harness";
   const gh = surfaces().find((s) => s.id === "github");
   const cov = gh?.select({ board: { projects: [{}, {}, {}], forge: { a: {} } }, inbox: null }, "") as { coverage?: { projects: number; configured: number } };
   if (cov?.coverage?.projects !== 3 || cov?.coverage?.configured !== 1) fail("the forge does not count projects against the forge from the feed");
+
+  // The five states that are not data: each its own sentence and action,
+  // never a count or an empty list.
+  const readAt = new Date(Date.now() - 12 * 60_000).toISOString();
+  const was = [row("an old issue", true)];
+  const proj = (state: string, extra: Record<string, unknown> = {}) => ({ project: "p", project_name: "saas", github: { state, ...extra } });
+  const at = (github: Record<string, unknown> | null, projects: unknown[] = [proj(String(github?.state ?? "signed_in"))]) =>
+    html(GithubList, { loaded: true, issues: was, pulls: [], github, projects, readAt, coverage: { projects: 1, configured: 1 } });
+  const states: [string, string, RegExp, RegExp][] = [
+    ["signed_out", "Not signed in to GitHub", /href="#setup"[^>]*>[\s\S]*?Sign in/, /an old issue/],
+    ["expired", "GitHub sign-in expired", /href="#setup"[^>]*>[\s\S]*?Sign in/, /an old issue/],
+    ["rate_limited", "GitHub's rate limit is spent", /resets at \d\d:\d\d/, /stale, read 12m ago/],
+    ["unreachable", "GitHub unreachable", /devplane doctor/, /stale, read 12m ago/],
+  ];
+  for (const [state, title, action, rest] of states) {
+    const out = at({ state, until: new Date(Date.now() + 3_600_000).toISOString(), why: "could not connect", since: readAt });
+    if (!out.includes(title.replace("'", "&#39;")) && !out.includes(title)) fail(`the forge does not say "${title}" for ${state}`);
+    if (!action.test(out)) fail(`the forge's ${state} state has no action`);
+    if (/class="count/.test(out)) fail(`the forge counts rows while ${state}`);
+    if (/No open issue/.test(out)) fail(`the forge shows an empty list while ${state}`);
+    const blocks = state === "signed_out" || state === "expired";
+    if (blocks && rest.test(out)) fail(`the forge shows rows of a sign-in that ended (${state})`);
+    if (!blocks && !rest.test(out)) fail(`the forge's ${state} state does not keep the last data, marked stale`);
+  }
+  const elsewhere = at({ state: "signed_in" }, [proj("not_github", { why: "no git remote" })]);
+  if (!/Not a GitHub repository/.test(elsewhere)) fail("a project on no GitHub host does not say so");
+  if (/No open issue|class="count/.test(elsewhere)) fail("a project on no GitHub host reads as an empty list");
+  if (!/git remote add origin/.test(elsewhere)) fail("not a GitHub repository offers no action");
+  const truncated = html(GithubList, { loaded: true, issues: was, github: { state: "signed_in" }, projects: [{ ...proj("signed_in"), issues_more: 5 }] });
+  if (!/5 more open issues on GitHub/.test(truncated)) fail("a truncated list does not say how many more");
+}
+
+// ── Setup: signing in to GitHub from the window ──────────────────────────
+{
+  const pending = html(GitHubPanel, { hosts: [{ host: "github.com", state: "pending", user_code: "WDJB-MJHT", verification_uri: "https://github.com/login/device" }] });
+  if (!/class="big[^"]*">WDJB-MJHT</.test(pending)) fail("a pending sign-in does not show its code large");
+  if (!/href="https:\/\/github.com\/login\/device"/.test(pending)) fail("a pending sign-in does not link GitHub's device page");
+  if (!/Copy code/.test(pending)) fail("a pending sign-in cannot copy its code");
+  const inn = html(GitHubPanel, { hosts: [{ host: "github.com", state: "signed_in", login: "octocat", scopes: ["repo", "read:org"] }] });
+  if (!/signed in as octocat · repo, read:org/.test(inn) || !/>Sign out</.test(inn)) fail("a signed-in host does not say who, or offer sign-out");
+  const out = html(GitHubPanel, { hosts: [{ host: "github.com", state: "signed_out" }], said: "Signed out of github.com: the token is deleted. The grant still exists at GitHub; revoke it at https://github.com/settings/applications." });
+  if (!/>Sign in</.test(out)) fail("a signed-out host offers no sign-in");
+  if (!/revoke it at/.test(out)) fail("sign-out does not say where to revoke the grant");
+  const noApp = html(GitHubPanel, { hosts: [{ host: "github.com", state: "signed_out" }], clientId: false });
+  if (!/--with-token/.test(noApp) || !/disabled/.test(noApp)) fail("a build with no GitHub app offers a sign-in it cannot start");
+  const perHost = html(GitHubPanel, { hosts: [{ host: "ghe.corp", state: "signed_out", device_flow: false }], clientId: true });
+  if (!/--host ghe.corp/.test(perHost) || !/disabled/.test(perHost)) fail("a host with no app of its own is offered the configured host's sign-in");
+  const denied = html(GitHubPanel, { hosts: [{ host: "github.com", state: "signed_in", login: "octocat", said: "the sign-in was denied at GitHub" }] });
+  if (!/denied at GitHub/.test(denied)) fail("a denied attempt over a standing sign-in is not said");
+  const setup = source("../src/surfaces/setup/Setup.svelte");
+  if (!/resource<[^>]*>\(\(\) => "\/api\/github"/.test(setup)) fail("setup does not read the sign-in through the shared resource");
 }
 
 // ── The ledger: every decision with its authority, and latest by default ──
 {
   const why = source("../src/surfaces/why/Why.svelte");
-  if (!why.includes('"/api/decisions?limit=1000"')) fail("the ledger with no focus does not read the latest decisions");
-  if (!/let live = true/.test(why) || !/live = false/.test(why)) fail("the ledger does not ignore a stale response");
+  if (!why.includes("`/api/decisions?limit=${LIMIT}`")) fail("the ledger with no focus does not read the latest decisions");
+  // A late answer for an older focus is dropped by the shared read.
+  const shared = source("../src/lib/resource.svelte.ts");
+  if (!/resource<Decision\[\]>\(/.test(why) || !/if \(mine !== gen \|\| n < landed\) return;/.test(shared)) fail("the ledger does not ignore a stale response");
   if (/Open a row and this shows/.test(html(Why, { about: "" }))) fail("the ledger with no focus renders an instruction");
   if (!/Narrowed to[\s\S]*run-7/.test(html(Why, { about: "run-7" }))) fail("the ledger does not say what it was narrowed to");
 }

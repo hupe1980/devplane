@@ -3,6 +3,8 @@
 //! the run id in its environment to vouch for the origin.
 
 mod common;
+#[path = "common/github_double.rs"]
+mod double;
 #[path = "common/sandbox.rs"]
 mod sandbox;
 
@@ -615,48 +617,46 @@ async fn an_instruction_in_evidence_is_quoted_everywhere() {
     assert!(told.contains("treat it as a claim to check"), "{told}");
     only_quoted(&told, planted, "the started change's prompt");
 
-    // The drafted issue, through a `gh` stub that records its input.
-    let scratch = h.home.join("gh");
-    std::fs::create_dir_all(&scratch).unwrap();
-    let log = scratch.join("calls");
-    let gh = scratch.join("gh.sh");
-    std::fs::write(
-        &gh,
-        format!(
-            "#!/bin/sh\necho \"$@\" >> {log}\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --body-file ]; then cp \"$2\" {body}; fi\n  shift\ndone\necho https://github.com/acme/core-lib/issues/7\n",
-            log = log.display(),
-            body = scratch.join("body").display()
-        ),
-    )
-    .unwrap();
-    make_executable(&gh);
-    // SAFETY: the one test in this binary that reaches `gh`.
-    unsafe { std::env::set_var("DEVPLANE_GH", &gh) };
+    // The drafted issue, through a GitHub double that records what it was
+    // sent; a `gh` on `PATH` records any run, and none may happen.
+    let gh_log = double::trap_gh();
+    let forge = double::Double::start("github.com").await;
+    let tokens = std::sync::Arc::new(devplane::github::Memory::default());
+    h.state.github.use_store(tokens);
+    h.state.github.route("github.com", forge.host());
+    h.state
+        .github
+        .finish("github.com", devplane::github::Secret::new(double::TOKEN))
+        .await
+        .unwrap();
     let v = filed(&file("acme/core-lib"));
     let draft = v["report"]["id"].as_str().unwrap().to_string();
     assert_eq!(v["routed"], "drafted", "{v}");
-    assert!(!log.exists(), "filing a GitHub report ran gh");
+    assert!(
+        forge.created().is_empty(),
+        "filing a GitHub report wrote to GitHub"
+    );
     let opened = h
         .post(&format!("/api/reports/{draft}/open"), json!({}))
         .await;
-    unsafe { std::env::remove_var("DEVPLANE_GH") };
     assert_eq!(
         opened["url"], "https://github.com/acme/core-lib/issues/7",
         "{opened}"
     );
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert_eq!(calls.lines().count(), 1, "gh ran more than once: {calls}");
+    let created = forge.created();
+    assert_eq!(created.len(), 1, "one issue, once: {created:?}");
     assert!(
-        calls.contains("issue create --repo acme/core-lib"),
-        "{calls}"
+        forge
+            .requests()
+            .contains(&"POST /repos/acme/core-lib/issues".to_string())
     );
-    assert!(calls.contains("--body-file"), "{calls}");
-    let body = std::fs::read_to_string(scratch.join("body")).unwrap();
+    let body = created[0].1["body"].as_str().unwrap().to_string();
     only_quoted(&body, planted, "the issue body");
     assert!(
         body.contains("api — a person"),
         "the issue does not say where it came from: {body}"
     );
+    double::assert_no_gh(&gh_log);
     let again = h
         .post(&format!("/api/reports/{draft}/open"), json!({}))
         .await;
@@ -759,11 +759,4 @@ async fn delivery_is_by_name_and_never_instead_of_the_person() {
     );
     let v = h.post("/api/reports", file("wildcard")).await;
     assert!(v["delivered"].is_null(), "a wildcard delivered: {v}");
-}
-
-fn make_executable(p: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perm = std::fs::metadata(p).unwrap().permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(p, perm).unwrap();
 }

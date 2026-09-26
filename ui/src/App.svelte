@@ -9,9 +9,12 @@
   import { live } from "./lib/live.svelte";
   import { theme } from "./lib/theme.svelte";
   import { claimToken } from "./lib/api";
-  import { dispatch, help, onAction, run } from "./lib/keys";
+  import { untrack } from "svelte";
+  import { dispatch, help, onAction, run, spell } from "./lib/keys";
+  import { same } from "./lib/resource.svelte";
   import { go } from "./lib/route";
   import Stale from "./lib/Stale.svelte";
+  import { trap } from "./lib/trap";
   import Split from "./lib/ui/Split.svelte";
   import Icon from "./lib/ui/Icon.svelte";
   import TitleBar from "./shell/TitleBar.svelte";
@@ -33,9 +36,11 @@
   /// Whether a person is looking at the surface that marks a look.
   const looking = () => showing?.marksLook === true && document.visibilityState === "visible";
   const { state: feed, start, look } = live(looking);
-  $effect(start);
+  // One poll for the life of the page: started untracked, so moving between
+  // surfaces (which `look` reads) never tears it down and starts another.
+  $effect(() => untrack(start));
   $effect(() => {
-    if (showing?.marksLook) look();
+    if (showing?.marksLook) untrack(look);
   });
 
   const { state: themeState, restore, cycle } = theme();
@@ -212,8 +217,32 @@
   });
   const page = $derived(under.s);
   const Side = $derived(page?.side);
-  const props = $derived(page ? page.select(feed as Feed, under.f) : {});
-  const overlayProps = $derived(showing?.transient ? showing.select(feed as Feed, focus) : {});
+  /// A surface's props, kept by identity while they say the same thing. A
+  /// spread prop is read through the whole object, so a fresh object every
+  /// poll would re-run every effect under it — re-fetching, and resetting the
+  /// tab a person picked. Each value that did not change keeps its old
+  /// object, and when none changed the old props object is handed back.
+  function settler() {
+    let last: Record<string, unknown> = {};
+    return (next: Record<string, unknown>): Record<string, unknown> => {
+      const keys = Object.keys(next);
+      let changed = keys.length !== Object.keys(last).length;
+      const out: Record<string, unknown> = {};
+      for (const k of keys) {
+        if (k in last && same(last[k], next[k])) out[k] = last[k];
+        else {
+          out[k] = next[k];
+          changed = true;
+        }
+      }
+      if (changed) last = out;
+      return last;
+    };
+  }
+  const settlePage = settler();
+  const settleOverlay = settler();
+  const props = $derived(settlePage(page ? page.select(feed as Feed, under.f) : {}));
+  const overlayProps = $derived(settleOverlay(showing?.transient ? showing.select(feed as Feed, focus) : {}));
   function openFocus(f: string, pinIt = false) {
     if (!page) return;
     go(`#${page.id}${f ? `/${encodeURIComponent(f)}` : ""}`);
@@ -227,7 +256,9 @@
     <showing.component {...props} />
   </main>
 {:else}
-  <a class="skip" href="#surface">Skip to content</a>
+  <!-- A button, not `href="#surface"`: the address is the route, and a
+       fragment link would overwrite it. -->
+  <button class="skip" onclick={() => document.getElementById("surface")?.focus()}>Skip to content</button>
   <div class="wb">
     <TitleBar
       {crumbs}
@@ -248,7 +279,7 @@
         {/snippet}
         <Split id="panel" axis="y" side="end" size={220} min={120} max={560} collapsed={!panelOpen}>
           {#snippet pane()}
-            <Panel board={feed.board as never} open={runsAt ? (id) => go(`#${runsAt}/${encodeURIComponent(id)}`) : null} />
+            <Panel board={feed.board as never} error={feed.error} open={runsAt ? (id) => go(`#${runsAt}/${encodeURIComponent(id)}`) : null} />
           {/snippet}
           {#if tabs.list.length > 0}
             <EditorTabs
@@ -294,7 +325,7 @@
 
   {#if showing?.transient}
     <div class="scrim" role="presentation" onclick={() => run("leave", current)}></div>
-    <div class="overlay" role="dialog" aria-label={showing.title}>
+    <div class="overlay" role="dialog" aria-modal="true" aria-label={showing.title} use:trap>
       <showing.component {...overlayProps} />
     </div>
   {/if}
@@ -302,11 +333,11 @@
   {#if helpOpen}
     <!-- Generated from the bindings: every row is a binding with its label. -->
     <div class="scrim" role="presentation" onclick={() => (helpOpen = false)}></div>
-    <div class="help" role="dialog" aria-label="keys bound here">
+    <div class="help" role="dialog" aria-modal="true" aria-label="keys bound here" use:trap>
       <header><Icon name="keyboard" size={16} /> <h2>Keys bound here</h2></header>
       <dl>
         {#each keys as k (k.surface + k.combo)}
-          <dt><kbd>{k.combo}</kbd></dt>
+          <dt><kbd>{spell(k.combo)}</kbd></dt>
           <dd>{k.label}{#if k.surface === "global"}<span class="dim"> · everywhere</span>{/if}</dd>
         {/each}
       </dl>
@@ -321,6 +352,9 @@
     overflow: hidden;
   }
   .skip {
+    color: var(--ink);
+    font: inherit;
+    cursor: pointer;
     position: absolute;
     left: -9999px;
     top: var(--s-2);

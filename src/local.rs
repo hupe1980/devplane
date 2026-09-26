@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 /// read needs without a process.
 pub struct Local {
     pub store: Store,
-    pub policy: crate::core::PolicyCache,
+    pub policy: crate::policy_cache::PolicyCache,
     home: std::path::PathBuf,
 }
 
@@ -26,7 +26,7 @@ impl Local {
         let store = Store::open(&crate::config::db_path()?)
             .await
             .context("opening the store")?;
-        let (policy, _) = crate::core::PolicyCache::from_disk();
+        let (policy, _) = crate::policy_cache::PolicyCache::from_disk();
         Ok(Self {
             store,
             policy,
@@ -124,21 +124,21 @@ impl Local {
             ["api", "runs", id] => {
                 let id = snap
                     .world
-                    .resolve_run(id)
+                    .resolve_run(id, snap.now)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 view::run_detail(snap.world.run(&id).context("no such run")?)
             }
             ["api", "runs", id, "events"] => {
                 let id = snap
                     .world
-                    .resolve_run(id)
+                    .resolve_run(id, snap.now)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 serde_json::to_value(self.store.events_for_run(&id, limit).await?)?
             }
             ["api", "runs", id, "messages"] => {
                 let id = snap
                     .world
-                    .resolve_run(id)
+                    .resolve_run(id, snap.now)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 serde_json::to_value(self.store.messages_for_run(&id, limit).await?)?
             }
@@ -171,7 +171,7 @@ impl Local {
             }
             // Either resumes or re-baselines a run, which only a host can do.
             ["api", "changes", _, "drift", _] => {
-                anyhow::bail!("`{route}` needs a running host — start one with `devplane serve`")
+                return Err(crate::client::needs_host(&format!("`{route}`")));
             }
             ["api", "changes", id, "review"] => {
                 let id = snap.resolve_change(id).map_err(|e| anyhow::anyhow!(e))?;
@@ -200,17 +200,14 @@ impl Local {
                     .await?
                     .with_context(|| format!("no report `{id}`"))?,
             )?,
-            ["api", "specs"] => view::specs(&snap),
+            ["api", "specs"] => view::specs(&snap, &self.store).await,
             ["api", "projects"] => json!(view::projects(&snap)),
             ["api", "setup"] => view::setup(&snap),
-            ["api", "rules"] => {
-                view::rules(&snap, q("rule").as_deref(), flag("ask")).unwrap_or_else(|e| e)
-            }
             ["api", "quitting"] => serde_json::to_value(crate::core::reduce::facts::quitting(
                 snap.world.runs(),
                 &snap.open_asks,
             ))?,
-            _ => anyhow::bail!("`{route}` needs a running host — start one with `devplane serve`"),
+            _ => return Err(crate::client::needs_host(&format!("`{route}`"))),
         })
     }
 }
@@ -247,6 +244,38 @@ impl Reader {
         serde_json::from_value(v).with_context(|| format!("reading {path}"))
     }
 
+    /// Marks every current weakened row at `path` seen, as the person running
+    /// this: through the host where one runs, otherwise straight into the store.
+    pub async fn mark_seen(&self, change: &str, path: &str) -> Result<Value> {
+        match self {
+            Reader::Host(c) => {
+                c.post_json(
+                    &format!("/api/changes/{change}/review/seen"),
+                    &json!({ "path": path }),
+                )
+                .await
+            }
+            Reader::Store(l) => {
+                let snap = l.snapshot().await?;
+                let id = snap
+                    .resolve_change(change)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                Ok(
+                    match view::mark_seen(&snap, &l.store, &id, path, None).await {
+                        Ok(seen) => json!({ "seen": seen }),
+                        Err(view::SeenRefusal::NoSuchChange) => {
+                            json!({ "error": format!("no change `{change}`") })
+                        }
+                        Err(view::SeenRefusal::NoSuchRow(rows)) => json!({
+                            "error": format!("`{path}` has no weakened row to mark seen"),
+                            "rows": rows,
+                        }),
+                    },
+                )
+            }
+        }
+    }
+
     /// Answers an ask: through the host where one runs, so a waiting agent
     /// hears it; otherwise straight into the store, where a held permission's
     /// hook is polling and anything else waits for a host to resume its run.
@@ -256,8 +285,8 @@ impl Reader {
             Reader::Store(l) => {
                 let row = l.store.ask(ask).await?.with_context(|| {
                     format!(
-                        "no ask `{ask}` is waiting.\n\n  devplane asks lists every question and \
-                         what became of it."
+                        "no ask `{ask}` is waiting.\n\n  devplane inbox --all lists every \
+                         question and what became of it."
                     )
                 })?;
                 let s = |k: &str| body.get(k).and_then(|v| v.as_str()).map(str::to_string);
@@ -309,7 +338,7 @@ impl Reader {
             Reader::Host(_) => None,
             Reader::Store(_) => Some(
                 "read from the store — no host is running, so live sessions, GitHub and the \
-                 gate probe are not visible from here; `devplane serve` starts one",
+                 gate probe are not visible from here; `devplane open` starts one",
             ),
         }
     }

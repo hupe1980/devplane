@@ -2,43 +2,24 @@
   // The ledger: everything Devplane recorded as decided, and on whose
   // authority. *Decided for you* is one click. No rate, no score, no count per
   // person — the chips count rows.
-  import { api } from "../../lib/api";
+  import { resource } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Pill, { type Tone } from "../../lib/ui/Pill.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Empty from "../../lib/ui/Empty.svelte";
 
-  type Decision = {
-    id: string;
-    at: string;
-    authority: string;
-    action: string;
-    subject: string;
-    outcome: string;
-    reason?: string | null;
-    tool?: string | null;
-    project_id?: string | null;
-    run_id?: string | null;
-    change_id?: string | null;
-  };
+  import type { Decision } from "../../wire/Decision";
   let { about = "" }: { about?: string } = $props();
 
-  let rows = $state<Decision[] | null>(null);
-  let error = $state("");
-  $effect(() => {
-    const want = about;
-    let live = true;
-    api<Decision[]>(want ? `/api/decisions?about=${encodeURIComponent(want)}&limit=1000` : "/api/decisions?limit=1000")
-      .then((r) => {
-        if (live) rows = Array.isArray(r) ? r : [];
-      })
-      .catch((e) => {
-        if (live) error = e instanceof Error ? e.message : String(e);
-      });
-    return () => {
-      live = false;
-    };
-  });
+  /// How many rows one read asks for; a full read says there are more.
+  const LIMIT = 1000;
+  const want = $derived(about);
+  const read = resource<Decision[]>(
+    () => (want ? `/api/decisions?about=${encodeURIComponent(want)}&limit=${LIMIT}` : `/api/decisions?limit=${LIMIT}`),
+    { tell: () => (want ? `devplane audit ${want}` : "devplane audit") },
+  );
+  const rows = $derived(Array.isArray(read.data) ? read.data : null);
 
   const AUTH = ["person", "rule", "timer", "nobody", "devplane"];
   const FOR_YOU = new Set(["rule", "timer", "nobody"]);
@@ -76,11 +57,11 @@
   <header class="head">
     <h1>Ledger</h1>
     <button class="foryou" class:on={forYou} onclick={() => (forYou = !forYou)} title="rule, timer and nobody — what was decided instead of you">
-      <Icon name="person" size={13} /> Decided for you <span>{(rows ?? []).filter((r) => FOR_YOU.has(r.authority)).length}</span>
+      <Icon name="person" size={13} /> Decided for you <span>{rows ? rows.filter((r) => FOR_YOU.has(r.authority)).length : ""}</span>
     </button>
     <div class="chips" role="group" aria-label="by authority">
       {#each counts as [a, n] (a)}
-        <button class:on={only === a} disabled={n === 0} onclick={() => (only = only === a ? null : a)}>{a} <span>{n}</span></button>
+        <button class:on={only === a} disabled={n === 0} onclick={() => (only = only === a ? null : a)}>{a} <span>{rows ? n : ""}</span></button>
       {/each}
     </div>
     <span class="gap"></span>
@@ -88,8 +69,14 @@
   </header>
   {#if about}<p class="about">Narrowed to <code>{about}</code> · <a href="#why">show everything</a></p>{/if}
 
-  {#if error}
-    <Empty icon="alert" title="The ledger could not be read" body={error} />
+  {#if read.phase === "stale" && read.failure}
+    <Failed what="the ledger" failure={read.failure} at={read.at} stale />
+  {/if}
+  {#if rows && rows.length >= LIMIT}
+    <p class="more">The newest {LIMIT} decisions are shown; <code>{want ? `devplane audit ${want}` : "devplane audit"}</code> has every one.</p>
+  {/if}
+  {#if read.phase === "failed" && read.failure}
+    <Failed what="the ledger" failure={read.failure} />
   {:else if rows && rows.length === 0}
     <Empty icon="ledger" title="Nothing has been decided yet" body="Every refusal a rule made, every question a person answered, every gate Devplane ran — each lands here with the authority that decided it." />
   {:else}
@@ -275,6 +262,11 @@
     gap: 0.3rem;
     color: var(--accent);
     text-decoration: none;
+  }
+  .more {
+    margin: 0;
+    font-size: var(--t-xs);
+    color: var(--dim);
   }
   .quiet {
     padding: var(--s-4);

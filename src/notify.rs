@@ -159,25 +159,42 @@ fn applescript_escape(s: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn platform_command(title: &str, body: &str) -> Option<Command> {
+    Some(notify_send_command(title, body))
+}
+
+/// `notify-send`, with `--` so a title or body that starts with `-` stays a
+/// positional rather than being read as an option.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn notify_send_command(title: &str, body: &str) -> Command {
     let mut c = Command::new("notify-send");
-    c.args(["--app-name=Devplane", title, body]);
-    Some(c)
+    c.args(["--app-name=Devplane", "--", title, body]);
+    c
 }
 
 #[cfg(target_os = "windows")]
 fn platform_command(title: &str, body: &str) -> Option<Command> {
-    let script = format!(
-        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null; \
-         $t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(1); \
-         $t.GetElementsByTagName('text')[0].AppendChild($t.CreateTextNode('{}')) > $null; \
-         $t.GetElementsByTagName('text')[1].AppendChild($t.CreateTextNode('{}')) > $null; \
-         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Devplane').Show($t)",
-        title.replace('\'', "''"),
-        body.replace('\'', "''")
-    );
+    Some(toast_command(title, body))
+}
+
+/// The PowerShell toast script. Static: the title and body never become
+/// script source. PowerShell treats the typographic quotes U+2018..U+201B as
+/// string delimiters too, so no amount of escaping `'` is enough; the text
+/// arrives through the environment instead and is only ever read as a value.
+const TOAST_SCRIPT: &str = "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null; \
+     $t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(1); \
+     $t.GetElementsByTagName('text')[0].AppendChild($t.CreateTextNode($env:DEVPLANE_TOAST_TITLE)) > $null; \
+     $t.GetElementsByTagName('text')[1].AppendChild($t.CreateTextNode($env:DEVPLANE_TOAST_BODY)) > $null; \
+     [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Devplane').Show($t)";
+
+/// `powershell` showing a toast, with the text passed as environment
+/// variables. Built on every platform so the separation is testable anywhere.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn toast_command(title: &str, body: &str) -> Command {
     let mut c = Command::new("powershell");
-    c.args(["-NoProfile", "-Command", &script]);
-    Some(c)
+    c.args(["-NoProfile", "-NonInteractive", "-Command", TOAST_SCRIPT])
+        .env("DEVPLANE_TOAST_TITLE", title)
+        .env("DEVPLANE_TOAST_BODY", body);
+    c
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -202,7 +219,7 @@ mod tests {
             detail: None,
             answer_in: None,
             options: vec![],
-            actions: vec![Action::Focus],
+            actions: vec![Action::Attach],
             ask: None,
             request_id: None,
             form: None,
@@ -345,6 +362,46 @@ mod tests {
         }
         // And a failed spawn is simply nothing to wait for.
         reap(Err(std::io::Error::other("no notifier")));
+    }
+
+    /// Agent text reaches the toast only as an environment value: the script
+    /// is the same constant whatever the text, so neither ASCII nor
+    /// typographic quotes can close a string and run code.
+    #[test]
+    fn toast_text_never_becomes_powershell_source() {
+        let evil = "\u{2019}); Start-Process calc; (\u{2018}' ; calc";
+        let c = toast_command("t\u{201B}itle", evil);
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.last().map(String::as_str), Some(TOAST_SCRIPT));
+        assert!(args.iter().all(|a| !a.contains("Start-Process")));
+        let env: std::collections::HashMap<String, String> = c
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            env.get("DEVPLANE_TOAST_BODY").map(String::as_str),
+            Some(evil)
+        );
+        assert_eq!(
+            env.get("DEVPLANE_TOAST_TITLE").map(String::as_str),
+            Some("t\u{201B}itle")
+        );
+    }
+
+    /// A body that looks like an option is still the body.
+    #[test]
+    fn notify_send_ends_its_options_before_the_text() {
+        let c = notify_send_command("-t", "--help");
+        let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy()).collect();
+        assert_eq!(args, ["--app-name=Devplane", "--", "-t", "--help"]);
     }
 
     #[cfg(target_os = "macos")]

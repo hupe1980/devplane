@@ -1,6 +1,6 @@
 # Devplane
 
-> Devplane — the desktop workbench for spec-driven agentic development. Write the spec, dispatch any ACP agent, verify against your own gates, and keep the record of who decided what while you were not looking. One local-first Rust binary: no account, no cloud relay, loopback only.
+> Devplane — know when an agent's work is actually done. Run any ACP agent in its own worktree, verify its change with your own checks run outside the agent, see the weakened tests first, and keep the record of who decided what while you were not looking. One local-first Rust binary: no account, no cloud relay, loopback only.
 
 The unit of work is a **change**: a branch, an isolated git worktree, the agent runs in it, the gate reports, the decisions taken, and a done certificate. A change may name a spec folder (Spec Kit, OpenSpec, Kiro, or any folder `[spec] plans` declares) and the task lines sent to the agent.
 
@@ -12,14 +12,15 @@ The unit of work is a **change**: a branch, an isolated git worktree, the agent 
 
 ## Start here
 
-- [Quickstart](https://hupe1980.github.io/devplane/docs/quickstart/): see your sessions, connect an agent, open the workbench, start and verify a change.
-- [Install](https://hupe1980.github.io/devplane/docs/install/): installer, `npx devplane`, `cargo install`, the window, the Claude Code plugin, what lives in `~/.devplane/`.
+- [Quickstart](https://hupe1980.github.io/devplane/docs/quickstart/): from nothing to a verified change in a practice repository — prerequisites (git, Node with `npx`, a signed-in agent, two terminals), host, `devplane.toml`, trust, start, supervise, review.
+- [Install](https://hupe1980.github.io/devplane/docs/install/): the platform table (prebuilt: macOS Apple Silicon, Linux x86_64/arm64, Windows x86_64 via npm or zip; others `cargo install --locked devplane`), the window, the Claude Code plugin, what lives in `~/.devplane/`, upgrading, uninstalling.
+- [Troubleshooting](https://hupe1980.github.io/devplane/docs/troubleshooting/): the gate is off, the port is taken, a session is not watched, GitHub is not read, a verified change went stale, the ledger is empty after an upgrade.
 - [The workbench](https://hupe1980.github.io/devplane/docs/workbench/): the interface — palette, activity bar, a change's six views (Overview, Tasks, Review, Gates, Ledger, Agent), the review, the keys.
 - [CLI reference](https://hupe1980.github.io/devplane/docs/cli/): every command and flag.
 
 ## Commands
 
-Every command takes `--json`. Starting, steering or stopping an agent needs the host.
+Commands that print data take `--json` after the command name (`devplane inbox --json`); under `--json` an error is `{"error": "..."}` on stdout with a non-zero exit. `watch`, `open`, `answer`, `attach`, `speckit`, `completions`, `serve` and `app` take no `--json`. Starting, steering or stopping an agent needs the host.
 
 See what is happening:
 
@@ -32,53 +33,52 @@ See what is happening:
 What needs you, and what happened without you:
 
 - `devplane inbox`: what needs a person, most urgent first. `--project`, `--needs-you`.
-- `devplane asks`: everything an agent asked, and what became of each.
-- `devplane answer <ask>`: `--allow`, `--deny`, `--option`, `--custom`, `--field`. `--allow` is refused inside an agent session.
+- `devplane inbox --all`: everything an agent asked, and what became of each.
+- `devplane answer <ask>`: `--allow` or `--deny` for a permission; `--option`, `--custom`, `--field` for a question (`--option` cannot be combined with `--allow`/`--deny`; `--field` is for questions only). `--allow` is refused inside an agent session.
 - `devplane attention`: whether each inbox kind is worth reading. `--days`.
 - `devplane audit [id]`: what was decided and on whose authority. `--without-me`, `--limit`, `--otel` (OpenTelemetry GenAI log records on stdout; nothing is sent).
 - `devplane modes`: which live sessions decide without you, least-supervised first.
-- `devplane issues`, `devplane prs`: open GitHub issues and pull requests across registered projects, via your own `gh`. `issues --ready` lists what a repository offers as work.
-- `devplane snooze <id>`: hide a run's or change's inbox items; `--minutes 0` un-snoozes.
+- `devplane forge issues`, `devplane forge prs`: open GitHub issues and pull requests across registered projects, read with Devplane's own GitHub sign-in (`devplane login github`). `forge issues --ready` lists what a repository offers as work.
+- `devplane snooze <id>`: hide a run's or change's inbox items; `--minutes 0` un-snoozes; at most 30 days.
 
 Start and steer work:
 
 - `devplane change start "<title>"`: a worktree, an agent, and the gate when it finishes. `--project <name|path>` (repeatable: one prompt to several projects; every refusal reported before anything is created), `--agent`, `--spec <folder>`, `--task <REQ-3|file:line>` (repeatable), `--issue <n>`, `--no-worktree`.
-- `devplane change list|show|verify|retry|resume|finish|offer|archive|export|review|prompt|stop|drift|adopt`: the rest of a change's life. Six computed states: drafted, isolated, in flight, verified, offered, archived. `review <id> [--by risk|intent]` leads with checks weakened or changed. `prompt <change|run> <text>` sends a message without stopping the run. `export` prints the done certificate (`--json`: an in-toto statement). `offer` pushes and opens the PR only with `[github] pull_request = true`, else prints the commands. `drift <id> --run <run> --tell|--accept`. `archive [--delete-branch] [--discard-uncommitted] [--force]`.
+- `devplane change list|show|verify|retry|resume|finish|offer|archive|export|review|prompt|stop|drift|adopt`: the rest of a change's life. Six computed states: drafted, isolated, in flight, verified, offered, archived. `review <id> [--by risk|intent] [--seen <path>]` leads with checks weakened or changed; a verified change with one reads "verified · N check(s) weakened". `offer` is refused (exit 3) while a weakened-check row is unseen; `offer`, `finish`, `archive` and `review --seen` are refused inside an agent session. `prompt <change|run> <text>` sends a message without stopping the run. `export` prints the done certificate (`--json`: an in-toto statement). `offer` pushes and opens the PR only with `[github] pull_request = true`, else prints the commands. `drift <id> --run <run> --tell|--accept`. `archive [--delete-branch] [--discard-uncommitted] [--force]`.
 - `devplane report file|ls|show|start|reject|defer|fixed|open|discard`: findings one project files about another, delivered to that project's person; a GitHub draft is sent only by `report open`.
 - `devplane attach <run>`: attach a terminal to a run, resuming its session.
-- `devplane focus <run>`: raise the editor window that owns a run.
-- `devplane gate run [--cwd] [--name]`: run `[gates] check` (or one named gate) and exit on the verdict: `verified` 0; `failed`, `no_gates`, `config_unreadable`, `unknown_gate` non-zero. Records nothing.
+- `devplane gate [--cwd] [--name]`: run `[gates] check` (or one named gate) and exit on the verdict: `verified` 0; `failed`, `no_gates`, `config_unreadable`, `unknown_gate` non-zero. Records nothing.
 - `devplane rewind <run>`: files a run named for writing that Claude Code's `/rewind` will not restore.
 
 Set up a project:
 
-- `devplane connect claude|codex|copilot`, `devplane disconnect claude|codex|copilot`: install or remove hooks (and telemetry), diff shown first. `--yes`; `devplane connect --statusline claude` also wraps the status line.
+- `devplane connect claude|codex|copilot`, `devplane disconnect claude|codex|copilot`: install or remove hooks (and telemetry), diff shown first. Asks on a terminal; `--yes` is required otherwise and under `--json`. `connect` refuses a binary in a temporary place (npx cache, macOS App Translocation, `/Volumes`, an AppImage mount); `--bin <path>` names another. `devplane connect --statusline claude` also wraps the status line.
 - `devplane trust [path]`: allow agents to start in a repository after listing its hooks and MCP servers. `--dry-run`, `--yes`.
 - `devplane check [path]`: does `devplane.toml` parse, does everything it names exist, is anything unsafe. Offline.
 - `devplane explain <call>`: what the rules decide about one call, and why. `--tool`, `--input`, `--dir`, `--replay`.
-- `devplane rules [rule]`: which registered repositories are missing a rule. `--ask`. Writes nothing.
-- `devplane speckit install`: register the gate as a Spec Kit extension hook (`after_implement` by default). `--event`, `--dry-run`, `--anyway`.
+- `devplane speckit`: register the gate as a Spec Kit extension hook (`after_implement` by default). Needs `.specify/` and a `devplane-gate` skill file at `.claude/skills/devplane-gate/SKILL.md` (repository or home). `--event`, `--dry-run`, `--anyway`.
 - `devplane agents`: the agents Devplane can drive, including any in `~/.devplane/agents.toml`.
-- `devplane doctor` (alias `diagnostics`): channel health, latency, whether a host answers.
+- `devplane doctor` (alias `diagnostics`): channel health, latency, whether a host answers, whether the gate answers (or is "gate off" because a hook's binary is gone).
+- `devplane login github [--host <host>] [--with-token]`, `devplane logout github [--host <host>]`: sign Devplane in to GitHub by the device flow (token only in the OS credential store; `--with-token` reads stdin), and sign out, which says where to revoke the grant. `--json`.
 - `devplane completions <bash|zsh|fish>`: a shell completion script.
 
 The host:
 
-- `devplane serve [--port]`: the host in the foreground (default port 47831, `DEVPLANE_PORT`). A second host is refused while one answers.
+- `devplane serve [--port]`: the host in the foreground (default port 47831, `DEVPLANE_PORT`). A port another process holds is refused, never swapped for another. A second host is refused while one answers.
 - `devplane quit`: quit the running host, saying first what that ends.
-- `devplane app [--port]`: the host with a window (build with `cargo install devplane --features app`): tray count, notifications, one global shortcut, `devplane://` links. Nothing starts at login.
+- `devplane app [--port]`: the host with a window (build with `cargo install --locked devplane --features app`): tray count, notifications, one global shortcut, `devplane://` links. Nothing starts at login.
 
 Run by machines, not listed by `--help`:
 
 - `devplane mcp`: a read-only MCP server on stdio — `inbox`, `change`, `explain`, `audit`, `reports`.
 - `devplane hook`, `devplane statusline`: the hook and status-line entry points `connect` installs.
 
-Claude Code plugin (read-only; adds the MCP server and a skill, installs no hooks): `claude plugin marketplace add hupe1980/devplane`, then `/plugin install devplane@devplane`.
+Claude Code plugin (adds the MCP server and the `devplane-gate` skill, installs no hooks; the only write is that an `explain` question is recorded): in a shell, `claude plugin marketplace add hupe1980/devplane`, then `claude plugin install devplane@devplane`.
 
 ## Guides
 
 - [Verified done](https://hupe1980.github.io/devplane/docs/verified-done/): the gate, the tree digest, the six states, budgets, review, offer/finish/archive, the certificate.
-- [Working to a specification](https://hupe1980.github.io/devplane/docs/specs/): `--spec`, `--task`, ticked vs verified, spec drift, the Spec Kit hook and `devplane gate run`.
+- [Working to a specification](https://hupe1980.github.io/devplane/docs/specs/): `--spec`, `--task`, ticked vs verified, spec drift, the Spec Kit hook and `devplane gate`.
 - [Watching sessions](https://hupe1980.github.io/devplane/docs/observe/): roster, hooks, OpenTelemetry, status line; Claude Code, Copilot, Codex, OpenCode.
 - [Driving agents](https://hupe1980.github.io/devplane/docs/agents/): the built-in ACP agents and adding one in `agents.toml`.
 - [The decision log](https://hupe1980.github.io/devplane/docs/decisions/): the five authorities and what is recorded.
@@ -87,6 +87,6 @@ Claude Code plugin (read-only; adds the MCP server and a skill, installs no hook
 ## Reference
 
 - [Configuration](https://hupe1980.github.io/devplane/docs/configuration/): `devplane.toml` — `[project]`, `[workspace]`, `[gates]`, `[gates.named.*]`, `[policy]`, `[budget]` (`usd`, `max_turns`, `max_runtime`), `[transcripts]`, `[github]`, `[spec]`, `[questions]`, `[review]`, `[reports]` — plus `~/.devplane/policy.toml`, `app.toml` and the environment. Unknown keys are errors.
-- [Permissions](https://hupe1980.github.io/devplane/docs/permissions/): `never_auto`, `always_ask`, what a rule reaches, fail-closed loading.
+- [Permissions](https://hupe1980.github.io/devplane/docs/permissions/): `never_auto`, `always_ask`, what a rule reaches, lines that cannot be read are asked about, the built-in protection of Devplane's own files and the repository's `devplane.toml`, fail-closed loading.
 - [Architecture](https://hupe1980.github.io/devplane/docs/architecture/): the hook writes, the host folds, the API route table.
 - [Security](https://hupe1980.github.io/devplane/docs/security/): trust, loopback and the bearer token, what fails closed and the honest limits.

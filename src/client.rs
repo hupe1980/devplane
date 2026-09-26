@@ -7,8 +7,23 @@ use serde::de::DeserializeOwned;
 
 /// The one sentence for *nothing is running*, shared by every command that
 /// needs a host.
-pub const NO_HOST: &str =
-    "no host is running — start one with `devplane serve`, or `devplane open` for the workbench";
+pub const NO_HOST: &str = "no host is running — start one with `devplane open` (the workbench), \
+     or `devplane serve` to host without a window";
+
+/// The error for a route only a running host can answer: the cause (no host)
+/// first, then what needed one.
+#[must_use]
+pub fn needs_host(what: &str) -> anyhow::Error {
+    anyhow::anyhow!("{NO_HOST}. {what} needs one.")
+}
+
+/// Whether an error is the missing host, so a caller's own context does not
+/// bury it under a wrong guess.
+#[must_use]
+pub fn is_no_host(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|c| c.to_string().starts_with("no host is running"))
+}
 
 #[derive(Clone)]
 pub struct Client {

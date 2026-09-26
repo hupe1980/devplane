@@ -1,7 +1,9 @@
 <script lang="ts">
   // Search every session's tool calls, questions and errors. It says that
   // prompts and replies are never recorded, so cannot be found.
+  import { untrack } from "svelte";
   import { api } from "../../lib/api";
+  import { failure } from "../../lib/resource.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Empty from "../../lib/ui/Empty.svelte";
@@ -12,31 +14,45 @@
   let query = $state("");
   let hits = $state<Hit[]>([]);
   let ran = $state(false);
+  /// The query the hits on screen answer, not whatever the box says now.
+  let ranFor = $state("");
   let busy = $state(false);
   let said = $state("");
   let selected = $state<string | null>(null);
 
+  // The address's query fills the box and runs once per new value. Only `q`
+  // is tracked: typing in the box must never put the old query back.
+  const address = $derived(q);
   $effect(() => {
-    if (q && q !== query) {
-      query = q;
-      void run();
-    }
+    const want = address;
+    untrack(() => {
+      if (want) {
+        query = want;
+        void run();
+      }
+    });
   });
 
+  /// Bumped per search, so a slow answer to an older query is dropped.
+  let gen = 0;
   async function run() {
     const want = query.trim();
     if (!want) return;
+    const mine = ++gen;
     busy = true;
-    hits = [];
     try {
       const r = await api<{ hits?: Hit[] }>(`/api/search?q=${encodeURIComponent(want)}`);
+      if (mine !== gen) return;
       hits = r.hits ?? [];
       ran = true;
+      ranFor = want;
       said = "";
     } catch (e) {
-      said = `The search did not run: ${e instanceof Error ? e.message : String(e)}`;
+      if (mine !== gen) return;
+      const f = failure(e, `devplane search ${want}`);
+      said = `The search did not run: ${f.says}. \`${f.tell}\` tells more.`;
     } finally {
-      busy = false;
+      if (mine === gen) busy = false;
     }
   }
   const columns: Column<Hit>[] = [
@@ -59,7 +75,7 @@
   {#if said}<p class="fail">{said}</p>{/if}
 
   {#if ran && hits.length === 0 && !busy}
-    <Empty icon="search" title="Nothing matched" body={`Nothing any session recorded contains “${query.trim()}”.`} />
+    <Empty icon="search" title="Nothing matched" body={`Nothing any session recorded contains “${ranFor}”.`} />
   {:else if hits.length > 0}
     <div class="frame">
       <Grid id="search" {columns} rows={hits} key={(h) => h.run_id + h.at + h.text} bind:selected label="matches">

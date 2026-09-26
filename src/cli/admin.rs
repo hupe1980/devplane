@@ -14,7 +14,12 @@ pub async fn cmd_search(query: &str, json: bool) -> Result<()> {
         return Ok(());
     }
     let empty = vec![];
-    for hit in v.as_array().unwrap_or(&empty) {
+    let hits = v.as_array().unwrap_or(&empty);
+    if hits.is_empty() {
+        println!("No matches for `{query}`.");
+        return Ok(());
+    }
+    for hit in hits {
         println!(
             "{}  {}",
             paint(DIM, &clip(hit["run_id"].as_str().unwrap_or(""), 12)),
@@ -369,6 +374,8 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
                     })).collect::<Vec<_>>(),
                 },
                 "spooled_decisions": spooled,
+                // Whether or not a host answers: the sign-in record says it.
+                "github": super::github::doctor_hosts(diag.as_ref()).0,
                 "diagnostics": diag,
                 "provider": {
                     "name": provider.as_str(),
@@ -585,6 +592,23 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
             paint(DIM, "— they are enforced; start the host to file them")
         );
     }
+    // A hook whose binary is gone runs nothing: that event is ungated,
+    // whatever else the settings say.
+    for (event, bin) in &state.gate_off {
+        println!(
+            "  gate      {} for {event} — its hook runs {bin}, which no longer exists",
+            paint(render::RED, "off"),
+        );
+    }
+    if !state.gate_off.is_empty() {
+        println!(
+            "            {}",
+            paint(
+                DIM,
+                "run `devplane connect claude` from an installed devplane (or pass `--bin <path>`)"
+            )
+        );
+    }
     if state.gate_is_stale {
         println!(
             "  gate      {} — run `devplane connect claude`",
@@ -606,36 +630,15 @@ pub async fn cmd_diagnostics(json: bool) -> Result<()> {
         (None, _) => println!("  telemetry {}", paint(render::RED, "not configured")),
     }
 
+    // GitHub: its own section, per host, whether or not a host runs.
+    super::github::print_doctor(diag.as_ref());
     if let Some(d) = diag {
-        // GitHub: its own section, since `gh` not being logged in shows up
-        // nowhere else.
-        println!("\n{}", paint(BOLD, "github"));
-        let f = &d["forge"];
-        match (f["viewer"].as_str(), f["error"].as_str()) {
-            (_, Some(e)) if !e.is_empty() => {
-                println!(
-                    "  {}  {}",
-                    paint(render::YELLOW, "not read"),
-                    paint(DIM, &clip(e, 70))
-                )
-            }
-            (Some(v), _) => println!(
-                "  as {} · {} project(s) with a forge · {} ruled out · last read {}",
-                v,
-                f["projects"].as_u64().unwrap_or(0),
-                f["skipped"].as_u64().unwrap_or(0),
-                f["last_poll_at"]
-                    .as_str()
-                    .and_then(|t| t.get(11..19))
-                    .unwrap_or("never")
-            ),
-            (None, _) => println!("  {}", paint(DIM, "not read yet")),
-        }
         // Each ruled-out project with its reason, not just a count.
+        let f = &d["forge"];
         for p in f["skipped_projects"].as_array().unwrap_or(&vec![]) {
             println!(
                 "  {}  {}  {}",
-                paint(DIM, "ruled out"),
+                paint(DIM, "not a GitHub repository"),
                 p["project"].as_str().unwrap_or(""),
                 paint(DIM, &clip(p["reason"].as_str().unwrap_or(""), 60))
             );
@@ -867,21 +870,23 @@ pub async fn cmd_connect(
     statusline: bool,
     yes: bool,
     json: bool,
+    bin: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    // Every hook runs this path; one that vanishes turns the gate off.
+    let exe = stable_binary(bin)?;
     if what == ConnectTarget::Copilot {
-        return connect_copilot(yes, json).await;
+        return connect_copilot(yes, json, &exe).await;
     }
     if what == ConnectTarget::Codex {
-        return connect_codex(yes, json).await;
+        return connect_codex(yes, json, &exe).await;
     }
     // The running host's endpoint, or the default port. Nothing is started:
     // the gate works whether or not anything is listening.
     let base_url = host_base_url();
-    let token = config::load_or_create_token()?;
+    let token = config::ingest_token(&config::load_or_create_token()?);
     let path = crate::observe::connect::settings_path()?;
     let mut settings = crate::observe::connect::read_settings(&path)?;
     let before = crate::observe::connect::render_settings(&settings);
-    let exe = std::env::current_exe().context("finding the devplane binary")?;
     let mut report = crate::observe::connect::connect(&mut settings, &base_url, &token, &exe);
     if statusline {
         report.notes.push(crate::observe::connect::wrap_status_line(
@@ -893,8 +898,9 @@ pub async fn cmd_connect(
     let diff = crate::observe::connect::diff(&before, &after);
 
     if json {
-        // `--json` is the scripted form: the diff is reported and the write
-        // happens.
+        // `--json` is the scripted form: the diff is reported, and the write
+        // happens only when `--yes` says so.
+        require_yes(yes, !diff.is_empty(), &path)?;
         if !diff.is_empty() {
             crate::observe::connect::write_settings(&path, &settings)?;
         }
@@ -952,9 +958,8 @@ pub async fn cmd_connect(
 
 /// Prints the change a connect or disconnect is about to make to a file the
 /// person owns, and asks. On a terminal a non-answer is no; with stdin not a
-/// terminal the diff is printed and the write goes ahead.
+/// terminal nothing is written without `--yes`.
 fn show_diff_and_confirm(path: &std::path::Path, diff: &str) -> Result<bool> {
-    use std::io::{IsTerminal, Write};
     println!("{} {}", paint(BOLD, "Changes to"), path.display());
     for line in diff.lines() {
         let painted = match line.as_bytes().first() {
@@ -964,17 +969,79 @@ fn show_diff_and_confirm(path: &std::path::Path, diff: &str) -> Result<bool> {
         };
         println!("  {painted}");
     }
-    if !std::io::stdin().is_terminal() {
-        return Ok(true);
+    // Not `--yes` here: the caller skips this whole function when it is set.
+    super::confirm("Write this?", false)
+}
+
+/// Refuses a scripted (`--json`) write nobody confirmed.
+fn require_yes(yes: bool, would_write: bool, path: &std::path::Path) -> Result<()> {
+    if would_write && !yes {
+        anyhow::bail!(
+            "nothing was written to {}: under --json nobody can confirm the change. Re-run \
+             with `--yes` to write it (the diff is shown without --json).",
+            path.display()
+        );
     }
-    print!("  Write this? [y/N] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer)? == 0 {
-        println!();
-        return Ok(false);
+    Ok(())
+}
+
+/// Why a binary path would not outlive the hooks that name it, if it would
+/// not: a package runner's cache, a macOS App Translocation mount, a mounted
+/// disk image, or an AppImage's mount.
+#[must_use]
+pub fn transient_binary(path: &std::path::Path) -> Option<&'static str> {
+    let p = path.to_string_lossy().replace('\\', "/");
+    if p.contains("/_npx/") || p.contains("/.npm/_npx/") || p.contains("/npm-cache/_npx/") {
+        return Some("inside npx's package cache, which npm clears and replaces");
     }
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
+    if p.contains("/AppTranslocation/") {
+        return Some("a macOS App Translocation path, a read-only copy that moves on every launch");
+    }
+    if p.starts_with("/Volumes/") {
+        return Some("on a mounted volume (a .dmg, say), which is gone once it is ejected");
+    }
+    if p.contains("/.mount_") {
+        return Some("inside an AppImage's mount, which exists only while it runs");
+    }
+    None
+}
+
+/// The binary every hook will run: `--bin` when given, else this one — unless
+/// this one lives somewhere that will disappear, which is refused with the
+/// reason and the fix. An AppImage names itself through `$APPIMAGE`.
+fn stable_binary(bin: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
+    if let Some(bin) = bin {
+        let bin = std::fs::canonicalize(&bin)
+            .with_context(|| format!("--bin {}: no such file", bin.display()))?;
+        if !bin.is_file() {
+            anyhow::bail!("--bin {}: not a file", bin.display());
+        }
+        return Ok(bin);
+    }
+    // `$APPIMAGE` is set by the AppImage runtime; trusted only when it names
+    // the file, since any process can set a variable.
+    if let Some(image) = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty()) {
+        let image = std::path::PathBuf::from(image);
+        if image.is_file() {
+            return Ok(image);
+        }
+        anyhow::bail!(
+            "not connecting: $APPIMAGE names {}, which is not a file; pass --bin <path>",
+            image.display()
+        );
+    }
+    let exe = std::env::current_exe().context("finding the devplane binary")?;
+    match transient_binary(&exe) {
+        None => Ok(exe),
+        Some(why) => anyhow::bail!(
+            "not connecting: every hook runs the binary's path, and {} is {why}, so the hooks \
+             — and the gate — would stop working without a word when it goes. Install \
+             devplane (`npm install -g devplane`, `cargo install devplane`, or copy the \
+             binary somewhere permanent) and run `connect` from there, or pass \
+             `--bin <path>` naming a devplane binary that stays put.",
+            exe.display()
+        ),
+    }
 }
 
 /// `devplane connect copilot`.
@@ -983,20 +1050,20 @@ fn show_diff_and_confirm(path: &std::path::Path, diff: &str) -> Result<bool> {
 /// one file Devplane owns, and every hook in it runs this binary. Telemetry
 /// cannot be switched on from here (it lives in the environment or managed
 /// settings), so the environment lines are printed for the person to run.
-async fn connect_copilot(yes: bool, json: bool) -> Result<()> {
+async fn connect_copilot(yes: bool, json: bool, exe: &std::path::Path) -> Result<()> {
     let base_url = host_base_url();
-    let token = config::load_or_create_token()?;
-    let exe = std::env::current_exe().context("finding the devplane binary")?;
+    let token = config::ingest_token(&config::load_or_create_token()?);
     let dir = crate::observe::copilot::hooks_dir()
         .context("no home directory, so no ~/.copilot to write to")?;
     let file = dir.join(crate::observe::copilot::HOOKS_FILE);
-    let contents = crate::observe::copilot::hooks_file(&exe);
+    let contents = crate::observe::copilot::hooks_file(exe);
     let after = serde_json::to_string_pretty(&contents)? + "\n";
     // The file is entirely ours: diff against what we wrote last time, if any.
-    let before = std::fs::read_to_string(&file).unwrap_or_default();
+    let before = read_existing(&file)?;
     let diff = crate::observe::connect::diff(&before, &after);
 
-    // Three lines, not two: the telemetry routes need the same bearer token.
+    // Three lines, not two: the telemetry routes need a bearer token — the
+    // telemetry-only one, since an agent can read its own environment.
     let env = [
         ("COPILOT_OTEL_ENABLED", "true".to_string()),
         (
@@ -1011,7 +1078,7 @@ async fn connect_copilot(yes: bool, json: bool) -> Result<()> {
     if json {
         if !diff.is_empty() {
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-            std::fs::write(&file, &after).with_context(|| format!("writing {}", file.display()))?;
+            write_whole(&file, &after)?;
         }
         println!(
             "{}",
@@ -1038,7 +1105,7 @@ async fn connect_copilot(yes: bool, json: bool) -> Result<()> {
             return Ok(());
         }
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        std::fs::write(&file, &after).with_context(|| format!("writing {}", file.display()))?;
+        write_whole(&file, &after)?;
         println!("{} {}", paint(render::GREEN, "wrote"), file.display());
     }
     println!(
@@ -1091,6 +1158,7 @@ pub async fn cmd_disconnect(what: ConnectTarget, yes: bool, json: bool) -> Resul
             .unwrap_or_default();
         if json {
             if let Some(f) = &file {
+                require_yes(yes, true, f)?;
                 std::fs::remove_file(f).ok();
             }
             println!(
@@ -1127,6 +1195,7 @@ pub async fn cmd_disconnect(what: ConnectTarget, yes: bool, json: bool) -> Resul
     let after = crate::observe::connect::render_settings(&settings);
     let diff = crate::observe::connect::diff(&before, &after);
     if json {
+        require_yes(yes, !diff.is_empty(), &path)?;
         if !diff.is_empty() {
             crate::observe::connect::write_settings(&path, &settings)?;
         }
@@ -1167,24 +1236,24 @@ pub async fn cmd_disconnect(what: ConnectTarget, yes: bool, json: bool) -> Resul
 /// The file is the person's, so entries are merged in and picked back out on
 /// disconnect. No telemetry (none is documented). Codex silently skips any
 /// hook the person has not approved in its own dialog, so that is said last.
-async fn connect_codex(yes: bool, json: bool) -> Result<()> {
-    let exe = std::env::current_exe().context("finding the devplane binary")?;
+async fn connect_codex(yes: bool, json: bool, exe: &std::path::Path) -> Result<()> {
     let file = crate::observe::codex::hooks_path()
         .context("no home directory, so no ~/.codex to write to")?;
-    let before = std::fs::read_to_string(&file).unwrap_or_default();
+    let before = read_existing(&file)?;
     let mut doc: serde_json::Map<String, serde_json::Value> = if before.trim().is_empty() {
         Default::default()
     } else {
         serde_json::from_str(&before).with_context(|| format!("{} is not JSON", file.display()))?
     };
-    let added = crate::observe::codex::install(&mut doc, &exe);
+    let added = crate::observe::codex::install(&mut doc, exe);
     let after = serde_json::to_string_pretty(&doc)? + "\n";
     let diff = crate::observe::connect::diff(&before, &after);
     let trust = "Codex runs a hook only after you approve it in its own dialog, and skips one \
                  you have not without a word — until then nothing here is watched or gated";
     if json {
+        require_yes(yes, !diff.is_empty(), &file)?;
         if !diff.is_empty() {
-            write_codex(&file, &after)?;
+            write_whole(&file, &after)?;
         }
         println!(
             "{}",
@@ -1209,7 +1278,7 @@ async fn connect_codex(yes: bool, json: bool) -> Result<()> {
             println!("{}", paint(DIM, "left as it was"));
             return Ok(());
         }
-        write_codex(&file, &after)?;
+        write_whole(&file, &after)?;
         println!(
             "{} {added} hook events into {}",
             paint(render::GREEN, "installed"),
@@ -1227,17 +1296,36 @@ async fn connect_codex(yes: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn write_codex(file: &std::path::Path, contents: &str) -> Result<()> {
+/// A file of the person's, or empty when there is none. Any other failure —
+/// unreadable, not UTF-8 — is an error: read as empty, the file would be
+/// overwritten with only Devplane's entries in it.
+fn read_existing(file: &std::path::Path) -> Result<String> {
+    match std::fs::read_to_string(file) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {}; left as it was", file.display())),
+    }
+}
+
+/// Written beside and renamed over, so an interrupted write leaves the
+/// person's file whole.
+fn write_whole(file: &std::path::Path, contents: &str) -> Result<()> {
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    std::fs::write(file, contents).with_context(|| format!("writing {}", file.display()))
+    let tmp = file.with_extension(format!("devplane-{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, file)
+        .inspect_err(|_| {
+            std::fs::remove_file(&tmp).ok();
+        })
+        .with_context(|| format!("writing {}", file.display()))
 }
 
 async fn disconnect_codex(yes: bool, json: bool) -> Result<()> {
     let file =
         crate::observe::codex::hooks_path().context("no home directory, so no ~/.codex to read")?;
-    let before = std::fs::read_to_string(&file).unwrap_or_default();
+    let before = read_existing(&file)?;
     let mut doc: serde_json::Map<String, serde_json::Value> = if before.trim().is_empty() {
         Default::default()
     } else {
@@ -1251,8 +1339,9 @@ async fn disconnect_codex(yes: bool, json: bool) -> Result<()> {
     };
     let diff = crate::observe::connect::diff(&before, &after);
     if json {
+        require_yes(yes, !diff.is_empty(), &file)?;
         if !diff.is_empty() {
-            std::fs::write(&file, &after).with_context(|| format!("writing {}", file.display()))?;
+            write_whole(&file, &after)?;
         }
         println!(
             "{}",
@@ -1277,7 +1366,7 @@ async fn disconnect_codex(yes: bool, json: bool) -> Result<()> {
         println!("{}", paint(DIM, "left as it was"));
         return Ok(());
     }
-    std::fs::write(&file, &after).with_context(|| format!("writing {}", file.display()))?;
+    write_whole(&file, &after)?;
     println!(
         "{} {removed} hook entries from {}",
         paint(render::GREEN, "removed"),
@@ -1292,10 +1381,15 @@ async fn disconnect_codex(yes: bool, json: bool) -> Result<()> {
 /// own editing tools touch; this names what shell commands wrote past it.
 pub async fn cmd_rewind(run: &str, json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
+    // The missing host is the cause when there is one; "not on the board"
+    // would be a wrong guess on top of it.
     let v: serde_json::Value = c
         .get(&format!("/api/runs/{run}/rewind-gap"))
         .await
-        .context("that run is not on the board")?;
+        .map_err(|e| match crate::client::is_no_host(&e) {
+            true => e,
+            false => e.context("that run is not on the board"),
+        })?;
     let files: Vec<&str> = v["files"]
         .as_array()
         .map(|a| a.iter().filter_map(|f| f.as_str()).collect())
@@ -1372,5 +1466,37 @@ mod tests {
         assert_eq!(started_from(None, Some("/usr/local/bin/devplane")), None);
         assert_eq!(started_from(Some("/npx/devplane"), None), None);
         assert_eq!(started_from(None, None), None);
+    }
+
+    /// `connect` writes the binary's path into every hook, so a path that
+    /// will vanish is refused with the reason, and a stable one is not.
+    #[test]
+    fn a_binary_that_will_disappear_is_named_as_such() {
+        use std::path::Path;
+        for (p, word) in [
+            (
+                "/Users/me/.npm/_npx/1a2b/node_modules/devplane/bin/devplane",
+                "npx",
+            ),
+            (
+                "/private/var/folders/x/T/AppTranslocation/ABC/d/Devplane.app/Contents/MacOS/devplane",
+                "Translocation",
+            ),
+            (
+                "/Volumes/Devplane/Devplane.app/Contents/MacOS/devplane",
+                "mounted",
+            ),
+            ("/tmp/.mount_DevplaXYZ/usr/bin/devplane", "AppImage"),
+        ] {
+            let why = super::transient_binary(Path::new(p)).unwrap_or_else(|| panic!("{p}"));
+            assert!(why.contains(word), "{p}: {why}");
+        }
+        for p in [
+            "/usr/local/bin/devplane",
+            "/opt/homebrew/bin/devplane",
+            "/Users/me/.cargo/bin/devplane",
+        ] {
+            assert_eq!(super::transient_binary(Path::new(p)), None, "{p}");
+        }
     }
 }

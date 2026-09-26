@@ -15,13 +15,15 @@ pub const REFUSED: &str = "refused: ";
 /// something beats a `Waiting` state: a stale block would show a question
 /// nobody is asking any more.
 pub fn apply(run: &mut Run, env: &EventEnvelope) {
-    run.last_event_at = env.at;
+    // Events arrive out of order across channels; a late one never moves
+    // the clocks back.
+    run.last_event_at = run.last_event_at.max(env.at);
     // Recorded first: which channel carries the session decides whose word counts.
     if matches!(env.source, crate::core::Source::Hook) {
-        run.last_hook_at = Some(env.at);
+        run.last_hook_at = Some(run.last_hook_at.map_or(env.at, |t| t.max(env.at)));
     }
     if env.event.is_activity() {
-        run.last_activity_at = env.at;
+        run.last_activity_at = run.last_activity_at.max(env.at);
         run.reporting = true;
         // Later silence is then a fact, not an absence of wiring.
         run.activity_seen = true;
@@ -132,7 +134,21 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         Event::ToolFinished {
             tool, ok, call_id, ..
         } => {
-            run.state = RunState::Working;
+            // A call finishing says the session is working, unless it has
+            // ended (a late event must not revive it) or a person is being
+            // asked something — except when the call that finished is the
+            // one the permission dialog was about: it ran, so it was answered.
+            if run.state.is_live() {
+                if !run.state.needs_human() {
+                    run.state = RunState::Working;
+                } else if matches!(run.state, RunState::Waiting(WaitingFor::Permission))
+                    && run.blocked_on.as_ref().is_some_and(|b| b.tool.is_some())
+                    && decides_pending(run, &env.source, tool, call_id.as_deref())
+                {
+                    run.state = RunState::Working;
+                    run.blocked_on = None;
+                }
+            }
             // By id where the source has one; by name otherwise (every hook).
             if let Some(last) = run.recent_tools.iter_mut().rev().find(|c| {
                 c.ok.is_none()
@@ -174,19 +190,27 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             decision,
             by,
             reason,
+            call_id,
             ..
         } => {
             // A decision takes the answered request out of the inbox now;
-            // after a refusal the agent's next move may never come.
-            if matches!(run.state, RunState::Waiting(WaitingFor::Permission)) {
+            // after a refusal the agent's next move may never come. Only a
+            // decision about the call being waited on does: a late, batched
+            // one about an earlier call must not clear a live dialog.
+            if matches!(run.state, RunState::Waiting(WaitingFor::Permission))
+                && decides_pending(run, &env.source, tool, call_id.as_deref())
+            {
                 run.state = RunState::Working;
                 run.blocked_on = None;
             }
             // Refusals are counted: a refused agent tries something else, so
             // this is the only sign of a rule that is too tight. `deny` is
-            // Devplane's verdict or Claude Code's auto-mode denial; `reject_*`
-            // is a person refusing over the protocol.
-            if decision.starts_with("deny") || decision.starts_with("reject") {
+            // Devplane's verdict or Claude Code's auto-mode denial. A person
+            // saying no is not a rule and is not counted as one, and a
+            // telemetry copy of a refusal a hook already recorded is not
+            // counted twice.
+            let refused = decision.starts_with("deny") || decision.starts_with("reject");
+            if refused && !by_person(by) && !echoes_last_refusal(run, env, tool) {
                 run.refusals += 1;
                 run.last_refusal = Some(crate::core::run::Refusal {
                     tool: tool.clone(),
@@ -194,6 +218,8 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                     reason: reason.clone(),
                     at: env.at,
                 });
+            }
+            if refused {
                 // The call the summary names never ran.
                 if run.recent_tools.last().is_some_and(|c| c.tool == *tool)
                     && let Some(said) = run.summary.as_mut()
@@ -627,6 +653,10 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             run.blocked_on = None;
         }
 
+        // Kept in the log for review; what the agent claims it edited changes
+        // nothing about where the run is.
+        Event::EditReported { .. } => {}
+
         // Tells subscribers to re-read; not about a run.
         Event::Refresh => {}
     }
@@ -676,6 +706,50 @@ fn apply_jobs(run: &mut Run, count: u32, at: jiff::Timestamp) {
 /// `PreToolUse` and the tool running, so this is its subject.
 fn last_pending_tool(run: &Run) -> Option<&ToolCall> {
     run.recent_tools.iter().rev().find(|c| c.ok.is_none())
+}
+
+/// Whether a permission decision is about the call the run is waiting on.
+/// Telemetry is batched and arrives late, so an OpenTelemetry decision clears
+/// a block only when it names the pending call by id. A hook's decision about
+/// a different tool (another subagent) leaves the block alone. The host's and
+/// a feed's decisions answer the block they were raised for.
+fn decides_pending(
+    run: &Run,
+    source: &crate::core::event::Source,
+    tool: &str,
+    call_id: Option<&str>,
+) -> bool {
+    use crate::core::event::Source;
+    let blocked_tool = run.blocked_on.as_ref().and_then(|b| b.tool.as_deref());
+    let pending_id = last_pending_tool(run).and_then(|c| c.call_id.as_deref());
+    // Two ids that disagree are two calls, whoever says so.
+    if let (Some(a), Some(b)) = (call_id, pending_id)
+        && a != b
+    {
+        return false;
+    }
+    let same_tool = tool.is_empty() || blocked_tool.is_none_or(|t| t == tool);
+    match source {
+        Source::Otel => call_id.is_some() && call_id == pending_id && same_tool,
+        Source::Hook | Source::CopilotHook | Source::CodexHook => same_tool,
+        _ => true,
+    }
+}
+
+/// A person's refusal, in any of the spellings the channels use. Not a rule's.
+pub fn by_person(by: &str) -> bool {
+    matches!(by, "human" | "person") || by.starts_with("user")
+}
+
+/// A telemetry copy of the refusal a hook or the gate recorded moments ago:
+/// the same tool, within the export interval, from another channel.
+fn echoes_last_refusal(run: &Run, env: &EventEnvelope, tool: &str) -> bool {
+    if env.source != crate::core::event::Source::Otel {
+        return false;
+    }
+    run.last_refusal.as_ref().is_some_and(|last| {
+        last.tool == tool && (env.at.as_second() - last.at.as_second()).abs() <= 30
+    })
 }
 
 /// How much of a tool call's content is kept in state. Not a display width:
@@ -1163,7 +1237,7 @@ mod tests {
             "echo",
         );
         assert_eq!(r.sent_says(), "no tasks were sent to this run");
-        let task = crate::core::spec::SentTask {
+        let task = crate::spec::SentTask {
             path: "specs/1/tasks.md".into(),
             text: "T001 do it (FR-001)".into(),
             cites: vec!["FR-001".into()],
@@ -2168,6 +2242,7 @@ mod tests {
                 by: "human".into(),
                 reason: None,
                 context: None,
+                call_id: None,
             }),
         );
         assert_eq!(r.state, RunState::Working);
@@ -2222,6 +2297,7 @@ mod tests {
             by: by.into(),
             reason: None,
             context: None,
+            call_id: None,
         };
 
         apply(&mut r, &ev(refuse("policy:Bash(git push *)", "deny")));
@@ -2232,15 +2308,141 @@ mod tests {
         );
 
         // Claude Code's own auto mode, over the `PermissionDenied` hook.
-        apply(&mut r, &ev(refuse("claude", "deny")));
-        // The protocol's spellings when a person says no.
+        apply(&mut r, &ev(refuse("auto mode", "deny")));
+        assert_eq!(r.refusals, 2, "every rule's no counts as one");
+        // A person saying no is not a rule that is too tight.
         apply(&mut r, &ev(refuse("human", "reject_once")));
-        apply(&mut r, &ev(refuse("human", "reject_always")));
-        assert_eq!(r.refusals, 4, "every way of saying no counts as one");
+        apply(&mut r, &ev(refuse("person", "reject_always")));
+        assert_eq!(r.refusals, 2, "a person's no is not blamed on a rule");
+        assert_eq!(
+            r.last_refusal.as_ref().map(|x| x.by.as_str()),
+            Some("auto mode")
+        );
 
         // An allow neither counts nor resets the count.
         apply(&mut r, &ev(refuse("policy:Read", "allow")));
-        assert_eq!(r.refusals, 4);
+        assert_eq!(r.refusals, 2);
+    }
+
+    fn otel(e: Event) -> EventEnvelope {
+        EventEnvelope::new(
+            crate::core::ids::RunId::new("s1"),
+            crate::core::event::Source::Otel,
+            e,
+        )
+    }
+
+    fn decided(tool: &str, decision: &str, by: &str, call_id: Option<&str>) -> Event {
+        Event::PermissionDecided {
+            tool: tool.into(),
+            decision: decision.into(),
+            by: by.into(),
+            reason: None,
+            context: None,
+            call_id: call_id.map(str::to_string),
+        }
+    }
+
+    fn blocked_on_bash(r: &mut Run) {
+        apply(
+            r,
+            &ev(Event::Blocked {
+                waiting_for: WaitingFor::Permission,
+                message: Some("rm -rf build".into()),
+                request_id: None,
+                ask: None,
+                options: vec![],
+                call: Some(crate::core::event::ToolCallRef {
+                    tool: "Bash".into(),
+                    input: json!({"command": "rm -rf build"}),
+                }),
+                context: None,
+            }),
+        );
+        assert!(r.state.needs_human());
+    }
+
+    /// OTel is batched: an earlier call's decision arriving after a newer
+    /// permission was raised must leave that permission in the inbox.
+    #[test]
+    fn a_late_telemetry_decision_does_not_clear_a_live_permission() {
+        let mut r = run();
+        blocked_on_bash(&mut r);
+        // Read's auto-accept, from the batch.
+        apply(
+            &mut r,
+            &otel(decided(
+                "Read",
+                "accept",
+                "Claude Code's permission settings",
+                None,
+            )),
+        );
+        assert!(
+            r.state.needs_human(),
+            "another tool's decision is not this one's"
+        );
+        // Even the same tool: without the call's id, telemetry cannot say which.
+        apply(&mut r, &otel(decided("Bash", "accept", "person", None)));
+        assert!(r.state.needs_human(), "no id, no clearing");
+        // A hook's decision about another tool (another subagent) neither.
+        apply(&mut r, &ev(decided("Read", "deny", "auto mode", None)));
+        assert!(r.state.needs_human());
+        // The hook's own decision about the blocked tool does.
+        apply(&mut r, &ev(decided("Bash", "allow", "policy:Bash", None)));
+        assert_eq!(r.state, RunState::Working);
+    }
+
+    /// A telemetry decision naming the pending call by id is the answer.
+    #[test]
+    fn a_telemetry_decision_about_the_pending_call_clears_it() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::ToolStarted {
+                tool: "Bash".into(),
+                input: json!({"command": "ls"}),
+                server_source: None,
+                agent_id: None,
+                call_id: Some("toolu_1".into()),
+            }),
+        );
+        blocked_on_bash(&mut r);
+        apply(
+            &mut r,
+            &otel(decided("Bash", "accept", "person", Some("toolu_0"))),
+        );
+        assert!(r.state.needs_human(), "another call's id");
+        apply(
+            &mut r,
+            &otel(decided("Bash", "accept", "person", Some("toolu_1"))),
+        );
+        assert_eq!(r.state, RunState::Working);
+    }
+
+    /// The gate's denial, then Claude Code's telemetry copy of it: one refusal,
+    /// and the rule's name survives.
+    #[test]
+    fn a_telemetry_copy_of_a_recorded_refusal_is_not_counted_twice() {
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(decided("Bash", "deny", "policy:Bash(git push *)", None)),
+        );
+        apply(
+            &mut r,
+            &otel(decided(
+                "Bash",
+                "reject",
+                "Claude Code's permission settings",
+                None,
+            )),
+        );
+        assert_eq!(r.refusals, 1);
+        assert_eq!(
+            r.last_refusal.as_ref().map(|x| x.by.as_str()),
+            Some("policy:Bash(git push *)")
+        );
     }
 
     /// A refused call's summary says it was refused, once.
@@ -2261,6 +2463,7 @@ mod tests {
             by: "policy:Read(.env)".into(),
             reason: None,
             context: None,
+            call_id: None,
         };
         apply(&mut r, &ev(deny.clone()));
         assert_eq!(
@@ -2269,6 +2472,68 @@ mod tests {
         );
         apply(&mut r, &ev(deny));
         assert_eq!(r.summary.unwrap().matches(REFUSED).count(), 1);
+    }
+
+    /// Another call finishing while a person is asked about `Bash` leaves the
+    /// dialog up; `Bash` itself finishing means it was answered; and a late
+    /// finish never revives a run that has ended.
+    #[test]
+    fn a_tool_finishing_clears_only_its_own_permission_and_revives_nothing() {
+        let finished = |tool: &str| Event::ToolFinished {
+            tool: tool.into(),
+            ok: true,
+            duration_ms: None,
+            call_id: None,
+        };
+        let mut r = run();
+        apply(
+            &mut r,
+            &ev(Event::tool_started(
+                "Bash",
+                serde_json::json!({"command": "ls"}),
+            )),
+        );
+        apply(
+            &mut r,
+            &ev(Event::Blocked {
+                waiting_for: WaitingFor::Permission,
+                message: None,
+                request_id: None,
+                ask: None,
+                options: vec![],
+                call: None,
+                context: None,
+            }),
+        );
+        apply(&mut r, &ev(finished("Read")));
+        assert_eq!(r.state, RunState::Waiting(WaitingFor::Permission));
+        assert!(r.blocked_on.is_some());
+        apply(&mut r, &ev(finished("Bash")));
+        assert_eq!(r.state, RunState::Working);
+        assert!(r.blocked_on.is_none());
+
+        r.state = RunState::Stopped;
+        apply(&mut r, &ev(finished("Bash")));
+        assert_eq!(
+            r.state,
+            RunState::Stopped,
+            "a late finish revived an ended run"
+        );
+    }
+
+    /// Events arrive out of order across channels; the clocks never go back.
+    #[test]
+    fn a_late_event_never_moves_the_clocks_back() {
+        let mut r = run();
+        let now = jiff::Timestamp::now();
+        let mut late = ev(Event::tool_started("Read", serde_json::json!({})));
+        late.at = now;
+        apply(&mut r, &late);
+        let mut early = ev(Event::tool_started("Read", serde_json::json!({})));
+        early.at = now - jiff::SignedDuration::from_mins(5);
+        apply(&mut r, &early);
+        assert_eq!(r.last_event_at, now);
+        assert_eq!(r.last_activity_at, now);
     }
 }
 

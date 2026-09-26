@@ -23,14 +23,14 @@
 /// A directory a vendor reported, as the filesystem names it.
 ///
 /// One repository is one project whatever path reached it (macOS `/tmp` is
-/// `/private/tmp`). Same resolution as [`crate::core::project::named`], so an
+/// `/private/tmp`). Same resolution as [`crate::repo::named`], so an
 /// event and its project agree on the spelling.
 pub fn canonical_cwd<'de, D>(d: D) -> Result<Option<std::path::PathBuf>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let raw = <Option<std::path::PathBuf> as serde::Deserialize>::deserialize(d)?;
-    Ok(raw.map(|p| crate::core::project::named(&p)))
+    Ok(raw.map(|p| crate::repo::named(&p)))
 }
 
 pub mod agents_json;

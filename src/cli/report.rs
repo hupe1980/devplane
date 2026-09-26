@@ -152,7 +152,7 @@ pub async fn cmd_report(what: ReportCmd, json: bool) -> Result<()> {
         ReportCmd::Defer { id, reason } => resolve(&id, "deferred", Some(reason), json).await,
         ReportCmd::Fixed { id, reason } => resolve(&id, "fixed", reason, json).await,
         ReportCmd::Discard { id } => resolve(&id, "discarded", None, json).await,
-        ReportCmd::Open { id } => {
+        ReportCmd::Open { id, yes } => {
             let c = client::Client::connect_running().await?;
             let v: Value = c.get(&format!("/api/reports/{id}")).await?;
             if let Some(e) = v.get("error").and_then(Value::as_str) {
@@ -162,26 +162,27 @@ pub async fn cmd_report(what: ReportCmd, json: bool) -> Result<()> {
                 .as_str()
                 .context("that report is not a GitHub draft")?;
             // The draft is shown before asking: this writes to a forge under
-            // your name.
-            if !json {
-                println!(
+            // your name. Under `--json` it goes to stderr, beside the question.
+            {
+                let say = |line: String| match json {
+                    true => eprintln!("{line}"),
+                    false => println!("{line}"),
+                };
+                say(format!(
                     "{} {}",
                     paint(BOLD, "Would open an issue on"),
                     paint(BOLD, repo)
-                );
-                println!("  title  {}", v["title"].as_str().unwrap_or(""));
+                ));
+                say(format!("  title  {}", v["title"].as_str().unwrap_or("")));
                 for line in v["quoted"].as_str().unwrap_or("").lines() {
-                    println!("  {line}");
+                    say(format!("  {line}"));
                 }
-                println!(
-                    "{}",
-                    paint(
-                        DIM,
-                        "  opened by your own gh, under your name, with the body above"
-                    )
-                );
-                if !super::change::ask_to_proceed("Open it?")? {
-                    println!("Nothing was sent. The draft is still there.");
+                say(paint(
+                    DIM,
+                    "  opened under your GitHub sign-in, in your name, with the body above",
+                ));
+                if !crate::cli::confirm("Open it?", yes)? {
+                    eprintln!("Nothing was sent. The draft is still there.");
                     return Ok(());
                 }
             }
@@ -268,7 +269,7 @@ fn show(v: &Value) {
 /// `--from-me` mean.
 fn here() -> Result<String> {
     let dir = std::env::current_dir()?.canonicalize()?;
-    let root = crate::core::project::governing_root(&dir)
+    let root = crate::repo::governing_root(&dir)
         .context("this directory is not in a repository, so it is no project's")?;
     let root = root.canonicalize().unwrap_or(root);
     Ok(crate::core::ProjectId::from_path(&root).to_string())

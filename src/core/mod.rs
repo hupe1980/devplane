@@ -1,9 +1,10 @@
 //! Devplane's types and the pure logic over them. Nothing here may reach the
-//! outside world: no async, no `tokio`, `sqlx`, `reqwest` or `axum`; the only
-//! I/O is a synchronous read of a small local file in [`config`] and
-//! [`policy_cache`]. That is why run state replays as a pure `(Run, Event) -> Run`
-//! ([`reduce`]), the inbox is derived rather than stored ([`world`]), and the
-//! permission policy cannot fail open by waiting. `tests/purity.rs` enforces it.
+//! outside world: no async, no `tokio`, `sqlx`, `reqwest` or `axum`, no file
+//! I/O and no clock — what a file said and the time are passed in as values
+//! (`crate::config`, `crate::policy_cache` and `crate::stamp` read them). That
+//! is why run state replays as a pure `(Run, Event) -> Run` ([`reduce`]), the
+//! inbox is derived rather than stored ([`world`]), and the permission policy
+//! cannot fail open by waiting. `tests/purity.rs` enforces it.
 
 pub mod ask;
 pub mod attention;
@@ -26,7 +27,6 @@ pub mod ids;
 pub mod markers;
 pub mod offer;
 pub mod policy;
-pub mod policy_cache;
 pub mod preflight;
 pub mod project;
 pub mod provider;
@@ -34,10 +34,7 @@ pub mod question;
 pub mod reduce;
 pub mod report;
 pub mod review;
-pub mod rules;
 pub mod run;
-pub mod setup;
-pub mod spec;
 pub mod text;
 pub mod transcript;
 pub mod vendors;
@@ -52,12 +49,10 @@ pub use event::{ApiUsage, Choice, Event, EventEnvelope, Source, WaitingFor};
 pub use forge::{ForgeCounts, ForgeIssue, ForgePullRequest, ProjectForge};
 pub use ids::{AskId, AttentionId, ChangeId, ProjectId, ReportId, RunId, SessionId};
 pub use policy::{Policy, Rule, Verdict};
-pub use policy_cache::PolicyCache;
 pub use project::Project;
 pub use run::{
     AgentCapabilityRecord, BlockedOn, PlanStep, Run, RunMode, RunState, RunTotals, ToolCall,
 };
-pub use spec::Spec;
 pub use text::{clip, tail};
 pub use transcript::{Coalescer, Frame, Message, Role};
 pub use world::{Ambiguous, BoardSummary, Changed, RunHint, World};

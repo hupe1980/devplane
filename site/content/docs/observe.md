@@ -28,9 +28,9 @@ inbox` replay them in memory.
 | Vendor | How it is watched | State |
 |---|---|---|
 | **Claude Code** | roster, hooks, telemetry, status line | proved end to end |
-| **GitHub Copilot** | hooks, telemetry you export yourself | implemented, not yet proved on a live session |
-| **Codex** | hooks, in Claude Code's payload shapes | implemented, not yet proved on a live session; needs approval in Codex's own dialog |
-| **OpenCode** | its own event feed, when you point Devplane at `opencode serve` | read only; not yet proved on a live server |
+| **GitHub Copilot** | hooks, telemetry you export yourself | untested against a live session |
+| **Codex** | hooks, in Claude Code's payload shapes | untested against a live session; needs approval in Codex's own dialog |
+| **OpenCode** | its own event feed, when you point Devplane at `opencode serve` | read only; untested against a live server |
 | **Gemini CLI** | not watched | can only be driven |
 
 `devplane doctor` prints this table for your machine.
@@ -38,7 +38,7 @@ inbox` replay them in memory.
 ### Claude Code
 
 ```sh
-devplane connect claude      # diffs ~/.claude/settings.json, then asks
+devplane connect claude      # diffs ~/.claude/settings.json, then asks (--yes in a script)
 devplane doctor              # is anything arriving?
 devplane disconnect claude   # removes exactly what connect added
 ```
@@ -46,11 +46,18 @@ devplane disconnect claude   # removes exactly what connect added
 `connect` edits your **user** settings, so every project is covered, and merges beside hooks you
 already have:
 
-- **22 command hooks**, each running `devplane hook` with a five-second bound. Two decide:
+- **22 command hooks**, each running `devplane hook` by the binary's full path. Two decide:
   `PermissionRequest` (a session is about to ask you) and `PreToolUse` (every tool call, including in
   auto mode). They answer deny, ask, or nothing — **never allow**. Every other hook is `async`.
-- **OpenTelemetry variables** pointing at the host's loopback port, with the bearer token in
-  `OTEL_EXPORTER_OTLP_HEADERS`. An exporter you already configured is left alone.
+  Each hook has a five-second bound, except `PermissionRequest`, which may hold a permission for up
+  to two minutes under [`[questions] hold`](@/docs/configuration.md#questions) and is given 150 s.
+- Because the hooks name the binary's path, `connect` refuses one that will disappear (npx's cache,
+  a mounted disk image) and takes `--bin <path>` instead. Move or reinstall the binary and the hooks
+  run nothing: `devplane doctor` reports each such event as **gate off**. Run `connect` again.
+- **OpenTelemetry variables** pointing at the host's loopback port (the running host's, else
+  47831), with the telemetry-only token in `OTEL_EXPORTER_OTLP_HEADERS`: the agent can read that
+  block, so its token opens the telemetry routes and nothing else. An exporter you already configured
+  is left alone. Telemetry reaches only a host on that port, so keep the host there.
 
 The flags that would put prompt or response text into telemetry (`OTEL_LOG_USER_PROMPTS`,
 `OTEL_LOG_ASSISTANT_RESPONSES`, `OTEL_LOG_TOOL_CONTENT`) are never set.
@@ -75,7 +82,7 @@ Copilot reads telemetry settings from the environment, so `connect` prints the l
 ```sh
 export COPILOT_OTEL_ENABLED=true
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:47831/devplane/otel
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/token)"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/telemetry-token)"
 ```
 
 Copilot publishes no roster, so a session appears once it does something.
@@ -92,6 +99,11 @@ With `$CODEX_HOME` set, the file is `$CODEX_HOME/hooks.json`.
 Codex hooks take Claude Code's payloads and answers, so the same `devplane hook` serves, registered
 as `devplane hook --vendor codex`. Ten of its twelve events are registered. No telemetry is
 installed.
+
+**On Codex, a question is a refusal.** Codex reads an `ask` answer and runs the call anyway, so where
+Devplane would put a call to a person — an `always_ask` rule, a line it cannot read, a
+`devplane.toml` that will not load — it answers `deny` on Codex, saying why. Run the command yourself,
+or change the rule.
 
 > [!IMPORTANT]
 > **Codex silently skips any hook you have not approved in its own trust dialog.** Until you approve
@@ -147,8 +159,9 @@ A session that is **working** or **asking** is never counted away, however old. 
 project.
 
 - **Blocked states always reach the inbox.** Every `waitingFor` value the roster reports becomes an
-  item. An item for a session Devplane did not start has no Allow or Deny; the action is to open its
-  window (`devplane focus <run>`).
+  item. An item for a session Devplane did not start has no Allow or Deny unless the project sets a
+  [hold](@/docs/permissions.md#answering-a-watched-session-s-permission); otherwise the action is to
+  resume it in a terminal (`devplane attach <run>`) or answer in its own window.
 - **An agent waiting on a command it started** (usually a test suite) is not waiting on you. Devplane
   reads the process table and shows it as `running a command it started`, off the inbox.
 
@@ -181,14 +194,17 @@ session that reported no mode shows as unknown. Devplane never sets a mode.
 ## GitHub
 
 ```sh
-devplane issues          # every project's open issues, what needs you first
-devplane issues --ready  # this repo's issues with [github] ready_label
-devplane prs             # every project's open pull requests
+devplane forge issues          # every project's open issues, what needs you first
+devplane forge issues --ready  # this repo's issues with [github] ready_label
+devplane forge prs             # every project's open pull requests
 ```
 
-A running host reads them through your own `gh` after it starts and every five minutes. *Needs you*
-means assigned to you, a review requested from you, or your own pull request that is red, has changes
-requested, or is approved and waiting. Each is also an inbox item. Nothing here writes to GitHub.
+A running host reads them with your GitHub sign-in (`devplane login github`) after it starts, at
+once after a sign-in, and every five minutes: one request per repository, and one search request per
+host for what needs you. *Needs you* means assigned to you, a review requested from you, or your own
+pull request that is red, has changes requested, or is approved and waiting — found by the search, so
+an issue assigned long ago or a pull request past the first page still counts. Each is also an inbox
+item. Nothing here writes to GitHub.
 
 ## `devplane doctor`
 
@@ -198,7 +214,8 @@ The failures that look like a quiet machine:
 |---|---|
 | host | whether a host answers, and which binary it runs |
 | watched | each vendor channel: read, unproved, not published or not checked |
-| claude code | whether the hooks are installed and the gate **answers** — it runs the installed gate with a probe and times it |
+| claude code | whether the hooks are installed and the gate **answers** — it runs the installed gate with a probe and times it. **gate off** names an event whose hook runs a binary that is gone |
+| github | per host: signed in as whom, the scopes, when GitHub last answered; each project that is not a GitHub repository |
 | channels | which channels are arriving, how fast, the worst latency |
 | unreadable configuration | a `devplane.toml` that will not load — every gated call there is put in front of a person |
 | unwritten | events and decisions the store refused; the record is missing that much |
@@ -209,6 +226,6 @@ The failures that look like a quiet machine:
 
 A session **you** started has no transcript in Devplane: hooks carry lifecycle and tool inputs,
 telemetry redacts prompts and responses, and the vendor's transcript files are internal. The
-conversation is in the window that owns it: `devplane focus <run>` raises it, and `devplane rewind
+conversation is in the window that owns it (`devplane attach <run>` resumes it in a terminal), and `devplane rewind
 <run>` lists the files its shell commands named for writing, which Claude Code's `/rewind` does not
 restore. Driven runs keep transcripts; see [Driving agents](@/docs/agents.md).

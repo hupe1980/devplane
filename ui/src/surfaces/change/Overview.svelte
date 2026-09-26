@@ -1,7 +1,8 @@
 <script lang="ts">
   // The overview of a change: evidence in four cards, facts in a grid, history
   // on one axis. Each card states a fact and links the tab that holds the rest.
-  import { api } from "../../lib/api";
+  import { resource } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Props from "../../lib/ui/Props.svelte";
   import Timeline, { type Mark } from "../../lib/ui/Timeline.svelte";
@@ -11,19 +12,13 @@
   type Decision = { id: string; at: string; authority: string; action: string; outcome: string; subject: string };
   let { d, go }: { d: Detail; go: (view: string) => void } = $props();
 
-  let decisions = $state<Decision[]>([]);
-  $effect(() => {
-    const want = d.id;
-    let live = true;
-    api<Decision[]>(`/api/decisions?about=${encodeURIComponent(want)}&limit=200`)
-      .then((r) => {
-        if (live) decisions = Array.isArray(r) ? r : [];
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
+  /// How many decisions one read asks for; a full read says so.
+  const LIMIT = 200;
+  const about = $derived(d.id);
+  const read = resource<Decision[]>(() => `/api/decisions?about=${encodeURIComponent(about)}&limit=${LIMIT}`, {
+    tell: () => `devplane audit ${about}`,
   });
+  const decisions = $derived(Array.isArray(read.data) ? read.data : []);
 
   const failing = $derived(d.gate && !d.gate.passed ? (d.gate.commands ?? []).filter((c) => !(c.outcome.outcome === "exited" && c.outcome.code === 0)) : []);
   const short = (s?: string | null) => (s ? s.slice(0, 10) : null);
@@ -61,7 +56,7 @@
     <button class="card" onclick={() => go("tasks")}>
       <span class="k"><Icon name="spec" size={14} /> Tasks</span>
       {#if d.counts}
-        <span class="v"><b>{d.counts.tasks}</b> tasks · <b>{d.counts.ticked}</b> ticked · {#if d.counts.verified == null}no gates declared{:else}<b class="done">{d.counts.verified}</b> verified{/if}</span>
+        <span class="v"><b>{d.counts.tasks}</b> tasks · <b>{d.counts.ticked}</b> ticked · {#if d.counts.seen_by_pass == null}no gates declared{:else}<b>{d.counts.seen_by_pass}</b> seen by a passing check{/if}</span>
         {#if d.counts_says}<span class="s">{d.counts_says}</span>{/if}
         {#if d.counts.ticked_unsent?.length}<span class="s wait">{d.counts.ticked_unsent.length} ticked that no run was sent</span>{/if}
       {:else}
@@ -70,8 +65,16 @@
     </button>
     <button class="card" onclick={() => go("ledger")}>
       <span class="k"><Icon name="ledger" size={14} /> Decisions</span>
-      {#if decisions.length === 0}
+      {#if read.phase === "failed" && read.failure}
+        <span class="v fail">Not read: {read.failure.says}</span>
+        <span class="s"><code>{read.failure.tell}</code> tells more</span>
+      {:else if read.phase === "loading"}
+        <span class="v quiet">Reading…</span>
+      {:else if decisions.length === 0}
         <span class="v quiet">Nothing has been decided about it.</span>
+      {:else if decisions.length >= LIMIT}
+        <span class="v"><b>{LIMIT}</b> read — there are more</span>
+        <span class="s"><code>devplane audit {about}</code> has every one</span>
       {:else}
         <span class="v"><b>{decisions.length}</b> recorded</span>
         <span class="s">{byAuthority.map(([a, n]) => `${n} by ${a}`).join(" · ")}</span>
@@ -115,6 +118,9 @@
 
   <section class="history">
     <h2>History</h2>
+    <!-- The decisions lane is empty because it was not read, not because
+         nothing was decided. -->
+    {#if read.failure}<Failed what="the decisions" failure={read.failure} at={read.at} stale={read.data !== null} />{/if}
     <Timeline {marks} lanes={["change", "gates", "decisions"]} />
   </section>
 

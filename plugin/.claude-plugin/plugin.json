@@ -1,7 +1,7 @@
 {
   "name": "devplane",
-  "description": "Ask Devplane what is happening across every project on this machine — what needs you, what was decided and on whose authority, and whether a change is verified. Read-only from inside Claude Code: the plugin asks Devplane's store questions and changes nothing.",
-  "version": "0.10.0",
+  "description": "Ask Devplane what is happening across every project on this machine — what needs you, what was decided and on whose authority, and whether a change is verified. Read-only from inside Claude Code: it records each `explain` question it is asked and changes nothing else. Also ships the devplane-gate skill.",
+  "version": "0.11.0",
   "author": {
     "name": "hupe1980",
     "url": "https://github.com/hupe1980"

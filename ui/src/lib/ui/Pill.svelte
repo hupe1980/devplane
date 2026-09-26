@@ -3,7 +3,7 @@
   // colour only names the family, and an unknown word is neutral.
   export type Tone = "work" | "wait" | "fail" | "done" | "none";
 
-  // The only green is verified: `done` is every declared gate exiting zero, so
+  // The only green is verified: `done` is the `check` gate exiting zero, so
   // it goes to *verified* and a gate that *passed* and nothing else — not
   // *completed*, *allow*, *merged* or *archived*, which stay neutral.
   const TONES: Array<[Tone, RegExp]> = [

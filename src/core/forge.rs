@@ -1,7 +1,7 @@
 //! What the forge says about a project: its open issues and pull requests.
 //! GitHub is an observed source, polled and kept in memory, never written to:
-//! nothing here can comment, label or merge. The process that runs `gh` lives
-//! in `crate::github`; this side only derives.
+//! nothing here can comment, label or merge. The client that reads GitHub
+//! lives in `crate::github`; this side only derives.
 
 use crate::core::attention::{Action, AttentionItem, AttentionKind, Snoozed};
 use crate::core::ids::{AttentionId, ProjectId};
@@ -17,7 +17,7 @@ pub struct ForgeIssue {
     pub url: String,
     #[serde(default)]
     pub labels: Vec<String>,
-    /// Assigned to the person whose `gh` this is.
+    /// Assigned to the person signed in to GitHub.
     #[serde(default)]
     pub assigned_to_me: bool,
     #[serde(default)]
@@ -34,7 +34,7 @@ pub struct ForgePullRequest {
     pub status: String,
     #[serde(default)]
     pub draft: bool,
-    /// Authored by the person whose `gh` this is.
+    /// Authored by the person signed in to GitHub.
     #[serde(default)]
     pub mine: bool,
     /// A review was requested from that person, directly or through a team.
@@ -82,11 +82,20 @@ pub struct ProjectForge {
     /// The `owner/name` slug a launch link needs.
     #[serde(default)]
     pub repo: Option<String>,
+    /// The GitHub host the repository lives on.
+    #[serde(default)]
+    pub host: Option<String>,
     pub fetched_at: Timestamp,
     #[serde(default)]
     pub issues: Vec<ForgeIssue>,
+    /// How many open issues GitHub counts; one page is read, the rest is a
+    /// number ([`issues_more`](Self::issues_more)).
+    #[serde(default)]
+    pub issues_total: usize,
     #[serde(default)]
     pub pull_requests: Vec<ForgePullRequest>,
+    #[serde(default)]
+    pub pull_requests_total: usize,
     /// Why the last poll failed, kept beside the stale data rather than
     /// replacing it with an empty list.
     #[serde(default)]
@@ -108,10 +117,23 @@ pub struct ForgeCounts {
 }
 
 impl ProjectForge {
+    /// Open issues past the page that was read.
+    pub fn issues_more(&self) -> usize {
+        self.issues_total.saturating_sub(self.issues.len())
+    }
+
+    /// Open pull requests past the page that was read.
+    pub fn pull_requests_more(&self) -> usize {
+        self.pull_requests_total
+            .saturating_sub(self.pull_requests.len())
+    }
+
+    /// What GitHub counts as open, not the page that was read: one page is
+    /// read, the rest is a number.
     pub fn counts(&self) -> ForgeCounts {
         ForgeCounts {
-            issues: self.issues.len(),
-            pull_requests: self.pull_requests.len(),
+            issues: self.issues_total.max(self.issues.len()),
+            pull_requests: self.pull_requests_total.max(self.pull_requests.len()),
             needs_you: self.issues.iter().filter(|i| i.assigned_to_me).count()
                 + self.pull_requests.iter().filter(|p| p.needs_me()).count(),
             stale: self.error.clone(),
@@ -133,6 +155,7 @@ pub fn items_for_forge(
     forge: &ProjectForge,
     snoozed: &Snoozed,
     own_prs: &BTreeSet<u64>,
+    now: Timestamp,
 ) -> crate::core::attention::Derived {
     let mut out = Vec::new();
     // Hidden is counted, never dropped.
@@ -148,7 +171,7 @@ pub fn items_for_forge(
               since_at: Timestamp,
               actions: Vec<Action>,
               launch: Option<String>| {
-        if snoozed.hides(&kind) {
+        if snoozed.hides(&kind, now) {
             hidden.set(hidden.get() + 1);
             return None;
         }
@@ -262,7 +285,10 @@ mod tests {
         ProjectForge {
             project_id: ProjectId::new("p1"),
             repo: Some("acme/app".into()),
+            host: Some("github.com".into()),
             fetched_at: Timestamp::now(),
+            issues_total: 2,
+            pull_requests_total: 40,
             issues: vec![
                 ForgeIssue {
                     number: 7,
@@ -323,14 +349,26 @@ mod tests {
     #[test]
     fn the_counts_are_what_the_heading_says() {
         let c = forge().counts();
-        assert_eq!((c.issues, c.pull_requests), (2, 3));
+        // What GitHub counts as open, not the three rows of the page.
+        assert_eq!((c.issues, c.pull_requests), (2, 40));
         // One assigned issue, one red PR of mine, one review asked of me.
         assert_eq!(c.needs_you, 3);
+        // One page was read; the rest is said as a number.
+        assert_eq!(
+            (forge().issues_more(), forge().pull_requests_more()),
+            (0, 37)
+        );
     }
 
     #[test]
     fn only_what_needs_this_person_reaches_the_inbox() {
-        let items = items_for_forge(&forge(), &Snoozed::default(), &BTreeSet::new()).items;
+        let items = items_for_forge(
+            &forge(),
+            &Snoozed::default(),
+            &BTreeSet::new(),
+            Timestamp::now(),
+        )
+        .items;
         let kinds: Vec<_> = items.iter().map(|i| i.kind.as_str()).collect();
         assert_eq!(kinds, ["issue_assigned", "ci_red", "review_requested"]);
         assert!(items.iter().all(|i| i.url.is_some()));
@@ -349,7 +387,7 @@ mod tests {
     fn a_pull_request_devplane_opened_is_not_reported_twice() {
         // Its Change already raises `ci_red`.
         let own = BTreeSet::from([142u64]);
-        let items = items_for_forge(&forge(), &Snoozed::default(), &own).items;
+        let items = items_for_forge(&forge(), &Snoozed::default(), &own, Timestamp::now()).items;
         assert!(items.iter().all(|i| i.kind != AttentionKind::CiRed));
     }
 
@@ -360,7 +398,7 @@ mod tests {
             [AttentionKind::ReviewRequested],
             Timestamp::now() + jiff::SignedDuration::from_hours(1),
         );
-        let derived = items_for_forge(&forge(), &s, &BTreeSet::new());
+        let derived = items_for_forge(&forge(), &s, &BTreeSet::new(), Timestamp::now());
         assert_eq!(derived.snoozed, 1, "hidden is counted, not dropped");
         let items = derived.items;
         assert!(
@@ -373,7 +411,13 @@ mod tests {
 
     #[test]
     fn an_items_age_is_the_forges_not_the_hosts() {
-        let items = items_for_forge(&forge(), &Snoozed::default(), &BTreeSet::new()).items;
+        let items = items_for_forge(
+            &forge(),
+            &Snoozed::default(),
+            &BTreeSet::new(),
+            Timestamp::now(),
+        )
+        .items;
         let issue = items
             .iter()
             .find(|i| i.kind == AttentionKind::IssueAssigned)
@@ -386,7 +430,8 @@ mod tests {
         // High by default, but a poll is not an event: no notification.
         let mut f = forge();
         f.pull_requests[0].status = "changes_requested".into();
-        let items = items_for_forge(&f, &Snoozed::default(), &BTreeSet::new()).items;
+        let items =
+            items_for_forge(&f, &Snoozed::default(), &BTreeSet::new(), Timestamp::now()).items;
         assert!(!items.is_empty());
         for i in &items {
             assert_eq!(
@@ -406,7 +451,8 @@ mod tests {
         let mut f = forge();
         f.pull_requests[0].draft = true; // #142: mine, checks failing
         assert_eq!(f.pull_requests[0].asks_of_me(), None);
-        let items = items_for_forge(&f, &Snoozed::default(), &BTreeSet::new()).items;
+        let items =
+            items_for_forge(&f, &Snoozed::default(), &BTreeSet::new(), Timestamp::now()).items;
         assert!(items.iter().all(|i| i.kind != AttentionKind::CiRed));
         assert_eq!(f.counts().needs_you, 2, "and the heading agrees");
     }
@@ -455,9 +501,14 @@ mod tests {
                             updated_at: None,
                         }];
                         let counted = f.counts().needs_you;
-                        let listed = items_for_forge(&f, &Snoozed::default(), &BTreeSet::new())
-                            .items
-                            .len();
+                        let listed = items_for_forge(
+                            &f,
+                            &Snoozed::default(),
+                            &BTreeSet::new(),
+                            Timestamp::now(),
+                        )
+                        .items
+                        .len();
                         assert_eq!(
                             counted, listed,
                             "{status} draft={draft} mine={mine} review={review_requested}: \

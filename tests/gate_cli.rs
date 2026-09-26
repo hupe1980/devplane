@@ -1,4 +1,4 @@
-//! `devplane gate run`: an exit code and a sentence a workflow relies on. A failure,
+//! `devplane gate`: an exit code and a sentence a workflow relies on. A failure,
 //! an unchecked repository and an unreadable config must each be distinguishable
 //! from a pass.
 
@@ -22,7 +22,7 @@ fn scratch(tag: &str, config: Option<&str>) -> PathBuf {
 /// The command's JSON output, as the skill reads it.
 fn gate_json(dir: &PathBuf) -> (serde_json::Value, i32) {
     let out = Command::new(env!("CARGO_BIN_EXE_devplane"))
-        .args(["gate", "run", "--json", "--cwd"])
+        .args(["gate", "--json", "--cwd"])
         .arg(dir)
         .output()
         .expect("the gate runs");
@@ -39,7 +39,7 @@ fn gate_json(dir: &PathBuf) -> (serde_json::Value, i32) {
 /// The human-readable output, which must agree with the JSON.
 fn gate_text(dir: &PathBuf) -> (String, i32) {
     let out = Command::new(env!("CARGO_BIN_EXE_devplane"))
-        .args(["gate", "run", "--cwd"])
+        .args(["gate", "--cwd"])
         .arg(dir)
         .output()
         .expect("the gate runs");
@@ -184,20 +184,20 @@ run = ["false"]
     };
 
     // The default is still `check`, and naming a declared gate runs that one.
-    assert!(run(&["gate", "run"]).status.success(), "check");
+    assert!(run(&["gate"]).status.success(), "check");
     assert!(
-        run(&["gate", "run", "--name", "docs"]).status.success(),
+        run(&["gate", "--name", "docs"]).status.success(),
         "a declared named gate runs"
     );
 
     // A named gate whose command fails is a failed gate.
     assert!(
-        !run(&["gate", "run", "--name", "failing"]).status.success(),
+        !run(&["gate", "--name", "failing"]).status.success(),
         "a named gate whose command fails does not pass"
     );
 
     // An undeclared gate is an error, never a silent pass.
-    let out = run(&["gate", "run", "--name", "nope"]);
+    let out = run(&["gate", "--name", "nope"]);
     assert!(!out.status.success(), "an unknown gate must not pass");
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(said.contains("no such gate"), "{said}");

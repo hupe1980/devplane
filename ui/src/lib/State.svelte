@@ -1,7 +1,10 @@
 <script module lang="ts">
   // The state language, in one table: every state has a colour, a glyph and a
   // word, so colour is never the only channel. The only green is *verified* —
-  // every declared gate exited zero — and this is the one place it is paired.
+  // the `check` gate exited zero against the tree as it is now — and this is
+  // the one place it is paired. Verified is true and can be insufficient: what
+  // the change's own diff weakened is rendered beside it by `Qualifier.svelte`,
+  // never folded into it.
   //
   // Runs: working, needs you, failed, idle. Changes: the host's six words and
   // glyphs (`ChangeState::as_str`, `glyph`), held to that source by a guard;
@@ -39,6 +42,9 @@
   /// A change's life, in order. The stepper reads it here: one spelling.
   export const LIFE = ["drafted", "isolated", "in flight", "verified", "offered", "archived"] as const satisfies readonly Kind[];
   export type Life = (typeof LIFE)[number];
+
+  /// Whether a change the host described is archived: kept, never counted.
+  export const isArchived = (state: string | null | undefined): boolean => state === STATES.archived.word;
 
   /// The table's row for a word the host sent, or `null` for an unknown one,
   /// which is then rendered as the bare word, never a guessed glyph.

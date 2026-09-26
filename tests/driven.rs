@@ -504,6 +504,27 @@ async fn answering_a_question_clears_the_block() {
         .find(|a| a.run == run)
         .expect("the question was written down");
 
+    // An answer naming what was not asked is refused before the row closes:
+    // the question stays open, and the person can answer it properly.
+    for (field, chosen) in [("question_0", "Nope"), ("question_9", "Drop it")] {
+        let refused = devplane::driven::answer_ask(
+            &state,
+            ask.id.as_str(),
+            devplane::driven::Answer::Question(vec![(
+                field.into(),
+                devplane::core::question::Chosen::Option(chosen.into()),
+            )]),
+            "test",
+        )
+        .await
+        .expect_err("an answer to nothing that was asked");
+        assert!(refused.to_string().contains('`'), "{refused}");
+        assert!(
+            open_asks(&state, &run).await.iter().any(|a| a.id == ask.id),
+            "a refused answer closed the question"
+        );
+    }
+
     devplane::driven::answer_ask(
         &state,
         ask.id.as_str(),
@@ -524,4 +545,465 @@ async fn answering_a_question_clears_the_block() {
         "answered, and still reading as waiting on the question"
     );
     assert!(r.blocked_on.is_none(), "{:?}", r.blocked_on);
+}
+
+/// The open asks of one run.
+async fn open_asks(state: &Shared, run: &RunId) -> Vec<devplane::core::ask::Ask> {
+    state
+        .store
+        .open_asks()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|a| &a.run == run)
+        .collect()
+}
+
+/// Waits until the run has `n` open asks.
+async fn await_asks(state: &Shared, run: &RunId, n: usize) -> Vec<devplane::core::ask::Ask> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let asks = open_asks(state, run).await;
+        if asks.len() == n {
+            return asks;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected {n} open asks, have {}",
+            asks.len()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// What the agent said on this run, as kept in its transcript.
+async fn said(state: &Shared, run: &RunId) -> Vec<String> {
+    state
+        .store
+        .messages_for_run(run, 200)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.text)
+        .collect()
+}
+
+async fn await_said(state: &Shared, run: &RunId, needle: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if said(state, run).await.iter().any(|t| t.contains(needle)) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent never said `{needle}`: {:?}",
+            said(state, run).await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Two calls ask at once. Each answer reaches the call it answers, with that
+/// call's own options and title — never the options of whichever asked last.
+#[tokio::test]
+async fn parallel_permissions_are_answered_against_their_own_request() {
+    let Some(agent) = echo_agent() else { return };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("twins");
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo.clone(),
+        Some("twin-asks".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let asks = await_asks(&state, &run, 2).await;
+    let a = asks.iter().find(|a| a.message == "Read a.txt").expect("A");
+    let b = asks.iter().find(|a| a.message == "rm -rf b").expect("B");
+    let shown = |r: &devplane::core::Run| r.blocked_on.as_ref().and_then(|b| b.request_id.clone());
+
+    // Whichever the run shows, answer the *other* one first.
+    let (first, second) = {
+        let w = state.world.lock().await;
+        let r = w.run(&run).unwrap();
+        if shown(r).as_deref() == Some(a.request_id.as_str()) {
+            (b.clone(), a.clone())
+        } else {
+            (a.clone(), b.clone())
+        }
+    };
+    devplane::driven::answer_ask(
+        &state,
+        first.id.as_str(),
+        devplane::driven::Answer::Permission(devplane::driven::Decision::Allow),
+        "test",
+    )
+    .await
+    .expect("delivered");
+    {
+        let w = state.world.lock().await;
+        let r = w.run(&run).unwrap();
+        assert_eq!(
+            shown(r).as_deref(),
+            Some(second.request_id.as_str()),
+            "the request still waiting left the inbox"
+        );
+    }
+    devplane::driven::answer_ask(
+        &state,
+        second.id.as_str(),
+        devplane::driven::Answer::Permission(devplane::driven::Decision::Deny),
+        "test",
+    )
+    .await
+    .expect("delivered");
+    await_run(&state, &run, |r| r.totals.turns >= 1).await;
+
+    let (first_call, second_call) = match first.message.as_str() {
+        "Read a.txt" => ("pa", "pb"),
+        _ => ("pb", "pa"),
+    };
+    let text = said(&state, &run).await.join("\n");
+    assert!(
+        text.contains(&format!("{first_call} outcome: Selected(SelectedPermissionOutcome {{ option_id: PermissionOptionId(\"allow-{first_call}\")")),
+        "the first answer did not reach its own call with its own option: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "option_id: PermissionOptionId(\"deny-{second_call}\")"
+        )),
+        "{text}"
+    );
+    let decisions = state.store.decisions(Some(run.as_str()), 20).await.unwrap();
+    let person: Vec<(&str, &str)> = decisions
+        .iter()
+        .filter(|d| {
+            d.action == "agent:tool.use" && d.authority == devplane::core::Authority::Person
+        })
+        .filter(|d| d.outcome == "allow" || d.outcome == "deny")
+        .map(|d| (d.subject.as_str(), d.outcome.as_str()))
+        .collect();
+    assert!(
+        person.contains(&(first.message.as_str(), "allow")),
+        "the allow was recorded against another call: {person:?}"
+    );
+    assert!(
+        person.contains(&(second.message.as_str(), "deny")),
+        "{person:?}"
+    );
+}
+
+/// An agent withdrawing its request ends the ask as nobody's, takes it out of
+/// the inbox, and records no person deciding anything.
+#[tokio::test]
+async fn a_withdrawn_permission_ends_its_ask_as_nobodys() {
+    let Some(agent) = echo_agent() else { return };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("withdraw");
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo.clone(),
+        Some("withdraw".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    await_run(&state, &run, |r| r.totals.turns >= 1).await;
+    await_said(&state, &run, "withdrew the request").await;
+
+    assert!(
+        open_asks(&state, &run).await.is_empty(),
+        "still in the inbox"
+    );
+    let ask = state
+        .store
+        .asks(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|a| a.run == run)
+        .expect("written down");
+    assert!(
+        matches!(ask.ended, Some(devplane::core::ask::Ended::Nobody { .. })),
+        "{:?}",
+        ask.ended
+    );
+    assert!(ask.answer.is_none(), "a withdrawal is not an answer");
+    let decisions = state.store.decisions(Some(run.as_str()), 20).await.unwrap();
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d.outcome == "withdrawn" && d.authority == devplane::core::Authority::Nobody),
+        "{decisions:?}"
+    );
+    assert!(
+        !decisions
+            .iter()
+            .any(|d| d.action == "agent:tool.use"
+                && d.authority == devplane::core::Authority::Person),
+        "a person was credited with a withdrawal: {decisions:?}"
+    );
+    let r = state.world.lock().await.run(&run).cloned().unwrap();
+    assert!(r.blocked_on.is_none(), "{:?}", r.blocked_on);
+}
+
+/// A follow-up prompt supersedes a pending request: it is answered
+/// *cancelled*, ended as nobody's, and the prompt reaches the agent.
+#[tokio::test]
+async fn a_follow_up_prompt_cancels_what_was_still_waiting() {
+    let Some(agent) = echo_agent() else { return };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("followup");
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo.clone(),
+        Some("this needs permission".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    await_asks(&state, &run, 1).await;
+    devplane::driven::prompt(&state, &run, "never mind, say hi".into())
+        .await
+        .expect("prompted");
+    await_said(&state, &run, "permission outcome: Cancelled").await;
+    await_run(&state, &run, |r| r.totals.turns >= 2).await;
+    assert!(heard(&repo).contains("never mind, say hi"));
+    assert!(open_asks(&state, &run).await.is_empty());
+    let decisions = state.store.decisions(Some(run.as_str()), 20).await.unwrap();
+    assert!(
+        decisions
+            .iter()
+            .any(|d| d.outcome == "cancelled" && d.authority == devplane::core::Authority::Nobody),
+        "{decisions:?}"
+    );
+}
+
+/// Answering an ask the live session no longer waits on (one from before a
+/// restart) reaches the agent as a message, and never withdraws the requests
+/// it is waiting on now.
+#[tokio::test]
+async fn answering_a_stale_ask_leaves_the_live_requests_waiting() {
+    let Some(agent) = echo_agent() else { return };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("stale-ask");
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo.clone(),
+        Some("twin-asks".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let asks = await_asks(&state, &run, 2).await;
+    let mut stale = asks[0].clone();
+    stale.id = devplane::core::AskId::new("stale-from-before-a-restart");
+    stale.request_id = "request-from-before-a-restart".into();
+    state.store.save_ask(&stale).await.unwrap();
+
+    let answered = devplane::driven::answer_ask(
+        &state,
+        stale.id.as_str(),
+        devplane::driven::Answer::Permission(devplane::driven::Decision::Allow),
+        "test",
+    )
+    .await
+    .expect("answered");
+    assert!(
+        matches!(
+            answered.delivery,
+            Some(devplane::core::ask::Delivery::Resumed)
+        ),
+        "{:?}",
+        answered.delivery
+    );
+    let open = open_asks(&state, &run).await;
+    assert_eq!(open.len(), 2, "a live request was withdrawn: {open:?}");
+    let decisions = state.store.decisions(Some(run.as_str()), 20).await.unwrap();
+    assert!(
+        !decisions.iter().any(|d| d.outcome == "cancelled"),
+        "{decisions:?}"
+    );
+}
+
+/// The pids of the fixture processes that opened a session in `repo`, and
+/// how many of them are still running.
+fn alive_agents(repo: &Path) -> usize {
+    std::fs::read_dir(repo.join(".devplane/pids"))
+        .map(|d| {
+            d.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+                // SAFETY: signal 0 only checks for the process.
+                .filter(|pid| unsafe { libc::kill(*pid, 0) } == 0)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Waits until the running agents match what the host owns: one live
+/// session, or none.
+async fn await_owned(state: &Shared, run: &RunId, repo: &Path) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let owned = {
+            let map = state.sessions.lock().await;
+            map.get(run)
+                .map(|s| usize::from(s.is_live() && !s.is_stopping()))
+                .unwrap_or(0)
+        };
+        let settled = state
+            .sessions
+            .lock()
+            .await
+            .get(run)
+            .is_none_or(|s| !s.is_stopping());
+        let running = alive_agents(repo);
+        if settled && running == owned {
+            return owned;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{running} agent process(es) running while the host owns {owned}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Resumes racing each other, or a stop, leave exactly the one agent the
+/// host owns — never a second, unowned process.
+#[tokio::test]
+async fn racing_resumes_and_stops_leave_exactly_the_owned_agent() {
+    let Some(agent) = echo_agent() else { return };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("race");
+    trust(&c, &addr, &repo).await;
+    let run =
+        devplane::driven::dispatch(&state, &agent, repo.clone(), Some("hi".into()), Vec::new())
+            .await
+            .unwrap();
+    await_run(&state, &run, |r| {
+        r.totals.turns >= 1 && r.agent_session.is_some()
+    })
+    .await;
+
+    // Two resumes right behind a stop, while the old agent is still going.
+    devplane::driven::stop(&state, &run).await.unwrap();
+    let (a, b) = tokio::join!(
+        devplane::driven::resume(&state, &run),
+        devplane::driven::resume(&state, &run)
+    );
+    assert_eq!(
+        usize::from(a.is_ok()) + usize::from(b.is_ok()),
+        1,
+        "exactly one resume starts an agent: {a:?} {b:?}"
+    );
+    assert_eq!(await_owned(&state, &run, &repo).await, 1);
+
+    // A stop and a resume at once: whatever order they land in, what runs is
+    // what the host owns.
+    let (_stopped, _resumed) = tokio::join!(
+        devplane::driven::stop(&state, &run),
+        devplane::driven::resume(&state, &run)
+    );
+    await_owned(&state, &run, &repo).await;
+
+    if devplane::driven::is_live(&state, &run).await {
+        devplane::driven::stop(&state, &run).await.unwrap();
+    }
+    assert_eq!(await_owned(&state, &run, &repo).await, 0);
+}
+
+/// The diff a call reported is on the run's log, keyed on the call, as the
+/// agent's claim; and Devplane's MCP server was offered to the agent.
+#[tokio::test]
+async fn a_reported_diff_is_kept_on_the_log_and_our_tools_are_offered() {
+    let Some(agent) = echo_agent() else { return };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("diff");
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo.clone(),
+        Some("diff-edit".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    await_run(&state, &run, |r| r.totals.turns >= 1).await;
+    let events = state.store.events_for_run(&run, 1000).await.unwrap();
+    let reported: Vec<&devplane::core::Event> = events
+        .iter()
+        .map(|e| &e.event)
+        .filter(|e| matches!(e, devplane::core::Event::EditReported { .. }))
+        .collect();
+    assert_eq!(reported.len(), 1, "one diff, kept once: {reported:?}");
+    match reported[0] {
+        devplane::core::Event::EditReported {
+            call_id,
+            new_text,
+            old_text,
+            omitted_bytes,
+            ..
+        } => {
+            assert_eq!(call_id, "d1");
+            assert_eq!(new_text, "two\n", "the fragment was kept, not the whole");
+            assert_eq!(old_text.as_deref(), Some("one\n"));
+            assert_eq!(*omitted_bytes, 0);
+        }
+        _ => unreachable!(),
+    }
+
+    let offered: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join(".devplane/mcp.json")).unwrap_or_default(),
+    )
+    .unwrap_or_default();
+    assert_eq!(offered[0]["name"], "devplane", "{offered}");
+    assert_eq!(offered[0]["args"], serde_json::json!(["mcp"]), "{offered}");
+    assert!(
+        offered[0]["env"].as_array().is_some_and(|e| e
+            .iter()
+            .any(|v| v["name"] == "DEVPLANE_RUN" && v["value"] == run.as_str())),
+        "{offered}"
+    );
+}
+
+/// A repository that keeps no transcript keeps no reported diff either: it is
+/// file content the agent said.
+#[tokio::test]
+async fn a_reported_diff_is_not_kept_where_transcripts_are_not() {
+    let Some(agent) = echo_agent() else { return };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("diff-unkept");
+    std::fs::write(
+        repo.join("devplane.toml"),
+        "[gates]\ncheck = [\"true\"]\n\n[transcripts]\nkeep = false\n",
+    )
+    .unwrap();
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo.clone(),
+        Some("diff-edit".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    await_run(&state, &run, |r| r.totals.turns >= 1).await;
+    let events = state.store.events_for_run(&run, 1000).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, devplane::core::Event::EditReported { .. })),
+        "a diff was kept although transcripts are not"
+    );
 }

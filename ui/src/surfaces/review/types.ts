@@ -2,6 +2,7 @@
 import type { Coverage } from "../../wire/Coverage";
 import type { ReviewRole } from "../../wire/ReviewRole";
 import type { SentTask } from "../../wire/SentTask";
+import type { Weakened } from "../../wire/Weakened";
 
 export type Kind = "context" | "added" | "removed";
 export type Hunk = { header: string; lines: [Kind, string][]; formatter_only: boolean };
@@ -24,7 +25,10 @@ export type File = {
 };
 /// A group of files. The first is *checks weakened or changed* when the change
 /// skipped, deleted or redefined a check; `weakened` says what matched per file.
-export type Group = { role: ReviewRole | null; says: string; files: File[]; weakened?: Array<{ path: string; why: string }> };
+/// Each weakened row names what it matched, and whether a person marked it
+/// seen (durable, in the host: an offer waits for every one).
+export type WeakRow = Weakened & { seen: boolean };
+export type Group = { role: ReviewRole | null; says: string; files: File[]; weakened?: WeakRow[] };
 export type IntentGroup = { run: string; tasks: SentTask[]; title: string; says: string; files: string[] };
 export type Intent = {
   heading: string;
@@ -48,6 +52,7 @@ export type ReviewBody = {
   truncated_says: string | null;
   empty_says: string | null;
   latest_run: string | null;
+  qualifier?: import("../../wire/Qualifier").Qualifier | null;
 };
 
 /// One row of the risk tab: a role's heading, a file, or one of its hunks.

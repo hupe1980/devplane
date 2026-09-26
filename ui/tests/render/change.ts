@@ -9,6 +9,7 @@ import ChangeList from "../../src/surfaces/change/List.svelte";
 import { pair } from "../../src/surfaces/change/pair";
 import { STATES, LIFE } from "../../src/lib/State.svelte";
 import { recorded } from "../fixtures";
+import { plain } from "../../src/lib/md";
 
 // Recordings are found by their title, never by an id a recapture changes.
 const rate = recorded("change", "Rate-limit the login route");
@@ -31,8 +32,10 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   for (const d of [stale, untraced, ungated]) {
     const out = doc(d);
     if (!out.includes(d.title)) fail(`the change document does not carry its title "${d.title}"`);
-    const says = (d.standing_says ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
-    if ((out.split(says).length - 1) !== 1) fail(`"${d.standing_says}" is not said exactly once`);
+    // Rendered as the host's sentence: read as the words a person sees, once.
+    const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+    const says = norm(plain(d.standing_says ?? ""));
+    if ((norm(visible(out)).split(says).length - 1) !== 1) fail(`"${d.standing_says}" is not said exactly once`);
   }
   // A gate that passed against a stale tree is not verified, and nothing on
   // the page spends the verified green on it.
@@ -77,13 +80,14 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
 
 // ── Counts are counts: no percentage, no fraction, no n of m ─────────────
 //
-// Ticked is what an agent wrote about its own work; verified is a gate. They
-// are two numbers side by side, never one figure over the other.
+// Ticked is what an agent wrote about its own work; seen by a passing check
+// is a gate. They are two numbers side by side, never one figure over the
+// other — and a task is never called verified, only a change is.
 {
-  const counts = { tasks: 15, ticked: 11, verified: 9, ticked_unsent: ["T010 Write the docs (FR-004)"], sent_unticked: [] };
-  const d = { ...stale, counts, counts_says: "11 ticked · 9 verified", token_rows: [
-    { token: "FR-003", tasks: 3, ticked: 2, verified: 0, says: "3 tasks · 2 ticked · 0 verified" },
-    { token: "FR-004", tasks: 2, ticked: 2, verified: null, says: "2 tasks · 2 ticked · no gates declared" }],
+  const counts = { tasks: 15, ticked: 11, seen_by_pass: 9, ticked_unsent: ["T010 Write the docs (FR-004)"], sent_unticked: [] };
+  const d = { ...stale, counts, counts_says: "11 ticked · 9 seen by a passing check", token_rows: [
+    { token: "FR-003", tasks: 3, ticked: 2, seen_by_pass: 0, says: "3 tasks · 2 ticked · 0 seen by a passing check" },
+    { token: "FR-004", tasks: 2, ticked: 2, seen_by_pass: null, says: "2 tasks · 2 ticked · no gates declared" }],
     drifts: [{ run: "r-9f2", changed_at: "2026-09-25T10:18:00Z", started_at: "2026-09-25T10:00:00Z",
       says: "the specification changed 18m 0s into run r-9f2 and the run never saw it" }] };
   const over = html(Overview, { d, go: () => {} });
@@ -95,7 +99,12 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
     if (/\d+ of \d+(?! commands)/.test(text)) fail(`the ${name} view renders an "n of m"`);
     if (/<progress|<meter/.test(bare(markup))) fail(`the ${name} view renders a bar`);
   }
-  if (!tasks.includes("11 ticked · 9 verified")) fail("the tasks view does not print the host's two counts");
+  if (!tasks.includes("11 ticked · 9 seen by a passing check")) fail("the tasks view does not print the host's two counts");
+  for (const [name, markup] of [["overview", over], ["tasks", tasks]] as const) {
+    if (/\bverified\b/i.test(visible(markup))) fail(`the ${name} view calls a task verified`);
+    if (/class="[^"]*\bdone\b[^"]*"[^>]*>\s*9\b/.test(markup)) fail(`the ${name} view paints the seen count green`);
+  }
+  if (!over.includes("seen by a passing check")) fail("the overview does not say what the third count is");
   if (!tasks.includes("T010 Write the docs (FR-004)")) fail("a box ticked that nobody was sent is not listed by text");
   if (!tasks.includes("no gates declared")) fail("a requirement with no gates does not say so");
   if (!tasks.includes("the specification changed 18m 0s into run r-9f2")) fail("the drift sentence is not printed");
@@ -104,7 +113,7 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   if (!t.includes("/drift/tell`") || !t.includes("/drift/accept`") || !/JSON\.stringify\(\{ run \}\)/.test(t))
     fail("a drift decision does not post its run to a route spelled whole");
   // Absent is not zero: no gates declared is a sentence, not a 0.
-  const none = html(Overview, { d: { ...d, counts: { ...counts, verified: null } }, go: () => {} });
+  const none = html(Overview, { d: { ...d, counts: { ...counts, seen_by_pass: null } }, go: () => {} });
   if (!none.includes("no gates declared")) fail("an unverifiable count is rendered as a number");
 }
 
@@ -139,4 +148,19 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   const out = html(ChangeList, { all: [], open: () => {} });
   if (/No change has been started/.test(out)) fail("the change list says nothing was started before it has read");
   if (!/class="skel/.test(out)) fail("the change list renders no skeleton before it has read");
+}
+
+// ── The agent tab: a wait is words, and only what it can see is listed ───
+{
+  const agent = source("../src/surfaces/change/Agent.svelte");
+  if (!/waiting on you — question/.test(agent) || !/"waiting" in s/.test(agent))
+    fail("a waiting run's state object is not mapped to words, so it prints as [object Object]");
+  if (/Commands run/.test(agent)) fail("the agent tab claims a list of finished commands it cannot see");
+  // The review: marking a hunk reads only the weakened rows inside it.
+  const pane = source("../src/surfaces/review/Pane.svelte");
+  if (!/markRead\(\(weakRows\.get\(file\.path\) \?\? \[\]\)\.filter\(\(w\) => inHunk\(h, w\)\)\)/.test(pane))
+    fail("marking one hunk records every weakened row in its file as read");
+  // No count before the list is read.
+  const unread = html(ChangeList, { open: () => {} });
+  if (/class="n[^"]*">0</.test(unread)) fail("the changes sidebar prints 0 before it has read anything");
 }

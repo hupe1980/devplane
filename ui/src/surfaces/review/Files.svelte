@@ -44,7 +44,7 @@
           <span class="delta"><span class="add">+{f.added}</span> <span class="del">−{f.removed}</span></span>
           <span class="meta">
             {#if f.coverage?.coverage === "covered"}<span class="cov" title={f.coverage_says ?? ""}><Icon name="shield" size={11} /></span>{/if}
-            {#if f.hunks.length}<span class="seen" class:all={done === f.hunks.length}>{done}/{f.hunks.length}</span>{/if}
+            {#if f.hunks.length}<span class="seen" class:all={done === f.hunks.length} title="{done} of {f.hunks.length} hunks marked in this browser">{done}/{f.hunks.length}</span>{/if}
           </span>
         </button>
       {/each}

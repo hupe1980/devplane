@@ -2092,7 +2092,7 @@ async fn eleven_ticked_nine_verified_and_never_one_number() {
     );
     assert_eq!(row["counts"]["tasks"], 15, "{}", row["counts"]);
     assert_eq!(row["counts"]["ticked"], 11);
-    assert_eq!(row["counts"]["verified"], 9);
+    assert_eq!(row["counts"]["seen_by_pass"], 9);
     assert_eq!(
         row["counts"]["ticked_unsent"],
         serde_json::json!([
@@ -2102,7 +2102,7 @@ async fn eleven_ticked_nine_verified_and_never_one_number() {
         "ticked by hand, sent to nobody"
     );
     assert_eq!(row["counts"]["sent_unticked"], serde_json::json!([]));
-    assert_eq!(row["counts_says"], "11 ticked · 9 verified");
+    assert_eq!(row["counts_says"], "11 ticked · 9 seen by a passing check");
     let rows: Vec<(String, u64, u64, Value)> = row["token_rows"]
         .as_array()
         .unwrap()
@@ -2112,7 +2112,7 @@ async fn eleven_ticked_nine_verified_and_never_one_number() {
                 r["token"].as_str().unwrap().to_string(),
                 r["tasks"].as_u64().unwrap(),
                 r["ticked"].as_u64().unwrap(),
-                r["verified"].clone(),
+                r["seen_by_pass"].clone(),
             )
         })
         .collect();
@@ -2127,7 +2127,7 @@ async fn eleven_ticked_nine_verified_and_never_one_number() {
     );
     assert_eq!(
         row["token_rows"][3]["says"],
-        "4 tasks · 2 ticked · 0 verified"
+        "4 tasks · 2 ticked · 0 seen by a passing check"
     );
     let specs = get(&c, &addr, "/api/specs").await;
     let plan = specs["projects"][0]["plans"]
@@ -2137,13 +2137,13 @@ async fn eleven_ticked_nine_verified_and_never_one_number() {
         .find(|p| p["change_id"] == id)
         .expect("the plan the change works to");
     assert_eq!(plan["counts"]["ticked"], 11, "{plan}");
-    assert_eq!(plan["counts"]["verified"], 9);
+    assert_eq!(plan["counts"]["seen_by_pass"], 9);
     assert_eq!(plan["token_rows"][0]["token"], "FR-001");
 
     // No gates declared is different from zero.
     std::fs::write(repo.join("devplane.toml"), "[project]\n").unwrap();
     let row = get(&c, &addr, &format!("/api/changes/{id}")).await;
-    assert!(row["counts"]["verified"].is_null(), "{}", row["counts"]);
+    assert!(row["counts"]["seen_by_pass"].is_null(), "{}", row["counts"]);
     assert_eq!(row["counts"]["ticked"], 11);
     assert_eq!(row["counts_says"], "11 ticked · no gates declared");
     assert_eq!(
@@ -2486,7 +2486,7 @@ fn explain_says_why_nothing_answered() {
 
     let explain = |dir: &std::path::Path| -> Value {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-            .args(["--json", "explain", "--dir"])
+            .args(["explain", "--json", "--dir"])
             .arg(dir)
             .arg("cat .env")
             .env("DEVPLANE_HOME", &home)
@@ -2534,7 +2534,7 @@ fn explain_says_why_nothing_answered() {
 /// A change's files against the project's base, uncommitted work included.
 async fn change_set_of(repo: &Path, tree: &Path) -> Value {
     let base = devplane::view::base_of(Some(repo), tree).await;
-    serde_json::json!({ "changes": devplane::git::change_set(tree, &base).await })
+    serde_json::json!({ "changes": devplane::git::change_set(tree, &base).await.unwrap() })
 }
 
 /// The change set keeps apart: a real change, a branch that changed nothing,
@@ -2939,12 +2939,17 @@ async fn touching_a_file_makes_a_verified_change_unverified_with_no_flag_written
         .cloned()
         .unwrap();
     let then = record.gates.last().and_then(|g| g.commit.clone());
+    let ran: Vec<String> = record
+        .check_report()
+        .map(|g| g.commands.iter().map(|c| c.command.clone()).collect())
+        .unwrap_or_default();
+    let declared = devplane::core::change::Declared::Checks(&ran);
     assert_eq!(
-        record.state(then.as_ref()),
+        record.state(declared, then.as_ref()),
         devplane::core::ChangeState::Verified
     );
     assert_ne!(
-        record.state(record.tree_now.as_ref()),
+        record.state(declared, record.tree_now.as_ref()),
         devplane::core::ChangeState::Verified
     );
     std::fs::remove_dir_all(&repo).ok();
@@ -2991,7 +2996,11 @@ async fn uncommitted_work_that_passes_check_is_verified() {
 /// Only `check` verifies; a named gate passing after a failed `check` does not.
 #[test]
 fn a_named_gate_after_a_failing_check_is_not_verified() {
-    use devplane::core::change::{CommandResult, CommitStamp, GateReport, Reach, Standing};
+    use devplane::core::change::{
+        CommandResult, CommitStamp, Declared, GateReport, Reach, Standing,
+    };
+    let declared = ["x".to_string()];
+    let declared = Declared::Checks(&declared);
     let stamp = CommitStamp {
         commit: Some("c0ffee".into()),
         tree: Some("7ree".into()),
@@ -3013,9 +3022,8 @@ fn a_named_gate_after_a_failing_check_is_not_verified() {
     let mut change =
         devplane::core::Change::new(devplane::core::ProjectId::new("p"), "t".into(), "t".into());
     change.gates = vec![report("check", 1), report("lint", 0)];
-    assert!(!change.is_verified(Some(&stamp)));
     assert!(matches!(
-        change.verdict(true, Some(&stamp)),
+        change.verdict(declared, Some(&stamp)),
         Standing::Failed { .. }
     ));
     assert_eq!(
@@ -3023,10 +3031,10 @@ fn a_named_gate_after_a_failing_check_is_not_verified() {
         None,
         "a named pass is no pass of check"
     );
-    assert!(!devplane::core::change::Completion::of(&change, true, Some(&stamp)).is_checked());
+    assert!(!devplane::core::change::Completion::of(&change, declared, Some(&stamp)).is_checked());
 
     change.gates.push(report("check", 0));
-    assert!(change.is_verified(Some(&stamp)));
+    assert_eq!(change.verdict(declared, Some(&stamp)), Standing::Verified);
 }
 
 fn tree_by_hand(dir: &Path) -> String {
@@ -3332,12 +3340,19 @@ async fn archiving_keeps_the_record_and_removes_the_worktree() {
     std::fs::remove_dir_all(&repo).ok();
 }
 
-/// Offering without `[github] pull_request` pushes nothing and returns two
-/// commands; the inbox offers it exactly on a verified change.
+/// Offering without `[github] pull_request` pushes nothing and returns the
+/// push command and GitHub's own compare page; the inbox never offers it, and
+/// leads with its review. No other tool is named.
 #[tokio::test]
 async fn offering_without_permission_hands_back_the_commands_and_pushes_nothing() {
     let repo = scratch_repo("offer", "escalate", 1);
     hand_made_branch(&repo, "feat/by-hand");
+    let remote = std::process::Command::new("git")
+        .args(["remote", "add", "origin", "git@github.com:acme/app.git"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(remote.status.success());
     let (addr, c, _state) = boot().await;
     trust(&c, &addr, &repo).await;
     let adopted = post(
@@ -3350,7 +3365,7 @@ async fn offering_without_permission_hands_back_the_commands_and_pushes_nothing(
     let id = adopted["change_id"].as_str().unwrap().to_string();
     post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
 
-    // Verified: the inbox offers it but never does it itself.
+    // Verified: the inbox leads with the review and never offers.
     let inbox = get(&c, &addr, "/api/inbox").await;
     let ready = inbox["items"]
         .as_array()
@@ -3359,14 +3374,9 @@ async fn offering_without_permission_hands_back_the_commands_and_pushes_nothing(
         .find(|i| i["kind"] == "ready_to_decide" && i["change_id"] == id)
         .cloned()
         .unwrap_or_else(|| panic!("no ready row: {inbox}"));
-    assert!(
-        ready["actions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|a| a == "offer"),
-        "{ready}"
-    );
+    let acts = ready["actions"].as_array().unwrap();
+    assert_eq!(acts[0], "review", "{ready}");
+    assert!(!acts.iter().any(|a| a == "offer"), "{ready}");
     assert!(change_row(&c, &addr, &id).await["pull_request"].is_null());
 
     let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
@@ -3378,19 +3388,11 @@ async fn offering_without_permission_hands_back_the_commands_and_pushes_nothing(
         "{push}"
     );
     assert!(
-        create.starts_with("cd ")
-            && create.contains("&& gh pr create")
-            && create.contains("--head feat/by-hand"),
-        "{create}"
+        create.starts_with("https://github.com/acme/app/compare/")
+            && create.ends_with("...feat/by-hand?expand=1"),
+        "the compare page for the branch, a link a person opens: {create}"
     );
-    assert!(
-        !create.contains("--repo"),
-        "`--repo` takes OWNER/REPO, never a path: {create}"
-    );
-    assert!(
-        create.contains(&format!("devplane change export {id}")),
-        "{create}"
-    );
+    assert!(!create.contains("gh "), "no other tool is named: {create}");
     let row = change_row(&c, &addr, &id).await;
     assert!(row["pull_request"].is_null(), "nothing was opened: {row}");
     assert_eq!(row["state"], "verified");
@@ -4732,4 +4734,335 @@ async fn archive_keeps_the_branch_and_a_merged_pull_request_counts_as_merged() {
     assert_eq!(done["branch_deleted"], true, "{done}");
     assert!(!git_ok(&repo, &["rev-parse", "--verify", "feat/squashed"]));
     std::fs::remove_dir_all(&repo).ok();
+}
+
+// ── Decide honestly: a weakened check guards the offer ──────────────────────
+
+/// The hand-made branch, plus a commit that skips the burst test.
+fn branch_that_skips_a_test(repo: &Path, branch: &str) {
+    hand_made_branch(repo, branch);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["checkout", "-q", branch]);
+    std::fs::create_dir_all(repo.join("tests")).unwrap();
+    std::fs::write(
+        repo.join("tests/login.test.ts"),
+        "test(\"login\", () => { expect(login()).toBe(true); });\nit.skip(\"rejects the sixth attempt\", () => {});\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "skip the burst test"]);
+    git(&["checkout", "-q", "main"]);
+}
+
+fn commit_in(dir: &Path, message: &str) {
+    for args in [vec!["add", "-A"], vec!["commit", "-qm", message]] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    }
+}
+
+/// Offering a verified change whose diff skipped a test is refused, naming the
+/// row, until a person marks it seen; then it proceeds exactly as before. A
+/// different skip marker is a different row, unseen again.
+#[tokio::test]
+async fn an_offer_waits_for_every_weakened_row_to_be_seen() {
+    let repo = scratch_repo("offer-weakened", "escalate", 1);
+    branch_that_skips_a_test(&repo, "feat/skips");
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/skips", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(adopted["change"]["worktree"].as_str().unwrap());
+    post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+
+    // The qualifier travels with the green.
+    let row = change_row(&c, &addr, &id).await;
+    assert_eq!(row["state"], "verified", "{row}");
+    assert_eq!(row["qualifier"]["weakened"], 1, "{row}");
+    assert_eq!(row["qualifier"]["unseen"], 1, "{row}");
+    assert_eq!(row["qualifier"]["says"], "1 check weakened", "{row}");
+
+    // Refused, naming the row and how to mark it; nothing is offered.
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(offer["refused"], "weakened_unseen", "{offer}");
+    let rows = offer["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{offer}");
+    assert_eq!(rows[0]["path"], "tests/login.test.ts");
+    assert!(
+        rows[0]["why"].as_str().unwrap().contains("it.skip("),
+        "{offer}"
+    );
+    assert!(
+        offer["seen_with"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("change review {id} --seen tests/login.test.ts")),
+        "{offer}"
+    );
+    assert!(change_row(&c, &addr, &id).await["pull_request"].is_null());
+
+    // A mark for a row that is not there is refused, and marks nothing.
+    let none = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "fixed.txt" }),
+    )
+    .await;
+    assert!(
+        none["error"].as_str().unwrap().contains("no weakened row"),
+        "{none}"
+    );
+    assert_eq!(none["rows"][0]["path"], "tests/login.test.ts", "{none}");
+
+    // Seen by a person: the review says so, and the offer proceeds as before.
+    let seen = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "tests/login.test.ts" }),
+    )
+    .await;
+    assert_eq!(seen["seen"][0]["path"], "tests/login.test.ts", "{seen}");
+    let review = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    assert_eq!(review["groups"][0]["weakened"][0]["seen"], true, "{review}");
+    assert_eq!(review["qualifier"]["unseen"], 0, "{review}");
+    let cert = get(&c, &addr, &format!("/api/changes/{id}/certificate")).await;
+    let md = cert["markdown"].as_str().unwrap();
+    assert!(
+        md.contains("altered the checks it was verified by")
+            && md.contains("A person marked each of these read."),
+        "the certificate still states it: {md}"
+    );
+
+    // The marker's text moves: a new row, unseen, and the offer is refused again.
+    std::fs::write(
+        wt.join("tests/login.test.ts"),
+        "test(\"login\", () => {});\nit.skip(\"rejects a burst\", () => {});\n",
+    )
+    .unwrap();
+    commit_in(&wt, "reword the skipped test");
+    let again = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(again["refused"], "weakened_unseen", "{again}");
+    post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "tests/login.test.ts" }),
+    )
+    .await;
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(offer["offer"], "commands", "{offer}");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// A diff git will not read is never "nothing weakened": the offer refuses and
+/// the certificate says it does not know.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unreadable_diff_refuses_the_offer_and_is_unknown_on_the_certificate() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = scratch_repo("offer-unreadable", "escalate", 1);
+    branch_that_skips_a_test(&repo, "feat/skips");
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/skips", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(adopted["change"]["worktree"].as_str().unwrap());
+    // `git diff` cannot hash a modified file it may not open.
+    let file = wt.join("tests/login.test.ts");
+    std::fs::write(&file, "it.skip(\"everything\", () => {});\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    let err = offer["error"].as_str().unwrap_or_else(|| panic!("{offer}"));
+    assert!(err.contains("diff could not be read"), "{err}");
+    let cert = get(&c, &addr, &format!("/api/changes/{id}/certificate")).await;
+    let md = cert["markdown"].as_str().unwrap();
+    assert!(md.contains("the diff could not be read"), "{md}");
+    assert!(!md.contains("altered none of its checks"), "{md}");
+    let row = change_row(&c, &addr, &id).await;
+    assert_eq!(
+        row["qualifier"]["says"], "the diff could not be read",
+        "{row}"
+    );
+
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// The ready row carries what the review leads with, and its first action is
+/// the review; it never offers, weakened or not.
+#[tokio::test]
+async fn the_ready_row_carries_the_reviews_facts_and_never_offers() {
+    let repo = scratch_repo("ready-facts", "escalate", 1);
+    branch_that_skips_a_test(&repo, "feat/skips");
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/skips", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+    let inbox = get(&c, &addr, "/api/inbox").await;
+    let ready = inbox["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "ready_to_decide" && i["change_id"] == id)
+        .cloned()
+        .unwrap_or_else(|| panic!("no ready row: {inbox}"));
+    let acts = ready["actions"].as_array().unwrap();
+    assert_eq!(acts[0], "review", "{ready}");
+    assert!(!acts.iter().any(|a| a == "offer"), "{ready}");
+    let facts = &ready["facts"];
+    assert_eq!(facts["qualifier"]["weakened"], 1, "{ready}");
+    assert_eq!(facts["qualifier"]["unseen"], 1, "{ready}");
+    assert!(facts["hunks"].as_u64().unwrap() >= 1, "{ready}");
+    assert_eq!(facts["says"].as_array().unwrap().len(), 2, "{ready}");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// Offering, finishing, archiving and marking a weakened row read are a
+/// person's decisions: refused from inside an agent's session before anything
+/// is read, with the same stated limit as `answer`.
+#[test]
+fn a_decision_about_a_change_is_refused_from_an_agent_session() {
+    for args in [
+        vec!["change", "offer", "c-any"],
+        vec!["change", "finish", "c-any"],
+        vec!["change", "archive", "c-any"],
+        vec!["change", "review", "c-any", "--seen", "tests/login.test.ts"],
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+            .args(&args)
+            .env("CLAUDECODE", "1")
+            .env(
+                "DEVPLANE_HOME",
+                std::env::temp_dir().join("vp-no-home-here"),
+            )
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} ran from an agent session");
+        assert!(
+            err.contains("`CLAUDECODE` is set") && err.contains("does not close it"),
+            "{args:?}: {err}"
+        );
+    }
+}
+
+/// Editing the definition of done after a pass does not keep the green: the
+/// commands that ran are compared with the commands declared now.
+#[test]
+fn a_pass_by_other_check_commands_is_not_verified() {
+    use devplane::core::change::{
+        Change, ChangeState, CommandResult, CommitStamp, Declared, GateReport, Outcome, Reach,
+        Standing,
+    };
+    let stamp = CommitStamp {
+        commit: Some("abc".into()),
+        tree: Some("t1".into()),
+        branch: None,
+        clean: true,
+        changed_files: 0,
+        reach: Reach::LocalOnly,
+        remote: None,
+    };
+    let mut change = Change::new_at(
+        devplane::core::ProjectId::new("p"),
+        "t".into(),
+        "p".into(),
+        jiff::Timestamp::now(),
+    );
+    change.gates.push(GateReport {
+        gate: "check".into(),
+        at: jiff::Timestamp::now(),
+        duration_ms: 1,
+        commands: vec![CommandResult {
+            command: "cargo test".into(),
+            outcome: Outcome::Exited { code: 0 },
+            duration_ms: 1,
+            output_tail: String::new(),
+            output_bytes: 0,
+            output_digest: String::new(),
+            failures: Vec::new(),
+        }],
+        attempt: 1,
+        spec: None,
+        commit: Some(stamp.clone()),
+    });
+    let same = ["cargo test".to_string()];
+    assert_eq!(
+        change.verdict(Declared::Checks(&same), Some(&stamp)),
+        Standing::Verified
+    );
+    let loosened = ["cargo test -- --skip slow".to_string()];
+    assert!(matches!(
+        change.verdict(Declared::Checks(&loosened), Some(&stamp)),
+        Standing::ChecksChanged { .. }
+    ));
+    assert_eq!(
+        change
+            .verdict(Declared::Checks(&loosened), Some(&stamp))
+            .word(),
+        "stale"
+    );
+
+    // The state is that same verdict, so the two never disagree: a loosened
+    // check, a deleted one, and a configuration nobody could read are each
+    // not verified in both.
+    for declared in [
+        Declared::Checks(&same),
+        Declared::Checks(&loosened),
+        Declared::Checks(&[]),
+        Declared::Unreadable,
+    ] {
+        let standing = change.verdict(declared, Some(&stamp));
+        let state = change.state(declared, Some(&stamp));
+        assert_eq!(
+            state == ChangeState::Verified,
+            standing == Standing::Verified,
+            "{declared:?}: state {state:?}, standing {standing:?}"
+        );
+    }
+    assert_eq!(
+        change.verdict(Declared::Checks(&[]), Some(&stamp)),
+        Standing::NoGatesDeclared
+    );
+    assert_eq!(
+        change.verdict(Declared::Unreadable, Some(&stamp)),
+        Standing::ConfigUnreadable
+    );
+    assert_ne!(
+        change.state(Declared::Unreadable, Some(&stamp)),
+        ChangeState::Verified
+    );
 }

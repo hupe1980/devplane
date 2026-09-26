@@ -1,29 +1,21 @@
 <script lang="ts">
   // Reports between projects, and a form to file one. A person files through
   // the agents' route with `as_person` as the origin.
-  import { onMount } from "svelte";
   import { api } from "../../lib/api";
+  import { resource, failure } from "../../lib/resource.svelte";
   import ReportList from "./ReportList.svelte";
   import type { Row, Project, Filing } from "./ReportList.svelte";
 
   let { projects = [] }: { projects?: Project[] } = $props();
 
-  let reports = $state<Row[]>([]);
-  let loaded = $state(false);
-  let failed = $state("");
+  const reportsRead = resource<Row[]>(() => "/api/reports?all=true", { tell: () => "devplane report ls --all" });
+  const reports = $derived(Array.isArray(reportsRead.data) ? reportsRead.data : []);
+  const loaded = $derived(reportsRead.phase !== "loading");
+  const failed = $derived(
+    reportsRead.failure ? `${reportsRead.failure.says} — \`${reportsRead.failure.tell}\` tells more${reportsRead.data ? " (showing the last read)" : ""}` : "",
+  );
   let said = $state("");
-
-  async function read() {
-    try {
-      reports = await api<Row[]>("/api/reports?all=true");
-      failed = "";
-    } catch (e) {
-      failed = e instanceof Error ? e.message : String(e);
-    } finally {
-      loaded = true;
-    }
-  }
-  onMount(read);
+  const read = () => reportsRead.reload();
 
   async function file(f: Filing) {
     try {
@@ -43,7 +35,7 @@
       await read();
       return true;
     } catch (e) {
-      said = `not filed: ${e instanceof Error ? e.message : String(e)}`;
+      said = `not filed: ${failure(e).says}`;
       return false;
     }
   }

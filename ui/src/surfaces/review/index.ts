@@ -4,15 +4,17 @@ import { register } from "../../lib/surfaces";
 import { bind } from "../../lib/keys";
 import Review from "./Review.svelte";
 
-// One key each. `accept` and `seen` are marks in this browser only; `request a
-// fix` is a message to the agent, not a rejection.
+// One key each. `s` marks a hunk in this browser, keyed by the hunk's
+// content so a rewritten hunk is unmarked again; a weakened line inside that
+// hunk is also recorded as read, durably, by the host; `request a fix` is a message
+// to the agent, not a rejection. There is no *accept* mark: one durable seen
+// record is the host's to keep, not a second verdict in the browser.
 const KEYS: Array<[string, string, string]> = [
   ["j", "hunk-next", "next hunk"],
   ["k", "hunk-prev", "previous hunk"],
   ["n", "file-next", "next file"],
   ["p", "file-prev", "previous file"],
-  ["s", "hunk-seen", "mark this hunk seen (kept in this browser only)"],
-  ["a", "hunk-accept", "accept this hunk (a mark in this browser, sent nowhere)"],
+  ["s", "hunk-seen", "mark this hunk (in this browser, until it changes); a weakened line in it is recorded as read by the host"],
   ["f", "hunk-fix", "request a fix: a message to the change's latest run, quoting this hunk"],
   ["x", "hunk-expand", "expand this file's collapsed formatter-only hunks"],
   ["v", "diff-mode", "switch between unified and side-by-side"],

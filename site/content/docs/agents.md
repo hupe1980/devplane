@@ -37,14 +37,15 @@ inherits the trust of the checkout that owns it.
 
 ```console
 $ devplane agents
-claude     Claude Code    npx -y @agentclientprotocol/claude-agent-acp@0.79.0
-codex      Codex          npx -y @agentclientprotocol/codex-acp@1.12.0
+claude     Claude Code    npx -y @agentclientprotocol/claude-agent-acp@0.81.2
+codex      Codex          npx -y @agentclientprotocol/codex-acp@1.13.1
 opencode   OpenCode       opencode acp
-copilot    GitHub Copilot npx -y @github/copilot@1.0.86 --acp
-gemini     Gemini CLI     npx -y @google/gemini-cli@0.60.0 --acp
+copilot    GitHub Copilot npx -y @github/copilot@1.0.88 --acp
+gemini     Gemini CLI     npx -y @google/gemini-cli@0.61.0 --acp
 ```
 
-Each is pinned to an exact version. What an agent supports (`resume`, `load`, `modes`, sign-in) is
+The agents launched through `npx` are pinned to exact versions, and need Node (with `npx`) and
+network access to npm the first time; OpenCode runs the `opencode` on your `PATH`. What an agent supports (`resume`, `load`, `modes`, sign-in) is
 advertised when it starts, so `devplane agents` lists it only for agents that have run, with the date.
 *Not probed* and *not supported* are different facts.
 
@@ -80,12 +81,24 @@ A bare word that is not a known id is an error, never a launch attempt.
 | `devplane change prompt <change\|run> <text>` | another message, without stopping it; queued until the turn ends |
 | `devplane watch <run>` | the conversation as it arrives; `--thinking` includes the reasoning |
 | `devplane show <run>` | the run in detail, with its last lines |
-| `devplane change stop <run>` | stop it; says first what survives (the change, worktree, branch and record) |
+| `devplane change stop <run>` | stop it; says first what survives (the change, worktree, branch and record), then asks — `--yes` where nobody can answer |
 | `devplane answer <ask>` | answer a permission (`--allow` / `--deny`) or a question (`--option`, `--custom`) |
 
 **An ask outlives the agent that made it.** Quit the host with a question waiting and it stays in the
 inbox, answerable with `devplane answer`; the next host delivers the answer by resuming the session.
 Only [`[questions] deadline`](@/docs/configuration.md#questions) ends an unanswered ask.
+
+## What a driven agent is given
+
+- **Devplane's read-only MCP server.** Every session is offered `devplane mcp` (the same five tools as
+  the [plugin](@/docs/cli.md#devplane-mcp): inbox, change, explain, audit, reports), so the agent can
+  read the inbox or its own change's standing. None of them acts.
+- **`DEVPLANE_RUN`** in its environment, which `devplane report file` reads as the origin.
+- **A clean ending.** Stopping a run, or quitting the host, closes the session over the protocol
+  (`session/close`) where the agent offers it, before its processes are ended.
+- **Withdrawn questions leave the inbox.** When the agent cancels a permission request it had put to
+  you (it moved on, or the turn ended), the item goes away rather than waiting for an answer nothing
+  will read.
 
 ## Transcripts
 
@@ -125,11 +138,11 @@ session is never passed off as a resume. Resuming is never automatic: it spends 
 
 ```sh
 devplane attach <run>    # this process becomes `claude --resume <session>`
-devplane focus <run>     # raises the editor window that owns its directory
 ```
 
-`attach` uses `exec`, so ctrl-C, resize and the alternate screen behave as without Devplane. It needs
-the `claude` binary ([finding it](@/docs/install.md#finding-the-claude-binary)).
+On Unix `attach` uses `exec`, so ctrl-C, resize and the alternate screen behave as without Devplane;
+on Windows it starts `claude` and waits. It needs the `claude` binary
+([finding it](@/docs/install.md#finding-the-claude-binary)).
 
 Watching sessions you started yourself covers a different set of vendors: see
 [Watching sessions](@/docs/observe.md).

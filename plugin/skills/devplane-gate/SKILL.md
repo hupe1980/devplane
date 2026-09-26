@@ -11,10 +11,11 @@ said. Nothing here reads a specification, grades prose or scores coverage.
 ## How to run it
 
 ```sh
-devplane gate run --json
+devplane gate --json
 ```
 
-From the repository root. It answers with `state`, `passed`, `summary` and `commands`.
+From the repository root. It answers with `state`, `passed`, `summary`, `says` and `commands` (each
+with its exit and the tail of its output), and `error` when the configuration could not be read.
 
 ## How to report it
 
@@ -26,7 +27,7 @@ code.
 | `verified` | This project's checks passed, naming the commands that ran. |
 | `failed` | Which command failed and what it exited with. |
 | `no_gates` | This repository declares no checks, so nothing was verified. |
-| `config_unreadable` | `devplane.toml` could not be read — quote the error — and nothing ran. |
+| `config_unreadable` | `devplane.toml` could not be read — quote `error` — and nothing ran. |
 
 Only `verified` is a pass. **Never report `no_gates` or `config_unreadable` as one.**
 
@@ -39,5 +40,5 @@ Only `verified` is a pass. **Never report `no_gates` or `config_unreadable` as o
 
 ## What it does not record
 
-`devplane gate run` writes no row to the decision log. The command that records a result is
+`devplane gate` writes no row to the decision log. The command that records a result is
 `devplane change verify <change>`. Do not tell the user the result was recorded.

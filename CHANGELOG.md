@@ -2,7 +2,92 @@
 
 Notable changes per release, in the style of [Keep a Changelog](https://keepachangelog.com/). Dates are UTC.
 
-## Unreleased
+## 0.11.0 — 2026-09-26
+
+Devplane signs in to GitHub itself, and this release closes the ways an agent could steer its own
+verdict.
+
+### Breaking
+
+- `gh` is no longer used. Sign in with `devplane login github` (OAuth device flow, token in the OS credential
+  store); `DEVPLANE_GH` is gone. Without `[github] pull_request`, `change offer` prints `git push` and the compare URL.
+- A task is never called *verified*: the count is *seen by a passing check* (`seen_by_pass` on the wire).
+- A change is *verified* only while its project declares a `check` and `devplane.toml` loads.
+- `change offer` is refused (exit `3`, HTTP `409`) while a weakened-check row is unseen.
+- Commands: `gate run` → `gate`, `speckit install` → `speckit`, `issues`/`prs` → `forge issues`/`forge prs`,
+  `asks` → `inbox --all`; `focus` and `rules` removed.
+- `--json` only on commands that print JSON; a refused command prints `{"error": …}` and exits non-zero.
+- `connect`, `disconnect` and `change stop` refuse without `--yes` when stdin is not a terminal.
+- `answer`: `--option` excludes `--allow`/`--deny`; `--field` is for questions only.
+- Store schema 11. The old store is moved aside, not migrated.
+- Telemetry settings carry a new token: run `devplane connect` again.
+
+### Security
+
+- The tree digest hashes every file as it is on disk. A clean filter planted in `.git/config` could make edited code
+  digest as verified code, and ran in the host.
+- Vendor settings carry a telemetry-only token (`~/.devplane/telemetry-token`). Claude Code hands its settings'
+  environment to every tool call, so the old header gave agents the token that answers permissions.
+- On Codex, an *ask* is a *deny*: Codex runs a call its hook asks about. A crash while deciding refuses on every vendor.
+- A prohibition cannot be walked past through a wrapper the reader does not know (`pkexec`, `unbuffer`, `taskset`, …),
+  `flock -c`, or an abbreviated long flag (`rm --rec --for`).
+- Host-run git never starts `core.fsmonitor`, never prompts, and times out; the offer pushes with `--no-verify`.
+- Built-in prohibition: an agent may not edit Devplane's files, read its token, or edit its repository's
+  `devplane.toml`. `change offer|finish|archive` and `review --seen` are refused from an agent's session.
+- A line whose effect cannot be read statically (a variable naming the program, `GIT_SSH_COMMAND`, `LD_PRELOAD`,
+  more than eight wrappers) is put to a person.
+- The workbench is served with a `'self'`-only Content-Security-Policy, `no-referrer` and `nosniff`.
+- The GitHub token lives only in the OS credential store; a token GitHub rejects is deleted.
+- The host refuses a taken port instead of moving; the token is accepted only in the `Authorization` header;
+  `~/.devplane` is `0700` and its files `0600`.
+- An unreadable diff holds the offer. Trusting a repository is recorded in the ledger.
+
+### Added
+
+- **GitHub:** `devplane login github [--host] [--with-token]`, `logout github`, Setup → GitHub in the workbench,
+  Enterprise hosts (`[github] host`, `[github.hosts."<host>"] client_id`), and a GitHub section in `doctor`.
+- The Forge view and `devplane forge` name each failure — not signed in, expired, rate limited, unreachable, not a
+  GitHub repository — with its fix, and say how many items lie past the page.
+- *Verified* is always shown with its qualifier (*verified · 1 check weakened*) on every surface.
+- `change review <id> --seen <path>` marks a weakened row read; the certificate says when.
+- The review also flags: a test added with no assertion, an assertion removed or made trivial, a removed test, a
+  changed tolerance, lint and type suppressions, a test file renamed out of the suite, a new `.gitignore` pattern,
+  edits to build, lint, coverage and CI configuration or to a script a gate runs, and masked failures (`|| true`, …).
+- `doctor` reports a hook whose binary is gone as *gate off*.
+- Driven agents get Devplane's read-only MCP server, start in their worktree, and are closed with `session/close`.
+- `cargo install devplane --features app` builds the desktop app from crates.io.
+- Docs: Troubleshooting, a platform table, an upgrade section, and a quickstart from nothing to a verified change.
+
+### Changed
+
+- A forge poll is one GraphQL request per repository plus one search per host, not two `gh` processes per project.
+- The inbox never offers a change; *ready to decide* leads with Review.
+- `snooze` is capped at 30 days.
+- The workbench keeps its state through the poll, pauses while hidden, never shows a count before its list loads,
+  says when a read failed or is stale, and shows progress on long writes.
+- Keys: `Alt+` shortcuts work on macOS, `a`/`d` allow and deny in the inbox, and Enter opens an item.
+- The pure core no longer reads the clock or the disk.
+
+### Removed
+
+- The `offer` inbox action, the review's *accept* mark, and the OTLP metrics receiver.
+
+### Fixed
+
+- Spec Kit, OpenSpec and Kiro repositories without a `devplane.toml` listed no specifications.
+- The certificate's re-run steps checked out a commit without the verified work.
+- An answer to something the agent did not ask closed the question and stranded the agent.
+- Concurrent opens of an old-schema store could leave the retired copy empty.
+- Retention deleted the runs of open changes.
+- A report's issue could be filed twice.
+- A late telemetry event could clear a waiting permission or revive an ended run.
+- An agent that could not start ended silently.
+- Offering a branch that already had a pull request failed on every retry.
+- *Needs you* missed assigned issues past the first page and repositories whose name differs in case.
+- The inbox could read *Clear.* while items waited; marking one hunk marked a whole file's weakened checks.
+- The window's host used a random port, so telemetry reached nothing.
+- `trust` needed a running host; `disconnect` damaged a status line ending in a quote.
+- `.worktreeinclude` failed on file systems without hard links.
 
 ## 0.10.0 — 2026-09-25
 

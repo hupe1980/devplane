@@ -15,7 +15,7 @@ register({
     if (!per) return null;
     return Object.values(per).reduce((n, f) => n + (f.needs_you ?? 0), 0);
   },
-  // The rows are a `gh` read on the host's schedule, not part of the poll.
+  // The rows are read from GitHub on the host's schedule, not part of the poll.
   reads: ["/api/forge"],
   // How many registered projects have a forge, for the empty state.
   select: (feed) => {

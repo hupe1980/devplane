@@ -2,7 +2,8 @@
   // What was decided about this change, and on whose authority (person, rule,
   // timer, nobody, devplane). The default hides nothing; each chip narrows by
   // authority and shows what it would leave.
-  import { api } from "../../lib/api";
+  import { resource } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
   import { ago } from "./types";
@@ -18,24 +19,14 @@
   };
   let { id }: { id: string } = $props();
 
-  let rows = $state<Decision[] | null>(null);
-  let error = $state("");
+  const LIMIT = 500;
+  const key = $derived(id);
+  const read = resource<Decision[]>(() => (key ? `/api/decisions?about=${encodeURIComponent(key)}&limit=${LIMIT}` : null), {
+    tell: () => `devplane audit ${key}`,
+  });
+  const rows = $derived(Array.isArray(read.data) ? read.data : null);
   let only = $state<string | null>(null);
   let selected = $state<string | null>(null);
-  $effect(() => {
-    const want = id;
-    let live = true;
-    api<Decision[]>(`/api/decisions?about=${encodeURIComponent(want)}&limit=500`)
-      .then((r) => {
-        if (live) rows = Array.isArray(r) ? r : [];
-      })
-      .catch((e) => {
-        if (live) error = e instanceof Error ? e.message : String(e);
-      });
-    return () => {
-      live = false;
-    };
-  });
 
   const AUTHORITIES = ["person", "rule", "timer", "nobody", "devplane"];
   const counts = $derived(
@@ -55,13 +46,16 @@
 
 <div class="ledger">
   <div class="chips" role="group" aria-label="by authority">
-    <button class:on={only === null} onclick={() => (only = null)}>everything <span>{rows?.length ?? 0}</span></button>
+    <button class:on={only === null} onclick={() => (only = null)}>everything <span>{rows ? rows.length : ""}</span></button>
     {#each counts as [a, n] (a)}
-      <button class:on={only === a} disabled={n === 0} onclick={() => (only = only === a ? null : a)}>{a} <span>{n}</span></button>
+      <button class:on={only === a} disabled={n === 0} onclick={() => (only = only === a ? null : a)}>{a} <span>{rows ? n : ""}</span></button>
     {/each}
   </div>
-  {#if error}
-    <p class="fail">The decisions could not be read: {error}</p>
+  {#if rows && rows.length >= LIMIT}
+    <p class="quiet">The newest {LIMIT} are shown; <code>devplane audit {key}</code> has every one.</p>
+  {/if}
+  {#if read.failure}
+    <Failed what="the decisions" failure={read.failure} at={read.at} stale={read.data !== null} />
   {:else}
     <div class="frame">
       <Grid id="change-ledger" {columns} rows={shown} key={(r) => r.id} bind:selected label="decisions about this change">
@@ -151,8 +145,5 @@
     font-size: var(--t-sm);
     padding: var(--s-4);
     margin: 0;
-  }
-  .fail {
-    color: var(--fail);
   }
 </style>

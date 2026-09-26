@@ -579,3 +579,513 @@ async fn a_change_that_alters_no_check_has_no_such_heading() {
     }
     std::fs::remove_dir_all(&repo).ok();
 }
+
+// ── What a change weakened, read from its diff alone ────────────────────────
+
+mod weakening {
+    use devplane::core::diff::parse;
+    use devplane::core::review::{Qualifier, WeakKind, Weakened, weakened};
+    use std::collections::HashSet;
+
+    /// One modified file's diff: `lines` are `' '`, `'+'` or `'-'` prefixed.
+    fn modified(path: &str, lines: &[&str]) -> String {
+        let old = lines.iter().filter(|l| !l.starts_with('+')).count();
+        let new = lines.iter().filter(|l| !l.starts_with('-')).count();
+        format!(
+            "diff --git a/{path} b/{path}\nindex 1111111..2222222 100644\n--- a/{path}\n+++ b/{path}\n@@ -1,{old} +1,{new} @@\n{}\n",
+            lines.join("\n")
+        )
+    }
+
+    fn deleted(path: &str, lines: &[&str]) -> String {
+        format!(
+            "diff --git a/{path} b/{path}\ndeleted file mode 100644\nindex 1111111..0000000\n--- a/{path}\n+++ /dev/null\n@@ -1,{} +0,0 @@\n{}\n",
+            lines.len(),
+            lines
+                .iter()
+                .map(|l| format!("-{l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    }
+
+    fn rows(diff: &str) -> Vec<Weakened> {
+        rows_with(diff, &[])
+    }
+
+    fn rows_with(diff: &str, gates: &[&str]) -> Vec<Weakened> {
+        let set = parse("main", diff, "git diff");
+        let gates: Vec<String> = gates.iter().map(|g| g.to_string()).collect();
+        weakened(&set, None, &gates)
+    }
+
+    fn has(rows: &[Weakened], kind: WeakKind, why: &str) -> bool {
+        rows.iter().any(|w| w.kind == kind && w.why.contains(why))
+    }
+
+    // The qualifier: counts by kind, and nothing when nothing was weakened.
+
+    #[test]
+    fn a_skip_marker_is_one_check_weakened() {
+        let r = rows(&modified(
+            "tests/login.test.ts",
+            &[
+                " test(\"login\", () => {});",
+                "+it.skip(\"rejects the sixth\", () => {});",
+            ],
+        ));
+        let q = Qualifier::of(&r, &HashSet::new());
+        assert_eq!(
+            (q.weakened, q.deleted, q.gates_changed, q.unseen),
+            (1, 0, 0, 1),
+            "{r:?}"
+        );
+        assert_eq!(q.says, "1 check weakened");
+        assert_eq!(r[0].matched, "it.skip(\"rejects the sixth\", () => {});");
+    }
+
+    #[test]
+    fn a_deleted_test_and_an_edited_workflow_count_by_kind() {
+        let diff = deleted("tests/auth.rs", &["#[test]", "fn a() {}"])
+            + &modified(
+                ".github/workflows/ci.yml",
+                &[" jobs:", "-  x: 1", "+  x: 2"],
+            );
+        let q = Qualifier::of(&rows(&diff), &HashSet::new());
+        assert_eq!((q.weakened, q.deleted, q.gates_changed), (0, 1, 1));
+        assert_eq!(q.says, "1 test deleted · 1 gate changed");
+    }
+
+    #[test]
+    fn nothing_weakened_says_nothing() {
+        let r = rows(&modified("src/lib.rs", &[" fn a() {}", "+fn b() {}"]));
+        let q = Qualifier::of(&r, &HashSet::new());
+        assert!(q.is_empty() && q.says.is_empty() && q.unseen == 0, "{q:?}");
+    }
+
+    /// A marker already in the base is context, never the change's own.
+    #[test]
+    fn a_marker_in_the_base_is_not_the_changes() {
+        let r = rows(&modified(
+            "tests/login.test.ts",
+            &[" it.skip(\"old\", () => {});", "+test(\"new\", () => {});"],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    /// A seen mark is keyed by what the row matched, so a different marker is
+    /// a different, unseen row.
+    #[test]
+    fn a_seen_mark_lapses_when_the_matched_text_changes() {
+        let before = rows(&modified(
+            "tests/a.test.ts",
+            &["+it.skip(\"a\", () => {});"],
+        ));
+        let seen: HashSet<(String, String)> = before
+            .iter()
+            .map(|w| (w.path.clone(), w.matched.clone()))
+            .collect();
+        assert_eq!(Qualifier::of(&before, &seen).unseen, 0);
+        let after = rows(&modified(
+            "tests/a.test.ts",
+            &["+it.skip(\"b\", () => {});"],
+        ));
+        assert_eq!(Qualifier::of(&after, &seen).unseen, 1);
+    }
+
+    // Removed assertions, in test files only.
+
+    #[test]
+    fn a_removed_assertion_with_none_in_its_place_is_named() {
+        let r = rows(&modified(
+            "tests/test_limit.py",
+            &[
+                " def test_limit():",
+                "     r = limit()",
+                "-    assert r == 5",
+            ],
+        ));
+        assert!(has(&r, WeakKind::Skip, "removes an assertion"), "{r:?}");
+        assert_eq!(r[0].matched, "assert r == 5");
+        for (path, line) in [
+            ("tests/a.rs", "-    assert_eq!(x, 1);"),
+            ("tests/a.test.ts", "-  expect(x).toBe(1);"),
+            ("pkg/a_test.go", "-\tt.Fatalf(\"bad\")"),
+            ("tests/test_b.py", "-        self.assertEqual(a, b)"),
+        ] {
+            let r = rows(&modified(path, &[" fn a() {", line]));
+            assert!(
+                has(&r, WeakKind::Skip, "removes an assertion"),
+                "{path}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_replaced_or_moved_assertion_is_not_removed() {
+        let r = rows(&modified(
+            "tests/test_limit.py",
+            &[
+                " def test_limit():",
+                "-    assert r == 5",
+                "+    assert r == 6",
+            ],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+        // Outside the tests, an assertion is code, not a check.
+        let r = rows(&modified(
+            "src/limit.py",
+            &[" def f():", "-    assert r == 5"],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+        // Rust's `.expect("…")` asserts nothing.
+        let r = rows(&modified(
+            "tests/a.rs",
+            &[" fn a() {", "-    let x = y.expect(\"y\");"],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    // A test removed from a file that stays.
+
+    #[test]
+    fn a_test_removed_from_a_kept_file_is_a_deleted_test() {
+        let r = rows(&modified(
+            "tests/test_limit.py",
+            &[" import limit", "-def test_sixth():", "-    pass"],
+        ));
+        assert!(
+            has(&r, WeakKind::Deleted, "removes a test and keeps the file"),
+            "{r:?}"
+        );
+        assert_eq!(Qualifier::of(&r, &HashSet::new()).says, "1 test deleted");
+    }
+
+    #[test]
+    fn a_renamed_test_is_not_a_deleted_one() {
+        let r = rows(&modified(
+            "tests/test_limit.py",
+            &[
+                " import limit",
+                "-def test_sixth():",
+                "+def test_the_sixth():",
+                "     pass",
+            ],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    // Tolerances.
+
+    #[test]
+    fn a_changed_tolerance_is_named() {
+        let r = rows(&modified(
+            "tests/test_rate.py",
+            &[
+                " def test_rate():",
+                "-    assert rate() == approx(0.5, rel=1e-6)",
+                "+    assert rate() == approx(0.5, rel=0.5)",
+            ],
+        ));
+        assert!(has(&r, WeakKind::Skip, "changes a tolerance"), "{r:?}");
+    }
+
+    #[test]
+    fn a_new_tolerance_in_a_new_test_is_not_a_change() {
+        let r = rows(&modified(
+            "tests/test_rate.py",
+            &[
+                " import rate",
+                "+def test_new():",
+                "+    assert rate() == approx(0.5, rel=1e-6)",
+            ],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    // Assertions that cannot fail.
+
+    #[test]
+    fn an_assertion_weakened_to_true_is_named() {
+        let r = rows(&modified(
+            "tests/test_rate.py",
+            &[
+                " def test_rate():",
+                "-    assert rate() == 5",
+                "+    assert True",
+            ],
+        ));
+        assert!(has(&r, WeakKind::Skip, "cannot fail"), "{r:?}");
+        assert!(!has(&r, WeakKind::Skip, "removes an assertion"), "{r:?}");
+        let r = rows(&modified(
+            "tests/a.test.ts",
+            &[" it(\"a\", () => {", "+  expect(true).toBe(true);"],
+        ));
+        assert!(has(&r, WeakKind::Skip, "cannot fail"), "{r:?}");
+    }
+
+    // Tests added with nothing in them that checks.
+
+    #[test]
+    fn a_new_test_with_no_assertion_is_named() {
+        for (path, lines) in [
+            (
+                "tests/test_rate.py",
+                &[" import rate", "+def test_rate():", "+    rate()"][..],
+            ),
+            (
+                "tests/limits.rs",
+                &[
+                    " use limits;",
+                    "+#[test]",
+                    "+fn parses() {",
+                    "+    let _ = limits::parse(\"5\");",
+                    "+}",
+                ][..],
+            ),
+            (
+                "src/a.test.ts",
+                &[
+                    " import { a } from './a';",
+                    "+it(\"runs\", () => {",
+                    "+  a();",
+                    "+});",
+                ][..],
+            ),
+        ] {
+            let r = rows(&modified(path, lines));
+            assert!(has(&r, WeakKind::Skip, "no assertion"), "{path}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_test_that_checks_anything_is_not_named() {
+        for lines in [
+            &[
+                " import rate",
+                "+def test_rate():",
+                "+    assert rate() == 5",
+            ][..],
+            &[
+                " import rate",
+                "+def test_rate():",
+                "+    check_rate(rate())",
+            ][..],
+            &[
+                " import rate",
+                "+def test_rate():",
+                "+    with pytest.raises(ValueError):",
+                "+        rate(-1)",
+            ][..],
+            // A rename: the body was already there.
+            &[" import rate", "+def test_the_rate():", "     rate()"][..],
+        ] {
+            let r = rows(&modified("tests/test_rate.py", lines));
+            assert!(r.is_empty(), "{lines:?}: {r:?}");
+        }
+        let r = rows(&modified(
+            "tests/limits.rs",
+            &[
+                " use limits;",
+                "+#[test]",
+                "+#[should_panic]",
+                "+fn rejects() {",
+                "+    limits::parse(\"x\");",
+                "+}",
+            ],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn an_assertion_about_a_true_value_is_not_trivial() {
+        let r = rows(&modified(
+            "tests/test_rate.py",
+            &[
+                " def test_rate():",
+                "+    assert rate() is True",
+                "+    assert True_ish()",
+            ],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    // Suppressions, anywhere but prose.
+
+    #[test]
+    fn a_lint_or_type_suppression_is_named_in_any_file() {
+        for (path, line) in [
+            ("src/a.ts", "+// @ts-ignore"),
+            ("src/b.ts", "+/* eslint-disable no-console */"),
+            ("src/c.py", "+import os  # noqa"),
+            ("src/d.py", "+x = f()  # type: ignore"),
+            ("src/e.rs", "+#[allow(dead_code)]"),
+            ("pkg/f.go", "+x := 1 //nolint"),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(has(&r, WeakKind::Skip, "suppression"), "{path}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn a_suppression_named_in_documentation_is_not_one() {
+        let r = rows(&modified(
+            "README.md",
+            &[" # Lint", "+Never add `@ts-ignore` or `# noqa`."],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+        // Nor is one already in the base.
+        let r = rows(&modified("src/a.ts", &[" // @ts-ignore", "+const x = 1;"]));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    // What defines the checks.
+
+    #[test]
+    fn an_edit_to_a_check_defining_file_is_a_gate_changed() {
+        for path in [
+            "justfile",
+            "Makefile",
+            ".pre-commit-config.yaml",
+            "tox.ini",
+            "setup.cfg",
+            "pytest.ini",
+            "clippy.toml",
+            "deny.toml",
+            "rustfmt.toml",
+            ".eslintrc.json",
+            "eslint.config.js",
+            "tsconfig.json",
+            "ui/tsconfig.app.json",
+            "codecov.yml",
+            ".coveragerc",
+        ] {
+            let r = rows(&modified(path, &[" a", "-b", "+c"]));
+            assert!(r.iter().any(|w| w.kind == WeakKind::Gate), "{path}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_configuration_file_is_not_a_gate() {
+        for path in [
+            "src/config.json",
+            "tsconfig.md",
+            "docs/Makefile.md",
+            "src/setup.py",
+        ] {
+            let r = rows(&modified(path, &[" a", "-b", "+c"]));
+            assert!(r.is_empty(), "{path}: {r:?}");
+        }
+    }
+
+    /// The script a declared gate runs defines passing as much as the gate.
+    #[test]
+    fn a_file_a_gate_command_names_is_a_gate() {
+        let diff = modified("scripts/test.sh", &[" #!/bin/sh", "-npm test", "+exit 0"]);
+        let r = rows_with(&diff, &["sh ./scripts/test.sh", "cargo test --locked"]);
+        assert!(
+            has(&r, WeakKind::Gate, "which a declared gate runs"),
+            "{r:?}"
+        );
+        // Without that gate, it is an ordinary script.
+        assert!(rows_with(&diff, &["cargo test"]).is_empty());
+    }
+
+    // Masked failures, where the checks are defined.
+
+    #[test]
+    fn a_masked_failure_in_ci_is_named() {
+        for line in [
+            "+      - run: cargo test || true",
+            "+        continue-on-error: true",
+            "+      - run: pytest -k \"not slow\"",
+            "+      - run: cargo test -- --skip login",
+        ] {
+            let r = rows(&modified(".github/workflows/ci.yml", &[" jobs:", line]));
+            assert!(
+                has(&r, WeakKind::Gate, "masks a failing step"),
+                "{line}: {r:?}"
+            );
+        }
+        let r = rows(&modified(
+            "justfile",
+            &[" check:", "+    cargo clippy || true"],
+        ));
+        assert!(has(&r, WeakKind::Gate, "masks a failing step"), "{r:?}");
+    }
+
+    #[test]
+    fn a_masked_step_in_an_ordinary_script_is_not_a_gate() {
+        let r = rows(&modified(
+            "scripts/deploy.sh",
+            &[" #!/bin/sh", "+rm -f cache || true"],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    fn renamed(from: &str, to: &str) -> String {
+        format!(
+            "diff --git a/{from} b/{to}\nsimilarity index 100%\nrename from {from}\nrename to {to}\n"
+        )
+    }
+
+    /// A test file renamed where the runner no longer collects it is a
+    /// deleted test, and a renamed runner configuration a changed gate.
+    #[test]
+    fn a_rename_that_hides_a_test_or_a_gate_is_named() {
+        for (from, to) in [
+            ("tests/test_login.py", "attic/test_login.py.off"),
+            ("tests/test_login.py", "tests/login.py"),
+            ("src/login.test.ts", "src/login.ts.bak"),
+        ] {
+            let r = rows(&renamed(from, to));
+            assert!(
+                has(
+                    &r,
+                    WeakKind::Deleted,
+                    "moves a test file out of the test suite"
+                ),
+                "{from} → {to}: {r:?}"
+            );
+        }
+        let r = rows(&renamed("conftest.py", "conftest.py.bak"));
+        assert!(has(&r, WeakKind::Gate, "renames `conftest.py`"), "{r:?}");
+        let r = rows_with(
+            &renamed("scripts/test.sh", "scripts/test.sh.old"),
+            &["sh ./scripts/test.sh"],
+        );
+        assert!(
+            has(&r, WeakKind::Gate, "renames `scripts/test.sh`"),
+            "{r:?}"
+        );
+        // A test moved within the suite, and an ordinary file renamed, are not.
+        assert!(rows(&renamed("tests/test_a.py", "tests/unit/test_a.py")).is_empty());
+        assert!(rows(&renamed("src/a.rs", "src/b.rs")).is_empty());
+    }
+
+    /// An ignored file is outside the digest and the review; a pattern added
+    /// to `.gitignore` is said, a comment or an exception is not.
+    #[test]
+    fn an_added_ignore_pattern_is_a_gate_changed() {
+        let r = rows(&modified(
+            ".gitignore",
+            &[" target/", "+tests/secret_test.py"],
+        ));
+        assert!(has(&r, WeakKind::Gate, "adds an ignore pattern"), "{r:?}");
+        let r = rows(&modified(
+            ".gitignore",
+            &[" target/", "+# build output", "+!keep.txt", "-old/"],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    /// `.skip(` is every Rust iterator: only whole spellings count.
+    #[test]
+    fn an_iterator_skip_is_not_a_skip_marker() {
+        let r = rows(&modified(
+            "tests/a.rs",
+            &[" fn a() {", "+    let b = v.iter().skip(1);"],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+}

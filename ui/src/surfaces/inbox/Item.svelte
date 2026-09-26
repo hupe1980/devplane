@@ -4,6 +4,10 @@
   // result sentence and the one undo.
   import State from "../../lib/State.svelte";
   import { clip } from "../../lib/text";
+  import Qualifier from "../../lib/Qualifier.svelte";
+  import { markedFor } from "../review/marks";
+  import { safeHref } from "../../lib/href";
+  import type { ReadyFacts } from "../../wire/ReadyFacts";
 
   /// How much of a detail the row shows; the rest is in the `title`.
   const DETAIL_CHARS = 400;
@@ -49,6 +53,8 @@
     since?: string;
     /// The report a report row is about — what its controls address.
     report?: string | null;
+    /// On a *ready to decide* row: what its review leads with.
+    facts?: ReadyFacts | null;
   };
 
   /// The bodies the answer route accepts. A body with none of these fields
@@ -83,7 +89,13 @@
   } = $props();
 
   const acts = $derived(item.actions ?? []);
+  /// Hunks this browser marked, never more than the change has: the host
+  /// cannot see these marks, so the window adds them.
+  const markedHunks = $derived(item.facts && item.change_id ? Math.min(markedFor(item.change_id), item.facts.hunks) : 0);
   const has = (a: string) => acts.includes(a);
+  /// The host's links, only with a scheme `lib/href` allows.
+  const url = $derived(safeHref(item.url));
+  const launch = $derived(safeHref(item.launch));
 
   /// Critical and high carry the *needs you* diamond; the rest the idle ring,
   /// with the level word kept for screen readers.
@@ -168,6 +180,16 @@
     {:else if item.detail}
       <p class="d" title={item.detail.length > DETAIL_CHARS ? item.detail : undefined}>
         {clip(item.detail, DETAIL_CHARS)}
+      </p>
+    {/if}
+
+    <!-- A change ready to decide: what its review leads with, as numbers with
+         their words. The primary action opens the review; there is no offer. -->
+    {#if item.facts}
+      <p class="facts">
+        <Qualifier q={item.facts.qualifier} />
+        <span title="hunks marked in this browser's review">{markedHunks} of {item.facts.hunks} {item.facts.hunks === 1 ? "hunk" : "hunks"} marked</span>
+        {#each item.facts.says as s (s)}<span>· {s}</span>{/each}
       </p>
     {/if}
 
@@ -268,8 +290,8 @@
       {#if has("resume")}
         <button onclick={() => act(item, "resume")}>resume</button>
       {/if}
-      {#if has("offer")}
-        <button onclick={() => act(item, "offer")}>offer this change</button>
+      {#if has("review") && item.change_id}
+        <a class="act primary" href={`#review/${encodeURIComponent(item.change_id)}`}>review</a>
       {/if}
       <!-- A drift: tell the run which files moved, or accept it. Either is recorded. -->
       {#if has("tell_run")}
@@ -277,10 +299,6 @@
       {/if}
       {#if has("accept_drift")}
         <button onclick={() => act(item, "accept_drift")}>accept the drift</button>
-      {/if}
-      <!-- The only way to answer a session Devplane watches rather than drives. -->
-      {#if has("focus")}
-        <button onclick={() => act(item, "focus")}>raise its window</button>
       {/if}
       {#if has("open") && (item.run_id || item.change_id)}
         <a
@@ -290,14 +308,14 @@
             : `#why/${encodeURIComponent(item.run_id ?? "")}`}>open</a
         >
       {/if}
-      {#if (has("open_pr") || has("open_issue")) && item.url}
-        <a class="act" href={item.url} target="_blank" rel="noreferrer noopener">
+      {#if (has("open_pr") || has("open_issue")) && url}
+        <a class="act" href={url} target="_blank" rel="noreferrer noopener">
           {has("open_pr") ? "open pull request" : "open issue"}
         </a>
       {/if}
       <!-- A link, never a fetch: the vendor's window opens with the prompt typed. -->
-      {#if item.launch}
-        <a class="act" href={item.launch}>open an agent with this typed</a>
+      {#if launch}
+        <a class="act" href={launch}>open an agent with this typed</a>
       {/if}
       {#if has("start_from_report")}
         <button onclick={() => act(item, "start_from_report")}>start a change from this</button>
@@ -317,9 +335,9 @@
           <button onclick={() => answerReport("defer_report")}>defer</button>
         {/if}
       {/if}
-      <!-- A draft nothing sends until this is pressed, by you, with your gh. -->
+      <!-- A draft nothing sends until this is pressed, by you, under your GitHub sign-in. -->
       {#if has("open_draft")}
-        <button onclick={() => act(item, "open_draft")}>open on GitHub with your gh</button>
+        <button onclick={() => act(item, "open_draft")}>open on GitHub</button>
       {/if}
       {#if has("discard_draft")}
         <button onclick={() => act(item, "discard_draft")}>discard the draft</button>
@@ -450,6 +468,22 @@
   }
   .act:hover {
     border-color: var(--edge);
+  }
+  .act.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--chrome);
+    font-weight: 600;
+  }
+  .facts {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--s-2);
+    font-size: var(--t-sm);
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
   }
   .elsewhere {
     margin: 0;

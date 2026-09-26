@@ -192,7 +192,7 @@ async fn a_held_permission_is_answered_by_another_process_with_no_host() {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-                    .args(["asks", "--json"])
+                    .args(["inbox", "--all", "--json"])
                     .env("DEVPLANE_HOME", &home)
                     .env("DEVPLANE_NOTIFY", "0")
                     .output()
@@ -387,6 +387,48 @@ async fn a_devplane_toml_with_a_typo_asks_about_every_call() {
         d.iter()
             .all(|d| d.outcome == "unresolved" && d.authority.as_str() == "rule"),
         "{d:?}"
+    );
+}
+
+/// Codex parses `ask` and runs the call anyway, so on Codex every question
+/// Devplane would put to a person is a refusal that says why.
+#[test]
+fn on_codex_a_question_is_a_refusal_never_a_pass() {
+    let home = home("codex-ask");
+    std::fs::write(
+        home.join("policy.toml"),
+        "[policy]\nalways_ask = [\"Bash(git push *)\"]\n",
+    )
+    .unwrap();
+    let repo = home.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let call = |command: &str| {
+        hook_in(
+            &home,
+            &home,
+            &["--vendor", "codex"],
+            &format!(
+                r#"{{"hook_event_name":"PreToolUse","session_id":"s-codex","cwd":"{}",
+                    "tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#,
+                repo.display()
+            ),
+        )
+    };
+    let reply = call("git push origin main");
+    let out = &reply["hookSpecificOutput"];
+    assert_eq!(out["permissionDecision"], "deny", "{reply}");
+    assert!(
+        out["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("Codex hooks cannot ask a person"),
+        "{reply}"
+    );
+    // Nothing to decide stays silent.
+    let reply = call("ls");
+    assert_ne!(
+        reply["hookSpecificOutput"]["permissionDecision"], "deny",
+        "{reply}"
     );
 }
 
@@ -609,4 +651,109 @@ async fn a_hold_whose_hook_is_gone_ends_as_nobody() {
         "{:?}",
         row.ended
     );
+}
+
+/// A permission's answer is said once. Two bypasses found by audit: a
+/// `decision` beside an `option` let `--deny --option allow_always` allow, and
+/// a `field` on a permission let an allowing option past the self-answer check.
+#[test]
+fn a_permission_answer_that_says_two_things_is_refused() {
+    let asked = devplane::core::ask::Asked {
+        kind: devplane::core::ask::Kind::Permission,
+        request_id: String::new(),
+        message: "Bash · git push".into(),
+        payload: serde_json::json!({
+            "tool": "Bash",
+            "call": "git push",
+            "options": [{"id": "allow_always"}, {"id": "reject_once"}],
+        }),
+        at: jiff::Timestamp::now(),
+        deadline: devplane::core::ask::Deadline::Never,
+    };
+    let ask = devplane::core::ask::Ask::new(
+        devplane::core::AskId::new("two-things"),
+        devplane::core::RunId::new("s-two"),
+        asked,
+    );
+    let parse = |decision: Option<&str>, option: Option<&str>, field: Option<&str>| {
+        devplane::driven::parse_answer(
+            &ask,
+            decision,
+            option.map(str::to_string),
+            None,
+            field.map(str::to_string),
+            &[],
+        )
+    };
+    assert!(
+        parse(Some("deny"), Some("allow_always"), None).is_err(),
+        "a deny with an allowing option beside it was not refused"
+    );
+    assert!(
+        parse(None, Some("allow_always"), Some("x")).is_err(),
+        "a field on a permission was accepted"
+    );
+    assert!(parse(Some("deny"), None, None).is_ok());
+    assert!(parse(None, Some("reject_once"), None).is_ok());
+}
+
+/// The same two contradictions are refused by the command line before
+/// anything is read, so neither reaches a store or a host.
+#[test]
+fn the_answer_command_refuses_a_contradiction_before_it_runs() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+        .args(["answer", "any", "--deny", "--option", "allow_always"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// An answer to a held permission is not *delivered* until the hook holding
+/// it has read it: the row says so before, and `Live` only after.
+#[tokio::test]
+async fn a_held_answer_is_live_only_once_the_hook_has_read_it() {
+    let home = home("delivered");
+    let s = store(&home).await;
+    let store = s.clone();
+    let hold = tokio::spawn(async move {
+        devplane::record::hold(
+            &store,
+            "s-deliver",
+            Path::new("/tmp/alpha"),
+            "Bash",
+            "git push",
+            std::time::Duration::from_secs(20),
+            false,
+        )
+        .await
+    });
+    let mut id = None;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        if let Some(a) = s.open_asks().await.unwrap().first() {
+            id = Some(a.id.as_str().to_string());
+            break;
+        }
+    }
+    let id = id.expect("the hold raised a row");
+    let deny = devplane::driven::Answer::Permission(devplane::driven::Decision::Deny);
+    let answered = devplane::driven::answer_without_host(&s, &id, deny, "cli")
+        .await
+        .unwrap();
+    assert_eq!(
+        answered.delivery, None,
+        "nothing has read the answer yet, so nothing was delivered"
+    );
+    let behavior = tokio::time::timeout(std::time::Duration::from_secs(10), hold)
+        .await
+        .expect("the hook reads the answer")
+        .unwrap();
+    assert_eq!(behavior.as_deref(), Some("deny"));
+    let row = s.ask(&id).await.unwrap().unwrap();
+    assert_eq!(row.delivery, Some(devplane::core::ask::Delivery::Live));
 }

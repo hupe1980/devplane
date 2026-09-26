@@ -25,7 +25,8 @@ pub enum ChangeState {
     /// At least one run has worked on it, and nothing below applies.
     #[serde(rename = "in flight")]
     InFlight,
-    /// Every declared gate exited zero against the tree as it stands.
+    /// The latest `check` report exited zero against the tree as it stands,
+    /// and its commands are the ones the project declares now.
     #[serde(rename = "verified")]
     Verified,
     /// A pull request exists.
@@ -79,13 +80,13 @@ pub enum Waiting {
 
 impl Waiting {
     /// One phrase, for the word beside the state.
-    pub fn says(&self) -> String {
+    pub fn says_at(&self, now: Timestamp) -> String {
         match self {
             Waiting::Person => "needs you".into(),
             Waiting::Gates => "gates running".into(),
             Waiting::Feedback { round } => format!("feedback round {round}"),
             Waiting::Setup { command, since } => {
-                let elapsed = Timestamp::now().duration_since(*since).unsigned_abs();
+                let elapsed = now.duration_since(*since).unsigned_abs();
                 format!(
                     "installing · `{command}` · {}",
                     elapsed_words(elapsed.as_secs())
@@ -108,6 +109,30 @@ fn elapsed_words(secs: u64) -> String {
 /// gates are evidence a person asked for and never make a change verified.
 pub const CHECK: &str = "check";
 
+/// What the project declares done to mean, as read now: the one input besides
+/// the record and the tree that [`Change::verdict`] reads. There is no way to
+/// ask for a verdict without it, so no surface can call a change verified
+/// while its standing says the definition of done moved or cannot be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Declared<'a> {
+    /// The `check` commands the project declares now; empty when it declares
+    /// none.
+    Checks(&'a [String]),
+    /// The project's configuration would not load, so what it declares is
+    /// unknown.
+    Unreadable,
+}
+
+impl<'a> Declared<'a> {
+    /// From a configuration read: `None` is one that would not load.
+    pub fn of(checks: Option<&'a [String]>) -> Self {
+        match checks {
+            Some(c) => Declared::Checks(c),
+            None => Declared::Unreadable,
+        }
+    }
+}
+
 /// What the gates say about a change right now — the one derivation of
 /// `verified` ([`Change::verdict`]). Only the latest [`CHECK`] report counts.
 /// A stale pass is neither pass nor failure; both digests are carried so a
@@ -126,26 +151,33 @@ pub enum Standing {
     },
     /// The latest `check` did not pass.
     Failed { summary: String },
+    /// `check` passed against this tree, but the project's `check` commands
+    /// are not the ones that ran: the definition of done moved after the pass.
+    ChecksChanged {
+        /// The commands that ran and passed.
+        ran: Vec<String>,
+        /// The commands the project declares now.
+        declared: Vec<String>,
+    },
     /// Gates are declared and `check` has not run against this change.
     NotRun,
     /// The project never said what done means.
     NoGatesDeclared,
+    /// The project's configuration would not load, so nothing says what done
+    /// means now and no pass can be read against it.
+    ConfigUnreadable,
 }
 
 impl Standing {
-    /// Shorthand for [`Change::verdict`].
-    pub fn of(change: &Change, declares_gates: bool, now: Option<&CommitStamp>) -> Self {
-        change.verdict(declares_gates, now)
-    }
-
     /// The word the state table pairs a glyph with.
     pub fn word(&self) -> &'static str {
         match self {
             Standing::Verified => "verified",
-            Standing::Stale { .. } => "stale",
+            Standing::Stale { .. } | Standing::ChecksChanged { .. } => "stale",
             Standing::Failed { .. } => "failed",
             Standing::NotRun => "not run",
             Standing::NoGatesDeclared => "no gates declared",
+            Standing::ConfigUnreadable => "configuration unreadable",
         }
     }
 
@@ -161,10 +193,19 @@ impl Standing {
                     stale_clause(then.as_deref(), now.as_deref())
                 )
             }
+            Standing::ChecksChanged { .. } => {
+                "`check` passed, but its commands have changed since; it has not run as declared now"
+                    .into()
+            }
             Standing::Failed { summary } => summary.clone(),
             Standing::NotRun => "`check` has not run against this change".into(),
             Standing::NoGatesDeclared => {
                 "no gates declared — this project never said what done means".into()
+            }
+            Standing::ConfigUnreadable => {
+                "devplane.toml could not be read, so what done means is unknown and no pass \
+                 counts"
+                    .into()
             }
         }
     }
@@ -219,16 +260,6 @@ impl Stopped {
             Stopped::Broken { detail } => detail.clone(),
         }
     }
-
-    /// The text to hand back to the agent if a person overrules the bound, and
-    /// `None` where handing anything back would be dishonest.
-    pub fn feedback(&self) -> Option<String> {
-        match self {
-            // The gate report holds the failing lines; the caller has it.
-            Stopped::GateFailed { .. } | Stopped::OverBudget { .. } => None,
-            Stopped::Broken { .. } => None,
-        }
-    }
 }
 
 /// Why a change counts as finished, written when it finishes — the partner of
@@ -273,12 +304,17 @@ pub enum Completion {
 impl Completion {
     /// What this change rests on. Total: always a basis, never `None`.
     /// `now` is the tree as it stands (`None` if unreadable); a pass counts
-    /// only against it, so touching a file makes `verified` false.
-    pub fn of(change: &Change, project_declares_gates: bool, now: Option<&CommitStamp>) -> Self {
-        let at = Timestamp::now();
-        let attempts = change.gates.iter().filter(|g| g.gate == CHECK).count() as u32;
+    /// only against it, so touching a file makes `verified` false, and only
+    /// by the `check` commands `declared` now.
+    pub fn of_at(
+        change: &Change,
+        declared: Declared<'_>,
+        now: Option<&CommitStamp>,
+        at: Timestamp,
+    ) -> Self {
+        let attempts = change.check_attempts();
         let report = change.check_report();
-        match (change.verdict(project_declares_gates, now), report) {
+        match (change.verdict(declared, now), report) {
             (Standing::NoGatesDeclared, _) => Completion::NoGateDeclared { at },
             (Standing::Verified, Some(r)) => Completion::GatesPassed {
                 gate: r.gate.clone(),
@@ -286,14 +322,16 @@ impl Completion {
                 attempts,
                 at,
             },
-            (Standing::Stale { .. }, Some(r)) => Completion::GatesStale {
-                gate: r.gate.clone(),
-                attempt: r.attempt,
-                attempts,
-                ran_at: r.commit.clone().map(Box::new),
-                now: now.cloned().map(Box::new),
-                at,
-            },
+            (Standing::Stale { .. } | Standing::ChecksChanged { .. }, Some(r)) => {
+                Completion::GatesStale {
+                    gate: r.gate.clone(),
+                    attempt: r.attempt,
+                    attempts,
+                    ran_at: r.commit.clone().map(Box::new),
+                    now: now.cloned().map(Box::new),
+                    at,
+                }
+            }
             (_, r) => Completion::ByHand {
                 at,
                 last_gate: r.map(GateReport::summary),
@@ -662,16 +700,7 @@ impl Change {
 }
 
 impl SpecStamp {
-    /// Reads and fingerprints the specification a change names. A missing one
-    /// is kept unfingerprinted rather than dropped. Built from the same
-    /// [`Plan`] surfaces are served, so the two cannot disagree.
-    ///
-    /// [`Plan`]: crate::core::spec::Plan
-    pub fn of(path: &str, root: &std::path::Path, markers: &[String]) -> Self {
-        Self::from_plan(&crate::core::spec::Plan::read(root, path, markers))
-    }
-
-    pub fn from_plan(plan: &crate::core::spec::Plan) -> Self {
+    pub fn from_plan(plan: &crate::spec::Plan) -> Self {
         Self {
             path: plan.path.clone(),
             fingerprint: plan.fingerprint.clone(),
@@ -908,10 +937,20 @@ pub struct Change {
 }
 
 impl Change {
-    pub fn new(project_id: ProjectId, title: String, prompt: String) -> Self {
-        let now = Timestamp::now();
+    /// A change created at `now`. [`Change::new`] (outside the pure half)
+    /// stamps the wall clock.
+    pub fn new_at(project_id: ProjectId, title: String, prompt: String, now: Timestamp) -> Self {
         Self {
-            id: ChangeId::new(format!("c-{}", uuid::Uuid::now_v7().simple())),
+            // v7 from `now`, not the clock: ordering by id is ordering by it.
+            id: ChangeId::new(format!(
+                "c-{}",
+                uuid::Uuid::new_v7(uuid::Timestamp::from_unix(
+                    uuid::NoContext,
+                    now.as_second().max(0) as u64,
+                    now.subsec_nanosecond().max(0) as u32,
+                ))
+                .simple()
+            )),
             project_id,
             title,
             prompt,
@@ -956,16 +995,19 @@ impl Change {
         )
     }
 
-    /// Where this change is, from the record and `now` (the tree at read time;
-    /// `None` is unknown and never verified). Pure, so nothing stores it.
-    pub fn state(&self, now: Option<&CommitStamp>) -> ChangeState {
+    /// Where this change is, from the record, what the project `declared`
+    /// now, and `now` (the tree at read time; `None` is unknown and never
+    /// verified). Pure, so nothing stores it. *Verified* here is exactly
+    /// [`Change::verdict`] saying so: the state and the standing cannot
+    /// disagree.
+    pub fn state(&self, declared: Declared<'_>, now: Option<&CommitStamp>) -> ChangeState {
         if self.archived_at.is_some() {
             return ChangeState::Archived;
         }
         if self.pull_request.is_some() {
             return ChangeState::Offered;
         }
-        if self.is_verified(now) {
+        if self.verdict(declared, now) == Standing::Verified {
             return ChangeState::Verified;
         }
         if !self.runs.is_empty() {
@@ -977,24 +1019,17 @@ impl Change {
         ChangeState::Drafted
     }
 
-    /// The state against the tree the host last saw.
-    pub fn current_state(&self) -> ChangeState {
-        self.state(self.tree_now.as_ref())
-    }
-
-    /// `check` exited zero against the tree as it stands. Reports exist only
-    /// for declared gates, so `declares_gates` is implied.
-    pub fn is_verified(&self, now: Option<&CommitStamp>) -> bool {
-        self.verdict(true, now) == Standing::Verified
-    }
-
-    /// The one derivation of `verified`: the latest [`CHECK`] report passed
-    /// and its working-tree digest equals `now`'s. `now` is `None` when the
-    /// tree could not be read, which is never *unchanged*.
-    pub fn verdict(&self, declares_gates: bool, now: Option<&CommitStamp>) -> Standing {
-        if !declares_gates {
-            return Standing::NoGatesDeclared;
-        }
+    /// The one derivation of `verified`: the latest [`CHECK`] report passed,
+    /// its working-tree digest equals `now`'s, and its commands are the ones
+    /// the project `declared` now — editing the definition of done must not
+    /// keep the green. `now` is `None` when the tree could not be read, which
+    /// is never *unchanged*.
+    pub fn verdict(&self, declared: Declared<'_>, now: Option<&CommitStamp>) -> Standing {
+        let declared = match declared {
+            Declared::Unreadable => return Standing::ConfigUnreadable,
+            Declared::Checks([]) => return Standing::NoGatesDeclared,
+            Declared::Checks(c) => c,
+        };
         let Some(report) = self.check_report() else {
             return Standing::NotRun;
         };
@@ -1004,6 +1039,13 @@ impl Change {
             };
         }
         if crate::core::reduce::facts::still_current(report.commit.as_ref(), now) {
+            let ran: Vec<String> = report.commands.iter().map(|c| c.command.clone()).collect();
+            if ran.as_slice() != declared {
+                return Standing::ChecksChanged {
+                    ran,
+                    declared: declared.to_vec(),
+                };
+            }
             return Standing::Verified;
         }
         Standing::Stale {
@@ -1012,9 +1054,16 @@ impl Change {
         }
     }
 
-    /// The latest [`CHECK`] report — the only one that can verify a change.
+    /// The latest [`CHECK`] report — the only one that can verify a change,
+    /// and the one every surface reads: the verdict, the inbox, the retry.
     pub fn check_report(&self) -> Option<&GateReport> {
         self.gates.iter().rev().find(|g| g.gate == CHECK)
+    }
+
+    /// How many times [`CHECK`] has run on this change — the one count of
+    /// attempts, for the basis and the certificate alike.
+    pub fn check_attempts(&self) -> u32 {
+        self.gates.iter().filter(|g| g.gate == CHECK).count() as u32
     }
 
     /// Nothing more will happen on its own: finished, stopped, or archived.
@@ -1044,47 +1093,15 @@ impl Change {
             Some(Stopped::OverBudget { .. }) => false,
             Some(Stopped::Broken { .. }) | None => false,
             // The failing lines come from the gate report.
-            Some(Stopped::GateFailed { .. }) => self.last_gate().is_some(),
+            Some(Stopped::GateFailed { .. }) => self.check_report().is_some(),
         }
-    }
-
-    /// Validates the specification (a file or a folder) this change answers.
-    /// Untrusted input: refused unless it exists inside the project — an error,
-    /// never a silently dropped field.
-    pub fn with_spec(root: &std::path::Path, spec: &str) -> Result<String, String> {
-        let joined = root.join(spec);
-        if !crate::core::policy::within(root, &joined) {
-            return Err(format!("{spec} is outside the project"));
-        }
-        if !joined.exists() {
-            return Err(format!("{spec} is not in this project"));
-        }
-        // A folder with no Markdown is a typo; catch it now, not at the gate.
-        if joined.is_dir()
-            && crate::core::spec::Spec::read(root, spec, &[])
-                .docs
-                .is_empty()
-        {
-            return Err(format!("{spec} holds no markdown"));
-        }
-        // Stored relative, so the certificate reads the same on any machine.
-        Ok(joined
-            .strip_prefix(root)
-            .unwrap_or(&joined)
-            .to_string_lossy()
-            .replace('\\', "/"))
     }
 
     /// Whether the agent's own account is worth showing: only beside a failed
     /// gate that can contradict it. Alone it reads as a summary and is not
     /// one; neither is judged, the person reads both.
     pub fn claim_is_worth_showing(&self) -> bool {
-        self.last_gate().is_some_and(|g| !g.passed())
-    }
-
-    /// The most recent gate verdict, which is what the board shows.
-    pub fn last_gate(&self) -> Option<&GateReport> {
-        self.gates.last()
+        self.check_report().is_some_and(|g| !g.passed())
     }
 
     /// Whether this change works in the person's own checkout.

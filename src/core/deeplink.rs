@@ -16,15 +16,6 @@ fn prompt_param(prompt: &str) -> String {
     encode(&crate::core::text::clip(prompt, MAX_PROMPT))
 }
 
-/// Opens a Claude Code tab in VS Code on a conversation; an unknown id starts
-/// a fresh one.
-pub fn vscode_session(session_id: &str) -> String {
-    format!(
-        "vscode://anthropic.claude-code/open?session={}",
-        encode(session_id)
-    )
-}
-
 /// Opens a new terminal session in a local clone of `repo` (an `owner/name`
 /// slug), with the prompt typed and not sent.
 pub fn open_repo(repo: &str, prompt: &str) -> Option<String> {
@@ -95,13 +86,5 @@ mod tests {
         assert!(open_repo("acme/a&q=evil", "x").is_none());
         assert!(open_repo("acme/a/b", "x").is_none());
         assert!(open_repo("/name", "x").is_none());
-    }
-
-    #[test]
-    fn a_session_link_names_the_session() {
-        assert_eq!(
-            vscode_session("abc-123"),
-            "vscode://anthropic.claude-code/open?session=abc-123"
-        );
     }
 }

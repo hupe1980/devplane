@@ -19,16 +19,16 @@ pub mod completions;
 /// `main` answers this before clap parses and it never appears in a script.
 pub const COMPLETE_ARG: &str = "__complete";
 mod change;
+mod github;
 mod inbox;
 mod report;
-mod rules;
 
 use admin::{
     cmd_agents, cmd_audit, cmd_connect, cmd_diagnostics, cmd_disconnect, cmd_rewind, cmd_search,
 };
-use board::{cmd_attach, cmd_focus, cmd_ls, cmd_open, cmd_show, cmd_watch};
+use board::{cmd_attach, cmd_ls, cmd_open, cmd_show, cmd_watch};
 use change::{cmd_change, cmd_check, cmd_gate_run, cmd_speckit_install, cmd_trust};
-use inbox::{cmd_answer, cmd_asks, cmd_attention, cmd_inbox, cmd_snooze};
+use inbox::{cmd_answer, cmd_attention, cmd_inbox, cmd_inbox_all, cmd_snooze};
 
 /// The five errands, and every non-hidden subcommand assigned to exactly one.
 ///
@@ -43,19 +43,17 @@ pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
         "What needs you, and what happened without you",
         &[
             "inbox",
-            "asks",
             "answer",
             "attention",
             "audit",
             "modes",
-            "issues",
-            "prs",
+            "forge",
             "snooze",
         ],
     ),
     (
         "Start and steer work",
-        &["change", "report", "attach", "focus", "gate", "rewind"],
+        &["change", "report", "attach", "gate", "rewind"],
     ),
     (
         "Set up a project",
@@ -65,10 +63,11 @@ pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
             "trust",
             "check",
             "explain",
-            "rules",
             "speckit",
             "agents",
             "doctor",
+            "login",
+            "logout",
             "completions",
         ],
     ),
@@ -84,6 +83,12 @@ pub const COMMAND_GROUPS: &[(&str, &[&str])] = &[
 pub fn groups_block() -> String {
     use clap::Subcommand;
     let tree = Command::augment_subcommands(clap::Command::new("devplane"));
+    // A command this build hides (`app` without its feature) is not listed.
+    let hidden = |name: &str| {
+        tree.get_subcommands()
+            .find(|c| c.get_name() == name)
+            .is_some_and(clap::Command::is_hide_set)
+    };
     let about = |name: &str| -> String {
         tree.get_subcommands()
             .find(|c| c.get_name() == name)
@@ -102,7 +107,7 @@ pub fn groups_block() -> String {
     let mut out = String::from("What you came here to do:\n");
     for (name, commands) in COMMAND_GROUPS {
         out.push_str(&format!("\n  {name}\n"));
-        for c in *commands {
+        for c in commands.iter().filter(|c| !hidden(c)) {
             match about(c) {
                 d if d.is_empty() => out.push_str(&format!("    {c}\n")),
                 d => out.push_str(&format!("    {c:<widest$}  {d}\n")),
@@ -117,10 +122,11 @@ pub fn groups_block() -> String {
 #[command(
     name = "devplane",
     version,
-    about = "The desktop workbench for spec-driven agentic development",
-    long_about = "Devplane — the desktop workbench for spec-driven agentic development. Write \
-                  the spec, dispatch any ACP agent, verify against your own gates, and keep the \
-                  record of who decided what while you were not looking.\n\n\
+    about = "Know when an agent's work is actually done",
+    long_about = "Devplane — know when an agent's work is actually done. Run any ACP agent in \
+                  its own worktree, verify its change with your own checks run outside the \
+                  agent, see the weakened tests first, and keep the record of who decided what \
+                  while you were not looking.\n\n\
                   Start with `devplane open` (or `devplane app`), then \
                   `devplane change start \"<what to do>\"`.",
     after_help = groups_block(),
@@ -137,10 +143,6 @@ Options:
 pub struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-
-    /// Print machine-readable JSON instead of a table.
-    #[arg(long, global = true)]
-    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -162,11 +164,16 @@ pub enum Command {
         /// Only sessions that are waiting on a human.
         #[arg(long = "needs-you")]
         needs_you: bool,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Show what needs a human, most urgent first.
     ///
     /// Filters are never remembered between runs, and a narrowed list always
-    /// says how many items it is not showing.
+    /// says how many items it is not showing. `--all` lists everything an
+    /// agent has asked you instead, open ones first, and what ended each: you,
+    /// a clock your project set, or nobody.
     Inbox {
         /// Only this project. Matches any part of the name, as `ls --project` does.
         #[arg(long, short)]
@@ -174,28 +181,38 @@ pub enum Command {
         /// Only what can be answered from here (a question, not a red gate).
         #[arg(long = "needs-you")]
         needs_you: bool,
+        /// Every question and permission an agent asked, settled ones too.
+        #[arg(long, conflicts_with_all = ["project", "needs_you"])]
+        all: bool,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
-    /// Every open GitHub issue across every registered project, what needs you first.
-    ///
-    /// `--ready` narrows it to one repository's issues carrying
-    /// `[github].ready_label`: the list `change start --issue` picks from.
-    Issues {
-        /// Only the issues this repository offers as work.
-        #[arg(long)]
-        ready: bool,
-        /// The repository to ask. Defaults to the working directory. Implies `--ready`.
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        /// Only issues with this label. Defaults to `[github].ready_label`. Implies `--ready`.
-        #[arg(long)]
-        label: Option<String>,
+    /// Open GitHub issues and pull requests across every registered project,
+    /// what needs you first.
+    Forge {
+        #[command(subcommand)]
+        what: ForgeCmd,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
     },
-    /// Every open pull request across every registered project, what needs you first.
-    Prs,
     /// Show one run in detail.
-    Show { run: String },
+    Show {
+        /// The run, or a unique prefix of it, as `devplane ls` prints it.
+        run: String,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Search tool calls, questions and errors across every session.
-    Search { query: String },
+    Search {
+        /// Words to find in commands, questions and errors.
+        query: String,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Which of a run's files the vendor's checkpoint will not bring back.
     ///
     /// Claude Code's `/rewind` restores only files its editing tools touched;
@@ -204,6 +221,9 @@ pub enum Command {
     Rewind {
         /// The run, or a unique prefix of it, as `devplane ls` prints it.
         run: String,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Show what Devplane decided, and on whose authority.
     ///
@@ -215,6 +235,7 @@ pub enum Command {
         /// Only what was decided instead of you: by a rule, a clock, or nobody.
         #[arg(long = "without-me")]
         without_me: bool,
+        /// How many of the most recent rows to show.
         #[arg(long, default_value_t = 50)]
         limit: i64,
         /// Write the rows as OpenTelemetry GenAI log records instead.
@@ -224,6 +245,9 @@ pub enum Command {
         /// unknown). Nothing is sent anywhere.
         #[arg(long)]
         otel: bool,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Write a shell completion script.
     ///
@@ -233,27 +257,20 @@ pub enum Command {
     ///
     /// Ids (questions, sessions, changes) complete from a running host or the
     /// store, never starting one; zsh and fish show what each id is.
+    #[command(verbatim_doc_comment)]
     Completions {
         /// bash, zsh or fish.
         shell: String,
-    },
-    /// Which of your repositories is missing a rule.
-    ///
-    /// Checks every registered project's `devplane.toml` and agent
-    /// `permissions.deny` separately. It writes nothing; with no rule, it
-    /// reports what the projects disagree about.
-    Rules {
-        /// The rule, as you would write it: `Bash(curl:*)`, `Read(./.env)`.
-        rule: Option<String>,
-        /// Ask rather than deny, which changes the key the paste names.
-        #[arg(long)]
-        ask: bool,
     },
     /// Which projects are deciding without you, and what mode each is in.
     ///
     /// Live sessions only, least-supervised first; a session that has not
     /// reported a mode is shown as unknown.
-    Modes,
+    Modes {
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show whether the inbox is worth reading, per kind.
     ///
     /// How often each kind of item was acted on, dismissed, or resolved
@@ -262,11 +279,15 @@ pub enum Command {
         /// How many days back to look.
         #[arg(long, default_value_t = 7)]
         days: i64,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
-    /// Raise the editor window that owns a run.
-    Focus { run: String },
     /// Attach a terminal to a run, resuming its session.
-    Attach { run: String },
+    Attach {
+        /// The run, or a unique prefix of it, as `devplane ls` prints it.
+        run: String,
+    },
     /// Answer something an agent asked you — a permission or a question.
     ///
     /// The id is the one `devplane inbox` prints, not a session id: it outlives
@@ -276,12 +297,13 @@ pub enum Command {
         /// The ask, from `devplane inbox`.
         ask: String,
         /// Allow it — for a permission.
-        #[arg(long, conflicts_with_all = ["deny", "custom"])]
+        #[arg(long, conflicts_with_all = ["deny", "custom", "option", "field"])]
         allow: bool,
-        /// Refuse it — for a permission. The default when neither is given.
-        #[arg(long, conflicts_with_all = ["allow", "custom"])]
+        /// Refuse it — for a permission.
+        #[arg(long, conflicts_with_all = ["allow", "custom", "option", "field"])]
         deny: bool,
-        /// An exact option the agent offered, as it wrote it.
+        /// An exact option the agent offered, as it wrote it. Says the whole
+        /// answer, so it cannot be combined with `--allow` or `--deny`.
         #[arg(long)]
         option: Option<String>,
         /// Your own words, where the agent offered an "Other" box. Wins over `--option`.
@@ -296,30 +318,48 @@ pub enum Command {
     /// Decides on exit codes alone. Exits 0 only when the checks passed; no
     /// declared checks, or a config that will not parse, exits non-zero.
     Gate {
-        #[command(subcommand)]
-        what: GateCmd,
+        /// Which repository. Defaults to the working directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// One named gate from `devplane.toml` instead of the whole `check`.
+        /// A named gate never makes a change verified.
+        #[arg(long)]
+        name: Option<String>,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Register Devplane's gate as a Spec Kit extension hook.
     ///
     /// Spec Kit runs hooks from `.specify/extensions.yml`; this one runs the
     /// project's gates and reports what they exited with.
     Speckit {
-        #[command(subcommand)]
-        what: SpeckitCmd,
+        /// Which hook point. Defaults to `after_implement`.
+        #[arg(long)]
+        event: Option<String>,
+        /// Print and write nothing.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Write the hook even where the repository declares no gate to run.
+        #[arg(long)]
+        anyway: bool,
     },
-    /// Everything an agent has asked you, and what became of each one.
-    ///
-    /// Open ones first, oldest first; settled ones follow with what ended them:
-    /// you, a clock your project set, or nobody.
-    Asks,
     /// List the agents Devplane can drive.
-    Agents,
+    Agents {
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Read this repository's devplane.toml and say what it will do.
     ///
     /// Does it parse, does everything it names exist, and is anything unsafe.
     Check {
+        /// The repository to read. Defaults to the working directory.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Ask the gate what it would decide about one call, and why.
     ///
@@ -333,11 +373,13 @@ pub enum Command {
     ///
     /// `--replay` asks it of every observed call and names the rule that would
     /// stop the interruptions.
+    #[command(verbatim_doc_comment)]
     Explain {
         /// The call, for a tool with a plain specifier: a command for `Bash`,
         /// a path for `Read` and `Edit`, a URL for `WebFetch`.
         #[arg(trailing_var_arg = true)]
         call: Vec<String>,
+        /// The tool being called: `Bash`, `Read`, `Edit`, `WebFetch`, …
         #[arg(long, default_value = "Bash")]
         tool: String,
         /// The whole tool input as JSON, for a call a specifier cannot express.
@@ -353,6 +395,9 @@ pub enum Command {
         /// How many of the most recent calls to replay.
         #[arg(long, default_value_t = 5000)]
         limit: i64,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Allow Devplane to start agents in a repository.
     ///
@@ -360,6 +405,7 @@ pub enum Command {
     /// asking, so this prints what those are first. `--dry-run` prints them and
     /// trusts nothing.
     Trust {
+        /// The repository to trust. Defaults to the working directory.
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Trust without asking. For scripts and for a directory you wrote.
@@ -368,12 +414,18 @@ pub enum Command {
         /// Print what is there and trust nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Start a change: an isolated checkout, an agent in it, and the project's
     /// gates when the agent says it is finished.
     Change {
         #[command(subcommand)]
         what: ChangeCmd,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// File a finding about another project, and answer the ones filed here.
     ///
@@ -383,6 +435,9 @@ pub enum Command {
     Report {
         #[command(subcommand)]
         what: ReportCmd,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Hide a run's or a change's inbox items for a while.
     Snooze {
@@ -391,13 +446,16 @@ pub enum Command {
         /// Minutes to stay quiet. `0` un-snoozes.
         #[arg(long, default_value_t = 60)]
         minutes: i64,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Open the workbench in a browser, hosting here if nothing is running.
     Open,
     /// Follow events as they arrive, or one driven run's conversation.
     ///
     /// Given a run Devplane drives, prints its conversation like `tail -f`. For
-    /// a session you started yourself, `devplane focus` raises its window.
+    /// a session you started yourself, `devplane attach` resumes it in a terminal.
     Watch {
         /// One run to follow, as `devplane ls` prints it.
         run: Option<String>,
@@ -408,9 +466,32 @@ pub enum Command {
         #[arg(long, default_value_t = 40, requires = "run")]
         history: i64,
     },
-    /// Channel health, latency and whether a host answers.
+    /// Channel health, latency, whether a host answers, and each GitHub
+    /// host's sign-in.
     #[command(visible_alias = "diagnostics")]
-    Doctor,
+    Doctor {
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sign in to GitHub: a code to enter at GitHub's device page, and the
+    /// token kept only in the OS credential store.
+    Login {
+        #[command(subcommand)]
+        what: LoginTarget,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
+    },
+    /// Sign out of GitHub: the stored token is deleted, and where to revoke
+    /// the grant at GitHub is said.
+    Logout {
+        #[command(subcommand)]
+        what: LogoutTarget,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Install Devplane's hooks into a provider.
     Connect {
         #[command(subcommand)]
@@ -420,9 +501,18 @@ pub enum Command {
         // Global, so the flag works after the target as well as before it.
         #[arg(long, global = true)]
         statusline: bool,
-        /// Write the shown changes without asking.
+        /// Write the shown changes without asking. Required when stdin is
+        /// not a terminal, and under `--json`.
         #[arg(short = 'y', long, global = true)]
         yes: bool,
+        /// The devplane binary the hooks run. Defaults to this one, which is
+        /// refused when it lives somewhere temporary (npx's cache, a mounted
+        /// disk image).
+        #[arg(long, global = true, value_name = "PATH")]
+        bin: Option<PathBuf>,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Remove everything `connect` installed.
     Disconnect {
@@ -431,14 +521,21 @@ pub enum Command {
         /// Write the shown changes without asking.
         #[arg(short = 'y', long, global = true)]
         yes: bool,
+        /// Print machine-readable JSON instead of text.
+        #[arg(long, global = true)]
+        json: bool,
     },
     /// Quit the running host, saying what that ends before it ends it.
-    Quit,
+    Quit {
+        /// Print machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Open the window: the same host, with a tray item, notifications, one
     /// global shortcut and links that open the right change.
     ///
     /// Closing the window keeps hosting; quitting from the tray says what it
-    /// stops. Nothing starts at login. Hidden in builds without `app`.
+    /// stops. Nothing starts at login.
     #[cfg_attr(
         not(feature = "app"),
         command(
@@ -487,33 +584,48 @@ pub enum Command {
 }
 
 #[derive(Subcommand)]
-pub enum SpeckitCmd {
-    /// Add the hook to `.specify/extensions.yml`, or print it where one exists.
-    Install {
-        /// Which hook point. Defaults to `after_implement`.
+pub enum LoginTarget {
+    /// Sign in to GitHub (github.com, or `[github] host` in app.toml).
+    Github {
+        /// A GitHub Enterprise host, instead of the configured one.
         #[arg(long)]
-        event: Option<String>,
-        /// Print and write nothing.
-        #[arg(long = "dry-run")]
-        dry_run: bool,
-        /// Write the hook even where the repository declares no gate to run.
+        host: Option<String>,
+        /// Read a token from stdin instead of the device flow — never from
+        /// an argument. For a host with no registered app, and for CI.
         #[arg(long)]
-        anyway: bool,
+        with_token: bool,
     },
 }
 
 #[derive(Subcommand)]
-pub enum GateCmd {
-    /// Run this repository's gates now and report the verdict.
-    Run {
-        /// Which repository. Defaults to the working directory.
+pub enum LogoutTarget {
+    /// Sign out of GitHub.
+    Github {
+        /// A GitHub Enterprise host, instead of the configured one.
+        #[arg(long)]
+        host: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ForgeCmd {
+    /// Every open issue, what needs you first.
+    ///
+    /// `--ready` narrows it to one repository's issues carrying
+    /// `[github].ready_label`: the list `change start --issue` picks from.
+    Issues {
+        /// Only the issues this repository offers as work.
+        #[arg(long)]
+        ready: bool,
+        /// The repository to ask. Defaults to the working directory. Implies `--ready`.
         #[arg(long)]
         cwd: Option<PathBuf>,
-        /// One named gate from `devplane.toml` instead of the whole `check`.
-        /// A named gate never makes a change verified.
+        /// Only issues with this label. Defaults to `[github].ready_label`. Implies `--ready`.
         #[arg(long)]
-        name: Option<String>,
+        label: Option<String>,
     },
+    /// Every open pull request, what needs you first.
+    Prs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -525,6 +637,8 @@ pub enum ChangeCmd {
     Start {
         /// What to do. Becomes the branch name and the first prompt.
         title: Vec<String>,
+        /// Which agent to start, as `devplane agents` lists it. Defaults to the
+        /// project's `[agent] default`.
         #[arg(long)]
         agent: Option<String>,
         /// A project to start it in: a registered name or a path. Repeatable,
@@ -552,34 +666,55 @@ pub enum ChangeCmd {
     #[command(visible_alias = "ls")]
     List,
     /// Run the project's gates now.
-    Verify { change: String },
+    Verify {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
+        change: String,
+    },
     /// Hand the failures back to the agent once more, past the project's bound.
-    Retry { change: String },
+    Retry {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
+        change: String,
+    },
     /// Pick a change back up after a restart, against the same agent session.
     ///
     /// Reconnects to the conversation the agent kept rather than starting anew.
-    Resume { change: String },
+    Resume {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
+        change: String,
+    },
     /// Show one change: its state, its runs, and what its checks said.
-    Show { change: String },
+    Show {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
+        change: String,
+    },
     /// Print the done certificate: what was checked, against which commit, and
     /// how to check it yourself.
     ///
     /// Meant for a pull request: a reviewer can check out the commit and run
     /// the commands. `--json` gives an in-toto statement.
-    Export { change: String },
+    Export {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
+        change: String,
+    },
     /// Accept a change as finished. Records the basis; removes nothing.
-    Finish { change: String },
+    Finish {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
+        change: String,
+    },
     /// Decide what to do about a specification that moved under a run.
     ///
     /// `--tell` prompts the run with the changed files (resuming it if needed);
     /// `--accept` moves the change's start to what the run saw.
     Drift {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
         change: String,
         /// The run the drift names.
         #[arg(long)]
         run: String,
+        /// Accept the drift: move the change's start to what the run saw.
         #[arg(long, conflicts_with = "tell")]
         accept: bool,
+        /// Tell the run which specification files changed.
         #[arg(long)]
         tell: bool,
     },
@@ -595,6 +730,7 @@ pub enum ChangeCmd {
         /// The specification this change answers, relative to the repository.
         #[arg(long)]
         spec: Option<String>,
+        /// The change's title. Defaults to the first commit's subject.
         #[arg(long)]
         title: Option<String>,
     },
@@ -603,6 +739,7 @@ pub enum ChangeCmd {
     /// Refuses uncommitted or unmerged work unless forced. The branch is kept
     /// unless asked, and deleted only when its base has every commit.
     Archive {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
         change: String,
         /// Delete the branch too. Refused while it has commits its base does
         /// not, unless its pull request merged.
@@ -615,17 +752,28 @@ pub enum ChangeCmd {
         #[arg(long, requires = "delete_branch")]
         force: bool,
     },
-    /// Push the branch and open the pull request — or print the two commands
-    /// that would, when `[github] pull_request` does not say Devplane may.
-    Offer { change: String },
+    /// Push the branch and open the pull request — or, when `[github]
+    /// pull_request` does not say Devplane may, print the push command and
+    /// the address that opens the pull request in a browser.
+    Offer {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
+        change: String,
+    },
     /// Read a change in review order: files ordered by `[review] roles`, each
     /// with its role, test coverage, decisions and task, and the gate standing.
     ///
     /// `--by intent` groups files by the run that wrote them and its tasks.
+    ///
+    /// `--seen <path>` marks every current *checks weakened or changed* row at
+    /// that path read, as yours; an offer waits until every such row is.
     Review {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it.
         change: String,
         #[arg(long, value_parser = ["risk", "intent"], default_value = "risk")]
         by: String,
+        /// Mark the weakened rows at this path seen (repeatable).
+        #[arg(long, value_name = "PATH")]
+        seen: Vec<String>,
     },
     /// Send a message to a change's agent without stopping it. Mid-turn, it is
     /// queued until the turn ends.
@@ -634,8 +782,14 @@ pub enum ChangeCmd {
         run: String,
         text: Vec<String>,
     },
-    /// Stop a run. Says first what survives, then asks on a terminal.
-    Stop { run: String },
+    /// Stop a run. Says first what survives, then asks on a terminal;
+    /// anywhere else it needs `--yes`.
+    Stop {
+        run: String,
+        /// Stop without asking. Required when stdin is not a terminal.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -716,9 +870,15 @@ pub enum ReportCmd {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Open a GitHub draft with your own `gh` — the draft is shown first, and
-    /// this is the only command that writes to a forge.
-    Open { id: String },
+    /// Open a GitHub draft as an issue under your own sign-in. The draft is
+    /// shown and asked about first on a terminal; anywhere else it needs
+    /// `--yes`.
+    Open {
+        id: String,
+        /// Open it without asking. Required when stdin is not a terminal.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Throw a GitHub draft away. Nothing was ever sent.
     Discard { id: String },
 }
@@ -735,6 +895,124 @@ pub enum ConnectTarget {
     Copilot,
 }
 
+impl Cli {
+    /// Whether this command was asked for JSON, so an error is printed the
+    /// same way its output would have been.
+    #[must_use]
+    pub fn json(&self) -> bool {
+        match &self.command {
+            Some(
+                Command::Ls { json, .. }
+                | Command::Inbox { json, .. }
+                | Command::Forge { json, .. }
+                | Command::Show { json, .. }
+                | Command::Search { json, .. }
+                | Command::Rewind { json, .. }
+                | Command::Audit { json, .. }
+                | Command::Modes { json }
+                | Command::Attention { json, .. }
+                | Command::Gate { json, .. }
+                | Command::Agents { json }
+                | Command::Check { json, .. }
+                | Command::Explain { json, .. }
+                | Command::Trust { json, .. }
+                | Command::Change { json, .. }
+                | Command::Report { json, .. }
+                | Command::Snooze { json, .. }
+                | Command::Doctor { json }
+                | Command::Login { json, .. }
+                | Command::Logout { json, .. }
+                | Command::Connect { json, .. }
+                | Command::Disconnect { json, .. }
+                | Command::Quit { json },
+            ) => *json,
+            _ => false,
+        }
+    }
+}
+
+/// A command that has already said everything it had to and wants this exit
+/// status. Returned rather than calling `std::process::exit`, so destructors
+/// (the host lock, flushed output) run and a test can drive the command.
+#[derive(Debug)]
+pub struct Exit(pub i32);
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exit status {}", self.0)
+    }
+}
+
+impl std::error::Error for Exit {}
+
+/// Prints a command's error — as `{"error": …}` on stdout under `--json`, as
+/// text on stderr otherwise — and returns the process's exit status. An
+/// [`Exit`] has already been reported and prints nothing.
+#[must_use]
+pub fn report_error(e: &anyhow::Error, json: bool) -> i32 {
+    if let Some(Exit(code)) = e.downcast_ref::<Exit>() {
+        return *code;
+    }
+    if json {
+        println!("{}", serde_json::json!({ "error": format!("{e:#}") }));
+    } else {
+        eprintln!("Error: {e:?}");
+    }
+    1
+}
+
+/// Prints a host's answer as the `--json` document. An answer that carries
+/// `error` is printed the same and fails the command: a script reading the
+/// exit status must not take a refusal for success.
+pub(crate) fn print_json(v: &serde_json::Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(v)?);
+    if v.get("error").is_some_and(|e| !e.is_null()) {
+        return Err(Exit(1).into());
+    }
+    Ok(())
+}
+
+/// One rule for every question the CLI asks before it acts: on a terminal it
+/// asks on stderr, so `--json` output stays one document; anywhere else it
+/// refuses unless `--yes` said so, because nobody is there to answer and a
+/// pipe must not read as consent.
+pub(crate) fn confirm(question: &str, yes: bool) -> Result<bool> {
+    use std::io::IsTerminal;
+    confirm_with(
+        question,
+        yes,
+        std::io::stdin().is_terminal(),
+        &mut std::io::stdin().lock(),
+        &mut std::io::stderr(),
+    )
+}
+
+fn confirm_with(
+    question: &str,
+    yes: bool,
+    terminal: bool,
+    input: &mut dyn std::io::BufRead,
+    prompt: &mut dyn std::io::Write,
+) -> Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    if !terminal {
+        anyhow::bail!(
+            "nothing was done: stdin is not a terminal, so nobody can answer \"{question}\" — \
+             re-run with `--yes`"
+        );
+    }
+    write!(prompt, "  {question} [y/N] ")?;
+    prompt.flush()?;
+    let mut answer = String::new();
+    if input.read_line(&mut answer)? == 0 {
+        writeln!(prompt)?;
+        return Ok(false);
+    }
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
+}
+
 /// Runs the parsed command. Takes a `Cli` so a test can drive it in-process.
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -743,35 +1021,41 @@ pub async fn run(cli: Cli) -> Result<()> {
             all,
             project,
             needs_you,
-        }) => cmd_ls(all, project.as_deref(), needs_you, cli.json).await,
-        None => cmd_ls(false, None, false, cli.json).await,
-        Some(Command::Inbox { project, needs_you }) => {
-            cmd_inbox(cli.json, project.as_deref(), needs_you).await
-        }
-        Some(Command::Issues { ready, cwd, label }) => {
-            if ready || cwd.is_some() || label.is_some() {
-                crate::cli::change::cmd_ready_issues(cwd, label, cli.json).await
-            } else {
-                crate::cli::board::cmd_forge_issues(cli.json).await
+            json,
+        }) => cmd_ls(all, project.as_deref(), needs_you, json).await,
+        None => cmd_ls(false, None, false, false).await,
+        Some(Command::Inbox {
+            all: true, json, ..
+        }) => cmd_inbox_all(json).await,
+        Some(Command::Inbox {
+            project,
+            needs_you,
+            json,
+            ..
+        }) => cmd_inbox(json, project.as_deref(), needs_you).await,
+        Some(Command::Forge { what, json }) => match what {
+            ForgeCmd::Issues { ready, cwd, label } => {
+                if ready || cwd.is_some() || label.is_some() {
+                    crate::cli::change::cmd_ready_issues(cwd, label, json).await
+                } else {
+                    crate::cli::board::cmd_forge_issues(json).await
+                }
             }
-        }
-        Some(Command::Prs) => crate::cli::board::cmd_forge_prs(cli.json).await,
-        Some(Command::Show { run }) => cmd_show(&run, cli.json).await,
-        Some(Command::Search { query }) => cmd_search(&query, cli.json).await,
-        Some(Command::Rewind { run }) => cmd_rewind(&run, cli.json).await,
+            ForgeCmd::Prs => crate::cli::board::cmd_forge_prs(json).await,
+        },
+        Some(Command::Show { run, json }) => cmd_show(&run, json).await,
+        Some(Command::Search { query, json }) => cmd_search(&query, json).await,
+        Some(Command::Rewind { run, json }) => cmd_rewind(&run, json).await,
         Some(Command::Audit {
             about,
             without_me,
             limit,
             otel,
-        }) => cmd_audit(about.as_deref(), without_me, limit, cli.json, otel).await,
+            json,
+        }) => cmd_audit(about.as_deref(), without_me, limit, json, otel).await,
         Some(Command::Completions { shell }) => crate::cli::completions::cmd_completions(&shell),
-        Some(Command::Rules { rule, ask }) => {
-            crate::cli::rules::cmd_rules(rule, ask, cli.json).await
-        }
-        Some(Command::Modes) => crate::cli::inbox::cmd_modes(cli.json).await,
-        Some(Command::Attention { days }) => cmd_attention(days, cli.json).await,
-        Some(Command::Focus { run }) => cmd_focus(&run).await,
+        Some(Command::Modes { json }) => crate::cli::inbox::cmd_modes(json).await,
+        Some(Command::Attention { days, json }) => cmd_attention(days, json).await,
         Some(Command::Attach { run }) => cmd_attach(&run).await,
         Some(Command::Answer {
             ask,
@@ -781,20 +1065,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             custom,
             field,
         }) => cmd_answer(&ask, allow, deny, option, custom, field).await,
-        Some(Command::Asks) => cmd_asks(cli.json).await,
-        Some(Command::Gate {
-            what: GateCmd::Run { cwd, name },
-        }) => cmd_gate_run(cwd, name, cli.json).await,
+        Some(Command::Gate { cwd, name, json }) => cmd_gate_run(cwd, name, json).await,
         Some(Command::Speckit {
-            what:
-                SpeckitCmd::Install {
-                    event,
-                    dry_run,
-                    anyway,
-                },
+            event,
+            dry_run,
+            anyway,
         }) => cmd_speckit_install(event, dry_run, anyway),
-        Some(Command::Agents) => cmd_agents(cli.json).await,
-        Some(Command::Check { path }) => cmd_check(path, cli.json).await,
+        Some(Command::Agents { json }) => cmd_agents(json).await,
+        Some(Command::Check { path, json }) => cmd_check(path, json).await,
         Some(Command::Explain {
             call,
             tool,
@@ -802,33 +1080,47 @@ pub async fn run(cli: Cli) -> Result<()> {
             dir,
             replay,
             limit,
+            json,
         }) => {
             if replay {
-                crate::cli::change::cmd_replay(dir, limit, cli.json).await
+                crate::cli::change::cmd_replay(dir, limit, json).await
             } else {
-                crate::cli::change::cmd_explain(dir, tool, call, input, cli.json)
+                crate::cli::change::cmd_explain(dir, tool, call, input, json)
             }
         }
-        Some(Command::Trust { path, yes, dry_run }) => {
-            cmd_trust(path, yes, dry_run, cli.json).await
-        }
-        Some(Command::Change { what }) => cmd_change(what, cli.json).await,
-        Some(Command::Report { what }) => report::cmd_report(what, cli.json).await,
-        Some(Command::Snooze { id, minutes }) => cmd_snooze(&id, minutes, cli.json).await,
+        Some(Command::Trust {
+            path,
+            yes,
+            dry_run,
+            json,
+        }) => cmd_trust(path, yes, dry_run, json).await,
+        Some(Command::Change { what, json }) => cmd_change(what, json).await,
+        Some(Command::Report { what, json }) => report::cmd_report(what, json).await,
+        Some(Command::Snooze { id, minutes, json }) => cmd_snooze(&id, minutes, json).await,
         Some(Command::Open) => cmd_open().await,
         Some(Command::Watch {
             run,
             thinking,
             history,
         }) => cmd_watch(run.as_deref(), thinking, history).await,
-        Some(Command::Doctor) => cmd_diagnostics(cli.json).await,
+        Some(Command::Doctor { json }) => cmd_diagnostics(json).await,
+        Some(Command::Login {
+            what: LoginTarget::Github { host, with_token },
+            json,
+        }) => github::cmd_login(host, with_token, json).await,
+        Some(Command::Logout {
+            what: LogoutTarget::Github { host },
+            json,
+        }) => github::cmd_logout(host, json).await,
         Some(Command::Connect {
             what,
             statusline,
             yes,
-        }) => cmd_connect(what, statusline, yes, cli.json).await,
-        Some(Command::Disconnect { what, yes }) => cmd_disconnect(what, yes, cli.json).await,
-        Some(Command::Quit) => cmd_quit(cli.json).await,
+            bin,
+            json,
+        }) => cmd_connect(what, statusline, yes, json, bin).await,
+        Some(Command::Disconnect { what, yes, json }) => cmd_disconnect(what, yes, json).await,
+        Some(Command::Quit { json }) => cmd_quit(json).await,
         #[cfg(feature = "app")]
         Some(Command::App { port }) => crate::app::run(port).await,
         #[cfg(not(feature = "app"))]
@@ -946,10 +1238,19 @@ pub(crate) async fn drain_decision_spool(state: &std::sync::Arc<host::AppState>)
         "filing decisions the hook could not write down"
     );
     for row in pending {
-        if let Ok(env) = serde_json::from_value::<crate::core::DecidedEnvelope>(row)
-            && let Err(e) = crate::record::decided(&state.store, env).await
-        {
-            tracing::warn!(error = %e, "a spooled decision could not be filed");
+        match serde_json::from_value::<crate::core::DecidedEnvelope>(row.clone()) {
+            Ok(env) => {
+                if let Err(e) = crate::record::decided(&state.store, env).await {
+                    tracing::warn!(error = %e, "a spooled decision could not be filed");
+                }
+            }
+            // A row nobody can read is a decision the ledger lost: say so, with
+            // the row, rather than dropping it in silence.
+            Err(e) => tracing::error!(
+                error = %e,
+                row = %row,
+                "a spooled decision would not parse and is not in the ledger"
+            ),
         }
     }
 }
@@ -960,7 +1261,7 @@ pub(crate) async fn drain_decision_spool(state: &std::sync::Arc<host::AppState>)
 /// will not load means every call is asked, never no rules; the host still
 /// starts and logs an error.
 fn load_policy() -> crate::core::Policy {
-    let (policy, _) = crate::core::policy_cache::global_policy();
+    let (policy, _) = crate::policy_cache::global_policy();
     match policy.load_error() {
         Some(e) => tracing::error!(
             error = %e,
@@ -1108,5 +1409,43 @@ mod uptime_tests {
         assert_eq!(uptime_of(""), "start time unknown");
         let future = (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(600)).to_string();
         assert_eq!(uptime_of(&future), "start time in the future");
+    }
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::confirm_with;
+
+    fn ask(yes: bool, terminal: bool, typed: &str) -> (anyhow::Result<bool>, String) {
+        let mut input = std::io::Cursor::new(typed.as_bytes().to_vec());
+        let mut prompt = Vec::new();
+        let r = confirm_with("Stop it?", yes, terminal, &mut input, &mut prompt);
+        (r, String::from_utf8(prompt).unwrap())
+    }
+
+    #[test]
+    fn a_json_refusal_is_printed_and_fails_the_command() {
+        let e = super::print_json(&serde_json::json!({"error": "no such change"})).unwrap_err();
+        assert_eq!(e.downcast_ref::<super::Exit>().map(|x| x.0), Some(1));
+        assert!(super::print_json(&serde_json::json!({"error": null, "ok": true})).is_ok());
+        assert!(super::print_json(&serde_json::json!({"state": "finished"})).is_ok());
+    }
+
+    #[test]
+    fn without_a_terminal_only_yes_proceeds() {
+        // A pipe is not consent: `y` piped in is refused the same as nothing.
+        let (r, said) = ask(false, false, "y\n");
+        assert!(r.unwrap_err().to_string().contains("--yes"));
+        assert!(said.is_empty(), "nothing is asked of nobody");
+        assert!(ask(true, false, "").0.unwrap());
+    }
+
+    #[test]
+    fn on_a_terminal_the_question_is_asked_and_no_is_the_default() {
+        let (r, said) = ask(false, true, "y\n");
+        assert!(r.unwrap());
+        assert!(said.contains("Stop it? [y/N]"));
+        assert!(!ask(false, true, "\n").0.unwrap());
+        assert!(!ask(false, true, "").0.unwrap(), "end of input is no");
     }
 }

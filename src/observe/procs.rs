@@ -90,7 +90,7 @@ fn parse(text: &str) -> Vec<Proc> {
 /// The pids of this process's own children that lead their own groups.
 ///
 /// Diffed around a spawn to find the new agent. Group leaders only, which
-/// drops the short-lived `git`/`gh`/gate children that share our group.
+/// drops the short-lived `git` and gate children that share our group.
 pub fn own_group_leading_children() -> HashSet<u32> {
     let me = std::process::id();
     snapshot()

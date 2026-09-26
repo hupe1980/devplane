@@ -444,7 +444,7 @@ pub struct Run {
     /// The tasks Devplane sent this run. `None` means nothing was ever sent,
     /// never an empty list standing in for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sent: Option<Vec<crate::core::spec::SentTask>>,
+    pub sent: Option<Vec<crate::spec::SentTask>>,
     /// What the specification said when this run last closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed: Option<Observed>,
@@ -557,8 +557,15 @@ impl Run {
         true
     }
 
-    pub fn new(session_id: SessionId, cwd: PathBuf, mode: RunMode, agent: &str) -> Self {
-        let now = Timestamp::now();
+    /// A run first seen at `now`. [`Run::new`] (outside the pure half)
+    /// stamps the wall clock.
+    pub fn new_at(
+        session_id: SessionId,
+        cwd: PathBuf,
+        mode: RunMode,
+        agent: &str,
+        now: Timestamp,
+    ) -> Self {
         Self {
             id: RunId::from_session(&session_id),
             session_id,
@@ -641,23 +648,24 @@ impl Run {
         self.worktree.as_ref().unwrap_or(&self.cwd)
     }
 
-    /// Seconds since the last activity, for the stall timer and the UI.
-    pub fn idle_seconds(&self) -> i64 {
-        (Timestamp::now() - self.last_activity_at).get_seconds()
+    /// Seconds since the last activity as of `now`, for the stall timer and
+    /// the UI.
+    pub fn idle_seconds_at(&self, now: Timestamp) -> i64 {
+        (now - self.last_activity_at).get_seconds()
     }
 
     /// Whether this run belongs in the working set. A session asking for
     /// something, working, or waiting on a job never ages out; anything else
     /// that reported, failed or was lost stays for [`IN_PLAY_SECONDS`] and is
     /// then counted rather than listed (`--all` lists it).
-    pub fn is_active(&self) -> bool {
+    pub fn is_active_at(&self, now: Timestamp) -> bool {
         if self.state.needs_human()
             || matches!(self.state, RunState::Working | RunState::Starting)
             || self.state.waits_on_a_job()
         {
             return true;
         }
-        let recent = self.idle_seconds() < IN_PLAY_SECONDS;
+        let recent = self.idle_seconds_at(now) < IN_PLAY_SECONDS;
         recent && (self.reporting || matches!(self.state, RunState::Failed | RunState::Lost))
     }
 

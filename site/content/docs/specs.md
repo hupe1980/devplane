@@ -59,7 +59,7 @@ says *checked against `specs/001-password-reset` at `3f9a…`*.
 ```console
 $ devplane change show c-3f9a
   spec       specs/001-password-reset at 3f9a1c40b7e2d518 over 4 documents
-  tasks      11 ticked · 9 verified
+  tasks      11 ticked · 9 seen by a passing check
 ```
 
 ## Sending chosen tasks
@@ -87,19 +87,20 @@ edge; a token on only one side is reported as a gap. Spec Kit's `[US1]` marker a
 ## Ticked is not verified
 
 A ticked box is the agent's claim about its own work, so a change that names a spec reports two
-counts and never combines them:
+counts and never combines them. Neither is *verified*: only a change is.
 
 ```console
-  tasks      11 ticked · 9 verified
+  tasks      11 ticked · 9 seen by a passing check
              ticked, sent to nobody: tasks.md:31, tasks.md:32
-  REQ-3      3 tasks · 2 ticked · 0 verified
+  REQ-3      3 tasks · 2 ticked · 0 seen by a passing check
 ```
 
 - **ticked** — `- [x]` in the task file, read in the change's worktree.
-- **verified** — ticked, sent to a run of this change with `--task`, and that run finished before the
-  change's latest passing `check` gate ran, so the gate saw its work.
+- **seen by a passing check** — ticked, sent to a run of this change with `--task`, and that run
+  finished before a `check` that passed, so the check ran over its work. It stays true if a later
+  check fails, which is why it is never called verified.
 - A box ticked by hand is listed as *ticked, sent to nobody*. With no gates declared the line reads
-  *11 ticked · no gates declared*, never *0 verified*. No percentage is computed anywhere.
+  *11 ticked · no gates declared*, never *0 seen*. No percentage is computed anywhere.
 
 ## When the spec moves under a run
 
@@ -129,24 +130,32 @@ That checks the specs against each other; your tests compare spec and code.
 ## The gate inside Spec Kit's workflow
 
 Spec Kit's commands look in `.specify/extensions.yml` for hooks, and run and wait for a hook marked
-`optional: false`. Devplane's gate goes there:
+`optional: false`. Devplane's hook names the skill `devplane-gate`, which runs `devplane gate` and
+reports what it exited with. The agent has to find that skill as a file, so copy it into the project
+(or into `~/.claude/skills/` for every project) first:
 
 ```sh
-devplane speckit install              # writes .specify/extensions.yml
-devplane speckit install --dry-run    # print it, write nothing
-devplane gate run                     # what the hook runs
+mkdir -p .claude/skills/devplane-gate
+curl -LsSf -o .claude/skills/devplane-gate/SKILL.md   https://raw.githubusercontent.com/hupe1980/devplane/main/plugin/skills/devplane-gate/SKILL.md
+
+devplane speckit              # writes .specify/extensions.yml
+devplane speckit --dry-run    # print it, write nothing
+devplane gate                 # what the skill runs
 ```
 
-If `.specify/extensions.yml` already exists, `speckit install` prints the entry instead.
-The hook goes on `after_implement` unless you pass `--event`. `speckit install` refuses when the
-repository declares no gate (declare `[gates] check` first, or pass `--anyway`), and when nothing
-defines the `devplane-gate` skill the hook resolves to: install the
-[Claude Code plugin](@/docs/install.md#inside-claude-code-as-a-plugin), or put a skill of that name in
-the project's or your own `.claude/skills/`.
+The [Claude Code plugin](@/docs/install.md#inside-claude-code-as-a-plugin) ships the same skill, but
+`devplane speckit` does not look inside a plugin install, so it still refuses until the file is at
+`.claude/skills/devplane-gate/SKILL.md` in the repository or your home.
 
-`devplane gate run` runs `[gates] check` and exits 0 only when it passed; *no gates declared* and an
+`speckit` needs Spec Kit initialised here (`.specify/`). If `.specify/extensions.yml` already exists,
+it prints the entry and where to add it instead of editing the file. The hook goes on
+`after_implement` unless you pass `--event`. It refuses when the repository declares no gate (declare
+`[gates] check` first) and when the skill file is missing; `--anyway` writes it regardless, and
+`--dry-run` applies the same refusals.
+
+`devplane gate` runs `[gates] check` and exits 0 only when it passed; *no gates declared* and an
 unreadable `devplane.toml` exit non-zero. It records nothing, and the hook never waits on a person.
-States and flags: [`devplane gate run`](@/docs/cli.md#devplane-gate-run).
+States and flags: [`devplane gate`](@/docs/cli.md#devplane-gate).
 
 ## Next
 

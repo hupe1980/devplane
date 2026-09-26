@@ -3,6 +3,7 @@
 import Inbox from "../../src/surfaces/inbox/Inbox.svelte";
 import List from "../../src/surfaces/inbox/List.svelte";
 import recorded from "../../fixtures/inbox.json";
+import { address, place } from "../../src/surfaces/inbox/place.svelte";
 import { fail, html, source } from "../harness";
 
 const open = () => {};
@@ -42,9 +43,15 @@ const list = (props: Record<string, unknown>) => html(List, { open, ...props });
   if (!since.includes("since you last looked · 16h")) fail("the boundary is not rendered");
   if (!since.includes(">new<")) fail("an item raised since the last look is not marked");
 
-  // Narrowing is the host's: the list asks `/api/inbox?project=`.
+  // Narrowing is the host's: the list asks `/api/inbox?project=`, once for
+  // the list and the item beside it.
   const code = source("../src/surfaces/inbox/List.svelte");
-  if (!code.includes("/api/inbox?project=")) fail("the list narrows by filtering locally rather than asking the host");
+  const narrow = source("../src/surfaces/inbox/narrow.svelte.ts");
+  if (!narrow.includes("/api/inbox?project=") || !/narrowed\(/.test(code)) fail("the list narrows by filtering locally rather than asking the host");
+  if (/api<[^>]*>\(`\/api\/inbox\?project=/.test(code + source("../src/surfaces/inbox/Inbox.svelte")))
+    fail("the narrowed inbox is read by two components, so twice per poll");
+  // A failed narrowing never falls back to the whole inbox under the chip.
+  if (!/narrowedFeed = \$derived\(narrow\.on \? \(narrow\.data \?\? NONE\) : null\)/.test(code)) fail("a failed narrowing shows the un-narrowed inbox");
   if (!/onclick=\{\(\) => open\(/.test(code)) fail("a project chip does not narrow through the address");
 }
 
@@ -81,7 +88,7 @@ const list = (props: Record<string, unknown>) => html(List, { open, ...props });
   if (!under.includes(">context high<")) fail("a kind with an underscore is printed as a machine name");
 
   // The rule to paste, and where — printed, never written.
-  const offered = html(Inbox, { items: [{ ...perm, id: "o1", offer: { rule: "Bash(cargo test *)", file: "settings.json",
+  const offered = html(Inbox, { items: [{ id: "o1", offer: { rule: "Bash(cargo test *)", file: "settings.json",
     section: "permissions.allow", covers: 12, more: true } }].map((x) => ({ ...x, kind: "permission", level: "high",
     title: "Bash: cargo test", ask: "a", actions: ["allow", "deny"] })), loaded: true });
   if (!offered.includes("Bash(cargo test *)")) fail("the rule to paste is not shown");
@@ -94,7 +101,10 @@ const list = (props: Record<string, unknown>) => html(List, { open, ...props });
   // A recorded watched-session permission offers what the host offered.
   const watched = html(Inbox, { items: [recorded.items[0]], loaded: true });
   if (!watched.includes(recorded.items[0].answer_in ?? "")) fail("a dialog another tool owns does not say where to answer it");
-  if (!/>raise its window</.test(watched)) fail("a watched session's permission offers no way to reach its window");
+  // The host no longer raises windows (`POST /api/runs/{id}/focus` is gone):
+  // the row says where to answer and opens what it is about.
+  if (!/>open<\/a/.test(watched)) fail("a watched session's permission offers no way to open what it is about");
+  if (/raise its window/.test(watched)) fail("the inbox offers to raise a window the host can no longer raise");
 }
 
 // ── A multi-question form is answered field by field ─────────────────────
@@ -164,7 +174,7 @@ const list = (props: Record<string, unknown>) => html(List, { open, ...props });
   if (!/aria-label="why, for the project that filed it"/.test(row)) fail("a rejection has nowhere to say why");
   const draft = html(Inbox, { loaded: true, items: [{ id: "rp-2:report_filed", kind: "report_filed", level: "normal",
     title: "An issue is drafted", detail: quoted, report: "rp-2", actions: ["open_draft", "discard_draft"] }] });
-  if (!/<button[^>]*>open on GitHub with your gh<\/button>/.test(draft)) fail("a draft offers no open");
+  if (!/<button[^>]*>open on GitHub<\/button>/.test(draft)) fail("a draft offers no open");
   if (/start a change from this/.test(draft)) fail("a draft offers a change in a project nobody registered");
   if (/\.finding\b|\.evidence\b/.test(source("../src/surfaces/inbox/Item.svelte"))) fail("the inbox reads a report's finding instead of its quote");
 }
@@ -205,5 +215,30 @@ const list = (props: Record<string, unknown>) => html(List, { open, ...props });
   if ((acts.match(/undo: null/g) ?? []).length < 6) fail("undo is not cleared by every path that is not reversible");
   if (!/undo = r\.undo/.test(code)) fail("the inbox does not take the undo from the action's outcome");
   if (!/cannot be taken back/.test(acts)) fail("answering says nothing about being final");
-  if (!/\{#if undo\}/.test(code)) fail("the undo control renders unconditionally");
+  if (!/\{#if undo(Here)?\}/.test(code)) fail("the undo control renders unconditionally");
+}
+
+// ── The address says what it names, and a named item that left says so ───
+{
+  const rows = [
+    { id: "a", kind: "permission", level: "high", title: "Run rm", actions: ["allow", "deny"] },
+    { id: "b", kind: "question", level: "high", title: "Which table?", ask: "ask-b", actions: ["reply"] },
+  ];
+  const at = address("item=a", rows);
+  if (at.item !== "a" || at.project) fail("a row's address is read as a project");
+  if (address("ask=x", rows).wanted !== "x") fail("a followed ask's address is not read as one");
+  if (address("saas", rows).project !== "saas") fail("a bare name is not a project");
+  if (address("a", rows).item !== "a") fail("an older bare row address no longer names its row");
+  // Answered from the list: the next row is shown and the sentence says why.
+  const gone = place(rows as never, { item: "zz", wanted: "" });
+  if (gone.gone !== "item" || gone.current?.id !== "a") fail("a named row that left the list is not said to have left");
+  const followed = html(Inbox, { items: rows, loaded: true, wanted: "answered-ask" });
+  if (!followed.includes("The ask you followed was already answered.")) fail("a followed link to an answered ask quietly shows another item");
+  const resolved = html(Inbox, { items: rows, loaded: true, item: "gone-row" });
+  if (!resolved.includes("That item was resolved")) fail("a named row that left the list quietly shows another item");
+  if (/Clear\./.test(resolved)) fail("the inbox says Clear. while items wait");
+  // Enter goes into the item, never onto its first answer.
+  const code = source("../src/surfaces/inbox/Inbox.svelte");
+  if (/querySelector\([^)]*\.one button/.test(code)) fail("Enter lands on the item's first button, so Enter twice answers");
+  if (!/<kbd[^>]*>a<\/kbd> allow/.test(html(Inbox, { items: rows, loaded: true, item: "a" }))) fail("the answer keys are not printed on the item");
 }

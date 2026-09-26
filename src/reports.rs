@@ -105,7 +105,7 @@ pub async fn file(store: &Store, req: FileRequest) -> Result<Filed, Refusal> {
                 .map(|p| p.id.clone())
                 .or_else(|| {
                     let dir = Path::new(from).canonicalize().ok()?;
-                    let root = crate::core::project::governing_root(&dir)?;
+                    let root = crate::repo::governing_root(&dir)?;
                     let id = ProjectId::from_path(&root.canonicalize().unwrap_or(root));
                     projects.iter().any(|p| p.id == id).then_some(id)
                 })
@@ -125,10 +125,10 @@ pub async fn file(store: &Store, req: FileRequest) -> Result<Filed, Refusal> {
         .map(|p| p.root.clone())
         .unwrap_or_else(|| PathBuf::from(provenance.project.as_str()));
     let confine = |named: &str| -> Result<(), String> {
-        match crate::core::spec::confine(&source_root, named) {
+        match crate::spec::confine(&source_root, named) {
             Ok(_) => Ok(()),
             Err(why) => match &worktree {
-                Some(w) if crate::core::spec::confine(w, named).is_ok() => Ok(()),
+                Some(w) if crate::spec::confine(w, named).is_ok() => Ok(()),
                 _ => Err(why),
             },
         }
@@ -252,8 +252,11 @@ pub async fn deliver(state: &Shared, report: &Report) -> Option<RunId> {
             .filter(|c| c.project_id == *project && !c.is_settled())
             .filter_map(|c| {
                 let run = c.current_run()?;
+                // A live session that is not on its way out: a stopping one
+                // cannot take the report, and handing it one loses it.
                 sessions
-                    .contains_key(run)
+                    .get(run)
+                    .is_some_and(|s| s.is_live() && !s.is_stopping())
                     .then(|| (c.updated_at, c.id.clone(), run.clone()))
             })
             .max_by_key(|(at, _, _)| *at)
@@ -491,12 +494,41 @@ pub async fn told(state: &Shared, change: &ChangeId, ids: &[crate::core::ReportI
     }
 }
 
-/// Opens a drafted GitHub issue with the person's own `gh`.
+/// The reports whose issue is being written right now, in this host.
+static OPENING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A report claimed for opening; released when dropped.
+struct Opening(String);
+
+impl Opening {
+    fn claim(id: &str) -> Option<Self> {
+        let mut held = OPENING.lock().unwrap_or_else(|e| e.into_inner());
+        if held.iter().any(|h| h == id) {
+            return None;
+        }
+        held.push(id.to_string());
+        Some(Opening(id.to_string()))
+    }
+}
+
+impl Drop for Opening {
+    fn drop(&mut self) {
+        let mut held = OPENING.lock().unwrap_or_else(|e| e.into_inner());
+        held.retain(|h| h != &self.0);
+    }
+}
+
+/// Opens a drafted GitHub issue, signed in as the person.
 ///
-/// The only function that writes to a forge, reached only from a person's
-/// command or button. The body ([`Report::issue_body`]) goes via a file so no
-/// shell sees it.
+/// The only function that writes an issue to a forge, reached only from a
+/// person's command or button. The body is [`Report::issue_body`]: the report
+/// quoted as untrusted text.
 pub async fn open(state: &Shared, id: &str) -> Result<Report> {
+    // Claimed for the length of the write: a double click, or the window and
+    // the CLI at once, must not file the same report twice.
+    let Some(_claim) = Opening::claim(id) else {
+        bail!("report {id} is being opened already");
+    };
     let report = state
         .store
         .report(id)
@@ -512,44 +544,41 @@ pub async fn open(state: &Shared, id: &str) -> Result<Report> {
             report.state_says()
         );
     }
-    let dir = {
-        let w = state.world.lock().await;
-        w.project(&report.provenance.project)
-            .map(|p| p.root.clone())
-            .unwrap_or_else(std::env::temp_dir)
-    };
-    let body = std::env::temp_dir().join(format!("devplane-{}.md", report.id));
-    std::fs::write(&body, report.issue_body()).context("writing the issue body")?;
-    let body_arg = body.to_string_lossy().to_string();
-    let out = crate::github::gh(
-        &dir,
-        &[
-            "issue",
-            "create",
-            "--repo",
-            repo,
-            "--title",
-            &report.title,
-            "--body-file",
-            &body_arg,
-        ],
+    // The host whichever registered project is that repository lives on;
+    // otherwise the configured host.
+    let host = state
+        .forge
+        .lock()
+        .await
+        .repos
+        .values()
+        .find(|r| r.slug().eq_ignore_ascii_case(repo))
+        .map(|r| r.host.clone())
+        .unwrap_or_else(|| state.github.default_host().to_string());
+    let url = crate::github::create_issue(
+        &state.github,
+        &host,
+        repo,
+        &report.title,
+        &report.issue_body(),
     )
-    .await;
-    let _ = std::fs::remove_file(&body);
-    let out = out.context("opening the issue")?;
-    let url = out
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    .await
+    .context("opening the issue")?;
     settle(state, report, State::Opened { url }, "report:opened").await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Answer;
+    use super::{Answer, Opening};
+
+    #[test]
+    fn a_report_being_opened_cannot_be_claimed_twice() {
+        let first = Opening::claim("r-1").expect("free");
+        assert!(Opening::claim("r-1").is_none(), "claimed twice");
+        assert!(Opening::claim("r-2").is_some(), "another report is free");
+        drop(first);
+        assert!(Opening::claim("r-1").is_some(), "released when done");
+    }
 
     #[test]
     fn a_rejection_needs_a_reason_and_an_unknown_answer_is_named() {

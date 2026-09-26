@@ -23,7 +23,6 @@ pub fn router(state: Shared) -> Router {
         // Receivers. The `/devplane/` marker lets `connect` recognise its own
         // entries when disconnecting.
         .route("/devplane/otel/v1/logs", post(otel_logs))
-        .route("/devplane/otel/v1/metrics", post(otel_metrics))
         // Claude Code exports log records; GenAI-convention agents (Copilot,
         // Codex) export traces over the same `http/json` transport.
         .route("/devplane/otel/v1/traces", post(otel_traces))
@@ -37,7 +36,6 @@ pub fn router(state: Shared) -> Router {
         .route("/api/runs/{id}/rewind-gap", get(run_rewind_gap))
         .route("/api/runs/{id}/messages", get(run_messages))
         .route("/api/runs/{id}/snooze", post(snooze))
-        .route("/api/runs/{id}/focus", post(focus_run))
         .route("/api/runs/{id}/prompt", post(prompt_run))
         // One answer route addressed by the ask, not the run: the row knows its
         // kind, the caller says what the person chose.
@@ -55,6 +53,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/changes/{id}/retry", post(retry_change))
         .route("/api/changes/{id}/snooze", post(snooze_change))
         .route("/api/changes/{id}/review", get(change_review))
+        .route("/api/changes/{id}/review/seen", post(mark_review_seen))
         .route("/api/changes/{id}/certificate", get(change_certificate))
         .route("/api/changes/{id}/open", post(open_change))
         .route("/api/changes/{id}/resume", post(resume_change))
@@ -73,6 +72,11 @@ pub fn router(state: Shared) -> Router {
         .route("/api/projects/{id}/snooze", post(snooze_project))
         .route("/api/issues", post(list_issues))
         .route("/api/forge", get(forge))
+        // Sign-in state per GitHub host; never the token.
+        .route("/api/github", get(github_state))
+        .route("/api/github/login", post(github_login))
+        .route("/api/github/logout", post(github_logout))
+        .route("/api/github/refresh", post(github_refresh))
         .route("/api/decisions", get(decisions))
         .route("/api/explain", get(explain))
         .route("/api/search", get(search))
@@ -89,7 +93,6 @@ pub fn router(state: Shared) -> Router {
             "/healthz",
             get(|| async { concat!("ok ", env!("CARGO_PKG_VERSION")) }),
         )
-        .route("/api/rules", get(rules))
         .route("/", get(asset))
         .route("/{file}", get(asset))
         .with_state(state)
@@ -103,7 +106,7 @@ type Refusal = (StatusCode, Json<serde_json::Value>);
 /// they meant. Ambiguity is a 409 naming the candidates, never a guess.
 async fn resolved_run(state: &Shared, id: String) -> Result<RunId, Refusal> {
     let world = state.world.lock().await;
-    world.resolve_run(&id).map_err(|e| {
+    world.resolve_run(&id, jiff::Timestamp::now()).map_err(|e| {
         let code = match e {
             crate::core::Ambiguous::NotFound => StatusCode::NOT_FOUND,
             crate::core::Ambiguous::Several(_) => StatusCode::CONFLICT,
@@ -156,15 +159,15 @@ macro_rules! run_id {
 }
 
 /// Checks the bearer token. Loopback is not access control; the token, in a
-/// user-only file, is. A `token` query parameter is accepted too, because
-/// `EventSource` cannot send a header.
-fn authorised(state: &Shared, headers: &HeaderMap, query: Option<&str>) -> bool {
+/// user-only file, is. Only ever from the header: a token in a URL ends up in
+/// logs and process lists.
+fn authorised(state: &Shared, headers: &HeaderMap) -> bool {
     let from_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.strip_prefix("Bearer ").unwrap_or(v));
 
-    match from_header.or(query) {
+    match from_header {
         Some(t) => constant_time_eq(t.as_bytes(), state.token.as_bytes()),
         None => false,
     }
@@ -178,9 +181,20 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// The telemetry routes' check: the control token, or the telemetry-only one
+/// vendor settings carry.
+fn authorised_to_ingest(state: &Shared, headers: &HeaderMap) -> bool {
+    authorised(state, headers)
+        || headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.strip_prefix("Bearer ").unwrap_or(v))
+            .is_some_and(|t| constant_time_eq(t.as_bytes(), state.ingest_token.as_bytes()))
+}
+
 macro_rules! guard {
     ($state:expr, $headers:expr) => {
-        if !authorised(&$state, &$headers, None) {
+        if !authorised(&$state, &$headers) {
             return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorised"})))
                 .into_response();
         }
@@ -211,6 +225,28 @@ fn content_type_of(path: &str) -> &'static str {
     }
 }
 
+/// What the page may load and where it may send things: this host and
+/// nothing else. The page renders agent-written text and holds the bearer
+/// token, so a script that got in could reach no other origin with it, and no
+/// other page may frame it. Inline styles are Svelte's own `style=`.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
+     style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
+     object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+/// The headers every interface file is served with.
+fn asset_headers(path: &str) -> [(axum::http::HeaderName, &'static str); 5] {
+    use axum::http::header;
+    [
+        (header::CONTENT_TYPE, content_type_of(path)),
+        (header::CACHE_CONTROL, "no-store"),
+        (header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY),
+        // The token is read from the address once and removed; no page this
+        // one links to is ever told where it came from.
+        (header::REFERRER_POLICY, "no-referrer"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    ]
+}
+
 /// The interface: the embedded bundle, or the `dist/` directory named by
 /// `DEVPLANE_UI` (development only; falls back to the embedded copy).
 async fn asset(uri: axum::http::Uri) -> impl IntoResponse {
@@ -224,16 +260,7 @@ async fn asset(uri: axum::http::Uri) -> impl IntoResponse {
     if let Some(dir) = std::env::var_os("DEVPLANE_UI") {
         let path = std::path::Path::new(&dir).join(want);
         match std::fs::read(&path) {
-            Ok(bytes) => {
-                return (
-                    [
-                        (axum::http::header::CONTENT_TYPE, content_type_of(want)),
-                        (axum::http::header::CACHE_CONTROL, "no-store"),
-                    ],
-                    bytes,
-                )
-                    .into_response();
-            }
+            Ok(bytes) => return (asset_headers(want), bytes).into_response(),
             Err(e) => tracing::warn!(
                 path = ?path, error = %e,
                 "DEVPLANE_UI is set and unreadable; serving the embedded interface"
@@ -259,71 +286,7 @@ async fn asset(uri: axum::http::Uri) -> impl IntoResponse {
     let Some(found) = bundle.iter().find(|a| a.path == want) else {
         return (StatusCode::NOT_FOUND, "no such file").into_response();
     };
-    (
-        [
-            (
-                axum::http::header::CONTENT_TYPE,
-                content_type_of(found.path),
-            ),
-            (axum::http::header::CACHE_CONTROL, "no-store"),
-        ],
-        found.bytes,
-    )
-        .into_response()
-}
-
-/// Which project is missing a rule relied on elsewhere.
-async fn rules(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Query(q): Query<RulesQuery>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let snap = state.snapshot().await;
-    match crate::view::rules(&snap, q.rule.as_deref(), q.ask) {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(e)).into_response(),
-    }
-}
-
-#[derive(Debug, serde::Deserialize, Default)]
-struct RulesQuery {
-    rule: Option<String>,
-    /// Ask rather than deny, which changes the key the paste names.
-    #[serde(default)]
-    ask: bool,
-}
-
-/// Raises the editor window that owns a run, for the browser shell.
-async fn focus_run(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let id = run_id!(state, id);
-    let dir = {
-        let w = state.world.lock().await;
-        w.run(&id).map(|r| r.working_dir().clone())
-    };
-    let Some(dir) = dir else {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
-    };
-    match crate::focus::focus_path(&dir) {
-        Ok(crate::focus::Focused::Editor { app, pid }) => {
-            Json(json!({"focused": true, "app": app, "pid": pid})).into_response()
-        }
-        Ok(crate::focus::Focused::Nothing) => Json(json!({
-            "focused": false,
-            "reason": format!("no editor window has {} open", dir.display())
-        }))
-        .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
+    (asset_headers(found.path), found.bytes).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +301,13 @@ async fn otel_logs(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    guard!(state, headers);
+    if !authorised_to_ingest(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorised"})),
+        )
+            .into_response();
+    }
     ingest_otel(state, &body, crate::observe::otel::parse_logs).await
 }
 
@@ -348,7 +317,13 @@ async fn otel_traces(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    guard!(state, headers);
+    if !authorised_to_ingest(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorised"})),
+        )
+            .into_response();
+    }
     ingest_otel(state, &body, crate::observe::otel::parse_traces).await
 }
 
@@ -392,21 +367,6 @@ async fn ingest_otel(
     state
         .store
         .record_channel("otel", started.elapsed().as_micros() as u64, None)
-        .await
-        .ok();
-    (StatusCode::OK, Json(json!({"partialSuccess": {}}))).into_response()
-}
-
-async fn otel_metrics(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let n = crate::observe::otel::parse_metrics_sessions(&body).len();
-    state
-        .store
-        .record_channel("otel_metrics", n as u64, None)
         .await
         .ok();
     (StatusCode::OK, Json(json!({"partialSuccess": {}}))).into_response()
@@ -536,6 +496,38 @@ async fn forge(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
         })
         .collect();
 
+    // Per project, which state its GitHub is in: read, stale, not signed in,
+    // expired, rate limited, unreachable, or not a GitHub repository — so no
+    // surface draws an empty list where a failure belongs.
+    let projects: Vec<serde_json::Value> = names
+        .iter()
+        .map(|(id, name)| {
+            let skipped = f.skip.get(id);
+            let pf = f.projects.get(id);
+            let host = pf
+                .and_then(|p| p.host.clone())
+                .or_else(|| f.repos.get(id).map(|r| r.host.clone()));
+            let github = match (skipped, &host) {
+                (Some((why, _)), _) => json!({"state": "not_github", "why": why}),
+                (None, Some(h)) => serde_json::to_value(state.github.view(h)).unwrap_or_default(),
+                // Not polled yet: nothing is known about its remote.
+                (None, None) => json!({"state": "unknown"}),
+            };
+            json!({
+                "project": id.to_string(),
+                "project_name": name,
+                "repo": pf.and_then(|p| p.repo.clone()).or_else(|| f.repos.get(id).map(|r| r.slug())),
+                "host": host,
+                "github": github,
+                "stale": pf.and_then(|p| p.error.clone()),
+                "read_at": pf.filter(|p| p.error.is_none() || !p.issues.is_empty() || !p.pull_requests.is_empty())
+                    .map(|p| p.fetched_at.to_string()),
+                "issues_more": pf.map(|p| p.issues_more()).unwrap_or(0),
+                "pull_requests_more": pf.map(|p| p.pull_requests_more()).unwrap_or(0),
+            })
+        })
+        .collect();
+
     Json(json!({
         "viewer": f.viewer,
         "error": f.error,
@@ -543,8 +535,141 @@ async fn forge(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
         "issues": issues,
         "pull_requests": prs,
         "stale": stale,
+        // The configured host's sign-in, for the page as a whole.
+        "github": state.github.view(state.github.default_host()),
+        "projects": projects,
+        "issues_more": f.projects.values().map(|p| p.issues_more()).sum::<usize>(),
+        "pull_requests_more": f.projects.values().map(|p| p.pull_requests_more()).sum::<usize>(),
     }))
     .into_response()
+}
+
+/// Every GitHub host's sign-in: state, login, scopes, a pending code. Never
+/// the token.
+async fn github_state(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    Json(json!({
+        "hosts": state.github.views(),
+        // The configured host's; each host says its own as `device_flow`.
+        "client_id": state.github.client_id(state.github.default_host()).is_some(),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct GitHubHostBody {
+    #[serde(default)]
+    host: Option<String>,
+}
+
+/// A refusal from the GitHub hub, as the status the contract names.
+fn github_refusal(e: &crate::github::Error) -> axum::response::Response {
+    use crate::github::Error as E;
+    let code = match e {
+        E::NoClientId => StatusCode::CONFLICT,
+        E::NoCredentialStore(_) | E::Store(_) => StatusCode::SERVICE_UNAVAILABLE,
+        E::Unreachable(_) | E::RateLimited { .. } => StatusCode::BAD_GATEWAY,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    (code, Json(json!({"error": e.to_string()}))).into_response()
+}
+
+/// Starts the device flow for a host, or returns the one already waiting, so
+/// the window and the CLI show one code. The poll runs here, in the host.
+async fn github_login(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: Option<Json<GitHubHostBody>>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let host = state.github.host_or_default(body.host.as_deref());
+    let already = matches!(
+        state.github.view(&host).sign_in,
+        crate::github::SignIn::Pending { .. }
+    );
+    match state.github.start(&host).await {
+        Ok(pending) => {
+            if !already {
+                let hub = state.github.clone();
+                let tell = state.clone();
+                tokio::spawn(async move {
+                    match hub.wait(pending).await {
+                        Ok(v) => {
+                            tracing::info!(login = %v.login, "signed in to GitHub");
+                            tell.notify_changed();
+                            // The surface that said *not signed in* fills now,
+                            // not at the next tick.
+                            crate::poller::forge_now(&tell).await;
+                        }
+                        Err(e) => tracing::info!(error = %e, "a GitHub sign-in ended"),
+                    }
+                    tell.notify_changed();
+                });
+            }
+            state.notify_changed();
+            Json(state.github.view(&host)).into_response()
+        }
+        Err(e) => github_refusal(&e),
+    }
+}
+
+/// Deletes a host's token and every copy the host holds, and says where to
+/// revoke the grant at GitHub.
+async fn github_logout(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: Option<Json<GitHubHostBody>>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let host = state.github.host_or_default(body.host.as_deref());
+    match state.github.logout(&host).await {
+        Ok(from) => {
+            {
+                let mut f = state.forge.lock().await;
+                let gone: Vec<_> = f
+                    .projects
+                    .iter()
+                    .filter(|(_, p)| p.host.as_deref() == Some(host.as_str()))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in gone {
+                    f.projects.remove(&id);
+                }
+                if host == state.github.default_host() {
+                    f.viewer = None;
+                }
+            }
+            state.notify_changed();
+            let mut v = serde_json::to_value(state.github.view(&host)).unwrap_or_default();
+            // `null` when the host was not signed in and nothing was deleted.
+            v["deleted_from"] = json!(from);
+            v["revoke_at"] = json!(crate::github::revoke_url(&host));
+            Json(v).into_response()
+        }
+        Err(e) => github_refusal(&e),
+    }
+}
+
+/// Says a sign-in changed outside this host — `devplane login github
+/// --with-token` stores the token in its own process — so the copy this host
+/// holds is dropped and the forge is read at once.
+async fn github_refresh(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    body: Option<Json<GitHubHostBody>>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let host = state.github.host_or_default(body.host.as_deref());
+    state.github.forget_token(&host);
+    let tell = state.clone();
+    tokio::spawn(async move {
+        crate::poller::forge_now(&tell).await;
+        tell.notify_changed();
+    });
+    Json(state.github.view(&host)).into_response()
 }
 
 /// Hides a project's forge items for a while, per kind, so dismissing a
@@ -556,8 +681,7 @@ async fn snooze_project(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = (q.minutes > 0)
-        .then(|| jiff::Timestamp::now() + jiff::SignedDuration::from_mins(q.minutes));
+    let until = snooze_until(q.minutes);
     let project = crate::core::ProjectId::new(id);
     let dismissed: Vec<crate::core::AttentionKind> = {
         let mut f = state.forge.lock().await;
@@ -573,6 +697,7 @@ async fn snooze_project(
             &pf,
             f.snoozed.get(&project).unwrap_or(&none),
             &Default::default(),
+            jiff::Timestamp::now(),
         )
         .items
         .into_iter()
@@ -666,7 +791,7 @@ async fn explain(
     let input = json!({ field: q.call });
 
     // The gate this machine enforces, machine-wide rules included.
-    let (cache, _) = crate::core::PolicyCache::from_disk();
+    let (cache, _) = crate::policy_cache::PolicyCache::from_disk();
     let verdict = cache.restrictive(&dir, &q.tool, &input);
 
     let asked_by = q.asked_by.as_deref().unwrap_or("api");
@@ -825,8 +950,8 @@ async fn answer_ask(
         return (
             StatusCode::NOT_FOUND,
             format!(
-                "no ask `{id}` is waiting.\n\n  devplane asks lists every question and what \
-                 became of it."
+                "no ask `{id}` is waiting.\n\n  devplane inbox --all lists every question and \
+                 what became of it."
             ),
         )
             .into_response();
@@ -980,7 +1105,11 @@ impl StartChangeBody {
     }
 
     /// The title and prompt, from the body or from the issue it names.
-    async fn words(&self, targets: &[String]) -> Result<(String, String), String> {
+    async fn words(
+        &self,
+        hub: &crate::github::GitHub,
+        targets: &[String],
+    ) -> Result<(String, String), String> {
         let title = self.title.clone();
         let prompt = self.prompt.clone().unwrap_or_else(|| title.clone());
         let Some(number) = self.issue else {
@@ -989,12 +1118,16 @@ impl StartChangeBody {
         let [dir] = targets else {
             return Err("an issue is one repository's: start from it in one project".into());
         };
-        let issues = crate::github::issues(std::path::Path::new(dir), None, 100)
+        // Asked by number: an issue older than any list is still one to start.
+        match crate::github::issue(hub, std::path::Path::new(dir), number)
             .await
-            .map_err(|e| e.to_string())?;
-        match issues.into_iter().find(|i| i.number == number) {
-            Some(issue) => Ok((format!("#{} {}", issue.number, issue.title), issue.prompt())),
-            None => Err(format!("issue #{number} is not open here")),
+            .map_err(|e| e.to_string())?
+        {
+            Some((issue, true)) => {
+                Ok((format!("#{} {}", issue.number, issue.title), issue.prompt()))
+            }
+            Some((_, false)) => Err(format!("issue #{number} is closed")),
+            None => Err(format!("this repository has no issue #{number}")),
         }
     }
 }
@@ -1024,7 +1157,7 @@ async fn preflight_change(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let targets = body.targets();
-    let prompt = match body.words(&targets).await {
+    let prompt = match body.words(&state.github, &targets).await {
         Ok((_, prompt)) => prompt,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
     };
@@ -1056,7 +1189,7 @@ async fn start_change(
         )
             .into_response();
     }
-    let (title, prompt) = match body.words(&targets).await {
+    let (title, prompt) = match body.words(&state.github, &targets).await {
         Ok(words) => words,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
     };
@@ -1399,6 +1532,50 @@ async fn change_review(
     }
 }
 
+/// Marks a weakened row seen: a person read it. `matched` narrows the mark to
+/// one row; without it every current row at `path` is marked.
+#[derive(Deserialize)]
+struct SeenBody {
+    path: String,
+    #[serde(default)]
+    matched: Option<String>,
+}
+
+async fn mark_review_seen(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<SeenBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    let snap = state.snapshot().await;
+    match crate::view::mark_seen(
+        &snap,
+        &state.store,
+        &id,
+        &body.path,
+        body.matched.as_deref(),
+    )
+    .await
+    {
+        Ok(seen) => Json(json!({ "seen": seen })).into_response(),
+        Err(crate::view::SeenRefusal::NoSuchChange) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("no change `{id}`")})),
+        )
+            .into_response(),
+        Err(crate::view::SeenRefusal::NoSuchRow(rows)) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("`{}` has no weakened row to mark seen", body.path),
+                "rows": rows,
+            })),
+        )
+            .into_response(),
+    }
+}
+
 async fn snooze_change(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -1406,8 +1583,7 @@ async fn snooze_change(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = (q.minutes > 0)
-        .then(|| jiff::Timestamp::now() + jiff::SignedDuration::from_mins(q.minutes));
+    let until = snooze_until(q.minutes);
     let id = change_id!(state, id);
     // A drift is derived from the runs, so it is asked before the row is held.
     let drifting = crate::change::has_drift(&state, &id).await;
@@ -1417,10 +1593,15 @@ async fn snooze_change(
         match changes.get_mut(&id) {
             Some(w) => {
                 // The kinds on screen now, never what turns up later.
-                let mut kinds: Vec<_> = crate::core::attention::items_for_change(w, false, false)
-                    .into_iter()
-                    .map(|i| i.kind)
-                    .collect();
+                let mut kinds: Vec<_> = crate::core::attention::items_for_change(
+                    w,
+                    false,
+                    false,
+                    jiff::Timestamp::now(),
+                )
+                .into_iter()
+                .map(|i| i.kind)
+                .collect();
                 if drifting {
                     kinds.push(crate::core::AttentionKind::SpecDrifted);
                 }
@@ -1474,8 +1655,15 @@ async fn finish_change(
                 crate::core::attention::Resolution::Acted,
             )
             .await;
+            // The state the board will show, from the same declared checks.
+            let checks = crate::change::governing_root(&state, &id)
+                .await
+                .and_then(|root| crate::core::ProjectConfig::load(&root).ok())
+                .map(|cfg| cfg.gates.check);
+            let declared = crate::core::change::Declared::of(checks.as_deref());
             let c = state.changes.lock().await.get(&id).cloned();
-            Json(json!({"ok": true, "state": c.map(|c| c.current_state())})).into_response()
+            Json(json!({"ok": true, "state": c.map(|c| c.state(declared, c.tree_now.as_ref()))}))
+                .into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -1702,7 +1890,7 @@ async fn resolve_report(
     }
 }
 
-/// Opens a GitHub draft with the person's own `gh`. `409` unless it is a draft.
+/// Opens a GitHub draft as the signed-in person. `409` unless it is a draft.
 async fn open_report(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -1790,6 +1978,23 @@ async fn offer_change(
             .await;
             Json(serde_json::to_value(offer).unwrap_or_default()).into_response()
         }
+        // Structured, so the window names each row with an action.
+        Err(e) if e.downcast_ref::<crate::change::WeakenedUnseen>().is_some() => {
+            let w = e
+                .downcast_ref::<crate::change::WeakenedUnseen>()
+                .expect("checked above");
+            (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "refused": "weakened_unseen",
+                    "says": crate::change::WeakenedUnseen::SAYS,
+                    "error": e.to_string(),
+                    "rows": w.rows,
+                    "seen_with": w.seen_with(),
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -1870,6 +2075,16 @@ async fn trust_project(
                 )
                     .into_response();
             }
+            // Trust lets a headless agent run this repository's own hooks
+            // and MCP servers, so it is a decision, and the record says who.
+            state
+                .record(crate::core::Decision::new(
+                    crate::core::Authority::Person,
+                    "project:trust",
+                    p.root.display().to_string(),
+                    "trusted",
+                ))
+                .await;
             Json(json!({"trusted": true, "project": p})).into_response()
         }
         None => (
@@ -1908,8 +2123,18 @@ async fn list_issues(
             .ok()
             .and_then(|c| c.github.ready_label),
     };
-    match crate::github::issues(&dir, label.as_deref(), body.limit).await {
-        Ok(issues) => Json(issues).into_response(),
+    match crate::github::issues(&state.github, &dir, label.as_deref(), body.limit).await {
+        // In the board's shape, as `/api/forge` lists issues.
+        Ok(issues) => {
+            let me = crate::github::remote::of_dir(&dir)
+                .await
+                .ok()
+                .and_then(|r| state.github.signed_in(&r.host))
+                .map(|v| v.login);
+            let rows: Vec<crate::core::ForgeIssue> =
+                issues.iter().map(|i| i.to_forge(me.as_deref())).collect();
+            Json(rows).into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -1921,7 +2146,7 @@ async fn list_issues(
 async fn specs(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let snap = state.snapshot().await;
-    Json(crate::view::specs(&snap)).into_response()
+    Json(crate::view::specs(&snap, &state.store).await).into_response()
 }
 
 /// What a person can start a change in, and whether an agent may start
@@ -1966,8 +2191,6 @@ async fn attention(
 
 #[derive(Deserialize)]
 struct StreamQuery {
-    #[serde(default)]
-    token: Option<String>,
     /// Narrow to one run.
     #[serde(default)]
     run: Option<String>,
@@ -1993,25 +2216,32 @@ async fn snooze(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = (q.minutes > 0)
-        .then(|| jiff::Timestamp::now() + jiff::SignedDuration::from_mins(q.minutes));
+    let until = snooze_until(q.minutes);
 
     let run_id = run_id!(state, id);
+    let now = jiff::Timestamp::now();
     // Named before the snooze hides them: a dismissal is the clearest signal
     // that a kind is too loud.
     let mut dismissed: Vec<crate::core::AttentionKind> = Vec::new();
     let saved = {
         let mut w = state.world.lock().await;
+        // The run's own project threshold, the one its inbox row was
+        // derived with, so the snooze hides exactly what was on screen.
+        let stall = w
+            .run(&run_id)
+            .and_then(|r| state.policy.stall_seconds(r.working_dir()))
+            .unwrap_or(w.attention.stall_seconds);
         if until.is_some()
             && let Some(r) = w.run(&run_id)
         {
             let cfg = w.attention;
-            dismissed = crate::core::attention::items_for_run(r, &cfg, cfg.stall_seconds)
+            dismissed = crate::core::attention::run_items_at(r, &cfg, stall, now)
+                .items
                 .into_iter()
                 .map(|i| i.kind)
                 .collect();
         }
-        if !w.snooze(&run_id, until) {
+        if !w.snooze(&run_id, until, now, stall) {
             None
         } else {
             w.run(&run_id).cloned()
@@ -2160,6 +2390,9 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
         json!({
             "viewer": f.viewer,
             "error": f.error,
+            // Per GitHub host: signed in as whom, and when GitHub last
+            // answered. Never the token.
+            "github": state.github.views(),
             "last_poll_at": f.last_poll_at.map(|t| t.to_string()),
             "projects": f.projects.len(),
             "skipped": f.skip.len(),
@@ -2214,7 +2447,7 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
         "pid": std::process::id(),
         "started_at": state.started_at.to_string(),
         "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
-        "summary": w.summary(),
+        "summary": w.summary(jiff::Timestamp::now()),
         "channels": channels,
         // The OpenCode subscription. The feed does not replay, so a dead
         // subscription looks like a quiet machine. Absent where not asked for.
@@ -2255,7 +2488,7 @@ async fn stream(
     Query(q): Query<StreamQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, StatusCode> {
     // A bad token says so, rather than looking like a quiet machine.
-    if !authorised(&state, &headers, q.token.as_deref()) {
+    if !authorised(&state, &headers) {
         return Err(StatusCode::UNAUTHORIZED);
     }
     let rx = state.tx.subscribe();
@@ -2275,8 +2508,16 @@ async fn stream(
                 };
                 match next {
                     Ok(frame) => {
+                        // A refresh is about no one run, so it reaches every
+                        // subscriber: a change or gate update is news to a
+                        // watcher of one run too.
+                        let refresh = matches!(
+                            &frame,
+                            crate::core::Frame::Event(e) if matches!(e.event, crate::core::Event::Refresh)
+                        );
                         if let Some(want) = &only
                             && frame.run_id() != want
+                            && !refresh
                         {
                             continue;
                         }
@@ -2300,4 +2541,26 @@ async fn stream(
     });
 
     Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
+}
+
+/// When a snooze of `minutes` ends: none for zero or less, and at most thirty
+/// days, so a huge number is a long snooze rather than an overflow panic.
+fn snooze_until(minutes: i64) -> Option<jiff::Timestamp> {
+    const MAX_MINUTES: i64 = 30 * 24 * 60;
+    (minutes > 0).then(|| {
+        let span = jiff::SignedDuration::from_mins(minutes.min(MAX_MINUTES));
+        jiff::Timestamp::now()
+            .checked_add(span)
+            .unwrap_or(jiff::Timestamp::MAX)
+    })
+}
+
+#[cfg(test)]
+mod snooze_tests {
+    #[test]
+    fn a_huge_snooze_is_long_not_a_panic() {
+        assert!(super::snooze_until(i64::MAX).is_some());
+        assert!(super::snooze_until(0).is_none());
+        assert!(super::snooze_until(-5).is_none());
+    }
 }

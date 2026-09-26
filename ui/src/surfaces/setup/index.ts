@@ -9,7 +9,7 @@ register({
   band: "project",
   order: 0,
   // Fetched by the surface; declared so the route guard can see it.
-  reads: ["/api/setup"],
+  reads: ["/api/setup", "/api/github"],
   select: () => ({}),
   component: Setup,
 });

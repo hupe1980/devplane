@@ -3,7 +3,7 @@
 
 use devplane::core::config::{ProjectConfig, SpecSection};
 use devplane::core::run::{Observed, Run, RunMode};
-use devplane::core::spec::{
+use devplane::spec::{
     ChangeFolder, TaskAnchor, TokenShape, Trace, UNRECOGNISED, changes, counts, detect, edges,
     select_tasks, token_rows,
 };
@@ -255,7 +255,7 @@ async fn an_unrecognised_notation_names_the_key_on_every_surface() {
         now: jiff::Timestamp::now(),
         started_at: None,
     };
-    let specs = devplane::view::specs(&snap);
+    let specs = devplane::view::specs(&snap, &store).await;
     let plan = &specs["projects"][0]["plans"][0];
     assert_eq!(plan["plan"]["path"], "docs", "{specs}");
     assert_eq!(plan["trace"]["unrecognised"], true, "{plan}");
@@ -295,26 +295,27 @@ fn closed_run(id: &str, trace: &Trace, selectors: &[&str], closed: &str) -> Run 
     r
 }
 
-/// Ticked and verified are separate counts (11 and 9 here), never combined.
+/// Ticked and seen by a passing check are separate counts (11 and 9 here),
+/// never combined, and neither is called verified.
 #[test]
-fn ticked_and_verified_are_two_columns() {
+fn ticked_and_seen_by_a_passing_check_are_two_columns() {
     let t = trace("counts", "specs/007-counts");
     let a = closed_run("a", &t, &["FR-001", "FR-002"], "2026-09-25T10:00:00Z");
     let b = closed_run("b", &t, &["FR-003"], "2026-09-25T10:05:00Z");
     let pass = Some("2026-09-25T10:10:00Z".parse().unwrap());
 
     let c = counts(&t, &[&a, &b], true, pass);
-    assert_eq!((c.tasks, c.ticked, c.verified_tasks), (15, 11, Some(9)));
-    assert_eq!(c.says(false), "11 ticked · 9 verified");
+    assert_eq!((c.tasks, c.ticked, c.seen_by_pass), (15, 11, Some(9)));
+    assert_eq!(c.says(false), "11 ticked · 9 seen by a passing check");
 
-    // Every box ticked and no gate run: verified is zero and says so.
+    // Every box ticked and no gate run: zero, and it says so.
     let c = counts(&t, &[&a, &b], true, None);
-    assert_eq!(c.verified_tasks, Some(0));
-    assert_eq!(c.says(false), "11 ticked · 0 verified");
+    assert_eq!(c.seen_by_pass, Some(0));
+    assert_eq!(c.says(false), "11 ticked · 0 seen by a passing check");
 
     // No gates: absent, which is a different fact from zero.
     let c = counts(&t, &[&a, &b], false, pass);
-    assert_eq!(c.verified_tasks, None);
+    assert_eq!(c.seen_by_pass, None);
     assert_eq!(c.says(false), "11 ticked · no gates declared");
 
     // Per token too: two integers or null on the wire, never a derived figure.
@@ -325,7 +326,7 @@ fn ticked_and_verified_are_two_columns() {
             rows[3].token.as_str(),
             rows[3].tasks,
             rows[3].ticked,
-            rows[3].verified_tasks
+            rows[3].seen_by_pass
         ),
         ("FR-004", 4, 2, Some(0))
     );
@@ -337,8 +338,8 @@ fn ticked_and_verified_are_two_columns() {
         );
     }
     assert!(
-        json.get("verified").is_some(),
-        "the wire keeps the contract's word"
+        json.get("verified").is_none() && json.get("seen_by_pass").is_some(),
+        "a task is never called verified, on the wire either"
     );
 }
 
@@ -478,8 +479,8 @@ fn configured_shapes_replace_the_defaults_and_a_numeric_prefix_is_refused() {
 /// its source. The file must exist and be non-trivial, or a rename passes this.
 #[test]
 fn the_reader_computes_no_percentage_ratio_or_coverage() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core/spec.rs");
-    let source = std::fs::read_to_string(&path).expect("src/core/spec.rs is the reader");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/spec.rs");
+    let source = std::fs::read_to_string(&path).expect("src/spec.rs is the reader");
     assert!(
         source.contains("pub fn edges"),
         "the file was found but is not the reader"

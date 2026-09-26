@@ -123,7 +123,7 @@ function __devplane_live
     devplane {arg} $argv[1] 2>/dev/null
 end
 complete -c devplane -n "__fish_seen_subcommand_from answer" -f   -a "(__devplane_live asks)" -d "waiting question"
-complete -c devplane -n "__fish_seen_subcommand_from show watch snooze focus attach" -f   -a "(__devplane_live runs)" -d "session"
+complete -c devplane -n "__fish_seen_subcommand_from show watch snooze attach" -f   -a "(__devplane_live runs)" -d "session"
 complete -c devplane -n "__fish_seen_subcommand_from change" -f   -a "(__devplane_live changes)" -d "change"
 "#
     )
@@ -155,7 +155,7 @@ fn offered() -> clap::Command {
 pub enum Values {
     /// Questions and permissions waiting for an answer.
     Asks,
-    /// Sessions, so `show`, `watch`, `focus` and `attach` complete.
+    /// Sessions, so `show`, `watch` and `attach` complete.
     Runs,
     /// Changes, for every `devplane change <verb> <change>`.
     Changes,

@@ -3,8 +3,6 @@
 // changes when somebody saves a file, not on every poll.
 import { api } from "../../lib/api";
 import type { Plan } from "../../wire/Plan";
-import type { Counts } from "../../wire/Counts";
-import type { TokenRow } from "../../wire/TokenRow";
 
 export type Task = { path: string; line: number; text: string; done: boolean; cites: string[] };
 export type Trace = {
@@ -17,13 +15,13 @@ export type PlanRow = {
   change_id: string | null;
   title: string | null;
   state: string | null;
+  /// What the working change's diff weakened, beside its state.
+  qualifier?: import("../../wire/Qualifier").Qualifier | null;
   contradicts_done: boolean;
   drifted: boolean | null;
   plan: Plan;
   trace?: Trace | null;
-  counts?: Counts | null;
   counts_says?: string | null;
-  token_rows?: Array<TokenRow & { says?: string }>;
 };
 export type ProjectRow = {
   project_id: string;

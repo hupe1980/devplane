@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/devplane"
 title = "Devplane"
-description = "Devplane — the desktop workbench for spec-driven agentic development. Write the spec, dispatch any ACP agent, verify against your own gates, and keep the record of who decided what while you were not looking. Local-first, one binary, and it never approves a tool call."
+description = "Devplane — know when an agent's work is actually done. Run any ACP agent in its own worktree, verify its change with your own checks run outside the agent, see the weakened tests first, and keep the record of who decided what. Local-first, one binary, and it never approves a tool call."
 default_language = "en"
 author = "hupe1980"
 
@@ -41,10 +41,10 @@ include_path = true
 include_content = true
 
 [extra]
-tagline = "The desktop workbench for spec-driven agentic development."
+tagline = "Know when an agent's work is actually done."
 repo = "https://github.com/hupe1980/devplane"
 acp = "https://agentclientprotocol.com"
-version = "0.10.0"
+version = "0.11.0"
 og_image = "/og.png"
 
 [[extra.nav]]

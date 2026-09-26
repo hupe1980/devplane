@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::time::Duration;
 
 /// The file Devplane looks for at a repository root.
@@ -69,7 +68,7 @@ pub struct Gates {
     /// How many times failures are handed back to the agent before a human is
     /// asked; bounded because each round costs money.
     pub max_feedback_rounds: u32,
-    /// Gates run only by name (`devplane gate run --name <name>`). They never
+    /// Gates run only by name (`devplane gate --name <name>`). They never
     /// make a change verified: that is `check` alone.
     pub named: BTreeMap<String, NamedGate>,
 }
@@ -240,8 +239,11 @@ impl Budget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitHub {
-    /// Open a pull request when the gates pass. Off by default: pushing is
-    /// the first thing Devplane does that other people can see.
+    /// Let `change offer` push the branch and open the pull request itself,
+    /// when a person offers the change — never on its own when gates pass.
+    /// Off by default (the offer then prints the push command and GitHub's
+    /// address instead): pushing is the first thing Devplane does that other
+    /// people can see.
     pub pull_request: bool,
     /// Open it as a draft, since nobody has read the work yet.
     pub draft: bool,
@@ -282,47 +284,16 @@ pub struct SpecSection {
 }
 
 impl SpecSection {
-    /// The immediate children of the plans directory, in path order. Which
-    /// one is being worked to is answered only by a change naming it.
-    pub fn plan_paths(&self, root: &std::path::Path) -> Vec<String> {
-        let Some(dir) = self.plans.as_deref() else {
-            return Vec::new();
-        };
-        crate::core::spec::changes(root, &crate::core::spec::Detected::plain(dir))
-            .into_iter()
-            .map(|c| c.path)
-            .collect()
-    }
-
-    /// The recognised layouts present, plus the one `plans` declares unless a
-    /// recognised layout already covers that root. Empty means
-    /// [`crate::core::spec::NO_LAYOUT`].
-    pub fn layouts(&self, root: &std::path::Path) -> Vec<crate::core::spec::Detected> {
-        let mut out = crate::core::spec::detect(root);
-        if let Some(dir) = self.plans.as_deref() {
-            let plain = crate::core::spec::Detected::plain(dir);
-            if !out.iter().any(|d| d.root == plain.root) {
-                out.push(plain);
-            }
-        }
-        out
-    }
-
     /// The configured token shapes, or the defaults. An invalid prefix is
     /// dropped here and reported by `devplane check`.
-    pub fn token_shapes(&self) -> Vec<crate::core::spec::TokenShape> {
+    pub fn token_shapes(&self) -> Vec<crate::spec::TokenShape> {
         match self.tokens.as_deref() {
             Some(list) if !list.is_empty() => list
                 .iter()
-                .filter_map(|p| crate::core::spec::TokenShape::new(p).ok())
+                .filter_map(|p| crate::spec::TokenShape::new(p).ok())
                 .collect(),
-            _ => crate::core::spec::TokenShape::defaults(),
+            _ => crate::spec::TokenShape::defaults(),
         }
-    }
-
-    /// The edges of one change, under this repository's own shapes.
-    pub fn trace(&self, change: &crate::core::spec::ChangeFolder) -> crate::core::spec::Trace {
-        crate::core::spec::edges(change, &self.token_shapes())
     }
 
     /// What in `[spec]` parses but cannot do what it says. An invalid token
@@ -336,7 +307,7 @@ impl SpecSection {
             )),
             Some(list) => {
                 for prefix in list {
-                    if let Err(why) = crate::core::spec::TokenShape::new(prefix) {
+                    if let Err(why) = crate::spec::TokenShape::new(prefix) {
                         out.push(Problem::error("[spec] tokens".into(), why));
                     }
                 }
@@ -456,49 +427,41 @@ pub struct GlobalConfig {
 }
 
 impl GlobalConfig {
-    /// Reads `<home>/policy.toml`. Missing means no rules; malformed is an
-    /// error, because a typo in a deny rule must never read as permission.
-    pub fn load(home: &Path) -> Result<Self, ConfigError> {
-        let path = home.join("policy.toml");
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(ConfigError::Io(path.display().to_string(), e.to_string())),
-        };
-        toml::from_str(&text)
-            .map_err(|e| ConfigError::Parse(path.display().to_string(), e.to_string()))
-    }
-
     pub fn policy(&self) -> crate::core::Policy {
         crate::core::Policy::rules(&self.policy.never_auto, &self.policy.always_ask)
     }
 
-    /// Rules in the machine-wide file that cannot do what they say.
+    /// Rules in the machine-wide file that cannot do what they say — and the
+    /// two keys the shared `[policy]` shape accepts that only a project reads.
     pub fn validate(&self) -> Vec<Problem> {
-        self.policy()
+        let mut out: Vec<Problem> = self
+            .policy()
             .problems()
             .into_iter()
             .map(|(fatal, what)| match fatal {
                 true => Problem::error("[policy]".into(), what),
                 false => Problem::warning("[policy]".into(), what),
             })
-            .collect()
+            .collect();
+        for (set, key) in [
+            (self.policy.max_parallel_runs.is_some(), "max_parallel_runs"),
+            (self.policy.stall_timeout.is_some(), "stall_timeout"),
+        ] {
+            if set {
+                out.push(Problem::warning(
+                    format!("[policy] {key}"),
+                    format!(
+                        "`{key}` has no effect in policy.toml; it is read only from a \
+                         project's devplane.toml"
+                    ),
+                ));
+            }
+        }
+        out
     }
 }
 
 impl ProjectConfig {
-    /// Reads the configuration for a repository root. Missing is the default;
-    /// malformed is an error, so a typo never silently removes a deny rule.
-    pub fn load(root: &Path) -> Result<Self, ConfigError> {
-        let path = root.join(CONFIG_FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(ConfigError::Io(path.display().to_string(), e.to_string())),
-        };
-        Self::parse(&text).map_err(|e| ConfigError::Parse(path.display().to_string(), e))
-    }
-
     /// Parses a file's text, naming any removed key.
     pub fn parse(text: &str) -> Result<Self, String> {
         if let Ok(table) = text.parse::<toml::Table>()
@@ -1247,7 +1210,7 @@ run = ["cargo test --test slow"]
 
     #[test]
     fn a_repository_with_no_file_still_works() {
-        let c = ProjectConfig::load(Path::new("/definitely/not/here")).unwrap();
+        let c = ProjectConfig::load(std::path::Path::new("/definitely/not/here")).unwrap();
         assert!(!c.has_gates());
         assert_eq!(c.gates.max_feedback_rounds, 2);
         assert!(c.policy.never_auto.is_empty());
@@ -1347,7 +1310,7 @@ ready_label = "devplane:ready"
 
     #[test]
     fn a_missing_global_policy_decides_nothing() {
-        let g = GlobalConfig::load(Path::new("/definitely/not/here")).unwrap();
+        let g = GlobalConfig::load(std::path::Path::new("/definitely/not/here")).unwrap();
         assert!(g.policy.never_auto.is_empty());
         assert!(g.policy.always_ask.is_empty());
     }

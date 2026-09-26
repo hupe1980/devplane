@@ -23,7 +23,16 @@
   };
   /// Shows a run on whichever surface holds runs; `null` when none does, and
   /// the rows are then plain text.
-  let { board, open }: { board: Board | null; open: ((run: string) => void) | null } = $props();
+  let {
+    board,
+    open,
+    error = null,
+  }: {
+    board: Board | null;
+    open: ((run: string) => void) | null;
+    /// Why the feed is not the present, when it is not.
+    error?: string | null;
+  } = $props();
 
   let view = $state<"activity" | "sight">("activity");
   const runs = $derived(
@@ -41,15 +50,19 @@
 <section class="panel" aria-label="activity panel">
   <div class="head" role="tablist" aria-label="panel views">
     <button role="tab" aria-selected={view === "activity"} onclick={() => (view = "activity")}>
-      Activity <span class="n">{runs.length}</span>
+      Activity <span class="n">{board ? runs.length : ""}</span>
     </button>
     <button role="tab" aria-selected={view === "sight"} onclick={() => (view = "sight")}>
-      Sight <span class="n">{(w.unproved?.length ?? 0) + (w.driven_only?.length ?? 0)}</span>
+      Sight <span class="n">{board ? (w.unproved?.length ?? 0) + (w.driven_only?.length ?? 0) : ""}</span>
     </button>
   </div>
   <div class="body">
     {#if view === "activity"}
-      {#if runs.length === 0}
+      {#if !board && error}
+        <p class="quiet fail">The sessions could not be read: {error}</p>
+      {:else if !board}
+        <p class="quiet">Reading the sessions…</p>
+      {:else if runs.length === 0}
         <p class="quiet">No session has reported anything yet.</p>
       {:else}
         <ol class="log">
@@ -197,5 +210,8 @@
     margin: var(--s-2) var(--s-4);
     color: var(--faint);
     font-size: var(--t-xs);
+  }
+  .quiet.fail {
+    color: var(--fail);
   }
 </style>

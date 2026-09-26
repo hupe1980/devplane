@@ -3,11 +3,25 @@
 // is never silent.
 
 import { api } from "../../lib/api";
+import { copyText } from "../../lib/resource.svelte";
 import type { Answer, Item } from "./Item.svelte";
 
 /// What an action reports, and — for the one action that can be taken back —
-/// how to take it back.
-export type Outcome = { said: string; undo: { says: string; where: string } | null };
+/// how to take it back. `commands` are what the host handed back for the
+/// person to run instead (a push it was not allowed to make); they are shown
+/// to copy, never summarised as done.
+export type Outcome = { said: string; undo: { says: string; where: string } | null; commands?: string[] };
+
+/// What the host answered a write with. Its own sentence wins over ours, and
+/// commands it hands back are the outcome, not a detail.
+type Answered = { says?: string; push?: string; create?: string; offer?: string } | null;
+function outcome(r: Answered, ours: string): Outcome {
+  const commands = [r?.push, r?.create].filter((c): c is string => !!c);
+  if (commands.length) {
+    return { said: r?.says ?? "Nothing was pushed — run these yourself:", undo: null, commands };
+  }
+  return { said: r?.says ?? ours, undo: null };
+}
 
 /// The routes behind the actions that are not answers (`attach` is absent: a
 /// browser cannot attach). Each route is written out whole so the guard that
@@ -16,16 +30,10 @@ export const ROUTES: Record<
   string,
   { of: "run" | "change"; route: string; says: string; body?: (item: Item) => unknown }
 > = {
-  focus: { of: "run", route: "/api/runs/{id}/focus", says: "raised the window that owns it" },
   retry: { of: "change", route: "/api/changes/{id}/retry", says: "retrying" },
   resume: { of: "change", route: "/api/changes/{id}/resume", says: "resumed" },
-  // The only way a pull request opens. Where Devplane may not push, the host
-  // answers with the commands instead.
-  offer: {
-    of: "change",
-    route: "/api/changes/{id}/offer",
-    says: "offer made — open the change to see what came of it",
-  },
+  // No `offer`: the inbox never offers a change. Offering happens from the
+  // change itself, after its review, where a weakened check is read first.
   // Both name the run the drift is about; the route is the change's.
   tell_run: {
     of: "change",
@@ -43,7 +51,7 @@ export const ROUTES: Record<
 
 /// The routes behind a report row's controls, addressed by the report.
 /// `open_draft` is the one control that writes to a forge, under the
-/// person's own `gh`.
+/// person's own GitHub sign-in.
 export const REPORT_ROUTES: Record<string, { route: string; says: string; body?: (reason: string) => unknown }> = {
   start_from_report: {
     route: "/api/reports/{id}/start",
@@ -61,7 +69,7 @@ export const REPORT_ROUTES: Record<string, { route: string; says: string; body?:
   },
   open_draft: {
     route: "/api/reports/{id}/open",
-    says: "opened on GitHub with your gh, under your name",
+    says: "opened on GitHub under your sign-in, in your name",
   },
   discard_draft: {
     route: "/api/reports/{id}/resolve",
@@ -78,12 +86,12 @@ async function actOnReport(item: Item, action: string, reason: string): Promise<
   const r = REPORT_ROUTES[action];
   if (!r || !item.report) return { said: `${action} cannot be done from here`, undo: null };
   try {
-    await api(r.route.replace("{id}", encodeURIComponent(item.report)), {
+    const res = await api<Answered>(r.route.replace("{id}", encodeURIComponent(item.report)), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(r.body ? r.body(reason) : {}),
     });
-    return { said: r.says, undo: null };
+    return outcome(res, r.says);
   } catch (e) {
     return { said: `${action.replace(/_/g, " ")} did not land: ${failed(e)}`, undo: null };
   }
@@ -95,11 +103,11 @@ export async function act(item: Item, action: string, reason = ""): Promise<Outc
   const id = r?.of === "change" ? item.change_id : item.run_id;
   if (!r || !id) return { said: `${action} cannot be done from here`, undo: null };
   try {
-    await api(r.route.replace("{id}", encodeURIComponent(id)), {
+    const res = await api<Answered>(r.route.replace("{id}", encodeURIComponent(id)), {
       method: "POST",
       ...(r.body ? { body: JSON.stringify(r.body(item)) } : {}),
     });
-    return { said: r.says, undo: null };
+    return outcome(res, r.says);
   } catch (e) {
     return { said: `${action} did not land: ${failed(e)}`, undo: null };
   }
@@ -159,10 +167,7 @@ export async function takeBack(undo: { where: string }): Promise<Outcome> {
 /// A convenience: the rule is also on screen as selectable text, for browsers
 /// that withhold the clipboard.
 export async function copyRule(rule: string): Promise<Outcome> {
-  try {
-    await navigator.clipboard?.writeText(rule);
-    return { said: `copied: ${rule}`, undo: null };
-  } catch {
-    return { said: "no clipboard here — select the rule above", undo: null };
-  }
+  return (await copyText(rule))
+    ? { said: `copied: ${rule}`, undo: null }
+    : { said: "nothing was copied: this page has no clipboard — select the rule above", undo: null };
 }

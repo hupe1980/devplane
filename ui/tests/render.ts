@@ -6,8 +6,10 @@ import "./render/board";
 import "./render/inbox";
 import "./render/change";
 import "./render/review";
+import "./render/honest";
 import "./render/controls";
 import "./render/places";
+import "./render/behaviour";
 import { finish } from "./harness";
 
 finish();

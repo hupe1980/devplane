@@ -4,6 +4,7 @@
   // grades it: counts and names only, no percentage or bar.
   import Icon from "../../lib/ui/Icon.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
+  import Qualifier from "../../lib/Qualifier.svelte";
   import Empty from "../../lib/ui/Empty.svelte";
   import { run } from "../../lib/keys";
   import { specs, watch, key } from "./store.svelte";
@@ -45,7 +46,7 @@
       <div class="acts">
         {#if r.change_id}
           <a class="btn" href={`#change/${encodeURIComponent(r.change_id)}`}><Icon name="change" size={14} /> {r.title}</a>
-          {#if r.state}<Pill word={r.state} />{/if}
+          {#if r.state}<Pill word={r.state} /><Qualifier q={r.qualifier} />{/if}
           {#if r.counts_says}<span class="quiet">{r.counts_says}</span>{/if}
         {:else}
           <button class="btn primary" onclick={() => run("new-change", "plan")}><Icon name="play" size={14} /> Start a change…</button>

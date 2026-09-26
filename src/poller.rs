@@ -350,7 +350,8 @@ pub async fn pull_requests(state: Shared) {
         };
 
         for (id, dir, branch) in watched {
-            let Ok(Some(pr)) = crate::github::pr_for_branch(&dir, &branch).await else {
+            let Ok(Some(pr)) = crate::github::pr_for_branch(&state.github, &dir, &branch).await
+            else {
                 continue;
             };
             let status = pr.status().as_str().to_string();
@@ -382,16 +383,15 @@ pub async fn pull_requests(state: Shared) {
     }
 }
 
-/// How often every project's forge is read (`gh` is two spawns per project).
+/// How often every project's forge is read: one request per repository and
+/// one review search per host, so five minutes is gentle on the rate limit.
 const FORGE_EVERY: Duration = Duration::from_secs(300);
-/// Per-project cap on issues and pull requests; past it the board shows a count.
-const FORGE_LIMIT: u32 = 100;
 
 /// Reads open issues and pull requests for every registered project, and which
-/// are waiting on the `gh` user. Read-only.
+/// are waiting on the signed-in person. Read-only.
 ///
-/// A project without a GitHub remote is skipped for a while; a `gh` that is not
-/// logged in stops the pass and is reported in `doctor`.
+/// A project without a GitHub remote is skipped for a while; a host nobody is
+/// signed in to is not asked at all, and says so on the Forge surface.
 pub async fn forge_watch(state: Shared) {
     tokio::time::sleep(Duration::from_secs(3)).await;
     loop {
@@ -400,46 +400,15 @@ pub async fn forge_watch(state: Shared) {
     }
 }
 
-async fn forge_once(state: &Shared) {
+/// One pass: for each GitHub host with a signed-in person, one review search,
+/// then one snapshot per repository on it: never a request per list.
+pub async fn forge_once(state: &Shared) {
     let projects: Vec<crate::core::Project> =
         state.world.lock().await.projects().cloned().collect();
     if projects.is_empty() {
         return;
     }
-
-    // Whose forge; asked once.
-    let viewer = {
-        let known = state.forge.lock().await.viewer.clone();
-        match known {
-            Some(v) => Some(v),
-            None => match crate::github::viewer_login(&std::env::temp_dir()).await {
-                Ok(v) => {
-                    let mut f = state.forge.lock().await;
-                    f.viewer = Some(v.clone());
-                    f.error = None;
-                    Some(v)
-                }
-                Err(e) => {
-                    let mut f = state.forge.lock().await;
-                    f.error = Some(e.to_string());
-                    f.last_poll_at = Some(jiff::Timestamp::now());
-                    tracing::info!(error = %e, "forge: gh is not usable");
-                    return;
-                }
-            },
-        }
-    };
-
-    // Review requests for this person, in one search: whether a team request
-    // reaches them is known only to the server. A failure costs this signal
-    // only.
-    let asked_of_me = match crate::github::review_requested_of_me(&std::env::temp_dir()).await {
-        Ok(set) => set,
-        Err(e) => {
-            tracing::info!(error = %e, "forge: could not search for review requests");
-            Default::default()
-        }
-    };
+    let hub = state.github.clone();
 
     // A ruled-out project is retried after an hour, since people add remotes.
     let now = jiff::Timestamp::now();
@@ -451,63 +420,97 @@ async fn forge_once(state: &Shared) {
             .cloned()
             .collect()
     };
-    let before = state.forge.lock().await.counts();
+
+    // Which repository each project is, grouped by host. Asks git only.
+    let mut by_host: std::collections::BTreeMap<
+        String,
+        Vec<(crate::core::Project, crate::github::RepoRef)>,
+    > = Default::default();
     for p in projects {
         if skip.contains(&p.id) {
             continue;
         }
-        let issues = crate::github::open_issues(&p.root, FORGE_LIMIT).await;
-        let prs = crate::github::open_pull_requests(&p.root, FORGE_LIMIT).await;
-        let mut f = state.forge.lock().await;
-        match (issues, prs) {
-            (Ok(issues), Ok(prs)) => {
-                let slug = p.repo_slug();
-                f.projects.insert(
-                    p.id.clone(),
-                    crate::core::ProjectForge {
-                        project_id: p.id.clone(),
-                        repo: slug.clone(),
-                        fetched_at: jiff::Timestamp::now(),
-                        issues: issues
-                            .iter()
-                            .map(|i| i.to_forge(viewer.as_deref()))
-                            .collect(),
-                        pull_requests: prs
-                            .iter()
-                            .map(|r| {
-                                // Server-resolved: team membership is not in the row.
-                                let asked = slug.as_deref().is_some_and(|s| {
-                                    asked_of_me.contains(&(s.to_string(), r.number))
-                                });
-                                r.to_forge(viewer.as_deref(), asked)
-                            })
-                            .collect(),
-                        error: None,
-                    },
-                );
+        let repo = crate::github::remote::of_dir(&p.root).await.and_then(|r| {
+            match hub.is_github_host(&r.host) {
+                true => Ok(r),
+                false => Err(crate::github::Error::NotGitHub(format!(
+                    "its remote is on {}, which is not a GitHub host this machine signs in to",
+                    r.host
+                ))),
             }
-            (Err(e), _) | (_, Err(e)) => {
-                let msg = e.to_string();
-                if crate::github::is_permanent(&msg) {
-                    // Not a GitHub project; stop asking.
-                    tracing::debug!(project = %p.name, error = %msg, "forge: no GitHub remote");
-                    f.skip.insert(p.id.clone(), (msg, jiff::Timestamp::now()));
-                    f.projects.remove(&p.id);
-                } else if let Some(existing) = f.projects.get_mut(&p.id) {
-                    // Keep what was known; a network blip must not empty the board.
-                    existing.error = Some(msg);
-                } else {
+        });
+        match repo {
+            Ok(repo) => {
+                state
+                    .forge
+                    .lock()
+                    .await
+                    .repos
+                    .insert(p.id.clone(), repo.clone());
+                by_host
+                    .entry(repo.host.clone())
+                    .or_default()
+                    .push((p, repo));
+            }
+            Err(e) => {
+                tracing::debug!(project = %p.name, error = %e, "forge: not a GitHub repository");
+                let mut f = state.forge.lock().await;
+                f.skip.insert(p.id.clone(), (e.to_string(), now));
+                f.projects.remove(&p.id);
+                f.repos.remove(&p.id);
+            }
+        }
+    }
+
+    let before = state.forge.lock().await.counts();
+    for (host, repos) in by_host {
+        // Nobody signed in to this host: nothing is asked, and the surface
+        // says *not signed in* rather than showing an empty list.
+        let Some(viewer) = hub.signed_in(&host) else {
+            let mut f = state.forge.lock().await;
+            for (p, _) in &repos {
+                f.projects.remove(&p.id);
+            }
+            continue;
+        };
+        if host == hub.default_host() {
+            state.forge.lock().await.viewer = Some(viewer.login.clone());
+        }
+
+        // What is asked of this person, in one search request per host:
+        // whether a team request reaches them is known only to the server, and
+        // an assigned issue older than a repository's page is still assigned.
+        // A failure costs this signal only, unless it is the sign-in itself.
+        let asks = match crate::github::asks(&hub, &host).await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::info!(%host, error = %e, "forge: could not search for what needs you");
+                if stops_the_host(&e) {
+                    mark_stale(state, &repos, &e).await;
+                    continue;
+                }
+                Default::default()
+            }
+        };
+
+        for (p, repo) in &repos {
+            let read = crate::github::snapshot(&hub, repo).await;
+            let mut f = state.forge.lock().await;
+            match read {
+                Ok(snap) => {
                     f.projects.insert(
                         p.id.clone(),
-                        crate::core::ProjectForge {
-                            project_id: p.id.clone(),
-                            repo: p.repo_slug(),
-                            fetched_at: jiff::Timestamp::now(),
-                            issues: vec![],
-                            pull_requests: vec![],
-                            error: Some(msg),
-                        },
+                        project_forge(p, repo, &host, &viewer.login, snap, &asks),
                     );
+                }
+                Err(e) => {
+                    drop(f);
+                    if stops_the_host(&e) {
+                        // The rest of this host would say the same thing.
+                        mark_stale(state, &repos, &e).await;
+                        break;
+                    }
+                    mark_stale(state, std::slice::from_ref(&(p.clone(), repo.clone())), &e).await;
                 }
             }
         }
@@ -519,6 +522,148 @@ async fn forge_once(state: &Shared) {
     };
     if before != after {
         state.notify_changed();
+    }
+}
+
+/// One repository's poll, as the board keeps it: the snapshot's page, with
+/// what the host's search found asked of this person folded in — flagged on
+/// a row the page has, added where the page stopped short.
+///
+/// A search hit belongs to this repository when its `owner/name` is the one
+/// GitHub spelled the snapshot by, compared without case: a remote may be
+/// typed `Acme/App` for `acme/app`. A row is the same row by its address.
+fn project_forge(
+    p: &crate::core::Project,
+    repo: &crate::github::RepoRef,
+    host: &str,
+    login: &str,
+    snap: crate::github::query::Snapshot,
+    asks: &crate::github::query::Asks,
+) -> crate::core::ProjectForge {
+    let canonical = snap.name_with_owner.clone().unwrap_or_else(|| repo.slug());
+    let here = |name: &str| name.eq_ignore_ascii_case(&canonical);
+    let same = |a_url: &str, a_num: u64, b_url: &str, b_num: u64| {
+        a_url.eq_ignore_ascii_case(b_url) || a_num == b_num
+    };
+    let mut issues: Vec<crate::core::ForgeIssue> = snap
+        .issues
+        .items
+        .iter()
+        .map(|i| i.to_forge(Some(login)))
+        .collect();
+    for (_, i) in asks.assigned.iter().filter(|(r, _)| here(r)) {
+        match issues
+            .iter_mut()
+            .find(|x| same(&x.url, x.number, &i.url, i.number))
+        {
+            Some(x) => x.assigned_to_me = true,
+            None => {
+                let mut row = i.to_forge(Some(login));
+                // The search asked for exactly this, whatever the row lists.
+                row.assigned_to_me = true;
+                issues.push(row);
+            }
+        }
+    }
+    let mut pull_requests: Vec<crate::core::ForgePullRequest> = snap
+        .pull_requests
+        .items
+        .iter()
+        .map(|r| {
+            // Server-resolved: team membership is not in the row.
+            let asked = asks
+                .reviews
+                .iter()
+                .any(|(n, x)| here(n) && same(&x.url, x.number, &r.url, r.number));
+            r.to_forge(Some(login), asked)
+        })
+        .collect();
+    for (_, r) in asks.reviews.iter().filter(|(n, _)| here(n)) {
+        if !pull_requests
+            .iter()
+            .any(|x| same(&x.url, x.number, &r.url, r.number))
+        {
+            pull_requests.push(r.to_forge(Some(login), true));
+        }
+    }
+    crate::core::ProjectForge {
+        project_id: p.id.clone(),
+        repo: Some(repo.slug()),
+        host: Some(host.to_string()),
+        fetched_at: jiff::Timestamp::now(),
+        issues,
+        issues_total: snap.issues.total,
+        pull_requests,
+        pull_requests_total: snap.pull_requests.total,
+        error: None,
+    }
+}
+
+/// Reads the forge now rather than at the next tick — after a sign-in, when
+/// the person is looking at the surface that said *not signed in*. Rulings
+/// made before it are dropped: a repository this sign-in can see was *not
+/// found* to the one before.
+pub async fn forge_now(state: &Shared) {
+    state.forge.lock().await.skip.clear();
+    forge_once(state).await;
+}
+
+/// A failure that is about the host, not one repository: asking the next
+/// repository would only repeat it.
+fn stops_the_host(e: &crate::github::Error) -> bool {
+    use crate::github::Error as E;
+    matches!(
+        e,
+        E::NotSignedIn(_)
+            | E::Expired(_)
+            | E::RateLimited { .. }
+            | E::Unreachable(_)
+            | E::NoCredentialStore(_)
+            | E::Store(_)
+    )
+}
+
+/// Keeps what was known, marked stale with why: a network blip must not empty
+/// the board. A sign-in that ended drops the rows instead — they belong to
+/// somebody no longer signed in.
+async fn mark_stale(
+    state: &Shared,
+    repos: &[(crate::core::Project, crate::github::RepoRef)],
+    e: &crate::github::Error,
+) {
+    use crate::github::Error as E;
+    let mut f = state.forge.lock().await;
+    for (p, repo) in repos {
+        if matches!(e, E::NotSignedIn(_) | E::Expired(_)) {
+            f.projects.remove(&p.id);
+            continue;
+        }
+        if matches!(e, E::NotFound(_)) {
+            // GitHub has no such repository, or this sign-in cannot see it.
+            f.skip
+                .insert(p.id.clone(), (e.to_string(), jiff::Timestamp::now()));
+            f.projects.remove(&p.id);
+            continue;
+        }
+        match f.projects.get_mut(&p.id) {
+            Some(existing) => existing.error = Some(e.to_string()),
+            None => {
+                f.projects.insert(
+                    p.id.clone(),
+                    crate::core::ProjectForge {
+                        project_id: p.id.clone(),
+                        repo: Some(repo.slug()),
+                        host: Some(repo.host.clone()),
+                        fetched_at: jiff::Timestamp::now(),
+                        issues: vec![],
+                        issues_total: 0,
+                        pull_requests: vec![],
+                        pull_requests_total: 0,
+                        error: Some(e.to_string()),
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -716,15 +861,18 @@ pub async fn reconcile_at_startup(state: &Shared) {
 
     let lost = {
         let mut w = state.world.lock().await;
-        w.reconcile(&|run| {
-            if roster
-                .as_ref()
-                .is_some_and(|r| r.iter().any(|k| k == run.id.as_str()))
-            {
-                return true;
-            }
-            still_running(run, roster.as_deref())
-        })
+        w.reconcile(
+            &|run| {
+                if roster
+                    .as_ref()
+                    .is_some_and(|r| r.iter().any(|k| k == run.id.as_str()))
+                {
+                    return true;
+                }
+                still_running(run, roster.as_deref())
+            },
+            jiff::Timestamp::now(),
+        )
     };
 
     for env in lost {

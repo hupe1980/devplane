@@ -3,7 +3,7 @@
 use super::raw;
 use crate::render::{BOLD, DIM, clip, level_marker, paint};
 use crate::{client, render};
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 /// How wide a detail line is printed; the only clip applied to it.
 const DETAIL_WIDTH: usize = 100;
@@ -24,12 +24,14 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
-    let items: Vec<render::InboxItem> =
-        serde_json::from_value(body.get("items").cloned().unwrap_or_default()).unwrap_or_default();
-    let close = body
-        .get("close")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let render::InboxResponse {
+        items,
+        folded,
+        inhibited,
+        narrowed,
+        snoozed,
+        close,
+    } = serde_json::from_value(body).context("the host's inbox reply did not parse")?;
 
     // The "since you last looked" line: absent when there was no previous
     // look, and on a narrowed list (the host omits `close` there).
@@ -41,16 +43,6 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         println!();
     }
 
-    let folded: Vec<render::InboxSummary> =
-        serde_json::from_value(body.get("folded").cloned().unwrap_or_default()).unwrap_or_default();
-    let inhibited: Vec<render::InboxInhibited> =
-        serde_json::from_value(body.get("inhibited").cloned().unwrap_or_default())
-            .unwrap_or_default();
-
-    // Deserialised, not read key by key, so a renamed field fails to compile.
-    let narrowed: Option<crate::core::attention::Narrowed> =
-        serde_json::from_value(body.get("narrowed").cloned().unwrap_or_default()).unwrap_or(None);
-    let snoozed = body.get("snoozed").and_then(|v| v.as_u64()).unwrap_or(0);
     if snoozed > 0 {
         println!(
             "{}",
@@ -508,7 +500,7 @@ pub async fn cmd_answer(
 }
 
 /// Everything an agent has asked, and what became of each one.
-pub async fn cmd_asks(json: bool) -> Result<()> {
+pub async fn cmd_inbox_all(json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
     let v = raw(&c, "/api/asks").await?;
     if json {

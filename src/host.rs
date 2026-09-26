@@ -5,7 +5,8 @@
 use crate::core::event::{Event, EventEnvelope, Source};
 use crate::core::ids::RunId;
 use crate::core::run::RunMode;
-use crate::core::{Policy, PolicyCache, World};
+use crate::core::{Policy, World};
+use crate::policy_cache::PolicyCache;
 use crate::store::Store;
 use anyhow::{Context, Result};
 use axum::Router;
@@ -103,10 +104,15 @@ pub struct AppState {
     /// What GitHub says about every registered project, from the last poll.
     /// In memory only: it is a copy of somebody else's system of record.
     pub forge: Mutex<ForgeState>,
+    /// GitHub: each host's sign-in, the credential store, and the client.
+    /// The token is never held here; it is read from the store per request.
+    pub github: Arc<crate::github::GitHub>,
     /// Agents this machine can drive: built-ins with the user's `agents.toml`
     /// layered over them. Read once at start.
     pub agents: Vec<crate::acp::AgentSpec>,
     pub token: String,
+    /// Accepted on the telemetry routes only; see [`crate::config::ingest_token`].
+    pub ingest_token: String,
     /// Broadcasts state changes and driven agents' output, as separate frames.
     pub tx: broadcast::Sender<crate::core::Frame>,
     /// Flipped by `POST /api/quit`, so `devplane quit` asks with the token
@@ -136,18 +142,19 @@ pub type Opener = Box<dyn Fn(OpenIn, &std::path::Path) -> Result<(), String> + S
 /// The polled forge, for every project at once.
 #[derive(Debug, Default)]
 pub struct ForgeState {
-    /// Whose `gh` this is. Asked once; "assigned to you" is relative to it.
+    /// Who the configured GitHub host is signed in as; "assigned to you" is
+    /// relative to it.
     pub viewer: Option<String>,
-    /// Why the last poll could not run at all — `gh` missing, not logged in,
-    /// no network. Per project errors live on the project's entry.
+    /// Why the last poll could not run at all. Per project errors live on
+    /// the project's entry; per host sign-in states on `AppState::github`.
     pub error: Option<String>,
-    /// Projects `gh` said will never have a forge, with why and when.
+    /// Which GitHub repository each project's remote names, as last read.
+    pub repos: std::collections::BTreeMap<crate::core::ProjectId, crate::github::RepoRef>,
+    /// Projects that are not a GitHub repository, with why and when.
     ///
-    /// A ruling expires ([`should_skip`]): it rests on matching `gh`'s English
-    /// error text ([`is_permanent`]), and adding a remote changes the answer.
+    /// A ruling expires ([`should_skip`]): adding a remote changes the answer.
     ///
     /// [`should_skip`]: ForgeState::should_skip
-    /// [`is_permanent`]: crate::github::is_permanent
     pub skip: std::collections::BTreeMap<crate::core::ProjectId, (String, jiff::Timestamp)>,
     pub projects: std::collections::BTreeMap<crate::core::ProjectId, crate::core::ProjectForge>,
     /// Per project, which forge kinds a person dismissed and until when.
@@ -161,7 +168,11 @@ impl ForgeState {
     ///
     /// Pull requests Devplane opened (`changes`) already raise items through
     /// their Change and are skipped here.
-    pub fn items(&self, changes: &[crate::core::Change]) -> crate::core::attention::Derived {
+    pub fn items(
+        &self,
+        changes: &[crate::core::Change],
+        now: jiff::Timestamp,
+    ) -> crate::core::attention::Derived {
         let none = crate::core::attention::Snoozed::default();
         let mut out = crate::core::attention::Derived::default();
         for f in self.projects.values() {
@@ -171,7 +182,7 @@ impl ForgeState {
                 .filter_map(|w| w.pull_request.as_ref().map(|p| p.number))
                 .collect();
             let snoozed = self.snoozed.get(&f.project_id).unwrap_or(&none);
-            let d = crate::core::forge::items_for_forge(f, snoozed, &own);
+            let d = crate::core::forge::items_for_forge(f, snoozed, &own, now);
             out.items.extend(d.items);
             out.snoozed += d.snoozed;
         }
@@ -263,7 +274,9 @@ impl AppState {
             unwritten: Unwritten::default(),
             leaked_agents: Mutex::new(Vec::new()),
             forge: Mutex::new(ForgeState::default()),
+            github: Arc::new(crate::github::GitHub::new(&home)),
             policy: PolicyCache::new(policy, home, dirs::home_dir()),
+            ingest_token: crate::config::ingest_token(&token),
             token,
             tx,
             stopping: tokio::sync::watch::Sender::new(false),
@@ -406,7 +419,7 @@ impl AppState {
             let f = self.forge.lock().await;
             Some(crate::view::Forge {
                 counts: f.counts(),
-                items: f.items(&changes),
+                items: f.items(&changes, jiff::Timestamp::now()),
             })
         };
         let leaked_agents = self.leaked_agents.lock().await.clone();
@@ -498,6 +511,10 @@ impl AppState {
 
 /// Binds and serves until the process is asked to stop.
 pub async fn serve(state: Shared, port: u16) -> Result<()> {
+    // Owner-only before anything is published; the store is already open,
+    // and whatever it or a hook created is tightened here.
+    let home = crate::config::home()?;
+    secure_home(&home).with_context(|| format!("making {} owner-only", home.display()))?;
     let app: Router = crate::api::router(state.clone());
     let listener = bind(port).await?;
     let bound = listener.local_addr()?;
@@ -512,6 +529,9 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
             .ok()
             .map(|p| p.display().to_string()),
     })?;
+
+    // Written with the default mode; the record names the port the token opens.
+    secure_home(&home).ok();
 
     tracing::info!(%bound, "devplane host listening");
 
@@ -563,30 +583,95 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Makes Devplane's home owner-only: the directory `0700`, and the database
+/// (with its WAL, shared memory and backups), the token and `host.json`
+/// `0600`. Creates the directory if it is missing, and tightens what an older
+/// build or a hook left world-readable. Commands, transcripts, decisions and
+/// the bearer token live here, and every local user can reach loopback.
+///
+/// A no-op beyond creating the directory where the platform has no Unix modes.
+pub fn secure_home(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let secret = name == "token"
+                || name == "host.json"
+                || name == "policy.toml"
+                || name.starts_with("devplane.");
+            // `symlink_metadata`: a link is left alone rather than followed to
+            // a file this does not own.
+            let is_file = entry
+                .path()
+                .symlink_metadata()
+                .map(|m| m.file_type().is_file())
+                .unwrap_or(false);
+            if secret && is_file {
+                std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
 /// Binds a loopback-only listener; there is no option to expose it.
 ///
-/// If the default port is taken, another is chosen: the caller has already
-/// established no host of this `DEVPLANE_HOME` is running, and clients read
-/// the port from `host.json`. An explicitly requested port is never swapped.
-async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
+/// A taken port is a refusal, never a quiet move to another one: `devplane
+/// connect` wrote this port and the bearer token into the vendors' settings,
+/// so a host elsewhere would leave every session sending the token to
+/// whatever holds the configured port. The message names the port and the
+/// way out.
+pub async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => Ok(l),
-        Err(e)
-            if e.kind() == std::io::ErrorKind::AddrInUse && port == crate::config::DEFAULT_PORT =>
-        {
-            tracing::warn!(
-                port,
-                "the usual port is taken by something else; taking another one"
-            );
-            tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-                .await
-                .context("binding a loopback port")
-        }
-        Err(e) => Err(e).with_context(|| {
-            format!("binding {addr} — something else is using it, and you asked for that port")
-        }),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(anyhow::anyhow!(
+            "port {port} on 127.0.0.1 is taken by another process{}, so the host did not start. \
+             Devplane will not listen elsewhere: the agents' settings send the bearer token to \
+             port {port}, and whatever holds it would receive the token. Stop that process, or \
+             pick a free port with `--port <n>` (or DEVPLANE_PORT) and run `devplane connect` \
+             again so the settings follow.",
+            holder_of(port)
+                .map(|h| format!(" ({h})"))
+                .unwrap_or_default()
+        )),
+        Err(e) => Err(e).with_context(|| format!("binding {addr}")),
     }
+}
+
+/// Who listens on a loopback port, as `lsof` names it (`command, pid N`),
+/// when it can tell. Best effort: only for the refusal's wording.
+fn holder_of(port: u16) -> Option<String> {
+    let out = std::process::Command::new("lsof")
+        .args([
+            "-nP",
+            &format!("-iTCP@127.0.0.1:{port}"),
+            "-sTCP:LISTEN",
+            "-Fpc",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let pid = text.lines().find_map(|l| l.strip_prefix('p'))?;
+    let command = text.lines().find_map(|l| l.strip_prefix('c'));
+    Some(match command {
+        Some(c) => format!("{c}, pid {pid}"),
+        None => format!("pid {pid}"),
+    })
 }
 
 async fn shutdown_signal() {

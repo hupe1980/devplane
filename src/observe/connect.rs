@@ -186,11 +186,37 @@ pub fn write_settings(path: &Path, settings: &Map<String, Value>) -> Result<()> 
     // Temporary file and rename: an interrupted write never leaves half a
     // settings file.
     let tmp = path.with_extension("json.devplane-tmp");
-    std::fs::write(&tmp, body).with_context(|| format!("writing {}", tmp.display()))?;
+    // A file that carries the bearer token is owner-only whatever it was:
+    // the token opens the host's API to whoever reads it.
+    let secret = body.contains("Authorization=Bearer");
+    // Created owner-only when it carries the token, so it is never readable
+    // by others even for the moment before the mode below is applied.
+    let _ = std::fs::remove_file(&tmp);
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    if secret {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    {
+        use std::io::Write;
+        open.open(&tmp)
+            .and_then(|mut f| f.write_all(body.as_bytes()))
+            .with_context(|| format!("writing {}", tmp.display()))?;
+    }
     if let Some(p) = mode {
         std::fs::set_permissions(&tmp, p)
             .with_context(|| format!("keeping the mode of {}", path.display()))?;
     }
+    #[cfg(unix)]
+    if secret {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("making {} owner-only", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = secret;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
@@ -347,15 +373,20 @@ pub fn connect(
     // Somebody else's collector is any endpoint without our marker — a
     // collector on loopback included. In the file and in this process's
     // environment alike.
+    // The logs-only endpoint takes precedence over the general one for the
+    // records this sends, so it is somebody else's collector too.
     let is_foreign = |endpoint: &str| !endpoint.is_empty() && !endpoint.contains(URL_MARKER);
-    let foreign = env
-        .get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .and_then(|v| v.as_str())
-        .is_some_and(is_foreign)
-        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .ok()
-            .as_deref()
-            .is_some_and(is_foreign);
+    let foreign = [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    ]
+    .iter()
+    .any(|key| {
+        env.get(*key)
+            .and_then(|v| v.as_str())
+            .is_some_and(is_foreign)
+            || std::env::var(key).ok().as_deref().is_some_and(is_foreign)
+    });
 
     if foreign {
         report.telemetry = TelemetryStatus::External;
@@ -387,7 +418,9 @@ pub fn connect(
         );
         // The telemetry endpoints are authenticated. This branch runs only
         // when no foreign collector is configured, so the bearer header
-        // reaches exactly one collector: ours.
+        // reaches exactly one collector: ours. The vendor exports this block
+        // to every tool call, so `token` is the telemetry-only one — it
+        // cannot answer a permission or reach any other route.
         env.insert(
             "OTEL_EXPORTER_OTLP_HEADERS".into(),
             json!(format!("Authorization=Bearer {token}")),
@@ -433,6 +466,17 @@ fn shell_arg(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Undoes [`shell_arg`]: exactly one quote off each end, then every `'\''`
+/// back to `'`. Not `trim_matches`, which would eat a quote that belongs to the
+/// original (`echo 'hi'`). Anything not shaped like our quoting is returned
+/// as it is.
+fn unshell_arg(s: &str) -> String {
+    match s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        Some(inner) => inner.replace("'\\''", "'"),
+        None => s.to_string(),
+    }
+}
+
 /// Removes everything `connect` added, and nothing else.
 pub fn disconnect(settings: &mut Map<String, Value>) -> ConnectReport {
     let mut report = ConnectReport::default();
@@ -465,7 +509,7 @@ pub fn disconnect(settings: &mut Map<String, Value>) -> ConnectReport {
     {
         match cmd.split_once(" --then ") {
             Some((_, original)) => {
-                let original = original.trim().trim_matches('\'').replace("'\\''", "'");
+                let original = unshell_arg(original.trim());
                 settings.insert(
                     "statusLine".into(),
                     json!({ "type": "command", "command": original }),
@@ -605,6 +649,49 @@ pub struct ConnectState {
     /// `PermissionRequest`, the latter outlasting the longest hold. "Installed"
     /// alone would be false reassurance; `doctor` says to reconnect.
     pub gate_is_stale: bool,
+    /// Hook events of ours whose command names a binary that no longer
+    /// exists, with that path. The vendor runs nothing for them, so the gate
+    /// is off for that event however the settings read.
+    pub gate_off: Vec<(String, String)>,
+}
+
+/// The binary one of our shim commands runs, unquoted as [`shell_quote`]
+/// wrote it.
+pub fn shim_binary(cmd: &str) -> Option<PathBuf> {
+    let trimmed = cmd.trim();
+    let head = ["hook", "statusline"]
+        .iter()
+        .find_map(|verb| trimmed.split_once(&format!(" {verb}")).map(|(h, _)| h))?
+        .trim();
+    Some(PathBuf::from(unshell_arg(head)))
+}
+
+/// Our hook events whose binary is gone, as `(event, path)`.
+fn missing_binaries(settings: &Map<String, Value>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(hooks) = settings.get("hooks").and_then(|h| h.as_object()) else {
+        return out;
+    };
+    for (event, entries) in hooks {
+        let commands = entries
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|e| is_ours(e))
+            .filter_map(|e| e.get("hooks").and_then(|h| h.as_array()))
+            .flatten()
+            .filter_map(|h| h.get("command").and_then(|c| c.as_str()))
+            .filter(|c| is_shim_command(c));
+        for cmd in commands {
+            if let Some(bin) = shim_binary(cmd)
+                && !bin.exists()
+            {
+                out.push((event.clone(), bin.display().to_string()));
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Whether the entries for a deciding event contain a gate that can decide.
@@ -824,6 +911,7 @@ pub fn inspect(settings: &Map<String, Value>, path: &Path) -> ConnectState {
         });
 
     ConnectState {
+        gate_off: missing_binaries(settings),
         gate_is_stale,
         settings_path: path.to_path_buf(),
         telemetry_is_ours: telemetry_endpoint
@@ -852,6 +940,36 @@ mod tests {
 
     fn connect_test(s: &mut Map<String, Value>, url: &str, token: &str) -> ConnectReport {
         connect(s, url, token, Path::new("/usr/local/bin/devplane"))
+    }
+
+    /// A hook whose binary was removed (an npx cache cleared, a moved
+    /// install) runs nothing: `doctor` names the event as gate off.
+    #[test]
+    fn a_hook_whose_binary_is_gone_is_reported_as_gate_off() {
+        let mut gone = Map::new();
+        connect(
+            &mut gone,
+            "http://127.0.0.1:47831",
+            "tok",
+            Path::new("/nonexistent/it's gone/devplane"),
+        );
+        let state = inspect(&gone, Path::new("/tmp/settings.json"));
+        let events: Vec<&str> = state.gate_off.iter().map(|(e, _)| e.as_str()).collect();
+        assert!(events.contains(&"PreToolUse"), "{events:?}");
+        assert!(events.contains(&"PermissionRequest"), "{events:?}");
+        assert!(
+            state
+                .gate_off
+                .iter()
+                .all(|(_, p)| p == "/nonexistent/it's gone/devplane"),
+            "the path is unquoted back: {:?}",
+            state.gate_off
+        );
+        // One that exists is not reported.
+        let exe = std::env::current_exe().unwrap();
+        let mut here = Map::new();
+        connect(&mut here, "http://127.0.0.1:47831", "tok", &exe);
+        assert!(inspect(&here, Path::new("/tmp/s.json")).gate_off.is_empty());
     }
 
     #[test]
@@ -1249,6 +1367,24 @@ mod tests {
         let once = s["statusLine"]["command"].as_str().unwrap().to_string();
         wrap_status_line(&mut s, Path::new("/usr/local/bin/devplane"));
         assert_eq!(s["statusLine"]["command"].as_str().unwrap(), once);
+    }
+
+    #[test]
+    fn a_quoted_status_line_survives_connect_and_disconnect() {
+        for original in [
+            "echo 'hi'",
+            "jq -r '.model.display_name'",
+            "'quoted at both ends'",
+            "it's",
+        ] {
+            let mut s: Map<String, Value> = serde_json::from_value(
+                json!({"statusLine": {"type": "command", "command": original}}),
+            )
+            .unwrap();
+            wrap_status_line(&mut s, Path::new("/usr/local/bin/devplane"));
+            disconnect(&mut s);
+            assert_eq!(s["statusLine"]["command"], json!(original), "{original}");
+        }
     }
 
     #[test]

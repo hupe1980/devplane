@@ -20,8 +20,10 @@
   );
 </script>
 
-<p class="stale" role="status">
-  {error}
+<!-- Only the error is announced: the age ticks every second and would be
+     read out again each time. -->
+<p class="stale">
+  <span role="status">{error}</span>
   {#if age}
     <span class="age">· showing what was read {age} ago</span>
   {:else}

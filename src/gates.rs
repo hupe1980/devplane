@@ -178,6 +178,11 @@ async fn run_one(
     };
 
     let pid = child.id();
+    // The group dies with this call however it ends: normally, on a timeout,
+    // or because the caller stopped waiting and dropped the future. Without
+    // it a `cmd &` in a check, or a whole suite whose gate was cancelled,
+    // outlives the gate unowned.
+    let mut group = Group(pid);
 
     // Both pipes are drained concurrently into a buffer that outlives the
     // read. Sequential reads deadlock once a command fills the 64 KiB stderr
@@ -185,14 +190,33 @@ async fn run_one(
     // by the future because a timeout drops the future, and a hung suite's
     // output is exactly what names the test it hung in.
     let captured = std::sync::Arc::new(std::sync::Mutex::new(Captured::default()));
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    let drains = async {
+        tokio::join!(
+            drain(stdout, captured.clone()),
+            drain(stderr, captured.clone())
+        )
+    };
+    tokio::pin!(drains);
+    let mut drained = false;
+    // The verdict is the shell's exit, not the pipes closing: a background
+    // child still holding stdout must not turn a finished check into a
+    // timeout.
     let status = tokio::time::timeout(timeout, async {
-        let (_, _) = tokio::join!(
-            drain(child.stdout.take(), captured.clone()),
-            drain(child.stderr.take(), captured.clone())
-        );
-        child.wait().await
+        loop {
+            tokio::select! {
+                s = child.wait() => break s,
+                _ = &mut drains, if !drained => drained = true,
+            }
+        }
     })
     .await;
+    // Whatever the leader left running goes now; that closes their ends of
+    // the pipes, so what they already wrote is read to the end.
+    group.kill();
+    if !drained {
+        let _ = tokio::time::timeout(Duration::from_secs(2), &mut drains).await;
+    }
 
     let outcome = match status {
         Ok(Ok(s)) => match s.code() {
@@ -206,8 +230,7 @@ async fn run_one(
             reason: e.to_string(),
         },
         Err(_) => {
-            // Kill the whole group, not just the shell.
-            terminate_group(pid);
+            // The group is already gone; the shell is reaped here.
             let _ = child.kill().await;
             Outcome::TimedOut {
                 after_secs: timeout.as_secs(),
@@ -273,6 +296,23 @@ where
             let keep = c.tail.len() - 2 * OUTPUT_TAIL_BYTES;
             c.tail.drain(..keep);
         }
+    }
+}
+
+/// A gate command's process group, killed once: explicitly when the command
+/// ends, or on drop when the future was cancelled first. Once, so a pid the
+/// system has since reused is never signalled.
+struct Group(Option<u32>);
+
+impl Group {
+    fn kill(&mut self) {
+        terminate_group(self.0.take());
+    }
+}
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 

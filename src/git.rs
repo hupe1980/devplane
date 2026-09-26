@@ -47,14 +47,42 @@ struct Porcelain {
     untracked: Vec<String>,
 }
 
+/// How long any one git command may take. Generous — a first `worktree add`
+/// of a large repository checks out every file — but finite, so a hung
+/// command cannot stop the poller that called it.
+pub const GIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Runs a git command in a directory and returns stdout.
+///
+/// `GIT_OPTIONAL_LOCKS=0` on every call: a read such as `git status` otherwise
+/// refreshes and rewrites `.git/index`, and the poller reads every open
+/// change's tree on a timer, so the person's or agent's own `git commit` would
+/// fail at random on `index.lock`. Writes (`worktree add`, `branch -D`) take
+/// the locks they need regardless; the variable only drops the optional ones.
+///
+/// A checkout's `.git/config` is writable by the agent in it, so nothing it
+/// names runs here: `core.fsmonitor` is forced off (it is a command git would
+/// start on every `status`), git never prompts for a credential, and a call
+/// that has not answered in [`GIT_DEADLINE`] is killed.
 async fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new("git")
+    let run = tokio::process::Command::new("git")
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .current_dir(dir)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
-        .output()
+        .output();
+    let out = tokio::time::timeout(GIT_DEADLINE, run)
         .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "git {} did not answer in {}s",
+                args.join(" "),
+                GIT_DEADLINE.as_secs()
+            )
+        })?
         .with_context(|| format!("running git {}", args.join(" ")))?;
     if !out.status.success() {
         bail!(
@@ -70,6 +98,21 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String> {
 /// even when no telemetry has reported it.
 pub async fn remote_url(root: &Path) -> Option<String> {
     let out = git(root, &["remote", "get-url", "origin"]).await.ok()?;
+    let url = out.trim();
+    (!url.is_empty()).then(|| url.to_string())
+}
+
+/// The remote a forge is read from: `origin`, else the first remote git lists.
+///
+/// `git remote get-url` applies `url.<base>.insteadOf` rewrites itself, so the
+/// URL returned is the one git would fetch from.
+pub async fn forge_remote_url(root: &Path) -> Option<String> {
+    if let Some(url) = remote_url(root).await {
+        return Some(url);
+    }
+    let names = git(root, &["remote"]).await.ok()?;
+    let first = names.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let out = git(root, &["remote", "get-url", first]).await.ok()?;
     let url = out.trim();
     (!url.is_empty()).then(|| url.to_string())
 }
@@ -214,9 +257,24 @@ pub async fn commit_stamp(dir: &Path) -> Option<CommitStamp> {
 /// disk, untracked files that are not ignored, ignored files left out.
 ///
 /// Computed with a temporary index, so nothing the person or agent sees
-/// changes: the real index is copied (for its stat cache), or `HEAD` read into
-/// an empty one, then `git add -A && git write-tree` — what a reviewer runs to
-/// re-derive it. The copy lives in the git directory and is always removed.
+/// changes. The digest must not be steerable from inside the checkout, and
+/// the checkout's `.git/config`, `.git/info/` and `.gitattributes` are all
+/// writable by the agent in it, so:
+/// * **every file's bytes are hashed as they are on disk**, with
+///   `hash-object --no-filters`: no clean or `process` filter, no end-of-line
+///   or encoding conversion, no `ident` — an attribute cannot make an edited
+///   file hash as the old one, and no filter command runs in this process;
+/// * no stat cache is trusted, so no `assume-unchanged`, `skip-worktree`,
+///   `core.checkStat` or restored mtime can hide an edit — each file is read;
+/// * untracked files are excluded by the `.gitignore` files in the tree
+///   (committed or not), never by `.git/info/exclude` or `core.excludesFile`,
+///   which an agent can write from its worktree to hide a file without a
+///   trace in the tree. Devplane's own `.claude/worktrees/` is the one
+///   exception: other changes' checkouts are not this tree.
+///
+/// Where a repository declares no filter, this is the tree `git add -A &&
+/// git write-tree` would give. The objects are not written; the copy of the
+/// index lives in the git directory and is always removed.
 pub async fn tree_digest(dir: &Path) -> Result<String> {
     let index = git(
         dir,
@@ -224,20 +282,36 @@ pub async fn tree_digest(dir: &Path) -> Result<String> {
     )
     .await?;
     let index = PathBuf::from(index.trim());
+    let top = git(dir, &["rev-parse", "--show-toplevel"]).await?;
+    let top = PathBuf::from(top.trim());
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = index.with_file_name(format!("devplane-index-{}-{n}", std::process::id()));
-    let result = digest_with(dir, &index, &tmp).await;
-    let _ = std::fs::remove_file(&tmp);
-    let _ = std::fs::remove_file(tmp.with_extension("lock"));
+    let result = digest_with(&top, &index, &tmp).await;
+    for t in [tmp.clone(), tmp.with_extension("lock")] {
+        let _ = std::fs::remove_file(t);
+    }
     result
 }
 
-async fn digest_with(dir: &Path, index: &Path, tmp: &Path) -> Result<String> {
+/// One entry of the tree being built: its mode, and where its object id
+/// comes from.
+enum Entry {
+    /// A regular file, hashed from disk by path.
+    File(&'static str),
+    /// A symbolic link: its target, hashed as the blob git stores for it.
+    Link(Vec<u8>),
+    /// A submodule or embedded repository, at the commit it has checked out.
+    Gitlink(String),
+}
+
+async fn digest_with(top: &Path, index: &Path, tmp: &Path) -> Result<String> {
     let tmp_str = tmp.to_str().context("git directory is not utf-8")?;
+    // What is tracked is what the index says, staged additions included; the
+    // index is copied so the real one is never locked or refreshed.
     let seeded = index.exists() && std::fs::copy(index, tmp).is_ok();
     if !seeded {
-        let has_head = git(dir, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        let has_head = git(top, &["rev-parse", "--verify", "--quiet", "HEAD"])
             .await
             .is_ok();
         let args: &[&str] = if has_head {
@@ -245,10 +319,137 @@ async fn digest_with(dir: &Path, index: &Path, tmp: &Path) -> Result<String> {
         } else {
             &["read-tree", "--empty"]
         };
-        git_with_index(dir, tmp_str, args).await?;
+        git_with_index(top, tmp_str, args, None).await?;
     }
-    git_with_index(dir, tmp_str, &["add", "-A"]).await?;
-    let tree = git_with_index(dir, tmp_str, &["write-tree"]).await?;
+    let staged = git_with_index(top, tmp_str, &["ls-files", "--stage", "-z"], None).await?;
+    let mut tracked: Vec<(String, String, String)> = Vec::new();
+    for rec in staged.split('\0').filter(|r| !r.is_empty()) {
+        let Some((meta, path)) = rec.split_once('\t') else {
+            continue;
+        };
+        let mut f = meta.split(' ');
+        let (Some(mode), Some(oid)) = (f.next(), f.next()) else {
+            continue;
+        };
+        // A conflicted path is listed once per stage; the file on disk is one.
+        if tracked.last().is_none_or(|(_, _, p)| p != path) {
+            tracked.push((mode.to_string(), oid.to_string(), path.to_string()));
+        }
+    }
+    // Untracked files, excluded by committed `.gitignore` files alone: no
+    // `--exclude-standard`, which would read `info/exclude` and the person's
+    // global excludes file. An embedded repository is listed as `dir/`.
+    let untracked = git_with_index(
+        top,
+        tmp_str,
+        &[
+            "ls-files",
+            "--others",
+            "-z",
+            "--exclude-per-directory=.gitignore",
+            "--exclude=/.claude/worktrees/",
+        ],
+        None,
+    )
+    .await?;
+
+    let mut entries: Vec<(String, Entry)> = Vec::new();
+    let candidates = tracked
+        .iter()
+        .map(|(mode, oid, path)| (path.clone(), Some((mode.as_str(), oid.as_str()))))
+        .chain(
+            untracked
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(|p| (p.trim_end_matches('/').to_string(), None)),
+        );
+    for (path, was) in candidates {
+        let on_disk = top.join(&path);
+        let Ok(meta) = std::fs::symlink_metadata(&on_disk) else {
+            continue; // deleted
+        };
+        let gitlink =
+            was.is_some_and(|(mode, _)| mode == "160000") || (was.is_none() && meta.is_dir());
+        if gitlink {
+            let head = git(&on_disk, &["rev-parse", "--verify", "--quiet", "HEAD"]).await;
+            match (head, was) {
+                (Ok(h), _) => entries.push((path, Entry::Gitlink(h.trim().to_string()))),
+                // Not checked out: what the index says it should be.
+                (Err(_), Some((_, oid))) => entries.push((path, Entry::Gitlink(oid.to_string()))),
+                (Err(_), None) => {}
+            }
+        } else if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&on_disk)?;
+            entries.push((
+                path,
+                Entry::Link(target.as_os_str().as_encoded_bytes().to_vec()),
+            ));
+        } else if meta.is_file() {
+            entries.push((path, Entry::File(file_mode(&meta, was.map(|(m, _)| m)))));
+        }
+        // A tracked path now a directory holds only untracked files, which
+        // the untracked listing names on their own.
+    }
+
+    // Regular files by path in one process; a path git's line-based input
+    // cannot carry, and every link target, by content.
+    let by_path: Vec<&str> = entries
+        .iter()
+        .filter(|(p, e)| matches!(e, Entry::File(_)) && !p.contains('\n'))
+        .map(|(p, _)| p.as_str())
+        .collect();
+    let mut hashed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if !by_path.is_empty() {
+        let input = by_path.join("\n") + "\n";
+        let out = git_with_index(
+            top,
+            tmp_str,
+            &["hash-object", "--no-filters", "--stdin-paths"],
+            Some(input.as_bytes()),
+        )
+        .await?;
+        let oids: Vec<&str> = out.lines().collect();
+        if oids.len() != by_path.len() {
+            bail!(
+                "git hash-object answered {} of {} paths",
+                oids.len(),
+                by_path.len()
+            );
+        }
+        for (p, o) in by_path.iter().zip(oids) {
+            hashed.insert((*p).to_string(), o.to_string());
+        }
+    }
+    let mut info: Vec<u8> = Vec::new();
+    for (path, entry) in &entries {
+        let (mode, oid) = match entry {
+            Entry::Gitlink(oid) => ("160000", oid.clone()),
+            Entry::File(mode) => match hashed.get(path) {
+                Some(oid) => (*mode, oid.clone()),
+                None => (
+                    *mode,
+                    hash_bytes(top, tmp_str, &std::fs::read(top.join(path))?).await?,
+                ),
+            },
+            Entry::Link(target) => ("120000", hash_bytes(top, tmp_str, target).await?),
+        };
+        info.extend_from_slice(format!("{mode} {oid}\t").as_bytes());
+        info.extend_from_slice(path.as_bytes());
+        info.push(0);
+    }
+    // A fresh index holding exactly those entries.
+    std::fs::remove_file(tmp).ok();
+    git_with_index(top, tmp_str, &["read-tree", "--empty"], None).await?;
+    if !info.is_empty() {
+        git_with_index(
+            top,
+            tmp_str,
+            &["update-index", "-z", "--index-info"],
+            Some(&info),
+        )
+        .await?;
+    }
+    let tree = git_with_index(top, tmp_str, &["write-tree", "--missing-ok"], None).await?;
     let tree = tree.trim().to_string();
     if tree.is_empty() {
         bail!("git write-tree printed nothing");
@@ -256,18 +457,70 @@ async fn digest_with(dir: &Path, index: &Path, tmp: &Path) -> Result<String> {
     Ok(tree)
 }
 
-/// A git command against an index that is not the person's.
-async fn git_with_index(dir: &Path, index: &str, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_INDEX_FILE", index)
-        // `add` must not take the real index's lock or refresh it.
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .kill_on_drop(true)
-        .output()
-        .await
-        .with_context(|| format!("running git {}", args.join(" ")))?;
+/// The mode git records for a regular file: executable by its bits where the
+/// file system has them, else as the index had it.
+fn file_mode(meta: &std::fs::Metadata, indexed: Option<&str>) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = indexed;
+        if meta.permissions().mode() & 0o111 != 0 {
+            "100755"
+        } else {
+            "100644"
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        if indexed == Some("100755") {
+            "100755"
+        } else {
+            "100644"
+        }
+    }
+}
+
+/// The blob id of `bytes`, unfiltered.
+async fn hash_bytes(top: &Path, index: &str, bytes: &[u8]) -> Result<String> {
+    let out = git_with_index(
+        top,
+        index,
+        &["hash-object", "--no-filters", "--stdin"],
+        Some(bytes),
+    )
+    .await?;
+    Ok(out.trim().to_string())
+}
+
+/// A git command against an index that is not the person's, optionally fed
+/// on stdin. The file system monitor and untracked cache are off, so neither
+/// a copied cache nor a daemon's answer stands in for looking at the files,
+/// and every stat check the repository's config could relax is forced on.
+async fn git_with_index(
+    dir: &Path,
+    index: &str,
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<String> {
+    let mut forced: Vec<&str> = vec![
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "core.trustctime=true",
+        "-c",
+        "core.checkStat=default",
+        "-c",
+        "core.ignoreStat=false",
+    ];
+    // Windows reports no executable bit, which is why git turns this off there.
+    if cfg!(not(windows)) {
+        forced.extend(["-c", "core.fileMode=true"]);
+    }
+    let full: Vec<&str> = forced.into_iter().chain(args.iter().copied()).collect();
+    let out = git_stdin(dir, &[("GIT_INDEX_FILE", index)], &full, input).await?;
     if !out.status.success() {
         bail!(
             "git {} failed: {}",
@@ -276,6 +529,50 @@ async fn git_with_index(dir: &Path, index: &str, args: &[&str]) -> Result<String
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Runs git in `dir` with `env`, optionally fed on stdin, and returns what it
+/// printed whatever its exit status. Never takes an optional lock (`add` must
+/// not take the real index's lock or refresh it; status must not rewrite it).
+async fn git_stdin(
+    dir: &Path,
+    env: &[(&str, &str)],
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<std::process::Output> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .envs(env.iter().copied())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
+        let bytes = bytes.to_vec();
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&bytes).await;
+        });
+    }
+    tokio::time::timeout(GIT_DEADLINE, child.wait_with_output())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "git {} did not answer in {}s",
+                args.join(" "),
+                GIT_DEADLINE.as_secs()
+            )
+        })?
+        .with_context(|| format!("running git {}", args.join(" ")))
 }
 
 /// Whether a commit exists anywhere but this machine.
@@ -681,50 +978,85 @@ pub async fn remove_worktree(root: &Path, dir: &Path, discard_uncommitted: bool)
 /// Diffs against the merge base, so a `base` that moved on does not show
 /// everybody else's commits. Uncommitted work is included: a reviewer
 /// approves the checkout as it stands.
-pub async fn change_set(dir: &Path, base: &str) -> crate::core::diff::ChangeSet {
+///
+/// Every failure is returned — a base that resolves neither as `origin/<base>`
+/// nor locally, no merge base, a diff git refused — because an unreadable diff
+/// is not an empty one: whatever makes a claim from it (the offer's guard, the
+/// certificate's "altered none of its checks") must say it could not read it.
+///
+/// The base resolves the way [`create_worktree`] resolves it, `origin/` first,
+/// so the diff is against what the checkout was made from. Every invocation is
+/// independent of the person's diff config (external drivers, textconv,
+/// prefixes), which the parser would otherwise misread.
+pub async fn change_set(dir: &Path, base: &str) -> Result<crate::core::diff::ChangeSet> {
+    let base_ref = resolve_base(dir, base).await.with_context(|| {
+        format!("the base branch `{base}` resolves neither as `origin/{base}` nor locally")
+    })?;
     // One diff from the merge base to the working tree, so a file committed
     // then edited (or deleted) is listed once, as it stands.
-    let from = match git(dir, &["merge-base", "--end-of-options", base, "HEAD"]).await {
-        Ok(mb) if !mb.trim().is_empty() => mb.trim().to_string(),
-        _ => base.to_string(),
-    };
+    let from = git(dir, &["merge-base", "--end-of-options", &base_ref, "HEAD"])
+        .await
+        .with_context(|| format!("finding where this checkout left `{base_ref}`"))?;
+    let from = from.trim().to_string();
+    if from.is_empty() {
+        bail!("`{base_ref}` and HEAD share no history");
+    }
     // `--find-renames`: a moved file reads as moved, not deleted and added.
     let working = git(
         dir,
         &[
+            "-c",
+            "core.quotePath=false",
             "diff",
             "--find-renames",
             "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             "--end-of-options",
             &from,
         ],
     )
-    .await
-    .unwrap_or_default();
+    .await?;
     // `git diff` misses files git has never seen, so an agent's new files are
     // diffed one by one. `--no-index` rather than `add -N`, because a read
     // must not write to the index.
     let mut untracked = String::new();
-    let mut untracked_total = 0usize;
-    if let Ok(list) = git(dir, &["ls-files", "--others", "--exclude-standard"]).await {
-        let paths: Vec<&str> = list.lines().filter(|l| !l.is_empty()).collect();
+    let untracked_total;
+    {
+        let list = git(dir, &["ls-files", "--others", "--exclude-standard", "-z"]).await?;
+        let paths: Vec<&str> = list.split('\0').filter(|l| !l.is_empty()).collect();
         untracked_total = paths.len();
         for path in paths.into_iter().take(MAX_UNTRACKED) {
             // `--no-index` exits 1 whenever files differ; not an error here.
             let out = tokio::process::Command::new("git")
-                .args(["diff", "--no-color", "--no-index", "--", "/dev/null", path])
+                .args([
+                    "-c",
+                    "core.quotePath=false",
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    path,
+                ])
                 .current_dir(dir)
+                .env("GIT_OPTIONAL_LOCKS", "0")
                 .kill_on_drop(true)
                 .output()
-                .await;
-            if let Ok(o) = out {
-                untracked.push_str(&String::from_utf8_lossy(&o.stdout));
-            }
+                .await
+                .with_context(|| format!("diffing the new file {path}"))?;
+            untracked.push_str(&String::from_utf8_lossy(&out.stdout));
         }
     }
 
     let text = format!("{working}{untracked}");
-    let command = format!("git diff $(git merge-base {base} HEAD)");
+    let command = format!("git diff $(git merge-base {base_ref} HEAD)");
     let mut set = crate::core::diff::parse(base, &text, &command);
     // Untracked files past the bound were never diffed; count them here or
     // they vanish silently.
@@ -753,7 +1085,7 @@ pub async fn change_set(dir: &Path, base: &str) -> crate::core::diff::ChangeSet 
                 .map(|m| m.len());
         }
     }
-    set
+    Ok(set)
 }
 
 /// How many never-seen files are diffed individually (one process each). Past
@@ -782,39 +1114,79 @@ pub async fn touched_files(dir: &Path, base: &str) -> Vec<String> {
     out
 }
 
-/// Every file git ignores inside this checkout, repository-relative and
-/// `/`-separated: the `.worktreeinclude` candidates.
+/// The gitignored files `.worktreeinclude` names, repository-relative and
+/// `/`-separated: the candidates a fresh checkout may carry. Empty when the
+/// repository has no `.worktreeinclude`.
 ///
-/// This listing never names a tracked file, so "only gitignored files are
-/// copied" holds by construction.
+/// Git does the matching with its own gitignore engine rather than listing
+/// every ignored file (a `target/` or `node_modules/` can hold hundreds of
+/// thousands): `ls-files --others --ignored --exclude-from=.worktreeinclude`
+/// names the untracked files the patterns select, and `check-ignore` keeps
+/// those the repository's standard rules ignore. Neither step ever names a
+/// tracked file, so "only gitignored files are copied" holds by construction.
 pub async fn ignored_files(root: &Path) -> Result<Vec<String>> {
-    let text = git(
-        root,
-        &[
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-        ],
-    )
-    .await?;
-    Ok(text
+    let include = root.join(".worktreeinclude");
+    if !include.is_file() {
+        return Ok(Vec::new());
+    }
+    let from = format!(
+        "--exclude-from={}",
+        include.to_str().context("repository path is not utf-8")?
+    );
+    let chosen = git(root, &["ls-files", "--others", "--ignored", "-z", &from]).await?;
+    let chosen: Vec<&str> = chosen.split('\0').filter(|p| !p.is_empty()).collect();
+    if chosen.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input: Vec<u8> = chosen
+        .iter()
+        .flat_map(|p| p.bytes().chain(std::iter::once(0)))
+        .collect();
+    let ignored = check_ignore(root, &input).await?;
+    Ok(ignored
         .split('\0')
         .filter(|p| !p.is_empty())
         .map(|p| p.replace('\\', "/"))
         .collect())
 }
 
+/// `git check-ignore -z --stdin`: the paths the standard rules ignore. Exit
+/// status 1 means none are, which is an answer rather than a failure.
+async fn check_ignore(root: &Path, input: &[u8]) -> Result<String> {
+    let out = git_stdin(root, &[], &["check-ignore", "-z", "--stdin"], Some(input)).await?;
+    match out.status.code() {
+        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+        _ => bail!(
+            "git check-ignore failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
+}
+
 /// Copies the gitignored files `.worktreeinclude` chose into a fresh
-/// worktree, never over anything already there.
+/// worktree, never over anything already there and never outside it.
 ///
-/// A repository can still point an ignored path elsewhere via a symlink, so:
+/// A repository can point a path elsewhere via a symlink, on either side:
 /// * the source is canonicalised and must stay inside the repository;
-/// * the destination must not exist at all, checked with `symlink_metadata`
-///   so a dangling symlink counts; copying through one is an arbitrary write.
+/// * every directory on the way to the destination is walked one component at
+///   a time and must be a real directory, never a symlink (a tracked
+///   `config -> /tmp/public` in the worktree would otherwise receive
+///   `config/local.env`); missing ones are created one by one;
+/// * the destination's parent, canonicalised, must still be inside the
+///   canonical worktree;
+/// * the file is copied under a fresh name in that parent and hard-linked
+///   into place, which fails rather than follows if anything, a dangling
+///   symlink included, appeared at the destination.
+///
+/// `std::fs::copy` clones where the file system can (`clonefile` on APFS,
+/// `copy_file_range` reflinks on Btrfs and XFS), so large files cost nothing.
 pub fn copy_included(root: &Path, worktree: &Path, files: &[String]) -> Vec<String> {
     let mut copied = Vec::new();
+    let (Ok(real_root), Ok(real_tree)) = (root.canonicalize(), worktree.canonicalize()) else {
+        // Unresolvable is refused: a wrong answer could hand an agent a
+        // private key, or write one somewhere public.
+        return copied;
+    };
     for pattern in files {
         let from = root.join(pattern);
         let to = worktree.join(pattern);
@@ -828,31 +1200,100 @@ pub fn copy_included(root: &Path, worktree: &Path, files: &[String]) -> Vec<Stri
         if !from.is_file() {
             continue;
         }
-        match (from.canonicalize(), root.canonicalize()) {
-            (Ok(real), Ok(real_root)) if real.starts_with(&real_root) => {}
-            (Ok(_), Ok(_)) => {
+        match from.canonicalize() {
+            Ok(real) if real.starts_with(&real_root) => {}
+            Ok(_) => {
                 tracing::warn!(
                     pattern,
                     "refusing to copy a file that points outside the repository"
                 );
                 continue;
             }
-            // Unresolvable is refused: a wrong answer could hand an agent a
-            // private key.
-            _ => continue,
+            Err(_) => continue,
         }
-        // Anything already there, including a dangling symlink, is left alone.
-        if to.symlink_metadata().is_ok() {
-            continue;
-        }
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        if std::fs::copy(&from, &to).is_ok() {
-            copied.push(pattern.clone());
+        match copy_into(&real_tree, worktree, pattern, &from) {
+            Ok(true) => copied.push(pattern.clone()),
+            Ok(false) => {}
+            Err(why) => tracing::warn!(pattern, why, "refusing to copy an included file"),
         }
     }
     copied
+}
+
+/// One confined copy; `Ok(false)` when something is already there.
+fn copy_into(
+    real_tree: &Path,
+    worktree: &Path,
+    relative: &str,
+    from: &Path,
+) -> std::result::Result<bool, &'static str> {
+    use std::path::Component;
+    // `a/../b` is `b`: resolved lexically (the caller has checked it stays
+    // inside), so the walk below only ever steps down into named directories.
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for c in Path::new(relative).components() {
+        match c {
+            Component::Normal(c) => parts.push(c),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop().ok_or("the path climbs out of the worktree")?;
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("the path is not a relative path");
+            }
+        }
+    }
+    let Some((name, dirs)) = parts.split_last() else {
+        return Err("the path names no file");
+    };
+    let mut parent = worktree.to_path_buf();
+    {
+        for c in dirs {
+            parent.push(c);
+            match parent.symlink_metadata() {
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err("a directory on the way is a symlink");
+                }
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => return Err("a directory on the way is a file"),
+                Err(_) => {
+                    std::fs::create_dir(&parent).map_err(|_| "could not create a directory")?
+                }
+            }
+        }
+    }
+    match parent.canonicalize() {
+        Ok(real) if real.starts_with(real_tree) => {}
+        _ => return Err("the destination resolves outside the worktree"),
+    }
+    let to = parent.join(name);
+    if to.symlink_metadata().is_ok() {
+        return Ok(false);
+    }
+    let tmp = parent.join(format!(".devplane-copy-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::copy(from, &tmp).map_err(|_| "the copy failed")?;
+    // A hard link puts the whole copy in place at once and never follows a
+    // link planted at `to`. Where the file system has none (exFAT, FAT, some
+    // network shares), `create_new` refuses the same things: a file, or a
+    // symlink, already there.
+    let placed = match std::fs::hard_link(&tmp, &to) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => (|| {
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&to)?;
+            let mut src = std::fs::File::open(&tmp)?;
+            std::io::copy(&mut src, &mut out)?;
+            std::fs::set_permissions(&to, std::fs::metadata(&tmp)?.permissions())
+        })(),
+        linked => linked,
+    };
+    std::fs::remove_file(&tmp).ok();
+    match placed {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(_) => Err("could not put the copy in place"),
+    }
 }
 
 /// Whether `path` stays inside `root` once `..` and `.` are resolved.
@@ -1142,7 +1583,7 @@ mod tests {
 
         let set = change_set(&root, &hostile).await;
         assert!(!target.exists(), "`git diff` wrote a file it was told to");
-        assert!(set.is_empty());
+        assert!(set.is_err(), "a base that is an option resolves to nothing");
 
         let touched = touched_files(&root, &hostile).await;
         assert!(!target.exists());
@@ -1249,7 +1690,7 @@ mod tests {
         git(&root, &["commit", "-qm", "edit"]).await.unwrap();
         std::fs::write(root.join("a.txt"), "hello\nworld\nagain\n").unwrap();
         std::fs::remove_file(root.join("b.txt")).unwrap();
-        let set = change_set(&root, "main").await;
+        let set = change_set(&root, "main").await.unwrap();
         let paths: Vec<&str> = set.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["a.txt"], "b.txt was added and removed: nothing");
         assert_eq!((set.files[0].added, set.files[0].removed), (2, 0));
@@ -1262,7 +1703,7 @@ mod tests {
         for i in 0..(MAX_UNTRACKED + 5) {
             std::fs::write(root.join(format!("new-{i:02}.txt")), "x\n").unwrap();
         }
-        let set = change_set(&root, "main").await;
+        let set = change_set(&root, "main").await.unwrap();
         assert_eq!(set.files.len(), MAX_UNTRACKED);
         let t = set
             .truncated
@@ -1334,6 +1775,87 @@ mod tests {
             })
             .collect();
         assert!(leftovers.is_empty(), "the temporary index was left behind");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A clean filter planted from inside the checkout — `.git/info/attributes`
+    /// is outside the tree, `.git/config` is writable — can neither make an
+    /// edited file digest as the old one nor run.
+    #[tokio::test]
+    async fn a_planted_filter_cannot_steer_the_digest_or_run() {
+        let root = scratch_repo("filter").await;
+        let before = tree_digest(&root).await.unwrap();
+        let ran = root.join("filter-ran");
+        std::fs::create_dir_all(root.join(".git/info")).unwrap();
+        std::fs::write(root.join(".git/info/attributes"), "* filter=evil\n").unwrap();
+        let clean = format!("touch {} && git show HEAD:a.txt", ran.display());
+        git(&root, &["config", "filter.evil.clean", &clean])
+            .await
+            .unwrap();
+        git(
+            &root,
+            &[
+                "config",
+                "core.fsmonitor",
+                &format!("touch {}", ran.display()),
+            ],
+        )
+        .await
+        .unwrap();
+
+        std::fs::write(root.join("a.txt"), "rewritten by the agent\n").unwrap();
+        let after = tree_digest(&root).await.unwrap();
+        assert_ne!(after, before, "an edited file changed the digest");
+        porcelain_status(&root).await;
+        assert!(!ran.exists(), "a command from the checkout's config ran");
+
+        // Where no filter is declared the digest is git's own tree.
+        std::fs::remove_file(root.join(".git/info/attributes")).unwrap();
+        git(&root, &["config", "--unset", "filter.evil.clean"])
+            .await
+            .unwrap();
+        git(&root, &["config", "--unset", "core.fsmonitor"])
+            .await
+            .unwrap();
+        git(&root, &["add", "-A"]).await.unwrap();
+        let by_hand = git(&root, &["write-tree"]).await.unwrap();
+        assert_eq!(by_hand.trim(), after);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Symbolic links, executable bits and embedded repositories digest as
+    /// `git add -A` records them.
+    #[tokio::test]
+    async fn links_modes_and_embedded_repositories_digest_as_git_records_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch_repo("modes").await;
+        std::os::unix::fs::symlink("a.txt", root.join("link")).unwrap();
+        std::fs::write(root.join("run.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(root.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let inner = root.join("vendor/inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "i",
+            ],
+        ] {
+            git(&inner, &args).await.unwrap();
+        }
+        std::fs::remove_file(root.join("a.txt")).unwrap();
+        let digest = tree_digest(&root).await.unwrap();
+        git(&root, &["add", "-A"]).await.unwrap();
+        let by_hand = git(&root, &["write-tree"]).await.unwrap();
+        assert_eq!(digest, by_hand.trim());
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1468,8 +1990,13 @@ mod tests {
 
     #[tokio::test]
     async fn ignored_files_lists_what_git_ignores_and_never_a_tracked_file() {
-        // A tracked file is never a candidate, however a pattern reads.
+        // A tracked file is never a candidate, however a pattern reads; only
+        // what `.worktreeinclude` names is listed at all.
         let root = scratch_repo("ignored").await;
+        assert!(
+            ignored_files(&root).await.unwrap().is_empty(),
+            "no .worktreeinclude, no candidates"
+        );
         std::fs::write(root.join(".gitignore"), ".env\nconfig/\n").unwrap();
         std::fs::write(root.join("keep.txt"), "tracked\n").unwrap();
         git(&root, &["add", "-A"]).await.unwrap();
@@ -1478,6 +2005,12 @@ mod tests {
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::write(root.join("config/a.local"), "x\n").unwrap();
         std::fs::write(root.join("scratch.txt"), "untracked, not ignored\n").unwrap();
+        std::fs::write(root.join("other.env"), "ignored? no, and not named\n").unwrap();
+        std::fs::write(
+            root.join(".worktreeinclude"),
+            ".env\nconfig/\nkeep.txt\nscratch.txt\n",
+        )
+        .unwrap();
 
         let mut files = ignored_files(&root).await.unwrap();
         files.sort();

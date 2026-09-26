@@ -24,13 +24,11 @@ pub mod config;
 pub mod core;
 /// Runs Devplane owns, over the Agent Client Protocol.
 pub mod driven;
-/// Raising the window that owns a session.
-pub mod focus;
 /// Verification gates: the project's own definition of done, run and parsed.
 pub mod gates;
 /// Git: worktrees per unit of work, and the status the board shows.
 pub mod git;
-/// GitHub, through the `gh` command: issues, pull requests, checks.
+/// GitHub, spoken to directly: sign-in, issues, pull requests, checks.
 pub mod github;
 /// `devplane hook` and `devplane statusline`, run in the vendor's process.
 pub mod hook;
@@ -44,15 +42,27 @@ pub mod mcp;
 pub mod notify;
 /// Observation channels: hooks, OpenTelemetry, the roster, the status line.
 pub mod observe;
+/// The policy that governs a directory, read from disk and cached.
+pub mod policy_cache;
 /// Background loops: the roster poller, the stall sweeper, the PR watcher.
 pub mod poller;
 /// What a short-lived process writes down, with no host in the path.
 pub mod record;
 /// Terminal output.
 pub mod render;
+/// Where a directory belongs on disk: repository, worktree owner, governing
+/// root.
+pub mod repo;
 /// Reports between projects: filed, routed, answered, and opened on a forge
 /// only by a person.
 pub mod reports;
+/// What a repository already has set up for agents, read from disk.
+pub mod setup;
+/// The specification a change answers, read back from disk.
+pub mod spec;
+/// The wall clock, read at the edge: the pure half's constructors stamped
+/// with now.
+pub mod stamp;
 /// The observation store: SQLite, WAL, rebuildable.
 pub mod store;
 /// What the surfaces show, composed once for every caller.

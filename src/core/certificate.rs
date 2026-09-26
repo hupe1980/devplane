@@ -5,7 +5,10 @@
 //! that these commands ended as recorded against this commit — not that the
 //! work is correct — and says so in its own text ([`LIMITS`]).
 
-use super::change::{Change, CommandResult, CommitStamp, Completion, GateReport, Outcome, Reach};
+use super::change::{
+    Change, ChangeState, CommandResult, CommitStamp, Completion, Declared, GateReport, Outcome,
+    Reach,
+};
 
 /// Where a piece of evidence came from, in the OpenTelemetry GenAI conventions'
 /// proposed vocabulary (not yet a standard). An unknown origin is absent, never
@@ -63,19 +66,29 @@ pub struct Certificate<'a> {
     pub change: &'a Change,
     /// The gate run the basis points at, when it points at one.
     pub evidence: Option<&'a GateReport>,
+    /// How many times `check` ran on this change ([`Change::check_attempts`]).
     pub attempts: u32,
+    /// Where the change is, from the checks the project declares now.
+    pub state: ChangeState,
     /// The agent's own account, when the rules allow it to be shown at all.
     pub claim: Option<&'a str>,
     /// The checks the change itself altered, read from its diff. `None` when
     /// the worktree is gone — said, never rendered as *nothing altered*.
     pub weakened: Option<Vec<super::review::Weakened>>,
+    /// Why the diff could not be read, when it could not: `weakened` is then
+    /// `None`, said as unknown, never as *nothing altered*.
+    pub weakened_unreadable: Option<String>,
+    /// Every weakened row was marked seen by a person before this was read.
+    pub weakened_read: bool,
 }
 
 impl<'a> Certificate<'a> {
     /// Builds the certificate for a change. The evidence is the run the basis
     /// names, not the latest; if that run is gone the evidence is absent (no
     /// fallback to another run). With no basis yet, the latest `check` report.
-    pub fn of(change: &'a Change, claim: Option<&'a str>) -> Self {
+    /// `declared` is what the project declares done to mean now, which the
+    /// state is read against.
+    pub fn of(change: &'a Change, declared: Declared<'_>, claim: Option<&'a str>) -> Self {
         let evidence = match change.completion.as_ref().and_then(Completion::gate) {
             Some((gate, attempt)) => change
                 .gates
@@ -86,9 +99,12 @@ impl<'a> Certificate<'a> {
         Self {
             change,
             evidence,
-            attempts: change.gates.len() as u32,
+            attempts: change.check_attempts(),
+            state: change.state(declared, change.tree_now.as_ref()),
             claim,
             weakened: None,
+            weakened_unreadable: None,
+            weakened_read: false,
         }
     }
 
@@ -117,9 +133,19 @@ impl<'a> Certificate<'a> {
     /// The sentence about the checks the change itself altered.
     pub fn weakened_says(&self) -> String {
         match &self.weakened {
-            None => "Whether this change altered its own checks could not be read: its worktree \
-                     is gone."
-                .into(),
+            None => match &self.weakened_unreadable {
+                Some(why) => format!(
+                    "Whether this change altered its own checks is unknown: {} ({why}).",
+                    super::review::UNREADABLE
+                ),
+                None => "Whether this change altered its own checks could not be read: its \
+                         worktree is gone."
+                    .into(),
+            },
+            Some(w) if self.weakened_read && !w.is_empty() => format!(
+                "{} A person marked each of these read.",
+                super::review::weakened_sentence(w).unwrap_or_default()
+            ),
             Some(w) => super::review::weakened_sentence(w).unwrap_or_else(|| {
                 "This change altered none of its checks: no skip marker added, no test file \
                  deleted, no gate or CI definition edited."
@@ -143,7 +169,19 @@ impl<'a> Certificate<'a> {
         self.change.completion.is_some()
     }
 
-    /// The commands a reader runs to check this, in order.
+    /// Whether the tree the evidence ran on held uncommitted or untracked
+    /// files, so its commit alone is not what was checked. Agents do not
+    /// commit, so this is the ordinary case.
+    fn uncommitted(&self) -> bool {
+        self.evidence
+            .and_then(|r| r.commit.as_ref())
+            .is_some_and(|c| !c.clean)
+    }
+
+    /// The commands a reader runs to check this, in order. A clean tree is
+    /// its commit, checked out by name. An uncommitted one is found by its
+    /// working-tree digest instead: checking out the commit it sat on would
+    /// re-run the commands on a different tree.
     pub fn verification_steps(&self) -> Vec<String> {
         let mut out = Vec::new();
         let Some(report) = self.evidence else {
@@ -161,8 +199,28 @@ impl<'a> Certificate<'a> {
             let q = shell_quote(url);
             out.push(format!("git clone {q} && cd \"$(basename {q} .git)\""));
         }
-        if let Some(sha) = report.commit.as_ref().and_then(|c| c.commit.as_deref()) {
-            out.push(format!("git checkout {sha}"));
+        match report.commit.as_ref() {
+            Some(c) if c.clean => {
+                if let Some(sha) = c.commit.as_deref() {
+                    out.push(format!("git checkout {sha}"));
+                }
+            }
+            Some(c) => {
+                // A digest is hex; anything else is not pasted into a shell.
+                if let Some(tree) = c
+                    .tree
+                    .as_deref()
+                    .filter(|t| !t.is_empty() && t.chars().all(|ch| ch.is_ascii_hexdigit()))
+                {
+                    out.push(format!(
+                        "c=$(git log --all --format='%H %T' | awk '$2 == \"{tree}\" {{ print $1; exit }}')"
+                    ));
+                    out.push(format!(
+                        "git checkout \"${{c:?no commit has tree {tree}; the checked tree was never committed}}\""
+                    ));
+                }
+            }
+            None => {}
         }
         out.extend(report.commands.iter().map(|c| c.command.clone()));
         out
@@ -171,6 +229,31 @@ impl<'a> Certificate<'a> {
     /// Why a reader may not be able to follow those steps, if they cannot.
     pub fn verification_caveat(&self) -> Option<String> {
         let commit = self.evidence.and_then(|r| r.commit.as_ref())?;
+        let reach = self.reach_caveat(commit);
+        if !self.uncommitted() {
+            return reach;
+        }
+        let tree = match commit.tree.as_deref() {
+            Some(tree) => format!(
+                "The tree these commands ran on had uncommitted or untracked files, so no commit \
+                 named here is that tree, and checking out the commit it sat on would run them \
+                 on a different one. The steps look for a commit whose tree is `{tree}` (the \
+                 working-tree digest); if none has it, the checked tree was never committed and \
+                 cannot be re-run from the repository."
+            ),
+            None => "The tree these commands ran on had uncommitted or untracked files, and no \
+                     working-tree digest was recorded, so nothing names the tree that was checked \
+                     and these steps cannot reproduce it."
+                .into(),
+        };
+        Some(match reach {
+            Some(r) => format!("{tree} {r}"),
+            None => tree,
+        })
+    }
+
+    /// Whether others can reach the commit the evidence names.
+    fn reach_caveat(&self, commit: &CommitStamp) -> Option<String> {
         match (&commit.commit, &commit.reach) {
             (None, _) => {
                 Some("This repository had no commits yet, so there is nothing to check out.".into())
@@ -324,7 +407,7 @@ impl Certificate<'_> {
             // Unfinished: say where it is — not an error, not a certificate.
             o.push_str(&format!(
                 "**This change is not finished.** It is {}.\n\n",
-                where_it_is(w)
+                where_it_is(w, self.state)
             ));
             if let Some(g) = self.evidence {
                 o.push_str(&format!("Its last gate said: {}\n\n", inline(&g.summary())));
@@ -391,10 +474,17 @@ impl Certificate<'_> {
                 o.push_str(&format!("> {caveat}\n\n"));
             }
             o.push_str(&fenced(&steps.join("\n")));
-            o.push_str(
-                "\n\nYou should see the same outcomes. You will probably **not** see the \
-                        same output digests — see *What this does not establish*.\n\n",
-            );
+            let same = match self.uncommitted() {
+                true => {
+                    "Only once a commit with that tree is checked out should you see the same \
+                         outcomes."
+                }
+                false => "You should see the same outcomes.",
+            };
+            o.push_str(&format!(
+                "\n\n{same} You will probably **not** see the same output digests — see *What \
+                 this does not establish*.\n\n"
+            ));
         }
 
         if let Some(report) = self.evidence
@@ -494,7 +584,7 @@ impl Certificate<'_> {
             "subject": subject,
             "predicateType": PREDICATE_TYPE,
             "predicate": {
-                "change": { "id": w.id, "title": w.title, "state": w.current_state().as_str(),
+                "change": { "id": w.id, "title": w.title, "state": self.state.as_str(),
                           "branch": w.branch },
                 "completion": w.completion,
                 "evidence": self.evidence.map(|r| json!({
@@ -539,7 +629,7 @@ impl Certificate<'_> {
                 "finished": false,
                 // Where an unfinished change is — not an error.
                 "unfinished": format!("This change is not finished. It is {}.",
-                                      where_it_is(self.change)),
+                                      where_it_is(self.change, self.state)),
                 "last_gate": self.evidence.map(|g| g.summary()),
                 "checks_altered": self.weakened_says(),
             });
@@ -613,8 +703,7 @@ impl Certificate<'_> {
 }
 
 /// Where an unfinished change is: its state, and what it waits on.
-fn where_it_is(change: &Change) -> String {
-    let state = change.current_state();
+fn where_it_is(change: &Change, state: ChangeState) -> String {
     match change
         .waiting
         .as_ref()

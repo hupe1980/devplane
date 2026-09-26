@@ -59,20 +59,26 @@ const run = (over: Record<string, unknown> = {}) => ({
   if (/\b0%/.test(visible(unsaid))) fail("an unreported context percentage rendered as zero");
 }
 
-// ── Every session is counted once; an unknown state is *other*, never *done* ─
+// ── The chips are the host's numbers: every session counted once ─────────
 {
   const runs = feed.runs;
   const out = html(Board, { loaded: true, runs, summary: feed.summary, thresholds: feed.thresholds, watching: feed.watching });
   const chips = [...out.matchAll(/<button[^>]*>([a-z ]+) <span[^>]*>(\d+)<\/span><\/button>/g)];
   const all = chips.find((m) => m[1] === "all");
-  if (!all || Number(all[2]) !== runs.length) fail("the board's total is not the number of sessions it was handed");
+  if (!all || Number(all[2]) !== feed.summary.runs) fail("the board's total is not the host's count of sessions");
   const sum = chips.filter((m) => m[1] !== "all").reduce((n, m) => n + Number(m[2]), 0);
-  if (sum !== runs.length) fail(`the state chips count ${sum} sessions of ${runs.length}; one is hidden or counted twice`);
+  if (sum !== feed.summary.runs) fail(`the state chips count ${sum} sessions of ${feed.summary.runs}; one is hidden or counted twice`);
+  const waiting = chips.find((m) => m[1] === "waiting");
+  if (!waiting || Number(waiting[2]) !== feed.summary.needs_you) fail("the waiting chip is not the host's number");
   for (const r of runs) if (r.project_name && !out.includes(r.project_name)) fail(`the board drops ${r.project_name}'s session`);
 
-  const odd = html(Board, { loaded: true, runs: [run({ state: "hibernating" })] });
-  if (/>done <span[^>]*>1</.test(odd)) fail("a state the board does not know was counted as done");
-  if (!/>other <span[^>]*>1</.test(odd)) fail("a state the board does not know is not counted at all");
+  // No chip, and so no count, before the host has answered.
+  const early = html(Board, { runs: [], summary: null });
+  if (/all <span/.test(early)) fail("the board prints counts before the feed has arrived");
+
+  const odd = html(Board, { loaded: true, runs: [run({ state: "hibernating", reporting: true })],
+    summary: { runs: 1, working: 0, needs_you: 0, idle: 1, failed: 0, dormant: 0 } });
+  if (/>done <span/.test(odd)) fail("the board invents a done bucket the host does not count");
   // The word the host sent is on the row, whatever bucket it fell in.
   if (!odd.includes("hibernating")) fail("the board's row does not carry the state's word");
 }

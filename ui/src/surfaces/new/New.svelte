@@ -14,6 +14,9 @@
   // and lists every refusal by project; Start is enabled only when none is
   // refused. A fresh worktree's cost is said before you commit.
   import { api } from "../../lib/api";
+  import { resource, failure } from "../../lib/resource.svelte";
+  import { writer } from "../../lib/write.svelte";
+  import Failed from "../../lib/Failed.svelte";
   import { go } from "../../lib/route";
   import { run } from "../../lib/keys";
   import Icon from "../../lib/ui/Icon.svelte";
@@ -32,14 +35,14 @@
     targets?: Target[] | null;
   } = $props();
 
-  let projects = $state<Project[]>([]);
-  let agents = $state<Agent[]>([]);
-  let specs = $state<SpecProject[]>([]);
-  $effect(() => {
-    api<Project[]>("/api/projects").then((r) => (projects = Array.isArray(r) ? r : [])).catch(() => {});
-    api<Agent[]>("/api/agents").then((r) => (agents = Array.isArray(r) ? r : [])).catch(() => {});
-    api<{ projects: SpecProject[] }>("/api/specs").then((r) => (specs = r.projects ?? [])).catch(() => {});
-  });
+  // Three reads, each with its own failure: a host that did not answer is
+  // never *No project is registered yet*.
+  const projectsRead = resource<Project[]>(() => "/api/projects", { tell: () => "devplane doctor" });
+  const agentsRead = resource<Agent[]>(() => "/api/agents", { tell: () => "devplane agents" });
+  const specsRead = resource<{ projects: SpecProject[] }>(() => "/api/specs", { tell: () => "devplane doctor" });
+  const projects = $derived(Array.isArray(projectsRead.data) ? projectsRead.data : []);
+  const agents = $derived(Array.isArray(agentsRead.data) ? agentsRead.data : []);
+  const specs = $derived(specsRead.data?.projects ?? []);
 
   let chosen = $state<string[]>([]);
   let title = $state("");
@@ -105,25 +108,27 @@
   const refused = $derived((targets ?? []).filter((t) => t.refusal));
   const ready = $derived(startable(targets, checking, checkError));
 
-  let starting = $state(false);
+  /// Creating a worktree and installing into it takes as long as it takes:
+  /// no timeout, the elapsed time on the button, and no second start.
+  const starting = writer();
   let said = $state("");
   async function start(e: Event) {
     e.preventDefault();
-    if (!ready || starting) return;
-    starting = true;
-    try {
-      const r = await api<{ change_id?: string; changes?: Array<{ change_id: string }>; error?: string }>("/api/changes", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      const first = r.change_id ?? r.changes?.[0]?.change_id;
-      if (r.error) said = r.error;
-      if (first) go(`#${changeSurface}/${encodeURIComponent(first)}`);
-    } catch (err) {
-      said = `Nothing was started: ${err instanceof Error ? err.message : String(err)}`;
-    } finally {
-      starting = false;
-    }
+    if (!ready || starting.busy) return;
+    await starting.run("start", async () => {
+      try {
+        const r = await api<{ change_id?: string; changes?: Array<{ change_id: string }>; error?: string }>("/api/changes", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        const first = r.change_id ?? r.changes?.[0]?.change_id;
+        if (r.error) said = r.error;
+        if (first) go(`#${changeSurface}/${encodeURIComponent(first)}`);
+      } catch (err) {
+        const f = failure(err, "devplane change list");
+        said = `Nothing was started: ${f.says}. \`${f.tell}\` tells more.`;
+      }
+    });
   }
   const close = () => run("leave", "new");
 </script>
@@ -149,11 +154,20 @@
             {#if !p.trusted}<span class="untrusted">not trusted</span>{/if}
           </button>
         {:else}
-          <p class="quiet">No project is registered yet. <code>devplane trust &lt;path&gt;</code> adds one.</p>
+          {#if projectsRead.phase === "failed" && projectsRead.failure}
+            <Failed what="the projects" failure={projectsRead.failure} />
+          {:else if projectsRead.phase === "loading"}
+            <p class="quiet">Reading the projects…</p>
+          {:else}
+            <p class="quiet">No project is registered yet. <code>devplane trust &lt;path&gt;</code> adds one.</p>
+          {/if}
         {/each}
       </div>
     </section>
 
+    {#if one && specsRead.failure}
+      <Failed what="the specifications, so none can be picked" failure={specsRead.failure} />
+    {/if}
     {#if one && plans.length > 0}
       <section>
         <label class="label" for="spec">Specification <span class="hint">optional — the change works to it, and its tasks are traced</span></label>
@@ -181,7 +195,7 @@
       <section>
         <label class="label" for="agent">Agent</label>
         <select id="agent" bind:value={agent}>
-          <option value="">the project's default</option>
+          <option value="">{agentsRead.failure ? "the project's default (the agents could not be read)" : "the project's default"}</option>
           {#each agents as a (a.id)}<option value={a.id}>{a.name ?? a.id}</option>{/each}
         </select>
       </section>
@@ -221,8 +235,8 @@
   <footer>
     <span class="quiet">{refused.length ? `${refused.length} refused — nothing will be created until every project can start` : chosen.length > 1 ? `${chosen.length} changes, one per project` : ""}</span>
     <button type="button" onclick={close}>Cancel</button>
-    <button type="submit" class="primary" disabled={!ready || starting}>
-      <Icon name="play" size={13} /> {starting ? "Starting…" : chosen.length > 1 ? `Start ${chosen.length} changes` : "Start the change"}
+    <button type="submit" class="primary" disabled={!ready || !!starting.busy}>
+      <Icon name="play" size={13} /> {starting.busy ? `Starting · ${starting.elapsed}` : chosen.length > 1 ? `Start ${chosen.length} changes` : "Start the change"}
     </button>
   </footer>
 </form>

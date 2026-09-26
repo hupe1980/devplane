@@ -314,9 +314,6 @@ pub enum Action {
     /// Send free text back to a driven run: the answer to a question that
     /// offered no options, or a correction mid-turn.
     Reply,
-    /// Raise the window that owns this session — the only way to answer an
-    /// observed session.
-    Focus,
     Attach,
     Open,
     /// Open the pull request in a browser. The item carries its `url`.
@@ -326,9 +323,10 @@ pub enum Action {
     /// Hand the failures back once more, past the project's bound. Recorded as
     /// the person's choice.
     Retry,
-    /// Push the branch and open the pull request, or be handed the commands.
-    /// Verified changes only, and only ever done by a person.
-    Offer,
+    /// Open the change's review, where its weakened checks are read first.
+    /// The inbox never offers a change: offering happens from the change
+    /// itself, after the review, and only ever by a person.
+    Review,
     /// Continue a change whose agent is gone, against the same agent-side
     /// session. Offered only when the run recorded its `session/resume` id.
     Resume,
@@ -345,7 +343,7 @@ pub enum Action {
     RejectReport,
     /// Put a report off, with a reason the project that filed it is told.
     DeferReport,
-    /// Open a drafted GitHub issue with the person's own `gh`. The only
+    /// Open a drafted GitHub issue, under the person's own sign-in. The only
     /// action anywhere that writes to a forge.
     OpenDraft,
     DiscardDraft,
@@ -359,13 +357,12 @@ impl Action {
             Action::Allow => "allow",
             Action::Deny => "deny",
             Action::Reply => "reply",
-            Action::Focus => "focus",
             Action::Attach => "attach",
             Action::Open => "open",
             Action::OpenPr => "open_pr",
             Action::OpenIssue => "open_issue",
             Action::Retry => "retry",
-            Action::Offer => "offer",
+            Action::Review => "review",
             Action::Resume => "resume",
             Action::TellRun => "tell_run",
             Action::AcceptDrift => "accept_drift",
@@ -389,10 +386,9 @@ impl Action {
 pub struct Snoozed(std::collections::BTreeMap<String, Timestamp>);
 
 impl Snoozed {
-    pub fn hides(&self, kind: &AttentionKind) -> bool {
-        self.0
-            .get(kind.as_str())
-            .is_some_and(|until| Timestamp::now() < *until)
+    /// Whether `kind` is hidden as of `now`.
+    pub fn hides(&self, kind: &AttentionKind, now: Timestamp) -> bool {
+        self.0.get(kind.as_str()).is_some_and(|until| now < *until)
     }
 
     /// Hide these kinds until `until`. The caller passes the kinds currently
@@ -406,12 +402,6 @@ impl Snoozed {
     /// Un-snooze everything — what `minutes = 0` means.
     pub fn clear(&mut self) {
         self.0.clear();
-    }
-
-    /// When the last hidden kind comes back, for the surfaces that say so.
-    pub fn until(&self) -> Option<Timestamp> {
-        let now = Timestamp::now();
-        self.0.values().filter(|u| now < **u).max().copied()
     }
 }
 
@@ -691,7 +681,7 @@ pub fn agent_leaked_item_at(
 /// row, not a live run, so a restart never hides an unanswered question.
 /// It says plainly the agent is gone; an answer is recorded, then delivered by
 /// resuming the session where possible.
-pub fn stranded_ask_item(ask: &crate::core::ask::Ask) -> AttentionItem {
+pub fn stranded_ask_item(ask: &crate::core::ask::Ask, now: Timestamp) -> AttentionItem {
     let kind = match ask.kind {
         crate::core::ask::Kind::Permission => AttentionKind::Permission,
         crate::core::ask::Kind::Question => AttentionKind::Question,
@@ -709,7 +699,6 @@ pub fn stranded_ask_item(ask: &crate::core::ask::Ask) -> AttentionItem {
         .get("held_until")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok());
-    let now = Timestamp::now();
     let holding = held_until.is_some_and(|t| t > now);
     let lapsed = held_until.is_some_and(|t| t <= now);
 
@@ -737,11 +726,11 @@ pub fn stranded_ask_item(ask: &crate::core::ask::Ask) -> AttentionItem {
         project_id: ask.project.clone(),
         ask: Some(ask.id.clone()),
         options,
-        // No `focus` while a hold runs; once lapsed, only the vendor's dialog
-        // can answer, so raising its window is the offer.
+        // Once a hold lapsed only the vendor's dialog can answer, so resuming
+        // its session is the offer.
         actions: match (holding, lapsed) {
             (true, _) => vec![Action::Choose, Action::Reply],
-            (_, true) => vec![Action::Focus],
+            (_, true) => vec![Action::Attach],
             _ => vec![Action::Choose, Action::Reply],
         },
         request_id: Some(ask.request_id.clone()),
@@ -778,19 +767,9 @@ pub fn config_broken_item_at(root: &Path, why: &str, since: Timestamp) -> Attent
     )
 }
 
-/// Derives the inbox for one run. Pure, so the whole inbox is a map over runs
-/// and a rebuild after a restart produces exactly the same list.
-///
-/// `stall_seconds` is this run's threshold as the sweeper resolved it per
-/// project, passed in rather than read from `cfg` so the inbox and the
-/// `Stalled` event cannot disagree.
-pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Vec<AttentionItem> {
-    // TODO(purity): take `now` from the caller rather than the clock.
-    items_for_run_at(run, cfg, stall_seconds, Timestamp::now())
-}
-
-/// [`items_for_run`] as of `now`, with the snoozed rows dropped and not
-/// counted. Prefer [`run_items_at`], which counts them.
+/// [`run_items_at`] as of `now`, with the snoozed rows dropped and not
+/// counted. For tests.
+#[cfg(test)]
 pub fn items_for_run_at(
     run: &Run,
     cfg: &AttentionConfig,
@@ -798,6 +777,12 @@ pub fn items_for_run_at(
     now: Timestamp,
 ) -> Vec<AttentionItem> {
     run_items_at(run, cfg, stall_seconds, now).items
+}
+
+/// [`items_for_run_at`] as of the wall clock. For tests.
+#[cfg(test)]
+pub fn items_for_run(run: &Run, cfg: &AttentionConfig, stall_seconds: i64) -> Vec<AttentionItem> {
+    items_for_run_at(run, cfg, stall_seconds, Timestamp::now())
 }
 
 /// What a builder derived, and how many rows a snooze kept off the list.
@@ -869,7 +854,7 @@ pub fn run_items_at(
             false => None,
         };
         // Snoozed per kind, and counted.
-        if run.snoozed.hides(&kind) {
+        if run.snoozed.hides(&kind, now) {
             out.snoozed += 1;
             return;
         }
@@ -1034,7 +1019,7 @@ pub fn run_items_at(
     {
         let by = match last.by.strip_prefix("policy:") {
             Some(rule) => format!("`{rule}`"),
-            None if last.by == "claude" => "Claude Code's own auto mode".to_string(),
+            None if last.by == "auto mode" => "Claude Code's own auto mode".to_string(),
             None => last.by.clone(),
         };
         push(
@@ -1087,7 +1072,7 @@ pub fn run_items_at(
 pub fn plan_question_item_at(
     project: &str,
     project_id: &crate::core::ProjectId,
-    plans: &[(String, crate::core::spec::Plan)],
+    plans: &[(String, crate::spec::Plan)],
     since: Timestamp,
 ) -> Option<AttentionItem> {
     let total: u32 = plans.iter().map(|(_, p)| p.open_questions).sum();
@@ -1217,23 +1202,15 @@ pub fn report_item_at(
     Some(item)
 }
 
+/// [`change_items_in`] as of `now`, with no repository slug and the snoozed
+/// rows dropped and not counted.
 pub fn items_for_change(
     change: &crate::core::change::Change,
     can_drive: bool,
     can_resume: bool,
+    now: Timestamp,
 ) -> Vec<AttentionItem> {
-    items_for_change_in(change, can_drive, can_resume, None)
-}
-
-/// The same, told the repository slug so it can build a launch link, with the
-/// snoozed rows dropped and not counted. Prefer [`change_items_in`].
-pub fn items_for_change_in(
-    change: &crate::core::change::Change,
-    can_drive: bool,
-    can_resume: bool,
-    repo: Option<&str>,
-) -> Vec<AttentionItem> {
-    change_items_in(change, can_drive, can_resume, repo).items
+    change_items_in(change, can_drive, can_resume, None, None, now).items
 }
 
 /// Derives the inbox entries for a change, counting what its snooze hid.
@@ -1241,16 +1218,21 @@ pub fn items_for_change_in(
 /// `repo` is a slug, not a path, so a launch link resolves to whichever clone
 /// the reader has. Gate rows age from the gate's own timestamp, since
 /// `updated_at` moves on every write; rows with no timestamp of their own fall
-/// back to `updated_at`.
+/// back to `updated_at`. `checks` are the `check` commands the project
+/// declares now, `None` when they could not be read: a pass by others, or
+/// against a definition nobody could read, is not verified.
 pub fn change_items_in(
     change: &crate::core::change::Change,
     can_drive: bool,
     can_resume: bool,
     repo: Option<&str>,
+    checks: Option<&[String]>,
+    now: Timestamp,
 ) -> Derived {
     let mut out = Derived::default();
     let url = change.pull_request.as_ref().map(|p| p.url.clone());
-    let gate_at = change.last_gate().map(|g| g.at);
+    let declared = crate::core::change::Declared::of(checks);
+    let gate_at = change.check_report().map(|g| g.at);
     let launch_for = |kind: &AttentionKind| -> Option<String> {
         let repo = repo?;
         // Only the kinds that name work somebody is about to do anyway.
@@ -1278,7 +1260,7 @@ pub fn change_items_in(
                   detail: Option<String>,
                   actions: Vec<Action>,
                   since: Option<Timestamp>| {
-        if change.snoozed.hides(&kind) {
+        if change.snoozed.hides(&kind, now) {
             out.snoozed += 1;
             return;
         }
@@ -1308,7 +1290,8 @@ pub fn change_items_in(
     if !can_drive
         && !change.is_settled()
         && !change.needs_a_person()
-        && change.current_state() == crate::core::change::ChangeState::InFlight
+        && change.state(declared, change.tree_now.as_ref())
+            == crate::core::change::ChangeState::InFlight
     {
         let mut actions = vec![Action::Open, Action::Snooze];
         if can_resume {
@@ -1352,7 +1335,7 @@ pub fn change_items_in(
         }
 
         Some(crate::core::change::Stopped::GateFailed { gate }) => {
-            let report = change.last_gate();
+            let report = change.check_report();
             let detail = match report {
                 // The same failing lines the agent was handed.
                 Some(g) => {
@@ -1405,23 +1388,21 @@ pub fn change_items_in(
     if matches!(change.waiting, Some(crate::core::change::Waiting::Person))
         && change.pull_request.is_none()
         && change.completion.is_none()
-        && let Some(g) = change.last_gate()
+        && let Some(g) = change.check_report()
         && g.passed()
     {
-        // Offer only while the pass still describes the tree; a stale pass
-        // says so and offers nothing.
-        let verified = change.current_state() == crate::core::change::ChangeState::Verified;
-        let (detail, actions) = match verified {
-            true => (
-                g.summary(),
-                vec![Action::Offer, Action::Open, Action::Snooze],
-            ),
-            false => (
-                crate::core::change::Completion::of(change, true, change.tree_now.as_ref())
-                    .headline(),
-                vec![Action::Open, Action::Snooze],
-            ),
+        // Review first, never an offer: the shortest path from the inbox is
+        // the review, whose first rows are the checks the change weakened. A
+        // stale pass says so in the detail.
+        let tree = change.tree_now.as_ref();
+        let detail = match change.verdict(declared, tree) {
+            crate::core::change::Standing::Verified => g.summary(),
+            crate::core::change::Standing::ConfigUnreadable => {
+                crate::core::change::Standing::ConfigUnreadable.says()
+            }
+            _ => crate::core::change::Completion::of_at(change, declared, tree, now).headline(),
         };
+        let actions = vec![Action::Review, Action::Open, Action::Snooze];
         mk(
             AttentionKind::ReadyToDecide,
             format!("ready: {}", change.title),
@@ -1529,7 +1510,7 @@ fn answerable_actions(
 fn reach(run: &Run, then: &[Action]) -> Vec<Action> {
     let mut out = match run.mode {
         crate::core::run::RunMode::Driven => Vec::new(),
-        _ => vec![Action::Focus, Action::Attach],
+        _ => vec![Action::Attach],
     };
     out.extend_from_slice(then);
     out
@@ -1885,7 +1866,9 @@ pub fn inhibit(items: Vec<AttentionItem>) -> (Vec<AttentionItem>, Vec<Inhibited>
                 x.kind == c.cause
                     && match c.reach {
                         Reach::Machine => true,
-                        Reach::Project => x.project_id == it.project_id,
+                        // A cause with no project explains nothing about
+                        // another project-less row.
+                        Reach::Project => x.project_id.is_some() && x.project_id == it.project_id,
                     }
             }) else {
                 continue;
@@ -2187,13 +2170,13 @@ mod tests {
     fn a_machine_row_carries_the_age_it_was_given() {
         let then = "2026-09-20T08:00:00Z".parse::<Timestamp>().unwrap();
         let id = ProjectId::new("p");
-        let plan = crate::core::spec::Plan {
+        let plan = crate::spec::Plan {
             path: "specs/001".into(),
             present: true,
             files: 1,
             progress: None,
             truncated: None,
-            questions: vec![crate::core::spec::Question {
+            questions: vec![crate::spec::Question {
                 path: "spec.md".into(),
                 text: "[NEEDS CLARIFICATION] which?".into(),
             }],
@@ -2238,7 +2221,7 @@ mod tests {
         });
         // The change was touched just now.
         w.updated_at = Timestamp::now();
-        let item = items_for_change(&w, false, false)
+        let item = items_for_change(&w, false, false, Timestamp::now())
             .into_iter()
             .find(|i| i.kind == AttentionKind::GateFailed)
             .expect("a gate failure");
@@ -2255,7 +2238,7 @@ mod tests {
         );
         w.waiting = Some(crate::core::Waiting::Person);
         assert!(
-            !items_for_change(&w, false, false)
+            !items_for_change(&w, false, false, Timestamp::now())
                 .iter()
                 .any(|i| i.kind == AttentionKind::ReadyToDecide)
         );
@@ -2279,7 +2262,7 @@ mod tests {
             spec: None,
             commit: None,
         });
-        let items = items_for_change(&w, false, false);
+        let items = items_for_change(&w, false, false, Timestamp::now());
         let item = items
             .iter()
             .find(|i| i.kind == AttentionKind::ReadyToDecide)
@@ -2295,12 +2278,70 @@ mod tests {
             status: "ready_for_review".into(),
             failing_checks: vec![],
         });
-        let kinds: Vec<_> = items_for_change(&w, false, false)
+        let kinds: Vec<_> = items_for_change(&w, false, false, Timestamp::now())
             .into_iter()
             .map(|i| i.kind)
             .collect();
         assert!(kinds.contains(&AttentionKind::PrReady));
         assert!(!kinds.contains(&AttentionKind::ReadyToDecide), "{kinds:?}");
+    }
+
+    /// The ready row judges a pass the way the change document does: by
+    /// commands the project no longer declares, it is stale, not verified.
+    #[test]
+    fn a_ready_row_whose_checks_changed_is_not_verified() {
+        let mut w =
+            crate::core::Change::new(crate::core::ProjectId::new("p"), "x".into(), "…".into());
+        w.waiting = Some(crate::core::Waiting::Person);
+        let stamp = crate::core::change::CommitStamp {
+            commit: Some("c".into()),
+            tree: Some("t".into()),
+            branch: None,
+            clean: true,
+            changed_files: 0,
+            reach: crate::core::change::Reach::NoRemote,
+            remote: None,
+        };
+        w.tree_now = Some(stamp.clone());
+        w.gates.push(crate::core::change::GateReport {
+            gate: "check".into(),
+            at: Timestamp::now(),
+            duration_ms: 1,
+            commands: vec![crate::core::change::CommandResult {
+                command: "cargo test".into(),
+                outcome: crate::core::change::Outcome::Exited { code: 0 },
+                duration_ms: 1,
+                output_tail: String::new(),
+                output_bytes: 0,
+                output_digest: String::new(),
+                failures: Vec::new(),
+            }],
+            attempt: 1,
+            spec: None,
+            commit: Some(stamp),
+        });
+        let detail = |checks: &[String]| {
+            change_items_in(&w, false, false, None, Some(checks), Timestamp::now())
+                .items
+                .into_iter()
+                .find(|i| i.kind == AttentionKind::ReadyToDecide)
+                .and_then(|i| i.detail)
+                .unwrap_or_default()
+        };
+        let same = detail(&["cargo test".to_string()]);
+        let moved = detail(&["cargo test --all".to_string()]);
+        assert_ne!(
+            same, moved,
+            "a changed definition of done read as the same pass"
+        );
+        let stale = crate::core::change::Completion::of_at(
+            &w,
+            crate::core::change::Declared::Checks(&["cargo test --all".to_string()]),
+            w.tree_now.as_ref(),
+            Timestamp::now(),
+        )
+        .headline();
+        assert_eq!(moved, stale);
     }
 
     #[test]
@@ -2320,7 +2361,7 @@ mod tests {
             detail: "the worktree is gone".into(),
         });
         w.snoozed.hide([AttentionKind::ChangeBroken], until);
-        let d2 = change_items_in(&w, false, false, None);
+        let d2 = change_items_in(&w, false, false, None, None, Timestamp::now());
         assert!(d2.items.is_empty());
         assert_eq!(d2.snoozed, 1);
 
@@ -2816,7 +2857,7 @@ mod tests {
             title: "add oauth".into(),
             files: vec!["src/auth.rs".into()],
         }];
-        let items = items_for_change(&w, false, false);
+        let items = items_for_change(&w, false, false, Timestamp::now());
         let item = items
             .iter()
             .find(|i| i.kind == AttentionKind::Conflict)
@@ -2835,7 +2876,7 @@ mod tests {
 
         w.overlaps.clear();
         assert!(
-            !items_for_change(&w, false, false)
+            !items_for_change(&w, false, false, Timestamp::now())
                 .iter()
                 .any(|i| i.kind == AttentionKind::Conflict)
         );
@@ -2905,7 +2946,7 @@ mod tests {
         r.last_refusal = Some(crate::core::run::Refusal {
             reason: None,
             tool: "Bash".into(),
-            by: "claude".into(),
+            by: "auto mode".into(),
             at: Timestamp::now(),
         });
         let detail = items(&r)
@@ -3017,13 +3058,12 @@ mod tests {
         });
 
         let offered = &items(&r)[0].actions;
-        assert!(!offered.contains(&Action::Focus), "{offered:?}");
         assert!(!offered.contains(&Action::Attach), "{offered:?}");
 
         let mut o = run(RunMode::Observed);
         o.state = r.state.clone();
         o.blocked_on = r.blocked_on.clone();
-        assert!(items(&o)[0].actions.contains(&Action::Focus));
+        assert!(items(&o)[0].actions.contains(&Action::Attach));
     }
 
     fn blocked(waiting_for: WaitingFor, options: Vec<Choice>) -> BlockedOn {
@@ -3139,7 +3179,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{what} raised nothing"));
             assert!(item.title.contains(what), "{}", item.title);
             assert!(!item.actions.contains(&Action::Allow), "{:?}", item.actions);
-            assert!(item.actions.contains(&Action::Focus), "{:?}", item.actions);
+            assert!(item.actions.contains(&Action::Attach), "{:?}", item.actions);
         }
 
         let mut idle = run(RunMode::Observed);
@@ -3159,7 +3199,7 @@ mod tests {
         });
         assert!(w.current_run().is_none());
 
-        let item = &items_for_change(&w, false, false)[0];
+        let item = &items_for_change(&w, false, false, Timestamp::now())[0];
         assert_eq!(item.run_id, None);
         assert_eq!(item.change_id.as_ref(), Some(&w.id));
     }
@@ -3231,7 +3271,7 @@ mod one_row_per_thing {
                 deadline: crate::core::ask::Deadline::Never,
             },
         );
-        let item = stranded_ask_item(&ask);
+        let item = stranded_ask_item(&ask, Timestamp::now());
         assert_eq!(item.kind, AttentionKind::Question);
         assert_eq!(item.ask.as_ref().map(|a| a.as_str()), Some("a1"));
         assert!(item.actions.contains(&Action::Choose));
@@ -3246,6 +3286,6 @@ mod one_row_per_thing {
             detail.contains("nothing answers this but you"),
             "the deadline sentence is carried: {detail}"
         );
-        assert_eq!(item.id, stranded_ask_item(&ask).id);
+        assert_eq!(item.id, stranded_ask_item(&ask, Timestamp::now()).id);
     }
 }

@@ -73,14 +73,6 @@ export function close(i: number): Tab | null {
   return tabs.list[tabs.active];
 }
 
-/// Closes every tab but the active one.
-export function closeOthers(): void {
-  const t = tabs.list[tabs.active];
-  tabs.list = t ? [t] : [];
-  tabs.active = t ? 0 : -1;
-  keep();
-}
-
 export function hashOf(t: Tab): string {
   return `#${t.surface}${t.focus ? `/${encodeURIComponent(t.focus)}` : ""}`;
 }

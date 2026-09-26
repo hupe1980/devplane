@@ -223,7 +223,7 @@ pub enum State {
         reason: String,
     },
     Drafted,
-    /// A person opened the draft with their own `gh`.
+    /// A person opened the draft on GitHub, under their own sign-in.
     Opened {
         url: String,
     },
@@ -496,7 +496,7 @@ impl Report {
         match &self.target {
             Target::Project { name, .. } => format!("to {name}'s inbox, for its person"),
             Target::GitHub { repo } => format!(
-                "drafted for {repo} — run `devplane report open {}` to open it with your gh, or \
+                "drafted for {repo} — run `devplane report open {}` to open it on GitHub as you, or \
                  `devplane report discard {}`",
                 self.id, self.id
             ),

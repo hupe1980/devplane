@@ -222,6 +222,8 @@ const HOME_ALLOWED: &[&str] = &[
     "devplane.db-wal",
     "devplane.db-shm",
     "token",
+    // Derived from `token` and rewritten from it on every load.
+    "telemetry-token",
     "agents.toml",
     "policy.toml",
     "app.toml",
@@ -484,7 +486,7 @@ fn a_gate_that_invokes_devplane_itself_is_caught() {
     let s = Sandbox::new(Shape::Full);
     std::fs::write(
         s.repo.join("devplane.toml"),
-        "[project]\nname = \"fixture\"\n\n[gates]\ncheck = [\"devplane gate run\"]\n",
+        "[project]\nname = \"fixture\"\n\n[gates]\ncheck = [\"devplane gate\"]\n",
     )
     .unwrap();
     s.remove_devplane();

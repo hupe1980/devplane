@@ -3,7 +3,9 @@
   // the change working to it, and anything waiting on a person. A project with
   // no layout says which three it looked for.
   import Icon from "../../lib/ui/Icon.svelte";
+  import Inline from "../../lib/ui/Inline.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
+  import Qualifier from "../../lib/Qualifier.svelte";
   import { specs, watch, key } from "./store.svelte";
 
   let { focus = "", open }: { focus?: string; open: (f: string, pin?: boolean) => void } = $props();
@@ -52,7 +54,7 @@
             <span class="title"><Icon name="spec" size={13} /> {name(r.plan.path)}</span>
             <span class="meta">
               {#if r.plan.progress}<span class="boxes" title="boxes ticked in the task file · {r.plan.progress.total} tasks">{r.plan.progress.done} ticked</span>{/if}
-              {#if r.state}<Pill word={r.state} />{/if}
+              {#if r.state}<Pill word={r.state} /><Qualifier q={r.qualifier} />{/if}
               {#if r.plan.open_questions > 0}<span class="wait"><Icon name="question" size={11} /> {r.plan.open_questions}</span>{/if}
               {#if r.drifted}<span class="wait"><Icon name="alert" size={11} /> drifted</span>{/if}
             </span>
@@ -64,7 +66,7 @@
       <details class="bare">
         <summary><Icon name="folder" size={13} /> {bare.length} {bare.length === 1 ? "project has" : "projects have"} no specification layout</summary>
         <p>{bare.map((p) => p.project).join(", ")}</p>
-        <p class="why">{sentence}</p>
+        <p class="why"><Inline text={sentence} /></p>
       </details>
     {/if}
     {#if specs.omitted > 0}<p class="none">{specs.omitted} more not shown.</p>{/if}

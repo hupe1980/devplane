@@ -16,25 +16,33 @@
 //! | `slow`          | runs until cancelled, then stops properly |
 //! | `slowish`       | as `slow`, for three seconds, then ends the turn itself |
 //! | `write-file <path>` | writes `<path>` under its directory and reports it as an `Edit` call |
+//! | `twin-asks`     | asks two permissions at once, each with its own options |
+//! | `withdraw`      | asks a permission, then withdraws it (`$/cancel_request`) |
+//! | `diff-edit`     | reports an edit call whose diff arrives whole in a status-less update |
 //! | anything else   | streams the prompt back and ends the turn |
 //!
 //! Every prompt is appended to `.devplane/heard.log` in the session's working
 //! directory (prompt text is never stored in the event log), and `DEVPLANE_RUN`
-//! is written to `.devplane/run.id`.
+//! is written to `.devplane/run.id`. Opening a session writes the agent's pid
+//! to `.devplane/pids/<pid>` and the offered MCP servers to
+//! `.devplane/mcp.json`; `session/close` appends to `.devplane/closed.log`.
+//! `DEVPLANE_ECHO_PIDS=<dir>` writes the pid there at start, and
+//! `DEVPLANE_ECHO_SLOW_INIT=1` answers `initialize` only after 30 seconds.
 //!
 //! The question schema copies what `claude-agent-acp` sends: an
 //! `elicitation/create` form, only when the client declares `elicitation.form`.
 //! Stdout is JSON-RPC; diagnostics go to stderr.
 
 use agent_client_protocol::schema::v1::{
-    AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Cost, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
-    PlanEntry, PlanEntryPriority, PlanEntryStatus, PromptRequest, PromptResponse,
-    RequestPermissionRequest, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionId, SessionMode, SessionModeId, SessionModeState, SessionNotification,
-    SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallId,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+    AgentCapabilities, CancelNotification, CloseSessionRequest, CloseSessionResponse, ContentBlock,
+    ContentChunk, Cost, Diff, InitializeRequest, InitializeResponse, LoadSessionRequest,
+    LoadSessionResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionId, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    PromptRequest, PromptResponse, RequestPermissionRequest, ResumeSessionRequest,
+    ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionId, SessionMode,
+    SessionModeId, SessionModeState, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+    StopReason, TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
 use agent_client_protocol::{Agent, Client, Result, Stdio};
 
@@ -113,6 +121,22 @@ fn knows(session: &str) -> bool {
     session_file(session).is_some_and(|p| p.exists())
 }
 
+/// Leaves what a test reads to count this agent's processes and see what
+/// it was offered.
+fn note_session(mcp: &[agent_client_protocol::schema::v1::McpServer]) {
+    let Some(root) = CWD.lock().expect("cwd").clone() else {
+        return;
+    };
+    let pids = root.join(".devplane/pids");
+    std::fs::create_dir_all(&pids).ok();
+    std::fs::write(pids.join(std::process::id().to_string()), "").ok();
+    std::fs::write(
+        root.join(".devplane/mcp.json"),
+        serde_json::to_string(mcp).unwrap_or_default(),
+    )
+    .ok();
+}
+
 /// The next unused session name in this working directory.
 fn mint_session() -> String {
     for n in 1..10_000 {
@@ -137,11 +161,19 @@ fn open_session(session: &str) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if let Some(dir) = std::env::var_os("DEVPLANE_ECHO_PIDS") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).ok();
+        std::fs::write(dir.join(std::process::id().to_string()), "").ok();
+    }
     Agent
         .builder()
         .name("echo-agent")
         .on_receive_request(
             async move |init: InitializeRequest, responder, _cx| {
+                if std::env::var_os("DEVPLANE_ECHO_SLOW_INIT").is_some() {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                }
                 // `DEVPLANE_ECHO_NO_FORMS=1` withholds the question tool
                 // whatever the client declares.
                 CAN_RENDER_FORMS.store(
@@ -175,7 +207,9 @@ async fn main() -> Result<()> {
                     AgentCapabilities::new()
                         .load_session(true)
                         .session_capabilities(
-                            SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
+                            SessionCapabilities::new()
+                                .resume(SessionResumeCapabilities::new())
+                                .close(SessionCloseCapabilities::new()),
                         )
                 };
                 responder.respond(
@@ -201,6 +235,7 @@ async fn main() -> Result<()> {
                 // from a restarted one.
                 let id = mint_session();
                 open_session(&id);
+                note_session(&req.mcp_servers);
                 // `DEVPLANE_ECHO_MODE=<id>` declares a session mode. The id is
                 // arbitrary: an ACP mode is whatever string the agent chooses.
                 let resp = NewSessionResponse::new(SessionId::new(id));
@@ -227,6 +262,7 @@ async fn main() -> Result<()> {
                             .data(format!("no session {id}")),
                     );
                 }
+                note_session(&req.mcp_servers);
                 responder.respond(ResumeSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
@@ -242,7 +278,25 @@ async fn main() -> Result<()> {
                             .data(format!("no session {id}")),
                     );
                 }
+                note_session(&req.mcp_servers);
                 responder.respond(LoadSessionResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: CloseSessionRequest, responder, _cx| {
+                if let Some(root) = CWD.lock().expect("cwd").clone() {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(root.join(".devplane/closed.log"))
+                    {
+                        writeln!(f, "{}", req.session_id).ok();
+                    }
+                }
+                cancel(req.session_id.to_string());
+                responder.respond(CloseSessionResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -405,6 +459,98 @@ async fn take_turn(
             req.session_id.clone(),
             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 ToolCallId::new("w1"),
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+        ))?;
+    }
+
+    // Two calls asking at once, each with its own options.
+    if text.contains("twin-asks") {
+        let ask = |call: &str, title: &str| {
+            connection
+                .send_request(RequestPermissionRequest::new(
+                    req.session_id.clone(),
+                    ToolCallUpdate::new(
+                        ToolCallId::new(call.to_string()),
+                        ToolCallUpdateFields::new().title(title.to_string()),
+                    ),
+                    vec![
+                        PermissionOption::new(
+                            PermissionOptionId::new(format!("allow-{call}")),
+                            "Allow once".to_string(),
+                            PermissionOptionKind::AllowOnce,
+                        ),
+                        PermissionOption::new(
+                            PermissionOptionId::new(format!("deny-{call}")),
+                            "Deny".to_string(),
+                            PermissionOptionKind::RejectOnce,
+                        ),
+                    ],
+                ))
+                .block_task()
+        };
+        let (a, b) = tokio::join!(ask("pa", "Read a.txt"), ask("pb", "rm -rf b"));
+        connection.send_notification(say(format!("pa outcome: {:?}", a?.outcome)))?;
+        connection.send_notification(say(format!("pb outcome: {:?}", b?.outcome)))?;
+    }
+
+    // Asks, then thinks better of it: dropping the request sends
+    // `$/cancel_request`.
+    if text.contains("withdraw") {
+        let asked = connection
+            .send_request(RequestPermissionRequest::new(
+                req.session_id.clone(),
+                ToolCallUpdate::new(
+                    ToolCallId::new("wd"),
+                    ToolCallUpdateFields::new().title("git push --force"),
+                ),
+                vec![PermissionOption::new(
+                    PermissionOptionId::new("allow"),
+                    "Allow once".to_string(),
+                    PermissionOptionKind::AllowOnce,
+                )],
+            ))
+            .block_task();
+        let wait = std::env::var("DEVPLANE_ECHO_WITHDRAW_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1500);
+        match tokio::time::timeout(std::time::Duration::from_millis(wait), asked).await {
+            Ok(r) => connection.send_notification(say(format!("answered: {:?}", r?.outcome)))?,
+            Err(_) => connection.send_notification(say("withdrew the request".into()))?,
+        }
+    }
+
+    // An edit whose diff arrives in pieces: a partial one with the call, then
+    // the whole one in a status-less update, then the ending.
+    if text.contains("diff-edit")
+        && let Some(root) = CWD.lock().expect("cwd").clone()
+    {
+        let file = root.join("a.txt");
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ToolCall(
+                ToolCall::new(ToolCallId::new("d1"), "Edit a.txt".to_string())
+                    .kind(ToolKind::Edit)
+                    .raw_input(serde_json::json!({ "file_path": file.to_string_lossy() }))
+                    .content(vec![ToolCallContent::Diff(
+                        Diff::new(file.clone(), "tw").old_text("one\n".to_string()),
+                    )]),
+            ),
+        ))?;
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("d1"),
+                ToolCallUpdateFields::new().content(vec![ToolCallContent::Diff(
+                    Diff::new(file.clone(), "two\n").old_text("one\n".to_string()),
+                )]),
+            )),
+        ))?;
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("d1"),
                 ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
             )),
         ))?;

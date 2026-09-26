@@ -1,16 +1,17 @@
 # Devplane
 
-**The desktop workbench for spec-driven agentic development.** Write the spec, dispatch any agent that
-speaks the [Agent Client Protocol](https://agentclientprotocol.com), verify against your own gates,
-and keep the record of who decided what while you were not looking. One local-first binary: no
-account, no cloud relay, loopback only.
+**Know when an agent's work is actually done.** Run any agent that speaks the
+[Agent Client Protocol](https://agentclientprotocol.com) in its own worktree, verify its change with
+your own checks run outside the agent, see the weakened tests first, and keep the record of who
+decided what while you were not looking. One local-first binary: no account, no cloud relay,
+loopback only.
 
 It sits on top of your tools: the spec is your spec tool's folder, the checks are your commands, the
 isolation is `git worktree`. Delete Devplane and the project still builds.
 
 **[Documentation → hupe1980.github.io/devplane](https://hupe1980.github.io/devplane)**
 
-![A change open in the Devplane workbench: verified against the working tree, with its lifecycle, six views and evidence](site/static/workbench.png)
+![A change open in the Devplane workbench: verified against the working tree, with one check weakened beside it, its lifecycle, six views and evidence](site/static/workbench.png)
 
 ![The review leads with a check the agent weakened — a skipped test — before anything else](site/static/review.png)
 
@@ -20,25 +21,25 @@ isolation is `git worktree`. Delete Devplane and the project still builds.
 # prebuilt binary: macOS (Apple Silicon) and Linux
 curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh
 
-# any platform with Node, Windows included
-npx devplane ls
+# prebuilt binary through npm: the same, plus Windows x86_64
+npm install -g devplane
 
-# or from source (Rust 1.90+); add --features app for the desktop window
-cargo install devplane
+# anything else, from source (Rust 1.90+); add --features app for the desktop window
+cargo install --locked devplane
 ```
 
-On macOS use the installer, not a browser download: the binaries are not notarised.
-[Install guide →](https://hupe1980.github.io/devplane/docs/install/)
+On macOS use the installer, not a browser download: the binaries are not notarised. Intel Macs build
+from source. [Install guide and platform table →](https://hupe1980.github.io/devplane/docs/install/)
 
 ## Sixty seconds
 
 ```sh
 devplane ls                      # sessions already running on this machine — no setup
-devplane connect claude          # hooks + telemetry into your user settings (also: codex, copilot)
-devplane open                    # the workbench in your browser; hosts here if nothing is running
+devplane connect claude          # hooks + telemetry into your user settings; shows the diff, asks
+devplane open                    # the workbench in your browser; this terminal becomes the host
 ```
 
-Then, in a repository of yours:
+Then, in a repository of yours, in a second terminal:
 
 ```toml
 # devplane.toml — committed, so the definition of done is reviewed like code
@@ -51,6 +52,12 @@ devplane trust .                                  # lists the repo's hooks and M
 devplane change start "fix the flaky login test"  # a worktree, an agent, and your gate when it stops
 devplane change show <id>                         # verified, stale, or what failed
 ```
+
+GitHub is optional: `devplane login github` (or **Setup → GitHub** in the workbench) signs Devplane
+in by GitHub's device flow, with the token kept only in the OS credential store; no other tool is
+needed. Starting an agent needs Node (the built-in agents run through `npx`) and the agent signed
+in. The [quickstart](https://hupe1980.github.io/devplane/docs/quickstart/) walks a practice repository from
+nothing to a verified change.
 
 ## The loop
 
@@ -84,11 +91,13 @@ devplane change export <id> > cert.md
   bounded number of times, then to you. **Verified** means the latest `check` passed and the tree it
   ran against — uncommitted and untracked files included — is the tree now. Touch a file and it is
   stale.
-- **Review and offer.** The review leads with checks weakened or changed (skip markers added, test
-  files deleted, gate or CI configuration edited), then the files in the order your project declares.
-  Offering opens a draft pull request only if your project allows it; otherwise it prints the two
-  commands. The certificate carries the commands, exit codes and tree, so a reviewer can re-run them
-  without Devplane.
+- **Review and offer.** The review leads with checks weakened or changed (skip markers, removed
+  assertions, loosened tolerances, suppressions, deleted tests, gate or CI configuration edited), then
+  the files in the order your project declares. A verified change with one reads **verified · 1
+  check weakened**, and offering it is refused until a person has read the row. Offering opens a draft
+  pull request only if your project allows it; otherwise it prints the push command and the address
+  that opens the pull request. The certificate carries the commands, exit codes and tree, so a
+  reviewer can re-run them without Devplane.
 
 ## The workbench
 
@@ -108,8 +117,8 @@ Gates, Ledger, Agent. [Tour →](https://hupe1980.github.io/devplane/docs/workbe
 | `devplane` | Devplane doing what your project wrote down — running a gate, for example |
 
 **Devplane never approves a tool call.** It can refuse one or put one in front of you. Rules use
-Claude Code's syntax, reach through shell tricks, and fail closed. An agent cannot answer its own
-permission.
+Claude Code's syntax, reach through shell tricks, and fail closed; a line whose effect cannot be read
+is asked about. An agent cannot answer its own permission, or edit the rules that gate it.
 
 ```sh
 devplane audit --without-me     # only what a rule, a clock or nobody decided instead of you
@@ -135,7 +144,7 @@ Hooks decide in their own short-lived process and write straight to a SQLite sto
 never depends on something running. The **host** (`devplane serve`, `devplane open` or `devplane
 app`) is the one long-lived process: it drives agents, receives telemetry, serves the workbench and
 folds what the hooks wrote. Only you start it; `devplane quit` says what it stops first. Read commands
-work with the host closed. `devplane --help` sorts the thirty-three commands into five groups.
+work with the host closed. `devplane --help` sorts the thirty-one commands into five groups.
 
 [Architecture →](https://hupe1980.github.io/devplane/docs/architecture/) ·
 [Security →](https://hupe1980.github.io/devplane/docs/security/)
@@ -144,10 +153,10 @@ work with the host closed. `devplane --help` sorts the thirty-three commands int
 
 | Path | What |
 |---|---|
-| `src/core/` | types, the reducer, attention, permission policy, `devplane.toml` — synchronous, no network, no database |
+| `src/core/` | types, the reducer, attention, permission policy, `devplane.toml` — pure: no I/O, no clock |
 | `src/` | the hook, the host, the HTTP API, the ACP client, gates, git, GitHub, SQLite, the CLI |
 | `ui/` | the workbench — Svelte, built to a bundle the binary embeds |
-| `tests/purity.rs` | fails the build if `src/core/` awaits, spawns, or reaches the network or the database |
+| `tests/purity.rs` | fails the build if `src/core/` awaits, spawns, or reads the network, the database, the clock or files |
 | `site/` | the documentation site (Zola) |
 
 ## Development

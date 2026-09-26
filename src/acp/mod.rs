@@ -5,4 +5,7 @@ pub mod agent;
 pub mod session;
 
 pub use agent::{AgentSpec, available, builtin, resolve, user_agents};
-pub use session::{AcpEvent, PermissionOption, PlanStep, Session, ToolRequest, resume, spawn};
+pub use session::{
+    AcpEvent, DIFF_KEPT_BYTES, McpOffer, PermissionOption, PlanStep, ReportedDiff, Session,
+    ToolRequest, resume, spawn,
+};

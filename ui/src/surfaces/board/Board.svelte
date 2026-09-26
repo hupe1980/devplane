@@ -3,7 +3,7 @@
   // are both summary and filter. A selected row offers raising its window or
   // attaching a terminal. An empty grid says what Devplane cannot see, never
   // calm.
-  import { api } from "../../lib/api";
+  import { copyText } from "../../lib/resource.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
@@ -19,7 +19,7 @@
     mode?: string | null;
     permission_mode?: string | null;
     state?: string | null;
-    waiting_for?: unknown;
+    waiting_for?: string | null;
     cwd?: string | null;
     branch?: string | null;
     model?: string | null;
@@ -32,6 +32,7 @@
     tool_calls?: number;
     subagents?: number;
     idle_seconds?: number;
+    reporting?: boolean;
     last_event_at?: string | null;
     plan_done?: number | null;
     plan_total?: number | null;
@@ -58,17 +59,35 @@
     focus?: string;
   } = $props();
 
-  const bucket = (r: Run) => {
-    const s = (r.state ?? "").toLowerCase();
-    if (/wait|ask|need|block/.test(s)) return "needs you";
-    if (/work|run|busy|think/.test(s)) return "working";
-    if (/fail|error/.test(s)) return "failed";
-    if (/idle/.test(s)) return "idle";
-    if (/complete|done|finish|exit/.test(s)) return "done";
-    // An unknown state is counted as *other*, never guessed into *done*.
-    return "other";
+  /// The host's partition of sessions (its board summary): each chip's
+  /// number is the host's, and `bucket` files a row the way the host does,
+  /// so a chip's filter shows the rows its number counts.
+  const BUCKETS = [
+    ["working", "working"],
+    ["waiting", "needs_you"],
+    ["idle", "idle"],
+    ["failed", "failed"],
+    ["dormant", "dormant"],
+  ] as const;
+  type Bucket = (typeof BUCKETS)[number][0];
+  /// How long after its last activity a session is still in play (the host's
+  /// rule, a working day); past that it is dormant.
+  const IN_PLAY_SECONDS = 6 * 3600;
+  const bucket = (r: Run): Bucket => {
+    const s = r.state ?? "";
+    const w = r.waiting_for ?? "";
+    const waiting = s === "waiting";
+    const active =
+      (waiting && w !== "idle") ||
+      s === "working" ||
+      s === "starting" ||
+      ((r.idle_seconds ?? 0) < IN_PLAY_SECONDS && (!!r.reporting || s === "failed" || s === "lost"));
+    if (!active) return "dormant";
+    if (s === "working" || s === "starting") return "working";
+    if (waiting) return "waiting";
+    if (s === "failed" || s === "lost") return "failed";
+    return "idle";
   };
-  const BUCKETS = ["working", "needs you", "idle", "failed", "done", "other"];
   let only = $state<string | null>(null);
   let groupBy = $state<"project" | "state" | "none">("project");
   let selected = $state<string | null>(null);
@@ -77,7 +96,10 @@
     if (focus) selected = focus;
   });
 
-  const counts = $derived(BUCKETS.map((b) => [b, runs.filter((r) => bucket(r) === b).length] as const));
+  /// The host's numbers once it has answered; nothing before.
+  const counts = $derived(
+    loaded && summary ? BUCKETS.map(([b, field]) => [b, summary[field] ?? 0] as const) : null,
+  );
   const shown = $derived(only ? runs.filter((r) => bucket(r) === only) : runs);
   const pick = $derived(runs.find((r) => r.id === selected) ?? null);
   /// The threshold is the host's; with none, nothing is marked crowded.
@@ -110,33 +132,22 @@
   ];
 
   let said = $state("");
-  async function raise(r: Run) {
-    try {
-      await api(`/api/runs/${encodeURIComponent(r.id)}/focus`, { method: "POST" });
-      said = "Raised its window.";
-    } catch (e) {
-      said = `That did not land: ${e instanceof Error ? e.message : String(e)}`;
-    }
-  }
   async function copy(t: string) {
-    try {
-      await navigator.clipboard?.writeText(t);
-      said = `Copied: ${t}`;
-    } catch {
-      said = t;
-    }
+    said = (await copyText(t)) ? `Copied: ${t}` : `Nothing was copied — this page has no clipboard: ${t}`;
   }
 </script>
 
 <div class="board">
   <header class="head">
     <h1>Sessions</h1>
-    <div class="chips" role="group" aria-label="by state">
-      <button class:on={only === null} onclick={() => (only = null)}>all <span>{runs.length}</span></button>
-      {#each counts as [b, n] (b)}
-        <button class:on={only === b} class={b.replace(" ", "-")} disabled={n === 0} onclick={() => (only = only === b ? null : b)}>{b} <span>{n}</span></button>
-      {/each}
-    </div>
+    {#if counts}
+      <div class="chips" role="group" aria-label="by state">
+        <button class:on={only === null} aria-pressed={only === null} onclick={() => (only = null)}>all <span>{summary?.runs ?? runs.length}</span></button>
+        {#each counts as [b, n] (b)}
+          <button class:on={only === b} aria-pressed={only === b} class={b} disabled={n === 0} onclick={() => (only = only === b ? null : b)}>{b} <span>{n}</span></button>
+        {/each}
+      </div>
+    {/if}
     <span class="gap"></span>
     <label class="group">Group
       <select bind:value={groupBy} aria-label="group by">
@@ -208,7 +219,6 @@
             ]}
           />
           <div class="acts">
-            <button onclick={() => raise(pick!)}><Icon name="external" size={13} /> Raise its window</button>
             <button onclick={() => copy(`devplane attach ${pick!.id}`)}><Icon name="terminal" size={13} /> Copy attach command</button>
           </div>
           {#if said}<p class="said">{said}</p>{/if}
@@ -267,7 +277,7 @@
     opacity: 0.45;
     cursor: default;
   }
-  .chips .needs-you:not(:disabled) {
+  .chips .waiting:not(:disabled) {
     color: var(--wait);
   }
   .chips .failed:not(:disabled) {

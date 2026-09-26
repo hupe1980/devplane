@@ -3,6 +3,7 @@
 // when somebody is looking at the inbox.
 
 import { api, Unauthorised } from "./api";
+import { same } from "./resource.svelte";
 
 /// How often to ask. Cheap: the host is on loopback and the answer is a
 /// projection it already holds.
@@ -23,6 +24,13 @@ export type Live = {
   unauthorised: boolean;
 };
 
+/// Reads the feed now, outside the poll's rhythm: a surface calls it after a
+/// write, so what it just changed is not shown live for another two seconds.
+let poke: (() => void) | null = null;
+export function reread(): void {
+  poke?.();
+}
+
 /// Starts the poll. `looking` asks the shell whether the surface that marks a
 /// look is showing; the store must not know.
 export function live(looking: () => boolean): {
@@ -41,13 +49,19 @@ export function live(looking: () => boolean): {
     unauthorised: false,
   });
 
-  /// One request in flight at a time, so a stalled host is not queued up.
+  /// One request in flight at a time, so a stalled host is not queued up. A
+  /// look asked for meanwhile is kept and sent when that request is back.
   let inflight = false;
+  let queued: boolean | null = null;
   let lastGood: string | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
 
   async function tick(read: boolean) {
-    if (inflight || state.unauthorised) return;
+    if (state.unauthorised) return;
+    if (inflight) {
+      queued = (queued ?? false) || read;
+      return;
+    }
     inflight = true;
     try {
       const [board, inbox] = await Promise.all([
@@ -55,8 +69,10 @@ export function live(looking: () => boolean): {
         // Two whole literals, so the route guard reads `/api/inbox`.
         api<unknown>(read ? "/api/inbox?read=true" : "/api/inbox"),
       ]);
-      state.board = board;
-      state.inbox = inbox;
+      // An answer that says what the last one said changes nothing on
+      // screen, so nothing that reads it is woken.
+      if (!same($state.snapshot(state.board), board)) state.board = board;
+      if (!same($state.snapshot(state.inbox), inbox)) state.inbox = inbox;
       state.loaded = true;
       state.error = null;
       state.stale_since = null;
@@ -74,19 +90,30 @@ export function live(looking: () => boolean): {
       state.stale_since = lastGood;
     } finally {
       inflight = false;
+      if (queued !== null && !state.unauthorised) {
+        const again = queued;
+        queued = null;
+        void tick(again);
+      }
     }
   }
 
   function look() {
     void tick(looking());
   }
+  poke = () => void tick(false);
 
+  /// Starts the poll once; the shell calls it untracked, so moving between
+  /// surfaces never restarts it. A hidden tab is not polled.
   function start(): () => void {
     // The first fetch counts as a look only if the looked-at surface is the
     // one that opened.
     look();
-    timer = setInterval(() => void tick(false), EVERY_MS);
-    // A returning tab marks a look only if the inbox is what is showing.
+    timer = setInterval(() => {
+      if (!document.hidden) void tick(false);
+    }, EVERY_MS);
+    // A returning tab reads at once, and marks a look only if the inbox is
+    // what is showing.
     const onVisible = () => {
       if (document.visibilityState === "visible") look();
     };

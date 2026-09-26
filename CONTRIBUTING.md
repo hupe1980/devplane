@@ -10,13 +10,25 @@ test.
 2. **A vendor release that moved something.** Claude Code, Copilot and Codex change weekly. Use the
    *vendor drift* template and quote the changelog row.
 
+## Prerequisites
+
+- Rust stable (the minimum supported version is 1.90), [`just`](https://just.systems) and bash.
+- Node 22 or later, for the interface in `ui/`.
+- [Zola](https://www.getzola.org) 0.23, for `just site-build site-check`.
+- On Linux, `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`:
+  `just check` runs clippy with every feature, which compiles the window.
+
 ## Before a pull request
 
 ```sh
-just check          # fmt, clippy, build, test — what CI runs
+just check          # fmt, clippy, build, test — the Rust half of CI
+just ui-build ui-check wire   # the interface, its type check, the generated wire types
 just verify         # check, then deps (dependency count), site-build and site-check (Zola links)
 just notes          # checks over the maintainer's gitignored notes; says "skipped" where absent
 ```
+
+CI also fails when `ui/dist` or `ui/src/wire` differs from what those recipes produce, so commit any
+diff they leave.
 
 Features are specified with [GitHub Spec Kit](https://github.com/github/spec-kit) before they are
 built. Those working files are not published; every behaviour they ask for is a test, and
@@ -35,7 +47,7 @@ npm run build            # → ui/dist/, embedded into the binary
 npm run dev              # a dev server that proxies /api to a running host (`devplane serve`)
 npm run check            # svelte-check over TypeScript and every component
 npm run render           # renders every surface and asserts on the result
-npm run dev:fixtures     # the interface over recorded host responses, no host needed
+npm run dev:fixtures     # the interface over recorded host responses, no host needed (POSIX shells)
 ```
 
 - **`ui/dist/` is committed**, because `cargo publish` packages what is in git. Change a surface, run
@@ -44,8 +56,7 @@ npm run dev:fixtures     # the interface over recorded host responses, no host n
   host and saves what it serves. `bash scripts/make-board.sh` photographs the same seed into
   `site/static/`.
 - **`ui/src/wire/` is generated** from the Rust types (`ts-rs`). After changing a type that crosses
-  the API, run `TS_RS_EXPORT_DIR=ui/src cargo test --features typescript export_bindings` and commit
-  the result.
+  the API, run `just wire` and commit the result, new files included.
 - **The built output stays readable** (`minify: false`), and **nothing is fetched from outside the
   machine**, fonts included.
 - A surface is a directory under `ui/src/surfaces/`: an `index.ts` that registers itself and binds its
@@ -63,9 +74,8 @@ npm run dev:fixtures     # the interface over recorded host responses, no host n
 just app                 # cargo run --features app -- app
 ```
 
-The app is the cargo feature `app`, off by default. On macOS it needs no system packages; on Linux
-install `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev` first
-(`cargo clippy --all-features` compiles the app). `tests/app.rs` drives the app's host without a
+The app is the cargo feature `app`, off by default; on Linux it needs the packages under
+*Prerequisites*. `tests/app.rs` drives the app's host without a
 window (`cargo test --features app --test app`); `scripts/make-icon.py` regenerates `icons/`.
 
 ## Out of scope

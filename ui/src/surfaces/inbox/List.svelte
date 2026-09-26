@@ -2,13 +2,11 @@
   // The triage list: everything that stops without you, in the host's ranking,
   // never re-sorted here. One dense row each; the selected item opens beside
   // it. What was folded or held back is counted at the foot.
-  import { api } from "../../lib/api";
   import Icon from "../../lib/ui/Icon.svelte";
   import { ago } from "../../lib/text";
   import type { Item } from "./Item.svelte";
-
-  type Summary = { kind: string; project: string | null; count: number; level: string };
-  type Inhibited = { cause: string; count: number; because: string };
+  import { narrowed, type Summary, type Inhibited } from "./narrow.svelte";
+  import { address, place, itemFocus } from "./place.svelte";
 
   let {
     items = [],
@@ -34,39 +32,27 @@
   } = $props();
 
   /// The narrowed list comes from the host (`core::attention::narrow`), so the
-  /// window and the terminal narrow identically.
-  let narrowedFeed = $state<{ items: Item[]; folded: Summary[]; inhibited: Inhibited[] } | null>(null);
-  $effect(() => {
-    const want = project.trim();
-    if (!want) {
-      narrowedFeed = null;
-      return;
-    }
-    let live = true;
-    api<{ items: Item[]; folded: Summary[]; inhibited: Inhibited[] }>(`/api/inbox?project=${encodeURIComponent(want)}`)
-      .then((r) => {
-        if (live) narrowedFeed = r;
-      })
-      .catch(() => {
-        if (live) narrowedFeed = null;
-      });
-    return () => {
-      live = false;
-    };
-  });
+  /// window and the terminal narrow identically; read once for this list and
+  /// the item beside it.
+  const narrow = narrowed(() => project);
 
   const projects = $derived([...new Set(items.map((i) => i.project_name).filter((p): p is string => !!p))]);
+  // Narrowed, only what the host narrowed: never the whole inbox under a chip
+  // that names one project.
+  // While it is being read or could not be, the narrowed feed is empty, not
+  // absent.
+  const NONE = { items: [] as Item[], folded: [] as Summary[], inhibited: [] as Inhibited[] };
+  const narrowedFeed = $derived(narrow.on ? (narrow.data ?? NONE) : null);
   const shown = $derived(narrowedFeed?.items ?? items);
   const shownFolded = $derived(narrowedFeed?.folded ?? folded);
   const shownInhibited = $derived(narrowedFeed?.inhibited ?? inhibited);
+  const ready = $derived(narrow.on ? narrow.phase !== "loading" : loaded);
   const nothingRaised = $derived(shown.length === 0 && shownFolded.length === 0 && shownInhibited.length === 0);
-  const selected = $derived(
-    focus.startsWith("ask=")
-      ? (items.find((i) => i.ask === focus.slice(4) || i.request_id === focus.slice(4))?.id ?? "")
-      : shown.some((i) => i.id === focus)
-        ? focus
-        : shown[0]?.id || "",
-  );
+  /// The host knows no project by that name: said, never *Nothing needs you*.
+  const missing = $derived(narrow.missing);
+  /// The same row the item pane shows, by the same rule.
+  const selected = $derived(place(shown, address(focus, items)).current?.id ?? "");
+  const optionId = (id: string) => `inbox-row-${id.replace(/[^\w-]/g, "_")}`;
 
   const icon = (k: string) =>
     k === "permission" ? "shield" : k === "question" ? "question" : k.includes("gate") || k.includes("fail") ? "x" : k.includes("ready") ? "check" : k.includes("conflict") ? "alert" : k.includes("context") ? "clock" : "dot";
@@ -78,21 +64,13 @@
   });
   const age = (since?: string) => (since ? ago(Math.max(0, (now - Date.parse(since)) / 1000)) : "");
 
-  function key(e: KeyboardEvent) {
-    const i = shown.findIndex((x) => x.id === selected);
-    let next = i;
-    if (e.key === "ArrowDown" || e.key === "j") next = Math.min(shown.length - 1, i + 1);
-    else if (e.key === "ArrowUp" || e.key === "k") next = Math.max(0, i - 1);
-    else return;
-    e.preventDefault();
-    if (shown[next]) open(shown[next].id);
-  }
 </script>
 
 <div class="list">
   <header>
     <span class="t">What needs you</span>
-    <span class="n">{loaded ? shown.length : ""}</span>
+    <!-- No count until one is known: a list being read has no size yet. -->
+    <span class="n">{ready && !missing && !(narrow.on && narrow.failure && !narrow.data) ? shown.length : ""}</span>
   </header>
   {#if close?.since_last_look}<p class="since"><Icon name="clock" size={12} /> since you last looked · {close.since_last_look}</p>{/if}
   {#if projects.length > 1 || project}
@@ -102,8 +80,20 @@
     </div>
   {/if}
 
-  <div class="rows" role="listbox" aria-label="what needs you" tabindex="0" onkeydown={key}>
-    {#if !loaded && items.length === 0}
+  <!-- The list keys are the registry's (`bindList`, answered in the item
+       pane through `lib/cursor`), so they work with focus here or anywhere. -->
+  <div
+    class="rows"
+    role="listbox"
+    aria-label="what needs you"
+    tabindex="0"
+    aria-activedescendant={selected ? optionId(selected) : undefined}
+  >
+    {#if narrow.on && narrow.failure && !narrow.data}
+      <p class="quiet failed">Could not read the inbox narrowed to {project}: {narrow.failure.says}.</p>
+    {:else if missing}
+      <p class="quiet failed">No project is named “{project}”.</p>
+    {:else if !ready && shown.length === 0}
       {#each [0, 1, 2] as i (i)}<div class="skel" aria-busy="true"></div>{/each}
     {:else if nothingRaised && error}
       <p class="quiet">The last read had nothing for you, and Devplane has not answered since.</p>
@@ -115,10 +105,16 @@
         class="row"
         class:high={i.level === "high"}
         role="option"
+        id={optionId(i.id)}
         tabindex="-1"
         aria-selected={i.id === selected}
-        onclick={() => open(i.id)}
-        onkeydown={() => {}}
+        onclick={() => open(itemFocus(i.id))}
+        onkeydown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            open(itemFocus(i.id));
+          }
+        }}
       >
         <span class="ic"><Icon name={icon(i.kind)} size={14} /></span>
         <span class="title">{i.title}</span>
@@ -278,6 +274,9 @@
     margin: var(--s-3) var(--s-4);
     color: var(--faint);
     font-size: var(--t-sm);
+  }
+  .quiet.failed {
+    color: var(--fail);
   }
   .skel {
     height: 3rem;

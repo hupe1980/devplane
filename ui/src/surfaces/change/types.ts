@@ -54,6 +54,8 @@ export type Detail = {
   created_at?: string;
   updated_at?: string;
   state: string;
+  /// What the change's own diff weakened, by kind, beside its state.
+  qualifier?: import("../../wire/Qualifier").Qualifier | null;
   in_place?: boolean;
   in_place_says?: string | null;
   standing_says?: string | null;

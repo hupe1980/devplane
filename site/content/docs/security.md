@@ -12,26 +12,41 @@ branches. This page is the trust model, including what it does **not** defend ag
 ## Nothing leaves the machine
 
 No account, no cloud relay, no usage analytics, no crash reporting. The only network egress is
-GitHub through your own `gh` (opt-in, per repository) and the agents themselves, which talk to their
-providers as they do without Devplane.
+the GitHub host you configured (github.com unless `[github] host` says otherwise), and only once you
+have signed in to it, npm when `npx` first fetches a built-in agent's
+pinned adapter, and the agents themselves, which talk to their providers as they do without
+Devplane.
 
 ## Loopback plus a bearer token
 
 The host binds `127.0.0.1`, which any process running as you can reach. What separates it is the
-bearer token in `~/.devplane/token` (mode `0600`), required on every `/api` and `/devplane` request.
+bearer token in `~/.devplane/token`, required in the `Authorization` header on every `/api` and
+`/devplane` request; a token in a URL is not accepted. `~/.devplane` is mode `0700` and the files in
+it `0600`.
 
-- `/healthz` is the one open route: it names the version and is the liveness test.
-- The telemetry receiver needs the token too, because a forged observation corrupts the record.
+- `/healthz` is open: it names the version and is the liveness test. The workbench's static files are
+  open too, and carry no data.
+- **A taken port is a refusal.** The agents' settings send the token to one port; a host that quietly
+  moved elsewhere would leave the token going to whatever holds it. So the host does not start, and
+  says which process holds the port.
+- The telemetry receiver needs a token too, because a forged observation corrupts the record — but
+  **not the one above.** Claude Code hands its settings' `env` block to every tool call, so whatever
+  `connect` writes there the agent can read. It writes a **telemetry-only token**, derived one way
+  from the real one and kept in `~/.devplane/telemetry-token`: it is accepted on the telemetry
+  routes and refused everywhere else, so an agent holding it can report telemetry and nothing more.
   `devplane connect claude` writes the endpoint and `OTEL_EXPORTER_OTLP_HEADERS` together;
   `disconnect` removes both.
+- The workbench is served with a Content-Security-Policy of `'self'` only, `no-referrer` and
+  `nosniff`: the page renders agent-written text, and a script that got in could reach no other
+  origin.
 - `devplane open` hands the token to the workbench once in the URL; the page removes it from the
-  address bar.
+  address bar and sends it as a header from then on.
 
 To point Claude Code at Devplane by hand, set both:
 
 ```sh
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:47831/devplane/otel"
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/token)"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/telemetry-token)"
 ```
 
 ## The trust gate
@@ -71,19 +86,26 @@ critical item when it stops answering. Codex skips a hook you have not approved 
 ## An agent cannot approve itself — mostly
 
 `devplane answer --allow` is refused inside an agent session: when `CLAUDECODE`,
-`CLAUDE_CODE_SESSION_ID`, `DEVPLANE_RUN`, or a Codex or Copilot session variable is set. `--deny`
-still works.
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `DEVPLANE_RUN`, or a Codex or Copilot session
+variable (`CODEX_SANDBOX`, `CODEX_THREAD_ID`, `COPILOT_CLI`, …) is set. `--deny` still works.
+`change offer`, `change finish`, `change archive` and `change review --seen` are refused the same
+way.
 
-**The limit:** the token in `~/.devplane/token` is readable by the agent's user, which is you. An
-agent that unsets those variables, or calls `/api/asks/<id>/answer` with the token, gets past the
-refusal. A `never_auto` rule on `Read(~/.devplane/**)` and `Bash(devplane answer *)` narrows the gap;
-it does not close it.
+Beneath every rule you write, a built-in prohibition keeps an agent from editing Devplane's files,
+reading its token, or editing its repository's `devplane.toml` — by a file tool or a shell command.
+[Permissions](@/docs/permissions.md#devplane-s-own-files-are-protected) has the detail.
+
+**The limit:** the token in `~/.devplane/token` is readable by the agent's user, which is you. The
+built-in rule reads the command line a gated tool call runs; a script the agent runs that opens the
+file itself is not stopped, and neither is an agent that unsets those variables. A `never_auto` rule
+on `Bash(devplane answer *)` narrows the gap; it does not close it.
 
 ## Gates and setup are project-authored
 
 Gates (`[gates]`) and setup (`[workspace] setup`) are read from the `devplane.toml` in the checkout
 that **owns** the worktree, never from the agent's branch. They run as children of the host, never
-through the agent, each in its own process group so a timeout kills the whole tree. The review leads
+through the agent, each in its own process group so a timeout kills the whole tree (on Unix; on
+Windows a timed-out gate's children are not killed). The review leads
 with any check the change weakened. See [Verified done](@/docs/verified-done.md).
 
 ## Untrusted text is data
@@ -107,13 +129,14 @@ environment block before writing it and does not override a collector you config
 
 ## Transcripts
 
-What a **driven** agent says is stored in `~/.devplane/devplane.db` and pruned on the same retention
-sweep. A repository can opt out with `[transcripts] keep = false`. Watched sessions carry no prose.
+What a **driven** agent says is stored in `~/.devplane/devplane.db` and pruned after 30 days by the
+sweep a host runs when it starts. A repository can opt out with `[transcripts] keep = false`. Watched sessions carry no prose.
 
 ## Agent supply chain
 
-The built-in agents and their `npx` packages are pinned to exact versions; nothing auto-updates.
-Agents you add in `~/.devplane/agents.toml` run exactly the command you wrote.
+The built-in agents launched through `npx` are pinned to exact versions; nothing auto-updates.
+OpenCode runs the `opencode` on your `PATH`. Agents you add in `~/.devplane/agents.toml` run exactly
+the command you wrote.
 
 ## What this is not
 

@@ -9,6 +9,7 @@
     "dev": "vite",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "render": "vite build --ssr tests/render.ts --outDir .ssr && node .ssr/app.js",
+    "browser": "node tests/browser.mjs",
     "dev:fixtures": "DEVPLANE_FIXTURES=1 vite"
   },
   "devDependencies": {

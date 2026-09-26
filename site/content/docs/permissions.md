@@ -22,7 +22,8 @@ always_ask = [
 ]
 ```
 
-A machine-wide set with the same shape lives in `~/.devplane/policy.toml`. There is no allow list;
+A machine-wide pair of lists with the same shape lives in `~/.devplane/policy.toml` (only
+`never_auto` and `always_ask` apply there). There is no allow list;
 grants belong in your agent's own `settings.json`, under `permissions.allow`.
 
 The same rules answer a watched session's hooks (no host needed), the permission requests of runs
@@ -93,6 +94,8 @@ spelled. `Bash(rm *)` refuses all of these:
 | a here-string given to a shell | `bash <<< 'rm -rf /'` |
 | a program named by its path or in another case | `/usr/bin/rm -rf /`, `./rm x`, `RM -rf /` |
 | a globbed program name | `/bin/r? -rf x`, `/bin/r[m] -rf x` — the shell picks the program, so a person is asked |
+| a long flag abbreviated | `rm --rec --for /` reads as `rm -rf /` |
+| a wrapper the reader does not know | `pkexec rm -rf /`, `unbuffer rm x`, `taskset 1 rm x` — a program that may run its arguments, one of which a rule prohibits, is put to a person |
 
 Quoted text is data: `echo "a; rm -rf x"` is one `echo` and meets no `rm` rule, and a text tool's
 `-e` is a pattern, not a command (`grep -e 'rm -rf' f`).
@@ -164,6 +167,30 @@ never_auto = [
 
 `domain:` matches the URL's parsed host, not a substring. `Tool(param:value)` matches a top-level
 input field, with `*` as a wildcard; a parameter the model omits never matches.
+
+## Devplane's own files are protected
+
+Beneath every rule you write, one prohibition is built in. An agent may not edit Devplane's files in
+`~/.devplane` (`policy.toml`, `agents.toml`, the store, `token`, `host.json`) or read the token, and
+may not edit the `devplane.toml` of the repository it works in: the rules that gate it are not its to
+change. It holds for a file tool, and for a shell command that writes, truncates, moves, removes or
+redirects into one of those files, or removes, moves or changes the mode of `~/.devplane` itself,
+also after a `cd`, `pushd` or `git -C` on the same line. Doing that to a directory above them
+(`rm -rf ~`, `rm -rf .` in the project) is asked about.
+
+```console
+$ devplane explain 'echo x > devplane.toml'
+deny  Bash
+        by writes `/home/you/code/saas/devplane.toml` (built in: an agent may not change Devplane's own rules, records or credentials, nor read its token)
+```
+
+A program the reader does not know is refused the files in `~/.devplane` and asked about for
+`devplane.toml` (`git add devplane.toml` is ordinary, `sed -i` is not). A line that names them in a
+form the reader cannot resolve (through a variable or glob, or after a `cd` to somewhere it cannot
+follow) is asked about. A spelling that never names them (`~/.dev*/tok*`), or a script the agent
+runs that opens the file itself, is beyond what a command line shows.
+
+Reading the rest stays allowed. Change `devplane.toml` yourself, and commit it.
 
 ## Order: deny wins
 
@@ -241,16 +268,22 @@ ask — unreadable  Bash
 
 | Shape | Example |
 |---|---|
-| a program name the shell builds | `rm$IFS-rf x`, `$(echo rm) -rf x` |
+| a program name the shell builds | `rm$IFS-rf x`, `$(echo rm) -rf x`, `X=rm; $X -rf /` |
+| a command substitution anywhere on the line | `echo $(ls)`, `` echo `date` `` |
+| an argument the shell rewrites that could make a rule match | `rm $F /` under `Bash(rm -rf /)`; `cat $F` under `Read(.env)` |
+| a variable that names something run later | `GIT_SSH_COMMAND=… git fetch`, `LD_PRELOAD=… ls` |
 | a command line built from input | `xargs rm -rf`, `eval "$cmd"` |
 | code in a string, file or stdin | `python -c "…"`, `node -e "…"`, `python3 script.py`, `curl … \| sh` |
 | a command run somewhere else | `ssh host …`, `docker run …`, `su`, `chroot` |
 | `find` that runs or deletes | `find . -delete`, `find . -exec …` |
 | a wrapper flag the reader does not know | `sudo --made-up x rm …` |
+| more than 8 wrappers before the command | `sudo sudo … sudo ls` |
 | a line past 65,536 characters | — |
 
-This happens only where a rule **could** have applied, and a rule that answers the call always wins.
-The audit row's outcome is `unresolved`, under the authority of the rules that made it a question.
+This happens only where the project has rules for the tool, and a rule that answers the call always
+wins. Such a line is put to a person rather than left to the agent's own permission system, which
+might approve it. The audit row's outcome is `unresolved`, under the authority of the rules that made
+it a question.
 
 A heredoc's body fed to a program that cannot execute it (`cat`, `tee`, `grep`, `jq` and a fixed
 list of others) is data; fed to anything else (`bash`, `| sudo bash`, `| python3`) it is read.
@@ -297,13 +330,13 @@ wins and **you** are the authority. If nobody answers, the ask ends with **nobod
 and your agent shows its own dialog. A prohibition is applied first and never held.
 
 **An agent cannot answer its own permission.** `devplane answer --allow` is refused inside an agent
-session (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `DEVPLANE_RUN`, or a Codex or Copilot session
-variable set); `--deny` still works. This stops the easy path, not a hostile process; see
+session (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `DEVPLANE_RUN`, or a Codex
+or Copilot session variable set); `--deny` still works. This stops the easy path, not a hostile process; see
 [Security](@/docs/security.md).
 
 ## Tuning the rules
 
 - **Asked too often:** a permission in `devplane inbox` carries the narrowest rule that would stop it
-  being asked, and the `settings.json` to paste it into. `devplane rules <rule>` checks every
-  registered project.
+  being asked, and the `settings.json` to paste it into. `devplane explain --replay` names the allow
+  rules that would have answered the calls that reached you.
 - **A rule too tight:** five refusals in one run raise a `refused` item naming the rule.

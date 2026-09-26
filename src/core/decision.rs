@@ -1,5 +1,6 @@
-//! The decision log: what Devplane decided or allowed, and on whose authority —
-//! the rule that allowed a command, the checks that opened a pull request.
+//! The decision log: what was decided, and on whose authority — the rule that
+//! refused a command, the person who allowed one, the checks that ran. The
+//! policy never allows: an `allow` is always somebody's answer.
 //! Unlike observations, a decision cannot be re-derived, so it is append-only
 //! and survives event-log pruning. Not a tamper-evident journal: the threat is
 //! *"I cannot remember why that happened"*, not an adversary on the same machine.
@@ -66,7 +67,7 @@ impl Authority {
 }
 
 /// One thing that was decided. `action` is the verb in the policy's vocabulary
-/// (`agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`, `change:stop`);
+/// (`agent:tool.use`, `gate:run`, `git:push`, `github:pr.create`, `change:stop`);
 /// `subject` is what it was about.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -80,8 +81,8 @@ pub struct Decision {
     pub subject: String,
     /// `allow`, `deny`, `pass`, `fail`, `done`.
     pub outcome: String,
-    /// The rule that decided, or the reason: "auto-approved by
-    /// `Bash(pnpm test *)`", not "auto-approved".
+    /// The rule that decided, or the reason: "refused by `Bash(rm -rf *)`",
+    /// not "refused".
     pub reason: Option<String>,
     /// The tool, for a tool call (`Bash`, `Edit`, `mcp__…`); `None` otherwise.
     #[serde(default)]
@@ -101,15 +102,18 @@ pub struct Decision {
 }
 
 impl Decision {
-    pub fn new(
+    /// A decision taken at `at`. [`Decision::new`] (outside the pure half)
+    /// stamps the wall clock.
+    pub fn new_at(
         authority: Authority,
         action: &str,
         subject: impl Into<String>,
         outcome: &str,
+        at: Timestamp,
     ) -> Self {
         Self {
             id: crate::core::ids::new_event_id(),
-            at: Timestamp::now(),
+            at,
             authority,
             action: action.to_string(),
             subject: subject.into(),
@@ -190,19 +194,14 @@ mod tests {
 
     #[test]
     fn a_decision_says_who_decided_and_on_what_authority() {
-        // "auto-approved" is not an answer to "why did this run".
-        let d = Decision::new(
-            Authority::Rule,
-            "agent:tool.use",
-            "pnpm test -- --run",
-            "allow",
-        )
-        .because("Bash(pnpm test *)")
-        .for_run(&RunId::new("s1"));
+        // "refused" is not an answer to "why did this not run".
+        let d = Decision::new(Authority::Rule, "agent:tool.use", "rm -rf build", "deny")
+            .because("Bash(rm -rf *)")
+            .for_run(&RunId::new("s1"));
         let line = d.line();
-        assert!(line.contains("rule allow agent:tool.use"), "{line}");
-        assert!(line.contains("pnpm test"));
-        assert!(line.contains("Bash(pnpm test *)"));
+        assert!(line.contains("rule deny agent:tool.use"), "{line}");
+        assert!(line.contains("rm -rf build"));
+        assert!(line.contains("Bash(rm -rf *)"));
         assert_eq!(d.run_id, Some(RunId::new("s1")));
     }
 
@@ -332,8 +331,9 @@ mod rewind_tests {
     use super::*;
     use crate::core::ids::RunId;
 
+    /// A call a person answered: the policy never allows one itself.
     fn call(tool: &str, subject: &str, outcome: &str) -> Decision {
-        Decision::new(Authority::Rule, "agent:tool.use", subject, outcome)
+        Decision::new(Authority::Person, "agent:tool.use", subject, outcome)
             .by_tool(tool)
             .for_run(&RunId::new("s1"))
     }

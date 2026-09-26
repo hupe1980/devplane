@@ -180,10 +180,18 @@
         class:end={c.align === "end"}
         class:sortable={!!c.sort}
         role="columnheader"
-        tabindex="-1"
+        tabindex={c.sort ? 0 : -1}
         aria-sort={by?.key === c.key ? (by.dir === 1 ? "ascending" : "descending") : "none"}
+        title={c.sort ? `sort by ${c.label.toLowerCase()} (Enter or Space)` : undefined}
         onclick={() => toggle(c)}
-        onkeydown={(e) => e.key === "Enter" && toggle(c)}
+        onkeydown={(e) => {
+          // A header's own keys: they sort, and never reach the rows' Enter.
+          if (c.sort && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            e.stopPropagation();
+            toggle(c);
+          }
+        }}
       >
         <span>{c.label}</span>
         {#if by?.key === c.key}<Icon name={by.dir === 1 ? "down" : "right"} size={12} />{/if}

@@ -29,7 +29,7 @@ enum Rules {
 
 impl Rules {
     fn at(dir: &Path) -> Self {
-        let root = crate::core::project::governing_root(dir).unwrap_or_else(|| dir.to_path_buf());
+        let root = crate::repo::governing_root(dir).unwrap_or_else(|| dir.to_path_buf());
         let path = root.join(crate::core::config::CONFIG_FILE);
         match crate::core::ProjectConfig::load(&root) {
             Err(e) => Rules::Broken {
@@ -144,7 +144,7 @@ pub fn cmd_explain(
     };
 
     // The machine-wide policy is included: this is the gate as enforced.
-    let (cache, global_error) = crate::core::PolicyCache::from_disk();
+    let (cache, global_error) = crate::policy_cache::PolicyCache::from_disk();
     let verdict = cache.restrictive(&dir, &tool, &input);
 
     // Where the rules came from and whether they loaded: a broken
@@ -229,7 +229,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     let store = crate::store::Store::open(&crate::config::db_path()?).await?;
     // Scoped to the repository root containing `--dir`, so a session started
     // in `src/` counts toward the same project.
-    let scope = crate::core::project::find_repo_root(&dir).unwrap_or_else(|| dir.clone());
+    let scope = crate::repo::find_repo_root(&dir).unwrap_or_else(|| dir.clone());
     let named = scope
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -237,7 +237,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
     let calls = store.observed_tool_calls(Some(&scope), limit).await?;
 
     // Includes the machine-wide policy, as the gate does.
-    let (cache, _) = crate::core::PolicyCache::from_disk();
+    let (cache, _) = crate::policy_cache::PolicyCache::from_disk();
     // The third bucket is "no rule here decides" — not "interrupted a person":
     // the agent's own settings answer most of these silently.
     let mut counts = [0usize; 3]; // ask, deny, no rule here
@@ -376,7 +376,7 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool
         Some(p) => p.canonicalize().context("that path does not exist")?,
         None => std::env::current_dir()?,
     };
-    let root = crate::core::project::find_repo_root(&here).unwrap_or(here);
+    let root = crate::repo::find_repo_root(&here).unwrap_or(here);
 
     let config = match crate::core::ProjectConfig::load(&root) {
         Err(e) => {
@@ -400,7 +400,7 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool
                 println!("{}", state.says());
             }
             // Not a pass, and not a failure of the checks: they did not run.
-            std::process::exit(1);
+            return Err(crate::cli::Exit(1).into());
         }
         Ok(c) => c,
     };
@@ -434,7 +434,7 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool
                         println!("  {}", paint(DIM, &known));
                     }
                 }
-                std::process::exit(1);
+                return Err(crate::cli::Exit(1).into());
             }
         },
     };
@@ -456,7 +456,7 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool
             println!();
             println!("{}", state.says());
         }
-        std::process::exit(1);
+        return Err(crate::cli::Exit(1).into());
     }
 
     // The person's own checkout: its caches are theirs, so nothing is redirected.
@@ -508,7 +508,7 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool
 
     match state.passed() {
         true => Ok(()),
-        false => std::process::exit(1),
+        false => Err(crate::cli::Exit(1).into()),
     }
 }
 
@@ -518,10 +518,10 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool
 /// other hooks and comments that a round-trip would destroy, so the entry is
 /// printed for the person to paste instead.
 pub fn cmd_speckit_install(event: Option<String>, dry_run: bool, anyway: bool) -> Result<()> {
-    use crate::core::spec::{DEFAULT_HOOK_EVENT, EXTENSIONS_FILE, HOOK_COMMAND, HOOK_EVENTS};
+    use crate::spec::{DEFAULT_HOOK_EVENT, EXTENSIONS_FILE, HOOK_COMMAND, HOOK_EVENTS};
 
     let here = std::env::current_dir()?;
-    let root = crate::core::project::find_repo_root(&here).unwrap_or(here);
+    let root = crate::repo::find_repo_root(&here).unwrap_or(here);
 
     if !root.join(".specify").is_dir() {
         anyhow::bail!("Spec Kit is not installed here — there is nothing to register with.");
@@ -538,18 +538,15 @@ pub fn cmd_speckit_install(event: Option<String>, dry_run: bool, anyway: bool) -
     // A mandatory hook whose skill the agent cannot reach is a workflow step
     // that can neither be skipped nor run, so it is refused before anything is
     // written.
-    if !anyway
-        && let Some(why) = crate::core::spec::unreachable_skill(&root, dirs::home_dir().as_deref())
+    if !anyway && let Some(why) = crate::spec::unreachable_skill(&root, dirs::home_dir().as_deref())
     {
-        let places = crate::core::spec::skill_locations(&root, dirs::home_dir().as_deref());
+        let places = crate::spec::skill_locations(&root, dirs::home_dir().as_deref());
         anyhow::bail!(
             "{why}.\n\n\
              A hook registered `optional: false` is one the agent is told it may not skip. \n\
              Registering it now would put a step in the workflow that cannot run.\n\n\
-             Two ways to make it reachable:\n  \
-             · install the plugin — `claude plugin marketplace add hupe1980/devplane`, then \
-             `/plugin install devplane@devplane`\n  \
-             · or put a skill of that name at one of:\n      {}\n\n\
+             Put the `devplane-gate` skill (the plugin's `skills/devplane-gate/SKILL.md`) \
+             at one of these places, where the agent looks for skills:\n      {}\n\n\
              Then run this again. `--anyway` writes it regardless.",
             places
                 .iter()
@@ -573,11 +570,11 @@ pub fn cmd_speckit_install(event: Option<String>, dry_run: bool, anyway: bool) -
         return Ok(());
     }
 
-    let entry = crate::core::spec::hook_entry();
+    let entry = crate::spec::hook_entry();
     match existing {
         None => {
             println!("{EXTENSIONS_FILE} would be created, containing:\n");
-            println!("{}", crate::core::spec::extensions_file(&event));
+            println!("{}", crate::spec::extensions_file(&event));
             if dry_run {
                 println!(
                     "{}",
@@ -588,7 +585,7 @@ pub fn cmd_speckit_install(event: Option<String>, dry_run: bool, anyway: bool) -
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(&path, crate::core::spec::extensions_file(&event))?;
+            std::fs::write(&path, crate::spec::extensions_file(&event))?;
             println!("{}  {EXTENSIONS_FILE}", paint(render::GREEN, "written"));
         }
         Some(_) => {
@@ -610,7 +607,7 @@ pub fn cmd_speckit_install(event: Option<String>, dry_run: bool, anyway: bool) -
 
 pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
     let root = path.canonicalize().context("that path does not exist")?;
-    let root = crate::core::project::find_repo_root(&root).unwrap_or(root);
+    let root = crate::repo::find_repo_root(&root).unwrap_or(root);
     let file = root.join(crate::core::config::CONFIG_FILE);
 
     let config = match crate::core::ProjectConfig::load(&root) {
@@ -623,7 +620,7 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
                         &serde_json::json!({ "ok": false, "error": e.to_string() })
                     )?
                 );
-                std::process::exit(1);
+                return Err(crate::cli::Exit(1).into());
             }
             anyhow::bail!("{e}");
         }
@@ -647,7 +644,7 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
             }))?
         );
         if problems.iter().any(|p| p.fatal) {
-            std::process::exit(1);
+            return Err(crate::cli::Exit(1).into());
         }
         return Ok(());
     }
@@ -658,6 +655,14 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
              Add a devplane.toml when you want gates.",
             paint(DIM, &format!("no {}", file.display()))
         );
+        // The specifications are read without one: the layout is the tool's own.
+        for layout in &config.spec.layouts(&root) {
+            let n = crate::spec::changes(&root, layout).len();
+            println!(
+                "\n  {:<9} {} in {}/ ({n} found, by {})",
+                "spec", layout.name, layout.root, layout.detected_by
+            );
+        }
         return Ok(());
     }
 
@@ -702,11 +707,19 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         println!("  questions {}", crate::core::ask::Deadline::says(d));
     }
 
-    // Plans directory and open-question words, printed only where set: both
-    // decide whether a surface shows anything for this project.
-    if let Some(dir) = config.spec.plans.as_deref() {
-        let n = config.spec.plan_paths(&root).len();
-        println!("  {:<9} plans in {dir} ({n} found)", "spec");
+    // Every specification layout found — by the tool's own marker, or the
+    // `[spec] plans` key — with how many changes each holds; or the sentence
+    // naming what would have been recognised.
+    let layouts = config.spec.layouts(&root);
+    if layouts.is_empty() {
+        println!("  {:<9} {}", "spec", crate::spec::NO_LAYOUT);
+    }
+    for layout in &layouts {
+        let n = crate::spec::changes(&root, layout).len();
+        println!(
+            "  {:<9} {} in {}/ ({n} found, by {})",
+            "spec", layout.name, layout.root, layout.detected_by
+        );
     }
     if !config.spec.open_questions.is_empty() {
         // Padded by width, not spaces in the literal: `purity` rejects runs of
@@ -813,7 +826,7 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
 /// none of it, and `--dry-run` trusts nothing.
 pub async fn cmd_trust(path: PathBuf, yes: bool, dry_run: bool, json: bool) -> Result<()> {
     let root = path.canonicalize().context("that path does not exist")?;
-    let setup = crate::core::setup::scan(&root);
+    let setup = crate::setup::scan(&root);
 
     if json {
         let findings: Vec<serde_json::Value> = setup
@@ -862,7 +875,7 @@ pub async fn cmd_trust(path: PathBuf, yes: bool, dry_run: bool, json: bool) -> R
         return Ok(());
     }
     // Nothing to show means nothing to confirm.
-    if !yes && !setup.is_empty() && !confirm("Trust this repository?")? {
+    if !setup.is_empty() && !crate::cli::confirm("Trust this repository?", yes)? {
         println!("  {}", paint(DIM, "not trusted"));
         return Ok(());
     }
@@ -880,16 +893,36 @@ pub async fn cmd_trust(path: PathBuf, yes: bool, dry_run: bool, json: bool) -> R
 }
 
 async fn trust_call(root: &Path) -> Result<serde_json::Value> {
-    let c = client::Client::connect_running().await?;
-    c.post_json(
-        "/api/projects/trust",
-        &serde_json::json!({ "path": root.to_string_lossy() }),
-    )
-    .await
+    // Through the host where one runs, so its world hears it at once;
+    // otherwise straight into the store, which a host reads when it starts.
+    // Trusting is a person's record, and needs nothing running.
+    if let Ok(c) = client::Client::connect_running().await {
+        return c
+            .post_json(
+                "/api/projects/trust",
+                &serde_json::json!({ "path": root.to_string_lossy() }),
+            )
+            .await;
+    }
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("{} does not exist", root.display()))?;
+    let store = crate::store::Store::open(&crate::config::db_path()?)
+        .await
+        .context("opening the store")?;
+    let mut project = crate::core::Project::from_root(root);
+    project.trusted = true;
+    store.save_project(&project).await.with_context(|| {
+        format!(
+            "could not record that {} is trusted, so it is not",
+            project.root.display()
+        )
+    })?;
+    Ok(serde_json::json!({ "trusted": true, "project": project }))
 }
 
 /// What starting an agent here will load, grouped the way a person reads it.
-fn print_setup(root: &Path, setup: &crate::core::setup::Setup) {
+fn print_setup(root: &Path, setup: &crate::setup::Setup) {
     if setup.is_empty() {
         // Findings are what is worth flagging; skills are what is there.
         let quiet = match setup.skills {
@@ -940,37 +973,6 @@ async fn registered_names() -> Option<Vec<String>> {
     let store = crate::store::Store::open(&db).await.ok()?;
     let projects = store.load_projects().await.ok()?;
     Some(projects.into_iter().map(|p| p.name).collect())
-}
-
-/// A yes/no question on the terminal, default no. Empty stdin fails closed
-/// and says to pass `--yes`.
-fn confirm(question: &str) -> Result<bool> {
-    use std::io::Write;
-    print!("  {question} [y/N] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer)? == 0 {
-        println!();
-        anyhow::bail!("nothing on stdin to answer with — pass --yes to trust without asking");
-    }
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
-}
-
-/// Asks on a terminal; a script proceeds, as `connect` does — a pipe has
-/// nobody to answer, and the sentence has already been printed to it.
-pub(super) fn ask_to_proceed(question: &str) -> Result<bool> {
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
-        return Ok(true);
-    }
-    print!("  {question} [y/N] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer)? == 0 {
-        println!();
-        return Ok(false);
-    }
-    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
 /// The review, worded exactly as the surface words it: every sentence is the
@@ -1032,6 +1034,23 @@ fn print_review(r: &crate::view::ReviewView, by_intent: bool) {
         for g in &r.groups {
             println!();
             println!("  {}", paint(BOLD, &g.says));
+            // The weakened rows, each with what it matched and whether a
+            // person marked it seen; then the files.
+            for w in &g.weakened {
+                println!(
+                    "    {} — {} {}",
+                    w.row.path,
+                    paint(YELLOW, &w.row.why),
+                    paint(
+                        DIM,
+                        match w.seen {
+                            true => "(seen)",
+                            false => "(unseen)",
+                        }
+                    )
+                );
+                println!("      {}", paint(DIM, &clip(&w.row.matched, 120)));
+            }
             for f in &g.files {
                 row(f);
             }
@@ -1043,7 +1062,38 @@ fn print_review(r: &crate::view::ReviewView, by_intent: bool) {
     }
 }
 
+/// Refuses a decision about a change from inside an agent's session: an agent
+/// may not offer, finish, archive or mark read its own work. The same check
+/// `answer` makes, with the same limit: it narrows the hole and does not close
+/// it — an agent that unsets the variable, or calls the host with the token in
+/// `~/.devplane/token`, is not stopped by it.
+fn refuse_from_agent(what: &str) -> Result<()> {
+    if let Some(var) = crate::hook::agent_session() {
+        anyhow::bail!(
+            "refused: `{var}` is set, so this is running inside an agent's session, and an \
+             agent may not {what} its own change. Do it from the Devplane window or a terminal \
+             of your own. This check narrows the hole and does not close it: an agent that \
+             unsets the variable, or calls the host with its token, is not stopped by it."
+        );
+    }
+    Ok(())
+}
+
+/// The exit status of a refusal, distinct from an error's 1.
+const REFUSED: i32 = 3;
+
 pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
+    // Decisions a person takes, refused from an agent's session before
+    // anything is read.
+    match &what {
+        ChangeCmd::Offer { .. } => refuse_from_agent("offer")?,
+        ChangeCmd::Finish { .. } => refuse_from_agent("finish")?,
+        ChangeCmd::Archive { .. } => refuse_from_agent("archive")?,
+        ChangeCmd::Review { seen, .. } if !seen.is_empty() => {
+            refuse_from_agent("mark read a weakened check of")?
+        }
+        _ => {}
+    }
     // Reads work from the store; starting, steering or finishing needs a host.
     let host = client::Client::connect_running().await;
     match what {
@@ -1093,7 +1143,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
             if !refused.is_empty() {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&pre)?);
-                    std::process::exit(1);
+                    return Err(crate::cli::Exit(1).into());
                 }
                 for line in &refused {
                     println!("  {:<10}{line}", paint(BOLD, "refused"));
@@ -1152,8 +1202,9 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                         o.insert("sent_says".into(), one["sent_says"].clone());
                     }
                 }
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                // A project that changed between preflight and start fails
+                // the command here too.
+                return crate::cli::print_json(&v);
             }
             let started = v["changes"].as_array().cloned().unwrap_or_default();
             for (one, sent) in started.iter().zip(&sent_of) {
@@ -1222,8 +1273,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
                 anyhow::bail!("{e}");
@@ -1252,8 +1302,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             match v.get("error").and_then(|e| e.as_str()) {
                 Some(e) => anyhow::bail!("{e}"),
@@ -1273,8 +1322,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             match v.get("error").and_then(|e| e.as_str()) {
                 Some(e) => anyhow::bail!("{e}"),
@@ -1324,8 +1372,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 .get("/api/changes")
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             let empty = vec![];
             let items = v.as_array().unwrap_or(&empty);
@@ -1344,7 +1391,9 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 let says = w["standing_says"].as_str().unwrap_or("");
                 let gates = match standing {
                     Some(Standing::Verified) => paint(render::GREEN, says),
-                    Some(Standing::Stale { .. }) => paint(render::YELLOW, says),
+                    Some(Standing::Stale { .. } | Standing::ChecksChanged { .. }) => {
+                        paint(render::YELLOW, says)
+                    }
                     Some(Standing::Failed { .. }) => paint(render::RED, says),
                     _ => paint(DIM, says),
                 };
@@ -1458,8 +1507,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
                 anyhow::bail!("{e}");
@@ -1499,8 +1547,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             match v.get("error").and_then(|e| e.as_str()) {
                 Some(e) => anyhow::bail!("{e}"),
@@ -1530,7 +1577,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 Some(p) => p,
                 None => {
                     let here = std::env::current_dir()?;
-                    crate::core::project::find_repo_root(&here).unwrap_or(here)
+                    crate::repo::find_repo_root(&here).unwrap_or(here)
                 }
             };
             let v: serde_json::Value = c
@@ -1545,8 +1592,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
                 anyhow::bail!("{e}");
@@ -1595,8 +1641,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             match v.get("error").and_then(|e| e.as_str()) {
                 Some(e) => anyhow::bail!("{e}"),
@@ -1618,14 +1663,54 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
             }
         }
 
-        ChangeCmd::Review { change, by } => {
+        ChangeCmd::Review { change, seen, .. } if !seen.is_empty() => {
+            let reader = crate::local::Reader::open().await?;
+            let mut all = Vec::new();
+            for path in &seen {
+                let v = reader.mark_seen(&change, path).await?;
+                if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+                    let rows: Vec<String> = v["rows"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|r| r["path"].as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    anyhow::bail!(
+                        "{e}{}",
+                        match rows.is_empty() {
+                            true => String::new(),
+                            false => format!("; the weakened rows are at: {}", rows.join(", ")),
+                        }
+                    );
+                }
+                for r in v["seen"].as_array().cloned().unwrap_or_default() {
+                    if !json {
+                        println!(
+                            "seen: {} — {}",
+                            r["path"].as_str().unwrap_or(""),
+                            r["why"].as_str().unwrap_or("")
+                        );
+                    }
+                    all.push(r);
+                }
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "seen": all }))?
+                );
+            }
+        }
+
+        ChangeCmd::Review { change, by, .. } => {
             let v: serde_json::Value = crate::local::Reader::open()
                 .await?
                 .get(&format!("/api/changes/{change}/review"))
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
                 anyhow::bail!("{e}");
@@ -1663,8 +1748,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                 )
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             match v.get("error").and_then(|e| e.as_str()) {
                 Some(e) => anyhow::bail!("{e}"),
@@ -1672,26 +1756,26 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
             }
         }
 
-        ChangeCmd::Stop { run } => {
+        ChangeCmd::Stop { run, yes } => {
             let c = host?;
             // What survives, said before anything is stopped.
             let before: serde_json::Value = c.get(&format!("/api/runs/{run}/stop")).await?;
             if let Some(e) = before.get("error").and_then(|e| e.as_str()) {
                 anyhow::bail!("{e}");
             }
-            if !json {
-                println!("{}", before["says"].as_str().unwrap_or(""));
+            match json {
+                true => eprintln!("{}", before["says"].as_str().unwrap_or("")),
+                false => println!("{}", before["says"].as_str().unwrap_or("")),
             }
-            if !ask_to_proceed("Stop it?")? {
-                println!("{}", paint(DIM, "not stopped"));
+            if !crate::cli::confirm("Stop it?", yes)? {
+                eprintln!("{}", paint(DIM, "not stopped"));
                 return Ok(());
             }
             let v: serde_json::Value = c
                 .post_json(&format!("/api/runs/{run}/stop"), &serde_json::json!({}))
                 .await?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             match v.get("error").and_then(|e| e.as_str()) {
                 Some(e) => anyhow::bail!("{e}"),
@@ -1707,9 +1791,39 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                     &serde_json::json!({}),
                 )
                 .await?;
+            // A weakened check nobody marked seen: every row, and how to mark one.
+            if v["refused"] == "weakened_unseen" {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "refused": v["refused"],
+                            "rows": v["rows"],
+                            "seen_with": v["seen_with"],
+                        }))?
+                    );
+                    return Err(crate::cli::Exit(REFUSED).into());
+                }
+                eprintln!(
+                    "{} {}\n",
+                    paint(BOLD, "refused:"),
+                    v["says"].as_str().unwrap_or("")
+                );
+                for r in v["rows"].as_array().cloned().unwrap_or_default() {
+                    eprintln!(
+                        "  {}   {}",
+                        r["path"].as_str().unwrap_or(""),
+                        r["why"].as_str().unwrap_or("")
+                    );
+                }
+                eprintln!(
+                    "\nread it in `devplane change review {change}`, then mark it seen:\n  {}",
+                    v["seen_with"].as_str().unwrap_or("")
+                );
+                return Err(crate::cli::Exit(REFUSED).into());
+            }
             if json {
-                println!("{}", serde_json::to_string_pretty(&v)?);
-                return Ok(());
+                return crate::cli::print_json(&v);
             }
             if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
                 anyhow::bail!("{e}");
@@ -1722,13 +1836,15 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
                     paint(DIM, v["pull_request"]["url"].as_str().unwrap_or(""))
                 ),
                 _ => {
-                    // `[github] pull_request` is off: print the commands, run none.
+                    // `[github] pull_request` is off: print the command and
+                    // the address, run nothing.
                     println!(
                         "{}",
                         paint(
                             DIM,
                             "nothing was pushed — [github] pull_request is not set for this \
-                             project, so these are yours to run:"
+                             project: push the branch, then open the address to create the \
+                             pull request yourself:"
                         )
                     );
                     println!("  {}", v["push"].as_str().unwrap_or(""));
@@ -1747,10 +1863,25 @@ fn print_change(w: &serde_json::Value) {
         paint(BOLD, w["title"].as_str().unwrap_or("")),
         paint(DIM, w["id"].as_str().unwrap_or(""))
     );
-    // Word and glyph come from the enum, parsed back from the host.
+    // Word and glyph come from the enum, parsed back from the host. What the
+    // change's own diff weakened follows the word on the same line, never
+    // folded into it.
     let state: Option<ChangeState> = serde_json::from_value(w["state"].clone()).ok();
+    let qualified = match w["qualifier"]["says"].as_str().filter(|s| !s.is_empty()) {
+        Some(q) => format!(
+            " · {}",
+            paint(
+                render::YELLOW,
+                &format!(
+                    "{q} ({} unseen)",
+                    w["qualifier"]["unseen"].as_u64().unwrap_or(0)
+                )
+            )
+        ),
+        None => String::new(),
+    };
     println!(
-        "  state      {} {}{}{}",
+        "  state      {} {}{qualified}{}{}",
         state.map_or("?", ChangeState::glyph),
         state.map_or("?", ChangeState::as_str),
         match w["waiting_says"].as_str() {
@@ -1773,12 +1904,11 @@ fn print_change(w: &serde_json::Value) {
         let colour = match standing {
             Some(Standing::Verified) => render::GREEN,
             Some(Standing::Failed { .. }) => render::RED,
-            Some(Standing::Stale { .. }) => render::YELLOW,
+            Some(Standing::Stale { .. } | Standing::ChecksChanged { .. }) => render::YELLOW,
             _ => DIM,
         };
         println!("  gates      {}", paint(colour, says));
     }
-    println!("  kind       {}", w["kind"].as_str().unwrap_or("?"));
     if let Some(b) = w["branch"].as_str() {
         println!("  branch     {b}");
     }
@@ -2051,7 +2181,7 @@ fn print_change(w: &serde_json::Value) {
     }
 }
 
-/// The issues one repository offers as work: `devplane issues --ready`.
+/// The issues one repository offers as work: `devplane forge issues --ready`.
 /// The cross-project list lives in `cli::board`.
 pub async fn cmd_ready_issues(
     cwd: Option<std::path::PathBuf>,
@@ -2070,8 +2200,7 @@ pub async fn cmd_ready_issues(
         )
         .await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
-        return Ok(());
+        return crate::cli::print_json(&v);
     }
     if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
         anyhow::bail!("{e}");

@@ -6,7 +6,7 @@ import type { RunId } from "./RunId";
 
 /**
  * One thing that was decided. `action` is the verb in the policy's vocabulary
- * (`agent:tool.use`, `gate:run`, `git:push`, `gh:pr.create`, `change:stop`);
+ * (`agent:tool.use`, `gate:run`, `git:push`, `github:pr.create`, `change:stop`);
  * `subject` is what it was about.
  */
 export type Decision = { id: string, at: string, authority: Authority, action: string, subject: string, 
@@ -15,8 +15,8 @@ export type Decision = { id: string, at: string, authority: Authority, action: s
  */
 outcome: string, 
 /**
- * The rule that decided, or the reason: "auto-approved by
- * `Bash(pnpm test *)`", not "auto-approved".
+ * The rule that decided, or the reason: "refused by `Bash(rm -rf *)`",
+ * not "refused".
  */
 reason: string | null, 
 /**

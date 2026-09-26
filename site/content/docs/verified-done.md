@@ -23,18 +23,22 @@ A change is **verified** when both are true:
 2. the tree it ran against is the tree now.
 
 “The tree” is the git tree of the working tree, **including uncommitted and untracked files**
-(ignored files are left out), computed with a temporary index. Re-derive it in a copy of the
-checkout:
+(ignored files are left out), computed with a temporary index. **Each file is hashed as its bytes
+are on disk**: no clean filter, end-of-line conversion or stat cache is consulted, because the
+checkout's `.git/config` and `.git/info/` are the agent's to write. Where your repository declares no
+filter, re-derive it in a copy of the checkout:
 
 ```sh
 git add -A && git write-tree
 ```
 
 - **Uncommitted work can be verified.** Agents need not commit.
-- **Touch any file and it is stale**, with both digests shown.
+- **Touch any file and it is stale**, with both digests shown. Changing the `check` commands in
+  your checkout's `devplane.toml` makes an earlier pass stale too, until `check` runs as declared now;
+  deleting `check`, or a `devplane.toml` that will not load, means nothing is verified.
 - **A gate that edits the tree it checks cannot verify.** If the digest differs before and after the
   commands, the pass is recorded without a digest.
-- **Only `check` decides.** Named gates (`[gates.named.*]`, `devplane gate run --name`) are evidence
+- **Only `check` decides.** Named gates (`[gates.named.*]`, `devplane gate --name`) are evidence
   and never make a change verified. Put everything that defines done in `check`.
 
 The gate standing a change shows is one of **verified**, **stale**, **failed**, **not run** or **no
@@ -55,7 +59,7 @@ max_feedback_rounds = 2
 
 ```sh
 devplane check        # does it parse, does all it names exist, is it safe
-devplane gate run     # run check here, now, and exit on the verdict
+devplane gate         # run check here, now, and exit on the verdict
 ```
 
 Gates:
@@ -130,8 +134,28 @@ devplane change review <id>              # by risk, per [review] roles
 devplane change review <id> --by intent  # grouped by the run that wrote it
 ```
 
-The review leads with **checks weakened or changed** (added skip markers, deleted test files, edits
-to the gates or CI configuration), because an agent stuck on a red test can make the test go away.
+The review leads with **checks weakened or changed**, because an agent stuck on a red test can make
+the test go away. Each row says what it matched, and is one of three kinds:
+
+| Kind | What the change's own diff did |
+|---|---|
+| check weakened | added a skip marker (`it.skip(`, `#[ignore`, `@pytest.mark.skip`, …); in a test file, removed an assertion with none in its place, added one that cannot fail (`assert True`, `expect(true)`), or changed a tolerance (`rel=`, `atol=`, `toBeCloseTo(`, …); anywhere but prose, added a lint or type suppression (`@ts-ignore`, `eslint-disable`, `# noqa`, `# type: ignore`, `#[allow(`, `//nolint`) |
+| test deleted | deleted a test file, or removed a test from a file that stays |
+| gate changed | edited what defines passing: `devplane.toml`, CI, `justfile`, `Makefile`, pre-commit, the test runner's, a linter's, the type checker's or coverage configuration, `package.json` scripts, a `Cargo.toml` profile, or a script a declared gate runs — or masked a failure there (`\|\| true`, `continue-on-error: true`, `--skip`, `-k "not`) |
+
+Only lines the change added (or removed) count: a marker already in the base never does. These are
+signals from the diff text, not verdicts.
+
+*Verified* is still the `check` gate's exit against the tree; a weakened check makes it true and
+insufficient, and every surface says so beside the green: **verified · 1 check weakened**. While any
+row is unseen, **Review** is the change's primary action and offering is refused. Mark a row read in
+the review, or:
+
+```sh
+devplane change review <id> --seen tests/login.test.ts
+```
+
+A mark records that a person read it — never when — and lapses if the row's matched text changes.
 Then the files in the declared order, each with whether a declared test covers it. The
 [workbench](@/docs/workbench.md#the-review) shows the same review as a diff.
 
@@ -146,9 +170,15 @@ devplane change finish <id>   # accept; records the basis, removes nothing
 devplane change archive <id>  # remove the worktree; keep branch and record
 ```
 
-- **`offer`**: with `[github] pull_request = true` in your checkout, pushes and runs `gh pr create`
-  (a draft by default); without it, prints the exact `git push` and `gh pr create` lines. It refuses a
-  worktree with uncommitted changes or a branch with no commits past its base.
+- **`offer`**: with `[github] pull_request = true` in your checkout, pushes and opens the pull
+  request under your GitHub sign-in (a draft by default); without it, prints the exact `git push`
+  line and the address of GitHub's compare page for the branch. It refuses,
+  first, while any weakened-check row is unseen — naming every one and the command that marks it
+  read, with exit status `3` — then a worktree with uncommitted changes or a branch with no commits
+  past its base. The certificate states the weakened check either way.
+- `offer`, `finish`, `archive` and `review --seen` are refused from inside an agent's session, by the
+  same check that stops an agent answering its own permission. It narrows the hole and does not close
+  it: an agent that unsets the variable, or calls the host with its token, is not stopped by it.
 - **`finish`** records why the change counts as done: *gates passed*, *gates passed, stale*, *no gate
   declared*, or *finished by hand*. They never render alike.
 - **`archive`** refuses uncommitted or unmerged work unless told otherwise (`--discard-uncommitted`,
@@ -163,7 +193,7 @@ draft        = true
 ready_label  = "devplane:ready"
 ```
 
-Checks on an offered pull request are polled through your own `gh`; a red one becomes a `ci_red` item
+Checks on an offered pull request are polled with your GitHub sign-in; a red one becomes a `ci_red` item
 even after every session has ended. `devplane change start --issue 7` starts from an issue, whose
 body reaches the agent marked as untrusted text.
 
@@ -173,7 +203,7 @@ A branch you made by hand joins the same loop with `devplane change adopt <branc
 
 ```sh
 devplane change export <id> > cert.md  # paste into the pull request
-devplane --json change export <id>     # same facts as an in-toto statement
+devplane change export <id> --json     # same facts as an in-toto statement
 ```
 
 The Gates view's **Copy as markdown** gives the same bytes. The certificate names the repository, the
@@ -198,5 +228,5 @@ about your code.
 
 ## Next
 
-- [Working to a specification](@/docs/specs.md) — ticked vs verified tasks, and the Spec Kit hook.
+- [Working to a specification](@/docs/specs.md) — ticked tasks against checked ones, and the Spec Kit hook.
 - [Configuration](@/docs/configuration.md) — every key used above.

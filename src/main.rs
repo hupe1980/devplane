@@ -4,11 +4,10 @@
 //! This file is the argument parser; the commands live in `devplane::cli` so
 //! tests can drive them directly.
 
-use anyhow::Result;
 use clap::Parser;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     // The completion helper is answered before clap sees the arguments: a
     // command clap does not know about cannot leak into the completion scripts
     // `clap_complete` generates (a hidden subcommand still would).
@@ -19,7 +18,16 @@ async fn main() -> Result<()> {
             .is_some_and(|a| a == devplane::cli::COMPLETE_ARG)
         && let Some(what) = args.next()
     {
-        return devplane::cli::completions::cmd_complete(&what.to_string_lossy()).await;
+        if let Err(e) = devplane::cli::completions::cmd_complete(&what.to_string_lossy()).await {
+            std::process::exit(devplane::cli::report_error(&e, false));
+        }
+        return;
     }
-    devplane::cli::run(devplane::cli::Cli::parse()).await
+    let cli = devplane::cli::Cli::parse();
+    // Read before the command consumes the arguments: an error under `--json`
+    // is printed as JSON.
+    let json = cli.json();
+    if let Err(e) = devplane::cli::run(cli).await {
+        std::process::exit(devplane::cli::report_error(&e, json));
+    }
 }

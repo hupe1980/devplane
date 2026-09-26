@@ -425,6 +425,62 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
     );
 }
 
+/// The page renders agent-written text and holds the token, so it may reach
+/// no other origin, tell no linked page where it came from, and be framed by
+/// nothing.
+#[tokio::test]
+async fn the_page_is_served_confined_to_this_host() {
+    let (addr, _token, c) = boot(Policy::default()).await;
+    let r = c.get(format!("http://{addr}/")).send().await.unwrap();
+    let h = r.headers();
+    let csp = h["content-security-policy"].to_str().unwrap();
+    for part in [
+        "default-src 'self'",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+    ] {
+        assert!(csp.contains(part), "{csp}");
+    }
+    assert_eq!(h["referrer-policy"], "no-referrer");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+}
+
+/// Vendor settings are read by the agent they configure, so the token they
+/// carry writes telemetry and opens nothing else — not the inbox, not an
+/// answer, not a trust.
+#[tokio::test]
+async fn the_telemetry_token_opens_only_the_telemetry_routes() {
+    let (addr, token, c) = boot(Policy::default()).await;
+    let ingest = devplane::config::ingest_token(&token);
+    assert_ne!(ingest, token);
+    let otel = c
+        .post(format!("http://{addr}/devplane/otel/v1/logs"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {ingest}"))
+        .body(r#"{"resourceLogs":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(otel.status(), 401, "the telemetry route accepts it");
+    for path in ["/api/board", "/api/inbox"] {
+        let r = c
+            .get(format!("http://{addr}{path}"))
+            .header("authorization", format!("Bearer {ingest}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "{path} refuses the telemetry token");
+    }
+    let r = c
+        .post(format!("http://{addr}/api/projects/trust"))
+        .header("authorization", format!("Bearer {ingest}"))
+        .json(&serde_json::json!({"path": "/tmp"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "trust refuses the telemetry token");
+}
+
 #[tokio::test]
 async fn telemetry_gives_the_run_its_cost_and_context() {
     let (addr, token, c, state) = boot_with_state(Policy::default()).await;
@@ -437,8 +493,12 @@ async fn telemetry_gives_the_run_its_cost_and_context() {
     // OTLP/HTTP JSON as Claude Code exports it: 64-bit integers are strings.
     c.post(format!("http://{addr}/devplane/otel/v1/logs"))
         .header("content-type", "application/json")
-        // The bearer `observe::connect` writes into `OTEL_EXPORTER_OTLP_HEADERS`.
-        .header("authorization", format!("Bearer {token}"))
+        // The bearer `observe::connect` writes into `OTEL_EXPORTER_OTLP_HEADERS`:
+        // the telemetry-only one.
+        .header(
+            "authorization",
+            format!("Bearer {}", devplane::config::ingest_token(&token)),
+        )
         .body(
             r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{
                 "body":{"stringValue":"claude_code.api_request"},
@@ -1516,7 +1576,10 @@ async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() 
             ProjectForge {
                 project_id: ProjectId::new("p1"),
                 repo: Some("acme/app".into()),
+                host: Some("github.com".into()),
                 fetched_at: jiff::Timestamp::now(),
+                issues_total: 2,
+                pull_requests_total: 2,
                 issues: vec![
                     ForgeIssue {
                         number: 1,
@@ -1580,12 +1643,12 @@ async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() 
     {
         let mut f = state.forge.lock().await;
         f.projects.get_mut(&ProjectId::new("p1")).unwrap().error =
-            Some("gh: connection refused".into());
+            Some("GitHub unreachable: could not connect".into());
     }
     let v = get_json(&c, &addr, "/api/forge", &token).await;
     let stale = v["stale"].as_array().expect("stale");
     assert_eq!(stale.len(), 1, "the view names what it could not read");
-    assert_eq!(stale[0]["error"], "gh: connection refused");
+    assert_eq!(stale[0]["error"], "GitHub unreachable: could not connect");
     assert!(stale[0]["last_good"].is_string(), "and when it last could");
     assert_eq!(
         v["issues"].as_array().unwrap().len(),
@@ -1594,8 +1657,16 @@ async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() 
     );
     let board = get_json(&c, &addr, "/api/board", &token).await;
     assert_eq!(
-        board["forge"]["p1"]["stale"], "gh: connection refused",
+        board["forge"]["p1"]["stale"], "GitHub unreachable: could not connect",
         "and the heading's counts carry why they might be wrong"
+    );
+    assert_eq!(
+        (
+            board["summary"]["open_issues"].as_u64(),
+            board["summary"]["forge_stale"].as_u64()
+        ),
+        (Some(0), Some(1)),
+        "last-good numbers are said as stale, not summed as current"
     );
     {
         let mut f = state.forge.lock().await;
@@ -1614,7 +1685,7 @@ async fn the_forge_serves_both_halves_in_one_answer_with_what_needs_you_first() 
 }
 
 /// A project ruled out of the forge is re-checked, and says why: the ruling
-/// rests on parsing another program's error text and a remote can be added later.
+/// is a reading of the git remote, and a remote can be added later.
 #[tokio::test]
 async fn a_project_ruled_out_of_the_forge_is_re_checked_and_says_why() {
     use devplane::core::ProjectId;
@@ -2435,12 +2506,12 @@ fn an_empty_list_names_the_vendors_it_cannot_see() {
         (
             "installed and quiet",
             "/bin/echo",
-            "No Claude Code sessions are running",
+            "No agent sessions are running",
         ),
         (
             "not installed at all",
             "/nonexistent/claude",
-            "Claude Code was not found on this machine",
+            "No `claude` binary was found",
         ),
     ];
 
@@ -2483,6 +2554,11 @@ fn an_empty_list_names_the_vendors_it_cannot_see() {
             text.contains("not listed here"),
             "`{what}`: the unwatchable vendors are named without saying what that means"
         );
+        assert!(
+            !text.contains("using /"),
+            "`{what}`: the empty list prints which binary it found, which says nothing \
+             about why the list is empty:\n{text}"
+        );
     }
 }
 
@@ -2500,7 +2576,7 @@ fn core_vendors_driven_only() -> Vec<String> {
 #[tokio::test]
 async fn telemetry_without_the_token_is_refused_on_every_signal() {
     let (addr, token, c) = boot(Policy::default()).await;
-    for signal in ["logs", "traces", "metrics"] {
+    for signal in ["logs", "traces"] {
         let url = format!("http://{addr}/devplane/otel/v1/{signal}");
         let anonymous = c
             .post(&url)

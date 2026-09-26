@@ -55,7 +55,10 @@ fn blocks_under(dir: &Path) -> Vec<Block> {
         let path = entry.path();
         if path.is_dir() {
             // `reference/` is fetched third-party documentation; its `toml` blocks are not ours.
-            if path.file_name().and_then(|n| n.to_str()) == Some("reference") {
+            // An `.archive-*` directory is unmaintained by declaration, and its examples
+            // describe configuration that has since been deleted.
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "reference" || name.starts_with(".archive-") {
                 continue;
             }
             out.extend(blocks_under(&path));
@@ -338,7 +341,7 @@ fn the_release_workflow_builds_every_target_the_manifest_declares() {
 /// The Spec Kit version this integration was read against is recorded as a version.
 #[test]
 fn the_spec_kit_version_this_was_read_against_is_recorded() {
-    use devplane::core::spec::SPEC_KIT_READ_AGAINST;
+    use devplane::spec::SPEC_KIT_READ_AGAINST;
 
     assert!(
         SPEC_KIT_READ_AGAINST
@@ -821,18 +824,15 @@ fn the_speckit_hook_contract_still_says_what_this_feature_relies_on() {
     assert!(
         gone.is_empty(),
         "Spec Kit's hook contract changed under this feature. Re-read \
-         {skill:?} and `devplane speckit install` before trusting it:\n  {}",
+         {skill:?} and `devplane speckit` before trusting it:\n  {}",
         gone.join("\n  ")
     );
 
     // And the event we default to is one the installed copy actually reads.
     assert!(
-        body.contains(&format!(
-            "hooks.{}",
-            devplane::core::spec::DEFAULT_HOOK_EVENT
-        )),
+        body.contains(&format!("hooks.{}", devplane::spec::DEFAULT_HOOK_EVENT)),
         "`{}` is not an event this Spec Kit version looks for",
-        devplane::core::spec::DEFAULT_HOOK_EVENT
+        devplane::spec::DEFAULT_HOOK_EVENT
     );
 }
 
@@ -1071,7 +1071,7 @@ fn a_failure_a_person_meets_never_shows_them_the_plumbing() {
     );
     let api = std::fs::read_to_string(root.join("src/api.rs")).expect("api.rs");
     assert!(
-        api.contains("devplane asks lists every question"),
+        api.contains("devplane inbox --all lists every question"),
         "answering an unknown ask does not say how to find the real ones"
     );
 }
@@ -1135,10 +1135,16 @@ fn both_inbox_surfaces_read_the_project_and_the_wait() {
 #[test]
 fn the_help_screen_lists_every_command_exactly_once() {
     use clap::CommandFactory;
-    let help = devplane::cli::Cli::command().render_help().to_string();
+    let tree = devplane::cli::Cli::command();
+    let help = tree.clone().render_help().to_string();
+    // A command this build hides (`app` without its feature) is listed nowhere.
+    let hidden = |c: &str| {
+        tree.get_subcommands()
+            .any(|s| s.get_name() == c && s.is_hide_set())
+    };
 
     for (_, commands) in devplane::cli::COMMAND_GROUPS {
-        for c in *commands {
+        for c in commands.iter().filter(|c| !hidden(c)) {
             // A listing entry: indented, the name, then whitespace or end of line.
             let entries = help
                 .lines()
@@ -1230,6 +1236,11 @@ fn the_site_and_the_binary_agree_which_group_a_command_is_in() {
 #[test]
 fn the_readme_names_as_many_commands_as_the_binary_groups() {
     const WORDS: &[(&str, usize)] = &[
+        ("twenty-eight", 28),
+        ("twenty-nine", 29),
+        ("thirty", 30),
+        ("thirty-one", 31),
+        ("thirty-two", 32),
         ("thirty-three", 33),
         ("thirty-four", 34),
         ("thirty-five", 35),

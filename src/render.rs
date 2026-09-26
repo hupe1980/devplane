@@ -82,6 +82,24 @@ pub use crate::core::BoardSummary as Summary;
 pub use crate::core::ForgeCounts;
 pub use crate::view::{BoardResponse, RunView};
 
+/// `/api/inbox`, as the terminal reads it. Deserialised whole, so a reply
+/// this build cannot read is an error rather than a silently empty inbox.
+#[derive(Debug, Deserialize)]
+pub struct InboxResponse {
+    pub items: Vec<InboxItem>,
+    #[serde(default)]
+    pub folded: Vec<InboxSummary>,
+    #[serde(default)]
+    pub inhibited: Vec<InboxInhibited>,
+    #[serde(default)]
+    pub narrowed: Option<crate::core::attention::Narrowed>,
+    #[serde(default)]
+    pub snoozed: u64,
+    /// The close ("since you last looked" and the summary under it).
+    #[serde(default)]
+    pub close: serde_json::Value,
+}
+
 /// A group of items shown as one row. Counted, never hidden: the ids are here
 /// so the group can be expanded.
 #[derive(Debug, Default, Deserialize)]

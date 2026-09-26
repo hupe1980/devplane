@@ -1,6 +1,6 @@
 <script lang="ts" module>
   export type Kind = "change" | "surface" | "action" | "project";
-  export type Entry = { kind: Kind; label: string; hint?: string; icon: string; go: () => void };
+  export type Entry = { kind: Kind; label: string; hint?: string; icon: string; go: () => void; qualifier?: import("../../wire/Qualifier").Qualifier | null };
 
   /// Letters in order; a lower score is a better match, `null` is no match.
   /// A prefix of the label, then the start of a word, then anywhere
@@ -42,11 +42,13 @@
 </script>
 
 <script lang="ts">
+  import Qualifier from "../../lib/Qualifier.svelte";
   // The command palette: changes, places, actions and projects by name,
   // floating over the current page. Fuzzy (see `score`); `>` narrows to
   // actions; every action shows its key.
-  import { api } from "../../lib/api";
-  import { all, run, help } from "../../lib/keys";
+  import { resource } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
+  import { all, run, help, spell } from "../../lib/keys";
   import { landing, listed, surfaces } from "../../lib/surfaces";
   import { go } from "../../lib/route";
   import Icon from "../../lib/ui/Icon.svelte";
@@ -57,26 +59,22 @@
     projects = null,
   }: {
     from?: string;
-    changes?: Array<{ id: string; title: string; state?: string }> | null;
+    changes?: Array<{ id: string; title: string; state?: string; qualifier?: import("../../wire/Qualifier").Qualifier | null }> | null;
     projects?: Array<{ id: string; name: string }> | null;
   } = $props();
 
   let query = $state("");
-  let unread = $state("");
-  let fetchedChanges = $state<Array<{ id: string; title: string; state?: string }> | null>(null);
-  let fetchedProjects = $state<Array<{ id: string; name: string }> | null>(null);
-  $effect(() => {
-    api<Array<{ id: string; title: string; state?: string }>>("/api/changes")
-      .then((r) => (fetchedChanges = Array.isArray(r) ? r : []))
-      .catch((e) => {
-        fetchedChanges = [];
-        unread = `The changes could not be read (${e instanceof Error ? e.message : String(e)}), so none are listed.`;
-      });
-    api<Array<{ id: string; name: string }>>("/api/projects")
-      .then((r) => (fetchedProjects = Array.isArray(r) ? r : []))
-      .catch(() => (fetchedProjects = []));
-    // A host that did not answer is said as such, not as "no changes".
-  });
+  // A host that did not answer is said as such, not as "no changes".
+  const changesRead = resource<Array<{ id: string; title: string; state?: string; qualifier?: import("../../wire/Qualifier").Qualifier | null }>>(
+    () => "/api/changes",
+    { tell: () => "devplane change list" },
+  );
+  const projectsRead = resource<Array<{ id: string; name: string }>>(() => "/api/projects", { tell: () => "devplane doctor" });
+  const fetchedChanges = $derived(Array.isArray(changesRead.data) ? changesRead.data : null);
+  const fetchedProjects = $derived(Array.isArray(projectsRead.data) ? projectsRead.data : null);
+  /// The list keys move a list on the page under the palette; they are not
+  /// commands to run from it.
+  const LIST_ACTIONS = new Set(["next", "prev", "first", "last", "open"]);
 
   const over = $derived(from.replace(/^#/, "").split("/")[0] || landing()?.id || "");
   const opensChange = $derived(surfaces().find((s) => s.link === "change"));
@@ -86,18 +84,18 @@
     for (const c of fetchedChanges ?? changes ?? []) {
       const to = opensChange?.id;
       if (!to) continue;
-      out.push({ kind: "change", icon: "change", label: c.title || c.id, hint: c.state, go: () => go(`#${to}/${encodeURIComponent(c.id)}`) });
+      out.push({ kind: "change", icon: "change", label: c.title || c.id, hint: c.state, qualifier: c.qualifier, go: () => go(`#${to}/${encodeURIComponent(c.id)}`) });
     }
     for (const s of listed()) {
       out.push({ kind: "surface", icon: s.icon ?? "right", label: `Go to ${s.title}`, go: () => go(`#${s.id}`) });
     }
     for (const b of help(over)) {
-      if (b.action === "open-palette" || b.action === "leave") continue;
+      if (b.action === "open-palette" || b.action === "leave" || LIST_ACTIONS.has(b.action)) continue;
       out.push({
         kind: "action",
         icon: "keyboard",
         label: b.label.charAt(0).toUpperCase() + b.label.slice(1),
-        hint: b.combo,
+        hint: spell(b.combo),
         go: () => {
           go(from || "");
           setTimeout(() => run(b.action, over), 0);
@@ -153,19 +151,31 @@
   <label class="field">
     <Icon name="search" size={16} />
     <!-- svelte-ignore a11y_autofocus -->
-    <input bind:value={query} onkeydown={typed} placeholder="Type a change, a place, an action — or > for actions only" aria-label="find by name" autofocus />
+    <input
+      bind:value={query}
+      onkeydown={typed}
+      placeholder="Type a change, a place, an action — or > for actions only"
+      aria-label="find by name"
+      role="combobox"
+      aria-expanded="true"
+      aria-controls="palette-matches"
+      aria-autocomplete="list"
+      aria-activedescendant={shown[at] ? `palette-opt-${at}` : undefined}
+      autofocus
+    />
   </label>
-  {#if unread}<p class="unread" role="status">{unread}</p>{/if}
-  <ul role="listbox" aria-label="matches">
+  {#if changesRead.failure && !changesRead.data}<div class="unread"><Failed what="the changes, so none are listed" failure={changesRead.failure} /></div>{/if}
+  {#if projectsRead.failure && !projectsRead.data}<div class="unread"><Failed what="the projects, so none are listed" failure={projectsRead.failure} /></div>{/if}
+  <ul role="listbox" aria-label="matches" id="palette-matches">
     {#each shown as e, i (i)}
       {#if i === 0 || shown[i - 1].kind !== e.kind}
         <li class="sec" role="presentation">{TITLES[e.kind]}</li>
       {/if}
-      <li role="option" aria-selected={i === at}>
-        <button onclick={e.go} onmouseenter={() => (at = i)}>
+      <li role="option" id="palette-opt-{i}" aria-selected={i === at}>
+        <button tabindex="-1" onclick={e.go} onmouseenter={() => (at = i)}>
           <Icon name={e.icon} size={14} />
           <span class="label">{e.label}</span>
-          {#if e.hint}<span class="hint" class:kbd={e.kind === "action"}>{e.hint}</span>{/if}
+          {#if e.hint}<span class="hint" class:kbd={e.kind === "action"}>{e.hint}</span>{/if}<Qualifier q={e.qualifier} />
         </button>
       </li>
     {/each}

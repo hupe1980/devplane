@@ -1,0 +1,4 @@
+# ts-rs writes the wire types relative to this directory. Without it, any
+# `--all-features` test run drops a stray `bindings/` at the repository root.
+[env]
+TS_RS_EXPORT_DIR = { value = "ui/src", relative = true }

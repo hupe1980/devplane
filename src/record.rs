@@ -125,6 +125,7 @@ pub async fn decided(store: &Store, env: DecidedEnvelope) -> Result<()> {
                 .unwrap_or_else(|| "policy".into()),
             reason: env.why.clone(),
             context: context.clone(),
+            call_id: None,
         }),
         _ if env.blocked => events.push(Event::Blocked {
             waiting_for: crate::core::event::WaitingFor::Permission,
@@ -259,6 +260,11 @@ pub async fn hold(
 ) -> Option<String> {
     let run = RunId::new(session.to_string());
     let id = crate::core::AskId::new(crate::core::ids::new_event_id());
+    let held_until = jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_millis(
+            i64::try_from(wait.as_millis()).unwrap_or(i64::MAX),
+        ))
+        .unwrap_or(jiff::Timestamp::MAX);
     let asked = crate::core::ask::Asked {
         kind: crate::core::ask::Kind::Permission,
         // Empty: no protocol request stands behind a watched session's ask.
@@ -267,9 +273,7 @@ pub async fn hold(
         payload: serde_json::json!({
             "tool": tool,
             "call": call,
-            "held_until": (jiff::Timestamp::now()
-                + jiff::SignedDuration::from_millis(wait.as_millis() as i64))
-            .to_string(),
+            "held_until": held_until.to_string(),
             "options": [
                 {"id": "allow", "label": "Allow"},
                 {"id": "deny", "label": "Deny"},
@@ -300,7 +304,10 @@ pub async fn hold(
         );
     }
 
-    let deadline = std::time::Instant::now() + wait;
+    // The wall clock, like the orphan sweep that reads `held_until`: a
+    // monotonic clock stops while the machine sleeps, so after a sleep the
+    // sweep would end a hold this loop still thought live.
+    let deadline = held_until;
     let answer = loop {
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         match store.ask(id.as_str()).await {
@@ -308,7 +315,7 @@ pub async fn hold(
             _ => {}
         }
         // One read after the deadline too, so a last-moment answer is kept.
-        if std::time::Instant::now() >= deadline {
+        if jiff::Timestamp::now() >= deadline {
             break match store.ask(id.as_str()).await {
                 Ok(Some(a)) if a.answer.is_some() => a.answer,
                 _ => None,
@@ -344,6 +351,13 @@ pub async fn hold(
         } else {
             behavior = behavior_of(a.answer.as_ref());
         }
+    }
+    // Read by the process that carries it back: only now has it been
+    // delivered, and only now does the row say so.
+    if behavior.is_some() {
+        let _ = store
+            .set_ask_delivery(id.as_str(), &crate::core::ask::Delivery::Live)
+            .await;
     }
     behavior
 }

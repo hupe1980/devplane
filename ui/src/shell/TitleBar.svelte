@@ -3,6 +3,7 @@
   // side-region toggles. The find box is a button that opens the palette, so
   // there is one way to find things.
   import Icon from "../lib/ui/Icon.svelte";
+  import { spell } from "../lib/keys";
 
   let {
     crumbs,
@@ -22,7 +23,6 @@
     togglePanel: () => void;
   } = $props();
 
-  const mod = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
 </script>
 
 <header class="title">
@@ -41,17 +41,17 @@
   <button class="find" onclick={find} aria-label="find anything — changes, sessions, commands">
     <Icon name="search" size={14} />
     <span>Find a change, a session, a command…</span>
-    <kbd>{mod}K</kbd>
+    <kbd>{spell("Mod+k")}</kbd>
   </button>
 
   <div class="acts">
-    <button class="primary" onclick={create} title="Start a new change (Alt+N)">
+    <button class="primary" onclick={create} title="Start a new change ({spell('Alt+n')})">
       <Icon name="plus" size={14} /> New change
     </button>
-    <button class="icon" class:on={sideOpen} onclick={toggleSide} title="Sidebar ({mod}B)" aria-label="toggle the sidebar" aria-pressed={sideOpen}>
+    <button class="icon" class:on={sideOpen} onclick={toggleSide} title="Sidebar ({spell('Mod+b')})" aria-label="toggle the sidebar" aria-pressed={sideOpen}>
       <Icon name="sidebar" size={16} />
     </button>
-    <button class="icon" class:on={panelOpen} onclick={togglePanel} title="Activity panel ({mod}J)" aria-label="toggle the activity panel" aria-pressed={panelOpen}>
+    <button class="icon" class:on={panelOpen} onclick={togglePanel} title="Activity panel ({spell('Mod+j')})" aria-label="toggle the activity panel" aria-pressed={panelOpen}>
       <Icon name="panel" size={16} />
     </button>
   </div>

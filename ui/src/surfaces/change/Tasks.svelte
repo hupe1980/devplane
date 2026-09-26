@@ -1,45 +1,46 @@
 <script lang="ts">
   // The specification's tasks against the work: ticked, sent to which run, and
-  // verified. Ticked (the agent's word) and verified (closed before the latest
-  // passing gate) are two columns, never one figure.
+  // seen by a passing check. Ticked (the agent's word) and seen by a passing
+  // check (its run closed before a check that passed) are two columns, never
+  // one figure. A task is never called verified — only a change is.
   import { api } from "../../lib/api";
+  import { resource, failure } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
+  import { writer } from "../../lib/write.svelte";
   import Plan from "./Plan.svelte";
   import type { Detail } from "./types";
   import type { Step } from "./pair";
 
-  let { d, lastRun }: { d: Detail; lastRun: string } = $props();
+  let { d, lastRun, reload = async () => {} }: { d: Detail; lastRun: string; reload?: () => Promise<void> } = $props();
 
-  let steps = $state<Step[]>([]);
-  let said = $state("");
-  $effect(() => {
-    const want = lastRun;
-    steps = [];
-    if (!want) return;
-    let live = true;
-    api<{ plan?: Step[] }>(`/api/runs/${encodeURIComponent(want)}`)
-      .then((r) => {
-        if (live) steps = r?.plan ?? [];
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
+  const run = $derived(lastRun);
+  const read = resource<{ plan?: Step[] }>(() => (run ? `/api/runs/${encodeURIComponent(run)}` : null), {
+    tell: () => `devplane show ${run}`,
   });
+  const steps = $derived(read.data?.plan ?? []);
+  /// Loaded (or nothing to load): until then the plan's counts are not shown.
+  const planKnown = $derived(!run || read.phase !== "loading");
+  let said = $state("");
+  const pending = writer();
 
   const sent = $derived(
     (d.run_rows ?? []).find((r) => r.id === lastRun)?.sent ?? d.run_rows?.[d.run_rows.length - 1]?.sent ?? [],
   );
 
   async function decide(verb: "tell" | "accept", run: string) {
-    try {
-      const id = encodeURIComponent(d.id);
-      const route = verb === "tell" ? `/api/changes/${id}/drift/tell` : `/api/changes/${id}/drift/accept`;
-      await api(route, { method: "POST", body: JSON.stringify({ run }) });
-      said = verb === "tell" ? "Told — the run was handed the files that changed." : "Accepted — the change now works to what the run saw.";
-    } catch (e) {
-      said = `That did not land: ${e instanceof Error ? e.message : String(e)}`;
-    }
+    said = "";
+    await pending.run(verb === "tell" ? "Telling the run" : "Accepting", async () => {
+      try {
+        const id = encodeURIComponent(d.id);
+        const route = verb === "tell" ? `/api/changes/${id}/drift/tell` : `/api/changes/${id}/drift/accept`;
+        await api(route, { method: "POST", body: JSON.stringify({ run }) });
+        said = verb === "tell" ? "Told — the run was handed the files that changed." : "Accepted — the change now works to what the run saw.";
+        await reload();
+      } catch (e) {
+        said = `That did not land: ${failure(e).says}`;
+      }
+    });
   }
 </script>
 
@@ -48,7 +49,10 @@
     <div class="counts">
       <div><span class="big">{d.counts.tasks}</span><span class="lbl">tasks</span></div>
       <div><span class="big">{d.counts.ticked}</span><span class="lbl">ticked by an agent</span></div>
-      <div><span class="big done">{d.counts.verified ?? "—"}</span><span class="lbl">verified by a gate</span></div>
+      <div>
+        {#if d.counts.seen_by_pass == null}<span class="big quiet">—</span><span class="lbl">no gates declared</span>
+        {:else}<span class="big">{d.counts.seen_by_pass}</span><span class="lbl">seen by a passing check</span>{/if}
+      </div>
       <p class="says">{d.counts_says}</p>
     </div>
     {#if d.counts.ticked_unsent?.length}
@@ -73,11 +77,11 @@
       {#each d.drifts ?? [] as x, i (i)}
         <div class="drift">
           <p>{x.says}</p>
-          <button onclick={() => decide("tell", x.run)}>Tell the run</button>
-          <button onclick={() => decide("accept", x.run)}>Accept what it saw</button>
+          <button disabled={!!pending.busy} onclick={() => decide("tell", x.run)}>Tell the run</button>
+          <button disabled={!!pending.busy} onclick={() => decide("accept", x.run)}>Accept what it saw</button>
         </div>
       {/each}
-      {#if said}<p class="said">{said}</p>{/if}
+      {#if pending.busy}<p class="said" role="status">{pending.busy}… {pending.elapsed}</p>{:else if said}<p class="said" role="status">{said}</p>{/if}
     </section>
   {/if}
 
@@ -85,14 +89,14 @@
     <section>
       <h2>Requirements and the tasks that cite them</h2>
       <table>
-        <thead><tr><th>requirement</th><th>tasks</th><th>ticked</th><th>verified</th><th></th></tr></thead>
+        <thead><tr><th>requirement</th><th>tasks</th><th>ticked</th><th>seen by a passing check</th><th></th></tr></thead>
         <tbody>
           {#each d.token_rows ?? [] as r (r.token)}
             <tr>
               <td class="mono">{r.token}</td>
               <td>{r.tasks}</td>
               <td>{r.ticked}</td>
-              <td class="done">{r.verified ?? "—"}</td>
+              <td class:quiet={r.seen_by_pass == null}>{r.seen_by_pass ?? "no gates"}</td>
               <td class="quiet">{r.says ?? ""}</td>
             </tr>
           {/each}
@@ -103,7 +107,12 @@
 
   <section>
     <h2>What the latest run was sent, and its own plan</h2>
-    <Plan tasks={sent.map((t) => ({ text: t.text, path: t.path, line: t.line }))} {steps} />
+    {#if read.failure}<Failed what="the run's own plan" failure={read.failure} at={read.at} stale={read.data !== null} />{/if}
+    {#if planKnown}
+      <Plan tasks={sent.map((t) => ({ text: t.text, path: t.path, line: t.line }))} {steps} />
+    {:else}
+      <p class="quiet" aria-busy="true">Reading the run's own plan…</p>
+    {/if}
   </section>
 
   {#if (d.run_rows ?? []).length > 1}
@@ -245,7 +254,6 @@
   .outline .h2 {
     color: var(--ink);
   }
-  .done { color: var(--done); }
   .quiet { color: var(--faint); }
   .n { color: var(--faint); font-weight: 400; }
 </style>

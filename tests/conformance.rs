@@ -75,7 +75,7 @@ async fn collect(
 #[tokio::test]
 async fn a_prompt_runs_a_turn_and_streams_the_answer() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .expect("spawning the agent");
 
@@ -103,7 +103,7 @@ async fn a_prompt_runs_a_turn_and_streams_the_answer() {
 #[tokio::test]
 async fn a_tool_call_is_reported() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -138,7 +138,7 @@ async fn a_tool_call_is_reported() {
 #[tokio::test]
 async fn a_stop_answers_a_pending_permission_before_cancelling_the_turn() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -175,7 +175,7 @@ async fn a_stop_answers_a_pending_permission_before_cancelling_the_turn() {
 #[tokio::test]
 async fn a_permission_request_blocks_until_it_is_answered() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -222,7 +222,7 @@ async fn a_permission_request_blocks_until_it_is_answered() {
 #[tokio::test]
 async fn refusing_a_permission_also_lets_the_turn_finish() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -247,7 +247,7 @@ async fn refusing_a_permission_also_lets_the_turn_finish() {
 #[tokio::test]
 async fn a_refusal_is_reported_as_the_stop_reason() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -264,7 +264,7 @@ async fn a_refusal_is_reported_as_the_stop_reason() {
 #[tokio::test]
 async fn several_turns_run_on_one_session() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -289,7 +289,7 @@ async fn an_agent_that_needs_a_login_says_how() {
     let mut spec = echo_agent();
     spec.command = format!("env DEVPLANE_ECHO_NEEDS_AUTH=1 {}", spec.command);
 
-    let (session, mut rx) = devplane::acp::spawn(&spec, std::env::temp_dir(), &[])
+    let (session, mut rx) = devplane::acp::spawn(&spec, std::env::temp_dir(), &[], None)
         .await
         .expect("the fixture starts");
     let events = collect(&mut rx, |e| {
@@ -321,7 +321,7 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
     spec.command = format!("env DEVPLANE_ECHO_NO_RESUME=1 {}", spec.command);
     let cwd = std::env::temp_dir();
 
-    let (session, mut rx) = devplane::acp::spawn(&spec, cwd.clone(), &[])
+    let (session, mut rx) = devplane::acp::spawn(&spec, cwd.clone(), &[], None)
         .await
         .expect("the fixture starts");
     let ready = collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -335,7 +335,7 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
     session.stop();
 
     // Same id, a second connection: continued rather than started again.
-    let (again, mut rx2) = devplane::acp::resume(&spec, cwd, id.clone(), &[])
+    let (again, mut rx2) = devplane::acp::resume(&spec, cwd, id.clone(), &[], None)
         .await
         .expect("the fixture starts again");
     let ready2 = collect(&mut rx2, |e| {
@@ -356,7 +356,7 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
 async fn a_missing_agent_fails_loudly_rather_than_hanging() {
     let _serial = common::one_agent_at_a_time();
     let spec = AgentSpec::new("nope", "nope", "/definitely/not/an/agent --acp");
-    match devplane::acp::spawn(&spec, scratch(), &[]).await {
+    match devplane::acp::spawn(&spec, scratch(), &[], None).await {
         Err(e) => assert!(!e.to_string().is_empty()),
         Ok((session, mut events)) => {
             // Some transports fail only once the process is reaped.
@@ -379,7 +379,7 @@ async fn a_missing_agent_fails_loudly_rather_than_hanging() {
 #[tokio::test]
 async fn a_cancelled_turn_is_acknowledged_rather_than_timed_out() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -412,7 +412,7 @@ async fn a_cancelled_turn_is_acknowledged_rather_than_timed_out() {
 #[tokio::test]
 async fn a_question_reaches_a_person_and_the_answer_reaches_the_agent() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -466,7 +466,7 @@ async fn a_question_reaches_a_person_and_the_answer_reaches_the_agent() {
 #[tokio::test]
 async fn a_typed_answer_reaches_the_agent_under_the_custom_field() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -494,7 +494,7 @@ async fn a_typed_answer_reaches_the_agent_under_the_custom_field() {
 #[tokio::test]
 async fn a_form_with_two_questions_keeps_them_in_order() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -532,7 +532,7 @@ async fn a_form_with_two_questions_keeps_them_in_order() {
 #[tokio::test]
 async fn an_elicitation_that_cannot_be_rendered_is_reported_not_swallowed() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -558,7 +558,7 @@ async fn an_elicitation_that_cannot_be_rendered_is_reported_not_swallowed() {
 #[tokio::test]
 async fn a_question_nobody_answers_is_cancelled_rather_than_answered_with_nothing() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -598,7 +598,7 @@ async fn a_question_nobody_answers_is_cancelled_rather_than_answered_with_nothin
 #[tokio::test]
 async fn two_answers_to_one_question_deliver_once() {
     let _serial = common::one_agent_at_a_time();
-    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[])
+    let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
@@ -645,7 +645,9 @@ async fn an_agent_asks_in_prose_when_the_client_cannot_render_a_question() {
     let mut spec = echo_agent();
     spec.command = format!("env DEVPLANE_ECHO_NO_FORMS=1 {}", spec.command);
 
-    let (session, mut events) = devplane::acp::spawn(&spec, scratch(), &[]).await.unwrap();
+    let (session, mut events) = devplane::acp::spawn(&spec, scratch(), &[], None)
+        .await
+        .unwrap();
     collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
     session.prompt("ask me a question").await.unwrap();
     let seen = collect(&mut events, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
@@ -673,7 +675,7 @@ async fn an_agent_declares_its_own_session_mode_and_it_is_not_a_vendor_s() {
     spec.command = format!("env DEVPLANE_ECHO_MODE=echo-supervised {}", spec.command);
     let cwd = std::env::temp_dir();
 
-    let (session, mut rx) = devplane::acp::spawn(&spec, cwd, &[])
+    let (session, mut rx) = devplane::acp::spawn(&spec, cwd, &[], None)
         .await
         .expect("the fixture starts");
     let seen = collect(&mut rx, |e| matches!(e, AcpEvent::ModeChanged { .. })).await;
@@ -719,7 +721,7 @@ async fn what_an_agent_supports_is_read_from_its_own_handshake() {
     };
 
     // The default fixture: both ways to continue a session.
-    let (session, mut rx) = devplane::acp::spawn(&caps(""), std::env::temp_dir(), &[])
+    let (session, mut rx) = devplane::acp::spawn(&caps(""), std::env::temp_dir(), &[], None)
         .await
         .expect("the fixture starts");
     let seen = collect(&mut rx, |e| matches!(e, AcpEvent::Capabilities { .. })).await;
@@ -747,6 +749,7 @@ async fn what_an_agent_supports_is_read_from_its_own_handshake() {
         &caps("DEVPLANE_ECHO_NO_RESUME=1 DEVPLANE_ECHO_NEEDS_AUTH=1"),
         std::env::temp_dir(),
         &[],
+        None,
     )
     .await
     .expect("the fixture starts again");
@@ -770,4 +773,227 @@ async fn what_an_agent_supports_is_read_from_its_own_handshake() {
         "an agent with load-only and a sign-in must not read like one with everything"
     );
     assert_ne!(full, narrow, "two different agents produced one record");
+}
+
+/// Whether a process is still running.
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks for the process.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// The pids the fixture wrote into `dir`, once there is at least one.
+async fn pids_in(dir: &std::path::Path) -> Vec<i32> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let pids: Vec<i32> = std::fs::read_dir(dir)
+            .map(|d| {
+                d.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !pids.is_empty() || tokio::time::Instant::now() >= deadline {
+            return pids;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Every event until the session's channel closes.
+async fn drain(rx: &mut tokio::sync::mpsc::Receiver<AcpEvent>) -> Vec<AcpEvent> {
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        out.push(ev);
+    }
+    out
+}
+
+/// A stop while the agent is still in `initialize` ends the connection and
+/// the process, rather than waiting for a handshake that may never come.
+#[tokio::test]
+async fn a_stop_during_setup_tears_the_agent_down() {
+    let _serial = common::one_agent_at_a_time();
+    let pids = scratch().join("pids");
+    let (session, mut rx) = devplane::acp::spawn(
+        &echo_agent(),
+        scratch(),
+        &[
+            ("DEVPLANE_ECHO_PIDS".into(), pids.clone()),
+            ("DEVPLANE_ECHO_SLOW_INIT".into(), PathBuf::from("1")),
+        ],
+        None,
+    )
+    .await
+    .expect("spawning the agent");
+    let pid = *pids_in(&pids).await.first().expect("the agent started");
+    session.stop();
+    let started = std::time::Instant::now();
+    let seen = drain(&mut rx).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the stop waited for the handshake"
+    );
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, AcpEvent::Ended { error: None })),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|e| matches!(e, AcpEvent::Ready { .. })),
+        "{seen:?}"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while alive(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!alive(pid), "the agent outlived its stopped session");
+}
+
+/// An agent that offers `session/close` is told the session is closed before
+/// the connection goes.
+#[tokio::test]
+async fn a_stop_closes_the_session_when_the_agent_offers_it() {
+    let _serial = common::one_agent_at_a_time();
+    let dir = scratch();
+    let (session, mut rx) = devplane::acp::spawn(&echo_agent(), dir.clone(), &[], None)
+        .await
+        .unwrap();
+    let ready = collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
+    let id = ready
+        .iter()
+        .find_map(|e| match e {
+            AcpEvent::Ready { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("ready");
+    session.stop();
+    let seen = drain(&mut rx).await;
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, AcpEvent::Closed { sent: true })),
+        "{seen:?}"
+    );
+    let closed = std::fs::read_to_string(dir.join(".devplane/closed.log")).unwrap_or_default();
+    assert_eq!(closed.trim(), id, "the agent never heard `session/close`");
+    let ended = seen
+        .iter()
+        .filter(|e| matches!(e, AcpEvent::Ended { .. }))
+        .count();
+    assert_eq!(ended, 1, "the ending is reported once: {seen:?}");
+}
+
+/// An agent withdrawing its own permission request (`$/cancel_request`) is
+/// reported as that, and nothing is left waiting on an answer.
+#[tokio::test]
+async fn a_withdrawn_permission_is_reported_and_forgotten() {
+    let _serial = common::one_agent_at_a_time();
+    let (session, mut rx) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
+        .await
+        .unwrap();
+    collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
+    session.prompt("withdraw it").await.unwrap();
+    let turn = collect(&mut rx, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
+    let asked = turn
+        .iter()
+        .find_map(|e| match e {
+            AcpEvent::PermissionRequested { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("the agent asked");
+    assert!(
+        turn.iter().any(
+            |e| matches!(e, AcpEvent::PermissionWithdrawn { request_id } if *request_id == asked)
+        ),
+        "{turn:?}"
+    );
+    assert!(
+        turn.iter()
+            .any(|e| matches!(e, AcpEvent::Text(t) if t.contains("withdrew the request"))),
+        "{turn:?}"
+    );
+    assert!(session.waiting().await.is_empty(), "still parked");
+    assert!(session.decide(&asked, None).await.is_err());
+    session.stop();
+}
+
+/// A diff in a tool call's content is kept, and the whole one wins over the
+/// fragment that came first.
+#[tokio::test]
+async fn a_tool_calls_diff_arrives_whole_before_the_call_ends() {
+    let _serial = common::one_agent_at_a_time();
+    let (session, mut rx) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
+        .await
+        .unwrap();
+    collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
+    session.prompt("diff-edit please").await.unwrap();
+    let turn = collect(&mut rx, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
+    let diffs: Vec<(usize, &devplane::acp::ReportedDiff)> = turn
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            AcpEvent::Diffs { call_id, diffs } if call_id == "d1" => Some((i, &diffs[0])),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(diffs.len(), 2, "{turn:?}");
+    let (at, last) = diffs[1];
+    assert_eq!(last.new_text, "two\n");
+    assert_eq!(last.old_text.as_deref(), Some("one\n"));
+    let completed = turn
+        .iter()
+        .position(|e| {
+            matches!(e, AcpEvent::Tool { call, status } if call.id == "d1"
+                && status.as_deref() == Some("completed"))
+        })
+        .expect("the call completed");
+    assert!(at < completed, "the diff came after the ending");
+    session.stop();
+}
+
+/// Devplane's MCP server is offered on `session/new` and again on
+/// `session/resume`, as a stdio server with its own environment.
+#[tokio::test]
+async fn devplanes_mcp_server_is_offered_on_new_and_on_resume() {
+    let _serial = common::one_agent_at_a_time();
+    let dir = scratch();
+    let offer = devplane::acp::McpOffer {
+        name: "devplane".into(),
+        command: PathBuf::from("/usr/local/bin/devplane"),
+        args: vec!["mcp".into()],
+        env: vec![("DEVPLANE_CHANGE".into(), "chg-1".into())],
+    };
+    let offered = |dir: &std::path::Path| -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(dir.join(".devplane/mcp.json")).unwrap_or_default(),
+        )
+        .unwrap_or_default()
+    };
+
+    let (session, mut rx) =
+        devplane::acp::spawn(&echo_agent(), dir.clone(), &[], Some(offer.clone()))
+            .await
+            .unwrap();
+    let ready = collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
+    let id = ready
+        .iter()
+        .find_map(|e| match e {
+            AcpEvent::Ready { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let v = offered(&dir);
+    assert_eq!(v[0]["name"], "devplane", "{v}");
+    assert_eq!(v[0]["command"], "/usr/local/bin/devplane", "{v}");
+    assert_eq!(v[0]["args"], serde_json::json!(["mcp"]), "{v}");
+    assert_eq!(v[0]["env"][0]["name"], "DEVPLANE_CHANGE", "{v}");
+    session.stop();
+    drain(&mut rx).await;
+
+    std::fs::remove_file(dir.join(".devplane/mcp.json")).ok();
+    let (again, mut rx) = devplane::acp::resume(&echo_agent(), dir.clone(), id, &[], Some(offer))
+        .await
+        .unwrap();
+    collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
+    assert_eq!(offered(&dir)[0]["args"], serde_json::json!(["mcp"]));
+    again.stop();
 }

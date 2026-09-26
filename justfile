@@ -79,7 +79,7 @@ channels:
 notes:
     @if [ -d concepts ]; then bash scripts/concepts-check.sh; else echo "skipped: notes absent (concepts/ is gitignored and not in this checkout)"; fi
     @if [ -d concepts/reference ]; then bash scripts/verify-claims.sh; else echo "skipped: notes absent (concepts/reference/ is gitignored; \`just reference\` fetches it)"; fi
-    cargo test --locked --test documentation --test library -- --ignored
+    cargo test --locked --test documentation -- --ignored
 
 # Everything that runs on a clean clone: check, the dependency count, the site build and link check.
 verify: check deps site-build site-check

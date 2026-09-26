@@ -62,7 +62,7 @@ function host(): string {
 
 /// `npm run dev:fixtures`: answers `/api/*` from `ui/fixtures/` (recorded by
 /// `scripts/capture-fixtures.sh`), with no host running. A missing recording is
-/// a 404; a write answers `{}`. Dev only.
+/// a 404; a write answers `{}` unless a refusal of it was recorded. Dev only.
 function fixtures() {
   return {
     name: "devplane-fixtures",
@@ -71,7 +71,6 @@ function fixtures() {
         const url = new URL(req.url ?? "/", "http://x");
         if (!url.pathname.startsWith("/api/")) return next();
         res.setHeader("content-type", "application/json");
-        if (req.method !== "GET") return res.end("{}");
         const parts = url.pathname.slice(5).split("/");
         const name =
           parts.length === 1
@@ -81,6 +80,17 @@ function fixtures() {
               : `${parts[2]}-${parts[1]}`;
         // @ts-expect-error — `@types/node` is not installed, on purpose (see the top of this file).
         const { readFile } = await import("node:fs/promises");
+        // A write answers `{}`, unless its refusal was recorded (an offer the
+        // host refused), which answers as the host did: 409 with its body.
+        if (req.method !== "GET") {
+          try {
+            const body = await readFile(new URL(`./fixtures/${name}.json`, import.meta.url));
+            if (String(body).includes('"refused"')) res.statusCode = 409;
+            return res.end(body);
+          } catch {
+            return res.end("{}");
+          }
+        }
         try {
           res.end(await readFile(new URL(`./fixtures/${name}.json`, import.meta.url)));
         } catch {

@@ -25,17 +25,18 @@ impl AgentSpec {
 
 /// The agents Devplane knows about out of the box, pinned to exact `x.y.z`
 /// versions: `@0.76` is a range, and `npx` would fetch whatever is newest.
+/// The pins match the ACP Registry index read on 2026-09-25.
 pub fn builtin() -> Vec<AgentSpec> {
     vec![
         AgentSpec::new(
             "claude",
             "Claude Code",
-            "npx -y @agentclientprotocol/claude-agent-acp@0.79.0",
+            "npx -y @agentclientprotocol/claude-agent-acp@0.81.2",
         ),
         AgentSpec::new(
             "codex",
             "Codex",
-            "npx -y @agentclientprotocol/codex-acp@1.12.0",
+            "npx -y @agentclientprotocol/codex-acp@1.13.1",
         ),
         // The registry distributes OpenCode as a binary, launched as
         // `opencode acp`; there is no `npx` entry to pin.
@@ -45,12 +46,12 @@ pub fn builtin() -> Vec<AgentSpec> {
         AgentSpec::new(
             "copilot",
             "GitHub Copilot",
-            "npx -y @github/copilot@1.0.86 --acp",
+            "npx -y @github/copilot@1.0.88 --acp",
         ),
         AgentSpec::new(
             "gemini",
             "Gemini CLI",
-            "npx -y @google/gemini-cli@0.60.0 --acp",
+            "npx -y @google/gemini-cli@0.61.0 --acp",
         ),
     ]
 }

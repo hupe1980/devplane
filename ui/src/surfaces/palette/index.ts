@@ -1,5 +1,5 @@
 import { register } from "../../lib/surfaces";
-import { bindList, onAction } from "../../lib/keys";
+import { onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
 import Palette from "./Palette.svelte";
 
@@ -19,7 +19,8 @@ onAction("leave", (surface) => {
   from = "";
   return true;
 });
-bindList("palette");
+// No list keys in the registry: focus stays in the palette's field, which
+// takes ↑, ↓ and Enter itself, so a binding here could never fire.
 
 register({
   id: "palette",

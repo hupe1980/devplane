@@ -29,7 +29,8 @@ group = "reference"
   │ acp      the client for every driven agent  │
   │ observe  OTLP, the roster, OpenCode's feed  │
   │ change   worktrees, gates, offers           │
-  │ git/gh   the git and gh CLIs                │
+  │ git      the git CLI                        │
+  │ github   GitHub's API, its own sign-in       │
   │ web      the workbench, embedded            │
   └─────────────────────────────────────────────┘
            ▲ HTTP + SSE
@@ -70,16 +71,18 @@ A second instance is a second home: `DEVPLANE_HOME=/tmp/vp devplane serve --port
 ## The purity rule
 
 `src/core/` may not reach the outside world: no `async fn`, no `.await`, no runtime, no database, no
-HTTP. `tests/purity.rs` fails the build on a violation. The one allowance is a synchronous read of a
-small local file (`config`, `policy_cache`), which is how the hook reads a project's rules.
+HTTP, no clock and no file system. The clock and files are read at the edge and passed in.
+`tests/purity.rs` fails the build on a violation.
 
 This is what keeps state rebuildable by replay, the inbox correct after a restart, and the permission
 policy unable to fail open by waiting.
 
 ## The store
 
-SQLite with WAL and FTS5, in one file. A schema change moves the old file aside
-(`devplane.v<n>.bak`) instead of migrating it. `sqlite3 ~/.devplane/devplane.db` opens it.
+SQLite with WAL and FTS5, in one file (schema version 11). A schema change moves the old file aside
+as `devplane.v<n>.<time>.bak` instead of migrating it, and never deletes one that holds anything.
+`sqlite3 ~/.devplane/devplane.db` opens it. `~/.devplane` is mode `0700`; the store, the token and
+the other files in it are `0600`.
 
 | Rows | What | Re-derivable? |
 |---|---|---|
@@ -91,19 +94,21 @@ SQLite with WAL and FTS5, in one file. A schema change moves the old file aside
 | `reports` | findings one project filed about another, with evidence and resolved origin | no |
 | `projection`, `channel_health`, `attention_log`, `agent_capabilities`, `looks` | the tail's mark, channel latency, inbox outcomes, what each agent advertised, when you last looked | bookkeeping |
 
-The retention sweep runs when a host starts and prunes the event log and its search index together.
+The retention sweep runs once when a host starts. Events (telemetry included) and driven agents'
+messages older than 30 days are pruned, the search index with them, and finished runs older than 7
+days. Decisions and asks are kept.
 
 ## The API
 
-HTTP + JSON on `127.0.0.1`, with Server-Sent Events for live updates. Everything under `/api` and
-`/devplane` needs the bearer token from `~/.devplane/token` (header, or `?token=` for the stream).
-`/healthz` is open, and so are the static files of the workbench, which contain no data.
+HTTP + JSON on `127.0.0.1`, with Server-Sent Events for live updates. Everything under `/api` needs
+the bearer token from `~/.devplane/token`, in the `Authorization` header only. The telemetry routes
+under `/devplane` also accept the telemetry-only token from `~/.devplane/telemetry-token`, which
+opens nothing else. `/healthz` and the workbench's static files are open and carry no data.
 
 | Route | Method | Purpose |
 |---|---|---|
 | `/healthz` | GET | `ok <version>`; proves the port is a Devplane host |
 | `/devplane/otel/v1/logs` | POST | Claude Code's OpenTelemetry log records |
-| `/devplane/otel/v1/metrics` | POST | OpenTelemetry metrics |
 | `/devplane/otel/v1/traces` | POST | GenAI-convention traces (Copilot, Codex) |
 | `/api/board` | GET | the working set (`?all=true` for everything) |
 | `/api/inbox` | GET | what needs a person |
@@ -111,7 +116,6 @@ HTTP + JSON on `127.0.0.1`, with Server-Sent Events for live updates. Everything
 | `/api/runs/{id}/rewind-gap` | GET | files a shell command named for writing |
 | `/api/runs/{id}/messages` | GET | what a driven agent said |
 | `/api/runs/{id}/snooze` | POST | quieten a run's inbox items |
-| `/api/runs/{id}/focus` | POST | raise the editor window that owns it |
 | `/api/runs/{id}/prompt` | POST | send a driven run a message; queued mid-turn |
 | `/api/asks` | GET | everything asked, and what became of each |
 | `/api/asks/{id}/answer` | POST | answer a permission or a question |
@@ -129,6 +133,7 @@ HTTP + JSON on `127.0.0.1`, with Server-Sent Events for live updates. Everything
 | `/api/changes/{id}/retry` | POST | one more feedback round past the bound |
 | `/api/changes/{id}/snooze` | POST | quieten its inbox items |
 | `/api/changes/{id}/review` | GET | the change for review: checks weakened or changed first, then files in role order |
+| `/api/changes/{id}/review/seen` | POST | mark weakened-check rows read, as a person |
 | `/api/changes/{id}/certificate` | GET | the done certificate |
 | `/api/changes/{id}/open` | POST | open its worktree in an editor or terminal (the window); the path otherwise |
 | `/api/changes/{id}/resume` | POST | reconnect to the agent's session |
@@ -140,12 +145,16 @@ HTTP + JSON on `127.0.0.1`, with Server-Sent Events for live updates. Everything
 | `/api/reports/{id}` | GET | one report |
 | `/api/reports/{id}/start` | POST | start a change in the target from it |
 | `/api/reports/{id}/resolve` | POST | reject, defer, mark fixed or discard |
-| `/api/reports/{id}/open` | POST | open a GitHub draft with your `gh`; the only route that writes to a forge |
+| `/api/reports/{id}/open` | POST | open a GitHub draft under your sign-in; the only route that writes an issue |
 | `/api/projects` | GET | registered projects |
 | `/api/specs` | GET | every project's specifications and their requirement-to-task trace |
 | `/api/projects/trust` | POST | trust a repository |
 | `/api/projects/{id}/snooze` | POST | quieten a project's GitHub items |
-| `/api/issues` | POST | a repository's open issues, read live through `gh` |
+| `/api/issues` | POST | a repository's open issues, read live from GitHub |
+| `/api/github` | GET | each GitHub host's sign-in: state, login, scopes, a pending code; never the token |
+| `/api/github/login` | POST | start the device-flow sign-in for a host, or return the one waiting |
+| `/api/github/logout` | POST | delete a host's token; says where to revoke the grant at GitHub |
+| `/api/github/refresh` | POST | a sign-in changed in another process: drop the held token, read the forge now |
 | `/api/forge` | GET | what the last GitHub poll read, per project |
 | `/api/decisions` | GET | the decision log |
 | `/api/explain` | GET | what the gate would decide about one call |
@@ -157,11 +166,9 @@ HTTP + JSON on `127.0.0.1`, with Server-Sent Events for live updates. Everything
 | `/api/quitting` | GET | what quitting would end |
 | `/api/quit` | POST | quit the host |
 | `/api/stream` | GET | Server-Sent Events |
-| `/api/rules` | GET | which projects are missing a rule |
 | `/`, `/{file}` | GET | the embedded workbench |
 
-There is no hook receiver: hooks write to the store. The telemetry endpoints need the token too, so
-no other local process can write into the record.
+There is no hook receiver: hooks write to the store.
 
 ## Recovery
 
@@ -175,8 +182,9 @@ branch and worktree untouched, with **resume** offered where the agent supports 
 
 ## The window
 
-`devplane app` runs the host in its own process and opens a WebView on
-`http://127.0.0.1:<port>/?token=…`, the address `devplane open` gives a browser. Same page, same API;
+`devplane app` runs the host inside the app's own process and opens a WebView on
+`http://127.0.0.1:<port>/?token=…`, the address `devplane open` gives a browser. The page takes the
+token from the address once, removes it, and sends it as a header from then on. Same page, same API;
 no data crosses the window's bridge. The window adds native notifications, a tray count, one global
 shortcut, `devplane://` links, and opening a worktree in an editor or terminal. It is the cargo
 feature `app`, off by default, so the CLI build carries no WebKit.
@@ -200,7 +208,8 @@ kill them for you.
 | HTTP | `axum` |
 | Store | SQLite via `sqlx`, WAL, FTS5 |
 | Telemetry | an OTLP/HTTP JSON reader |
-| Git / GitHub | the `git` and `gh` CLIs |
+| Git | the `git` CLI |
+| GitHub | its documented GraphQL and REST APIs over `reqwest` with rustls; the token in the OS credential store via `keyring` |
 | Workbench | Svelte 5 and Vite, embedded in the binary; fetches nothing from any other origin |
 | Window | Tauri 2, behind the `app` feature |
 

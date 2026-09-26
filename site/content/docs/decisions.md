@@ -18,9 +18,9 @@ devplane audit --otel            # OpenTelemetry GenAI log records on stdout
 ```
 
 ```console
-2026-09-13T18:04:11 person   gh:pr.create     https://github.com/acme/app/pull/142
+2026-09-13T18:04:11 person   github:pr.create https://github.com/acme/app/pull/142
                      ↳ offered as a draft
-2026-09-13T18:04:09 person   git:push         fix/flaky-login-a1b2c3
+2026-09-13T18:04:09 person   git:push         change/fix-the-flaky-login-test-a1b2c3
                      ↳ offered the change
 2026-09-13T18:04:02 devplane gate:run         pnpm typecheck && pnpm test -- --run
                      ↳ check passed
@@ -40,7 +40,7 @@ The same rows are in the workbench's **Ledger**, and on each change's Ledger tab
 ## What a row says
 
 The **authority**, the **action** (`agent:tool.use`, `agent:question`, `gate:run`, `git:push`,
-`gh:pr.create`, `change:archive`), the **subject**, the **outcome**, and the **reason**: not
+`github:pr.create`, `change:archive`), the **subject**, the **outcome**, and the **reason**: not
 "refused" but "refused by `Bash(rm *)`".
 
 | Authority | What it means |
@@ -58,8 +58,13 @@ leaves out `person` and `devplane` rows. With `--otel`, the authority rides on e
 
 ## Decisions are never pruned
 
-Runs, events, telemetry and transcripts are pruned on a timer. Decisions and asks are appended and
-kept.
+When a host starts, events, telemetry and transcripts older than 30 days, and finished runs older
+than 7 days, are pruned. Decisions and asks are appended and kept.
+
+An upgrade that changes the store's schema is the exception: the whole file is moved aside as
+`~/.devplane/devplane.v<n>.<time>.bak` (never deleted by Devplane) and a new store starts, so
+`devplane audit` and the Ledger start empty. The old log is still in that file, readable with
+`sqlite3`. See [Troubleshooting](@/docs/troubleshooting.md#the-ledger-is-empty-after-an-upgrade).
 
 The hook writes its decision straight to the store, so no host has to be running. If the store will
 not open, the decision goes to `~/.devplane/pending-decisions.jsonl`; `devplane doctor` counts what
@@ -72,7 +77,7 @@ A report writes up to three actions on the record of the change that filed it:
 | Action | Authority | When |
 |---|---|---|
 | `report:resolved` | `person` | answered: fixed, rejected or deferred with a reason, or a GitHub draft discarded |
-| `report:opened` | `person` | a GitHub draft opened with your own `gh`; the issue address is the reason |
+| `report:opened` | `person` | a GitHub draft opened under your GitHub sign-in; the issue address is the reason |
 | `report:delivered` | `rule` | the target's `[reports] deliver_from` named the source, so the report was handed to its live run |
 
 Filing a report writes no decision. See [Reports between projects](@/docs/reports.md).

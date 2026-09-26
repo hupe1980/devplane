@@ -200,13 +200,27 @@ fn log_to_event(name: &str, a: &Attrs) -> Option<Event> {
                 .and_then(|v| v.as_f64())
                 .map(|f| f as i64),
         }),
-        "claude_code.tool_decision" => Some(Event::PermissionDecided {
-            tool: s(a, "tool_name").unwrap_or_default(),
-            decision: s(a, "decision").unwrap_or_default(),
-            by: s(a, "source").unwrap_or_else(|| "unknown".into()),
-            reason: None,
-            context: None,
-        }),
+        "claude_code.tool_decision" => {
+            // A closed set: who decided is a fact only when the vendor names a
+            // decider this build knows. `hook` is Devplane's own gate (or
+            // another hook), which already recorded the verdict with its rule;
+            // a copy here would count it twice and lose the rule's name.
+            let by = match s(a, "source")?.as_str() {
+                "config" => "Claude Code's permission settings",
+                "user_permanent" | "user_temporary" | "user_reject" | "user_abort" => "person",
+                _ => return None,
+            };
+            Some(Event::PermissionDecided {
+                tool: s(a, "tool_name").unwrap_or_default(),
+                decision: s(a, "decision").unwrap_or_default(),
+                by: by.into(),
+                reason: None,
+                context: None,
+                // The only thing that lets a batched, late decision clear the
+                // block it is about and no other.
+                call_id: s(a, "tool_use_id"),
+            })
+        }
         // The mode changing (`Shift+Tab`, leaving plan mode, an auto-mode
         // gate), which no hook announces; a repeated mode is a no-op.
         "claude_code.permission_mode_changed" => s(a, "to_mode")
@@ -355,42 +369,42 @@ pub fn parse_traces(body: &[u8]) -> Result<Vec<OtelRecord>, serde_json::Error> {
     Ok(out)
 }
 
-/// Parses an OTLP/HTTP metrics payload, for session ids only: metrics
-/// duplicate the log records, and `connect` does not enable the exporter, so
-/// this reads what a hand-written configuration sends.
-pub fn parse_metrics_sessions(body: &[u8]) -> Vec<String> {
-    let Ok(v) = serde_json::from_slice::<Value>(body) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    collect_session_ids(&v, &mut out);
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn collect_session_ids(v: &Value, out: &mut Vec<String>) {
-    match v {
-        Value::Object(o) => {
-            if o.get("key").and_then(|k| k.as_str()) == Some("session.id")
-                && let Some(id) = o
-                    .get("value")
-                    .and_then(|x| x.get("stringValue"))
-                    .and_then(|x| x.as_str())
-            {
-                out.push(id.to_string());
-            }
-            for x in o.values() {
-                collect_session_ids(x, out);
-            }
-        }
-        Value::Array(a) => a.iter().for_each(|x| collect_session_ids(x, out)),
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    fn decision(source: Option<&str>) -> Vec<super::OtelRecord> {
+        let mut attrs = vec![
+            serde_json::json!({"key": "event.name", "value": {"stringValue": "claude_code.tool_decision"}}),
+            serde_json::json!({"key": "session.id", "value": {"stringValue": "s1"}}),
+            serde_json::json!({"key": "tool_name", "value": {"stringValue": "Bash"}}),
+            serde_json::json!({"key": "decision", "value": {"stringValue": "reject"}}),
+            serde_json::json!({"key": "tool_use_id", "value": {"stringValue": "toolu_9"}}),
+        ];
+        if let Some(src) = source {
+            attrs.push(serde_json::json!({"key": "source", "value": {"stringValue": src}}));
+        }
+        let body = serde_json::json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [
+            {"attributes": attrs}
+        ]}]}]});
+        super::parse_logs(body.to_string().as_bytes()).expect("parses")
+    }
+
+    /// Who decided is a closed set: a hook's verdict is already on the
+    /// ledger, and an unnamed or unknown decider is no decider at all.
+    #[test]
+    fn a_tool_decision_names_only_a_known_decider() {
+        assert!(decision(Some("hook")).is_empty(), "the gate recorded it");
+        assert!(decision(None).is_empty(), "never an invented decider");
+        assert!(decision(Some("something_new")).is_empty());
+        let person = decision(Some("user_reject"));
+        match &person[0].event {
+            crate::core::event::Event::PermissionDecided { by, call_id, .. } => {
+                assert_eq!(by, "person");
+                assert_eq!(call_id.as_deref(), Some("toolu_9"));
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+
     #[test]
     fn a_genai_trace_becomes_the_same_events_a_claude_log_does() {
         // The second dialect: GenAI-convention traces, one event model.
@@ -619,21 +633,5 @@ mod tests {
     #[test]
     fn garbage_is_an_error_not_a_panic() {
         assert!(parse_logs(b"not json").is_err());
-        assert!(parse_metrics_sessions(b"not json").is_empty());
-    }
-
-    #[test]
-    fn metrics_yield_their_session_ids() {
-        let body = json!({"resourceMetrics": [{"scopeMetrics": [{"metrics": [{
-            "name": "claude_code.token.usage",
-            "sum": {"dataPoints": [{
-                "asInt": "100",
-                "attributes": [attr("session.id", json!({"stringValue": "s9"}))]
-            }]}
-        }]}]}]});
-        assert_eq!(
-            parse_metrics_sessions(&serde_json::to_vec(&body).unwrap()),
-            vec!["s9".to_string()]
-        );
     }
 }

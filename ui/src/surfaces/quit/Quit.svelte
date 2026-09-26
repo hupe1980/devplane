@@ -3,6 +3,7 @@
   // is the host's (`/api/quitting`, as `devplane quit` prints it), verbatim.
   // *Keep running* hides the window and changes nothing.
   import { api } from "../../lib/api";
+  import { resource, failure } from "../../lib/resource.svelte";
   import { hideWindow } from "../../lib/frame";
   import { onAction } from "../../lib/keys";
 
@@ -11,21 +12,17 @@
     says = null,
   }: { says?: string | null } = $props();
 
-  let fetched = $state<string | null>(null);
-  let unreadable = $state("");
+  const read = resource<{ says?: string }>(() => "/api/quitting", { tell: () => "devplane quit" });
+  let refused = $state("");
   let stopping = $state(false);
-  const shown = $derived(fetched ?? says);
-
-  $effect(() => {
-    api<{ says?: string }>("/api/quitting")
-      .then((r) => {
-        fetched = r.says ?? "";
-      })
-      .catch((e) => {
-        // Unreadable is not empty: never print *this stops nothing*.
-        unreadable = `Could not read what this would stop (${e instanceof Error ? e.message : String(e)}). Quitting anyway ends anything it started.`;
-      });
-  });
+  const shown = $derived(read.data ? (read.data.says ?? "") : says);
+  // Unreadable is not empty: never print *this stops nothing*.
+  const unreadable = $derived(
+    refused ||
+      (read.failure
+        ? `Could not read what this would stop (${read.failure.says}). Quitting anyway ends anything it started.`
+        : ""),
+  );
 
   $effect(() =>
     onAction("leave", () => {
@@ -40,7 +37,7 @@
       await api("/api/quit", { method: "POST" });
     } catch (e) {
       stopping = false;
-      unreadable = `that did not land: ${e instanceof Error ? e.message : String(e)}`;
+      refused = `that did not land: ${failure(e).says}`;
     }
   }
   function keep() {

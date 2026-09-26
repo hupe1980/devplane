@@ -311,6 +311,10 @@ pub enum Event {
         /// the payload carried it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<PermissionContext>,
+        /// The tool call decided, where the source names it. A decision clears
+        /// a waiting permission only when it is about that call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
     },
     /// A question the agent asked was answered anywhere (Claude Code's
     /// `ElicitationResult`), including in the person's own terminal.
@@ -477,7 +481,7 @@ pub enum Event {
     /// The tasks sent to this run. Recorded when sent, never inferred: a run
     /// without one was sent nothing.
     TasksSent {
-        tasks: Vec<crate::core::spec::SentTask>,
+        tasks: Vec<crate::spec::SentTask>,
     },
     /// The specification's ticked boxes when the run closed, and the fingerprint
     /// of the folder, so *ticked* sits beside *sent* and plan drift is a
@@ -489,9 +493,28 @@ pub enum Event {
         /// The newest modification time among the folder's documents.
         changed_at: Option<Timestamp>,
     },
+    /// A driven agent's own report of one edit a tool call made: the diff
+    /// from the call's content. The agent's claim, labelled so — never
+    /// evidence for a gate or for *verified*; the worktree is. Keyed on the
+    /// call so review can tie hunks to it and to the decision about it.
+    EditReported {
+        call_id: String,
+        path: PathBuf,
+        /// `None` when the agent reports a new file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_text: Option<String>,
+        new_text: String,
+        /// Bytes of either side beyond the kept limit, dropped.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted_bytes: u64,
+    },
     /// Something changed that no observation describes (a change phase, a gate
     /// verdict, a snooze). Tells subscribers to ask again; applied to no run.
     Refresh,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A tool call named on an event that is not itself a tool call.
@@ -530,6 +553,7 @@ impl Event {
             | Event::Lost { .. }
             | Event::TasksSent { .. }
             | Event::SpecObserved { .. }
+            | Event::EditReported { .. }
             | Event::Refresh => Source::Host,
             _ => Source::Hook,
         }
@@ -575,6 +599,7 @@ impl Event {
             Event::Lost { .. } => "lost",
             Event::TasksSent { .. } => "tasks_sent",
             Event::SpecObserved { .. } => "spec_observed",
+            Event::EditReported { .. } => "edit_reported",
             Event::Refresh => "refresh",
         }
     }
@@ -624,10 +649,12 @@ impl Event {
 }
 
 impl EventEnvelope {
-    pub fn new(run_id: RunId, source: Source, event: Event) -> Self {
+    /// An envelope observed at `at`. [`EventEnvelope::new`] (outside the
+    /// pure half) stamps the wall clock.
+    pub fn at(run_id: RunId, source: Source, event: Event, at: Timestamp) -> Self {
         Self {
             id: crate::core::ids::new_event_id(),
-            at: Timestamp::now(),
+            at,
             run_id,
             project_id: None,
             source,

@@ -260,6 +260,7 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
             by: "auto mode".into(),
             reason: p.reason.clone().filter(|r| !r.is_empty()),
             context: p.permission_context.clone(),
+            call_id: None,
         }),
 
         "Notification" => match p.notification_type.as_deref() {
@@ -421,7 +422,7 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
 /// The same test the board and the policy use: any `git worktree add`
 /// checkout, including Claude Code's `.claude/worktrees/`.
 fn is_worktree_path(p: &std::path::Path) -> bool {
-    crate::core::project::is_worktree(p)
+    crate::repo::is_worktree(p)
 }
 
 /// Pulls the question and its options out of an `AskUserQuestion` tool input.

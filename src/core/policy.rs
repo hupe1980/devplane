@@ -4,7 +4,7 @@
 //! `Bash(rm -rf *)`), and an unreadable line is [`Verdict::Unresolved`] rather
 //! than silence — being wider only ever costs a prompt.
 
-use crate::core::command::{self, Access, FileTarget, Line, Simple, Via};
+use crate::core::command::{self, Access, ArgKind, FileTarget, Line, Simple, Via};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -248,7 +248,8 @@ impl CommandSpec {
             .first()
             .map(|p| p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase())
             .unwrap_or_default();
-        let (flags, operands) = split_flags(words.get(1..).unwrap_or(&[]));
+        let rest = normalise_flags(&program, words.get(1..).unwrap_or(&[]));
+        let (flags, operands) = split_flags(&rest);
         Self {
             program,
             flags: flags.into_iter().map(|f| f.to_ascii_lowercase()).collect(),
@@ -263,7 +264,8 @@ impl CommandSpec {
         if !wildcard(&self.program, &cmd.program) {
             return false;
         }
-        let (flags, operands) = split_flags(&cmd.args);
+        let args = normalise_flags(&cmd.program, &cmd.args);
+        let (flags, operands) = split_flags(&args);
         let letters: String = flags
             .iter()
             .filter(|f| !f.starts_with("--"))
@@ -310,6 +312,59 @@ impl CommandSpec {
         })
     }
 
+    /// The first argument the shell rewrites, when some rewriting of it could
+    /// make this rule match: `rm $F /` could be `rm -rf /`. `None` when every
+    /// argument is literal or no expansion could reach the rule.
+    fn could_match<'c>(&self, cmd: &'c Simple) -> Option<&'c str> {
+        if !wildcard(&self.program, &cmd.program) {
+            return None;
+        }
+        let opaque = cmd
+            .args
+            .iter()
+            .zip(&cmd.kinds)
+            .find(|(_, k)| **k != ArgKind::Literal)
+            .map(|(a, _)| a.as_str())?;
+        let args = normalise_flags(&cmd.program, &cmd.args);
+        // An expansion can be any words at all, flags included.
+        let items: Vec<(String, ArgKind)> = args
+            .iter()
+            .zip(cmd.kinds.iter().chain(std::iter::repeat(&ArgKind::Literal)))
+            .map(|(a, k)| (a.clone(), *k))
+            .collect();
+        let wild = items
+            .iter()
+            .any(|(a, k)| *k == ArgKind::Unknown || (*k == ArgKind::Glob && a.starts_with('-')));
+        let literal: Vec<&str> = items
+            .iter()
+            .filter(|(_, k)| *k == ArgKind::Literal)
+            .map(|(a, _)| a.as_str())
+            .collect();
+        let (flags, _) = split_flags(&literal);
+        let present = flag_set(&flags);
+        if !wild && !flag_set(&self.flags).is_subset(&present) {
+            return None;
+        }
+        // Operands in order; a rewritten word spans any run of pattern tokens.
+        let mut ended = false;
+        let operands: Vec<(String, ArgKind)> = items
+            .into_iter()
+            .filter(|(a, k)| {
+                if *k != ArgKind::Literal {
+                    return true;
+                }
+                if !ended && a == "--" {
+                    ended = true;
+                    return false;
+                }
+                ended || !a.starts_with('-') || a.len() == 1
+            })
+            .collect();
+        (0..=operands.len())
+            .any(|skip| could_tokens(&self.operands, &operands[skip..]))
+            .then_some(opaque)
+    }
+
     fn is_exact(&self) -> bool {
         !self.program.contains(['*', '?']) && !self.operands.iter().any(|t| t.contains(['*', '?']))
     }
@@ -339,6 +394,87 @@ impl CommandSpec {
                 _ => self.operands == other.operands,
             }
     }
+}
+
+/// The equivalent spellings of `rm`'s two dangerous flags, so `rm --recursive
+/// --force /` meets `Bash(rm -rf *)`. Deliberately only `rm`: this is not a
+/// general option normaliser, and a miss elsewhere is a rule to write.
+fn normalise_flags<S: AsRef<str>>(program: &str, args: &[S]) -> Vec<String> {
+    let mut ended = false;
+    args.iter()
+        .map(|a| {
+            let a = a.as_ref();
+            if program != "rm" || ended {
+                return a.to_string();
+            }
+            match a {
+                "--" => {
+                    ended = true;
+                    a.to_string()
+                }
+                "--verbose" => "-v".into(),
+                // GNU takes any unambiguous prefix of a long option: `--rec`.
+                long if long.len() > 2 && long.starts_with("--") => {
+                    let (name, value) = long[2..].split_once('=').unwrap_or((&long[2..], ""));
+                    let of = |full: &str| full.starts_with(name);
+                    match value {
+                        "" if of("recursive") => "-r".into(),
+                        "" if of("force") => "-f".into(),
+                        "" if of("dir") => "-d".into(),
+                        "never" if of("interactive") => "-f".into(),
+                        _ => a.to_string(),
+                    }
+                }
+                _ => a.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Whether some expansion of the rewritten words makes `pattern` match: an
+/// `Unknown` word spans any run of pattern tokens (none included), a glob
+/// word spans tokens it could meet.
+fn could_tokens(pattern: &[String], text: &[(String, ArgKind)]) -> bool {
+    let (p, t) = (pattern.len(), text.len());
+    // reach[i][j]: pattern[i..] can still match text[j..].
+    let mut reach = vec![vec![false; t + 1]; p + 1];
+    reach[p][t] = true;
+    for i in (0..=p).rev() {
+        for j in (0..=t).rev() {
+            if i == p && j == t {
+                continue;
+            }
+            let star = i < p && pattern[i] == "*";
+            let mut ok = false;
+            if star {
+                ok |= reach[i + 1][j] || (j < t && reach[i][j + 1]);
+            }
+            if j < t {
+                let (word, kind) = &text[j];
+                match kind {
+                    ArgKind::Unknown => {
+                        ok |= reach[i][j + 1] || (i < p && reach[i + 1][j]);
+                    }
+                    // A pattern can match several files, or none.
+                    ArgKind::Glob => {
+                        ok |= reach[i][j + 1];
+                        if i < p && !star && globs_meet(&pattern[i], word) {
+                            ok |= reach[i + 1][j + 1] || reach[i + 1][j];
+                        }
+                    }
+                    ArgKind::Literal => {
+                        ok |= i < p && !star && wildcard(&pattern[i], word) && reach[i + 1][j + 1];
+                    }
+                }
+            }
+            reach[i][j] = ok;
+        }
+    }
+    reach[0][0]
+}
+
+fn globs_meet(a: &str, b: &str) -> bool {
+    globs_intersect(a, &collapse_brackets(b))
 }
 
 struct Operand {
@@ -490,9 +626,6 @@ impl Rule {
         }
     }
 
-    pub fn is_malformed(&self) -> bool {
-        self.malformed
-    }
     pub fn is_negated(&self) -> bool {
         self.negated
     }
@@ -613,6 +746,7 @@ impl Rule {
                 t.access == Access::Write
             } else {
                 t.access == Access::Read
+                    || (restrictive && t.access == Access::Named)
                     || (restrictive && t.access == Access::Write && t.via == Via::Command)
             };
             if !governs {
@@ -626,6 +760,55 @@ impl Rule {
             }
         }
         false
+    }
+
+    /// Why this restrictive path rule could reach a target the reader cannot
+    /// name exactly (`cat $F`), or one an unknown program may write
+    /// (`sed -i … x` under `Edit(x)`); `None` when it cannot.
+    fn shell_path_could(
+        &self,
+        p: &PathPattern,
+        ctx: &Context<'_>,
+        targets: &[FileTarget],
+    ) -> Option<String> {
+        if !is_shell_rule_tool(self.tool.as_str()) || !self.class.is_restrictive() {
+            return None;
+        }
+        let edit = self.tool.as_str().eq_ignore_ascii_case("Edit");
+        for t in targets {
+            let governs = t.access == Access::Named
+                || if edit {
+                    t.access == Access::Write
+                } else {
+                    t.access == Access::Read || t.via == Via::Command
+                };
+            if !governs {
+                continue;
+            }
+            if edit && t.access == Access::Named && p.matches(ctx, Path::new(&t.path), self.class) {
+                return Some(format!(
+                    "`{}` is named by a program this reader cannot tell reads or writes it",
+                    t.path
+                ));
+            }
+            let hidden = t.path.contains(['$', '`', '{']);
+            if !hidden {
+                continue;
+            }
+            let base = t.path.rsplit('/').next().unwrap_or(&t.path);
+            let last = p.segments.last().map(String::as_str).unwrap_or("**");
+            let could = base.contains(['$', '`', '{'])
+                || last.contains("**")
+                || t.subtree
+                || segments_could_meet(last, base);
+            if could {
+                return Some(format!(
+                    "`{}` is expanded by the shell, so it could name what `{}` protects",
+                    t.path, self.raw
+                ));
+            }
+        }
+        None
     }
 
     /// `(fatal, sentence)` for everything the gate would not apply or that
@@ -1146,15 +1329,40 @@ fn first_match<'r>(
             .any(|r| r.matches_read(ctx, tool, input, line));
         (!excepted).then_some(matched)
     };
-    match line {
-        Some(l) if l.commands.len() > 1 => l.commands.iter().find_map(|c| {
-            speaks(Some(&Line {
-                commands: vec![c.clone()],
-                barrier: None,
-            }))
-        }),
-        _ => speaks(line),
-    }
+    let Some(l) = line.filter(|l| !l.commands.is_empty()) else {
+        return speaks(line);
+    };
+    // Every simple command on its own, and within one every file it names
+    // on its own: `!Read(.env.example)` excuses that file, not `.env` beside it.
+    l.commands.iter().find_map(|c| {
+        let one = Line {
+            commands: vec![c.clone()],
+            barrier: None,
+        };
+        let whole = rules
+            .iter()
+            .filter(|r| !r.negated && !matches!(r.spec, Spec::Path(_)))
+            .find(|r| r.matches_read(ctx, tool, input, Some(&one)));
+        let excused = rules
+            .iter()
+            .filter(|r| r.negated && !matches!(r.spec, Spec::Path(_)))
+            .any(|r| r.matches_read(ctx, tool, input, Some(&one)));
+        if excused {
+            return None;
+        }
+        if whole.is_some() {
+            return whole;
+        }
+        command::targets_of(&one).into_iter().find_map(|t| {
+            let t = [t];
+            let path = |r: &&Rule| match &r.spec {
+                Spec::Path(p) => r.shell_path_matches(p, ctx, &t),
+                _ => false,
+            };
+            let hit = rules.iter().filter(|r| !r.negated).find(path)?;
+            (!rules.iter().filter(|r| r.negated).any(|r| path(&r))).then_some(hit)
+        })
+    })
 }
 
 /// An allow rule in the agent's own settings that grants an arbitrary program.
@@ -1264,10 +1472,15 @@ impl Policy {
             if constraining.len() > 3 {
                 by = format!("{by}` and {} more `", constraining.len() - 3);
             }
-            if let Some(why) = line.and_then(|l| l.barrier) {
+            if let Some(why) = line.as_ref().and_then(|l| l.barrier.clone()) {
                 return Verdict::Unresolved {
                     why: format!("{why}; `{by}` constrains what {tool} may run"),
                 };
+            }
+            if let Some(l) = &line
+                && let Some(why) = self.could_apply(ctx, tool, l)
+            {
+                return Verdict::Unresolved { why };
             }
             if tool == "PowerShell" {
                 return Verdict::Unresolved {
@@ -1279,6 +1492,64 @@ impl Policy {
             }
         }
         Verdict::Undecided
+    }
+
+    /// Why a rule nothing matched could still apply once the shell rewrites
+    /// the line: an argument it expands, or a file only an expansion names.
+    fn could_apply(&self, ctx: &Context<'_>, tool: &str, line: &Line) -> Option<String> {
+        let rules = || self.deny.iter().chain(&self.ask).filter(|r| !r.negated);
+        for c in &line.commands {
+            for r in rules() {
+                if let Spec::Command(spec) = &r.spec
+                    && r.command_tool_applies(tool)
+                    && let Some(word) = spec.could_match(c)
+                {
+                    return Some(format!(
+                        "the shell rewrites `{word}` before `{}` runs, so this could be what \
+                         `{}` names",
+                        c.program, r.raw
+                    ));
+                }
+            }
+            // A program the reader does not know as a wrapper may still be
+            // one: `pkexec rm -rf /` reads as `pkexec` with arguments.
+            if command::may_run_a_word(&c.program) {
+                for r in rules() {
+                    if let Spec::Command(spec) = &r.spec
+                        && r.command_tool_applies(tool)
+                        && !wildcard(&spec.program, &c.program)
+                        && let Some(arg) = c
+                            .args
+                            .iter()
+                            .zip(&c.kinds)
+                            .filter(|(a, k)| **k == ArgKind::Literal && !a.starts_with('-'))
+                            .map(|(a, _)| a)
+                            .find(|a| {
+                                let base = a.rsplit('/').next().unwrap_or(a);
+                                wildcard(&spec.program, &base.to_ascii_lowercase())
+                            })
+                    {
+                        return Some(format!(
+                            "`{}` may run `{arg}`, which `{}` constrains",
+                            c.program, r.raw
+                        ));
+                    }
+                }
+            }
+            let one = Line {
+                commands: vec![c.clone()],
+                barrier: None,
+            };
+            let targets = command::targets_of(&one);
+            for r in rules() {
+                if let Spec::Path(p) = &r.spec
+                    && let Some(why) = r.shell_path_could(p, ctx, &targets)
+                {
+                    return Some(why);
+                }
+            }
+        }
+        None
     }
 
     /// Non-exception rules about what this shell tool may run or reach.

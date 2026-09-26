@@ -4,7 +4,8 @@
 
 use devplane::core::certificate::{Certificate, LIMITS, MAX_BYTES, REDERIVABLE};
 use devplane::core::change::{
-    Change, CommandResult, CommitStamp, Completion, GateReport, Outcome, Reach, SpecStamp, Waiting,
+    Change, CommandResult, CommitStamp, Completion, Declared, GateReport, Outcome, Reach,
+    SpecStamp, Waiting,
 };
 
 fn change() -> Change {
@@ -39,6 +40,25 @@ fn report(gate: &str, attempt: u32, commands: Vec<CommandResult>) -> GateReport 
     }
 }
 
+/// The `check` commands the project declares now: the ones the latest report
+/// ran, so the definition of done has not moved under these tests.
+fn declared(w: &Change) -> Vec<String> {
+    match w.check_report() {
+        Some(r) => r.commands.iter().map(|c| c.command.clone()).collect(),
+        None => vec!["cargo test".into()],
+    }
+}
+
+/// The basis, with `declares` false for a project that declares no checks.
+fn basis_of(w: &Change, declares: bool, now: Option<&CommitStamp>) -> Completion {
+    let checks = if declares { declared(w) } else { Vec::new() };
+    Completion::of(w, Declared::Checks(&checks), now)
+}
+
+fn cert_of<'a>(w: &'a Change, claim: Option<&'a str>) -> Certificate<'a> {
+    Certificate::of(w, Declared::Checks(&declared(w)), claim)
+}
+
 fn finished(mut w: Change, basis: Completion) -> Change {
     w.completion = Some(basis);
     w
@@ -51,7 +71,7 @@ fn passing() -> Change {
         1,
         vec![CommandResult::exited("cargo test", 0)],
     ));
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
@@ -64,7 +84,7 @@ fn passing() -> Change {
 #[test]
 fn the_document_names_the_commit_the_commands_and_how_to_run_them() {
     let w = passing();
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(md.contains("4f2a9c1e"), "the commit is not named:\n{md}");
     assert!(md.contains("cargo test"), "the command is not named");
     assert!(
@@ -77,7 +97,7 @@ fn the_document_names_the_commit_the_commands_and_how_to_run_them() {
 #[test]
 fn both_shapes_report_the_same_commit_and_the_same_outcome() {
     let w = passing();
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     let j = c.json();
     assert_eq!(j["subject"][0]["digest"]["gitCommit"], "4f2a9c1e");
     assert_eq!(
@@ -91,7 +111,7 @@ fn both_shapes_report_the_same_commit_and_the_same_outcome() {
 fn the_structured_shape_is_an_in_toto_statement() {
     // A shape supply-chain tooling already parses.
     let w = passing();
-    let j = Certificate::of(&w, None).json();
+    let j = cert_of(&w, None).json();
     assert_eq!(j["_type"], "https://in-toto.io/Statement/v1");
     assert_eq!(
         j["predicateType"],
@@ -105,16 +125,13 @@ fn the_structured_shape_is_an_in_toto_statement() {
 fn it_says_it_is_unsigned_rather_than_implying_otherwise() {
     // Unsigned: a signature would invite trusting the builder.
     let w = passing();
-    assert_eq!(
-        Certificate::of(&w, None).json()["predicate"]["signed"],
-        false
-    );
+    assert_eq!(cert_of(&w, None).json()["predicate"]["signed"], false);
 }
 
 #[test]
 fn the_verification_steps_are_data_and_not_only_prose() {
     let w = passing();
-    let j = Certificate::of(&w, None).json();
+    let j = cert_of(&w, None).json();
     let steps = j["predicate"]["verification"]["steps"].as_array().unwrap();
     assert!(steps[0].as_str().unwrap().starts_with("git clone "));
     assert_eq!(steps[1], "git checkout 4f2a9c1e");
@@ -125,7 +142,7 @@ fn the_verification_steps_are_data_and_not_only_prose() {
 #[test]
 fn the_certificate_says_which_repository() {
     let w = passing();
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     let md = c.markdown();
     assert!(md.contains("acme/widgets"), "no repository is named:\n{md}");
     assert!(
@@ -147,13 +164,13 @@ fn the_attempt_says_which_of_how_many() {
             vec![CommandResult::exited("cargo test", code)],
         ));
     }
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(
         md.contains("attempt 4 of 4"),
         "\"passed on the fourth try\" and \"passed\" are different sentences:\n{md}"
@@ -177,7 +194,7 @@ fn the_evidence_is_the_run_the_basis_names_not_merely_the_last_one() {
             at: jiff::Timestamp::now(),
         },
     );
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(
         md.contains("first"),
         "showed a different run from the basis"
@@ -193,13 +210,13 @@ fn a_gate_that_ran_outside_a_repository_says_so() {
     let mut r = report("check", 1, vec![CommandResult::exited("cargo test", 0)]);
     r.commit = None;
     w.gates.push(r);
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(md.contains("No commit was recorded"), "{md}");
     assert!(
         !md.contains("clean"),
@@ -213,13 +230,13 @@ fn a_repository_with_no_commits_yet_is_a_state_not_a_blank() {
     let mut r = report("check", 1, vec![CommandResult::exited("x", 0)]);
     r.commit = Some(stamp(None, true, Reach::NoRemote));
     w.gates.push(r);
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     assert!(c.markdown().contains("had no commits yet"));
     assert!(c.verification_caveat().is_some());
 }
@@ -231,13 +248,13 @@ fn a_commit_nobody_can_fetch_says_so_where_the_instructions_are() {
     let mut r = report("check", 1, vec![CommandResult::exited("x", 0)]);
     r.commit = Some(stamp(Some("deadbeef"), true, Reach::LocalOnly));
     w.gates.push(r);
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     let instructions = md.find("Check this yourself").expect("no instructions");
     let warning = md.find("on no remote").expect("no local-only warning");
     assert!(
@@ -260,14 +277,14 @@ fn the_four_reaches_read_differently() {
         let mut r = report("check", 1, vec![CommandResult::exited("x", 0)]);
         r.commit = Some(stamp(Some("abc"), true, reach));
         w.gates.push(r);
-        let basis = Completion::of(
+        let basis = basis_of(
             &w,
             true,
             Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
         );
         let w = finished(w, basis);
         assert!(
-            seen.insert(Certificate::of(&w, None).markdown()),
+            seen.insert(cert_of(&w, None).markdown()),
             "two reachability states produced the same document"
         );
     }
@@ -279,13 +296,13 @@ fn a_dirty_tree_is_said_where_the_commit_is() {
     let mut r = report("check", 1, vec![CommandResult::exited("x", 0)]);
     r.commit = Some(stamp(Some("abc123"), false, Reach::Remote));
     w.gates.push(r);
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     // Where the commit is shown; a stale-pass headline also mentions it.
     let at_commit = md.find("Commit `abc123`").expect("the commit is shown");
     let warning = md.find("does NOT describe").expect("no dirty warning");
@@ -293,6 +310,79 @@ fn a_dirty_tree_is_said_where_the_commit_is() {
         warning - at_commit < 300,
         "a reviewer who reads the commit has left the page before a footnote arrives"
     );
+}
+
+/// Agents do not commit: the checked tree is usually not the commit it sat
+/// on. The steps never check that commit out as if it were; they look the
+/// tree up by its digest, and the document says why.
+#[test]
+fn an_uncommitted_tree_is_found_by_its_digest_and_never_checked_out_by_its_commit() {
+    let mut w = change();
+    let mut r = report("check", 1, vec![CommandResult::exited("cargo test", 0)]);
+    let mut dirty = stamp(Some("abc123"), false, Reach::Remote);
+    dirty.tree = Some("0123456789abcdef0123456789abcdef01234567".into());
+    r.commit = Some(dirty.clone());
+    w.gates.push(r);
+    let basis = basis_of(&w, true, Some(&dirty));
+    let w = finished(w, basis);
+    let c = cert_of(&w, None);
+    let steps = c.verification_steps();
+    assert!(
+        !steps.iter().any(|s| s.contains("git checkout abc123")),
+        "checks out a commit that is not the checked tree: {steps:?}"
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|s| s.contains("git log --all --format='%H %T'")
+                && s.contains("0123456789abcdef0123456789abcdef01234567")),
+        "{steps:?}"
+    );
+    assert_eq!(steps.last().map(String::as_str), Some("cargo test"));
+    let caveat = c
+        .verification_caveat()
+        .expect("an uncommitted tree is said");
+    assert!(caveat.contains("uncommitted"), "{caveat}");
+    let md = c.markdown();
+    assert!(
+        !md.contains("\n\nYou should see the same outcomes."),
+        "{md}"
+    );
+    assert!(
+        md.contains("Only once a commit with that tree is checked out"),
+        "{md}"
+    );
+
+    // With no digest recorded, nothing is checked out at all.
+    let mut w2 = change();
+    let mut r = report("check", 1, vec![CommandResult::exited("cargo test", 0)]);
+    let mut none = stamp(Some("abc123"), false, Reach::Remote);
+    none.tree = None;
+    r.commit = Some(none);
+    w2.gates.push(r);
+    let c = cert_of(&w2, None);
+    assert!(
+        !c.verification_steps()
+            .iter()
+            .any(|s| s.contains("checkout")),
+        "{:?}",
+        c.verification_steps()
+    );
+    assert!(
+        c.verification_caveat()
+            .unwrap()
+            .contains("no working-tree digest")
+    );
+}
+
+/// One count of attempts: how often `check` ran, never every gate report.
+#[test]
+fn attempts_count_only_check() {
+    let mut w = passing();
+    w.gates
+        .push(report("lint", 1, vec![CommandResult::exited("x", 0)]));
+    assert_eq!(cert_of(&w, None).attempts, w.check_attempts());
+    assert_eq!(w.check_attempts(), 1);
 }
 
 #[test]
@@ -314,14 +404,14 @@ fn the_four_outcomes_produce_four_sentences() {
             1,
             vec![CommandResult::without_verdict("cargo test", outcome)],
         ));
-        let basis = Completion::of(
+        let basis = basis_of(
             &w,
             true,
             Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
         );
         let w = finished(w, basis);
         assert!(
-            seen.insert(Certificate::of(&w, None).markdown()),
+            seen.insert(cert_of(&w, None).markdown()),
             "two outcomes rendered alike"
         );
     }
@@ -340,13 +430,13 @@ fn a_specification_that_was_not_found_is_stated_not_omitted() {
         open_questions: 0,
     });
     w.gates.push(r);
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(md.contains("there was no such file or folder"), "{md}");
 }
 
@@ -363,13 +453,13 @@ fn unticked_tasks_appear_beside_the_outcome_and_neither_is_judged() {
         open_questions: 1,
     });
     w.gates.push(r);
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(md.contains("28 of 31 ticked"));
     assert!(md.contains("exit 0"));
     assert!(
@@ -442,10 +532,10 @@ fn the_four_bases_read_differently_one_at_a_time() {
 #[test]
 fn a_project_with_no_gates_is_not_reported_as_a_pass() {
     let w = change();
-    let basis = Completion::of(&w, false, None);
+    let basis = basis_of(&w, false, None);
     assert!(matches!(basis, Completion::NoGateDeclared { .. }));
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(md.contains("never said what done means"), "{md}");
     assert!(md.contains("Nothing was checked by this tool"), "{md}");
 }
@@ -458,7 +548,7 @@ fn a_failing_gate_cannot_produce_a_gates_passed_basis() {
         1,
         vec![CommandResult::exited("cargo test", 101)],
     ));
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
@@ -492,7 +582,7 @@ fn no_basis_names_a_person_because_there_is_no_identity_to_name() {
 #[test]
 fn the_limits_travel_with_the_paste() {
     let w = passing();
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(
         md.contains(LIMITS),
         "the statement of limits is not in the artifact"
@@ -503,7 +593,7 @@ fn the_limits_travel_with_the_paste() {
 #[test]
 fn every_rederivable_field_is_named_in_both_shapes_from_one_list() {
     let w = passing();
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     let md = c.markdown();
     let j = c.json();
     let listed = j["predicate"]["rederivable"].as_array().unwrap();
@@ -520,7 +610,7 @@ fn every_rederivable_field_is_named_in_both_shapes_from_one_list() {
 #[test]
 fn it_does_not_invite_the_reader_to_compare_digests() {
     let w = passing();
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(md.contains("not reproducible"), "{md}");
     assert!(md.contains("bind the stored output to the run"));
 }
@@ -528,7 +618,7 @@ fn it_does_not_invite_the_reader_to_compare_digests() {
 #[test]
 fn the_agent_claim_never_appears_without_an_outcome_beside_it() {
     let w = passing();
-    let md = Certificate::of(&w, Some("I fixed everything and all tests pass.")).markdown();
+    let md = cert_of(&w, Some("I fixed everything and all tests pass.")).markdown();
     let claim = md.find("I fixed everything").expect("the claim is missing");
     let outcome = md.find("exit 0").expect("no outcome anywhere");
     assert!(outcome < claim, "the claim precedes any evidence");
@@ -539,7 +629,7 @@ fn the_agent_claim_never_appears_without_an_outcome_beside_it() {
 #[test]
 fn a_change_with_no_claim_is_not_reported_as_an_agent_that_said_nothing() {
     let w = passing();
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     assert!(
         !md.contains("The agent's claim"),
         "an absent claim grew a section"
@@ -558,7 +648,7 @@ fn an_unfinished_change_exports_an_honest_account_rather_than_a_certificate() {
         1,
         vec![CommandResult::exited("cargo test", 101)],
     ));
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     assert!(!c.is_finished());
     let md = c.markdown();
     assert!(md.contains("not finished"), "{md}");
@@ -582,13 +672,13 @@ fn the_artifact_is_bounded_and_says_that_it_truncated() {
         ..CommandResult::exited("cargo test", 0)
     };
     w.gates.push(report("check", 1, vec![huge]));
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown_bounded();
+    let md = cert_of(&w, None).markdown_bounded();
     assert!(md.len() <= MAX_BYTES, "{} bytes", md.len());
     assert!(
         md.contains("104857600 bytes"),
@@ -604,13 +694,13 @@ fn untrusted_text_cannot_restructure_the_document() {
     w.title = nasty.into();
     w.gates
         .push(report("check", 1, vec![CommandResult::exited(nasty, 0)]));
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     let md = c.markdown();
 
     for section in [
@@ -667,13 +757,13 @@ fn a_fence_in_the_verification_block_cannot_close_it() {
         1,
         vec![CommandResult::exited("echo '```'; rm -rf /", 0)],
     ));
-    let basis = Completion::of(
+    let basis = basis_of(
         &w,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
     );
     let w = finished(w, basis);
-    let md = Certificate::of(&w, None).markdown();
+    let md = cert_of(&w, None).markdown();
     let start = md.find("## Check this yourself").unwrap();
     let block = &md[start..];
     let fence_line = block
@@ -754,10 +844,10 @@ fn the_waiting_setter_cannot_express_done() {
 fn a_basis_exists_exactly_when_the_change_is_finished() {
     let unfinished = change();
     assert!(unfinished.completion.is_none());
-    assert!(!Certificate::of(&unfinished, None).is_finished());
+    assert!(!cert_of(&unfinished, None).is_finished());
 
     let done = passing();
-    assert!(Certificate::of(&done, None).is_finished());
+    assert!(cert_of(&done, None).is_finished());
     assert!(
         done.completion.is_some(),
         "a finished work with nothing attached"
@@ -796,7 +886,7 @@ fn every_shape_of_change_gets_a_basis() {
     for w in &cases {
         for declares in [true, false] {
             for now in [None, Some(&here)] {
-                let basis = Completion::of(w, declares, now);
+                let basis = basis_of(w, declares, now);
                 assert!(!basis.headline().is_empty());
             }
         }
@@ -812,7 +902,7 @@ fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
 
     assert!(
         matches!(
-            Completion::of(&w, true, Some(&here)),
+            basis_of(&w, true, Some(&here)),
             Completion::GatesPassed { .. }
         ),
         "a gate on the very commit it ran against is current"
@@ -820,7 +910,7 @@ fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
 
     // The branch moved on: stale, not failed.
     let moved = stamp(Some("b7c2ffff"), true, Reach::Remote);
-    let basis = Completion::of(&w, true, Some(&moved));
+    let basis = basis_of(&w, true, Some(&moved));
     assert!(
         matches!(basis, Completion::GatesStale { .. }),
         "a commit that moved on must stop being a pass: {basis:?}"
@@ -836,14 +926,14 @@ fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
     // Dirty alone is not stale: the same working-tree digest is the same tree.
     let dirty = stamp(Some("4f2a9c1e"), false, Reach::Remote);
     assert!(matches!(
-        Completion::of(&w, true, Some(&dirty)),
+        basis_of(&w, true, Some(&dirty)),
         Completion::GatesPassed { .. }
     ));
 
     // Same commit, different working-tree digest.
     let mut touched = dirty.clone();
     touched.tree = Some("0dd5ea7e".into());
-    let basis = Completion::of(&w, true, Some(&touched));
+    let basis = basis_of(&w, true, Some(&touched));
     assert!(
         matches!(basis, Completion::GatesStale { .. }),
         "touching one file makes it false"
@@ -855,7 +945,7 @@ fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
     );
 
     // Git could not answer: unknown is not unchanged.
-    let basis = Completion::of(&w, true, None);
+    let basis = basis_of(&w, true, None);
     assert!(
         matches!(basis, Completion::GatesStale { now: None, .. }),
         "a tree that cannot be read is not a verified one"
@@ -867,7 +957,7 @@ fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
     );
 
     let done = finished(w.clone(), basis);
-    let md = Certificate::of(&done, None).markdown();
+    let md = cert_of(&done, None).markdown();
     assert!(md.contains("cargo test"), "{md}");
     assert!(md.contains("not against the tree as it stands"), "{md}");
     assert!(!md.contains("Nothing was checked"), "{md}");
@@ -993,7 +1083,7 @@ fn the_certificate_says_where_its_predicate_came_from_and_never_defaults_it() {
     let key = Origin::KEY;
 
     let w = passing();
-    let cert = Certificate::of(&w, Some("I added rate limiting and it all works."));
+    let cert = cert_of(&w, Some("I added rate limiting and it all works."));
     let j = cert.json();
     let predicate = &j["predicate"];
 
@@ -1021,7 +1111,7 @@ fn the_certificate_says_where_its_predicate_came_from_and_never_defaults_it() {
             at: jiff::Timestamp::now(),
         },
     );
-    let none = Certificate::of(&bare, None);
+    let none = cert_of(&bare, None);
     let jn = none.json();
     assert!(
         jn["predicate"]["evidence"].is_null(),
@@ -1046,7 +1136,7 @@ fn every_way_a_change_reaches_done_says_which_one_it_was() {
     let stale = {
         let w = passing();
         let moved = stamp(Some("b7c2ffff"), true, Reach::Remote);
-        let basis = Completion::of(&w, true, Some(&moved));
+        let basis = basis_of(&w, true, Some(&moved));
         finished(w, basis)
     };
     let cases: Vec<(&str, Change)> = vec![
@@ -1069,7 +1159,7 @@ fn every_way_a_change_reaches_done_says_which_one_it_was() {
     ];
 
     for (name, w) in &cases {
-        let page = Certificate::of(w, None).page();
+        let page = cert_of(w, None).page();
         assert_eq!(page["finished"], true, "{name}");
 
         let basis = page["basis"].as_str().unwrap_or_default();
@@ -1112,7 +1202,7 @@ fn every_way_a_change_reaches_done_says_which_one_it_was() {
             last_gate: None,
         },
     );
-    let page = Certificate::of(&by_hand, None).page();
+    let page = cert_of(&by_hand, None).page();
     assert!(
         page["basis"]
             .as_str()
@@ -1129,7 +1219,7 @@ fn every_way_a_change_reaches_done_says_which_one_it_was() {
     let said: std::collections::BTreeSet<String> = cases
         .iter()
         .map(|(_, w)| {
-            Certificate::of(w, None).page()["basis"]
+            cert_of(w, None).page()["basis"]
                 .as_str()
                 .unwrap_or("")
                 .to_string()
@@ -1143,7 +1233,7 @@ fn every_way_a_change_reaches_done_says_which_one_it_was() {
 #[test]
 fn the_certificate_carries_the_tree_digest_beside_the_commit() {
     let w = passing();
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     let md = c.markdown();
     let at_commit = md.find("4f2a9c1e").expect("the commit is named");
     let at_tree = md
@@ -1169,10 +1259,10 @@ fn the_certificate_carries_the_tree_digest_beside_the_commit() {
     old.tree = None;
     r.commit = Some(old);
     w.gates.push(r);
-    let basis = Completion::of(&w, true, Some(&stamp(Some("abc123"), true, Reach::Remote)));
+    let basis = basis_of(&w, true, Some(&stamp(Some("abc123"), true, Reach::Remote)));
     let w = finished(w, basis);
     assert!(
-        Certificate::of(&w, None)
+        cert_of(&w, None)
             .markdown()
             .contains("tree digest not recorded")
     );
@@ -1182,7 +1272,7 @@ fn the_certificate_carries_the_tree_digest_beside_the_commit() {
 #[test]
 fn the_certificate_offers_no_flag_the_cli_does_not_have() {
     let w = passing();
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     // Past the size ceiling, so the truncation note's command is checked too.
     let mut huge = change();
     huge.gates.push(report(
@@ -1190,7 +1280,7 @@ fn the_certificate_offers_no_flag_the_cli_does_not_have() {
         1,
         vec![CommandResult::exited("x".repeat(2 * MAX_BYTES), 0)],
     ));
-    let basis = Completion::of(
+    let basis = basis_of(
         &huge,
         true,
         Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
@@ -1200,7 +1290,7 @@ fn the_certificate_offers_no_flag_the_cli_does_not_have() {
         c.markdown(),
         c.page().to_string(),
         c.json().to_string(),
-        Certificate::of(&huge, None).markdown_bounded(),
+        cert_of(&huge, None).markdown_bounded(),
     ]
     .join("\n");
 
@@ -1262,7 +1352,7 @@ fn a_long_command_is_short_on_the_page_and_complete_in_the_copy() {
         },
     );
 
-    let cert = Certificate::of(&w, None);
+    let cert = cert_of(&w, None);
     let page = cert.page();
     let cmd = &page["evidence"]["commands"][0];
 
@@ -1315,7 +1405,7 @@ fn the_surface_and_the_certificate_count_one_plan_the_same_way() {
     .unwrap();
 
     let markers = vec!["NEEDS CLARIFICATION".to_string()];
-    let plan = devplane::core::spec::Plan::read(&root, "specs/001-feature", &markers);
+    let plan = devplane::spec::Plan::read(&root, "specs/001-feature", &markers);
     let stamp = devplane::core::change::SpecStamp::of("specs/001-feature", &root, &markers);
 
     assert_eq!(
@@ -1349,11 +1439,11 @@ fn the_surface_and_the_certificate_count_one_plan_the_same_way() {
 /// cannot render as complete.
 #[test]
 fn a_plan_with_no_boxes_has_no_progress_to_render() {
-    assert_eq!(devplane::core::spec::Progress::of(0, 0), None);
-    let p = devplane::core::spec::Progress::of(2, 4).expect("boxes exist");
+    assert_eq!(devplane::spec::Progress::of(0, 0), None);
+    let p = devplane::spec::Progress::of(2, 4).expect("boxes exist");
     assert_eq!(p.open(), 2);
     assert!(!p.complete());
-    assert!(devplane::core::spec::Progress::of(4, 4).unwrap().complete());
+    assert!(devplane::spec::Progress::of(4, 4).unwrap().complete());
 }
 
 /// A change naming a specification that is not there reads as a
@@ -1362,7 +1452,7 @@ fn a_plan_with_no_boxes_has_no_progress_to_render() {
 fn a_plan_that_is_not_there_is_a_finding_rather_than_a_blank() {
     let root = std::env::temp_dir().join(format!("dp-noplan-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&root).unwrap();
-    let plan = devplane::core::spec::Plan::read(&root, "specs/never-written", &[]);
+    let plan = devplane::spec::Plan::read(&root, "specs/never-written", &[]);
     assert!(!plan.present);
     assert_eq!(plan.files, 0);
     assert_eq!(plan.progress, None);
@@ -1386,7 +1476,7 @@ fn a_project_that_declares_no_markers_has_no_questions() {
     )
     .unwrap();
 
-    let plan = devplane::core::spec::Plan::read(&root, "specs/001-x", &[]);
+    let plan = devplane::spec::Plan::read(&root, "specs/001-x", &[]);
     assert_eq!(
         plan.open_questions, 0,
         "a word nobody declared was collected"
@@ -1420,7 +1510,7 @@ fn many_markers_in_one_project_are_one_item() {
     std::fs::write(dir.join("spec.md"), format!("# X\n\n{body}")).unwrap();
 
     let markers = vec!["NEEDS CLARIFICATION".to_string()];
-    let plan = devplane::core::spec::Plan::read(&root, "specs/001-x", &markers);
+    let plan = devplane::spec::Plan::read(&root, "specs/001-x", &markers);
     assert_eq!(plan.open_questions, 40, "the count is the whole folder's");
     assert!(
         plan.questions.len() <= 20,
@@ -1458,7 +1548,7 @@ fn a_plan_that_moved_under_the_change_is_on_the_certificate() {
     std::fs::write(dir.join("spec.md"), "# X\n\n## Why\n").unwrap();
     std::fs::write(dir.join("tasks.md"), "# Tasks\n\n- [x] T001 done\n").unwrap();
 
-    let before = devplane::core::spec::Spec::read(&root, "specs/001-x", &[])
+    let before = devplane::spec::Spec::read(&root, "specs/001-x", &[])
         .fingerprint()
         .expect("a plan has a fingerprint");
 
@@ -1477,7 +1567,7 @@ fn a_plan_that_moved_under_the_change_is_on_the_certificate() {
         "# X\n\n## Why\n\n## And another thing\n",
     )
     .unwrap();
-    let after = devplane::core::spec::Spec::read(&root, "specs/001-x", &[])
+    let after = devplane::spec::Spec::read(&root, "specs/001-x", &[])
         .fingerprint()
         .expect("still has one");
     assert_ne!(
@@ -1521,7 +1611,7 @@ fn the_clone_line_quotes_the_remote() {
     if let Some(c) = w.gates[0].commit.as_mut() {
         c.remote = Some(evil.into());
     }
-    let steps = Certificate::of(&w, None).verification_steps();
+    let steps = cert_of(&w, None).verification_steps();
     let quoted = devplane::core::certificate::shell_quote(evil);
     assert_eq!(quoted, "'https://x.test/a.git; rm -rf ~ #'\\'''");
     assert_eq!(
@@ -1541,7 +1631,7 @@ fn a_missing_basis_run_is_said_and_never_replaced() {
         attempts: 2,
         at: jiff::Timestamp::now(),
     });
-    let c = Certificate::of(&w, None);
+    let c = cert_of(&w, None);
     assert!(c.evidence.is_none());
     assert!(c.basis_run_missing());
     let md = c.markdown();
@@ -1559,7 +1649,7 @@ fn a_missing_basis_run_is_said_and_never_replaced() {
 /// ignored files out.
 #[test]
 fn the_certificate_says_the_digest_excludes_ignored_files() {
-    let md = Certificate::of(&passing(), None).markdown();
+    let md = cert_of(&passing(), None).markdown();
     assert!(md.contains("ignored files excluded"), "{md}");
     assert!(md.contains("git add -A && git write-tree"), "{md}");
     assert!(md.contains("Gate commands digest"), "{md}");
@@ -1571,17 +1661,28 @@ fn the_certificate_says_the_digest_excludes_ignored_files() {
 fn the_certificate_names_the_checks_the_change_altered() {
     use devplane::core::review::Weakened;
     let w = passing();
-    let mut c = Certificate::of(&w, None);
+    let mut c = cert_of(&w, None);
     assert!(c.markdown().contains("could not be read"));
     c.weakened = Some(Vec::new());
     assert!(c.markdown().contains("altered none of its checks"));
     c.weakened = Some(vec![Weakened {
         path: "tests/login.rs".into(),
         why: "adds a skip marker `#[ignore`".into(),
+        kind: devplane::core::review::WeakKind::Skip,
+        matched: "#[ignore]".into(),
     }]);
     let md = c.markdown();
     assert!(
         md.contains("This change itself altered the checks it was verified by: `tests/login.rs`"),
+        "{md}"
+    );
+    assert!(!md.contains("marked each of these read"), "{md}");
+    // Read by a person: still stated, and said to have been read.
+    c.weakened_read = true;
+    let md = c.markdown();
+    assert!(
+        md.contains("altered the checks it was verified by")
+            && md.contains("A person marked each of these read."),
         "{md}"
     );
 }

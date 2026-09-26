@@ -48,12 +48,14 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn new(run_id: RunId, role: Role, text: impl Into<String>) -> Self {
+    /// A message said at `at`. [`Message::new`] (outside the pure half)
+    /// stamps the wall clock.
+    pub fn new_at(run_id: RunId, role: Role, text: impl Into<String>, at: Timestamp) -> Self {
         Self {
             // Uuid v7: ordering by id is ordering by time.
             id: crate::core::ids::new_event_id(),
             run_id,
-            at: Timestamp::now(),
+            at,
             role,
             text: text.into(),
         }

@@ -23,11 +23,46 @@ use std::str::FromStr;
 /// satisfy (a renamed or added column, a changed type, a dropped table). A file
 /// stamped with anything else is moved aside on open (`Store::retire`), not
 /// migrated.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// The statement that stamps it, written out because `PRAGMA user_version`
 /// accepts no bind parameter.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 9";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 11";
+
+/// The database and its sidecars readable by their owner alone, whoever
+/// opened them first — a hook creates the file long before any `serve` would
+/// tighten the home. Best effort: a file this process does not own is left.
+fn owner_only(path: &Path) {
+    #[cfg(unix)]
+    for suffix in ["", "-wal", "-shm"] {
+        use std::os::unix::fs::PermissionsExt;
+        let file = PathBuf::from(format!("{}{suffix}", path.display()));
+        let is_file = file
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_file() && m.permissions().mode() & 0o077 != 0);
+        if is_file {
+            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Deletes a retired database that holds nothing: the file is empty and no
+/// write-ahead log beside it holds a byte. Anything else is kept.
+fn remove_if_empty(bak: &Path) {
+    let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
+    let wal = PathBuf::from(format!("{}-wal", bak.display()));
+    if len(bak) != Some(0) || len(&wal).is_some_and(|n| n > 0) {
+        return;
+    }
+    if std::fs::remove_file(bak).is_ok() {
+        tracing::info!(backup = %bak.display(), "an empty retired database was deleted");
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", bak.display()));
+        }
+    }
+}
 
 /// A handle on the observation store.
 #[derive(Debug, Clone)]
@@ -45,6 +80,12 @@ impl Store {
     /// hook passes a short one: it runs under the vendor's timeout, and a locked
     /// database must cost the record (which is spooled), never the answer.
     pub async fn open_waiting(path: &Path, busy: std::time::Duration) -> Result<Self> {
+        let store = Self::open_file(path, busy).await?;
+        owner_only(path);
+        Ok(store)
+    }
+
+    async fn open_file(path: &Path, busy: std::time::Duration) -> Result<Self> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
@@ -57,64 +98,160 @@ impl Store {
             .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
             .foreign_keys(true)
             .busy_timeout(busy);
-        // One connection: the hook opens the store on every tool call, so the
-        // version is read on the connection that will do the work.
-        let existed = path.exists();
+        // Connecting sets the journal mode, which SQLite refuses at once —
+        // without the busy handler — while another opener is re-creating the
+        // file under the retire lock, and a file renamed away mid-connect
+        // answers an I/O error; both are retried, within the same `busy` a
+        // query would wait.
         let connect = || {
-            SqlitePoolOptions::new()
-                .max_connections(8)
-                .connect_with(opts.clone())
+            let opts = opts.clone();
+            async move {
+                let until = std::time::Instant::now() + busy;
+                loop {
+                    match SqlitePoolOptions::new()
+                        .max_connections(8)
+                        .connect_with(opts.clone())
+                        .await
+                    {
+                        Err(e)
+                            if ["database is locked", "disk I/O error"]
+                                .iter()
+                                .any(|m| e.to_string().contains(m))
+                                && std::time::Instant::now() < until =>
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                        other => break other,
+                    }
+                }
+            }
         };
+        // The version is read on a read-only connection that neither creates
+        // the file nor changes its journal: an opener racing a retire must not
+        // touch the old file, or a fresh one appearing at its path.
+        let probe = || {
+            let opts = SqliteConnectOptions::new()
+                .filename(path)
+                .read_only(true)
+                .busy_timeout(busy);
+            async move {
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(opts)
+                    .await
+                    .ok()?;
+                let v = sqlx::query_as::<_, (i64,)>("PRAGMA user_version")
+                    .fetch_optional(&pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|(n,)| n);
+                pool.close().await;
+                v
+            }
+        };
+        if path.exists() {
+            match probe().await {
+                // Complete: the stamp is written after the schema applies.
+                Some(SCHEMA_VERSION) => {
+                    let pool = connect()
+                        .await
+                        .with_context(|| format!("opening {}", path.display()))?;
+                    return Ok(Self { pool });
+                }
+                // Written by a different schema: moved aside, never migrated
+                // or reused. Parallel tool calls fire concurrent hooks; one
+                // retires under an exclusive lock and the rest re-read after.
+                Some(v) if v != 0 => {
+                    let lock = Self::retire_lock(path).await?;
+                    match probe().await {
+                        Some(SCHEMA_VERSION) => {
+                            drop(lock);
+                            let pool = connect()
+                                .await
+                                .with_context(|| format!("opening {}", path.display()))?;
+                            return Ok(Self { pool });
+                        }
+                        Some(v) if v != 0 => Self::retire(path, v)?,
+                        _ => {}
+                    }
+                    let pool = connect()
+                        .await
+                        .with_context(|| format!("opening {}", path.display()))?;
+                    let store = Self { pool };
+                    // Applied under the lock too, so no opener sees a half-made file.
+                    let migrated = store.migrate().await;
+                    drop(lock);
+                    migrated?;
+                    return Ok(store);
+                }
+                // Empty, or being created by another opener: the schema is
+                // idempotent.
+                _ => {}
+            }
+        }
         let pool = connect()
             .await
             .with_context(|| format!("opening {}", path.display()))?;
-        let found: Option<i64> = sqlx::query_as::<_, (i64,)>("PRAGMA user_version")
-            .fetch_optional(&pool)
-            .await
-            .ok()
-            .flatten()
-            .map(|(n,)| n);
-        // The stamp is written after the schema applies, so a file carrying
-        // this build's version is complete and the schema is not re-run.
-        if existed && found == Some(SCHEMA_VERSION) {
-            return Ok(Self { pool });
-        }
-        // A database written by a different schema is moved aside, never
-        // migrated or reused.
-        let pool = if existed && found.is_some_and(|v| v != 0) {
-            pool.close().await;
-            Self::retire(path, found.unwrap_or(0))?;
-            connect()
-                .await
-                .with_context(|| format!("opening {}", path.display()))?
-        } else {
-            pool
-        };
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
     }
 
+    /// Takes the exclusive lock that serialises retiring, on a file next to
+    /// the database. Released when the returned handle drops (and by the OS if
+    /// the process dies).
+    async fn retire_lock(path: &Path) -> Result<std::fs::File> {
+        let at = PathBuf::from(format!("{}.lock", path.display()));
+        tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&at)
+                .with_context(|| format!("opening {}", at.display()))?;
+            file.lock()
+                .with_context(|| format!("locking {}", at.display()))?;
+            Ok(file)
+        })
+        .await
+        .context("waiting for the retire lock")?
+    }
+
     /// Renames a database written by a different schema out of the way.
     ///
     /// There is no migration machinery. Observations cost a replay to rebuild;
-    /// the record tables are why the old file is moved rather than deleted. The
-    /// user is told where it went.
+    /// the record tables are why the old file is moved rather than deleted —
+    /// moved aside, named by the schema version and the retire time, and never
+    /// deleted afterwards. The user is told where it went. Called only under
+    /// [`Self::retire_lock`].
     fn retire(path: &Path, found: i64) -> Result<()> {
-        let aside = path.with_extension(format!("v{found}.bak"));
-        std::fs::rename(path, &aside).with_context(|| {
-            format!(
-                "moving a database written by schema v{found} aside to {}",
-                aside.display()
-            )
-        })?;
-        // Both sidecars go too, or the new database inherits a stale journal.
+        // A name no earlier retire used: renaming onto an existing backup
+        // would destroy the only copy of an older record.
+        let stamp = jiff::Timestamp::now()
+            .strftime("%Y%m%dT%H%M%SZ")
+            .to_string();
+        let mut aside = path.with_extension(format!("v{found}.{stamp}.bak"));
+        let mut n = 1;
+        while aside.exists() {
+            aside = path.with_extension(format!("v{found}.{stamp}-{n}.bak"));
+            n += 1;
+        }
+        // Both sidecars go first, or the new database inherits a stale journal
+        // — and while the old file still stands at `path`, no opener creates a
+        // new one there whose journal this would carry off.
         for suffix in ["-wal", "-shm"] {
             let from = PathBuf::from(format!("{}{suffix}", path.display()));
             if from.exists() {
                 let _ = std::fs::rename(&from, format!("{}{suffix}", aside.display()));
             }
         }
+        std::fs::rename(path, &aside).with_context(|| {
+            format!(
+                "moving a database written by schema v{found} aside to {}",
+                aside.display()
+            )
+        })?;
         tracing::warn!(
             schema_found = found,
             schema_expected = SCHEMA_VERSION,
@@ -123,7 +260,30 @@ impl Store {
              observations will be rebuilt from the providers; the record tables — changes, \
              asks, decisions, reports — are in the old file and nowhere else"
         );
+        Self::drop_empty_backups(path);
         Ok(())
+    }
+
+    /// Deletes the retired databases that hold nothing. Every other one is
+    /// kept — moved aside, never deleted — whatever its age: the record tables
+    /// in it are the only copy. Nothing is ranked, so no clock decides.
+    fn drop_empty_backups(path: &Path) {
+        let (Some(dir), Some(stem)) = (
+            path.parent(),
+            path.file_stem().map(|s| s.to_string_lossy().to_string()),
+        ) else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let prefix = format!("{stem}.v");
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) && name.ends_with(".bak") {
+                remove_if_empty(&entry.path());
+            }
+        }
     }
 
     /// An in-memory store for tests, configured exactly like the real one
@@ -334,14 +494,13 @@ impl Store {
     /// Writes the run projection; one upsert, called after every applied event.
     pub async fn save_run(&self, run: &Run) -> Result<()> {
         sqlx::query(
-            "INSERT INTO runs (id, session_id, agent, cwd, last_event_at, payload)
-             VALUES (?,?,?,?,?,?)
+            "INSERT INTO runs (id, agent, cwd, last_event_at, payload)
+             VALUES (?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                agent=excluded.agent, cwd=excluded.cwd,
                last_event_at=excluded.last_event_at, payload=excluded.payload",
         )
         .bind(run.id.as_str())
-        .bind(run.session_id.as_str())
         .bind(&run.agent)
         .bind(run.cwd.to_string_lossy().to_string())
         .bind(ts(&run.last_event_at))
@@ -360,8 +519,8 @@ impl Store {
 
     pub async fn save_project(&self, p: &Project) -> Result<()> {
         sqlx::query(
-            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered, created_at)
-             VALUES (?,?,?,?,?,?,?)
+            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered)
+             VALUES (?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                name=excluded.name, trusted=excluded.trusted, repo_url=excluded.repo_url,
                auto_discovered=excluded.auto_discovered",
@@ -372,7 +531,6 @@ impl Store {
         .bind(p.trusted as i32)
         .bind(p.repo_url.as_deref())
         .bind(p.auto_discovered as i32)
-        .bind(ts(&jiff::Timestamp::now()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -384,8 +542,8 @@ impl Store {
     /// never revoke a trust granted in between.
     pub async fn note_project(&self, p: &Project) -> Result<()> {
         sqlx::query(
-            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered, created_at)
-             VALUES (?,?,?,?,?,?,?)
+            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered)
+             VALUES (?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                repo_url = COALESCE(projects.repo_url, excluded.repo_url)",
         )
@@ -395,7 +553,6 @@ impl Store {
         .bind(p.trusted as i32)
         .bind(p.repo_url.as_deref())
         .bind(p.auto_discovered as i32)
-        .bind(ts(&jiff::Timestamp::now()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -823,18 +980,14 @@ impl Store {
     /// open row, not the item id: asked again after an answer is a new raise.
     pub async fn attention_raise(&self, item: &crate::core::AttentionItem) -> Result<()> {
         sqlx::query(
-            "INSERT INTO attention_log
-               (item_id, kind, level, project_id, run_id, change_id, raised_at)
-             SELECT ?,?,?,?,?,?,?
+            "INSERT INTO attention_log (item_id, kind, run_id, raised_at)
+             SELECT ?,?,?,?
              WHERE NOT EXISTS (
                SELECT 1 FROM attention_log WHERE item_id = ? AND resolved_at IS NULL)",
         )
         .bind(item.id.0.as_str())
         .bind(item.kind.as_str())
-        .bind(item.level.as_str())
-        .bind(item.project_id.as_ref().map(|p| p.as_str()))
         .bind(item.run_id.as_ref().map(|r| r.as_str()))
-        .bind(item.change_id.as_ref().map(|w| w.as_str()))
         .bind(ts(&item.since))
         .bind(item.id.0.as_str())
         .execute(&self.pool)
@@ -875,8 +1028,10 @@ impl Store {
         resolution: crate::core::attention::Resolution,
     ) -> Result<u64> {
         Ok(sqlx::query(
-            "UPDATE attention_log SET resolved_at = ?, resolution = ?
-             WHERE resolved_at IS NULL AND item_id LIKE ? || '%'",
+            // An exact prefix, not `LIKE`: an id holding `_` or `%` would
+            // otherwise match other projects' items.
+            "UPDATE attention_log SET resolved_at = ?1, resolution = ?2
+             WHERE resolved_at IS NULL AND substr(item_id, 1, length(?3)) = ?3",
         )
         .bind(ts(&jiff::Timestamp::now()))
         .bind(resolution.as_str())
@@ -1008,6 +1163,34 @@ impl Store {
         Ok(())
     }
 
+    /// Records that a person read one weakened-check row of a change. No time
+    /// is stored: only that it was seen, and by a person.
+    pub async fn mark_weakened_seen(&self, change: &str, path: &str, matched: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO weakened_seen (change_id, path, matched, authority) \
+             VALUES (?, ?, ?, 'person') ON CONFLICT DO NOTHING",
+        )
+        .bind(change)
+        .bind(path)
+        .bind(matched)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every `(path, matched)` a person marked seen on this change.
+    pub async fn weakened_seen(
+        &self,
+        change: &str,
+    ) -> Result<std::collections::HashSet<(String, String)>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT path, matched FROM weakened_seen WHERE change_id = ?")
+                .bind(change)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// One day's decisions and the count of the day's questions, for the close.
     /// Bounded by the day, not a count, so the tally is about the whole day.
     pub async fn day(&self, since: &str) -> Result<(Vec<crate::core::Decision>, u32)> {
@@ -1117,15 +1300,14 @@ impl Store {
         for sql in [
             "DELETE FROM events WHERE run_id = ?",
             "DELETE FROM decisions WHERE run_id = ?",
-            "DELETE FROM runs WHERE id = ? OR session_id = ?",
+            // A run's id is its session's id.
+            "DELETE FROM runs WHERE id = ?",
         ] {
-            let q = sqlx::query(sql).bind(session);
-            let q = if sql.contains("session_id") {
-                q.bind(session)
-            } else {
-                q
-            };
-            n += q.execute(&self.pool).await?.rows_affected();
+            n += sqlx::query(sql)
+                .bind(session)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
         }
         n += sqlx::query("DELETE FROM projects WHERE root LIKE '%/devplane-probe-%'")
             .execute(&self.pool)
@@ -1165,17 +1347,27 @@ impl Store {
     }
 
     /// Deletes runs that ended more than `days` ago, so restarts stop reloading
-    /// them. Liveness is the struct's own `is_live`; a live run or an unreadable
-    /// row is never pruned.
+    /// them. Liveness is the struct's own `is_live`; a live run, a run of a
+    /// change not yet archived (its answers and resumes still need the
+    /// session) or an unreadable row is never pruned.
     pub async fn prune_runs(&self, days: i64) -> Result<u64> {
         let cutoff = ts(&(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(24 * days)));
         let rows = sqlx::query("SELECT id, payload FROM runs WHERE last_event_at < ?")
             .bind(&cutoff)
             .fetch_all(&self.pool)
             .await?;
+        let changes = sqlx::query("SELECT id, payload FROM changes")
+            .fetch_all(&self.pool)
+            .await?;
+        let kept: std::collections::HashSet<String> =
+            decode_rows("change", &changes, payload::<crate::core::Change>)
+                .into_iter()
+                .filter(|c| c.archived_at.is_none())
+                .flat_map(|c| c.runs.into_iter().map(|r| r.to_string()))
+                .collect();
         let ended: Vec<String> = decode_rows("run", &rows, payload::<Run>)
             .into_iter()
-            .filter(|r| !r.state.is_live())
+            .filter(|r| !r.state.is_live() && !kept.contains(r.id.as_str()))
             .map(|r| r.id.to_string())
             .collect();
         if ended.is_empty() {
@@ -1866,6 +2058,143 @@ mod tests {
         assert_eq!(raised, 1, "the resolved row went and the open one stayed");
     }
 
+    fn backups(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("devplane.v") && n.ends_with(".bak"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    async fn write_old_schema(path: &Path, version: i64) {
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "PRAGMA user_version = {version};
+             CREATE TABLE decisions (id TEXT PRIMARY KEY);
+             INSERT INTO decisions (id) VALUES ('only-copy');"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+    }
+
+    /// Parallel hooks opening an old-schema database: exactly one retires it,
+    /// the rest wait and open the new file, and the old record survives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_opens_of_an_old_database_retire_it_once() {
+        let dir = std::env::temp_dir().join(format!(
+            "devplane-retire-race-{}-{}",
+            std::process::id(),
+            jiff::Timestamp::now().as_nanosecond()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("devplane.db");
+        write_old_schema(&path, 97).await;
+
+        let opens: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                tokio::spawn(async move { Store::open(&path).await })
+            })
+            .collect();
+        for o in opens {
+            o.await.unwrap().expect("every opener gets a usable store");
+        }
+        let baks = backups(&dir);
+        assert_eq!(baks.len(), 1, "one retire, not one per opener: {baks:?}");
+        // The retired file still holds the only copy of the record.
+        let old = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(dir.join(&baks[0])))
+            .await
+            .unwrap();
+        let (id,): (String,) = sqlx::query_as("SELECT id FROM decisions")
+            .fetch_one(&old)
+            .await
+            .expect("the backup is the old database, not a fresh one");
+        assert_eq!(id, "only-copy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store opened by anything (a hook, before any `serve`) is owner-only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_store_is_owner_only_from_its_first_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "devplane-owner-only-{}-{}",
+            std::process::id(),
+            jiff::Timestamp::now().as_nanosecond()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("devplane.db");
+        let store = Store::open(&path).await.unwrap();
+        for suffix in ["", "-wal"] {
+            let file = PathBuf::from(format!("{}{suffix}", path.display()));
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", file.display());
+        }
+        store.pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retiring never overwrites or deletes an earlier backup, however many
+    /// there are; only an empty one, which holds nothing, goes.
+    #[tokio::test]
+    async fn retiring_keeps_every_backup_and_drops_only_empty_ones() {
+        let dir = std::env::temp_dir().join(format!(
+            "devplane-retire-keep-{}-{}",
+            std::process::id(),
+            jiff::Timestamp::now().as_nanosecond()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("devplane.db");
+        // A pre-existing backup with the old fixed name, and an empty one.
+        std::fs::write(dir.join("devplane.v1.bak"), b"old record").unwrap();
+        std::fs::write(dir.join("devplane.v2.bak"), b"").unwrap();
+        // Empty, but its log is not: kept.
+        std::fs::write(dir.join("devplane.v3.bak"), b"").unwrap();
+        std::fs::write(dir.join("devplane.v3.bak-wal"), b"frames").unwrap();
+
+        for v in [90, 91, 92, 93, 94] {
+            for f in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{f}", path.display()));
+            }
+            write_old_schema(&path, v).await;
+            Store::open(&path).await.unwrap().pool.close().await;
+        }
+        let baks: Vec<String> = backups(&dir)
+            .into_iter()
+            .filter(|b| b.ends_with(".bak"))
+            .collect();
+        assert!(!baks.iter().any(|b| b == "devplane.v2.bak"), "{baks:?}");
+        for kept in ["devplane.v1.bak", "devplane.v3.bak"] {
+            assert!(
+                baks.iter().any(|b| b == kept),
+                "{kept} was deleted: {baks:?}"
+            );
+        }
+        for v in [90, 91, 92, 93, 94] {
+            assert!(
+                baks.iter()
+                    .any(|b| b.starts_with(&format!("devplane.v{v}."))),
+                "v{v} was deleted: {baks:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn a_database_from_another_schema_is_moved_aside_rather_than_migrated() {
         // A file stamped with a different schema is renamed aside and a fresh
@@ -1917,8 +2246,9 @@ mod tests {
         assert_eq!(rows.len(), 1, "the new file starts empty: {rows:?}");
         assert_eq!(rows[0].authority, crate::core::Authority::Nobody);
 
-        assert!(
-            dir.join("devplane.v99.bak").exists(),
+        assert_eq!(
+            backups(&dir).len(),
+            1,
             "the old file is kept — a decision log is the one thing here that \
              cannot be re-derived, so it is moved and never deleted"
         );
@@ -2021,8 +2351,8 @@ mod tests {
 
         // A row written by some other version of this struct.
         sqlx::query(
-            "INSERT INTO runs (id, session_id, agent, cwd, last_event_at, payload)
-             VALUES ('s-bad','s-bad','claude','/tmp/repo','t','{\"not\":\"a run\"}')",
+            "INSERT INTO runs (id, agent, cwd, last_event_at, payload)
+             VALUES ('s-bad','claude','/tmp/repo','t','{\"not\":\"a run\"}')",
         )
         .execute(&s.pool)
         .await
@@ -2373,6 +2703,19 @@ mod integrity_tests {
             s.save_run(r).await.unwrap();
         }
 
+        // An old ended run of a change still open is its session: kept.
+        let mut parked = done.clone();
+        parked.id = RunId::new("parked");
+        s.save_run(&parked).await.unwrap();
+        let mut change = crate::core::Change::new_at(
+            crate::core::ProjectId::new("p"),
+            "waiting on a person".into(),
+            "…".into(),
+            long_ago,
+        );
+        change.runs.push(parked.id.clone());
+        s.save_change(&change).await.unwrap();
+
         assert_eq!(s.prune_runs(7).await.unwrap(), 1);
         let left: Vec<String> = s
             .load_runs()
@@ -2383,8 +2726,8 @@ mod integrity_tests {
             .collect();
         assert_eq!(
             left,
-            ["fresh", "busy"],
-            "newest first; the old finished run is gone"
+            ["fresh", "busy", "parked"],
+            "newest first; the old finished run is gone, the open change's is not"
         );
     }
 
@@ -2396,14 +2739,7 @@ mod integrity_tests {
         for (table, expected) in [
             (
                 "runs",
-                vec![
-                    "id",
-                    "session_id",
-                    "agent",
-                    "cwd",
-                    "last_event_at",
-                    "payload",
-                ],
+                vec!["id", "agent", "cwd", "last_event_at", "payload"],
             ),
             ("changes", vec!["id", "updated_at", "payload"]),
         ] {

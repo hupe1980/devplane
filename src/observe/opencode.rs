@@ -158,6 +158,7 @@ pub fn read(line: &str) -> Option<Observed> {
                     by: "opencode".into(),
                     reason: None,
                     context: None,
+                    call_id: None,
                 },
             })
         }

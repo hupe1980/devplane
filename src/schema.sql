@@ -17,8 +17,7 @@ CREATE TABLE IF NOT EXISTS projects (
     root         TEXT NOT NULL,
     trusted      INTEGER NOT NULL DEFAULT 0,
     repo_url     TEXT,
-    auto_discovered INTEGER NOT NULL DEFAULT 1,
-    created_at   TEXT NOT NULL
+    auto_discovered INTEGER NOT NULL DEFAULT 1
 );
 
 -- A projection of the event log, stored so the board renders before a replay
@@ -26,7 +25,6 @@ CREATE TABLE IF NOT EXISTS projects (
 -- reads (probe cleanup, rule scope, inbox vendors, order and retention).
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
-    session_id   TEXT NOT NULL,
     agent        TEXT NOT NULL,
     cwd          TEXT NOT NULL,
     last_event_at TEXT NOT NULL,
@@ -137,10 +135,7 @@ CREATE INDEX IF NOT EXISTS messages_by_time ON messages(at);
 CREATE TABLE IF NOT EXISTS attention_log (
     item_id      TEXT NOT NULL,
     kind         TEXT NOT NULL,
-    level        TEXT NOT NULL,
-    project_id   TEXT,
     run_id       TEXT,
-    change_id      TEXT,
     raised_at    TEXT NOT NULL,
     resolved_at  TEXT,
     resolution   TEXT,
@@ -228,3 +223,15 @@ CREATE TABLE IF NOT EXISTS reports (
 
 CREATE INDEX IF NOT EXISTS reports_by_target ON reports(target_project, state);
 CREATE INDEX IF NOT EXISTS reports_by_source ON reports(source_project, state);
+
+-- A person read a weakened-check row of a change's review: that the row was
+-- seen, and by whom, never when — a time beside the change's ready time would
+-- record how long somebody spent reviewing. Keyed by the row's matched text,
+-- so a different skip marker is a different, unseen row. Guards the offer.
+CREATE TABLE IF NOT EXISTS weakened_seen (
+    change_id  TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    matched    TEXT NOT NULL,
+    authority  TEXT NOT NULL CHECK (authority = 'person'),
+    PRIMARY KEY (change_id, path, matched)
+);

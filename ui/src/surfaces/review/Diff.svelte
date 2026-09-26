@@ -66,7 +66,7 @@
   <section class="hunk" class:current={i === current} id="hunk-{i}">
     <button class="hh" onclick={() => onpick?.(i)}>
       <code>{h.header}</code>
-      {#if m}<span class="mark {m}"><Icon name={m === "accepted" ? "check" : "eye"} size={12} /> {m}</span>{/if}
+      {#if m}<span class="mark {m}" title="marked in this browser"><Icon name="eye" size={12} /> marked</span>{/if}
     </button>
     {#if h.formatter_only && !expanded}
       <button class="folded" onclick={onexpand}>
@@ -142,9 +142,6 @@
     font-size: var(--t-xs);
   }
   /* A mark in this browser, not a verification: never the verified green. */
-  .mark.accepted {
-    color: var(--accent);
-  }
   .mark.seen {
     color: var(--dim);
   }

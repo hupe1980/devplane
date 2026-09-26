@@ -1,16 +1,19 @@
 +++
 title = "CLI reference"
-description = "Every Devplane command. All of them take --json; reading works with nothing running, and a command that needs the host says so."
+description = "Every Devplane command and flag. Reading works with nothing running; a command that needs the host says so."
 weight = 20
 [extra]
 group = "reference"
 +++
 
-Every command takes `--json`. Colour follows `NO_COLOR`, is off when output is not a terminal, and
-`CLICOLOR_FORCE=1` forces it on.
+A command that prints something a script would read takes `--json`, after the command's name
+(`devplane inbox --json`, `devplane change show <id> --json`). `watch`, `open`, `answer`, `attach`,
+`speckit`, `completions`, `serve` and `app` do not. Under `--json` a failure is one object on
+stdout, `{"error": "…"}`, with a non-zero exit. Colour follows `NO_COLOR`, is off when
+output is not a terminal, and `CLICOLOR_FORCE=1` forces it on.
 
-**Reading needs no host.** `ls`, `inbox`, `asks`, `audit`, `show`, `search`, `change list`, `change
-show`, `modes`, `agents`, `rules` and `attention` ask a running host if one answers, and otherwise
+**Reading needs no host.** `ls`, `inbox`, `audit`, `show`, `search`, `change list`, `change
+show`, `modes`, `agents` and `attention` ask a running host if one answers, and otherwise
 read the store and print one dim line about what only a host can see (the runs it drives, GitHub,
 the gate probe). A command that starts, steers or stops an agent needs the host and says *no host is
 running — start one with `devplane serve`, or `devplane open` for the workbench*. `devplane answer`
@@ -40,9 +43,9 @@ reported. Change ids (`<change>`) resolve by prefix the same way. `devplane chan
 | Group | Commands |
 |---|---|
 | **See what is happening** | `ls` `show` `watch` `search` `open` |
-| **What needs you, and what happened without you** | `inbox` `asks` `answer` `attention` `audit` `modes` `issues` `prs` `snooze` |
-| **Start and steer work** | `change` `report` `attach` `focus` `gate` `rewind` |
-| **Set up a project** | `connect` `disconnect` `trust` `check` `explain` `rules` `speckit` `agents` `doctor` `completions` |
+| **What needs you, and what happened without you** | `inbox` `answer` `attention` `audit` `modes` `forge` `snooze` |
+| **Start and steer work** | `change` `report` `attach` `gate` `rewind` |
+| **Set up a project** | `connect` `disconnect` `trust` `check` `explain` `speckit` `agents` `doctor` `login` `logout` `completions` |
 | **The host** | `serve` `quit` `app` |
 
 Three commands are for machines and are not listed: `devplane mcp` (below), and `devplane hook` and
@@ -59,6 +62,7 @@ Sessions in play, and anything asking for you. Alias `ps`; plain `devplane` does
 | `-a`, `--all` | include sessions that have never reported anything — usually editor tabs left open |
 | `-p`, `--project <name>` | one project; matches any part of the name, so `mat` finds `matter-kit` |
 | `--needs-you` | only sessions waiting on a person |
+| `--json` | the same, as JSON |
 
 ### `devplane show <run>`
 
@@ -70,7 +74,7 @@ sent, that it was sent none, or that it was watched rather than started.
 
 With no run: follow events as they arrive. With a run: print what that driven agent says, like
 `tail -f`. Needs the host. Only driven runs have a conversation here; for a session you started,
-`devplane focus` raises its window.
+`devplane attach` resumes it in a terminal. No `--json`.
 
 | Flag | What |
 |---|---|
@@ -100,7 +104,7 @@ correct after a restart.
 | stops without you | a question or permission an agent is waiting on |
 | already stopped | an abandoned question, a run that is gone |
 | broke after the fact | a gate red after the agent finished; a run that failed |
-| ready to decide | a verified change waiting to be finished or offered |
+| ready to decide | a verified change waiting to be reviewed; never offered from the inbox |
 | owed by you | a review requested, an issue assigned, an open question in a specification |
 | worth knowing | drift, overlap, a cost anomaly, the machine's own health |
 
@@ -108,6 +112,7 @@ correct after a restart.
 |---|---|
 | `-p`, `--project <name>` | one project, matched like `ls --project` |
 | `--needs-you` | only what can be answered from here — a question with a reply, not a red gate |
+| `--all` | everything an agent asked you instead, settled ones too (below) |
 
 A narrowing is never remembered, and a narrowed list says how many items it hides. Above twelve
 rows, interchangeable items (issues assigned, stalled sessions) fold into one counted row; questions,
@@ -130,7 +135,7 @@ file to paste it into. Nothing is written for you.
 Two items are about Devplane itself: `gate_down` (the installed permission gate is not answering) and
 `config_broken` (a `devplane.toml` will not load, so every gated call there goes to a person).
 
-### `devplane asks`
+#### `devplane inbox --all`
 
 Everything an agent asked you: open ones first, oldest first, then settled ones with what ended them
 — **you**, **a clock** set in [`[questions] deadline`](@/docs/configuration.md#questions), or
@@ -144,13 +149,17 @@ the process that asked, so an answer given tomorrow reaches the agent through a 
 | Flag | What |
 |---|---|
 | `--allow` | allow it — a permission |
-| `--deny` | refuse it — a permission; the default when neither is given |
-| `--option <text>` | one of the options the agent offered, as it wrote it |
+| `--deny` | refuse it — a permission |
+| `--option <text>` | one of the options the agent offered, as it wrote it. It is the whole answer, so it cannot be combined with `--allow` or `--deny` |
 | `--custom <text>` | your own words, where the agent offered an *Other* box; wins over `--option` |
-| `--field <id>` | which question, when the agent asked several at once |
+| `--field <id>` | which question, when the agent asked several at once. Questions only: `--allow` and `--deny` refuse it |
+
+One of `--allow`, `--deny`, `--option` or `--custom` is required; with none, nothing is sent. No
+`--json`.
 
 **`--allow` is refused inside an agent session** (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
-`DEVPLANE_RUN`, or the Codex or Copilot session variables set). This stops the easy path, not a
+`CLAUDE_CODE_ENTRYPOINT`, `DEVPLANE_RUN`, or the Codex or Copilot session variables set), and so is an
+`--option` given without `--field`, which could be a permission's allow. This stops the easy path, not a
 hostile process; see [Security](@/docs/security.md). There is no dismiss. The first answer wins; a
 second is told who gave the first.
 
@@ -184,22 +193,29 @@ unrecognised mode shows as unknown. *Seen* is when Devplane first heard the sess
 also reports a question auto-continue timer (`askUserQuestionTimeout`, or `CLAUDE_AFK_TIMEOUT_MS` in
 a session's environment) and who set it. Devplane never sets a mode.
 
-### `devplane issues`
+### `devplane forge`
 
-Every open GitHub issue across registered projects, read through your own `gh`, what needs you
-first. The host refreshes it every five minutes; with no host it says so.
+Open GitHub issues and pull requests across registered projects, read with your GitHub sign-in, what
+needs you first. The host refreshes them every five minutes, and at once after a sign-in; with no
+host it says so. Writes nothing to GitHub. Each project is listed under its own heading with the
+state its GitHub is in — not signed in to its host, expired, rate limited, unreachable, stale, or not
+a GitHub repository — and how many more are open past the page that was read. Both take `--json` and
+print only their own list, with that per-project state: `devplane forge prs --json`.
+
+#### `devplane forge issues`
+
+Every open issue across registered projects.
 
 | Flag | What |
 |---|---|
-| `--ready` | only this repository's issues carrying `[github] ready_label`: the list `change start --issue` picks from |
+| `--ready` | only this repository's issues carrying `[github] ready_label`: the list `change start --issue` picks from. Without it, every project's open issues |
 | `--cwd <path>` | which repository; implies `--ready` |
 | `--label <label>` | default `[github] ready_label`; implies `--ready` |
 
-### `devplane prs`
+#### `devplane forge prs`
 
 Every open pull request across registered projects. `◆` marks what waits on you: a review requested
 of you, or your own pull request that is red, has changes requested, or is approved and unmerged.
-Writes nothing to GitHub.
 
 ### `devplane snooze <id>`
 
@@ -208,7 +224,7 @@ anything new still shows. The run keeps running.
 
 | Flag | What |
 |---|---|
-| `--minutes <n>` | default 60; `0` un-snoozes |
+| `--minutes <n>` | default 60; `0` un-snoozes. Anything past 30 days is taken as 30 days |
 
 ## Start and steer work
 
@@ -227,7 +243,8 @@ devplane change start --spec specs/001-password-reset --task REQ-3 \
 devplane change start --project api --project web "bump tokio to 1.40"
 ```
 
-The title becomes the branch name and the first prompt.
+The title becomes the first prompt and, slugged, the branch: `change/<slug>` (for example
+`change/add-rate-limiting-to-login-3f9a1c`). Every `change` subcommand takes `--json`.
 
 | Flag | What |
 |---|---|
@@ -256,8 +273,8 @@ declared*), runs, cost against the budget, and what each check said. With a spec
 counts and any drift:
 
 ```console
-tasks      11 ticked · 9 verified
-REQ-3      3 tasks · 2 ticked · 0 verified
+tasks      11 ticked · 9 seen by a passing check
+REQ-3      3 tasks · 2 ticked · 0 seen by a passing check
 drift      the specification changed 18m into run r-9f2 and the run never saw it
            devplane change drift c-01a0 --run r-9f2 --accept | --tell
 ```
@@ -278,15 +295,17 @@ Offered in the inbox only when the agent can resume. Never automatic.
 
 #### `devplane change review <change>`
 
-The change read for a merge decision: **checks weakened or changed** first (added skip markers,
-deleted test files, edits to the gates or CI config), then the gate standing, then every file in the
-order `[review] roles` declares, each with its role, whether a declared test covers it, the decisions
-taken while it was written, and its task. No score.
+The change read for a merge decision: **checks weakened or changed** first (skip markers, removed
+assertions, deleted tests, suppressions, edits to the gates, CI or a checker's configuration — each
+with what it matched and whether it was read), then the gate standing, then every file in the order
+`[review] roles` declares, each with its role, whether a declared test covers it, the decisions taken
+while it was written, and its task. No score.
 
 | Flag | What |
 |---|---|
 | `--by risk` | declared role order (the default) |
 | `--by intent` | grouped by the run that wrote each file and the tasks it was sent; files nobody asked for last |
+| `--seen <path>` | mark every weakened row at that path read, as yours (repeatable); refused for a path with none, and from inside an agent's session |
 
 #### `devplane change export <change>`
 
@@ -335,8 +354,12 @@ a refusal changes nothing.
 
 #### `devplane change offer <change>`
 
-Push the branch and open the pull request when `[github] pull_request = true` in your checkout.
-Otherwise it pushes nothing and prints the `git push` and `gh pr create` lines.
+Push the branch and open the pull request when `[github] pull_request = true` in your checkout; a
+branch that already has an open pull request records that one instead. Otherwise it pushes nothing and prints the `git push` line and the address of GitHub's own compare
+page for the branch, where you open the pull request yourself. Refused, with exit
+status `3`, while any weakened-check row is unseen: it names every row and the `change review --seen`
+line that marks one read (`--json` prints `refused`, `rows`, `seen_with`). Refused from inside an
+agent's session, as `finish` and `archive` are.
 
 #### `devplane change prompt <change|run> [TEXT]...`
 
@@ -346,7 +369,7 @@ queued until the turn ends; it is recorded as sent either way.
 #### `devplane change stop <run>`
 
 Stop a run. It says first what survives (the change, worktree, branch and record), then asks on a
-terminal and proceeds in a script.
+terminal. Anywhere else (a script, a pipe) it refuses unless `--yes` says so.
 
 ### `devplane report`
 
@@ -363,7 +386,7 @@ project's [`[reports] deliver_from`](@/docs/configuration.md#reports) names this
 | `devplane report reject <id> --reason <text>` | refuse it; the filing project is told why |
 | `devplane report defer <id> --reason <text>` | put it off; the filing project is told why |
 | `devplane report fixed <id> [--reason <text>]` | answer it as fixed by hand |
-| `devplane report open <id>` | show a GitHub draft, ask, then open it with your own `gh` — the only command that writes to a forge |
+| `devplane report open <id>` | show a GitHub draft, ask, then open it as an issue under your GitHub sign-in; `--yes` where nobody can answer |
 | `devplane report discard <id>` | throw a GitHub draft away; nothing was sent |
 
 ```sh
@@ -392,12 +415,7 @@ an argument. With neither set, `--as-person` files as you; otherwise it is refus
 Hand this terminal to the agent, resuming its session (`claude --resume <id>`, or `claude attach
 <id>` for a background session). Replaces this process rather than nesting.
 
-### `devplane focus <run>`
-
-Raise the editor window that owns a run's directory. When none has it open, it says so and prints the
-resume command.
-
-### `devplane gate run`
+### `devplane gate`
 
 Run this repository's gates and report what they exited with. Needs no host, records nothing, reads
 no specification. A [Spec Kit hook](@/docs/specs.md) calls it.
@@ -406,6 +424,7 @@ no specification. A [Spec Kit hook](@/docs/specs.md) calls it.
 |---|---|
 | `--cwd <path>` | which repository; default the working directory |
 | `--name <gate>` | run one `[gates.named.<gate>]` instead of `check` |
+| `--json` | `state`, `passed`, `summary` and `commands` |
 
 | `state` | Exit | Means |
 |---|---|---|
@@ -419,10 +438,11 @@ A named gate never makes a change verified; only `check` defines done. `devplane
 records a report on a change.
 
 ```console
-$ devplane gate run --name bench
+$ devplane gate --name bench
 ok        cargo bench --no-run exit 0
 
 bench passed
+Not recorded: this ran in a repository rather than against a change. `devplane change verify <id>` is the one that leaves a row.
 ```
 
 ### `devplane rewind <run>`
@@ -436,21 +456,31 @@ before it runs.
 ### `devplane connect <provider>`
 
 Install Devplane's hooks: `claude` (hooks and telemetry in your user settings, with a backup), `codex`
-(merged into `~/.codex/hooks.json`) or `copilot` (one file in `~/.copilot/hooks/`). It shows the diff
-and writes only when you confirm. Nothing is started.
+(merged into `~/.codex/hooks.json`) or `copilot` (one file in `~/.copilot/hooks/`). Nothing is
+started.
+
+It shows the diff first. On a terminal it asks; anywhere else (a script, a pipe, an agent's shell)
+and under `--json` it writes nothing unless you pass `--yes`.
+
+Every hook runs the binary by its full path, so `connect` refuses a binary that lives somewhere
+temporary: npx's package cache, a macOS App Translocation path, a mounted volume under `/Volumes`,
+or an AppImage's mount. Install `devplane` somewhere permanent and connect from there, or name one
+with `--bin`. After moving or reinstalling the binary, run `connect` again.
 
 | Flag | What |
 |---|---|
 | `--statusline` | also wrap your status line, the only source of subscription rate limits: `devplane connect --statusline claude` |
-| `-y`, `--yes` | write without asking |
+| `-y`, `--yes` | write without asking; required when stdin is not a terminal, and under `--json` |
+| `--bin <path>` | the `devplane` binary the hooks run; default this one |
+| `--json` | the diff and what was written |
 
 Codex runs a hook only after you approve it in its own dialog. For Copilot, `connect copilot` prints
 three environment lines to export. See [Watching sessions](@/docs/observe.md).
 
 ### `devplane disconnect <provider>`
 
-Remove exactly what `connect` installed for `claude`, `codex` or `copilot`. `-y` writes without
-asking.
+Remove exactly what `connect` installed for `claude`, `codex` or `copilot`. It shows the diff, asks on
+a terminal, and needs `-y` (`--yes`) anywhere else. Hooks you configured yourself are left alone.
 
 ### `devplane trust [path]`
 
@@ -503,8 +533,9 @@ undecided  Bash
         its rules loaded and none answers this one, so the provider's own dialog decides and it reaches your inbox
 ```
 
-The answers are `deny`, `ask`, `ask — unreadable`, `undecided`, and `unresolved` when the project's
-rules will not load. There is no `allow`. See [Permissions](@/docs/permissions.md).
+The table prints `deny`, `ask`, `ask — unreadable` (a line that hides what it runs, or rules that
+will not load) or `undecided`; `--json` calls the unreadable case `unresolved`. There is no `allow`.
+See [Permissions](@/docs/permissions.md).
 
 | Flag | What |
 |---|---|
@@ -518,33 +549,14 @@ rules will not load. There is no `allow`. See [Permissions](@/docs/permissions.m
 interruptions first, for your agent's `permissions.allow`. A rule is offered only after a command
 interrupted you three times. It writes nothing.
 
-### `devplane rules [RULE]`
+### `devplane speckit`
 
-Which registered projects are missing a rule, in `devplane.toml` (what Devplane refuses) and in the
-agent's `.claude/settings.json` (what the agent refuses), reported separately.
-
-```console
-$ devplane rules 'Bash(curl:*)'
-Bash(curl:*)
-
-  saas      devplane  missing     /Users/you/saas/devplane.toml
-  saas      agent     has it      /Users/you/saas/.claude/settings.json
-  core-lib  devplane  covered     by `Bash(*)`
-  ai-tool   devplane  unreadable  expected `=` at line 4 — run `devplane check`
-```
-
-It ends with what to paste into which file. `covered` means a wider rule already answers every call
-yours names. With no rule, it reports the rules some projects have and others lack. It writes nothing.
-
-| Flag | What |
-|---|---|
-| `--ask` | the rule belongs in the ask list, which changes the key the paste names |
-
-### `devplane speckit install`
-
-Register `devplane gate run` as a Spec Kit extension hook in `.specify/extensions.yml`. It writes the
-file only when there is none; otherwise it prints the entry and where to add it. See
-[Specifications](@/docs/specs.md).
+Register Devplane's gate as a Spec Kit extension hook in `.specify/extensions.yml`. The hook names the
+`devplane-gate` skill, which runs `devplane gate`. It needs Spec Kit initialised (`.specify/`), and it
+writes the file only when there is none; otherwise it prints the entry and where to add it. It refuses
+when the repository declares no gate, or when no `devplane-gate` skill is at
+`.claude/skills/devplane-gate/SKILL.md` in the repository or your home; `--dry-run` applies the same
+refusals. See [Specifications](@/docs/specs.md#the-gate-inside-spec-kit-s-workflow).
 
 | Flag | What |
 |---|---|
@@ -557,6 +569,41 @@ file only when there is none; otherwise it prints the entry and where to add it.
 The agents Devplane can drive and, for those it has started, what each advertised at its handshake
 (`resume`, `load`, `list`, modes, sign-in) with the date. See [Driving agents](@/docs/agents.md).
 
+### `devplane login github`
+
+Sign in to GitHub by its device flow: Devplane prints a short code and GitHub's device address, opens
+the address where it can, and waits while you enter the code there. It never sees your password. The
+token goes into the operating system's credential store (Keychain, Credential Manager, Secret
+Service) under service `devplane`, account `github:<host>`, and nowhere else; with no credential
+store, sign-in refuses rather than write a file. When a host runs, the window's **Setup** shows the
+same code.
+
+| Flag | |
+|---|---|
+| `--host <host>` | a GitHub Enterprise server instead of the configured host (`[github] host` in `~/.devplane/app.toml`, default `github.com`) |
+| `--with-token` | read a token from stdin — never an argument — verify it and store it: for a server with no registered app, and for CI |
+| `--json` | a `{ "state": "pending", "user_code", "verification_uri", "expires_at" }` line first, then `{ "host", "login", "scopes" }` |
+
+With no GitHub app registered for the host, the device flow is refused and the refusal names the way
+that works without one: a token on stdin.
+
+```sh
+gh auth token | devplane login github --with-token   # GitHub CLI's token
+devplane login github --with-token < pat.txt         # a fine-grained personal access token
+```
+
+An Enterprise server registers its own app; name it per host in `~/.devplane/app.toml` as
+`[github.hosts."ghe.corp"] client_id = "…"` (or `[github] client_id` for the configured host). A
+build's own app is used for `github.com` only. A sign-in finished here while a host runs is handed to
+it, and the Forge is read at once.
+
+### `devplane logout github`
+
+Deletes the token from the credential store and every copy Devplane holds; the Forge view reads *not
+signed in* at its next poll. A host nobody signed in to has nothing to delete, and the command says
+so. `--host` for an Enterprise server. The grant still exists at GitHub,
+and the command says where to revoke it (`https://<host>/settings/applications`).
+
 ### `devplane doctor`
 
 Whether Devplane is working. Alias `diagnostics`. It reports:
@@ -565,6 +612,11 @@ Whether Devplane is working. Alias `diagnostics`. It reports:
 - which model provider you are on, which decides which Claude Code surfaces exist;
 - the hook gate, **run** with a real `PreToolUse` payload against a throwaway deny rule, with its
   latency, or `INSTALLED AND NOT ANSWERING`;
+- **gate off** for any hook event whose binary no longer exists (an npx cache cleared, a binary
+  moved), and **out of date** when the installed hooks are not the ones this build writes;
+- per GitHub host, whom it is signed in as, the scopes and when GitHub last answered — never the
+  token — and each project that is not a GitHub repository, with the reason (`--json` carries the
+  hosts as `github`, whether or not a host runs);
 - what is watched per vendor and channel: `read`, `unproved`, `unbuilt`, `not published`, `not
   checked`;
 - the Claude Code release the rule syntax was modelled on;
@@ -580,7 +632,8 @@ devplane completions bash > /etc/bash_completion.d/devplane
 devplane completions fish > ~/.config/fish/completions/devplane.fish
 ```
 
-Needs no host; completing an id asks a running host and is silent without one. See
+Needs no host; completing an id asks a running host, or else reads the store (never starting a host),
+and gives up after 150 ms. See
 [Install](@/docs/install.md#shell-completion).
 
 ### `devplane mcp`
@@ -618,8 +671,10 @@ Run the host in the foreground, until ctrl-c.
 |---|---|
 | `--port <n>` | default `47831`, or `DEVPLANE_PORT`; `0` asks the OS for a free port |
 
-When the default port is held by something that is not a Devplane host, `serve` takes another and
-records it; a port you name is never swapped. A second host on the same home is refused with the
+A port held by another process is a refusal, never a quiet move elsewhere: the agents' settings send
+the bearer token to that port, so a host on another one would leave the token going to whatever holds
+it. The refusal names the holder where it can. Stop that process, or pick a free port and run
+`devplane connect` again so the settings follow. A second host on the same home is refused with the
 running one's port and uptime.
 
 ### `devplane quit`

@@ -3,7 +3,7 @@
 //! never by count alone.
 
 use devplane::core::config::SpecSection;
-use devplane::core::spec::{
+use devplane::spec::{
     ChangeFolder, DIALECTS, Detected, NO_LAYOUT, Shape, Spec, changes, confine, detect,
 };
 use std::path::{Path, PathBuf};
@@ -193,13 +193,18 @@ fn a_path_that_escapes_the_project_is_refused_by_name() {
         assert!(ChangeFolder::at(&root, named).is_err(), "{named}");
     }
     assert!(changes(&root, &Detected::plain("../")).is_empty());
+    // The escaping key contributes nothing; the fixture's own Spec Kit
+    // layout is still listed, because it is detected by its marker.
+    let listed = SpecSection {
+        plans: Some("../kiro/.kiro/specs".into()),
+        ..Default::default()
+    }
+    .plan_paths(&root);
     assert!(
-        SpecSection {
-            plans: Some("../kiro/.kiro/specs".into()),
-            ..Default::default()
-        }
-        .plan_paths(&root)
-        .is_empty()
+        listed
+            .iter()
+            .all(|p| !p.contains("..") && !p.contains("kiro")),
+        "an escaping `plans` listed something: {listed:?}"
     );
 
     // A path that does not exist is absent, not refused.

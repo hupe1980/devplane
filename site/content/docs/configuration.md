@@ -41,7 +41,7 @@ run     = ["pnpm test -- --run tests/e2e"]
 timeout = "20m"
 
 [policy]                    # refuse and defer; Devplane never approves
-never_auto = ["Bash(rm -rf *)", "Read(.env)"]
+never_auto = ["Bash(rm *)", "Read(.env)"]
 always_ask = ["Bash(git push *)"]
 max_parallel_runs = 2
 stall_timeout     = "12m"
@@ -81,7 +81,9 @@ ready_label  = "devplane:ready"
 deliver_from = ["api"]
 ```
 
-Durations are written the way people say them: `30s`, `10m`, `1h30m`. A bare number is seconds.
+Durations are strings, written the way people say them: `"30s"`, `"10m"`, `"1h30m"`; `"600"` is
+seconds. A bare TOML number (`timeout = 600`) is a parse error. `[questions] deadline` takes one unit
+only (`"90s"`, `"30m"`, `"4h"`) or `"never"`.
 
 ## `[project]`
 
@@ -137,7 +139,7 @@ timeout = "5m"
 ```
 
 A change is **verified** when the latest `check` report passed and its tree digest equals the working
-tree's. A `[gates.named]` gate is evidence you ask for (`devplane gate run --name bench`) and never
+tree's. A `[gates.named]` gate is evidence you ask for (`devplane gate --name bench`) and never
 makes a change verified; an undeclared name is an error. See [Verified done](@/docs/verified-done.md).
 
 ## `[policy]`
@@ -147,12 +149,12 @@ makes a change verified; an undeclared name is an error. See [Verified done](@/d
 | `never_auto` | list of rules | empty | refused, without asking anybody |
 | `always_ask` | list of rules | empty | put in front of a person |
 | `max_parallel_runs` | integer | unlimited | changes with an agent in them at once in this project; sessions you started yourself are not counted |
-| `stall_timeout` | duration | the machine's | how long a working run may produce nothing before it is called stalled |
+| `stall_timeout` | duration | `10m` | how long a working run may produce nothing before it is called stalled |
 
 ```toml
 [policy]
 never_auto = [
-  "Bash(rm -rf *)",
+  "Bash(rm *)",
   "Read(./.env)",
   "WebFetch(domain:pastebin.com)",
 ]
@@ -216,7 +218,7 @@ See [Specifications](@/docs/specs.md).
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `deadline` | `never` or a duration | `never` | how long an unanswered question or permission waits before the agent is told no |
-| `hold` | `true` or a duration | none | how long a permission on a **watched** session waits for an answer from Devplane before the agent's own dialog appears |
+| `hold` | `true`, `false` or a duration | none | how long a permission on a **watched** session waits for an answer from Devplane before the agent's own dialog appears |
 
 ```toml
 [questions]
@@ -272,9 +274,9 @@ unordered. Without any `[[review.covers]]` the coverage column is absent, which 
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `pull_request` | bool | `false` | let `devplane change offer` push and open the pull request; off, it prints the two commands |
+| `pull_request` | bool | `false` | let `devplane change offer` push and open the pull request (or record the one already open for the branch); off, it prints the `git push` line and GitHub's address for opening it. Nothing opens a pull request when gates pass |
 | `draft` | bool | `true` | open it as a draft |
-| `ready_label` | string | none | issues with this label are offered as work — `devplane issues --ready`, `change start --issue` |
+| `ready_label` | string | none | issues with this label are offered as work — `devplane forge issues --ready`, `change start --issue` |
 
 ## `[reports]`
 
@@ -291,20 +293,35 @@ authority `rule`. `"*"`, empty names and unregistered projects are refused by `d
 
 All under `~/.devplane/` (or `DEVPLANE_HOME`).
 
-**`policy.toml`**: the same `[policy]` section, applied to every project. Only `[policy]` is allowed.
-A file that will not load fails closed, like a broken `devplane.toml`.
+**`policy.toml`**: `never_auto` and `always_ask` in a `[policy]` section, applied to every project.
+Only `[policy]` is allowed. `max_parallel_runs` and `stall_timeout` parse there but do nothing: they
+are read only from a project's `devplane.toml`. A file that will not load fails closed, like a broken
+`devplane.toml`.
 
-**`app.toml`**: the window of `devplane app`:
+**`app.toml`**: the window of `devplane app`, and which GitHub this machine signs in to:
 
 ```toml
 # ~/.devplane/app.toml
 [app]
 shortcut = "CmdOrCtrl+Shift+Space"   # the one global shortcut
-port     = 0                         # the host's port; 0 picks a free one
+port     = 47831                     # the host's port; 0 picks a free one
+
+[github]
+host      = "ghe.corp"               # the configured host; github.com unless set
+client_id = "Iv1.…"                  # that host's OAuth App, for the device flow
+
+[github.hosts."ghe.other"]
+client_id = "Iv1.…"                  # another Enterprise server's own app
 ```
 
+A client id is public (the device flow has no secret). A release build carries its own for
+`github.com` only; a host with none signs in with a token on stdin (`devplane login github
+--with-token`).
+
 A missing file means these defaults. A file that will not parse, or a shortcut that cannot be
-registered, is reported by `devplane doctor`.
+registered, is reported by `devplane doctor`. The default, 47831, is the port `devplane connect claude`
+writes into the telemetry settings. With `port = 0` the window's host picks a new port each start and
+agent telemetry (cost, context) no longer reaches it.
 
 **`agents.toml`**: agents added by name, beside the built-in ones. See
 [Driving agents](@/docs/agents.md).
@@ -319,6 +336,8 @@ registered, is reported by `devplane doctor`.
 | `DEVPLANE_NOTIFY` | `0` turns desktop notifications off |
 | `DEVPLANE_CLAUDE_BIN` | the `claude` binary, when it is not on `PATH` |
 | `DEVPLANE_UI` | serve the interface from this built directory instead of the embedded copy |
+| `DEVPLANE_OPENCODE_URL` | a running `opencode serve` to watch; see [Watching sessions](@/docs/observe.md#opencode) |
+| `VISUAL`, `EDITOR` | the editor the window's **Editor** button opens a worktree in |
 | `DEVPLANE_RUN` | set by Devplane on every agent it starts; read by `devplane report file` |
 | `CLAUDE_CONFIG_DIR` | which Claude Code configuration `devplane connect claude` writes to |
 | `CODEX_HOME`, `COPILOT_HOME` | where Codex and Copilot keep their configuration |

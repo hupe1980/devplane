@@ -1,13 +1,16 @@
 <script lang="ts">
-  // What is configured on this machine: Devplane, its agent, your rules, and
-  // each project. Read-only: each section names the file it read and the
-  // command that changes it.
-  import { api } from "../../lib/api";
+  // What is configured on this machine: Devplane, its agent, the GitHub
+  // sign-in, your rules, and each project. Read-only but for the sign-in:
+  // each section names the file it read and the command that changes it.
+  import { resource } from "../../lib/resource.svelte";
+  import Failed from "../../lib/Failed.svelte";
   import Props from "../../lib/ui/Props.svelte";
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
-  import Empty from "../../lib/ui/Empty.svelte";
+  import GitHubPanel, { type HostSignIn } from "./GitHubPanel.svelte";
+  import { api } from "../../lib/api";
+  import { copyText } from "../../lib/resource.svelte";
 
   type ProjectRow = {
     id: string;
@@ -31,21 +34,47 @@
     projects?: ProjectRow[];
   };
 
-  let data = $state<Setup | null>(null);
-  let failed = $state("");
-  $effect(() => {
-    let live = true;
-    api<Setup>("/api/setup")
-      .then((r) => {
-        if (live) data = r;
-      })
-      .catch((e) => {
-        if (live) failed = e instanceof Error ? e.message : String(e);
-      });
-    return () => {
-      live = false;
-    };
+  const read = resource<Setup>(() => "/api/setup", { tell: () => "devplane doctor" });
+  // GitHub's sign-in per host, re-read while a code is waiting to be entered.
+  const github = resource<{ hosts?: HostSignIn[]; client_id?: boolean }>(() => "/api/github", {
+    every: 3_000,
+    tell: () => "devplane doctor",
   });
+  let busy = $state("");
+  let said = $state("");
+  async function signIn(host: string) {
+    if (busy) return;
+    busy = `starting a sign-in to ${host}`;
+    said = "";
+    try {
+      await api("/api/github/login", { method: "POST", body: JSON.stringify({ host }) });
+    } catch (e) {
+      said = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = "";
+      await github.reload();
+    }
+  }
+  async function signOut(host: string) {
+    if (busy) return;
+    busy = `signing out of ${host}`;
+    said = "";
+    try {
+      const r = await api<{ deleted_from?: string | null; revoke_at?: string }>("/api/github/logout", { method: "POST", body: JSON.stringify({ host }) });
+      said = r.deleted_from
+        ? `Signed out of ${host}: the token is deleted from ${r.deleted_from}. The grant still exists at GitHub; revoke it at ${r.revoke_at ?? "GitHub's settings"}.`
+        : `Not signed in to ${host}; there was no token to delete.`;
+    } catch (e) {
+      said = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = "";
+      await github.reload();
+    }
+  }
+  async function copy(code: string) {
+    said = (await copyText(code)) ? `copied ${code}` : "this page cannot reach the clipboard — type the code as shown";
+  }
+  const data = $derived(read.data);
 
   const hooks = $derived(data?.connect?.hooks_installed ?? []);
   const policy = $derived(data?.machine_policy ?? null);
@@ -61,8 +90,8 @@
 
 <div class="page">
   <h1>Setup</h1>
-  {#if failed}
-    <Empty icon="alert" title="Devplane could not say what is configured" body={failed} />
+  {#if read.phase === "failed" && read.failure}
+    <Failed what="what is configured" failure={read.failure} />
   {:else if !data}
     <p class="quiet">Reading the files…</p>
   {:else}
@@ -96,6 +125,12 @@
           />
         {/if}
       </section>
+
+      {#if github.phase === "failed" && github.failure}
+        <Failed what="the GitHub sign-in" failure={github.failure} />
+      {:else}
+        <GitHubPanel hosts={github.data?.hosts ?? []} clientId={github.data?.client_id ?? true} {busy} {said} {signIn} {signOut} {copy} />
+      {/if}
 
       <section class="card wide">
         <h2><Icon name="shield" size={14} /> Rules for every project</h2>

@@ -4,12 +4,12 @@
 <section class="hero">
   <div class="wrap">
     <p class="eyebrow">Local-first · One binary · MIT OR Apache-2.0</p>
-    <h1>Write the spec.<br><span class="accent">Verify the change.</span></h1>
+    <h1>Let the agent work.<br><span class="accent">Know when it is done.</span></h1>
     <p class="lede">
-      Devplane is the desktop workbench for spec-driven agentic development. Write the spec, dispatch
-      any agent that speaks the <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a>,
-      verify against your own gates, and keep the record of who decided what while you were not
-      looking.
+      Devplane tells you when an agent's work is actually done. Run any agent that speaks the
+      <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a> in its own worktree,
+      verify its change with your own checks run outside the agent, see the weakened tests first, and
+      keep the record of who decided what while you were not looking.
     </p>
     <p class="muted small">
       It sits on top of your tools: the spec is your spec tool’s folder, the checks are your commands,
@@ -26,8 +26,8 @@
       <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh" aria-label="Copy the install command">Copy</button>
     </div>
     <p class="muted small">
-      macOS and Linux — or <code>npx devplane ls</code> on any platform with Node, Windows included.
-      <a href="{{ get_url(path='/docs/install/') }}">Other install paths</a>.
+      macOS (Apple Silicon) and Linux. Windows through <code>npm install -g devplane</code>; anything
+      else with <code>cargo install</code>. <a href="{{ get_url(path='/docs/install/') }}">Every platform</a>.
     </p>
 
     <figure class="terminal" aria-label="Starting a change and reading its state">
@@ -36,10 +36,10 @@
 <span class="t-dim">$</span> devplane change show c-3f9a
 <span class="t-bold">password reset</span>  <span class="t-dim">c-3f9a</span>
   state      <span class="t-ok">✓ verified</span>
-  gates      <span class="t-ok">every declared gate exited zero against the tree as it stands</span>
-  branch     fix/password-reset
+  gates      <span class="t-ok">`check` exited zero against the working tree as it stands</span>
+  branch     change/password-reset-3f9a1c
   spec       specs/142-password-reset <span class="t-dim">at 3f9a1c40b7e2d518 over 4 documents</span>
-  tasks      11 ticked · 9 verified
+  tasks      11 ticked · 9 seen by a passing check
 <span class="t-dim">$</span> devplane change offer c-3f9a
 </code></pre>
     </figure>
@@ -47,7 +47,7 @@
 </section>
 
 <section class="wrap showcase">
-  <figure class="shot"><img src="{{ get_url(path="workbench.png") | safe }}" alt="A change open in the Devplane workbench: verified against the working tree, with its lifecycle, six views and evidence" width="1200"></figure>
+  <figure class="shot"><img src="{{ get_url(path="workbench.png") | safe }}" alt="A change open in the Devplane workbench: verified against the working tree, with one check weakened beside it, its lifecycle, six views and evidence" width="1200"></figure>
   <figure class="shot"><img src="{{ get_url(path="review.png") | safe }}" alt="The review leads with a check the agent weakened — a skipped test — before anything else" width="1200" loading="lazy"></figure>
 </section>
 
@@ -81,19 +81,20 @@
       <h3>Verified means verified</h3>
       <p>
         Your committed gate, run by Devplane rather than the agent, against a digest of the working
-        tree — uncommitted files included. Touch one file and it is stale. Only the gate that defines
-        done can make a change verified.
+        tree — uncommitted files included, hashed byte for byte. Touch one file and it is stale. Only
+        the gate that defines done can make a change verified.
       </p>
       <a class="more" href="{{ get_url(path='/docs/verified-done/') }}">Verified done</a>
     </article>
 
     <article class="feature">
-      <h3>Spec-driven, no format to adopt</h3>
+      <h3>Weakened checks first</h3>
       <p>
-        Name the spec folder and the tasks to send. Ticked boxes and verified tasks are two counts,
-        never one. Inside Spec Kit, Devplane’s gate is the hook that decides.
+        A skipped test, a removed assertion, a test that asserts nothing, a loosened tolerance, an
+        edited CI file: read before anything is green, and the offer waits until you have. Your spec
+        folder — Spec Kit, OpenSpec, Kiro — says what was asked for.
       </p>
-      <a class="more" href="{{ get_url(path='/docs/specs/') }}">Working to a spec</a>
+      <a class="more" href="{{ get_url(path='/docs/verified-done/#review-before-you-merge') }}">Review before you merge</a>
     </article>
 
     <article class="feature">
@@ -120,7 +121,7 @@
       <p>
         Every decision is on the record with its authority — a person, a rule, a timer, nobody, or
         Devplane doing what your project wrote down. “Refused” is not an answer;
-        “refused&nbsp;by <code>Bash(rm -rf *)</code>” is.
+        “refused&nbsp;by <code>Bash(rm *)</code>” is.
       </p>
       <a class="more" href="{{ get_url(path='/docs/decisions/') }}">The decision log</a>
     </article>

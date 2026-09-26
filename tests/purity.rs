@@ -1,7 +1,9 @@
 //! Source-scan guards for the crate's structural rules. The first: `src/core/`
 //! may not reach the outside world (no async, runtime, database, HTTP or
 //! spawning), so run state replays, the inbox is derived, and the policy cannot
-//! fail open. A synchronous read of a small local file is allowed.
+//! fail open. Nor may it read the clock or the disk: `now` and whatever a
+//! file said arrive as values, so the same inputs always derive the same
+//! board. Test modules (`#[cfg(test)]` onward) may do both.
 
 use std::path::Path;
 
@@ -35,6 +37,17 @@ const BANNED: &[(&str, &str)] = &[
         "tokio::process",
         "spawning is unbounded; gates and git are the other side of this line",
     ),
+    (
+        "Timestamp::now",
+        "the clock is read at the edge (`src/stamp.rs`) and passed in as `now`, so a replay derives the same inbox",
+    ),
+    ("Zoned::now", "as above"),
+    ("SystemTime::now", "as above"),
+    ("Instant::now", "as above"),
+    (
+        "std::fs::",
+        "file I/O belongs outside the pure half (`src/repo.rs`, `src/spec.rs`, `src/config.rs`); pass what the file said in as a value",
+    ),
 ];
 
 #[test]
@@ -55,6 +68,10 @@ fn the_pure_half_cannot_reach_the_outside_world() {
         let source = std::fs::read_to_string(path).expect("readable");
 
         for (line_no, line) in source.lines().enumerate() {
+            // Tests may use the clock and the disk to build their fixtures.
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                break;
+            }
             // Comments may quote what the rule forbids.
             let code = line.split("//").next().unwrap_or("");
             for (token, why) in BANNED {
@@ -335,7 +352,8 @@ fn only_a_run_devplane_drives_can_have_a_question_answered() {
         .expect("driven::deliver");
 
     let lookup = deliver
-        .find("state.sessions")
+        // `state.sessions`, however rustfmt breaks the chain.
+        .find(".sessions")
         .expect("delivery asks the driven-session table whether this run is one of ours");
     let live_send = deliver
         .find("Answer::Permission(d) => decide(")
@@ -345,16 +363,16 @@ fn only_a_run_devplane_drives_can_have_a_question_answered() {
         "an answer is sent before the run is checked to be one Devplane drives"
     );
 
-    // The resumed route goes through `resume`, which refuses the same way.
+    // The resumed route goes through `resume_run`, which refuses the same way.
     assert!(
-        deliver.contains("resume(state, &ask.run)"),
-        "the route for a run whose agent has gone must go through `resume`"
+        deliver.contains("resume_run(state, &ask.run"),
+        "the route for a run whose agent has gone must go through `resume_run`"
     );
     let resume_fn = driven
-        .split("pub async fn resume(")
+        .split("async fn resume_run(")
         .nth(1)
         .and_then(|s| s.split("\n/// ").next())
-        .expect("driven::resume");
+        .expect("driven::resume_run");
     assert!(
         resume_fn.contains("that is a session Devplane watches, not one it drives"),
         "resume stopped refusing a session Devplane merely watches"
@@ -544,8 +562,8 @@ fn the_speckit_gate_never_becomes_a_second_decider() {
         let end = rest[1..].find("\n}\n").map(|i| i + 4).unwrap_or(rest.len());
         bodies.push((name, rest[..end].to_string()));
     }
-    let spec = std::fs::read_to_string(root.join("src/core/spec.rs")).expect("the hook contract");
-    bodies.push(("src/core/spec.rs", spec));
+    let spec = std::fs::read_to_string(root.join("src/spec.rs")).expect("the hook contract");
+    bodies.push(("src/spec.rs", spec));
     let skill = std::fs::read_to_string(root.join("plugin/skills/devplane-gate/SKILL.md"))
         .expect("the gate skill");
     bodies.push(("plugin/skills/devplane-gate/SKILL.md", skill));
@@ -928,74 +946,6 @@ fn the_inbox_never_orders_by_what_a_model_thinks() {
     );
 }
 
-/// The rule-coverage path has no file write: an agent holding the token could
-/// reach it, and it must never edit a permission file.
-#[test]
-fn the_rule_coverage_path_writes_nothing_anywhere() {
-    // Both the pure decision and the CLI; a write would sit next to the read.
-    const BANNED: &[(&str, &str)] = &[
-        ("fs::write", "writing a file"),
-        ("File::create", "creating one"),
-        ("fs::rename", "renaming one over another"),
-        ("OpenOptions", "opening one for anything but reading"),
-        ("create_new", "as above"),
-        ("fs::remove", "removing one"),
-        ("truncate", "emptying one"),
-    ];
-
-    let core = std::fs::read_to_string("src/core/rules.rs").expect("core/rules.rs");
-    let cli = std::fs::read_to_string("src/cli/rules.rs").expect("cli/rules.rs");
-    for (source, name) in [(&core, "core::rules"), (&cli, "cli::rules")] {
-        for (banned, what) in BANNED {
-            assert!(
-                !source.contains(banned),
-                "`{name}` names `{banned}` — {what}. This feature reads six permission files and \
-                 prints what is missing, which is the exact shape of a tool that would apply it. \
-                 It does not, on purpose. Hand the text over instead."
-            );
-        }
-    }
-
-    // The disk reader, sliced out so writes elsewhere in the file don't count.
-    let api = std::fs::read_to_string("src/view.rs").expect("view.rs");
-    let reader = api
-        .split("fn read_rules(")
-        .nth(1)
-        .expect("`read_rules` is the one function here that touches a disk");
-    let reader = &reader[..reader.find("\n}\n").expect("the end of read_rules")];
-    for (banned, what) in BANNED {
-        assert!(
-            !reader.contains(banned),
-            "`read_rules` names `{banned}` — {what}. It reads two files per project and returns \
-             what they say. A write here would be reachable by an agent holding the token."
-        );
-    }
-    // And it is the only function of the feature that opens anything at all.
-    let route = api.split("pub fn rules(").nth(1).expect("the rules view");
-    let route = &route[..route.find("\n}\n").expect("the end of the route")];
-    assert!(
-        !route.contains("std::fs"),
-        "the rules view reaches the filesystem directly. Reading belongs in `read_rules`, \
-         where one check can cover it."
-    );
-
-    // No apply-to-all flag: the evidence doesn't support one.
-    let cli_mod = std::fs::read_to_string("src/cli/mod.rs").expect("cli/mod.rs");
-    for shape in ["apply_all", "apply-to-all", "--all", "everywhere"] {
-        let near = cli_mod
-            .split("Rules {")
-            .nth(1)
-            .map(|r| &r[..r.find('}').unwrap_or(r.len())])
-            .unwrap_or("");
-        assert!(
-            !near.contains(shape),
-            "`devplane rules` grew a `{shape}` flag. There is no apply-to-all: adding instruction \
-             files helped 27.7% of 148 measured projects and hurt 26.35%, and what separated them \
-             was their content rather than their presence."
-        );
-    }
-}
-
 /// Every read of a stored gate report either checks it against the current
 /// tree or names the commit it ran against; none reports passed with neither.
 #[test]
@@ -1004,7 +954,7 @@ fn every_read_of_a_stored_gate_report_is_honest_about_its_tree() {
     const SITES: &[(&str, &str, &str)] = &[
         (
             "src/core/change.rs",
-            "Completion::of",
+            "Completion::of_at",
             "checks currency via facts::still_current",
         ),
         (
@@ -1037,7 +987,7 @@ fn every_read_of_a_stored_gate_report_is_honest_about_its_tree() {
     let mut readers = 0;
     for (file, _, _) in SITES {
         let src = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{file}: {e}"));
-        readers += src.matches("last_gate()").count();
+        readers += src.matches("check_report()").count();
     }
     assert!(
         readers >= SITES.len(),
@@ -1049,7 +999,7 @@ fn every_read_of_a_stored_gate_report_is_honest_about_its_tree() {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if !src.contains("last_gate()") {
+        if !src.contains("check_report()") {
             continue;
         }
         let path = path.replace('\\', "/");
@@ -1250,40 +1200,59 @@ fn a_reports_finding_is_read_only_where_it_is_quoted() {
     );
 }
 
-/// `gh issue create` appears once, in `reports::open`, reached only from the
-/// route behind `devplane report open` and the window's button.
+/// The two forge writes — `github::create_issue` and `github::create_pr` —
+/// are each called once: the issue from `reports::open`, the pull request from
+/// `change::offer`, both reached only from a person's command or button. No
+/// program is run to write to a forge.
 #[test]
 fn nothing_writes_to_a_forge_but_a_persons_open() {
     let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-    let mut sites = Vec::new();
+    for (write, home, within) in [
+        ("github::create_issue(", "src/reports.rs", "pubasyncfnopen("),
+        ("github::create_pr(", "src/change.rs", "pubasyncfnoffer("),
+    ] {
+        let mut sites = Vec::new();
+        for file in walk("src") {
+            let prod = squash(&production(
+                &std::fs::read_to_string(&file).expect("source"),
+            ));
+            let n = prod.matches(write).count();
+            if n > 0 {
+                sites.push((file, n, prod));
+            }
+        }
+        assert_eq!(
+            sites
+                .iter()
+                .map(|(f, n, _)| (f.as_str(), *n))
+                .collect::<Vec<_>>(),
+            [(home, 1)],
+            "`{write}…)` must be called exactly once, in {home}"
+        );
+        let (_, _, body) = &sites[0];
+        let open_at = body
+            .find(within)
+            .unwrap_or_else(|| panic!("{within} exists in {home}"));
+        let create_at = body.find(write).expect("the call");
+        let next_fn = body[open_at + 1..]
+            .find("pubasyncfn")
+            .map(|i| open_at + 1 + i)
+            .unwrap_or(body.len());
+        assert!(
+            (open_at..next_fn).contains(&create_at),
+            "the forge write `{write}…)` is not inside {within}…)"
+        );
+    }
+    // Nothing starts a forge's command-line tool, for any purpose.
     for file in walk("src") {
         let prod = squash(&production(
             &std::fs::read_to_string(&file).expect("source"),
         ));
-        let n = prod.matches("\"issue\",\"create\"").count() + prod.matches("issuecreate").count();
-        if n > 0 {
-            sites.push((file, n, prod));
-        }
+        assert!(
+            !prod.contains("Command::new(\"gh\")") && !prod.contains("\"DEVPLANE_GH\""),
+            "{file} runs `gh`"
+        );
     }
-    assert_eq!(
-        sites
-            .iter()
-            .map(|(f, n, _)| (f.as_str(), *n))
-            .collect::<Vec<_>>(),
-        [("src/reports.rs", 1)],
-        "`gh issue create` must be written exactly once, in `reports::open`"
-    );
-    let (_, _, body) = &sites[0];
-    let open_at = body.find("pubasyncfnopen(").expect("reports::open exists");
-    let create_at = body.find("\"issue\",\"create\"").expect("the call");
-    let next_fn = body[open_at + 1..]
-        .find("pubasyncfn")
-        .map(|i| open_at + 1 + i)
-        .unwrap_or(body.len());
-    assert!(
-        (open_at..next_fn).contains(&create_at),
-        "the one forge write is not inside `reports::open`"
-    );
 
     // Its callers: the route, and nothing else.
     let mut callers = Vec::new();
