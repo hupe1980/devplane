@@ -77,6 +77,12 @@ jobs:
   build:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: plan
+    # The vendored libdbus (the Linux credential store) is C. GCC on aarch64
+    # calls atomics out of line in libgcc, which a static musl link lacks
+    # (`__aarch64_ldadd4_sync`); inline them. Read by the `cc` crate for this
+    # target only.
+    env:
+      CFLAGS_aarch64_unknown_linux_musl: -mno-outline-atomics
     strategy:
       fail-fast: false
       matrix:

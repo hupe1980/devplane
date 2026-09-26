@@ -216,7 +216,8 @@ impl Local {
 /// store. Neither is started by asking.
 pub enum Reader {
     Host(Client),
-    Store(Local),
+    /// Boxed: the store's reader is several times a client's size.
+    Store(Box<Local>),
 }
 
 impl Reader {
@@ -226,7 +227,7 @@ impl Reader {
         {
             return Ok(Reader::Host(c));
         }
-        Ok(Reader::Store(Local::open().await?))
+        Ok(Reader::Store(Box::new(Local::open().await?)))
     }
 
     pub async fn get(&self, path: &str) -> Result<Value> {

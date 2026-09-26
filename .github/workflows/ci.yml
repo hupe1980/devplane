@@ -100,6 +100,12 @@ jobs:
   # `[workspace.metadata.dist] targets`. Windows also runs clippy, which `test`
   # does not cover there yet.
   build:
+    # The vendored libdbus (the Linux credential store) is C. GCC on aarch64
+    # calls atomics out of line in libgcc, which a static musl link lacks
+    # (`__aarch64_ldadd4_sync`); inline them. Read by the `cc` crate for this
+    # target only.
+    env:
+      CFLAGS_aarch64_unknown_linux_musl: -mno-outline-atomics
     strategy:
       fail-fast: false
       matrix:
