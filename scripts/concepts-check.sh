@@ -22,7 +22,7 @@ say() { printf '%-42s %s\n' "$1" "$2"; }
 
 # ---- the corpus is the corpus ---------------------------------------------
 # Named rather than globbed, so a missing document fails.
-DOCS="README.md DIRECTION.md SPEC.md PRODUCT.md DESKTOP.md ARCHITECTURE.md \
+DOCS="README.md DIRECTION.md SPEC.md PRODUCT.md ARCHITECTURE.md \
 UX.md DESIGN.md PROVIDERS.md MARKET.md ROADMAP.md STATE.md DECISIONS.md RISKS.md"
 
 for f in $DOCS; do
@@ -176,6 +176,17 @@ if [ "$cargo_version" != "$state_version" ]; then
   fail=1
 else
   say "version" "STATE.md matches Cargo.toml: $cargo_version"
+fi
+# ...and the last tag it names must be the repository's last tag.
+git_tag=$(git -C "$root" tag --list 'v*' | sort -V | tail -1)
+expect "last tag in git" "$git_tag" || true
+state_tag=$(grep '^| Version |' STATE.md | grep -o '`v[0-9][0-9.]*` the last tag' | head -1 | cut -d'`' -f2)
+expect "last tag in STATE.md" "$state_tag" || true
+if [ "$git_tag" != "$state_tag" ]; then
+  echo "STATE.md says the last tag is $state_tag; git says $git_tag"
+  fail=1
+else
+  say "last tag" "STATE.md matches git: $git_tag"
 fi
 
 # ---- every figure has one home --------------------------------------------
@@ -375,6 +386,76 @@ if [ -d specs ]; then
 else
   say "specifications" "skipped: specs/ absent, so nothing could have been named"
 fi
+
+# ---- prose about the code, compared to the code (D080) --------------------
+cd "$root/concepts" || exit 1
+# The sprint of 2026-10-02 found fourteen wrong statements under an all-green
+# run: each was a claim in prose no guard read. These read the cheapest kinds.
+# Run from concepts/ like the guards above; fenced blocks are illustrations.
+prose() { awk '/^```/{f=!f; next} !f' "$1"; }
+
+# A `src/…/` or `ui/…/` directory named in the notes must exist, unless the
+# same line says it does not.
+missing_dirs=""
+for f in $DOCS; do
+  [ -f "$f" ] || continue
+  for d in $(prose "$f" | grep -vE 'not exist|does not|absent|deleted|removed|no longer' \
+               | grep -oE '`(src|ui/src|tests)/[A-Za-z0-9_/.-]+/`' | tr -d '`' | sort -u); do
+    [ -d "../$d" ] || missing_dirs="$missing_dirs\n  $f names $d"
+  done
+done
+[ -z "$missing_dirs" ] || { printf '%b\n' "directories the notes name that do not exist:$missing_dirs"; fail=1; }
+say "directories" "every src/ui/tests directory the notes name exists"
+
+# "N dialects" outside the roadmap and the log must be the number the code models.
+num() { case "$1" in one) echo 1;; two) echo 2;; three) echo 3;; four) echo 4;; five) echo 5;; six) echo 6;; *) echo "$1";; esac; }
+dialects=$(awk '/^pub const DIALECTS/,/^\];/' ../src/spec.rs | grep -c 'name: "')
+expect "dialects in src/spec.rs" "$dialects" || true
+bad_dialects=""
+for f in $DOCS; do
+  case "$f" in ROADMAP.md|DECISIONS.md) continue ;; esac
+  [ -f "$f" ] || continue
+  while read -r w; do
+    [ -n "$w" ] || continue
+    [ "$(num "$w")" = "$dialects" ] || bad_dialects="$bad_dialects\n  $f says $w"
+  done <<< "$(prose "$f" | grep -viE '#dialects|plain|would|will|unbuilt' \
+               | grep -oiE '\b(one|two|three|four|five|six|[0-9]+) (spec )?dialects (are |is )?(modell?ed|read)' \
+               | awk '{print tolower($1)}')"
+done
+[ -z "$bad_dialects" ] || { printf '%b\n' "dialect counts that are not the code's ($dialects):$bad_dialects"; fail=1; }
+say "dialects" "code models $dialects; every modelled/read count outside the roadmap agrees"
+
+# "N top-level commands" must be the number COMMAND_GROUPS lists.
+commands=$(awk '/^pub const COMMAND_GROUPS/,/^\];/' ../src/cli/mod.rs | grep -oE '&\[[^]]*\]|^ +"[a-z]+",' | grep -oE '"[a-z]+"' | wc -l | tr -d ' ')
+expect "commands in COMMAND_GROUPS" "$commands" || true
+bad_cmds=""
+for f in $DOCS; do
+  case "$f" in DECISIONS.md) continue ;; esac
+  [ -f "$f" ] || continue
+  for n in $(prose "$f" | grep -oE '\*?\*?[0-9]+\*?\*? top-level commands' | grep -oE '[0-9]+'); do
+    [ "$n" = "$commands" ] || bad_cmds="$bad_cmds\n  $f says $n"
+  done
+done
+[ -z "$bad_cmds" ] || { printf '%b\n' "top-level command counts that are not COMMAND_GROUPS' ($commands):$bad_cmds"; fail=1; }
+say "commands" "COMMAND_GROUPS lists $commands; every count in the notes agrees"
+
+# A retired anchor cited outside the roadmap and the log must be cited as retired.
+# Only the retired anchor itself — not the live anchor it points to (`→ #x`).
+retired=$(awk '/^## 6\. Retired/,/^## 7\./' ROADMAP.md | sed 's/([^)]*)//g' | grep -oE '`#[a-z0-9-]+`' | tr -d '`' | sort -u)
+expect "retired anchors" "$(echo "$retired" | grep -c .)" || true
+live_retired=""
+for f in $DOCS; do
+  case "$f" in ROADMAP.md|DECISIONS.md) continue ;; esac
+  [ -f "$f" ] || continue
+  for a in $retired; do
+    hit=$(prose "$f" | grep -nF "\`$a\`" | grep -viE 'retired|shipped|deleted|folded|→|merged|absorbed|replaced|was ' || true)
+    [ -z "$hit" ] || live_retired="$live_retired\n  $f cites $a as live: $(echo "$hit" | head -1 | cut -c1-80)"
+  done
+done
+[ -z "$live_retired" ] || { printf '%b\n' "retired anchors cited as live work:$live_retired"; fail=1; }
+say "retired anchors" "none cited as live work outside the roadmap and the log"
+
+cd "$root" || exit 1
 
 echo
 if [ "$fail" = 0 ]; then
