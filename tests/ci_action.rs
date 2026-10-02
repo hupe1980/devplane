@@ -132,3 +132,21 @@ fn the_action_reads_the_verdict_as_json() {
         "action.yml does not read `.verdict` with jq"
     );
 }
+
+/// `--sarif` reaches the shell through `env:`, its output names only a file
+/// this run wrote, and the action uploads nothing: uploading is the person's
+/// own step.
+#[test]
+fn the_action_writes_sarif_only_when_asked_and_uploads_nothing() {
+    let action = read("action.yml");
+    assert_eq!(input_default(&action, "sarif"), Some(""), "SARIF is opt-in");
+    assert!(action.contains("SARIF: ${{ inputs.sarif }}"));
+    assert!(action.contains(r#"args+=(--sarif "$SARIF")"#));
+    assert!(action.contains("jq -r '.wrote.sarif"));
+    for l in code_lines(&action) {
+        assert!(
+            !l.contains("upload-sarif") && !l.contains("code-scanning"),
+            "action.yml uploads the SARIF file: {l}"
+        );
+    }
+}

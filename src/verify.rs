@@ -22,6 +22,8 @@ pub struct Args {
     pub statement: Option<PathBuf>,
     /// `--no-base-checks`: `check` alone, without the pair.
     pub no_base_checks: bool,
+    /// `--sarif`: the weakened rows and failing named tests as SARIF 2.1.0.
+    pub sarif: Option<PathBuf>,
 }
 
 /// Where the Markdown goes.
@@ -74,6 +76,9 @@ impl Destination {
 /// Everything gathered before the verdict; each step may stop with a reason.
 #[derive(Default)]
 struct Gathered {
+    root: Option<PathBuf>,
+    /// The change the rows were read from; `None` when it was not read.
+    set: Option<crate::core::diff::ChangeSet>,
     base: Option<Base>,
     definition: Option<Definition>,
     rows: Vec<Weakened>,
@@ -98,6 +103,7 @@ async fn gather(dir: &Path, args: &Args, g: &mut Gathered) -> Result<Verdict, Co
     let root = git::toplevel(dir)
         .await
         .ok_or(CouldNotRun::NotARepository)?;
+    g.root = Some(root.clone());
 
     // The base: asked for, else what the remote calls its default, else
     // `main` — never the checkout's own config, never its current branch.
@@ -187,6 +193,7 @@ async fn gather(dir: &Path, args: &Args, g: &mut Gathered) -> Result<Verdict, Co
     crate::core::verify::ensure_definition_row(&mut g.rows, &change_declares);
     g.truncated = set.truncated.clone();
     g.no_change = merge_base == head && set.is_empty();
+    g.set = Some(set);
 
     // The base's `check`, in the checkout's root, under the base's timeout,
     // with the tree read before and after.
@@ -319,6 +326,52 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
         }
     }
 
+    // The same rows, placed on their files: annotations when GitHub Actions
+    // reads this log, SARIF when asked. Neither changes the verdict's word.
+    let root = g.root.clone().unwrap_or_else(|| dir.to_path_buf());
+    let findings =
+        crate::core::verify::annotate::findings(&g.rows, g.set.as_ref(), g.report.as_ref(), &|p| {
+            root.join(p).is_file()
+        });
+    let on_github = std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| !v.is_empty());
+    let (commands, annotations) = match on_github {
+        true => {
+            let (c, n) = crate::core::verify::annotate::commands(&findings);
+            (c, Some(n))
+        }
+        false => (Vec::new(), None),
+    };
+    if let Some(path) = &args.sarif {
+        if g.set.is_some() {
+            let log = crate::core::verify::annotate::sarif(&findings, env!("CARGO_PKG_VERSION"));
+            let text = serde_json::to_string_pretty(&log).unwrap_or_else(|_| log.to_string());
+            match std::fs::write(path, text + "\n") {
+                Ok(()) => wrote.sarif = Some(path.display().to_string()),
+                Err(e) => {
+                    let why = e.to_string();
+                    errors.push(format!(
+                        "the SARIF log could not be written to {}: {why}",
+                        path.display()
+                    ));
+                    if matches!(verdict, Verdict::Verified { .. }) {
+                        verdict = Verdict::CouldNotRun {
+                            why: CouldNotRun::CouldNotWrite {
+                                path: path.display().to_string(),
+                                why,
+                            },
+                        };
+                    }
+                }
+            }
+        } else {
+            errors.push(format!(
+                "the SARIF log was not written to {}: the change was not read, so there are no \
+                 rows to place",
+                path.display()
+            ));
+        }
+    }
+
     let run = |verdict: &Verdict| -> String {
         crate::core::verify::summary::markdown(
             &Run {
@@ -331,6 +384,7 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
                 verdict,
                 base_checks: &checks,
                 not_done: &not_done,
+                annotations,
             },
             crate::core::verify::summary::LIMIT_BYTES,
         )
@@ -366,6 +420,7 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
         verdict: &verdict,
         base_checks: &checks,
         not_done: &not_done,
+        annotations,
     };
     if args.json {
         let doc = crate::core::verify::json::json(&composed, &wrote);
@@ -374,6 +429,12 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
             serde_json::to_string_pretty(&doc).unwrap_or_else(|_| doc.to_string())
         );
     } else {
+        // Repository text is printed with workflow commands paused, so no
+        // line a change wrote is read by the runner as a command.
+        let pause = on_github.then(|| uuid::Uuid::new_v4().simple().to_string());
+        if let Some(token) = &pause {
+            println!("::stop-commands::{token}");
+        }
         print!("{}", crate::core::verify::summary::text(&composed));
         match &wrote.summary {
             Some(s) => println!("{:<13}written to {s}", "summary"),
@@ -386,6 +447,21 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
         }
         if let Some(s) = &wrote.statement {
             println!("statement    written to {s}");
+        }
+        if let Some(s) = &wrote.sarif {
+            println!("{:<13}written to {s}", "sarif");
+        }
+        if let Some(token) = &pause {
+            println!("::{token}::");
+        }
+        for c in &commands {
+            println!("{c}");
+        }
+    }
+    // Under `--json` stdout is the document; the runner reads stderr too.
+    if args.json {
+        for c in &commands {
+            eprintln!("{c}");
         }
     }
     for e in &errors {

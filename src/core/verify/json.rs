@@ -11,6 +11,8 @@ pub struct Wrote {
     pub statement: Option<String>,
     /// Why no statement was written although one was asked for.
     pub statement_withheld: Option<String>,
+    /// `--sarif`: where the SARIF log went.
+    pub sarif: Option<String>,
 }
 
 /// The document.
@@ -72,7 +74,12 @@ pub fn json(run: &Run<'_>, wrote: &Wrote) -> Value {
             "summary": wrote.summary,
             "statement": wrote.statement,
             "statementWithheld": wrote.statement_withheld,
+            "sarif": wrote.sarif,
         },
+        "annotations": run.annotations.map(|a| json!({
+            "printed": a.printed,
+            "leftOut": a.left_out,
+        })),
     });
     match v {
         Verdict::Failed { why } => {
@@ -158,6 +165,7 @@ mod tests {
                     verdict: v,
                     base_checks: &bc,
                     not_done: &[],
+                    annotations: None,
                 },
                 &Wrote::default(),
             );

@@ -130,6 +130,7 @@ impl Fixture {
             .env("DEVPLANE_HOME", self.top.join("no-home"))
             .env_remove("GITHUB_STEP_SUMMARY")
             .env_remove("GITHUB_EVENT_NAME")
+            .env_remove("GITHUB_ACTIONS")
             .env_remove("VERIFY_MARK");
         for (k, v) in env {
             c.env(k, v);
@@ -1026,6 +1027,220 @@ fn a_new_test_that_passes_on_the_base_is_listed() {
     );
 }
 
+// ── Annotations and SARIF ───────────────────────────────────────────────────
+
+const ON_GITHUB: &[(&str, &str)] = &[("GITHUB_ACTIONS", "true")];
+
+/// The structure SARIF 2.1.0 requires, and what a code-scanning upload reads:
+/// `version`, `runs[].tool.driver.name`, each result's `message.text`, a
+/// `level` from the enumeration, a `ruleId` matching `ruleIndex`, and a
+/// relative `artifactLocation.uri` with a `startLine` of at least one.
+fn assert_sarif_2_1_0(log: &Value) {
+    assert_eq!(log["version"], "2.1.0", "{log}");
+    let runs = log["runs"].as_array().expect("runs is an array");
+    assert!(!runs.is_empty(), "{log}");
+    for run in runs {
+        let driver = &run["tool"]["driver"];
+        assert!(
+            driver["name"].as_str().is_some_and(|n| !n.is_empty()),
+            "{run}"
+        );
+        let rules = driver["rules"].as_array().cloned().unwrap_or_default();
+        for r in &rules {
+            assert!(r["id"].is_string(), "every rule has an id: {r}");
+        }
+        for res in run["results"].as_array().expect("results is an array") {
+            assert!(res["message"]["text"].is_string(), "{res}");
+            assert!(
+                ["none", "note", "warning", "error"].contains(&res["level"].as_str().unwrap()),
+                "{res}"
+            );
+            let id = res["ruleId"].as_str().expect("ruleId");
+            let i = res["ruleIndex"].as_u64().expect("ruleIndex") as usize;
+            assert_eq!(rules[i]["id"], id, "ruleIndex names ruleId: {res}");
+            let locs = res["locations"].as_array().expect("locations");
+            assert!(!locs.is_empty(), "code scanning needs one location: {res}");
+            for l in locs {
+                let pl = &l["physicalLocation"];
+                let uri = pl["artifactLocation"]["uri"].as_str().expect("uri");
+                assert!(
+                    !uri.is_empty() && !uri.starts_with('/') && !uri.contains("://"),
+                    "relative to the repository: {uri}"
+                );
+                if let Some(region) = pl.get("region") {
+                    assert!(region["startLine"].as_u64().unwrap() >= 1, "{res}");
+                }
+            }
+        }
+    }
+}
+
+/// The settled-when check, locally: on GitHub Actions a skip marker is a
+/// warning annotation on its file and line, the job summary says so under
+/// the weakened checks, `--sarif` writes the same row, and the exit is 0.
+#[test]
+fn on_github_a_skip_marker_is_an_annotation_on_its_line_and_in_sarif() {
+    let f = Fixture::new("annotate");
+    f.branch("skip")
+        .write("tests/login.test.js", SKIPPED)
+        .commit("skip");
+    let out_md = f.path("out.md");
+    let sarif = f.path("verify.sarif");
+    let out = f.verify_in(
+        &f.work,
+        &[
+            "--base",
+            "main",
+            "--summary",
+            out_md.to_str().unwrap(),
+            "--sarif",
+            sarif.to_str().unwrap(),
+        ],
+        ON_GITHUB,
+    );
+    let text = stdout(&out);
+    assert_eq!(code(&out), 0, "a weakened row never fails the job: {text}");
+    let annotations: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("::warning"))
+        .collect();
+    assert_eq!(
+        annotations,
+        [
+            "::warning file=tests/login.test.js,line=1,title=Devplane verify — check weakened::\
+             adds a skip marker `it.skip(` — it.skip(\"rejects an expired token\", async () => {",
+            // The scan also reads the replaced `it(` as a test removed: a
+            // second row, on the line where it stood.
+            "::warning file=tests/login.test.js,line=1,title=Devplane verify — test deleted::\
+             removes a test and keeps the file — it(\"rejects an expired token\", async () => {",
+        ],
+        "{text}"
+    );
+    // The repository's own text is printed with commands paused, and the
+    // annotations after they resume.
+    let stop = text
+        .lines()
+        .position(|l| l.starts_with("::stop-commands::"))
+        .expect("commands paused");
+    let token = text.lines().nth(stop).unwrap()["::stop-commands::".len()..].to_string();
+    assert_eq!(token.len(), 32, "an unguessable token");
+    let resume = text
+        .lines()
+        .position(|l| l == format!("::{token}::"))
+        .expect("commands resumed");
+    let warning = text
+        .lines()
+        .position(|l| l.starts_with("::warning"))
+        .unwrap();
+    assert!(stop < resume && resume < warning, "{text}");
+    assert!(text.contains("sarif        written to"), "{text}");
+
+    let md = std::fs::read_to_string(&out_md).unwrap();
+    assert!(headings(&md)[0].starts_with("### Weakened checks"), "{md}");
+    assert!(
+        section(&md, "Weakened").contains("Annotations: 2 written"),
+        "{md}"
+    );
+
+    let log: Value = serde_json::from_str(&std::fs::read_to_string(&sarif).unwrap()).unwrap();
+    assert_sarif_2_1_0(&log);
+    let results = log["runs"][0]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "{log}");
+    assert_eq!(results[0]["ruleId"], "weakened/skip");
+    assert_eq!(results[1]["ruleId"], "weakened/deleted");
+    assert_eq!(results[0]["level"], "warning");
+    let pl = &results[0]["locations"][0]["physicalLocation"];
+    assert_eq!(pl["artifactLocation"]["uri"], "tests/login.test.js");
+    assert_eq!(pl["region"]["startLine"], 1);
+
+    // Off GitHub: no command in the output, and the same SARIF.
+    let out = f.verify(&["--base", "main"]);
+    assert!(!stdout(&out).contains("::"), "{}", stdout(&out));
+    // Under `--json` stdout stays one document; the annotations go to stderr.
+    let out = f.verify_in(&f.work, &["--json", "--base", "main"], ON_GITHUB);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        err.contains(annotations[0]) && err.contains(annotations[1]),
+        "{err}"
+    );
+    let (v, code) = parse(out);
+    assert_eq!(code, 0);
+    assert_eq!(v["annotations"]["printed"], 2, "{v}");
+    assert_eq!(v["annotations"]["leftOut"], 0, "{v}");
+}
+
+#[test]
+fn a_failing_named_test_is_an_error_annotation_and_the_exit_is_unchanged() {
+    let f = pytest_fixture("annotate-fail");
+    f.branch("drop")
+        .write("src/login.py", "def login(): pass\n")
+        .commit("drop");
+    let sarif = f.path("verify.sarif");
+    let out = f.verify_in(&f.work, &["--sarif", sarif.to_str().unwrap()], ON_GITHUB);
+    let text = stdout(&out);
+    assert_eq!(
+        code(&out),
+        1,
+        "check failed, so 1 — as without annotations: {text}"
+    );
+    let errors: Vec<&str> = text.lines().filter(|l| l.starts_with("::error")).collect();
+    assert_eq!(
+        errors,
+        [
+            "::error title=Devplane verify — test failed::tests.test_login::test_lockout failed in \
+          the base's check"
+        ],
+        "JUnit names no file, so the annotation is on none: {text}"
+    );
+    let log: Value = serde_json::from_str(&std::fs::read_to_string(&sarif).unwrap()).unwrap();
+    assert_sarif_2_1_0(&log);
+    let r = &log["runs"][0]["results"][0];
+    assert_eq!(r["level"], "error", "{log}");
+    assert_eq!(r["ruleId"], "test/failed", "{log}");
+}
+
+#[test]
+fn annotations_past_githubs_per_step_limit_are_counted_in_the_summary() {
+    let f = Fixture::new("annotate-cap");
+    f.branch("many");
+    for i in 0..12 {
+        f.write(
+            &format!("tests/t{i}.test.js"),
+            "it.skip(\"x\", () => {});\n",
+        );
+    }
+    f.commit("many");
+    let out_md = f.path("out.md");
+    let sarif = f.path("verify.sarif");
+    let out = f.verify_in(
+        &f.work,
+        &[
+            "--base",
+            "main",
+            "--summary",
+            out_md.to_str().unwrap(),
+            "--sarif",
+            sarif.to_str().unwrap(),
+        ],
+        ON_GITHUB,
+    );
+    let text = stdout(&out);
+    assert_eq!(code(&out), 0, "{text}");
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("::warning")).count(),
+        10,
+        "{text}"
+    );
+    let md = std::fs::read_to_string(&out_md).unwrap();
+    assert!(
+        section(&md, "Weakened").contains("Annotations: 10 written") && md.contains("2 left out"),
+        "{md}"
+    );
+    let log: Value = serde_json::from_str(&std::fs::read_to_string(&sarif).unwrap()).unwrap();
+    assert_sarif_2_1_0(&log);
+    assert_eq!(log["runs"][0]["results"].as_array().unwrap().len(), 12);
+}
+
 // ── The action and its documentation ───────────────────────────────────────
 
 fn action() -> String {
@@ -1126,6 +1341,7 @@ fn every_flag_verify_documents_is_implemented() {
         "--summary",
         "--statement",
         "--no-base-checks",
+        "--sarif",
     ];
     for f in flags {
         assert!(help.contains(f), "--help lists {f}");

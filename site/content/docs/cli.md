@@ -417,6 +417,10 @@ network.
 | `--summary <path>` | write the Markdown summary there; otherwise appended to `$GITHUB_STEP_SUMMARY` if set |
 | `--statement <path>` | write the in-toto statement (Test Result predicate, never signed) when `check` ran on a recorded tree |
 | `--no-base-checks` | skip the base checks that run after a pass |
+| `--sarif <path>` | write the weakened rows and failing named tests as SARIF 2.1.0 for your own upload step; nothing is uploaded |
+
+Under GitHub Actions (`GITHUB_ACTIONS` set), each weakened row is also a warning annotation on its
+file and line, and each failing named test an error annotation: [CI verify](@/docs/ci.md#annotations-and-sarif).
 
 `--json` prints one document: `verdict`, `exit`, `base`, `tree`, weakened rows, each command's outcome.
 Verdicts and exit codes: [CI verify](@/docs/ci.md#exit-codes). Weakened checks never change the exit
@@ -594,7 +598,7 @@ and every agent Devplane drives is offered it. By hand:
 | Tool | Answers |
 |---|---|
 | `inbox` | what needs a person, across every project |
-| `change` | a change's state, gate verdicts and spec; all open changes without an `id` |
+| `change` | a change's state, gate verdicts and spec; without an `id`, the change Devplane started the agent for, or all open changes for an agent it did not start |
 | `explain` | what the gate would decide about a call, and which rule |
 | `audit` | what Devplane decided, and on whose authority |
 | `spec_and_tests_conflict` | **not a question**: the calling agent says the specification and the tests of its change cannot both be satisfied |

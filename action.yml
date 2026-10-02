@@ -24,6 +24,11 @@ inputs:
   statement:
     description: Path to write the in-toto statement to. Empty writes none.
     default: ""
+  sarif:
+    description: >-
+      Path to write a SARIF 2.1.0 file of the weakened rows and failing named tests to. Empty writes
+      none. Nothing is uploaded; upload it in your own step.
+    default: ""
   install:
     description: "`false` uses a `devplane` already on PATH."
     default: "true"
@@ -35,6 +40,9 @@ outputs:
   statement:
     description: The statement's path, or empty.
     value: ${{ steps.verify.outputs.statement }}
+  sarif:
+    description: The SARIF file's path, or empty.
+    value: ${{ steps.verify.outputs.sarif }}
 
 runs:
   using: composite
@@ -108,20 +116,24 @@ runs:
       env:
         BASE: ${{ inputs.base }}
         STATEMENT: ${{ inputs.statement }}
+        SARIF: ${{ inputs.sarif }}
       run: |
         args=(verify --json)
         if [ -n "$BASE" ]; then args+=(--base "$BASE"); else echo "No base given: devplane verify uses origin/HEAD, else main."; fi
         if [ -n "$STATEMENT" ]; then args+=(--statement "$STATEMENT"); fi
+        if [ -n "$SARIF" ]; then args+=(--sarif "$SARIF"); fi
         out="$RUNNER_TEMP/devplane-verify.json"
         set +e
         devplane "${args[@]}" > "$out"
         status=$?
         set -e
-        # The document, for the log; the summary is on the run's page.
+        # The document, for the log; the summary is on the run's page. The
+        # annotations went to stderr, which the runner reads.
         cat "$out"
         # Read as JSON, by its keys; a document that does not parse leaves both empty.
         verdict="$(jq -r '.verdict // empty' "$out" 2>/dev/null || true)"
         written="$(jq -r '.wrote.statement // empty' "$out" 2>/dev/null || true)"
+        sarif="$(jq -r '.wrote.sarif // empty' "$out" 2>/dev/null || true)"
         case "$verdict" in verified|failed|could_not_run) ;; *) verdict="" ;; esac
         echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
         # Only a statement this run wrote, never a file left at the path.
@@ -129,5 +141,10 @@ runs:
           echo "statement=$STATEMENT" >> "$GITHUB_OUTPUT"
         else
           echo "statement=" >> "$GITHUB_OUTPUT"
+        fi
+        if [ -n "$SARIF" ] && [ "$sarif" = "$SARIF" ]; then
+          echo "sarif=$SARIF" >> "$GITHUB_OUTPUT"
+        else
+          echo "sarif=" >> "$GITHUB_OUTPUT"
         fi
         exit "$status"

@@ -319,6 +319,10 @@ fn compose_markdown(run: &Run<'_>, room: Room) -> String {
             t.files_shown, t.files_total
         ));
     }
+    if let Some(line) = annotations_say(run) {
+        o.push_str(&line);
+        o.push_str("\n\n");
+    }
 
     // 2. Gate.
     o.push_str("### Gate\n\n");
@@ -426,6 +430,23 @@ fn compose_markdown(run: &Run<'_>, room: Room) -> String {
     o
 }
 
+/// How many annotations were printed, and how many GitHub would not show.
+fn annotations_say(run: &Run<'_>) -> Option<String> {
+    let c = run.annotations?;
+    match (c.printed, c.left_out) {
+        (0, 0) => None,
+        (n, 0) => Some(format!(
+            "Annotations: {n} written, each on its file and line where one is known."
+        )),
+        (n, more) => Some(format!(
+            "Annotations: {n} written, each on its file and line where one is known; {more} left out, because GitHub shows at most {} warnings \
+             and {} errors per step. `--sarif` writes every one.",
+            super::annotate::PER_STEP,
+            super::annotate::PER_STEP,
+        )),
+    }
+}
+
 fn failed_block(o: &mut String, c: &CommandResult, tails: bool) {
     o.push_str(&format!(
         "**{}** — {}\n\n",
@@ -517,6 +538,9 @@ pub fn text(run: &Run<'_>) -> String {
             "  the diff was truncated: {} of {} files shown\n",
             t.files_shown, t.files_total
         ));
+    }
+    if let Some(line) = annotations_say(run) {
+        o.push_str(&format!("  {line}\n"));
     }
     o.push('\n');
     if let Some(d) = run.definition {
@@ -658,6 +682,7 @@ mod tests {
                 verdict,
                 base_checks: &bc,
                 not_done: &nd,
+                annotations: None,
             },
             LIMIT_BYTES,
         )

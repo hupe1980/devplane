@@ -6,6 +6,7 @@
 //! and hands the results in as values. [`Verdict::of`] takes no weakened row —
 //! a row is evidence shown first, never the verdict.
 
+pub mod annotate;
 pub mod json;
 pub mod summary;
 
@@ -490,6 +491,8 @@ pub struct Run<'a> {
     pub verdict: &'a Verdict,
     pub base_checks: &'a BaseChecks,
     pub not_done: &'a [String],
+    /// Set when `GITHUB_ACTIONS` is: the annotations printed and left out.
+    pub annotations: Option<annotate::Counted>,
 }
 
 #[cfg(test)]

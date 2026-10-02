@@ -22,6 +22,10 @@ pub struct VerifyArgs {
     /// change's new tests on the base, which run by default after a pass
     #[arg(long)]
     pub no_base_checks: bool,
+    /// Write the weakened rows and the failing named tests here as SARIF
+    /// 2.1.0, for your own upload step; nothing is uploaded
+    #[arg(long, value_name = "PATH")]
+    pub sarif: Option<PathBuf>,
 }
 
 pub async fn cmd_verify(a: VerifyArgs, json: bool) -> Result<()> {
@@ -31,6 +35,7 @@ pub async fn cmd_verify(a: VerifyArgs, json: bool) -> Result<()> {
         summary: a.summary,
         statement: a.statement,
         no_base_checks: a.no_base_checks,
+        sarif: a.sarif,
     };
     let here = std::env::current_dir()?;
     match crate::verify::run(&here, &args).await {
