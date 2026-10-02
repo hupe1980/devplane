@@ -253,3 +253,49 @@ async fn reloading_takes_up_trust_recorded_in_the_store() {
             .any(|q| q.root == root && q.trusted)
     );
 }
+
+/// Only a debug build may take the window's key from the environment, so the
+/// bars can hand a browser the key the app hands its webview. A release build
+/// that read it would let anything that sets a variable pass as the window.
+#[test]
+fn only_a_debug_build_reads_the_window_key_from_the_environment() {
+    let mut reads = 0;
+    for entry in walk(std::path::Path::new("src")) {
+        let text = std::fs::read_to_string(&entry).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("\"DEVPLANE_WINDOW_KEY\"") {
+                continue;
+            }
+            reads += 1;
+            let guarded = lines[..i]
+                .iter()
+                .rev()
+                .take(3)
+                .any(|l| l.trim() == "#[cfg(debug_assertions)]");
+            assert!(
+                guarded,
+                "{}:{} reads DEVPLANE_WINDOW_KEY outside a #[cfg(debug_assertions)] block",
+                entry.display(),
+                i + 1
+            );
+        }
+    }
+    assert!(
+        reads > 0,
+        "no read of DEVPLANE_WINDOW_KEY was found to check"
+    );
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    out
+}
