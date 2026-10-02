@@ -190,6 +190,8 @@ impl Local {
             ["api", "quitting"] => serde_json::to_value(crate::core::reduce::facts::quitting(
                 snap.world.runs(),
                 &snap.open_asks,
+                // No host, so nothing is held.
+                None,
             ))?,
             _ => return Err(crate::client::needs_host(&format!("`{route}`"))),
         })

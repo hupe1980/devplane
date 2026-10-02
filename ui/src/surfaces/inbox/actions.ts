@@ -66,20 +66,29 @@ export async function act(item: Item, action: string): Promise<Outcome> {
   }
 }
 
+/// What the host holds after an answer from here, before it is sent.
+export type Held = { ask: string; run: string; title: string; says: string; until: string; undo: string };
+/// What the last held answer came to once sent: delivered, or why not.
+export type Landed = { ask: string; title: string; ok: boolean; says: string };
+
 // Answering is a POST to the ask; the page composes no verdict and no rule.
-// A form answer names its `field`.
+// A form answer names its `field`. The host holds the answer for a few
+// seconds before it reaches the agent — `z` takes it back in that time — and
+// sends it when the hold ends even if this page has closed. The undo is the
+// host's (`held` on the inbox), not this outcome's, so a reload keeps it.
 export async function answer(item: Item, what: Answer): Promise<Outcome> {
   const ask = item.ask ?? item.request_id;
   if (!ask) return { said: "this one cannot be answered from here", undo: null };
   try {
-    await api(`/api/asks/${encodeURIComponent(ask)}/answer`, {
+    const r = await api<{ held?: Held | null }>(`/api/asks/${encodeURIComponent(ask)}/answer`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(what),
+      body: JSON.stringify({ ...what, hold: true }),
     });
-    // No undo: the answer is on the record and with the agent.
+    // Once sent it is on the record and with the agent: it cannot be taken
+    // back after that, and the held line says so when it happens.
     return {
-      said: "answered — on the record and on its way to the agent. That cannot be taken back.",
+      said: r?.held ? `${r.held.says} — held; z takes it back before it is sent` : "answered — on its way to the agent. That cannot be taken back.",
       undo: null,
     };
   } catch (e) {
@@ -107,11 +116,11 @@ export async function snooze(item: Item): Promise<Outcome> {
   }
 }
 
-/// Takes back the last snooze.
+/// Takes back the last snooze, or the answer the host is holding.
 export async function takeBack(undo: { where: string }): Promise<Outcome> {
   try {
-    await api(undo.where, { method: "POST" });
-    return { said: "back in the list", undo: null };
+    const r = await api<{ says?: string } | null>(undo.where, { method: "POST" });
+    return { said: r?.says ?? "back in the list", undo: null };
   } catch (e) {
     return { said: `that did not land: ${failed(e)}`, undo: null };
   }

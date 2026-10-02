@@ -1056,6 +1056,36 @@ pub async fn answer_without_host(
     Ok(ask)
 }
 
+/// An answer in words, as the person gave it: `allow`, `deny`, the option's
+/// label where the question named one, or their own words quoted. For the
+/// line that says what is being held, and for the quit sentence.
+pub fn answer_says(ask: &crate::core::ask::Ask, answer: &Answer) -> String {
+    match answer {
+        Answer::Permission(d) => match (d.label(), d.option_id()) {
+            (Some(l), _) => l.to_string(),
+            (None, Some(id)) => format!("option {id}"),
+            (None, None) => "an answer".to_string(),
+        },
+        Answer::Question(choices) => {
+            let form = form_of(ask);
+            choices
+                .iter()
+                .map(|(field, c)| match c {
+                    crate::core::question::Chosen::Option(v) => form
+                        .iter()
+                        .find(|q| &q.field == field)
+                        .and_then(|q| q.options.iter().find(|o| &o.value == v))
+                        .map_or_else(|| v.clone(), |o| o.label.clone()),
+                    crate::core::question::Chosen::Custom(t) => {
+                        format!("\u{201c}{}\u{201d}", crate::core::text::clip(t, 80))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        }
+    }
+}
+
 /// Whether an answer could let a call through: any permission answer but a
 /// plain refusal. An option is counted as allowing, because what an agent's
 /// own option means is the agent's to say.
@@ -1379,7 +1409,7 @@ fn question_content(
 /// Whether `answer` can be delivered to what `ask` asked, checked before the
 /// ask is closed: an answer refused after the close would leave the row
 /// answered and the agent waiting for ever.
-fn check_answer(ask: &crate::core::ask::Ask, answer: &Answer) -> Result<()> {
+pub(crate) fn check_answer(ask: &crate::core::ask::Ask, answer: &Answer) -> Result<()> {
     match answer {
         // A held permission is read by the hook, which offers no options.
         Answer::Permission(_) if ask.request_id.is_empty() => Ok(()),

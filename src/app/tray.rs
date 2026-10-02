@@ -105,6 +105,8 @@ mod tests {
             change_id: None,
             offer: None,
             no_offer: None,
+            resume_command: None,
+            session_link: None,
             since: jiff::Timestamp::now(),
         }
     }

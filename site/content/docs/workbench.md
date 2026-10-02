@@ -153,7 +153,28 @@ See [Watching sessions](@/docs/observe.md).
 | `g g` · `G` | first · last |
 | `r` | review, on a change |
 
-No key fires while you type in a field, except `Esc`.
+No key fires while you type in a field, except `Esc` and the `⌘`/`Ctrl` chords.
+
+### On an inbox item
+
+The same keys work in the answer window. Each is printed on the control it presses; one that does
+not apply to the item says why instead of doing nothing.
+
+| Key | Does |
+|---|---|
+| `1`–`9` | choose that option (on a form, for the first question not yet answered) |
+| `t` · `⌘↵` / `Ctrl+Enter` | type an answer in your own words · send it |
+| `a` · `d` | allow, once · deny — a permission Devplane holds |
+| `w` | a dialog the vendor owns: open its session (VS Code) or copy its resume command |
+| `s` | snooze for an hour — never a question or a permission |
+| `o` · `r` | open what the item is about · open the change's review |
+| `z` | take back the answer before it is sent, or put a snoozed item back |
+
+An answer is held for 5 seconds before it reaches the agent: the inbox says what was answered and
+counts down, and `z` takes it back with nothing sent and nothing recorded. Answering another item
+sends the held one at once. Closing the page does not stop it being sent; quitting does — the quit
+question says so — and the question is waiting again at the next start. `devplane inbox answer`
+sends at once.
 
 ## The window
 

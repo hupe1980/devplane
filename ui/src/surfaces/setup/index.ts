@@ -1,7 +1,9 @@
 import { register } from "../../lib/surfaces";
-import { bind, onAction } from "../../lib/keys";
+import { bind, bindList, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
 
+// The project list: `j`/`k` move, Enter opens the inbox narrowed to it.
+bindList("setup", "open the inbox narrowed to the project");
 bind({ surface: "global", combo: "g ,", action: "go-setup", label: "go to the setup" });
 onAction("go-setup", () => {
   go("#setup");

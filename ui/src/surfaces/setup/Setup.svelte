@@ -12,6 +12,8 @@
   import GitHubPanel, { type HostSignIn } from "./GitHubPanel.svelte";
   import { api } from "../../lib/api";
   import { copyText } from "../../lib/resource.svelte";
+  import { cursor } from "../../lib/cursor";
+  import { go } from "../../lib/route";
 
   type ProjectRow = {
     id: string;
@@ -79,6 +81,19 @@
   const hooks = $derived(data?.connect?.hooks_installed ?? []);
   const policy = $derived(data?.machine_policy ?? null);
   let selected = $state<string | null>(null);
+  let order = $state<string[]>([]);
+  $effect(() =>
+    cursor({
+      scope: "setup",
+      size: () => order.length,
+      at: () => order.indexOf(selected ?? ""),
+      go: (i) => (selected = order[i]),
+      open: (i) => {
+        const p = (data?.projects ?? []).find((x) => x.id === order[i]);
+        if (p) go(`#inbox/${encodeURIComponent(p.name)}`);
+      },
+    }),
+  );
   const columns: Column<ProjectRow>[] = [
     { key: "name", label: "Project", width: 180, sort: (r) => r.name },
     { key: "trusted", label: "Trusted", width: 140, sort: (r) => (r.trusted ? 0 : 1) },
@@ -159,7 +174,7 @@
         <p class="quiet">None registered. A project is registered the first time an agent works in it, or with <code>devplane project trust &lt;path&gt;</code>.</p>
       {:else}
         <div class="frame">
-          <Grid id="setup-projects" {columns} rows={data.projects ?? []} key={(r) => r.id} bind:selected label="projects" dense>
+          <Grid id="setup-projects" {columns} rows={data.projects ?? []} key={(r) => r.id} bind:selected bind:order label="projects" dense>
             {#snippet cell(r, c)}
               {#if c.key === "name"}<b>{r.name}</b>
               {:else if c.key === "trusted"}<Pill word={r.trusted ? "trusted" : "not trusted"} as={r.trusted ? "none" : "wait"} />

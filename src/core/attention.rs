@@ -432,6 +432,14 @@ pub struct AttentionItem {
     /// Why there is no offer, on a permission item without one.
     #[serde(default)]
     pub no_offer: Option<crate::core::offer::NoOfferView>,
+    /// On a dialog the vendor owns: the command that resumes its session in a
+    /// terminal, for a person to run. Devplane runs nothing with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_command: Option<String>,
+    /// On a dialog the vendor owns, where the vendor documents one: a link that
+    /// opens the session (the VS Code extension's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_link: Option<String>,
     pub since: Timestamp,
 }
 
@@ -470,6 +478,8 @@ impl AttentionItem {
             change_id: None,
             offer: None,
             no_offer: None,
+            resume_command: None,
+            session_link: None,
             since,
         }
     }
@@ -823,6 +833,8 @@ pub fn run_items_at(
             }
             false => None,
         };
+        let claude_owned = answer_in.is_some()
+            && crate::core::vendors::vendor_of(&run.agent) == Some("Claude Code");
         // Snoozed per kind, and counted.
         if run.snoozed.hides(&kind, now) {
             out.snoozed += 1;
@@ -837,6 +849,23 @@ pub fn run_items_at(
             ask: run.blocked_on.as_ref().and_then(|b| b.ask.clone()),
             request_id: run.blocked_on.as_ref().and_then(|b| b.request_id.clone()),
             form: run.blocked_on.as_ref().and_then(|b| b.form.clone()),
+            // Where the vendor's own dialog is the only answer: the way to it.
+            resume_command: claude_owned
+                .then(|| {
+                    crate::core::deeplink::resume_command(
+                        run.session_id.as_str(),
+                        run.mode == crate::core::RunMode::Background,
+                    )
+                })
+                .flatten(),
+            session_link: claude_owned
+                .then(|| {
+                    crate::core::deeplink::session_link(
+                        run.session_id.as_str(),
+                        run.entrypoint.as_deref(),
+                    )
+                })
+                .flatten(),
             // No launch link (the session is already open) and no offer
             // (`offer::compose` fills it from the store).
             ..AttentionItem::machine(

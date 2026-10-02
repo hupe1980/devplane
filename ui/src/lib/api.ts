@@ -94,7 +94,9 @@ async function hmac(key: string, message: string): Promise<string> {
 async function windowProof(path: string, opts: RequestInit): Promise<Record<string, string>> {
   const key = windowKey();
   if (!key || !writes(opts) || !crypto?.subtle) return {};
-  const asked = /^\/api\/asks\/([^/?#]+)\/answer$/.exec(path);
+  // An answer, and taking a held one back: the host lets only the window
+  // withdraw what the window answered.
+  const asked = /^\/api\/asks\/([^/?#]+)\/(?:answer|undo)$/.exec(path);
   if (asked) {
     const id = decodeURIComponent(asked[1]);
     return { "X-Devplane-Ask-Proof": await hmac(key, `ask ${id}`) };

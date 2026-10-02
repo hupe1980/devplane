@@ -25,6 +25,7 @@ commits the tree the gates passed on.
 - `devplane gate` reports `passed`, not `verified`; only a change is *verified*.
 - `gate install --speckit` refuses a repository with no gate, unless `--anyway`.
 - `POST /api/projects/trust` refuses a request that carries only the control token.
+- A binding on a chord the browser keeps (`⌘W`, `⌘T`, `⌘N`, `⌘L`, `⌘R`, `⌘Q`, `⌘Tab`) fails the build.
 - Store schema 12. An older store is moved aside; a newer one is refused.
 - Minimum Rust is 1.94.
 
@@ -42,6 +43,14 @@ commits the tree the gates passed on.
 - `[gates] junit` names the JUnit files `check` writes, so tests are named, not only counted.
 - The workbench leads a change with its evidence, has one keyboard cursor on every list, keeps the open view in
   the address, and fits narrow windows.
+- The inbox from the keyboard: `1`–`9` choose an option, `t` types an answer and `⌘↵` sends it, `a`/`d` allow or
+  deny a permission Devplane holds, `w` reaches a session the vendor owns (its VS Code link, or its resume command
+  copied), `s` snoozes, `o` opens, `r` reviews. Each key is printed on its control, and a key that does not apply
+  says why. The answer window takes the same keys; Search and Setup take the list keys.
+- An answer from the window is held for 5 seconds before it reaches the agent, and `z` takes it back with nothing
+  recorded. Answering another item sends the held one at once. The host holds it, so closing the page still sends
+  it; quitting drops it, says so first, and leaves the question open. `devplane inbox answer` is never held.
+- `?` lists the keys for the item first, then the surface's, then those that work everywhere.
 
 ### Security
 

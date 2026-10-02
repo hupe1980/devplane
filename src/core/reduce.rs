@@ -885,6 +885,18 @@ pub mod facts {
         /// Live runs delegated to a provider's own daemon (`claude --bg`).
         pub delegated: usize,
         pub unanswered: usize,
+        /// An answer the window gave and has not sent yet. Quitting drops it.
+        #[serde(default)]
+        pub held: Option<HeldSummary>,
+    }
+
+    /// The held answer, as the quit sentence names it.
+    #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HeldSummary {
+        /// What was asked.
+        pub title: String,
+        /// The answer in words.
+        pub says: String,
     }
 
     impl Quitting {
@@ -893,6 +905,14 @@ pub mod facts {
         #[must_use]
         pub fn says(&self) -> String {
             let mut out = String::new();
+            // First: it is the one thing quitting loses that the person did.
+            if let Some(h) = &self.held {
+                out.push_str(&format!(
+                    "The answer you gave to \u{201c}{}\u{201d} ({}) is still held and will not reach \
+                     the agent: quitting drops it, nothing is recorded, and the question stays open.\n",
+                    h.title, h.says
+                ));
+            }
             if self.stops.is_empty() {
                 out.push_str(
                     "Quitting stops no agent: none of the live sessions is one Devplane started.\n",
@@ -945,9 +965,11 @@ pub mod facts {
     pub fn quitting<'a>(
         runs: impl Iterator<Item = &'a Run>,
         asks: &[crate::core::ask::Ask],
+        held: Option<HeldSummary>,
     ) -> Quitting {
         let mut q = Quitting {
             unanswered: asks.iter().filter(|a| a.is_open()).count(),
+            held,
             ..Quitting::default()
         };
         for run in runs.filter(|r| r.state.is_live()) {
@@ -994,6 +1016,7 @@ mod quitting_says {
             leaves: 0,
             delegated: 1,
             unanswered: 3,
+            held: None,
         };
         let s = q.says();
         assert!(
@@ -1020,6 +1043,26 @@ mod quitting_says {
             !none.contains("question"),
             "no questions, no sentence about them: {none}"
         );
+        assert!(!none.contains("held"), "nothing held, nothing said: {none}");
+    }
+
+    #[test]
+    fn a_held_answer_is_named_first_and_said_to_be_dropped() {
+        let q = Quitting {
+            unanswered: 1,
+            held: Some(super::facts::HeldSummary {
+                title: "Keep /v1/login?".into(),
+                says: "drop it".into(),
+            }),
+            ..Quitting::default()
+        };
+        let s = q.says();
+        assert!(
+            s.starts_with("The answer you gave to \u{201c}Keep /v1/login?\u{201d} (drop it)"),
+            "{s}"
+        );
+        assert!(s.contains("will not reach the agent"), "{s}");
+        assert!(s.contains("quitting drops it"), "{s}");
     }
 }
 
@@ -2934,7 +2977,7 @@ mod quitting_tests {
             run(RunMode::Observed, RunState::Working, "/code/cli"),
             run(RunMode::Background, RunState::Working, "/code/bg"),
         ];
-        let q = quitting(runs.iter(), &[]);
+        let q = quitting(runs.iter(), &[], None);
         assert_eq!(q.stops.len(), 1, "only the driven run is ours to end");
         assert_eq!(q.stops[0].at, "/code/api");
         assert_eq!(q.leaves, 2);
@@ -2948,7 +2991,7 @@ mod quitting_tests {
             run(RunMode::Driven, RunState::Completed, "/code/api"),
             run(RunMode::Observed, RunState::Interrupted, "/code/web"),
         ];
-        assert_eq!(quitting(runs.iter(), &[]), Quitting::default());
+        assert_eq!(quitting(runs.iter(), &[], None), Quitting::default());
     }
 
     /// Names the worktree, not the checkout.
@@ -2956,7 +2999,7 @@ mod quitting_tests {
     fn an_agent_in_a_worktree_is_named_by_where_it_is_working() {
         let mut r = run(RunMode::Driven, RunState::Working, "/code/api");
         r.worktree = Some(std::path::PathBuf::from("/code/api/.claude/worktrees/fix"));
-        let q = quitting([r].iter(), &[]);
+        let q = quitting([r].iter(), &[], None);
         assert_eq!(q.stops[0].at, "/code/api/.claude/worktrees/fix");
     }
 
@@ -2978,14 +3021,14 @@ mod quitting_tests {
             ask("a2", Kind::Permission),
             answered,
         ];
-        let q = quitting(runs.iter(), &asks);
+        let q = quitting(runs.iter(), &asks, None);
         assert_eq!(
             q.unanswered, 2,
             "one question and one permission still open"
         );
         assert_eq!(q.stops.len(), 1);
         assert_eq!(
-            quitting(runs.iter(), &[]).unanswered,
+            quitting(runs.iter(), &[], None).unanswered,
             0,
             "a blocked run without an ask row is not a question that survives"
         );
@@ -2996,8 +3039,8 @@ mod quitting_tests {
     fn the_agents_are_listed_in_a_stable_order() {
         let a = run(RunMode::Driven, RunState::Working, "/a");
         let b = run(RunMode::Driven, RunState::Working, "/b");
-        let one = quitting([a.clone(), b.clone()].iter(), &[]);
-        let other = quitting([b, a].iter(), &[]);
+        let one = quitting([a.clone(), b.clone()].iter(), &[], None);
+        let other = quitting([b, a].iter(), &[], None);
         assert_eq!(one, other);
     }
 }

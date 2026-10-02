@@ -1,4 +1,9 @@
 import { register } from "../../lib/surfaces";
+import { bindList } from "../../lib/keys";
+
+// The matches are a list like every other: `j`/`k` move, Enter opens the
+// session the match is from.
+bindList("search", "open the session the match is from");
 
 register({
   id: "search",

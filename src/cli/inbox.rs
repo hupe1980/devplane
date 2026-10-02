@@ -23,6 +23,7 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         narrowed,
         snoozed,
         close,
+        held,
         ..
     } = inbox;
 
@@ -34,6 +35,20 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
             paint(DIM, &format!("since you last looked · {since}"))
         );
         println!();
+    }
+
+    // Out of the list while it waits, so said here rather than hidden.
+    if let Some(h) = &held {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "held: {} → {} — sent to the agent at {} unless taken back in the window",
+                    h.title, h.says, h.until
+                )
+            )
+        );
     }
 
     if snoozed > 0 {

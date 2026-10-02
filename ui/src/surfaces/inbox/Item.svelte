@@ -9,6 +9,9 @@
   import { unreadSays } from "../change/review/unread.svelte";
   import Inline from "../../lib/ui/Inline.svelte";
   import { safeHref } from "../../lib/href";
+  import { spell } from "../../lib/keys";
+  import { copyText } from "../../lib/resource.svelte";
+  import { answerItemKeys } from "./keys";
   import type { ReadyFacts } from "../../wire/ReadyFacts";
 
   /// How much of a detail the row shows; the rest is in the `title`.
@@ -55,6 +58,11 @@
     since?: string;
     /// On a *ready to decide* row: what its review leads with.
     facts?: ReadyFacts | null;
+    /// On a dialog the vendor owns: the command that resumes its session.
+    resume_command?: string | null;
+    /// On a dialog the vendor owns, where the vendor documents one: a link
+    /// that opens the session.
+    session_link?: string | null;
   };
 
   /// The bodies the answer route accepts. A body with none of these fields
@@ -76,6 +84,7 @@
     snooze,
     copyRule,
     say,
+    keys = "",
   }: {
     item: Item;
     current?: boolean;
@@ -86,6 +95,10 @@
     copyRule: (rule: string) => Promise<void>;
     /// Reports a refusal this row makes on its own, such as an empty reply.
     say: (sentence: string) => void;
+    /// The surface whose item keys this row answers (`inbox`, `answer`);
+    /// empty for a row that takes no keys. The keys are printed on the
+    /// controls either way.
+    keys?: string;
   } = $props();
 
   const acts = $derived(item.actions ?? []);
@@ -122,7 +135,7 @@
   /// The form, when there is one, replaces the flat option list.
   const form = $derived((item.form ?? []).length > 0 ? (item.form ?? []) : null);
 
-  /// A multi-question form is answered once: picks are held until every field
+  /// A multi-question form is answered once: picks are kept until every field
   /// has one, then sent in one body. A one-field form sends on the pick.
   let picked = $state<Record<string, { option?: string; custom?: string }>>({});
   function pick(field: string, what: { option?: string; custom?: string }) {
@@ -132,8 +145,35 @@
       return;
     }
     picked = { ...picked, [field]: what };
+    // The last field picked sends the whole form: one key per field, and the
+    // hold still lets the answer be taken back.
+    if (fields.every((q) => picked[q.field])) send();
   }
   const outstanding = $derived((form ?? []).filter((q) => !picked[q.field]).length);
+  /// The field `1`–`9` answer: the first one not yet picked.
+  const keyedField = $derived((form ?? []).find((q) => !picked[q.field])?.field ?? null);
+  /// The numbers printed on the flat list's options: only the ones that can
+  /// be chosen are counted, so `2` is the second button.
+  const optionKey = (index: number) => {
+    const n = (item.options ?? []).slice(0, index + 1).filter((o) => o.id).length;
+    return n <= 9 ? String(n) : null;
+  };
+  const answerable = $derived((item.options ?? []).filter((o) => o.id).length);
+
+  /// `w`: the vendor's documented link where there is one, else the resume
+  /// command copied — and the control says which.
+  const sessionLink = $derived(safeHref(item.session_link));
+  async function copyResume() {
+    const cmd = item.resume_command;
+    if (!cmd) return;
+    say((await copyText(cmd)) ? `copied: ${cmd} — run it in a terminal to answer there` : `nothing was copied: this page has no clipboard — run ${cmd}`);
+  }
+
+  // The item keys press the control they are printed on, so a key and its
+  // button can never do two different things; a control that is not here
+  // makes the key say why, in place.
+  let root = $state<HTMLLIElement | undefined>();
+  $effect(() => (keys ? answerItemKeys(keys, () => root, () => item, say) : undefined));
   function send() {
     void answer(item, {
       answers: (form ?? []).map((q) => ({ field: q.field, ...picked[q.field] })),
@@ -141,7 +181,7 @@
   }
 </script>
 
-<li class="item" class:loud class:current id={item.ask ? `row-${item.ask}` : undefined} aria-current={current ? "true" : undefined}>
+<li bind:this={root} class="item" class:loud class:current id={item.ask ? `row-${item.ask}` : undefined} aria-current={current ? "true" : undefined}>
   <span class="lvl">
     {#if loud}
       <State state="needs you" word={item.level} />
@@ -187,11 +227,15 @@
           <div class="opts">
             <!-- Keyed by position: two options may share a label. -->
             {#each q.options as o, oi (oi)}
-              <button
-                class="choice"
-                class:picked={picked[q.field]?.option === o.value}
-                title={o.detail ?? undefined}
-                onclick={() => pick(q.field, { option: o.value })}>{o.label}</button
+              {@const k = q.field === keyedField && oi < 9 ? String(oi + 1) : null}
+              <span class="keyed"
+                ><button
+                  class="choice"
+                  class:picked={picked[q.field]?.option === o.value}
+                  title={o.detail ?? undefined}
+                  data-key={k}
+                  onclick={() => pick(q.field, { option: o.value })}>{o.label}</button
+                >{#if k}<kbd>{k}</kbd>{/if}</span
               >
             {/each}
           </div>
@@ -202,8 +246,10 @@
                 bind:value={custom[q.field]}
                 placeholder="your answer"
                 aria-label="your answer to: {q.title}"
+                data-key={q.field === keyedField ? "t" : null}
               />
-              <button onclick={() => reply(q.field)}>reply</button>
+              <button data-send onclick={() => reply(q.field)}>reply</button><kbd title="sends from inside the field">{spell("Mod+Enter")}</kbd>
+              {#if q.field === keyedField}<kbd title="puts you in this field">t</kbd>{/if}
             </div>
           {/if}
         </fieldset>
@@ -220,7 +266,11 @@
         <div class="opts">
           {#each item.options ?? [] as o, oi (oi)}
             {#if o.id}
-              <button class="choice" onclick={() => answer(item, { option: o.id! })}>{o.label}</button>
+              {@const k = optionKey(oi)}
+              <span class="keyed"
+                ><button class="choice" data-key={k} onclick={() => answer(item, { option: o.id! })}>{o.label}</button
+                >{#if k}<kbd>{k}</kbd>{/if}</span
+              >
             {:else}
               <!-- No id: only the provider's own window can answer, so it is
                    shown but not a button. -->
@@ -228,6 +278,9 @@
             {/if}
           {/each}
         </div>
+        {#if answerable > 9}
+          <p class="elsewhere">1–9 choose the first nine; Tab reaches the rest, and Enter chooses one.</p>
+        {/if}
       {/if}
       <!-- A free-text answer, where the agent asked for one. -->
       {#if has("reply")}
@@ -237,8 +290,10 @@
             bind:value={typed}
             placeholder="your answer"
             aria-label="your answer to: {item.title}"
+            data-key="t"
           />
-          <button onclick={() => reply()}>reply</button>
+          <button data-send onclick={() => reply()}>reply</button><kbd title="sends from inside the field">{spell("Mod+Enter")}</kbd>
+          <kbd title="puts you in this field">t</kbd>
         </div>
       {/if}
     {/if}
@@ -261,13 +316,26 @@
 
     <!-- A watched session has no protocol request, so nothing here can grant it. -->
     {#if item.answer_in}<p class="elsewhere"><Inline text={item.answer_in} /></p>{/if}
+    <!-- The way to the vendor's own dialog: a documented link, else the
+         command to run; the control says which it does. Never a window
+         raised: no documented channel can. -->
+    {#if item.answer_in && (sessionLink || item.resume_command)}
+      <p class="session">
+        {#if sessionLink}
+          <span class="keyed"><a class="act primary" data-key="w" href={sessionLink}>open the session in VS Code</a><kbd>w</kbd></span>
+        {:else}
+          <span class="keyed"><button class="primary" data-key="w" onclick={copyResume}>copy the resume command</button><kbd>w</kbd></span>
+          <code class="cmd">{item.resume_command}</code>
+        {/if}
+      </p>
+    {/if}
 
     <div class="acts">
       {#if has("allow")}
-        <button onclick={() => answer(item, { decision: "allow" })}>allow</button>
+        <span class="keyed"><button data-key="a" onclick={() => answer(item, { decision: "allow" })}>allow</button><kbd>a</kbd></span>
       {/if}
       {#if has("deny")}
-        <button onclick={() => answer(item, { decision: "deny" })}>deny</button>
+        <span class="keyed"><button data-key="d" onclick={() => answer(item, { decision: "deny" })}>deny</button><kbd>d</kbd></span>
       {/if}
       {#if has("retry")}
         <button onclick={() => act(item, "retry")}>retry</button>
@@ -276,7 +344,7 @@
         <button onclick={() => act(item, "resume")}>resume</button>
       {/if}
       {#if has("review") && item.change_id}
-        <a class="act primary" href={`#change/${encodeURIComponent(item.change_id)}/review`}>review</a>
+        <span class="keyed"><a class="act primary" href={`#change/${encodeURIComponent(item.change_id)}/review`} data-key="r">review</a><kbd>r</kbd></span>
       {/if}
       <!-- A drift: tell the run which files moved, or accept it. Either is recorded. -->
       {#if has("tell_run")}
@@ -286,11 +354,14 @@
         <button onclick={() => act(item, "accept_drift")}>accept the drift</button>
       {/if}
       {#if has("open") && (item.run_id || item.change_id)}
-        <a
-          class="act"
-          href={item.change_id
-            ? `#change/${encodeURIComponent(item.change_id)}`
-            : `#why/${encodeURIComponent(item.run_id ?? "")}`}>open</a
+        <span class="keyed"
+          ><a
+            class="act"
+            data-key="o"
+            href={item.change_id
+              ? `#change/${encodeURIComponent(item.change_id)}`
+              : `#why/${encodeURIComponent(item.run_id ?? "")}`}>open</a
+          ><kbd>o</kbd></span
         >
       {/if}
       {#if (has("open_pr") || has("open_issue")) && url}
@@ -303,7 +374,7 @@
         <a class="act" href={launch}>open an agent with this typed</a>
       {/if}
       {#if has("snooze")}
-        <button onclick={() => snooze(item)}>snooze 1h</button>
+        <span class="keyed"><button data-key="s" onclick={() => snooze(item)}>snooze 1h</button><kbd>s</kbd></span>
       {/if}
       <!-- A browser cannot attach, so show the command. -->
       {#if has("attach") && item.run_id}
@@ -465,6 +536,34 @@
   .reply {
     display: flex;
     gap: var(--s-2);
+    align-items: center;
+  }
+  /* A control and the key that presses it, side by side. */
+  .keyed {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  kbd {
+    font-family: var(--mono);
+    font-size: 0.625rem;
+    color: var(--faint);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0 0.25rem;
+  }
+  .session {
+    margin: 0;
+    display: flex;
+    gap: var(--s-2);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--chrome);
+    font-weight: 600;
   }
   .reply input {
     flex: 1;

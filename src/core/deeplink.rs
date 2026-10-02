@@ -43,9 +43,63 @@ fn is_repo_slug(s: &str) -> bool {
     ok(owner) && ok(name)
 }
 
+/// A session id safe to put on a command line and in a link: what Claude Code
+/// issues (a UUID) and nothing that could become a second argument.
+fn is_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+/// The command that reaches a Claude Code session from a terminal: `claude
+/// --resume <id>`, or `claude attach <id>` for one Claude Code's own daemon
+/// runs in the background — the command `devplane run attach` runs.
+pub fn resume_command(session: &str, background: bool) -> Option<String> {
+    if !is_session_id(session) {
+        return None;
+    }
+    Some(match background {
+        true => format!("claude attach {session}"),
+        false => format!("claude --resume {session}"),
+    })
+}
+
+/// The VS Code extension's documented link to a session, which focuses its
+/// tab where it is open — offered only for a session the extension started.
+pub fn session_link(session: &str, entrypoint: Option<&str>) -> Option<String> {
+    if entrypoint != Some("claude-vscode") || !is_session_id(session) {
+        return None;
+    }
+    Some(format!(
+        "vscode://anthropic.claude-code/open?session={}",
+        encode(session)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_is_reached_by_its_own_command_or_documented_link() {
+        assert_eq!(
+            resume_command("0b9e-41", false).as_deref(),
+            Some("claude --resume 0b9e-41")
+        );
+        assert_eq!(
+            resume_command("0b9e-41", true).as_deref(),
+            Some("claude attach 0b9e-41")
+        );
+        assert_eq!(resume_command("x; rm -rf ~", false), None);
+        assert_eq!(resume_command("", false), None);
+        assert_eq!(
+            session_link("0b9e-41", Some("claude-vscode")).as_deref(),
+            Some("vscode://anthropic.claude-code/open?session=0b9e-41")
+        );
+        assert_eq!(session_link("0b9e-41", Some("cli")), None);
+        assert_eq!(session_link("0b9e-41", None), None);
+    }
 
     #[test]
     fn a_prompt_is_data_and_is_escaped_as_data() {

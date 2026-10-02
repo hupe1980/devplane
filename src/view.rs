@@ -735,6 +735,8 @@ pub async fn inbox(
         snoozed,
         close,
         limits: snap.limits().map(str::to_string),
+        held: None,
+        landed: None,
     }
 }
 
@@ -758,6 +760,30 @@ pub struct InboxView {
     /// Why the answer is partial, when it was read without a host.
     #[serde(default)]
     pub limits: Option<String>,
+    /// The answer the window gave and has not sent yet: its item is out of
+    /// `items` while held, and is shown here instead — never hidden uncounted.
+    #[serde(default)]
+    pub held: Option<crate::hold::HeldView>,
+    /// What the last held answer came to once it was sent.
+    #[serde(default)]
+    pub landed: Option<crate::hold::Landed>,
+}
+
+impl InboxView {
+    /// Lays the host's held answer over the inbox: the item it answers leaves
+    /// the list while it waits, and the hold says what it is.
+    pub fn hold(
+        &mut self,
+        held: Option<crate::hold::HeldView>,
+        landed: Option<crate::hold::Landed>,
+    ) {
+        if let Some(h) = &held {
+            self.items
+                .retain(|r| r.item.ask.as_ref().is_none_or(|a| a.as_str() != h.ask));
+        }
+        self.held = held;
+        self.landed = landed;
+    }
 }
 
 /// The boundary since the last look and, for an empty inbox, what the day

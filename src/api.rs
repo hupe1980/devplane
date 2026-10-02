@@ -40,6 +40,7 @@ pub fn router(state: Shared) -> Router {
         // kind, the caller says what the person chose.
         .route("/api/asks", get(asks_index))
         .route("/api/asks/{id}/answer", post(answer_ask))
+        .route("/api/asks/{id}/undo", post(undo_answer))
         .route("/api/runs/{id}/stop", get(stop_preview).post(stop_run))
         .route("/api/agents", get(agents))
         .route("/api/changes", get(list_change).post(start_change))
@@ -465,7 +466,9 @@ async fn inbox(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let snap = state.snapshot().await;
-    Json(crate::view::inbox(&snap, &state.store, &state.policy, &q).await).into_response()
+    let mut view = crate::view::inbox(&snap, &state.store, &state.policy, &q).await;
+    view.hold(state.hold.held(), state.hold.landed());
+    Json(view).into_response()
 }
 
 /// One row of the cross-project issue or pull-request list. `needs_you` is
@@ -964,6 +967,11 @@ struct AnswerBody {
     /// is answered only once.
     #[serde(default)]
     answers: Vec<crate::driven::FieldAnswer>,
+    /// The window's answers are held for a few seconds so a slip can be taken
+    /// back before it reaches the agent ([`crate::hold`]). Without it the
+    /// answer is sent at once, as the command line's always is.
+    #[serde(default)]
+    hold: bool,
 }
 
 async fn asks_index(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
@@ -1010,18 +1018,36 @@ async fn answer_ask(
         }
     };
 
-    match crate::driven::answer_ask(&state, &id, answer, path_of(&state, &headers, &id)).await {
-        Ok(a) => {
-            acted_on(
-                &state,
-                a.run.as_str(),
-                &[
-                    crate::core::AttentionKind::Permission,
-                    crate::core::AttentionKind::Question,
-                ],
-                crate::core::attention::Resolution::Acted,
+    // Proved now, from this request, and kept with a held answer: the path
+    // recorded at commit is the one this request proved.
+    let from = path_of(&state, &headers, &id);
+    if body.hold {
+        // Refused now, not five seconds from now when nobody is looking.
+        if !ask.is_open() {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "that question is no longer waiting — it was answered or withdrawn"})),
             )
-            .await;
+                .into_response();
+        }
+        if let Err(e) = crate::driven::check_answer(&ask, &answer) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+        let (held, committed) = crate::hold::hold(&state, &ask, answer, from).await;
+        return (
+            StatusCode::ACCEPTED,
+            Json(json!({"held": held, "committed": committed})),
+        )
+            .into_response();
+    }
+
+    match crate::driven::answer_ask(&state, &id, answer, from).await {
+        Ok(a) => {
+            acted_on_ask(&state, a.run.as_str()).await;
             Json(crate::view::render_ask(&a)).into_response()
         }
         Err(e) => (
@@ -1030,6 +1056,45 @@ async fn answer_ask(
         )
             .into_response(),
     }
+}
+
+/// Takes back the answer the window is holding for this ask, before it
+/// reaches the agent: nothing was recorded or delivered, and the ask is open
+/// again. An answer the window held is taken back only with the window's proof
+/// for this ask.
+async fn undo_answer(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let window = path_of(&state, &headers, &id) == "window";
+    match state.hold.withdraw(&id, window) {
+        Ok(()) => Json(json!({
+            "withdrawn": id,
+            "says": "taken back — nothing reached the agent, and the question is waiting again",
+        }))
+        .into_response(),
+        Err(refused) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": refused.says(), "says": refused.says()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Records that an answered ask's inbox item was acted on.
+pub(crate) async fn acted_on_ask(state: &Shared, run: &str) {
+    acted_on(
+        state,
+        run,
+        &[
+            crate::core::AttentionKind::Permission,
+            crate::core::AttentionKind::Question,
+        ],
+        crate::core::attention::Resolution::Acted,
+    )
+    .await;
 }
 
 /// What stopping a run leaves behind, as the sentence a surface shows before
@@ -2245,7 +2310,11 @@ async fn decisions(
 async fn quitting(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let snap = state.snapshot().await;
-    let q = crate::core::reduce::facts::quitting(snap.world.runs(), &snap.open_asks);
+    let q = crate::core::reduce::facts::quitting(
+        snap.world.runs(),
+        &snap.open_asks,
+        state.hold.summary(),
+    );
     // The window prints `says` verbatim, so both readers share one sentence.
     let mut v = serde_json::to_value(&q).unwrap_or_else(|_| json!({}));
     v["says"] = json!(q.says());
@@ -2257,6 +2326,9 @@ async fn quitting(State(state): State<Shared>, headers: HeaderMap) -> impl IntoR
 /// the same graceful path as ctrl-c on every platform.
 async fn quit(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
+    // Dropped before the reply: a held answer must not be sent in the moment
+    // between the request and the stop.
+    state.hold.drop_on_stop();
     // Answer first: the reply has to leave before the server stops serving.
     let st = state.clone();
     tokio::spawn(async move {

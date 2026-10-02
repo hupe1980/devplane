@@ -14,18 +14,32 @@ export type Binding = {
   action: string;
   /// What `?` prints. Never empty.
   label: string;
+  /// A key that acts on the item the surface has selected, not on the
+  /// surface: `?` lists these first, under *this item*.
+  item?: boolean;
 };
+
+/// Chords the browser or the window takes before the page sees them. A
+/// binding on one would be a key the help sheet lies about, so `bind()`
+/// refuses it.
+export const RESERVED = ["Mod+w", "Mod+t", "Mod+n", "Mod+l", "Mod+r", "Mod+q", "Mod+Tab"] as const;
 
 const bindings: Binding[] = [];
 /// A listener says whether it took the action: the first that does ends the
-/// dispatch, so a surface's own answer to `leave` beats the shell's.
-type Listener = (surface: string) => boolean | void;
+/// dispatch, so a surface's own answer to `leave` beats the shell's. It is
+/// told the combo that ran it, so one action can stand for a row of keys
+/// (`1`–`9` choose option N).
+type Listener = (surface: string, combo: string) => boolean | void;
 const listeners = new Map<string, Set<Listener>>();
 
 /// Registers one binding, or throws naming the pair it collides with.
 export function bind(b: Binding): void {
   if (!b.label.trim()) throw new Error(`${b.surface}: ${b.combo} (${b.action}) has no label`);
   const combo = normalise(b.combo);
+  const reserved = RESERVED.find((r) => r.toLowerCase() === combo.toLowerCase());
+  if (reserved) {
+    throw new Error(`${b.surface}: ${b.combo} ("${b.label}") takes ${reserved}, which the browser keeps for itself`);
+  }
   const same = bindings.find((x) => x.combo === combo && x.surface === b.surface);
   if (same) {
     throw new Error(
@@ -85,6 +99,32 @@ export function help(surface: string): Binding[] {
   ];
 }
 
+/// A row of the help sheet: one binding, or several that run the same action
+/// with the same label (`1`–`9`), listed once with every combo.
+export type SheetRow = Binding & { combos: string[] };
+
+/// What `?` prints for a surface, in the order a person reaches for it: the
+/// keys on the selected item, then the surface's (its current mode's first),
+/// then the keys that work everywhere. A group with nothing in it is left out.
+export function sheet(surface: string): { title: string; keys: SheetRow[] }[] {
+  const rows = (keys: Binding[]): SheetRow[] => {
+    const out: SheetRow[] = [];
+    for (const b of keys) {
+      const same = out.find((r) => r.surface === b.surface && r.action === b.action && r.label === b.label);
+      if (same) same.combos.push(b.combo);
+      else out.push({ ...b, combos: [b.combo] });
+    }
+    return out;
+  };
+  const keys = help(surface);
+  const groups = [
+    { title: "This item", keys: rows(keys.filter((b) => b.surface !== "global" && b.item)) },
+    { title: "This surface", keys: rows(keys.filter((b) => b.surface !== "global" && !b.item)) },
+    { title: "Everywhere", keys: rows(keys.filter((b) => b.surface === "global")) },
+  ];
+  return groups.filter((g) => g.keys.length > 0);
+}
+
 /// Subscribes to an action by name. Returns the unsubscribe.
 export function onAction(action: string, fn: Listener): () => void {
   let set = listeners.get(action);
@@ -99,11 +139,11 @@ export function onAction(action: string, fn: Listener): () => void {
 }
 
 /// Runs an action by name, as a key would; whether a listener took it.
-export function run(action: string, surface: string): boolean {
+export function run(action: string, surface: string, combo = ""): boolean {
   const set = listeners.get(action);
   if (!set || set.size === 0) return false;
   for (const fn of set) {
-    if (fn(surface) === true) return true;
+    if (fn(surface, combo) === true) return true;
   }
   return false;
 }
@@ -251,7 +291,7 @@ export function dispatch(surface: string, e: KeyboardEvent): boolean {
   const fire = (k: string): boolean => {
     for (const s of within) {
       const hit = bindings.find((b) => b.surface === s && b.combo === k);
-      if (hit && run(hit.action, surface)) {
+      if (hit && run(hit.action, surface, k)) {
         e.preventDefault();
         return true;
       }

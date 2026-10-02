@@ -3,7 +3,7 @@
   import Inline from "../../lib/ui/Inline.svelte";
   import { ago } from "../../lib/text";
   import { cursor } from "../../lib/cursor";
-  import { onAction } from "../../lib/keys";
+  import { onAction, spell } from "../../lib/keys";
   import { place, remember, itemFocus } from "./place.svelte";
   import { reread } from "../../lib/live.svelte";
   import { writer } from "../../lib/write.svelte";
@@ -40,6 +40,8 @@
     stale_since = null,
     error = null,
     watching = null,
+    held = null,
+    landed = null,
     open = () => {},
   }: {
     items?: Item[];
@@ -60,6 +62,11 @@
     /// Why the feed is not the present, when it is not.
     error?: string | null;
     watching?: Watching | null;
+    /// The answer the host is holding before it reaches the agent; its item
+    /// is out of `items` while it waits.
+    held?: actions.Held | null;
+    /// What the last held answer came to once it was sent.
+    landed?: actions.Landed | null;
     /// Moves the address to a row (the shell's `open`).
     open?: (focus: string) => void;
   } = $props();
@@ -167,7 +174,7 @@
   });
   /// The undo, over the item it is about, or once that item has left the list
   /// (a snooze hides it, so the next item is on screen).
-  const undoHere = $derived(undo && (undo.id === current?.id || !shown.some((x) => x.id === undo!.id)) ? undo : null);
+  const undoHere = $derived(!held && undo && (undo.id === current?.id || !shown.some((x) => x.id === undo!.id)) ? undo : null);
 
   // The list keys: j/k and the arrows move the address, Enter moves into the
   // item's controls, g g and G go to the ends.
@@ -183,34 +190,80 @@
     }),
   );
 
-  /// The item's own answer keys, printed on the item. Each declines when
-  /// the item on screen does not offer that answer.
-  function keyed(action: "allow" | "deny") {
-    return (surface: string) => {
-      if (surface !== "inbox" || !current || pending.busy || !(current.actions ?? []).includes(action)) return false;
-      void answer(current, { decision: action });
-      return true;
-    };
-  }
+  /// The held answer while the address is on the full inbox; a narrowed list
+  /// shows it too, since it may be the very item that left.
+  const heldHere = $derived(held);
+  /// The asks this page held, so the sentence about what one came to is
+  /// said here and nowhere it would be news about somebody else's answer.
+  let mine = $state<string[]>([]);
   $effect(() => {
-    const offs = [
-      onAction("inbox-allow", keyed("allow")),
-      onAction("inbox-deny", keyed("deny")),
-      // Declines where the item has no snooze, or nothing is waiting to undo.
-      onAction("inbox-snooze", (surface) => {
-        if (surface !== "inbox" || !current || pending.busy || !(current.actions ?? []).includes("snooze")) return false;
-        void snooze(current);
-        return true;
-      }),
-      onAction("inbox-undo", (surface) => {
-        if (surface !== "inbox" || !undoHere || pending.busy) return false;
-        void takeBack();
-        return true;
-      }),
-    ];
-    return () => offs.forEach((off) => off());
+    const h = held?.ask;
+    if (h && !mine.includes(h)) mine = [...mine.slice(-9), h];
   });
-  const keysHere = $derived((current?.actions ?? []).filter((a) => a === "allow" || a === "deny" || a === "snooze"));
+  /// What the last held answer came to: always when it failed — an answer
+  /// that did not land is never silent — and when it was this page's.
+  const landedHere = $derived(!held && landed && (!landed.ok || mine.includes(landed.ask)) ? landed : null);
+
+  /// The ask to select once it is back in the list after an undo.
+  let returning = $state("");
+  $effect(() => {
+    if (!returning) return;
+    const back = shown.find((x) => x.ask === returning || x.request_id === returning);
+    if (back) {
+      returning = "";
+      open(itemFocus(back.id));
+    }
+  });
+  /// Takes the held answer back: nothing reached the agent, and the item is
+  /// back in the list, selected.
+  async function takeBackHeld() {
+    const h = held;
+    if (!h) return;
+    const r = await pending.run("undo", () => actions.takeBack({ where: h.undo }));
+    if (r) said = { text: r.said, id: "", title: h.title };
+    returning = h.ask;
+    reread();
+    void narrow.reload();
+  }
+
+  // `z`: the held answer first — it is the one about to become a decision —
+  // then the last snooze; with neither, it says so.
+  $effect(() =>
+    onAction("item-undo", (surface) => {
+      if (surface !== "inbox") return false;
+      if (pending.busy) return true;
+      if (held) void takeBackHeld();
+      else if (undoHere) void takeBack();
+      else say(landedHere?.ok ? "that answer was already sent — it can no longer be taken back" : "nothing to undo");
+      return true;
+    }),
+  );
+
+  /// The keys that apply to the item on screen, as the footer prints them.
+  const keysHere = $derived.by(() => {
+    const a = current?.actions ?? [];
+    const out: Array<[string, string]> = [];
+    const opts = (current?.options ?? []).filter((o) => o.id).length || (current?.form?.[0]?.options.length ?? 0);
+    if (opts) out.push([opts > 1 ? `1–${Math.min(opts, 9)}` : "1", "choose"]);
+    if (a.includes("reply") || current?.form?.some((q) => q.custom_field)) out.push(["t", "type an answer"]);
+    if (a.includes("allow")) out.push(["a", "allow"]);
+    if (a.includes("deny")) out.push(["d", "deny"]);
+    if (current?.answer_in && (current.session_link || current.resume_command))
+      out.push(["w", current.session_link ? "open the session" : "copy the resume command"]);
+    if (a.includes("snooze")) out.push(["s", "snooze"]);
+    if ((a.includes("open") || a.includes("review")) && (current?.change_id || current?.run_id)) out.push(["o", "open"]);
+    if (a.includes("review") && current?.change_id) out.push(["r", "review"]);
+    return out;
+  });
+
+  /// Seconds left on the held answer, from the host's `until`.
+  let tick = $state(Date.now());
+  $effect(() => {
+    if (!held) return;
+    const id = setInterval(() => (tick = Date.now()), 250);
+    return () => clearInterval(id);
+  });
+  const heldLeft = $derived(held ? Math.max(0, Math.ceil((Date.parse(held.until) - tick) / 1000)) : 0);
 
   let now = $state(Date.now());
   $effect(() => {
@@ -226,6 +279,16 @@
     <Inline text={sentence} />
     {#if undoHere}<button class="undo" onclick={takeBack} disabled={!!pending.busy}>{undoHere.says} <kbd>z</kbd></button>{/if}
   </p>
+  <!-- The answer waiting out its hold: what it is, the seconds left, and the
+       key that takes it back — in words. -->
+  {#if heldHere}
+    <p class="held" role="status">
+      <span><b>{heldHere.title}</b>: {heldHere.says} · {heldLeft > 0 ? `sending in ${heldLeft} s` : "sending now"} · <kbd>z</kbd> to undo</span>
+      <button class="undo" onclick={takeBackHeld} disabled={!!pending.busy}>take it back <kbd>z</kbd></button>
+    </p>
+  {:else if landedHere}
+    <p class="held" class:failed={!landedHere.ok} role="status"><span><b>{landedHere.title}</b>: {landedHere.says}</span></p>
+  {/if}
   {#if sentence && said?.commands?.length}<Commands commands={said.commands} />{/if}
 
   {#if narrow.on && narrow.failure && !narrow.data}
@@ -276,15 +339,15 @@
     <fieldset class="bare" disabled={!!pending.busy}>
       <ul role="list" class="one" class:stale={!!error} tabindex="-1" aria-label="the item: {current.title}">
         {#key current.id}
-          <Row item={current} current={true} age="" {answer} {act} {snooze} {copyRule} {say} />
+          <Row item={current} current={true} age="" {answer} {act} {snooze} {copyRule} {say} keys="inbox" />
         {/key}
       </ul>
     </fieldset>
     <footer class="nav">
       {#if current.change_id}<a href={`#change/${encodeURIComponent(current.change_id)}`}><Icon name="change" size={13} /> Open the change</a>{/if}
       <span class="keys"
-        ><kbd>j</kbd> <kbd>k</kbd> move between items · <kbd>Enter</kbd> moves into this one, <kbd>Tab</kbd> to its controls{#if keysHere.includes("allow")}
-          · <kbd>a</kbd> allow{/if}{#if keysHere.includes("deny")} · <kbd>d</kbd> deny{/if}{#if keysHere.includes("snooze")} · <kbd>s</kbd> snooze{/if}{#if undoHere} · <kbd>z</kbd> undo{/if}</span
+        ><kbd>j</kbd> <kbd>k</kbd> move between items · <kbd>Enter</kbd> moves into this one, <kbd>Tab</kbd> to its controls{#each keysHere as [k, what] (k)}
+          · <kbd>{k}</kbd> {what}{/each}{#if heldHere || undoHere} · <kbd>z</kbd> undo{/if} · <kbd>{spell("?")}</kbd> every key</span
       >
     </footer>
   {/if}
@@ -387,6 +450,22 @@
   }
   .undo {
     font-size: var(--t-xs);
+  }
+  .held {
+    display: flex;
+    align-items: center;
+    gap: var(--s-3);
+    margin: 0 0 var(--s-4);
+    padding: var(--s-2) var(--s-3);
+    border-left: 2px solid var(--wait);
+    background: var(--panel);
+    font-size: var(--t-sm);
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .held.failed {
+    border-left-color: var(--fail);
+    color: var(--ink);
   }
   .close {
     display: flex;

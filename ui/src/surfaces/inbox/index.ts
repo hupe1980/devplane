@@ -2,17 +2,15 @@ import { register, phase } from "../../lib/surfaces";
 import { bind, bindList, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
 import { address } from "./place.svelte";
+import { bindItemKeys } from "./keys";
 
 // The list keys (answered by `Inbox.svelte` through `lib/cursor`), and the
 // way here from anywhere.
 bindList("inbox", "move into the item (Tab then reaches its controls)");
-bind({ surface: "inbox", combo: "a", action: "inbox-allow", label: "allow the permission on screen" });
-bind({ surface: "inbox", combo: "d", action: "inbox-deny", label: "deny the permission on screen" });
-// Hiding is the one reversible action, and `z` takes it back. There is no
-// dismiss or mark-read: the host has neither for an inbox item. No key here
-// offers a change — offering is the change's own, after its review.
-bind({ surface: "inbox", combo: "s", action: "inbox-snooze", label: "snooze the item on screen for an hour" });
-bind({ surface: "inbox", combo: "z", action: "inbox-undo", label: "undo: put the snoozed item back" });
+// The keys on the item on screen — one list, shared with the answer window
+// (`keys.ts`). There is no dismiss or mark-read: the host has neither for an
+// inbox item. No key here offers a change.
+bindItemKeys("inbox");
 bind({ surface: "global", combo: "g i", action: "go-inbox", label: "go to the inbox" });
 onAction("go-inbox", () => {
   go("#inbox");
@@ -55,7 +53,14 @@ register({
   linkFocus: (id) => `ask=${id}`,
   select: (feed, focus) => {
     const b = feed.inbox as
-      | { items?: Array<{ id: string }>; folded?: unknown[]; inhibited?: unknown[]; close?: unknown }
+      | {
+          items?: Array<{ id: string }>;
+          folded?: unknown[];
+          inhibited?: unknown[];
+          close?: unknown;
+          held?: unknown;
+          landed?: unknown;
+        }
       | null;
     const items = b?.items ?? [];
     // `#inbox/item=<id>` is a row; `#inbox/ask=<id>` a link naming one;
@@ -68,6 +73,8 @@ register({
       folded: b?.folded ?? [],
       inhibited: b?.inhibited ?? [],
       close: b?.close ?? null,
+      held: b?.held ?? null,
+      landed: b?.landed ?? null,
       project,
       item,
       wanted,

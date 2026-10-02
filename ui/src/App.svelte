@@ -10,7 +10,7 @@
   import { theme } from "./lib/theme.svelte";
   import { claimToken } from "./lib/api";
   import { untrack } from "svelte";
-  import { dispatch, help, onAction, run, spell } from "./lib/keys";
+  import { dispatch, onAction, run, sheet, spell } from "./lib/keys";
   import { same } from "./lib/resource.svelte";
   import { go } from "./lib/route";
   import Stale from "./lib/Stale.svelte";
@@ -253,7 +253,7 @@
   const runsAt = $derived(surfaces().find((s) => s.holds === "run")?.id ?? "");
   /// Read when the sheet opens, so it lists the mode the surface is in now
   /// (a change's Review tab binds `j`/`k` to hunks).
-  const keys = $derived(helpOpen ? help(current) : []);
+  const groups = $derived(helpOpen ? sheet(current) : []);
   /// Under a transient surface, the page is the active tab's.
   const under = $derived.by(() => {
     if (!showing?.transient) return { s: showing, f: focus, v: view };
@@ -380,12 +380,17 @@
     <div class="scrim" role="presentation" onclick={() => (helpOpen = false)}></div>
     <div class="help" role="dialog" aria-modal="true" aria-label="keys bound here" use:trap>
       <header><Icon name="keyboard" size={16} /> <h2>Keys bound here</h2></header>
-      <dl>
-        {#each keys as k (k.surface + k.combo)}
-          <dt><kbd>{spell(k.combo)}</kbd></dt>
-          <dd>{k.label}{#if k.surface === "global"}<span class="dim"> · everywhere</span>{/if}</dd>
-        {/each}
-      </dl>
+      <!-- This item, this surface, everywhere: the order a hand reaches. -->
+      {#each groups as g (g.title)}
+        <h3>{g.title}</h3>
+        {@const keys = g.keys}
+        <dl>
+          {#each keys as k (k.surface + k.combo)}
+            <dt>{#each k.combos as c, ci (c)}{#if ci > 0}{" "}{/if}<kbd>{spell(c)}</kbd>{/each}</dt>
+            <dd>{k.label}</dd>
+          {/each}
+        </dl>
+      {/each}
     </div>
   {/if}
 {/if}
@@ -511,8 +516,16 @@
   .help dd {
     margin: 0;
   }
-  .dim {
-    color: var(--faint);
+  .help h3 {
+    margin: var(--s-4) 0 var(--s-2);
+    font-size: var(--t-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+  }
+  .help h3:first-of-type {
+    margin-top: 0;
   }
   kbd {
     font-family: var(--mono);

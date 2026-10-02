@@ -132,6 +132,9 @@ pub struct AppState {
     /// trust route refuses. In memory only: never in `host.json`, the store,
     /// the log or a vendor's settings.
     pub window_key: std::sync::OnceLock<String>,
+    /// The window's last answer, waiting out its undo window. In memory
+    /// only: a stop drops it, and the ask stays open.
+    pub hold: crate::hold::Hold,
 }
 
 pub type Shared = Arc<AppState>;
@@ -293,6 +296,7 @@ impl AppState {
             port: std::sync::OnceLock::new(),
             opener: std::sync::OnceLock::new(),
             window_key: std::sync::OnceLock::new(),
+            hold: crate::hold::Hold::default(),
         }))
     }
 
@@ -483,6 +487,8 @@ impl AppState {
     /// Stops every agent Devplane started and waits for their processes, so
     /// none is re-parented to init and left running unseen.
     pub async fn shutdown(&self) {
+        // Before anything else: a held answer must not be sent on the way down.
+        self.hold.drop_on_stop();
         // Set first, so no `Ended` that follows reads as the agent finishing.
         self.tearing_down
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -582,6 +588,8 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
                 }
                 _ = rx.wait_for(|stop| *stop) => tracing::info!("asked to stop"),
             }
+            // First on the way down: a held answer is dropped, never sent.
+            asked.hold.drop_on_stop();
         })
         .await;
 

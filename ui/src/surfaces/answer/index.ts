@@ -1,4 +1,11 @@
 import { register } from "../../lib/surfaces";
+import { bindList } from "../../lib/keys";
+import { bindItemKeys } from "../inbox/keys";
+
+// The same keys as the inbox, from the same list: this window is the inbox's
+// one item at a time. `j`/`k` move between the items waiting.
+bindList("answer", "move into the item (Tab then reaches its controls)");
+bindItemKeys("answer");
 
 register({
   id: "answer",
