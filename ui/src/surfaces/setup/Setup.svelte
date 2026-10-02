@@ -8,6 +8,7 @@
   import Grid, { type Column } from "../../lib/ui/Grid.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
   import GitHubPanel, { type HostSignIn } from "./GitHubPanel.svelte";
   import { api } from "../../lib/api";
   import { copyText } from "../../lib/resource.svelte";
@@ -23,7 +24,6 @@
   };
   type Setup = {
     machine?: { version?: string; home?: string; database?: string };
-    provider?: { name?: string; because?: string; vendor_supervision?: boolean };
     connect?: {
       settings_path?: string;
       hooks_installed?: string[];
@@ -81,7 +81,7 @@
   let selected = $state<string | null>(null);
   const columns: Column<ProjectRow>[] = [
     { key: "name", label: "Project", width: 180, sort: (r) => r.name },
-    { key: "trusted", label: "Trusted", width: 110, sort: (r) => (r.trusted ? 0 : 1) },
+    { key: "trusted", label: "Trusted", width: 140, sort: (r) => (r.trusted ? 0 : 1) },
     { key: "gates", label: "Gates", width: 130, sort: (r) => (r.declares_gates ? 0 : 1) },
     { key: "config", label: "devplane.toml", width: 150 },
     { key: "root", label: "Where", mono: true },
@@ -93,7 +93,7 @@
   {#if read.phase === "failed" && read.failure}
     <Failed what="what is configured" failure={read.failure} />
   {:else if !data}
-    <p class="quiet">Reading the files…</p>
+    <Skeleton rows={5} />
   {:else}
     <div class="grid">
       <section class="card">
@@ -103,7 +103,6 @@
             { label: "Version", value: data.machine?.version ?? null, missing: "unknown" },
             { label: "Home", value: data.machine?.home ?? null, mono: true },
             { label: "Record", value: data.machine?.database ?? null, mono: true },
-            { label: "Sessions from", value: data.provider?.name ? `${data.provider.name}${data.provider.because ? ` — ${data.provider.because}` : ""}` : null },
           ]}
         />
       </section>
@@ -111,12 +110,12 @@
       <section class="card">
         <h2><Icon name="agent" size={14} /> Your agent</h2>
         {#if !data.connect}
-          <p class="quiet">No agent settings file was found. <code>devplane connect claude</code> writes the hooks, and <code>devplane disconnect claude</code> removes exactly what it wrote.</p>
+          <p class="quiet">No agent settings file was found. <code>devplane agent connect claude</code> writes the hooks, and <code>devplane agent disconnect claude</code> removes exactly what it wrote.</p>
         {:else}
           <Props
             rows={[
               { label: "Settings", value: data.connect.settings_path ?? null, mono: true },
-              { label: "Hooks", value: hooks.length ? hooks.join(", ") : null, missing: "none installed — devplane connect claude" },
+              { label: "Hooks", value: hooks.length ? hooks.join(", ") : null, missing: "none installed — devplane agent connect claude" },
               {
                 label: "Telemetry",
                 value: !data.connect.telemetry_endpoint ? "not exporting" : data.connect.telemetry_is_ours ? "to Devplane" : "to somebody else's collector — left alone",
@@ -157,7 +156,7 @@
     <section class="projects">
       <h2><Icon name="folder" size={14} /> Projects <span>{data.projects?.length ?? 0}</span></h2>
       {#if (data.projects ?? []).length === 0}
-        <p class="quiet">None registered. A project is registered the first time an agent works in it, or with <code>devplane trust &lt;path&gt;</code>.</p>
+        <p class="quiet">None registered. A project is registered the first time an agent works in it, or with <code>devplane project trust &lt;path&gt;</code>.</p>
       {:else}
         <div class="frame">
           <Grid id="setup-projects" {columns} rows={data.projects ?? []} key={(r) => r.id} bind:selected label="projects" dense>
@@ -240,6 +239,7 @@
     flex-basis: 100%;
   }
   .rule {
+    overflow-wrap: anywhere;
     font-family: var(--mono);
     font-size: var(--t-xs);
     padding: 0.1rem 0.45rem;
@@ -267,6 +267,11 @@
   code {
     font-family: var(--mono);
     font-size: var(--t-xs);
+    overflow-wrap: anywhere;
+  }
+  /* A state word is never cut: its pill keeps the width of its word. */
+  .page :global(.pill) {
+    min-width: max-content;
   }
   .file {
     margin: 0;

@@ -1,0 +1,7 @@
+runner nextest
+ran 1
+lines 1
+run 1
+passed 0
+failed 1
+skipped 1

@@ -51,7 +51,7 @@ pub fn agent_session() -> Option<&'static str> {
 /// Why an allowing answer from inside an agent session is refused.
 ///
 ///
-/// This stops an agent approving its own permission via `devplane answer
+/// This stops an agent approving its own permission via `devplane inbox answer
 /// --allow` in its shell. It does not stop one that unsets these variables, nor
 /// a direct call to the HTTP API with the token in `~/.devplane/token`.
 pub fn refuse_self_answer(var: &str) -> String {
@@ -160,6 +160,22 @@ fn answer(text: &str) {
     let _ = out.flush();
 }
 
+/// A store written by another schema is state the gate cannot read. Where
+/// rules are in force the call is refused ([`fail`]), as for any unreadable
+/// state; the hook never sets the store aside, which only a person's own
+/// command or host does.
+fn refuse_on_skew(cache: &PolicyCache, dir: Option<&Path>) {
+    let skew = crate::config::db_path()
+        .ok()
+        .and_then(|p| crate::store::Store::schema_on_disk(&p))
+        .and_then(crate::store::Store::skew);
+    if let Some(why) = skew
+        && !cache.is_empty_at(dir)
+    {
+        fail(&why);
+    }
+}
+
 /// The store, opened with a short lock wait. `None` when it will not open.
 async fn open_store() -> Option<crate::store::Store> {
     let path = crate::config::db_path().ok()?;
@@ -196,6 +212,10 @@ async fn decide_claude(body: Option<&str>, source: crate::core::event::Source) -
         "PreToolUse" | "PermissionRequest"
     );
     DECIDING.store(deciding, std::sync::atomic::Ordering::SeqCst);
+    // `devplane doctor`'s probe asks about the policy path, which writes nothing.
+    if deciding && payload.session_id != crate::observe::hook::PROBE_SESSION {
+        refuse_on_skew(&cache, payload.cwd.as_deref());
+    }
     if !deciding {
         // An observation: written down, and the answer is silence.
         answer("{}");
@@ -352,6 +372,7 @@ async fn decide_copilot(body: Option<&str>) -> Result<()> {
     };
     let tool = payload.tool();
     let dir = payload.cwd.as_deref();
+    refuse_on_skew(&cache, dir);
     // `toolArgs` is an object or a JSON string of one; anything else is a
     // question wherever a rule speaks about the tool.
     let (input, verdict) = match payload.readable_input() {

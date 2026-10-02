@@ -18,11 +18,10 @@ check = [
   "cd ui && npm run render",
 ]
 timeout             = "20m"
-on_fail             = "feedback"
 max_feedback_rounds = 2
 
 # Run by name only: needs the gitignored `concepts/`, so it stays out of `check`.
-[gates.named.notes]
+[gates.notes]
 run     = ["bash scripts/concepts-check.sh"]
 timeout = "10m"
 
@@ -33,8 +32,8 @@ open_questions = ["NEEDS CLARIFICATION"]
 
 [policy]
 # Devplane only refuses or defers; grants belong in the agent's settings.json.
-never_auto = ["Read(.env)", "Bash(rm -rf *)"]
-always_ask = ["Bash(git push *)"]
+deny = ["Read(.env)", "Bash(rm -rf *)"]
+ask  = ["Bash(git push *)"]
 
 # Review order, costliest mistakes first. A file takes the first matching role,
 # so the security files under `src/core/` are excluded from logic by name.

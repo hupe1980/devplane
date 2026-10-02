@@ -81,7 +81,7 @@ export function live(looking: () => boolean): {
       if (e instanceof Unauthorised) {
         // Nothing this tab sends will be accepted again: stop and say why.
         state.unauthorised = true;
-        state.error = "This tab has no token. Run `devplane open` again for a fresh link.";
+        state.error = "This tab has no token. Run `devplane up` again for a fresh link.";
         if (timer !== null) clearInterval(timer);
         timer = null;
         return;

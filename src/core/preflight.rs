@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum PreflightReason {
     /// Nothing registered answers to that name, and it is not a directory.
     UnknownProject,
@@ -94,10 +93,7 @@ pub fn refusal(f: &Facts) -> Option<PreflightReason> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "note", rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "PreflightNote", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "PreflightNote"))]
 pub enum Note {
     /// `[workspace] setup` will run in the new tree before the agent starts.
     FirstRunInstalls { command: String },
@@ -170,10 +166,7 @@ pub fn notes_for(
 /// checks again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "PreflightFinding", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "PreflightFinding"))]
 pub struct Finding {
     /// What the person asked for: a name, an id or a path.
     pub asked: String,
@@ -200,11 +193,14 @@ impl Finding {
 pub fn refusal_line(name: &str, why: PreflightReason, root: &str, detail: Option<&str>) -> String {
     let fix = match why {
         PreflightReason::UnknownProject => {
-            "devplane ls groups by project, and devplane trust <path> adds one".to_string()
+            "devplane status groups by project, and devplane project trust <path> adds one"
+                .to_string()
         }
-        PreflightReason::Untrusted => format!("devplane trust {root}"),
-        PreflightReason::ConfigWillNotLoad => format!("devplane check {root}"),
-        PreflightReason::NoSuchAgent => "devplane agents lists the ones that can run".to_string(),
+        PreflightReason::Untrusted => format!("devplane project trust {root}"),
+        PreflightReason::ConfigWillNotLoad => format!("devplane config check {root}"),
+        PreflightReason::NoSuchAgent => {
+            "devplane agent list lists the ones that can run".to_string()
+        }
         PreflightReason::DirtyWorktree => "commit or stash first".to_string(),
         PreflightReason::CannotSend => String::new(),
     };
@@ -280,7 +276,10 @@ mod tests {
             None,
         );
         assert!(line.contains("not trusted"), "{line}");
-        assert!(line.contains("devplane trust /repos/billing"), "{line}");
+        assert!(
+            line.contains("devplane project trust /repos/billing"),
+            "{line}"
+        );
     }
 
     #[test]

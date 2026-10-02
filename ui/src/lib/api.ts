@@ -1,5 +1,5 @@
 // Talking to the host on loopback. The token arrives once in the URL from
-// `devplane open`, is kept for the tab, and is stripped from the address bar
+// `devplane up`, is kept for the tab, and is stripped from the address bar
 // so it never lands in a screenshot or a bookmark.
 
 const KEY = "vp_token";
@@ -25,7 +25,7 @@ export function claimToken(): string {
 
 export class Unauthorised extends Error {
   constructor() {
-    super("unauthorised — run `devplane open` again");
+    super("unauthorised — run `devplane up` again");
   }
 }
 
@@ -45,7 +45,7 @@ export class Unreachable extends Error {
     super(
       kind === "timeout"
         ? "Devplane is not answering (slow or wedged)"
-        : "Devplane is not running — start it with `devplane serve`",
+        : "Devplane is not running — start it with `devplane up --no-browser`",
     );
     this.kind = kind;
   }

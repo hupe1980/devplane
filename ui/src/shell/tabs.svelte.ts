@@ -4,7 +4,9 @@
 // A glance opens into one *preview* tab that the next glance replaces;
 // double-click, Enter or an edit pins it. Kept in `sessionStorage` only.
 
-export type Tab = { surface: string; focus: string; pinned: boolean };
+/// `view` is the view the focus was last shown in (a change's Review tab),
+/// kept so returning to the tab returns to it.
+export type Tab = { surface: string; focus: string; pinned: boolean; view?: string };
 
 const KEY = "vp-tabs";
 
@@ -30,16 +32,17 @@ function keep() {
 const same = (t: Tab, surface: string, focus: string) => t.surface === surface && t.focus === focus;
 
 /// The address changed: show that as a tab, reusing the preview slot.
-export function show(surface: string, focus: string, pin = false): void {
+export function show(surface: string, focus: string, pin = false, view = ""): void {
   const at = tabs.list.findIndex((t) => same(t, surface, focus));
   if (at !== -1) {
     if (pin) tabs.list[at].pinned = true;
+    tabs.list[at].view = view;
     tabs.active = at;
     keep();
     return;
   }
   const preview = tabs.list.findIndex((t) => !t.pinned);
-  const tab = { surface, focus, pinned: pin };
+  const tab = { surface, focus, pinned: pin, view };
   if (preview !== -1) {
     tabs.list[preview] = tab;
     tabs.active = preview;
@@ -74,5 +77,6 @@ export function close(i: number): Tab | null {
 }
 
 export function hashOf(t: Tab): string {
-  return `#${t.surface}${t.focus ? `/${encodeURIComponent(t.focus)}` : ""}`;
+  const v = t.focus && t.view ? `/${encodeURIComponent(t.view)}` : "";
+  return `#${t.surface}${t.focus ? `/${encodeURIComponent(t.focus)}` : ""}${v}`;
 }

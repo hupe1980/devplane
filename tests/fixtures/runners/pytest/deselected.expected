@@ -1,0 +1,5 @@
+runner pytest
+ran 3
+lines 1
+passed 3
+deselected 9

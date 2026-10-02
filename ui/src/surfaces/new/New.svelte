@@ -13,6 +13,7 @@
   // project. The live preflight sends the exact start body, writes nothing,
   // and lists every refusal by project; Start is enabled only when none is
   // refused. A fresh worktree's cost is said before you commit.
+  import Skeleton from "../../lib/Skeleton.svelte";
   import { api } from "../../lib/api";
   import { resource, failure } from "../../lib/resource.svelte";
   import { writer } from "../../lib/write.svelte";
@@ -38,7 +39,7 @@
   // Three reads, each with its own failure: a host that did not answer is
   // never *No project is registered yet*.
   const projectsRead = resource<Project[]>(() => "/api/projects", { tell: () => "devplane doctor" });
-  const agentsRead = resource<Agent[]>(() => "/api/agents", { tell: () => "devplane agents" });
+  const agentsRead = resource<Agent[]>(() => "/api/agents", { tell: () => "devplane agent list" });
   const specsRead = resource<{ projects: SpecProject[] }>(() => "/api/specs", { tell: () => "devplane doctor" });
   const projects = $derived(Array.isArray(projectsRead.data) ? projectsRead.data : []);
   const agents = $derived(Array.isArray(agentsRead.data) ? agentsRead.data : []);
@@ -157,9 +158,9 @@
           {#if projectsRead.phase === "failed" && projectsRead.failure}
             <Failed what="the projects" failure={projectsRead.failure} />
           {:else if projectsRead.phase === "loading"}
-            <p class="quiet">Reading the projects…</p>
+            <Skeleton rows={2} />
           {:else}
-            <p class="quiet">No project is registered yet. <code>devplane trust &lt;path&gt;</code> adds one.</p>
+            <p class="quiet">No project is registered yet. <code>devplane project trust &lt;path&gt;</code> adds one.</p>
           {/if}
         {/each}
       </div>

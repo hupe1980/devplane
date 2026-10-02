@@ -11,10 +11,10 @@ or refused, and on whose authority, so *why did that command run without anybody
 *why is there a pull request on this branch?* stay answerable months later.
 
 ```sh
-devplane audit                   # the latest 50 decisions
-devplane audit <run-or-change>   # narrowed to one run or change
-devplane audit --without-me      # only what was decided instead of you
-devplane audit --otel            # OpenTelemetry GenAI log records on stdout
+devplane audit                  # the latest 50 decisions
+devplane audit <run-or-change>  # narrowed to one run or change
+devplane audit --without-me     # only what was decided instead of you
+devplane audit --otel           # OpenTelemetry GenAI log records on stdout
 ```
 
 ```console
@@ -45,8 +45,8 @@ The **authority**, the **action** (`agent:tool.use`, `agent:question`, `gate:run
 
 | Authority | What it means |
 |---|---|
-| `person` | somebody was asked and answered — in the workbench or with `devplane answer` |
-| `rule` | a `never_auto` or `always_ask` rule matched. The rule is in the reason, and re-evaluating it reproduces the verdict |
+| `person` | somebody was asked and answered — in the workbench or with `devplane inbox answer` |
+| `rule` | a `deny` or `ask` rule matched. The rule is in the reason, and re-evaluating it reproduces the verdict |
 | `timer` | nobody answered before the deadline your project set in [`[questions]`](@/docs/configuration.md#questions); the duration and file are in the reason |
 | `nobody` | asked, never answered, and the moment passed — the run ended under the question, or a held permission lapsed. Quitting the host cleanly does **not** produce this: the question survives |
 | `devplane` | Devplane doing what your project wrote down: running a gate, stopping a change at its budget. A push and a pull request are `person`: you offered the change |
@@ -54,7 +54,7 @@ The **authority**, the **action** (`agent:tool.use`, `agent:question`, `gate:run
 There is no `unknown`: a row whose authority cannot be established is not written. `--without-me`
 leaves out `person` and `devplane` rows. With `--otel`, the authority rides on each
 `gen_ai.tool.call.decision` record; nothing is sent anywhere.
-[`devplane modes`](@/docs/cli.md#devplane-modes) shows which sessions run with no prompts at all.
+[`devplane status --modes`](@/docs/cli.md#devplane-status) shows which sessions run with no prompts at all.
 
 ## Decisions are never pruned
 
@@ -69,18 +69,6 @@ An upgrade that changes the store's schema is the exception: the whole file is m
 The hook writes its decision straight to the store, so no host has to be running. If the store will
 not open, the decision goes to `~/.devplane/pending-decisions.jsonl`; `devplane doctor` counts what
 is waiting there, and the next host files it, marked as filed late.
-
-## What became of a report
-
-A report writes up to three actions on the record of the change that filed it:
-
-| Action | Authority | When |
-|---|---|---|
-| `report:resolved` | `person` | answered: fixed, rejected or deferred with a reason, or a GitHub draft discarded |
-| `report:opened` | `person` | a GitHub draft opened under your GitHub sign-in; the issue address is the reason |
-| `report:delivered` | `rule` | the target's `[reports] deliver_from` named the source, so the report was handed to its live run |
-
-Filing a report writes no decision. See [Reports between projects](@/docs/reports.md).
 
 ## What is not in the log
 

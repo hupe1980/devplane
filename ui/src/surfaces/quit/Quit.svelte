@@ -1,6 +1,6 @@
 <script lang="ts">
   // What quitting stops, said before it stops, then two buttons. The sentence
-  // is the host's (`/api/quitting`, as `devplane quit` prints it), verbatim.
+  // is the host's (`/api/quitting`, as `devplane down` prints it), verbatim.
   // *Keep running* hides the window and changes nothing.
   import { api } from "../../lib/api";
   import { resource, failure } from "../../lib/resource.svelte";
@@ -12,7 +12,7 @@
     says = null,
   }: { says?: string | null } = $props();
 
-  const read = resource<{ says?: string }>(() => "/api/quitting", { tell: () => "devplane quit" });
+  const read = resource<{ says?: string }>(() => "/api/quitting", { tell: () => "devplane down" });
   let refused = $state("");
   let stopping = $state(false);
   const shown = $derived(read.data ? (read.data.says ?? "") : says);

@@ -1,0 +1,25 @@
+Recorded 2026-09-27 on macOS (aarch64), each from the real runner, colour on
+where the runner colours. Local paths and the host name are replaced by
+/work, /home/user and `host`; nothing else is edited.
+
+cargo/      cargo test 1.98 (`cargo test --color always -- --color always`,
+            with `FAIL=1` for one_failing, `--skip login` for skip)
+nextest/    cargo-nextest 0.9.146 (`cargo nextest run --color always`;
+            fail: --no-fail-fast; skipped: --run-ignored all -E 'not test(login)';
+            cancelled: fail-fast with --test-threads 1)
+pytest/     pytest 9.1.1 on Python 3.14 (`pytest --color=yes`, `-k`, `-q`,
+            an empty directory for no_tests_ran)
+jest/       jest 30.5 (`FORCE_COLOR=1 npx jest`)
+vitest/     vitest 5.0 (`FORCE_COLOR=1 npx vitest run`)
+gotestsum/  gotestsum latest (`gotestsum --format testname`), go 1.27
+go/         go 1.27 (`go test -v ./...`, and `go test ./...` without -v)
+junit/      pytest --junitxml (no `file` attribute), nextest [profile.default.junit]
+            (no `file`), jest-junit with JEST_JUNIT_ADD_FILE_ATTRIBUTE=true (`file`),
+            vitest --reporter=junit (no `file`), gotestsum --junitfile (no `file`)
+
+Corrections to the shapes assumed before recording:
+- nextest prints a failing test's own libtest output, `test result:` line
+  included, so a nextest summary makes cargo's lines in the same output not a
+  second runner.
+- gotestsum says `1 failure` in the singular.
+- `pytest -k` with a word in the module's name selects the whole module.

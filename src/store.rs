@@ -10,7 +10,7 @@ use crate::core::event::EventEnvelope;
 use crate::core::ids::{ProjectId, RunId};
 use crate::core::project::Project;
 use crate::core::run::Run;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::path::{Path, PathBuf};
@@ -23,14 +23,14 @@ use std::str::FromStr;
 /// satisfy (a renamed or added column, a changed type, a dropped table). A file
 /// stamped with anything else is moved aside on open (`Store::retire`), not
 /// migrated.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// The statement that stamps it, written out because `PRAGMA user_version`
 /// accepts no bind parameter.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 11";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 12";
 
 /// The database and its sidecars readable by their owner alone, whoever
-/// opened them first — a hook creates the file long before any `serve` would
+/// opened them first — a hook creates the file long before any `up` would
 /// tighten the home. Best effort: a file this process does not own is left.
 fn owner_only(path: &Path) {
     #[cfg(unix)]
@@ -72,20 +72,58 @@ pub struct Store {
 
 impl Store {
     /// Opens the store, creating it if needed.
+    /// A store written by an older schema is set aside ([`Self::retire`]); one
+    /// written by a newer schema is refused and left exactly as it is.
     pub async fn open(path: &Path) -> Result<Self> {
-        Self::open_waiting(path, std::time::Duration::from_secs(5)).await
-    }
-
-    /// Opens the store, waiting at most `busy` for another writer's lock. The
-    /// hook passes a short one: it runs under the vendor's timeout, and a locked
-    /// database must cost the record (which is spooled), never the answer.
-    pub async fn open_waiting(path: &Path, busy: std::time::Duration) -> Result<Self> {
-        let store = Self::open_file(path, busy).await?;
+        let store = Self::open_file(path, std::time::Duration::from_secs(5), true).await?;
         owner_only(path);
         Ok(store)
     }
 
-    async fn open_file(path: &Path, busy: std::time::Duration) -> Result<Self> {
+    /// Opens the store for the hook, waiting at most `busy` for another
+    /// writer's lock: it runs under the vendor's timeout, and a locked database
+    /// must cost the record (which is spooled), never the answer. It never sets
+    /// a store aside: a store of another schema is an error here, and only a
+    /// person's own command or host retires an older one.
+    pub async fn open_waiting(path: &Path, busy: std::time::Duration) -> Result<Self> {
+        let store = Self::open_file(path, busy, false).await?;
+        owner_only(path);
+        Ok(store)
+    }
+
+    /// The schema a database file is stamped with, read from its header
+    /// without opening it; `None` when there is no such file or it is not yet
+    /// a database. The stamp is written once, so the header cannot disagree
+    /// with a log that has not been checkpointed except by still reading 0.
+    pub fn schema_on_disk(path: &Path) -> Option<i64> {
+        use std::io::Read;
+        let mut head = [0u8; 64];
+        std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
+        if &head[..16] != b"SQLite format 3\0" {
+            return None;
+        }
+        Some(i64::from(i32::from_be_bytes([
+            head[60], head[61], head[62], head[63],
+        ])))
+    }
+
+    /// Why a store stamped `found` cannot be used by this binary, if it cannot.
+    pub fn skew(found: i64) -> Option<String> {
+        match found {
+            0 | SCHEMA_VERSION => None,
+            v if v > SCHEMA_VERSION => Some(format!(
+                "this store was written by a newer Devplane (schema {v}); this binary \
+                 understands {SCHEMA_VERSION} — update devplane"
+            )),
+            v => Some(format!(
+                "this store was written by an older Devplane (schema {v}); this binary \
+                 understands {SCHEMA_VERSION} — start the host (`devplane up` or `devplane \
+                 serve`) to set it aside"
+            )),
+        }
+    }
+
+    async fn open_file(path: &Path, busy: std::time::Duration, set_aside: bool) -> Result<Self> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
@@ -159,9 +197,14 @@ impl Store {
                         .with_context(|| format!("opening {}", path.display()))?;
                     return Ok(Self { pool });
                 }
-                // Written by a different schema: moved aside, never migrated
-                // or reused. Parallel tool calls fire concurrent hooks; one
-                // retires under an exclusive lock and the rest re-read after.
+                // Written by a newer schema: refused and never touched, since
+                // this binary cannot know what that record holds. By an older
+                // one, where this opener may: moved aside, never migrated or
+                // reused. Concurrent openers retire once, under an exclusive
+                // lock, and the rest re-read after.
+                Some(v) if v > SCHEMA_VERSION || (v != 0 && !set_aside) => {
+                    bail!("{}", Self::skew(v).unwrap_or_default());
+                }
                 Some(v) if v != 0 => {
                     let lock = Self::retire_lock(path).await?;
                     match probe().await {
@@ -171,6 +214,9 @@ impl Store {
                                 .await
                                 .with_context(|| format!("opening {}", path.display()))?;
                             return Ok(Self { pool });
+                        }
+                        Some(v) if v > SCHEMA_VERSION => {
+                            bail!("{}", Self::skew(v).unwrap_or_default());
                         }
                         Some(v) if v != 0 => Self::retire(path, v)?,
                         _ => {}
@@ -492,18 +538,24 @@ impl Store {
     }
 
     /// Writes the run projection; one upsert, called after every applied event.
+    /// Snapshots are taken and saved by concurrent tasks, so one that folded
+    /// fewer stored events than the row already holds is dropped, never
+    /// written over it.
     pub async fn save_run(&self, run: &Run) -> Result<()> {
         sqlx::query(
-            "INSERT INTO runs (id, agent, cwd, last_event_at, payload)
-             VALUES (?,?,?,?,?)
+            "INSERT INTO runs (id, agent, cwd, last_event_at, last_seq, payload)
+             VALUES (?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                agent=excluded.agent, cwd=excluded.cwd,
-               last_event_at=excluded.last_event_at, payload=excluded.payload",
+               last_event_at=excluded.last_event_at, last_seq=excluded.last_seq,
+               payload=excluded.payload
+             WHERE excluded.last_seq >= runs.last_seq",
         )
         .bind(run.id.as_str())
         .bind(&run.agent)
         .bind(run.cwd.to_string_lossy().to_string())
         .bind(ts(&run.last_event_at))
+        .bind(run.last_seq)
         .bind(serde_json::to_string(run)?)
         .execute(&self.pool)
         .await?;
@@ -757,118 +809,6 @@ impl Store {
         Ok(decode_rows("change", &rows, payload))
     }
 
-    // ── Reports ─────────────────────────────────────────────────────────
-
-    /// Writes a report, and every later state of it.
-    pub async fn save_report(&self, r: &crate::core::report::Report) -> Result<()> {
-        let target = match &r.target {
-            crate::core::report::Target::Project { project, .. } => Some(project.as_str()),
-            _ => None,
-        };
-        sqlx::query(
-            "INSERT OR REPLACE INTO reports
-               (id, filed_at, source_project, target_project, state, payload)
-             VALUES (?,?,?,?,?,?)",
-        )
-        .bind(r.id.as_str())
-        .bind(ts(&r.provenance.at))
-        .bind(r.provenance.project.as_str())
-        .bind(target)
-        .bind(r.state.as_str())
-        .bind(serde_json::to_string(r)?)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// One report by id or id prefix, since people copy the part a table printed.
-    pub async fn report(&self, id: &str) -> Result<Option<crate::core::report::Report>> {
-        let rows = sqlx::query("SELECT id, payload FROM reports WHERE id = ?")
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await?;
-        if let Some(r) = decode_rows("report", &rows, payload).pop() {
-            return Ok(Some(r));
-        }
-        let rows = sqlx::query("SELECT id, payload FROM reports WHERE id LIKE ? || '%' LIMIT 2")
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await?;
-        let mut hits = decode_rows("report", &rows, payload);
-        Ok(match hits.len() {
-            1 => hits.pop(),
-            _ => None,
-        })
-    }
-
-    /// Every report addressed to a project, newest first; only the open ones
-    /// when asked.
-    pub async fn reports_to(
-        &self,
-        project: &crate::core::ProjectId,
-        open_only: bool,
-    ) -> Result<Vec<crate::core::report::Report>> {
-        let rows = sqlx::query(
-            "SELECT id, payload FROM reports
-              WHERE target_project = ? AND (? = 0 OR state = 'open')
-              ORDER BY filed_at DESC",
-        )
-        .bind(project.as_str())
-        .bind(open_only as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(decode_rows("report", &rows, payload))
-    }
-
-    /// Every report a project filed, newest first; only the unanswered ones
-    /// when asked.
-    pub async fn reports_from(
-        &self,
-        project: &crate::core::ProjectId,
-        open_only: bool,
-    ) -> Result<Vec<crate::core::report::Report>> {
-        let rows = sqlx::query(
-            "SELECT id, payload FROM reports
-              WHERE source_project = ?
-                AND (? = 0 OR state IN ('open', 'accepted', 'drafted'))
-              ORDER BY filed_at DESC",
-        )
-        .bind(project.as_str())
-        .bind(open_only as i64)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(decode_rows("report", &rows, payload))
-    }
-
-    /// Every report, newest first, bounded — the inbox and the list read
-    /// the whole set and ask the struct.
-    pub async fn reports(&self, limit: i64) -> Result<Vec<crate::core::report::Report>> {
-        let rows = sqlx::query("SELECT id, payload FROM reports ORDER BY filed_at DESC LIMIT ?")
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(decode_rows("report", &rows, payload))
-    }
-
-    /// The reports a change raised or was started from, newest first. Read from
-    /// the payload rather than a column.
-    pub async fn reports_for_change(
-        &self,
-        change: &crate::core::ChangeId,
-    ) -> Result<Vec<crate::core::report::Report>> {
-        let rows = sqlx::query(
-            "SELECT id, payload FROM reports
-              WHERE json_extract(payload, '$.provenance.change') = ?
-                 OR json_extract(payload, '$.state.change') = ?
-              ORDER BY filed_at DESC",
-        )
-        .bind(change.as_str())
-        .bind(change.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(decode_rows("report", &rows, payload))
-    }
-
     /// How many stored rows this build can no longer read, for `devplane
     /// doctor`: on the board they look exactly like rows that never existed.
     pub async fn unreadable(&self) -> Result<Vec<(String, String)>> {
@@ -882,12 +822,6 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         out.extend(unreadable_in::<crate::core::Change>("change", &changes));
-        let reports = sqlx::query("SELECT id, payload FROM reports")
-            .fetch_all(&self.pool)
-            .await?;
-        out.extend(unreadable_in::<crate::core::report::Report>(
-            "report", &reports,
-        ));
         Ok(out)
     }
 
@@ -909,7 +843,7 @@ impl Store {
     /// The last thing the agent said on a run, to read beside a gate's exit
     /// code rather than on its own.
     ///
-    /// `None` when nothing was recorded (a watched run, or `[transcripts] keep
+    /// `None` when nothing was recorded (a watched run, or `[agent] keep_transcripts
     /// = false`), which surfaces must not show as *the agent said nothing*.
     pub async fn last_agent_message(&self, run: &RunId) -> Result<Option<String>> {
         let row = sqlx::query(
@@ -1294,25 +1228,31 @@ impl Store {
     }
 
     /// Removes what a gate probe left behind: the probe session's run, events
-    /// and decisions, and the temporary project it was discovered as.
+    /// and their search index, messages and decisions, and the temporary
+    /// project it was discovered as — in one transaction, so a failure leaves
+    /// all of it or none.
     pub async fn forget_probe(&self, session: &str) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
         let mut n = 0;
         for sql in [
+            "DELETE FROM events_fts WHERE run_id = ?",
             "DELETE FROM events WHERE run_id = ?",
+            "DELETE FROM messages WHERE run_id = ?",
             "DELETE FROM decisions WHERE run_id = ?",
             // A run's id is its session's id.
             "DELETE FROM runs WHERE id = ?",
         ] {
             n += sqlx::query(sql)
                 .bind(session)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?
                 .rows_affected();
         }
         n += sqlx::query("DELETE FROM projects WHERE root LIKE '%/devplane-probe-%'")
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?
             .rows_affected();
+        tx.commit().await?;
         Ok(n)
     }
 
@@ -1957,7 +1897,6 @@ mod tests {
             change_id: None,
             offer: None,
             no_offer: None,
-            report: None,
             since: jiff::Timestamp::now(),
         }
     }
@@ -2032,7 +1971,6 @@ mod tests {
             change_id: None,
             offer: None,
             no_offer: None,
-            report: None,
             since: jiff::Timestamp::now(),
             options: Vec::new(),
             actions: Vec::new(),
@@ -2100,7 +2038,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("devplane.db");
-        write_old_schema(&path, 97).await;
+        write_old_schema(&path, 7).await;
 
         let opens: Vec<_> = (0..8)
             .map(|_| {
@@ -2127,7 +2065,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A store opened by anything (a hook, before any `serve`) is owner-only.
+    /// A store opened by anything (a hook, before any `up`) is owner-only.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_store_is_owner_only_from_its_first_open() {
@@ -2167,7 +2105,7 @@ mod tests {
         std::fs::write(dir.join("devplane.v3.bak"), b"").unwrap();
         std::fs::write(dir.join("devplane.v3.bak-wal"), b"frames").unwrap();
 
-        for v in [90, 91, 92, 93, 94] {
+        for v in [5, 6, 7, 8, 9] {
             for f in ["", "-wal", "-shm"] {
                 let _ = std::fs::remove_file(format!("{}{f}", path.display()));
             }
@@ -2185,7 +2123,7 @@ mod tests {
                 "{kept} was deleted: {baks:?}"
             );
         }
-        for v in [90, 91, 92, 93, 94] {
+        for v in [5, 6, 7, 8, 9] {
             assert!(
                 baks.iter()
                     .any(|b| b.starts_with(&format!("devplane.v{v}."))),
@@ -2214,8 +2152,8 @@ mod tests {
                 .await
                 .unwrap();
             sqlx::raw_sql(
-                // Any version but this build's.
-                "PRAGMA user_version = 99;
+                // An older version than this build's.
+                "PRAGMA user_version = 10;
                  CREATE TABLE decisions (
                    id TEXT PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL,
                    action TEXT NOT NULL, subject TEXT NOT NULL, outcome TEXT NOT NULL,
@@ -2258,6 +2196,101 @@ mod tests {
         assert_eq!(s.decisions(None, 10).await.unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A newer binary's store is refused by name and never set aside; the
+    /// hook's opener sets aside nothing at all.
+    #[tokio::test]
+    async fn a_newer_store_is_refused_and_the_hook_never_sets_one_aside() {
+        let dir = std::env::temp_dir().join(format!(
+            "devplane-skew-{}-{}",
+            std::process::id(),
+            jiff::Timestamp::now().as_nanosecond()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("devplane.db");
+        let newer = SCHEMA_VERSION + 1;
+        write_old_schema(&path, newer).await;
+        assert_eq!(Store::schema_on_disk(&path), Some(newer));
+        for opened in [
+            Store::open(&path).await,
+            Store::open_waiting(&path, std::time::Duration::from_millis(50)).await,
+        ] {
+            let e = opened.expect_err("a newer store is refused").to_string();
+            assert!(
+                e.contains(&format!("newer Devplane (schema {newer})"))
+                    && e.contains("update devplane"),
+                "{e}"
+            );
+        }
+        assert!(backups(&dir).is_empty(), "nothing was set aside");
+        assert_eq!(Store::schema_on_disk(&path), Some(newer), "nor touched");
+
+        let _ = std::fs::remove_file(&path);
+        write_old_schema(&path, SCHEMA_VERSION - 1).await;
+        let e = Store::open_waiting(&path, std::time::Duration::from_millis(50))
+            .await
+            .expect_err("the hook does not retire an older store");
+        assert!(e.to_string().contains("older Devplane"), "{e}");
+        assert!(backups(&dir).is_empty());
+        // A person's own opener does.
+        Store::open(&path).await.unwrap().pool.close().await;
+        assert_eq!(backups(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An older snapshot saved after a newer one does not replace it.
+    #[tokio::test]
+    async fn an_older_run_snapshot_never_overwrites_a_newer_one() {
+        let s = Store::open_in_memory().await.unwrap();
+        let mut run = Run::new(
+            crate::core::ids::SessionId::new("s-order"),
+            "/tmp/repo".into(),
+            crate::core::run::RunMode::Observed,
+            "claude",
+        );
+        let mut newer = run.clone();
+        newer.last_seq = 7;
+        newer.summary = Some("folded through 7".into());
+        run.last_seq = 3;
+        run.summary = Some("folded through 3".into());
+        s.save_run(&newer).await.unwrap();
+        s.save_run(&run).await.unwrap();
+        let loaded = s.load_runs().await.unwrap();
+        assert_eq!(loaded[0].last_seq, 7);
+        assert_eq!(loaded[0].summary.as_deref(), Some("folded through 7"));
+        // The same mark still writes: an event the host applied directly.
+        newer.summary = Some("snoozed".into());
+        s.save_run(&newer).await.unwrap();
+        assert_eq!(
+            s.load_runs().await.unwrap()[0].summary.as_deref(),
+            Some("snoozed")
+        );
+    }
+
+    /// A probe leaves no search entry or message behind.
+    #[tokio::test]
+    async fn forgetting_a_probe_removes_its_search_index_and_messages() {
+        let s = Store::open_in_memory().await.unwrap();
+        for sql in [
+            "INSERT INTO events_fts (text, run_id, event_id) VALUES ('probe words', 'p1', 'e1')",
+            "INSERT INTO messages (id, run_id, at, role, text) VALUES ('m1','p1','t','agent','x')",
+            "INSERT INTO messages (id, run_id, at, role, text) VALUES ('m2','other','t','agent','y')",
+        ] {
+            sqlx::query(sql).execute(&s.pool).await.unwrap();
+        }
+        s.forget_probe("p1").await.unwrap();
+        let count = |sql: &'static str| {
+            let pool = s.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(sql)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(count("SELECT COUNT(*) FROM events_fts").await, 0);
+        assert_eq!(count("SELECT COUNT(*) FROM messages").await, 1);
     }
 
     #[tokio::test]
@@ -2391,98 +2424,6 @@ mod ask_store_tests {
         let back = s.ask("a1").await.unwrap().expect("stored");
         assert_eq!(back, a);
         assert_eq!(s.open_asks().await.unwrap().len(), 1);
-    }
-}
-
-#[cfg(test)]
-mod report_store_tests {
-    use super::*;
-    use crate::core::report::{Draft, Provenance, Report, State, Target};
-
-    fn filed(from: &str, to: &str, change: Option<&str>) -> Report {
-        Report::new(
-            Draft {
-                kind: "defect".into(),
-                title: "client retries on 4xx".into(),
-                finding: "retry() does not check status".into(),
-                ..Default::default()
-            },
-            Target::Project {
-                project: crate::core::ProjectId::new(to),
-                name: to.trim_start_matches('/').into(),
-            },
-            Provenance::of_run(
-                crate::core::ProjectId::new(from),
-                from.trim_start_matches('/').into(),
-                change.map(crate::core::ChangeId::new),
-                RunId::new("acp-1"),
-                "claude".into(),
-                jiff::Timestamp::now(),
-            ),
-            |_| Ok(()),
-        )
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn a_report_is_found_from_both_ends_and_by_its_change() {
-        let s = Store::open_in_memory().await.unwrap();
-        let mut r = filed("/api", "/core-lib", Some("c-src"));
-        s.save_report(&r).await.unwrap();
-        let api = crate::core::ProjectId::new("/api");
-        let core = crate::core::ProjectId::new("/core-lib");
-
-        assert_eq!(s.report(r.id.as_str()).await.unwrap().as_ref(), Some(&r));
-        assert_eq!(
-            s.report(&r.id.as_str()[..10]).await.unwrap().map(|x| x.id),
-            Some(r.id.clone()),
-            "the start of an id is enough when it names one"
-        );
-        assert_eq!(s.reports_to(&core, true).await.unwrap().len(), 1);
-        assert_eq!(s.reports_from(&api, true).await.unwrap().len(), 1);
-        assert!(s.reports_to(&api, false).await.unwrap().is_empty());
-
-        // Accepted into a change in the target: that change finds it too.
-        r.state = State::Accepted {
-            change: crate::core::ChangeId::new("c-dst"),
-        };
-        s.save_report(&r).await.unwrap();
-        assert!(
-            s.reports_to(&core, true).await.unwrap().is_empty(),
-            "no longer open"
-        );
-        assert_eq!(s.reports_to(&core, false).await.unwrap().len(), 1);
-        for c in ["c-src", "c-dst"] {
-            let found = s
-                .reports_for_change(&crate::core::ChangeId::new(c))
-                .await
-                .unwrap();
-            assert_eq!(found.len(), 1, "{c}");
-        }
-        assert_eq!(
-            s.reports(10).await.unwrap().len(),
-            1,
-            "rewritten, not appended"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_report_is_dropped_and_counted() {
-        let s = Store::open_in_memory().await.unwrap();
-        sqlx::query(
-            "INSERT INTO reports (id, filed_at, source_project, target_project, state, payload)
-             VALUES ('rp-bad', '2026-09-25T00:00:00.000000000Z', '/a', '/b', 'open', '{')",
-        )
-        .execute(s.pool())
-        .await
-        .unwrap();
-        s.save_report(&filed("/a", "/b", None)).await.unwrap();
-        assert_eq!(s.reports(10).await.unwrap().len(), 1);
-        let lost = s.unreadable().await.unwrap();
-        assert!(
-            lost.iter().any(|(what, _)| what == "report rp-bad"),
-            "{lost:?}"
-        );
     }
 }
 
@@ -2739,7 +2680,7 @@ mod integrity_tests {
         for (table, expected) in [
             (
                 "runs",
-                vec!["id", "agent", "cwd", "last_event_at", "payload"],
+                vec!["id", "agent", "cwd", "last_event_at", "last_seq", "payload"],
             ),
             ("changes", vec!["id", "updated_at", "payload"]),
         ] {

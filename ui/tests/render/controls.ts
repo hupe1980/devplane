@@ -86,12 +86,15 @@ import { fail, html, source, visible, walk } from "../harness";
   const e = (kind: Entry["kind"], label: string): Entry => ({ kind, label, icon: "dot", go: () => {} });
   const entries = [e("project", "saas"), e("action", "Start a new change"), e("change", "Rate-limit the login route"),
     e("surface", "Go to Sessions"), e("action", "Go to the changes"), e("change", "Retry only on 5xx")];
-  // Prefix beats word start beats inside beats scattered letters.
-  const s = [score("ret", "retry only"), score("onl", "retry only"), score("try", "retry only"), score("rty", "retry only")];
-  if (!(s[0]! < s[1]! && s[1]! < s[2]! && s[2]! < s[3]!)) fail(`the palette's match order is not prefix, word, inside, scattered: ${s}`);
+  // Prefix beats word start beats inside beats word initials.
+  const s = [score("ret", "retry only"), score("onl", "retry only"), score("try", "retry only"), score("ro", "retry only")];
+  if (!(s[0]! < s[1]! && s[1]! < s[2]! && s[2]! < s[3]!)) fail(`the palette's match order is not prefix, word, inside, initials: ${s}`);
+  // Letters scattered inside words are not a match.
+  if (score("rate", "Show or hide the activity panel") !== null) fail("the palette matches letters scattered inside words");
+  if (score("rlr", "Rate-limit the login route") === null) fail("the palette does not match word initials");
   if (score("zz", "retry") !== null) fail("the palette matches letters that are not there");
   const r = rank(entries, "re").map((x) => x.label);
-  if (r[0] !== "Retry only on 5xx" || r[1] !== "Rate-limit the login route") fail(`changes are not first, best match first: ${r}`);
+  if (r[0] !== "Retry only on 5xx" || r.includes("Rate-limit the login route")) fail(`changes are not first, or a scattered match is listed: ${r}`);
   const kinds = rank(entries, "").map((x) => x.kind);
   if (kinds.join() !== "change,change,surface,action,action,project") fail(`the palette's groups are out of order: ${kinds}`);
   const acts = rank(entries, "> go");
@@ -105,14 +108,14 @@ import { fail, html, source, visible, walk } from "../harness";
 // ── A new change: Start is enabled only when nothing is refused ──────────
 {
   const ok = (name: string): Target => ({ asked: name, name, root: `/r/${name}`, refusal: null, says: "a worktree on its own branch", notes: [] });
-  const no = (name: string): Target => ({ ...ok(name), refusal: "untrusted", says: "not trusted — devplane trust /r/x" });
+  const no = (name: string): Target => ({ ...ok(name), refusal: "untrusted", says: "not trusted — devplane project trust /r/x" });
   if (!startable([ok("a"), ok("b")], false, "")) fail("two projects that can both start are not startable");
   if (startable([ok("a"), no("b"), ok("c")], false, "")) fail("Start is enabled with one project refused");
   if (startable(null, false, "") || startable([], false, "")) fail("Start is enabled before the host answered");
   if (startable([ok("a")], true, "") || startable([ok("a")], false, "timed out")) fail("Start is enabled while checking or after a failed check");
   const refused = html(New, { targets: [ok("a"), no("b")] });
   if (!/<button type="submit"[^>]*disabled/.test(refused)) fail("the Start button is enabled while a project is refused");
-  if (!refused.includes("not trusted — devplane trust /r/x")) fail("a refusal is not said by project");
+  if (!refused.includes("not trusted — devplane project trust /r/x")) fail("a refusal is not said by project");
   if (!/1 refused — nothing will be created/.test(refused)) fail("the form does not say that nothing will be created");
   if (/<button type="submit"[^>]*disabled/.test(html(New, { targets: [ok("a")] }))) fail("the Start button is disabled with nothing refused");
   if (!source("../src/surfaces/new/New.svelte").includes('"/api/changes/preflight"')) fail("the preflight is not the host's");

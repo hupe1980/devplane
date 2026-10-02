@@ -7,6 +7,8 @@
   import Failed from "../../lib/Failed.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
+  import Md from "../../lib/ui/Md.svelte";
+  import Inline from "../../lib/ui/Inline.svelte";
   import type { Tone } from "../../lib/ui/Pill.svelte";
   import type { Detail } from "./types";
 
@@ -51,11 +53,11 @@
   const key = $derived(run);
   const runRead = resource<Run>(() => (key ? `/api/runs/${encodeURIComponent(key)}` : null), {
     every: EVERY_MS,
-    tell: () => `devplane show ${key}`,
+    tell: () => `devplane run show ${key}`,
   });
   const said_ = resource<Message[]>(() => (key ? `/api/runs/${encodeURIComponent(key)}/messages?limit=${LIMIT}` : null), {
     every: EVERY_MS,
-    tell: () => `devplane show ${key}`,
+    tell: () => `devplane run show ${key}`,
   });
   const detail = $derived(runRead.data);
   const messages = $derived(Array.isArray(said_.data) ? said_.data : []);
@@ -135,20 +137,21 @@
         <code class="quiet">{run.slice(0, 18)}</code>
         {#if d.runs && d.runs.length > 1}<span class="quiet">· latest of {d.runs.length} runs</span>{/if}
       </header>
-      {#if said_.failure}<div class="fail"><Failed what="the conversation" failure={said_.failure} at={said_.at} stale={said_.data !== null} /></div>{/if}
-      {#if runRead.failure}<div class="fail"><Failed what="the run" failure={runRead.failure} at={runRead.at} stale={runRead.data !== null} /></div>{/if}
+      <!-- One failure for the pane: both reads go to the same run. -->
+      {#if said_.failure}<div class="fail"><Failed what="the conversation" failure={said_.failure} at={said_.at} stale={said_.data !== null} /></div>
+      {:else if runRead.failure}<div class="fail"><Failed what="the run" failure={runRead.failure} at={runRead.at} stale={runRead.data !== null} /></div>{/if}
       <ol class="turns">
         {#if said_.phase === "loading"}
-          <li class="quiet">reading…</li>
+          <li class="quiet" aria-busy="true">…</li>
         {:else if said_.data !== null && messages.length === 0}
           <li class="quiet">Nothing has been said yet.</li>
         {:else if messages.length >= LIMIT}
-          <li class="quiet">Only {LIMIT} turns are shown here; <code>devplane show {run}</code> has every one.</li>
+          <li class="quiet">Only {LIMIT} turns are shown here; <code>devplane run show {run}</code> has every one.</li>
         {/if}
         {#each messages as m (m.id)}
           <li class="turn {m.role}">
             <span class="who">{m.role === "user" ? "you" : m.role}</span>
-            <div class="text">{m.text}</div>
+            <div class="text"><Md text={m.text} /></div>
           </li>
         {/each}
       </ol>
@@ -163,7 +166,7 @@
         <div class="send">
           <span class="quiet">⌘↵ to send</span>
           {#if survives}
-            <span class="warn">{survives}</span>
+            <span class="warn"><Inline text={survives} /></span>
             <button type="button" class="danger" onclick={stop}>Stop the run</button>
             <button type="button" onclick={() => (survives = "")}>Keep it running</button>
           {:else}
@@ -172,19 +175,19 @@
           <button type="submit" class="primary" disabled={!draft.trim() || sending}><Icon name="play" size={12} /> Send</button>
         </div>
       </form>
-      {#if said}<p class="said" role="status">{said}</p>{/if}
+      {#if said}<p class="said" role="status"><Inline text={said} /></p>{/if}
     </section>
 
     <aside class="record">
       <h2>Files written <span>{detail ? (detail.wrote?.length ?? 0) : ""}</span></h2>
       <ul>
-        {#each detail?.wrote ?? [] as f (f)}<li><Icon name="file" size={12} /><code>{f}</code></li>{:else}<li class="quiet">{detail ? "none yet" : runRead.failure ? "not read — see above" : "reading…"}</li>{/each}
+        {#each detail?.wrote ?? [] as f (f)}<li><Icon name="file" size={12} /><code>{f}</code></li>{:else}<li class="quiet">{detail ? "none yet" : runRead.failure ? "not read" : "…"}</li>{/each}
       </ul>
       <h2>Running now <span>{detail ? running.length : ""}</span></h2>
       <ul>
         {#each running as c, i (i)}
           <li><Icon name="terminal" size={12} /><span>{c.tool}</span>{#if c.what}<code>{c.what}</code>{/if}</li>
-        {:else}<li class="quiet">{detail ? "no tool call in flight" : runRead.failure ? "not read — see above" : "reading…"}</li>{/each}
+        {:else}<li class="quiet">{detail ? "no tool call in flight" : runRead.failure ? "not read" : "…"}</li>{/each}
       </ul>
     </aside>
   </div>
@@ -250,7 +253,6 @@
     background: var(--bg);
     border: 1px solid var(--line);
     font-size: var(--t-sm);
-    white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
   .turn.user .text {

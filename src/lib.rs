@@ -12,12 +12,15 @@ pub mod api;
 /// The window: the host with a tray, notifications and a shortcut (`app` feature).
 #[cfg(feature = "app")]
 pub mod app;
+/// The base's tests on a change and its new tests on the base, in one
+/// throwaway checkout at the merge base.
+pub mod base_checks;
 /// The loop that makes a run mean something.
-pub mod change;
+pub(crate) mod change;
 /// The command line, one module per thing a person is trying to do.
 pub mod cli;
 /// The CLI's view of the host.
-pub mod client;
+pub(crate) mod client;
 /// Where Devplane keeps its own state, and how a client finds the host.
 pub mod config;
 /// Types and the pure logic over them. Reaches nothing outside the process.
@@ -37,7 +40,7 @@ pub mod host;
 /// Reading the store with nothing running, into the same views the host serves.
 pub mod local;
 /// An MCP server agents can ask and cannot act through.
-pub mod mcp;
+pub(crate) mod mcp;
 /// Desktop notifications.
 pub mod notify;
 /// Observation channels: hooks, OpenTelemetry, the roster, the status line.
@@ -53,17 +56,16 @@ pub mod render;
 /// Where a directory belongs on disk: repository, worktree owner, governing
 /// root.
 pub mod repo;
-/// Reports between projects: filed, routed, answered, and opened on a forge
-/// only by a person.
-pub mod reports;
 /// What a repository already has set up for agents, read from disk.
-pub mod setup;
+pub(crate) mod setup;
 /// The specification a change answers, read back from disk.
 pub mod spec;
 /// The wall clock, read at the edge: the pure half's constructors stamped
 /// with now.
-pub mod stamp;
+pub(crate) mod stamp;
 /// The observation store: SQLite, WAL, rebuildable.
 pub mod store;
+/// `devplane verify`: the verdict where merges are decided, with no host.
+pub mod verify;
 /// What the surfaces show, composed once for every caller.
 pub mod view;

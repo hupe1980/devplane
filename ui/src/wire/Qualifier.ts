@@ -19,6 +19,10 @@ deleted: number,
  */
 gates_changed: number, 
 /**
+ * Rows of kind [`WeakKind::BaseTests`].
+ */
+base_tests: number, 
+/**
  * Rows with no current seen mark.
  */
 unseen: number, 

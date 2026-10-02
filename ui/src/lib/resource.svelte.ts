@@ -11,15 +11,21 @@ import { api, Unauthorised, Unreachable } from "./api";
 export type Phase = "loading" | "ok" | "stale" | "failed";
 
 /// Why a read or a write did not land, and the command to run for more.
-export type Failure = { says: string; tell: string };
+export type Failure = {
+  says: string;
+  tell: string;
+  /// The host itself did not answer: the shell's one banner names that, so
+  /// a region only says it was not read.
+  down?: boolean;
+};
 
 /// The failure a thrown error is. `tell` is the surface's own command for
 /// more (`devplane change show <id>`); a host that is down or a tab without
 /// a token has a better one, whatever was being read.
 export function failure(e: unknown, tell = "devplane doctor"): Failure {
-  if (e instanceof Unauthorised) return { says: "this tab has no token", tell: "devplane open" };
+  if (e instanceof Unauthorised) return { says: "this tab has no token", tell: "devplane up", down: true };
   if (e instanceof Unreachable) {
-    return { says: e.message, tell: e.kind === "refused" ? "devplane serve" : "devplane doctor" };
+    return { says: e.message, tell: e.kind === "refused" ? "devplane up --no-browser" : "devplane doctor", down: true };
   }
   return { says: e instanceof Error ? e.message : String(e), tell };
 }

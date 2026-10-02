@@ -1,10 +1,10 @@
 // The board registers itself; nothing else names it.
 import { register, phase } from "../../lib/surfaces";
-import { bind, onAction } from "../../lib/keys";
+import { bind, bindList, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
-import Board from "./Board.svelte";
 
 bind({ surface: "global", combo: "g b", action: "go-board", label: "go to the sessions" });
+bindList("board", "open the session's decisions in the ledger");
 onAction("go-board", () => {
   go("#board");
   return true;
@@ -45,7 +45,7 @@ register({
       runs: b?.runs ?? [],
       summary: b?.summary,
       coverage: b?.coverage ?? null,
-      // The host's configured threshold, the same one `devplane ls` uses.
+      // The host's configured threshold, the same one `devplane status` uses.
       thresholds: b?.thresholds ?? null,
       // What this board can see at all, for the empty state.
       watching: b?.watching ?? null,
@@ -55,5 +55,5 @@ register({
       ...phase(feed),
     };
   },
-  component: Board,
+  page: () => import("./Board.svelte"),
 });

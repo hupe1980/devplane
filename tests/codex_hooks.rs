@@ -42,7 +42,7 @@ async fn a_codex_session_is_recorded_gated_and_named_after_its_vendor() {
     let home = home("codex");
     std::fs::write(
         home.join("policy.toml"),
-        "[policy]\nnever_auto = [\"Read(.env)\"]\n",
+        "[policy]\ndeny = [\"Read(.env)\"]\n",
     )
     .unwrap();
     let quiet = hook(

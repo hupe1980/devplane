@@ -18,7 +18,7 @@
   // between tabs (the ARIA tabs pattern).
   import Icon from "./Icon.svelte";
 
-  type Tab = { id: string; label: string; icon?: string; count?: number | null; tone?: string };
+  type Tab = { id: string; label: string; icon?: string; count?: number | string | null; tone?: string };
   let {
     tabs,
     active = $bindable(),

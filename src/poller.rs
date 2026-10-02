@@ -119,7 +119,7 @@ pub async fn tail_once(state: &Shared) -> anyhow::Result<usize> {
     Ok(folded)
 }
 
-/// Reads the roster once, before the API is reachable, so the first `ls`
+/// Reads the roster once, before the API is reachable, so the first `status`
 /// after a cold start does not show an empty board.
 pub async fn initial_poll(state: &Shared) {
     match poll_once(state).await {
@@ -281,7 +281,7 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
             let cfg = w.attention;
             w.runs()
                 .filter(|r| {
-                    // The threshold is per project (`[policy] stall_timeout`,
+                    // The threshold is per project (`[agent] stall_timeout`,
                     // resolved from the run's worktree), else the host default.
                     let dir = r.worktree.as_deref().unwrap_or(&r.cwd);
                     let limit = state.policy.stall_seconds(dir).unwrap_or(cfg.stall_seconds);
@@ -938,7 +938,7 @@ async fn probe_gate_once(state: &Shared) {
     let Ok(probe) = probe else {
         return;
     };
-    // Not installed is not broken; other surfaces already say to `connect`.
+    // Not installed is not broken; other surfaces already say to `agent connect`.
     let down = (probe.command.is_some() && !probe.answered).then(|| {
         probe
             .error

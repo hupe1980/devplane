@@ -1,0 +1,104 @@
+
+  .palette.svelte-d7fgwz {
+    display: flex;
+    flex-direction: column;
+    max-height: 72vh;
+  }
+  .field.svelte-d7fgwz {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    padding: var(--s-3) var(--s-4);
+    border-bottom: 1px solid var(--line);
+    color: var(--faint);
+  }
+  .field.svelte-d7fgwz input:where(.svelte-d7fgwz) {
+    flex: 1;
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+    background: none;
+    color: var(--ink);
+    font: inherit;
+    font-size: var(--t-md);
+    outline: none;
+  }
+  ul.svelte-d7fgwz {
+    list-style: none;
+    margin: 0;
+    padding: var(--s-1) 0;
+    overflow: auto;
+    flex: 1;
+  }
+  .sec.svelte-d7fgwz {
+    padding: var(--s-2) var(--s-4) var(--s-1);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--faint);
+  }
+  li.svelte-d7fgwz button:where(.svelte-d7fgwz) {
+    display: flex;
+    align-items: center;
+    gap: var(--s-3);
+    width: 100%;
+    padding: 0.4rem var(--s-4);
+    border: 0;
+    border-radius: 0;
+    background: none;
+    color: var(--dim);
+    font: inherit;
+    font-size: var(--t-sm);
+    text-align: start;
+    cursor: pointer;
+  }
+  li[aria-selected="true"].svelte-d7fgwz button:where(.svelte-d7fgwz) {
+    background: var(--select);
+    color: var(--ink);
+  }
+  .label.svelte-d7fgwz {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+  }
+  .hint.svelte-d7fgwz {
+    font-size: var(--t-xs);
+    color: var(--faint);
+  }
+  .hint.kbd.svelte-d7fgwz {
+    font-family: var(--mono);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0 0.35rem;
+  }
+  .none.svelte-d7fgwz {
+    padding: var(--s-4);
+    color: var(--faint);
+    font-size: var(--t-sm);
+  }
+  .unread.svelte-d7fgwz {
+    margin: 0;
+    padding: var(--s-2) var(--s-4);
+    color: var(--wait);
+    font-size: var(--t-xs);
+    border-bottom: 1px solid var(--line);
+  }
+  footer.svelte-d7fgwz {
+    display: flex;
+    gap: var(--s-4);
+    padding: var(--s-2) var(--s-4);
+    border-top: 1px solid var(--line);
+    font-size: var(--t-xs);
+    color: var(--faint);
+  }
+  kbd.svelte-d7fgwz {
+    font-family: var(--mono);
+    font-size: 0.625rem;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0 0.25rem;
+    margin-right: 0.15rem;
+  }

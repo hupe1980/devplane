@@ -2,20 +2,44 @@
   // Every gate run against this change: each command, exit code, duration and
   // output (its own bytes), and the certificate a reviewer can re-run. The
   // newest attempt is open; older ones fold with their verdict showing.
+  import Skeleton from "../../lib/Skeleton.svelte";
   import { untrack } from "svelte";
   import { resource, copyText } from "../../lib/resource.svelte";
   import Failed from "../../lib/Failed.svelte";
   import { blocks } from "../../lib/md";
   import Inline from "../../lib/ui/Inline.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
-  import { exit, took, ago, type Detail, type GateReport } from "./types";
+  import { api, Refused } from "../../lib/api";
+  import { failure } from "../../lib/resource.svelte";
+  import { exit, took, ago, countSays, type Detail, type GateReport } from "./types";
 
   let {
     d,
     id,
+    /// Called after a write the host acted on, so the change is read again.
+    reload = () => {},
     /// A certificate already read (the render harness); the host's read replaces it.
     certificate = null,
-  }: { d: Detail; id: string; certificate?: { finished: boolean; markdown?: string } | null } = $props();
+  }: { d: Detail; id: string; reload?: () => void | Promise<void>; certificate?: { finished: boolean; markdown?: string } | null } = $props();
+
+  const bc = $derived(d.base_checks ?? null);
+  let asked = $state("");
+  let asking = $state(false);
+  /// *Run base checks*: drawn only when the host says a run can start.
+  async function runBaseChecks() {
+    if (asking) return;
+    asking = true;
+    try {
+      const r = await api<{ started?: boolean; current?: boolean }>(`/api/changes/${encodeURIComponent(id)}/base-checks`, { method: "POST" });
+      asked = r?.current ? "Already current for this tree — nothing ran." : "Base checks started — the base's tests on this change, then this change's new tests on the base.";
+      await reload();
+    } catch (e) {
+      const body = e instanceof Refused ? (e.body as { says?: string } | null) : null;
+      asked = body?.says ?? `That did not land: ${failure(e).says}`;
+    } finally {
+      asking = false;
+    }
+  }
 
   const attempts = $derived([...(d.gates ?? [])].reverse());
   let open = $state<Record<number, boolean>>({});
@@ -72,6 +96,7 @@
                   <Icon name={cok ? "check" : "x"} size={13} />
                   <code class="cmd">{c.command}</code>
                   <span class="exit">{exit(c.outcome)}</span>
+                  {#if c.tests}<span class="tests">{countSays(c.tests)}</span>{/if}
                   <span class="dur">{took(c.duration_ms)}</span>
                 </div>
                 {#if c.failures?.length}
@@ -89,16 +114,55 @@
     {/each}
   {/if}
 
+  {#if bc}
+    <section class="base">
+      <header>
+        <h2><Icon name="gate" size={14} /> Base checks</h2>
+        {#if bc.can_run}<button onclick={runBaseChecks} disabled={asking}><Icon name="play" size={13} /> Run base checks</button>{/if}
+      </header>
+      <p class="counts">{bc.counts_says}</p>
+      {#each bc.junit_notes as n, ni (ni)}<p class="w-warn">{n}</p>{/each}
+      {#if asked}<p class="said">{asked}</p>{/if}
+      {#if bc.stale && bc.on_change}<p class="quiet">These runs describe tree {bc.tree?.slice(0, 10)}, not this one.</p>{/if}
+      {#if bc.on_change}
+        <h3>The base's tests on this change</h3>
+        <p class="w-{bc.on_change.weight}">{bc.on_change.says}</p>
+        {#if bc.on_change.restored.length}<p class="files">Put back as the base has them: {#each bc.on_change.restored as f, fi (fi)}<code>{f}</code>{" "}{/each}</p>{/if}
+        {#if bc.on_change.removed.length}<p class="files">Removed, as the base lacks them: {#each bc.on_change.removed as f, fi (fi)}<code>{f}</code>{" "}{/each}</p>{/if}
+        {#each bc.on_change.junit_notes as n, ni (ni)}<p class="quiet">{n}</p>{/each}
+        {#each bc.on_change.commands as c, ci (ci)}<p class="cmdline"><code>{c.command}</code> {exit(c.outcome)} · {countSays(c.tests)}</p>{/each}
+        {#if bc.on_change.failing.length}
+          <ul class="names">{#each bc.on_change.failing as n, ni (ni)}<li>{n}</li>{/each}</ul>
+          {#if bc.on_change.failing_more}<p class="quiet">and {bc.on_change.failing_more} more — <code>devplane change show {id} --json</code> lists every one</p>{/if}
+        {/if}
+        {#if bc.on_change.named?.not_run_on_change.length}
+          <p>{bc.on_change.named.says}</p>
+          <ul class="names">{#each bc.on_change.named.not_run_on_change as n, ni (ni)}<li>{n}</li>{/each}</ul>
+          {#if bc.on_change.named.not_run_on_change_more}<p class="quiet">and {bc.on_change.named.not_run_on_change_more} more — <code>devplane change show {id} --json</code> lists every one</p>{/if}
+        {/if}
+      {/if}
+      {#if bc.on_base}
+        <h3>This change's new tests on the base</h3>
+        <p class="w-{bc.on_base.weight}">{bc.on_base.says}</p>
+        {#if bc.on_base.placed.length}<p class="files">Placed: {#each bc.on_base.placed as f, fi (fi)}<code>{f.path}</code>{#if f.blob} <span class="quiet">blob {f.blob.slice(0, 10)}</span>{/if}{" "}{/each}</p>{/if}
+        {#if bc.on_base.not_separable.length}<p class="files">Not separable: {#each bc.on_base.not_separable as f, fi (fi)}<code>{f}</code>{" "}{/each}</p>{/if}
+        {#each bc.on_base.commands as c, ci (ci)}<p class="cmdline"><code>{c.command}</code> {exit(c.outcome)} · {countSays(c.tests)}</p>{/each}
+        {#if bc.on_base.passing.length}<p>Passing without the change:</p><ul class="names">{#each bc.on_base.passing as n, ni (ni)}<li>{n}</li>{/each}</ul>{/if}
+        {#if bc.on_base.passing_more}<p class="quiet">and {bc.on_base.passing_more} more — <code>devplane change show {id} --json</code> lists every one</p>{/if}
+      {/if}
+    </section>
+  {/if}
+
   <section class="cert">
     <header>
       <h2><Icon name="shield" size={14} /> Certificate</h2>
       {#if cert?.markdown}<button onclick={copy}><Icon name="file" size={13} /> Copy as markdown</button>{/if}
     </header>
-    {#if said}<p class="said">{said}</p>{/if}
+    {#if said}<p class="said"><Inline text={said} /></p>{/if}
     {#if !cert && read.failure}
       <Failed what="the certificate" failure={read.failure} />
     {:else if !cert}
-      <p class="quiet">Reading…</p>
+      <Skeleton rows={3} />
     {:else}
       <!-- The host's markdown, rendered as text: inline code and emphasis, never literal markup. -->
       <div class="md">
@@ -230,6 +294,54 @@
   }
   .cert {
     margin-top: var(--s-4);
+  }
+  .base {
+    display: grid;
+    gap: var(--s-1);
+    font-size: var(--t-sm);
+  }
+  .base header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .base h3 {
+    margin: var(--s-2) 0 0;
+    font-size: var(--t-sm);
+  }
+  .base p {
+    margin: 0;
+  }
+  .base button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: var(--t-sm);
+  }
+  .counts,
+  .tests {
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .tests {
+    font-size: var(--t-xs);
+  }
+  .w-warn {
+    color: var(--wait);
+    font-weight: 600;
+  }
+  .w-absent {
+    color: var(--faint);
+  }
+  .files code,
+  .cmdline code,
+  .names {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+  }
+  .names {
+    margin: 0 0 0 var(--s-4);
+    padding: 0;
   }
   .cert header {
     display: flex;

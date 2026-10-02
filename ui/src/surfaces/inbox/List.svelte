@@ -2,6 +2,7 @@
   // The triage list: everything that stops without you, in the host's ranking,
   // never re-sorted here. One dense row each; the selected item opens beside
   // it. What was folded or held back is counted at the foot.
+  import Inline from "../../lib/ui/Inline.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import { ago } from "../../lib/text";
   import type { Item } from "./Item.svelte";
@@ -55,7 +56,7 @@
   const optionId = (id: string) => `inbox-row-${id.replace(/[^\w-]/g, "_")}`;
 
   const icon = (k: string) =>
-    k === "permission" ? "shield" : k === "question" ? "question" : k.includes("gate") || k.includes("fail") ? "x" : k.includes("ready") ? "check" : k.includes("conflict") ? "alert" : k.includes("context") ? "clock" : "dot";
+    k === "permission" ? "shield" : k === "question" ? "question" : k.includes("gate") || k.includes("fail") ? "x" : k.includes("ready") ? "decide" : k.includes("conflict") ? "alert" : k.includes("context") ? "clock" : "dot";
 
   let now = $state(Date.now());
   $effect(() => {
@@ -90,7 +91,7 @@
     aria-activedescendant={selected ? optionId(selected) : undefined}
   >
     {#if narrow.on && narrow.failure && !narrow.data}
-      <p class="quiet failed">Could not read the inbox narrowed to {project}: {narrow.failure.says}.</p>
+      <p class="quiet failed">Could not read the inbox narrowed to {project}: <Inline text={narrow.failure.says} />.</p>
     {:else if missing}
       <p class="quiet failed">No project is named “{project}”.</p>
     {:else if !ready && shown.length === 0}
@@ -119,7 +120,7 @@
         <span class="ic"><Icon name={icon(i.kind)} size={14} /></span>
         <span class="title">{i.title}</span>
         {#if i.new_to_you}<span class="new">new</span>{/if}
-        <span class="meta">{i.kind.replace(/_/g, " ")}{i.project_name ? ` · ${i.project_name}` : ""}</span>
+        <span class="meta">{i.kind.replace(/_/g, " ")}{#if i.facts?.qualifier?.says}<span class="weak">{` · ${i.facts.qualifier.says}`}</span>{/if}{i.project_name ? ` · ${i.project_name}` : ""}</span>
         <span class="age">{age(i.since)}</span>
       </div>
     {/each}
@@ -243,6 +244,10 @@
     color: var(--accent);
     font-weight: 700;
     text-transform: uppercase;
+  }
+  .weak {
+    color: var(--fail);
+    font-weight: 600;
   }
   .meta {
     grid-area: meta;

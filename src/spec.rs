@@ -1289,7 +1289,7 @@ pub fn select_tasks(
 /// over its work. It is never called *verified*: the check may have failed
 /// since, and only the change is ever verified. Computed on every read and
 /// `Serialize` only. Never divided.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Counts {
@@ -1319,7 +1319,7 @@ impl Counts {
 }
 
 /// One requirement token's row: `REQ-3 · 3 tasks · 2 ticked · 0 seen by a passing check`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct TokenRow {

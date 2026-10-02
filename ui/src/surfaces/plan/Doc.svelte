@@ -3,8 +3,9 @@
   // questions, and the change working to it. Devplane reads the spec, never
   // grades it: counts and names only, no percentage or bar.
   import Icon from "../../lib/ui/Icon.svelte";
-  import Pill from "../../lib/ui/Pill.svelte";
-  import Qualifier from "../../lib/Qualifier.svelte";
+  import ChangeState from "../../lib/ChangeState.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
+  import Inline from "../../lib/ui/Inline.svelte";
   import Empty from "../../lib/ui/Empty.svelte";
   import { run } from "../../lib/keys";
   import { specs, watch, key } from "./store.svelte";
@@ -21,7 +22,7 @@
 
 {#if !focus || !found}
   {#if specs.projects === null}
-    <div class="pad quiet">Reading the specifications…</div>
+    <div class="pad"><Skeleton rows={4} /></div>
   {:else}
     <Empty
       icon="spec"
@@ -46,8 +47,8 @@
       <div class="acts">
         {#if r.change_id}
           <a class="btn" href={`#change/${encodeURIComponent(r.change_id)}`}><Icon name="change" size={14} /> {r.title}</a>
-          {#if r.state}<Pill word={r.state} /><Qualifier q={r.qualifier} />{/if}
-          {#if r.counts_says}<span class="quiet">{r.counts_says}</span>{/if}
+          {#if r.state}<ChangeState state={r.state} q={r.qualifier} />{/if}
+          {#if r.counts_says}<span class="quiet"><Inline text={r.counts_says} /></span>{/if}
         {:else}
           <button class="btn primary" onclick={() => run("new-change", "plan")}><Icon name="play" size={14} /> Start a change…</button>
           <span class="quiet">No change is working to this specification; pick it in the form.</span>

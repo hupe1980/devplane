@@ -228,7 +228,6 @@ mod tests {
             change_id: None,
             offer: None,
             no_offer: None,
-            report: None,
             since: jiff::Timestamp::now(),
         }
     }

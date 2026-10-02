@@ -2,6 +2,8 @@
   // The topmost thing that needs you, answerable, and nothing else — what the
   // shortcut raises. The inbox's first row (same `Item.svelte`, same routes);
   // `Esc` gives focus back.
+  import Inline from "../../lib/ui/Inline.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
   import { ago } from "../../lib/text";
   import { hideWindow } from "../../lib/frame";
   import { onAction } from "../../lib/keys";
@@ -49,7 +51,7 @@
     await read.reload();
   }
   const answer = (item: Item, what: Answer) => report(() => actions.answer(item, what));
-  const act = (item: Item, action: string, reason?: string) => report(() => actions.act(item, action, reason));
+  const act = (item: Item, action: string) => report(() => actions.act(item, action));
   const snooze = (item: Item) => report(() => actions.snooze(item));
   async function copyRule(rule: string) {
     said = (await actions.copyRule(rule)).said;
@@ -64,12 +66,12 @@
 
 <section class="answer" aria-labelledby="answer-head">
   <h2 id="answer-head">The one thing that needs you</h2>
-  <p class="said" role="status" aria-live="polite">{said}</p>
+  <p class="said" role="status" aria-live="polite"><Inline text={said} /></p>
   {#if commands.length}<Commands {commands} />{/if}
   {#if failed && read.failure}
     <Failed what="what needs you" failure={read.failure} />
   {:else if !loaded}
-    <p class="dim">reading…</p>
+    <Skeleton rows={2} />
   {:else if first}
     {#if read.phase === "stale" && read.failure}<Failed what="what needs you" failure={read.failure} at={read.at} stale />{/if}
     <fieldset class="bare" disabled={!!pending.busy}>

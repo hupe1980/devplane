@@ -1,5 +1,4 @@
 import { register } from "../../lib/surfaces";
-import Search from "./Search.svelte";
 
 register({
   id: "search",
@@ -13,5 +12,5 @@ register({
   takesQuery: true,
   reads: ["/api/search"],
   select: (_feed, focus) => ({ q: focus }),
-  component: Search,
+  page: () => import("./Search.svelte"),
 });

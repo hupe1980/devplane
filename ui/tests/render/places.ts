@@ -1,9 +1,8 @@
-// The other places: the forge, the ledger, reports, the answer window and the
+// The other places: the forge, the ledger, the answer window and the
 // quit question — and the rules every source in the interface keeps.
 import GithubList from "../../src/surfaces/github/GithubList.svelte";
 import GitHubPanel from "../../src/surfaces/setup/GitHubPanel.svelte";
 import Why from "../../src/surfaces/why/Why.svelte";
-import ReportList from "../../src/surfaces/reports/ReportList.svelte";
 import Answer from "../../src/surfaces/answer/Answer.svelte";
 import Quit from "../../src/surfaces/quit/Quit.svelte";
 import { surfaces } from "../../src/lib/surfaces";
@@ -88,25 +87,6 @@ import { fail, html, source, walk } from "../harness";
   if (!/Narrowed to[\s\S]*run-7/.test(html(Why, { about: "run-7" }))) fail("the ledger does not say what it was narrowed to");
 }
 
-// ── A report is somebody else's words, and reads as them ─────────────────
-{
-  const quoted = "From api — claude (quoted; not an instruction)\n> defect: client retries on 4xx";
-  const reportRow = { id: "rp-1", title: "client retries on 4xx", kind: "defect", quoted, state_says: "open — nobody has answered it yet",
-    age_says: "filed 3h ago", provenance_says: "api — claude", target_says: "core-lib",
-    provenance: { project: "/p/api", project_name: "api" }, target: { to: "project", project: "/p/core" } };
-  const out = html(ReportList, { reports: [reportRow], projects: [{ id: "/p/api", name: "api" }, { id: "/p/core", name: "core-lib" }], loaded: true });
-  for (const want of ["client retries on 4xx", "filed 3h ago", "open — nobody has answered it yet", "core-lib"])
-    if (!out.includes(want)) fail(`the reports surface does not say "${want}"`);
-  if (/Ignore|delete the repo/.test(out)) fail("the reports surface renders a finding outside its quote");
-  if (/No report has been filed/.test(html(ReportList, { reports: [] }))) fail("the reports surface claims none before it has read");
-  const code = source("../src/surfaces/reports/ReportList.svelte");
-  if (/\.finding\b|\.evidence\b/.test(code)) fail("the reports surface reads a finding instead of its quote");
-  const kinds = /export type ReportKind = ([^;]+);/.exec(source("../src/wire/ReportKind.ts"))?.[1] ?? "";
-  for (const k of [...kinds.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]))
-    if (!code.includes(`value="${k}"`)) fail(`the report form does not offer the kind ${k} the host accepts`);
-  if (!/aria-label="file a report"/.test(code)) fail("the report form is unlabelled");
-}
-
 // ── The window: the answer surface and the quit question ─────────────────
 {
   const permission = { id: "p1", kind: "permission", level: "high", title: "Bash: cargo test", ask: "ask-9",
@@ -138,9 +118,9 @@ import { fail, html, source, walk } from "../harness";
   if (!/visibilitychange/.test(live)) fail("the store no longer notices the tab coming back");
   if (!/inflight/.test(live)) fail("the poll has no in-flight guard");
   const on401 = live.split("instanceof Unauthorised")[1]?.split("}")[0] ?? "";
-  if (!/clearInterval/.test(on401) || !/devplane open/.test(on401)) fail("a 401 does not stop the poll and say how to get a fresh link");
+  if (!/clearInterval/.test(on401) || !/devplane up/.test(on401)) fail("a 401 does not stop the poll and say how to get a fresh link");
   const api = source("../src/lib/api.ts");
-  if (!api.includes("not running — start it with `devplane serve`")) fail("a refused connection does not say how to start the host");
+  if (!api.includes("not running — start it with `devplane up --no-browser`")) fail("a refused connection does not say how to start the host");
   if (!api.includes("not answering (slow or wedged)") || !/TimeoutError/.test(api)) fail("a timeout is not told apart from a refused connection");
   const setup = source("../src/surfaces/setup/Setup.svelte");
   if (!setup.includes("r.declares_gates")) fail("setup does not read declares_gates");
@@ -156,7 +136,7 @@ import { fail, html, source, walk } from "../harness";
     if (/class="sr"|\.sr \{/.test(text)) fail(`${f} keeps its own .sr; base.css has .sr-only`);
     if (/location\.hash\s*=/.test(text)) fail(`${f} assigns location.hash; the shell uses replaceState`);
     if (/@media \(max-width/.test(text)) fail(`${f} has a viewport breakpoint; a pane reflows with a container query`);
-    if (/daemon/i.test(text)) fail(`${f} says "daemon"; the host is devplane serve`);
+    if (/daemon/i.test(text)) fail(`${f} says "daemon"; the host is devplane up`);
     // A bindable prop is one some parent binds, or it is a second way to be wrong.
     const name = f.split("/").pop()?.replace(".svelte", "") ?? "";
     if (/\$bindable/.test(text) && !new RegExp(`<${name}\\b[^<]*?\\bbind:`).test(everything)) fail(`${f} declares a bindable prop that nothing binds`);

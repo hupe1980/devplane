@@ -479,7 +479,6 @@ pub struct Observed {
 /// is over, so the type has nowhere to put an answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct AbandonedQuestion {
     /// As the agent wrote it. Rendered, never summarised.
     pub question: String,
@@ -501,7 +500,6 @@ pub struct AbandonedQuestion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum EndedBy {
     /// Derived: another tool call started while the question stood.
     MovedOn,

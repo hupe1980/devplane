@@ -59,8 +59,8 @@ check = ["sh ./scripts/lint.sh", "sh ./scripts/test.sh"]
 timeout = "60s"
 
 [policy]
-never_auto = ["Read(.env)", "Bash(rm -rf *)"]
-always_ask = ["Bash(git push *)"]
+deny = ["Read(.env)", "Bash(rm -rf *)"]
+ask = ["Bash(git push *)"]
 
 [review.roles]
 shared   = ["src/types/**", "migrations/**"]
@@ -116,7 +116,7 @@ for name in core-lib ai-tool mobile infra; do
 done
 
 # Started from inside the fixture, because the host registers its start directory.
-(cd "$tmp" && exec "$BIN" serve) >"$tmp/host.log" 2>&1 &
+(cd "$tmp" && exec "$BIN" up --no-browser) >"$tmp/host.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 50); do [ -s "$home/host.json" ] && break; sleep 0.2; done
 [ -s "$home/host.json" ] || { echo "seed-host: the host did not start"; cat "$tmp/host.log"; exit 1; }

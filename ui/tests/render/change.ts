@@ -51,7 +51,8 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   if (flight.includes("Offer as pull request")) fail("a change that is not verified offers itself as a pull request");
   if (flight.includes("Pick it back up")) fail("a change that is not stopped offers to be picked back up");
   if (!flight.includes("Run gates")) fail("a change with a worktree cannot have its gates run");
-  const verified = doc({ ...stale, state: "verified", standing_says: "verified · every declared gate exited zero" });
+  // Every weakened row read: the state and its green sentence are shown.
+  const verified = doc({ ...stale, state: "verified", qualifier: { ...rate.qualifier, unseen: 0 }, standing_says: "verified · every declared gate exited zero" });
   if (!verified.includes("Offer as pull request")) fail("a verified change is not offered as a pull request");
   if (!/class="standing done/.test(verified)) fail("a verified standing is not the verified green");
   const stopped = doc({ ...stale, stopped: { at: "x" }, can_retry: true });
@@ -67,15 +68,17 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   if (!/role="tablist"/.test(flight) || !/role="tabpanel"/.test(flight)) fail("the six views are not a tab strip over a panel");
 }
 
-// ── The stepper places the host's state; it spells nothing ───────────────
+// ── The stepper is one line: where the change is, and the step after it ──
 {
-  const out = html(Stepper, { state: "in flight" });
-  for (const w of LIFE) if (!out.includes(`>${STATES[w].word}<`)) fail(`the stepper lacks the state word ${w}`);
-  if (!/aria-current="step"[^>]*>[\s\S]{0,120}in flight/.test(out)) fail("the stepper does not mark in flight as where the change is");
-  const odd = html(Stepper, { state: "gates failing" });
-  if (!odd.includes("gates failing")) fail("a state outside the six is not said in its own word");
-  if (/class="[^"]*verified/.test(odd) || /class="[^"]*verified/.test(out)) fail("the stepper is verified-green on an unverified change");
-  if (!/class="[^"]*verified/.test(html(Stepper, { state: "verified" }))) fail("a verified change is not marked verified on the stepper");
+  const line = (props: Record<string, unknown>) => visible(html(Stepper, props)).replace(/\s+/g, " ").trim();
+  if (line({ state: "verified" }) !== "verified → next: offer") fail(`the stepper does not read "verified → next: offer": ${line({ state: "verified" })}`);
+  if (line({ state: "in flight" }) !== "in flight → next: run the gates") fail(`the stepper misplaces in flight: ${line({ state: "in flight" })}`);
+  if (!/aria-current="step"[^>]*>in flight</.test(html(Stepper, { state: "in flight" }))) fail("the stepper does not mark where the change is");
+  if (!line({ state: "gates failing" }).startsWith("gates failing")) fail("a state outside the six is not said in its own word");
+  if (!/next: read 1 weakened check/.test(line({ state: "verified", weakUnread: 1 }))) fail("an unread weakened check is not the next step");
+  if (line({ state: "offered", archived: true }) !== STATES.archived.word) fail("an archived change has a next step");
+  for (const w of LIFE) if (!line({ state: w }).startsWith(STATES[w].word)) fail(`the stepper does not say ${w}`);
+  if (/var\(--done\)/.test(source("../src/surfaces/change/Stepper.svelte"))) fail("the stepper spends the verified green");
 }
 
 // ── Counts are counts: no percentage, no fraction, no n of m ─────────────
@@ -95,7 +98,7 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   for (const [name, markup] of [["overview", over], ["tasks", tasks]] as const) {
     const text = visible(markup);
     if (/\d\s*%/.test(text)) fail(`the ${name} view renders a percentage`);
-    if (/\d+\s*\/\s*\d+/.test(text)) fail(`the ${name} view renders a fraction`);
+    if (/\d+\s*\/\s*\d+/.test(text)) fail(`the ${name} view renders a fraction: ${text.match(/.{0,40}\d+\s*\/\s*\d+.{0,20}/)?.[0]}`);
     if (/\d+ of \d+(?! commands)/.test(text)) fail(`the ${name} view renders an "n of m"`);
     if (/<progress|<meter/.test(bare(markup))) fail(`the ${name} view renders a bar`);
   }
@@ -157,7 +160,7 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
     fail("a waiting run's state object is not mapped to words, so it prints as [object Object]");
   if (/Commands run/.test(agent)) fail("the agent tab claims a list of finished commands it cannot see");
   // The review: marking a hunk reads only the weakened rows inside it.
-  const pane = source("../src/surfaces/review/Pane.svelte");
+  const pane = source("../src/surfaces/change/review/Pane.svelte");
   if (!/markRead\(\(weakRows\.get\(file\.path\) \?\? \[\]\)\.filter\(\(w\) => inHunk\(h, w\)\)\)/.test(pane))
     fail("marking one hunk records every weakened row in its file as read");
   // No count before the list is read.

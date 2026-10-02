@@ -14,7 +14,6 @@ use std::path::PathBuf;
 /// Every surface reads the word and glyph from here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum ChangeState {
     /// A record exists. No branch, no worktree, nothing has run.
     #[serde(rename = "drafted")]
@@ -148,6 +147,10 @@ pub enum Standing {
         then: Option<String>,
         /// The working-tree digest now; `None` when it could not be read.
         now: Option<String>,
+        /// Why a digest is missing, when that is known: the paths a `check`
+        /// moved, or an embedded repository it cannot see into.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
     },
     /// The latest `check` did not pass.
     Failed { summary: String },
@@ -187,10 +190,10 @@ impl Standing {
             Standing::Verified => {
                 "`check` exited zero against the working tree as it stands".into()
             }
-            Standing::Stale { then, now } => {
+            Standing::Stale { then, now, why } => {
                 format!(
                     "gates passed, stale — {}",
-                    stale_clause(then.as_deref(), now.as_deref())
+                    stale_clause(then.as_deref(), now.as_deref(), why.as_deref())
                 )
             }
             Standing::ChecksChanged { .. } => {
@@ -213,16 +216,28 @@ impl Standing {
 
 /// Why a passing `check` no longer describes the tree: which negation of
 /// `still_current` happened.
-fn stale_clause(then: Option<&str>, now: Option<&str>) -> String {
+fn stale_clause(then: Option<&str>, now: Option<&str>, why: Option<&str>) -> String {
     let short = |d: &str| d.chars().take(7).collect::<String>();
     match (then, now) {
-        (None, _) => "no tree digest was recorded when it ran (the tree moved while it ran, \
-                      or could not be read), so nothing says what it passed against"
-            .into(),
-        (Some(t), None) => format!(
-            "it ran against tree {} and the tree now could not be read",
-            short(t)
-        ),
+        (None, _) => match why {
+            Some(why) => format!(
+                "no tree digest was recorded when it ran — {why} — so nothing says what it \
+                 passed against"
+            ),
+            None => "no tree digest was recorded when it ran (the tree moved while it ran, \
+                     or could not be read), so nothing says what it passed against"
+                .into(),
+        },
+        (Some(t), None) => match why {
+            Some(why) => format!(
+                "it ran against tree {} and the tree now could not be read — {why}",
+                short(t)
+            ),
+            None => format!(
+                "it ran against tree {} and the tree now could not be read",
+                short(t)
+            ),
+        },
         (Some(t), Some(n)) => format!(
             "the working tree changed after it ran (tree {} then, {} now)",
             short(t),
@@ -409,9 +424,17 @@ fn stale_because(ran_at: Option<&CommitStamp>, now: Option<&CommitStamp>) -> Str
                 passed against"
             .into();
     };
+    let why = match &then.tree {
+        None => then.tree_unknown.as_deref(),
+        Some(_) => now.and_then(|n| n.tree_unknown.as_deref()),
+    };
     format!(
         "but {}",
-        stale_clause(then.tree.as_deref(), now.and_then(|n| n.tree.as_deref()))
+        stale_clause(
+            then.tree.as_deref(),
+            now.and_then(|n| n.tree.as_deref()),
+            why
+        )
     )
 }
 
@@ -475,6 +498,10 @@ pub struct CommandResult {
     /// Lines that look like the actual failures, where the runner is
     /// recognised; empty otherwise rather than a guess.
     pub failures: Vec<String>,
+    /// How many tests ran, as the runner printed it anywhere in the output;
+    /// or why that is not known. Never an input to *verified*.
+    #[serde(default)]
+    pub tests: crate::core::testcount::CommandCount,
 }
 
 impl CommandResult {
@@ -497,6 +524,7 @@ impl CommandResult {
             output_bytes: 0,
             output_digest: crate::core::hash::hex(b""),
             failures: Vec::new(),
+            tests: Default::default(),
         }
     }
 
@@ -547,9 +575,16 @@ pub struct CommitStamp {
     /// tree moved while a gate ran: *cannot verify*.
     #[serde(default)]
     pub tree: Option<String>,
+    /// Why `tree` is `None`, when that is known: an embedded repository with
+    /// work its commit does not record, or a `check` that moved the tree
+    /// (naming the paths it moved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_unknown: Option<String>,
     /// `None` on a detached head.
     pub branch: Option<String>,
-    /// Whether nothing was uncommitted or untracked. Shown, never a condition
+    /// Whether the working-tree digest is the commit's own tree: nothing on
+    /// disk the commit does not record. Never read from `git status`, which
+    /// an `assume-unchanged` flag hides an edit from. Shown, never a condition
     /// of `verified` (the digest covers what the commit does not).
     pub clean: bool,
     pub changed_files: u32,
@@ -604,7 +639,7 @@ impl Change {
 
 /// The specification moved under a run, and the run never saw it. Derived
 /// from the run's close against the change's start; never stored.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(
     feature = "typescript",
@@ -737,6 +772,14 @@ pub struct GateReport {
     /// The tree when this gate ran; `None` outside a repository (a finding).
     #[serde(default)]
     pub commit: Option<CommitStamp>,
+    /// The JUnit files `check` declared, as read after this run. Empty for
+    /// every other gate. Older `check` reports keep the reads, not the cases.
+    #[serde(default)]
+    pub junit: Vec<crate::core::testcount::junit::JunitFile>,
+    /// Where the change left its base branch when this ran: the one home of
+    /// the change's merge base, stamped by the host on every `check` report.
+    #[serde(default)]
+    pub base_commit: Option<String>,
 }
 
 /// What a gate run in a repository amounts to, for callers outside this
@@ -745,10 +788,10 @@ pub struct GateReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum GateState {
-    /// Gates were declared and every command passed.
-    Verified,
+    /// Gates were declared and every command passed. Never *verified*: that
+    /// word is a change's, against its tree, and only `check`'s.
+    Passed,
     /// Gates were declared and at least one did not pass.
     Failed,
     /// No `devplane.toml`, or one that declares no checks.
@@ -761,22 +804,22 @@ pub enum GateState {
 impl GateState {
     pub fn as_str(self) -> &'static str {
         match self {
-            GateState::Verified => "verified",
+            GateState::Passed => "passed",
             GateState::Failed => "failed",
             GateState::NoGates => "no_gates",
             GateState::ConfigUnreadable => "config_unreadable",
         }
     }
 
-    /// Only `Verified` is a pass; *nothing was checked* is never success.
+    /// Only `Passed` is a pass; *nothing was checked* is never success.
     pub fn passed(self) -> bool {
-        matches!(self, GateState::Verified)
+        matches!(self, GateState::Passed)
     }
 
     /// One sentence, and no two of them read alike.
     pub fn says(self) -> &'static str {
         match self {
-            GateState::Verified => "This project's own checks passed.",
+            GateState::Passed => "This project's own checks passed.",
             GateState::Failed => "A check did not pass. Nothing here has been marked done.",
             GateState::NoGates => {
                 "This repository declares no checks, so nothing is verified and nothing pretends to be."
@@ -885,10 +928,6 @@ pub struct Change {
     /// The isolated checkout, when the change has one.
     pub worktree: Option<PathBuf>,
     pub branch: Option<String>,
-    /// The report this change was started from, when a person started it from
-    /// one. Offering or finishing the change answers that report as fixed.
-    #[serde(default)]
-    pub from_report: Option<crate::core::ReportId>,
     /// Runs that have worked on this, oldest first.
     pub runs: Vec<RunId>,
     /// What preparing the checkout did. Not a gate and not in `gates`: it says
@@ -921,6 +960,12 @@ pub struct Change {
     /// *verified* follows the tree. `None` is unknown, never unchanged.
     #[serde(default)]
     pub tree_now: Option<CommitStamp>,
+    /// When `tree_now` was read from disk; `None` when nobody recorded it.
+    /// A surface that shows `verified` from it says how old it is; one that
+    /// states it (a single change, the certificate, the offer) reads the
+    /// tree again instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_as_of: Option<Timestamp>,
     /// When the worktree was removed. Archived is not deleted: the record stays.
     #[serde(default)]
     pub archived_at: Option<Timestamp>,
@@ -932,6 +977,15 @@ pub struct Change {
     /// budget) often outlive every run.
     #[serde(default)]
     pub snoozed: crate::core::attention::Snoozed,
+    /// The latest base checks: the base's tests on this change and its new
+    /// tests on the base, for one (base, tree, definition). Beside the gates,
+    /// never among them: nothing that derives the state reads it.
+    #[serde(
+        default,
+        rename = "base_checks_result",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub base_checks: Option<crate::core::base_checks::BaseChecks>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -958,7 +1012,6 @@ impl Change {
             spec_at_start: None,
             worktree: None,
             branch: None,
-            from_report: None,
             runs: Vec::new(),
             setup: None,
             gates: Vec::new(),
@@ -969,9 +1022,11 @@ impl Change {
             stopped: None,
             waiting: None,
             tree_now: None,
+            tree_as_of: None,
             archived_at: None,
             pull_request: None,
             snoozed: Default::default(),
+            base_checks: None,
             created_at: now,
             updated_at: now,
         }
@@ -1051,6 +1106,10 @@ impl Change {
         Standing::Stale {
             then: report.commit.as_ref().and_then(|c| c.tree.clone()),
             now: now.and_then(|c| c.tree.clone()),
+            why: match report.commit.as_ref().and_then(|c| c.tree.as_ref()) {
+                None => report.commit.as_ref().and_then(|c| c.tree_unknown.clone()),
+                Some(_) => now.and_then(|c| c.tree_unknown.clone()),
+            },
         }
     }
 
@@ -1256,6 +1315,8 @@ mod drift_tests {
         assert_eq!(w.last_pass_at(), None);
         let at = |s: &str| -> Timestamp { s.parse().unwrap() };
         let report = |when: &str, ok: bool| GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: at(when),
             duration_ms: 1,
@@ -1313,6 +1374,8 @@ mod tests {
         assert!(!w.claim_is_worth_showing());
 
         let report = |ok: bool| GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: Timestamp::now(),
             duration_ms: 1,
@@ -1469,6 +1532,8 @@ mod tests {
             ..ok.clone()
         };
         let report = |cmds: Vec<CommandResult>| GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: Timestamp::now(),
             duration_ms: 1,
@@ -1486,6 +1551,8 @@ mod tests {
     #[test]
     fn feedback_names_the_failures_not_the_whole_log() {
         let report = GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: Timestamp::now(),
             duration_ms: 1,
@@ -1511,6 +1578,8 @@ mod tests {
     #[test]
     fn a_timeout_is_reported_as_one() {
         let report = GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: Timestamp::now(),
             duration_ms: 1,
@@ -1530,11 +1599,11 @@ mod tests {
     }
     /// Four situations, four distinct sentences, one pass.
     #[test]
-    fn only_a_verified_gate_is_a_pass_and_no_two_states_read_alike() {
+    fn only_a_passed_gate_is_a_pass_and_no_two_states_read_alike() {
         use GateState::*;
-        let all = [Verified, Failed, NoGates, ConfigUnreadable];
+        let all = [Passed, Failed, NoGates, ConfigUnreadable];
 
-        assert!(Verified.passed());
+        assert!(Passed.passed());
         for state in [Failed, NoGates, ConfigUnreadable] {
             assert!(!state.passed(), "{state:?} must not be a pass");
         }

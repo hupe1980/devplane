@@ -1,4 +1,4 @@
-//! `devplane login github`, `devplane logout github`, and `doctor`'s GitHub
+//! `devplane auth login`, `devplane auth logout`, and `doctor`'s GitHub
 //! section. Sign-in goes through the running host when there is one (so the
 //! window shows the same code) and runs in this process otherwise; both store
 //! to the same credential-store entry.
@@ -79,7 +79,7 @@ fn token_from_stdin() -> Result<Secret> {
     if std::io::stdin().is_terminal() {
         bail!(
             "`--with-token` reads the token from stdin, never an argument: \
-             `echo \"$TOKEN\" | devplane login github --with-token`"
+             `echo \"$TOKEN\" | devplane auth login --with-token`"
         );
     }
     let mut s = String::new();
@@ -266,7 +266,7 @@ pub fn doctor_lines(hosts: &Value, default_host: &str) -> Vec<String> {
                     h["user_code"].as_str().unwrap_or("?"),
                     h["verification_uri"].as_str().unwrap_or("?")
                 ),
-                "expired" => format!("sign-in expired — devplane login github{flag}"),
+                "expired" => format!("sign-in expired — devplane auth login{flag}"),
                 "rate_limited" => {
                     format!("rate limited until {}", h["until"].as_str().unwrap_or("?"))
                 }
@@ -275,7 +275,7 @@ pub fn doctor_lines(hosts: &Value, default_host: &str) -> Vec<String> {
                     h["since"].as_str().unwrap_or("?"),
                     h["why"].as_str().unwrap_or("")
                 ),
-                _ => format!("not signed in — devplane login github{flag}"),
+                _ => format!("not signed in — devplane auth login{flag}"),
             };
             format!("  {name:<width$}   {says}")
         })
@@ -293,8 +293,8 @@ fn ago(t: jiff::Timestamp) -> String {
 
 /// Every GitHub host's sign-in and the configured host: from the running
 /// host's diagnostics when there are some, else from this machine's record.
-pub fn doctor_hosts(diag: Option<&Value>) -> (Value, String) {
-    match (diag.map(|d| &d["forge"]["github"]), GitHub::for_home().ok()) {
+pub fn doctor_hosts(hosts: Option<&Value>) -> (Value, String) {
+    match (hosts, GitHub::for_home().ok()) {
         (Some(v), Some(hub)) if v.is_array() => (v.clone(), hub.default_host().to_string()),
         (_, Some(hub)) => (
             serde_json::to_value(hub.views()).unwrap_or_default(),
@@ -305,9 +305,9 @@ pub fn doctor_hosts(diag: Option<&Value>) -> (Value, String) {
 }
 
 /// `doctor`'s GitHub section.
-pub fn print_doctor(diag: Option<&Value>) {
+pub fn print_doctor(hosts: Option<&Value>) {
     println!("\n{}", paint(BOLD, "github"));
-    let (hosts, default_host) = doctor_hosts(diag);
+    let (hosts, default_host) = doctor_hosts(hosts);
     for line in doctor_lines(&hosts, &default_host) {
         println!("{line}");
     }
@@ -357,7 +357,7 @@ mod tests {
         let lines = doctor_lines(&hosts, "github.com");
         assert!(lines[0].contains("signed in as octocat · repo, read:org · last read"));
         assert!(
-            lines[1].contains("not signed in — devplane login github --host ghe.corp"),
+            lines[1].contains("not signed in — devplane auth login --host ghe.corp"),
             "{lines:?}"
         );
     }

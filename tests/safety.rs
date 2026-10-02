@@ -7,30 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "devplane-safety-{tag}-{}-{}",
-        std::process::id(),
-        jiff::Timestamp::now().as_nanosecond()
-    ));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+mod common;
+use common::{git, scratch};
 
 fn repo(tag: &str) -> PathBuf {
     let dir = scratch(tag);
@@ -55,7 +33,10 @@ async fn a_taken_port_is_refused_rather_than_swapped() {
         .expect_err("a taken port must not bind");
     let msg = format!("{err:#}");
     assert!(msg.contains(&port.to_string()), "{msg}");
-    assert!(msg.contains("devplane connect"), "names the fix: {msg}");
+    assert!(
+        msg.contains("devplane agent connect"),
+        "names the fix: {msg}"
+    );
     assert!(msg.contains("--port"), "names the fix: {msg}");
     drop(squatter);
 }
@@ -261,7 +242,15 @@ async fn a_gate_leaves_no_process_behind() {
     let pidfile = dir.join("pid");
     let cmd = format!("sleep 60 & echo $! > {}; echo done", pidfile.display());
     let started = std::time::Instant::now();
-    let report = devplane::gates::run("check", &[cmd], &dir, Duration::from_secs(30), 1, &[]).await;
+    let report = devplane::gates::run(
+        "check",
+        &[cmd],
+        &dir,
+        Duration::from_secs(30),
+        1,
+        &devplane::gates::GateInput::default(),
+    )
+    .await;
     assert!(report.passed(), "{:?}", report.commands);
     assert!(
         started.elapsed() < Duration::from_secs(15),
@@ -288,7 +277,15 @@ async fn a_cancelled_gate_kills_its_group() {
     let cmd = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
     let d = dir.clone();
     let task = tokio::spawn(async move {
-        devplane::gates::run("check", &[cmd], &d, Duration::from_secs(60), 1, &[]).await
+        devplane::gates::run(
+            "check",
+            &[cmd],
+            &d,
+            Duration::from_secs(60),
+            1,
+            &devplane::gates::GateInput::default(),
+        )
+        .await
     });
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let pid: i32 = loop {

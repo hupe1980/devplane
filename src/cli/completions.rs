@@ -318,7 +318,7 @@ mod tests {
             .map(|c| c.get_name())
             .collect();
         assert!(
-            visible.len() > 20,
+            visible.len() > 12,
             "only {} commands are visible; this guard has stopped reading the tree",
             visible.len()
         );

@@ -1,5 +1,4 @@
 import { register } from "../../lib/surfaces";
-import Answer from "./Answer.svelte";
 
 register({
   id: "answer",
@@ -13,5 +12,5 @@ register({
   bare: true,
   reads: ["/api/inbox"],
   select: () => ({}),
-  component: Answer,
+  page: () => import("./Answer.svelte"),
 });

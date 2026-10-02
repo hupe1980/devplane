@@ -5,7 +5,7 @@
 -- observation or a projection of one; losing it costs history.
 --
 -- The record: `changes`, `asks`, `decisions`, `agent_capabilities`, `looks`,
--- `reports`, and the `trusted` flag. Nothing can say these again, so the
+-- and the `trusted` flag. Nothing can say these again, so the
 -- schema is versioned and an old file is moved aside rather than dropped.
 --
 -- `events` and `decisions` are append-only; tables updated in place say how.
@@ -23,11 +23,15 @@ CREATE TABLE IF NOT EXISTS projects (
 -- A projection of the event log, stored so the board renders before a replay
 -- finishes. `payload` is the whole Run; the other columns are the ones a query
 -- reads (probe cleanup, rule scope, inbox vendors, order and retention).
+-- `last_seq` is the payload's own mark of the last stored event folded in: a
+-- snapshot is written only over one that folded no more, so an older snapshot
+-- saved late cannot drop events the projection mark has already passed.
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
     agent        TEXT NOT NULL,
     cwd          TEXT NOT NULL,
     last_event_at TEXT NOT NULL,
+    last_seq     INTEGER NOT NULL DEFAULT 0,
     payload      TEXT NOT NULL
 );
 
@@ -92,8 +96,7 @@ CREATE TABLE IF NOT EXISTS decisions (
     subject      TEXT NOT NULL,
     outcome      TEXT NOT NULL,
     reason       TEXT,
-    -- The tool the call was, recorded rather than inferred from `subject` so
-    -- `devplane rewind` can tell exactly which calls wrote through a shell.
+    -- The tool the call was, recorded rather than inferred from `subject`.
     tool         TEXT,
     -- Where the MCP server behind `tool` came from, as the vendor reported it
     -- (`plugin`, `sdk`, `user`, `project`, or an unseen value stored as is).
@@ -207,22 +210,6 @@ CREATE TABLE IF NOT EXISTS projection (
     id        INTEGER PRIMARY KEY CHECK (id = 1),
     through   INTEGER NOT NULL
 );
-
--- A finding one project filed about another. `payload` is the whole report,
--- with provenance the host resolved from a run. `target_project` is NULL for
--- a GitHub draft or a report kept on its own change. Rewritten whole on every
--- state change; the resolution itself is a decision on the source change.
-CREATE TABLE IF NOT EXISTS reports (
-    id             TEXT PRIMARY KEY,     -- rp-<uuid7>
-    filed_at       TEXT NOT NULL,
-    source_project TEXT NOT NULL,
-    target_project TEXT,
-    state          TEXT NOT NULL,        -- open | accepted | fixed | rejected | deferred | drafted | opened | discarded
-    payload        TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS reports_by_target ON reports(target_project, state);
-CREATE INDEX IF NOT EXISTS reports_by_source ON reports(source_project, state);
 
 -- A person read a weakened-check row of a change's review: that the row was
 -- seen, and by whom, never when — a time beside the change's ready time would

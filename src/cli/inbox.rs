@@ -3,7 +3,7 @@
 use super::raw;
 use crate::render::{BOLD, DIM, clip, level_marker, paint};
 use crate::{client, render};
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// How wide a detail line is printed; the only clip applied to it.
 const DETAIL_WIDTH: usize = 100;
@@ -11,31 +11,24 @@ const DETAIL_WIDTH: usize = 100;
 pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
     // Narrowing is done by the host, so the board and this command agree.
-    let mut path = String::from("/api/inbox?read=true");
-    if let Some(p) = project {
-        path.push_str(&format!("&project={}", crate::core::text::url_escape(p)));
-    }
-    if needs_you {
-        path.push_str("&needs_you=true");
-    }
-    // `read=true`: running the command counts as a look for the boundary.
-    let body = raw(&c, &path).await?;
+    let inbox = c.inbox(project, needs_you).await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&body)?);
+        println!("{}", serde_json::to_string_pretty(&inbox)?);
         return Ok(());
     }
-    let render::InboxResponse {
+    let crate::view::InboxView {
         items,
         folded,
         inhibited,
         narrowed,
         snoozed,
         close,
-    } = serde_json::from_value(body).context("the host's inbox reply did not parse")?;
+        ..
+    } = inbox;
 
     // The "since you last looked" line: absent when there was no previous
     // look, and on a narrowed list (the host omits `close` there).
-    if let Some(since) = close.get("since_last_look").and_then(|v| v.as_str()) {
+    if let Some(since) = close.as_ref().and_then(|c| c.since_last_look.as_deref()) {
         println!(
             "{}",
             paint(DIM, &format!("since you last looked · {since}"))
@@ -48,7 +41,9 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
             "{}",
             paint(
                 DIM,
-                &format!("{snoozed} snoozed — `devplane snooze <id> --minutes 0` brings one back")
+                &format!(
+                    "{snoozed} snoozed — `devplane inbox snooze <id> --minutes 0` brings one back"
+                )
             )
         );
     }
@@ -87,36 +82,36 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
             }
             return Ok(());
         }
-        render_close(&close);
+        render_close(close.as_ref());
         return Ok(());
     }
-    for i in &items {
+    for row in &items {
+        let i = &row.item;
+        let kind = i.kind.as_str();
+        let actions: Vec<&str> = i.actions.iter().map(|a| a.as_str()).collect();
+        let run_id = i.run_id.as_ref().map(|r| r.as_str());
+        let change_id = i.change_id.as_ref().map(|w| w.as_str());
         // The word carries "new", colour only helps: red and amber are not
         // distinguishable under deuteranopia.
-        let fresh = match i.new_to_you {
+        let fresh = match row.new_to_you {
             true => format!(" {}", paint(render::GREEN, "new")),
             false => String::new(),
         };
         // Project and age, dim and after the kind; absent where there is none
         // (`gate_down` belongs to no project).
-        let where_from = match &i.project_name {
+        let where_from = match &row.project_name {
             Some(p) if !p.is_empty() => format!(" {}", paint(DIM, p)),
             _ => String::new(),
         };
-        let waited = i
-            .since
-            .as_deref()
-            .and_then(|t| t.parse::<jiff::Timestamp>().ok())
-            .map(|t| {
-                let secs = (jiff::Timestamp::now() - t).get_seconds().max(0);
-                format!(" {}", paint(DIM, &render::ago(secs)))
-            })
-            .unwrap_or_default();
+        let waited = {
+            let secs = (jiff::Timestamp::now() - i.since).get_seconds().max(0);
+            format!(" {}", paint(DIM, &render::ago(secs)))
+        };
         println!(
             "{} {} {}{}{}{}",
-            level_marker(&i.level),
+            level_marker(i.level.as_str()),
             paint(BOLD, &i.title),
-            paint(DIM, &format!("[{}]", i.kind)),
+            paint(DIM, &format!("[{kind}]")),
             where_from,
             waited,
             fresh
@@ -137,8 +132,8 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
                 }
             }
             if clipped {
-                let whole = match (i.run_id.as_deref(), i.change_id.as_deref()) {
-                    (Some(r), _) if !r.is_empty() => format!("devplane show {r}"),
+                let whole = match (run_id, change_id) {
+                    (Some(r), _) if !r.is_empty() => format!("devplane run show {r}"),
                     (_, Some(w)) if !w.is_empty() => format!("devplane change show {w}"),
                     _ => "devplane inbox --json".to_string(),
                 };
@@ -184,17 +179,17 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
             println!("     {}", paint(DIM, &no.sentence));
         }
         // A change has no run of its own once the agent is gone.
-        let subject = match (i.change_id.as_deref(), i.run_id.as_deref()) {
+        let subject = match (change_id, run_id) {
             (Some(w), _) => format!("change {}", clip(w, 14)),
             (None, Some(r)) if !r.is_empty() => format!("run {}", clip(r, 12)),
             _ => String::new(),
         };
         // A machine-wide item has neither subject nor action: print nothing.
-        let trailer = match (subject.is_empty(), i.actions.is_empty()) {
+        let trailer = match (subject.is_empty(), actions.is_empty()) {
             (true, true) => String::new(),
-            (true, false) => i.actions.join(", "),
+            (true, false) => actions.join(", "),
             (false, true) => subject,
-            (false, false) => format!("{subject} · {}", i.actions.join(", ")),
+            (false, false) => format!("{subject} · {}", actions.join(", ")),
         };
         if !trailer.is_empty() {
             println!("     {}", paint(DIM, &trailer));
@@ -203,27 +198,18 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
             println!("     {}", paint(DIM, url));
         }
         // The one action whose command a person cannot guess.
-        if i.actions.iter().any(|a| a == "resume")
-            && let Some(w) = &i.change_id
+        if actions.contains(&"resume")
+            && let Some(w) = change_id
         {
             println!(
                 "     {}",
                 paint(DIM, &format!("devplane change resume {w}"))
             );
         }
-        if let Some(r) = &i.report {
-            let says = match i.actions.iter().any(|a| a == "open_draft") {
-                true => format!("devplane report show {r} · open {r} | discard {r}"),
-                false => format!(
-                    "devplane report start {r} | reject {r} --reason … | defer {r} --reason …"
-                ),
-            };
-            println!("     {}", paint(DIM, &says));
-        }
-        if i.actions
+        if actions
             .iter()
-            .any(|a| a == "tell_run" || a == "accept_drift")
-            && let (Some(w), Some(r)) = (&i.change_id, i.run_id.as_deref())
+            .any(|a| *a == "tell_run" || *a == "accept_drift")
+            && let (Some(w), Some(r)) = (change_id, run_id)
         {
             println!(
                 "     {}",
@@ -238,7 +224,7 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         if let Some(ask) = &i.ask {
             println!(
                 "     {}",
-                paint(DIM, &answer_command(ask, &i.kind, &i.options))
+                paint(DIM, &answer_command(ask.as_str(), kind, &i.options))
             );
         }
     }
@@ -249,12 +235,12 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         for f in &folded {
             println!(
                 "{} {} {}",
-                level_marker(&f.level),
-                paint(BOLD, &format!("{} × {}", f.count, f.kind)),
+                level_marker(f.level.as_str()),
+                paint(BOLD, &format!("{} × {}", f.count, f.kind.as_str())),
                 paint(
                     DIM,
                     &match &f.project {
-                        Some(p) => format!("in {p}"),
+                        Some(p) => format!("in {}", p.as_str()),
                         None => "across projects".to_string(),
                     }
                 )
@@ -312,24 +298,16 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
     Ok(())
 }
 
-pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
-    let c = crate::local::Reader::open().await?;
-    let v = raw(&c, &format!("/api/attention?days={days}")).await?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
-        return Ok(());
-    }
+/// `doctor`'s inbox section: per kind, what the last week raised and what
+/// became of it — whether the inbox is worth reading at all.
+pub(super) fn print_attention(v: &serde_json::Value) {
+    let days = v["days"].as_i64().unwrap_or(7);
+    println!("\n{}", paint(BOLD, &format!("inbox, last {days} days")));
     let empty = serde_json::Map::new();
     let kinds = v.get("kinds").and_then(|k| k.as_object()).unwrap_or(&empty);
     if kinds.is_empty() {
-        println!(
-            "{}",
-            paint(
-                DIM,
-                &format!("Nothing has reached the inbox in the last {days} days.")
-            )
-        );
-        return Ok(());
+        println!("  {}", paint(DIM, "nothing has reached the inbox"));
+        return;
     }
     let n = |o: &serde_json::Value, k: &str| o.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
     println!(
@@ -413,29 +391,28 @@ pub async fn cmd_attention(days: i64, json: bool) -> Result<()> {
             )
         );
     }
-    Ok(())
 }
 
 pub async fn cmd_snooze(id: &str, minutes: i64, json: bool) -> Result<()> {
     let c = client::Client::connect_running().await?;
-    // Change ids (`c-…`) snooze the change; anything else is a run.
-    let what = if id.starts_with("c-") {
-        "changes"
-    } else {
-        "runs"
+    let reader = crate::local::Reader::Host(c.clone());
+    // A change id (`c-…`) snoozes the change; anything else is a run.
+    let (what, id) = match super::ids::change_or_run(&reader, id).await? {
+        super::ids::Subject::Change(id) => ("changes", id),
+        super::ids::Subject::Run(id) => ("runs", id),
     };
     let v: serde_json::Value = c
         .post(&format!("/api/{what}/{id}/snooze?minutes={minutes}"))
         .await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
-    } else if minutes == 0 {
-        println!(
+        return crate::cli::print_json(&v);
+    }
+    match minutes {
+        0 => println!(
             "{} — its items are back in the inbox.",
             paint(BOLD, "Un-snoozed")
-        );
-    } else {
-        println!("Quiet for {minutes} minutes.");
+        ),
+        _ => println!("Quiet for {minutes} minutes."),
     }
     Ok(())
 }
@@ -449,6 +426,7 @@ pub async fn cmd_answer(
     option: Option<String>,
     custom: Option<String>,
     field: Option<String>,
+    json: bool,
 ) -> Result<()> {
     if !allow && !deny && option.is_none() && custom.is_none() {
         anyhow::bail!(
@@ -464,6 +442,7 @@ pub async fn cmd_answer(
         anyhow::bail!("{}", crate::hook::refuse_self_answer(var));
     }
     let c = crate::local::Reader::open().await?;
+    let ask = &super::ids::ask(&c, ask).await?;
     let decision = match (allow, deny) {
         (true, _) => Some("allow"),
         (_, true) => Some("deny"),
@@ -477,10 +456,12 @@ pub async fn cmd_answer(
                 "option": option,
                 "custom": custom,
                 "field": field,
-                "from": "cli",
             }),
         )
         .await?;
+    if json {
+        return crate::cli::print_json(&v);
+    }
     match v.get("error").and_then(|e| e.as_str()) {
         Some(e) => anyhow::bail!("{e}"),
         // The outcome: delivered to a waiting agent, into a resumed session,
@@ -568,7 +549,7 @@ pub async fn cmd_inbox_all(json: bool) -> Result<()> {
             "",
             paint(
                 DIM,
-                &format!("devplane answer {}", a["id"].as_str().unwrap_or(""))
+                &format!("devplane inbox answer {}", a["id"].as_str().unwrap_or(""))
             )
         );
     }
@@ -780,7 +761,7 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
             )
         );
     }
-    // Sessions started before `devplane connect` have no clock reading, which
+    // Sessions started before `devplane agent connect` have no clock reading, which
     // is not the same as "nothing set". Printed only when there are some.
     if unread > 0 {
         println!(
@@ -813,25 +794,20 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
 fn answer_command(ask: &str, kind: &str, options: &[crate::core::Choice]) -> String {
     match (kind, options.first().and_then(|o| o.id.as_deref())) {
         // The option's own id — the schema's `const`, not its `title`.
-        ("question", Some(first)) => format!("devplane answer {ask} --option '{first}'"),
+        ("question", Some(first)) => format!("devplane inbox answer {ask} --option '{first}'"),
         // A question with no options is answered in prose.
-        ("question", None) => format!("devplane answer {ask} --custom '<your words>'"),
+        ("question", None) => format!("devplane inbox answer {ask} --custom '<your words>'"),
         // A permission is a grant or refusal however the agent spells options.
-        _ => format!("devplane answer {ask} --allow"),
+        _ => format!("devplane inbox answer {ask} --allow"),
     }
 }
 
 /// The empty state. Every sentence is the host's; this only lays them out.
-fn render_close(close: &serde_json::Value) {
+fn render_close(close: Option<&crate::view::Close>) {
     println!("{}", paint(render::GREEN, "Clear."));
-
-    let sentences: Vec<&str> = close
-        .get("sentences")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-
-    if sentences.is_empty() {
+    let nothing = crate::view::Close::default();
+    let close = close.unwrap_or(&nothing);
+    if close.sentences.is_empty() {
         // A day with nothing in it gets a sentence, never a table of zeroes.
         println!(
             "{}",
@@ -839,19 +815,19 @@ fn render_close(close: &serde_json::Value) {
         );
     } else {
         println!();
-        for s in sentences {
+        for s in &close.sentences {
             for line in crate::core::text::wrap(s, 76) {
                 println!("  {line}");
             }
         }
     }
 
-    if let Some(next) = close.get("next").and_then(|v| v.as_str()) {
+    if let Some(next) = &close.next {
         println!();
         println!("  {}", paint(render::YELLOW, &format!("next · {next}")));
     }
 
-    if let Some(keeps) = close.get("keeps_running").and_then(|v| v.as_str()) {
+    if let Some(keeps) = &close.keeps_running {
         println!();
         for line in crate::core::text::wrap(keeps, 76) {
             println!("{}", paint(DIM, &line));
@@ -880,7 +856,7 @@ mod tests {
             "question",
             &[choice("keep_route", "Keep it — retains /v1/login")],
         );
-        assert_eq!(cmd, "devplane answer a1 --option 'keep_route'");
+        assert_eq!(cmd, "devplane inbox answer a1 --option 'keep_route'");
         assert!(
             !cmd.contains("Keep it"),
             "the label is what a person reads and not what the protocol takes: {cmd}"
@@ -923,7 +899,7 @@ mod tests {
             ("permission", vec![]),
         ] {
             let cmd = answer_command("tok", kind, &opts);
-            assert!(cmd.starts_with("devplane answer tok "), "{cmd}");
+            assert!(cmd.starts_with("devplane inbox answer tok "), "{cmd}");
             assert!(!cmd.contains("--request"), "{cmd}");
         }
     }

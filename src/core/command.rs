@@ -14,6 +14,9 @@ pub struct Simple {
     pub fed: bool,
     /// What the shell does to each argument, index for index with `args`.
     pub kinds: Vec<ArgKind>,
+    /// The program is named by a path outside the system's own directories
+    /// (`./x.sh`, `/tmp/x`, `~/bin/x`): a file whose contents nobody read.
+    pub by_path: bool,
 }
 
 /// Whether the reader knows an argument's final text.
@@ -117,6 +120,10 @@ fn runs_its_value(name: &str) -> bool {
             | "PERL5OPT"
             | "RUBYOPT"
             | "ZDOTDIR"
+            // `less` runs `LESSOPEN`'s filter and a `+!cmd` in `LESS`.
+            | "LESS"
+            | "LESSOPEN"
+            | "LESSCLOSE"
     ) || n.starts_with("DYLD_")
         || n.starts_with("GIT_SSH")
         || n.starts_with("GIT_CONFIG_")
@@ -624,6 +631,10 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
                 );
             }
             let program = basename(&head.text).to_ascii_lowercase();
+            let by_path = (head.text.contains('/') || head.text.starts_with('~'))
+                && !SYSTEM_DIRS
+                    .iter()
+                    .any(|d| head.text.strip_prefix(d).is_some_and(|r| !r.contains('/')));
             let args: Vec<String> = words[1..].iter().map(|w| w.text.clone()).collect();
             let kinds: Vec<ArgKind> = words[1..].iter().map(Word::kind).collect();
             if matches!(
@@ -662,6 +673,9 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
                     .map(|w| w.text.as_str())
             };
             let p = program.as_str();
+            if let Some(runs) = runs_through(p, &words[1..]) {
+                first(&mut why, runs);
+            }
             // `sh < x.sh` runs the file as surely as `sh x.sh` does.
             let reads_file = redirects.iter().any(|r| !r.write);
             if INTERPRETERS.contains(&p) {
@@ -770,6 +784,7 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
                 redirects,
                 fed,
                 kinds,
+                by_path,
             })
         }
     };
@@ -784,6 +799,193 @@ fn finish(line: &mut Line, words: Vec<Word>, redirects: Vec<Redirect>, input: In
             line.barrier = Some("a command line is nested deeper than this reader follows".into());
         }
     }
+}
+
+/// Directories only the system writes: a program found there by path is the
+/// program its basename names.
+const SYSTEM_DIRS: &[&str] = &["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/"];
+
+/// Subcommands with which `tmux` runs a shell command or reads one.
+const TMUX_RUNS: &[&str] = &[
+    "new",
+    "new-session",
+    "new-window",
+    "neww",
+    "split-window",
+    "splitw",
+    "respawn-pane",
+    "respawnp",
+    "respawn-window",
+    "respawnw",
+    "run-shell",
+    "run",
+    "send-keys",
+    "send",
+    "if-shell",
+    "if",
+    "pipe-pane",
+    "pipep",
+    "display-popup",
+    "popup",
+    "source-file",
+    "source",
+    "bind-key",
+    "bind",
+    "command-prompt",
+    "confirm-before",
+    "set-hook",
+];
+
+/// Why a program that is no interpreter still runs a command line it is
+/// handed in an argument (or sets one a later word runs), if it does.
+fn runs_through(p: &str, args: &[Word]) -> Option<String> {
+    let has = |f: &dyn Fn(&str) -> bool| args.iter().any(|a| f(&a.text));
+    let flag =
+        |names: &[&str]| has(&|a: &str| names.contains(&a.split_once('=').map_or(a, |(h, _)| h)));
+    match p {
+        // `git config alias.x '!rm -rf /' && git x`: the setting is the command.
+        "git" => {
+            let at = args.iter().position(|a| !a.text.starts_with('-'))?;
+            let reads = [
+                "--get",
+                "--get-all",
+                "--get-regexp",
+                "--get-urlmatch",
+                "-l",
+                "--list",
+                "--unset",
+                "--unset-all",
+                "get",
+                "list",
+                "unset",
+            ];
+            let rest = &args[at + 1..];
+            (args[at].text == "config"
+                && !rest.iter().any(|a| reads.contains(&a.text.as_str()))
+                && rest.iter().any(|a| a.expands || git_config_runs(&a.text)))
+            .then(|| "`git config` sets a command git runs later".into())
+        }
+        "tar" | "gtar" | "bsdtar" => flag(&[
+            "--to-command",
+            "--checkpoint-action",
+            "--use-compress-program",
+            "--rsh-command",
+            "--info-script",
+            "--new-volume-script",
+            "-I",
+            "-F",
+        ])
+        .then(|| format!("`{p}` is given a command to run")),
+        "sed" | "gsed" => {
+            sed_runs(args).then(|| format!("`{p}` is given a script that may run a command"))
+        }
+        "zip" => {
+            flag(&["-TT", "--unzip-command"]).then(|| "`zip` is given a command to run".into())
+        }
+        "less" | "more" | "most" => has(&|a: &str| a.starts_with('+') && a.contains(['!', '|']))
+            .then(|| format!("`{p}` is given a command to run as it starts")),
+        "man" => flag(&["-P", "--pager", "-H", "--html"])
+            .then(|| "`man` is given a program to run as its pager".into()),
+        "tmux" => (flag(&["-f", "-C", "-CC"]) || has(&|a: &str| TMUX_RUNS.contains(&a)))
+            .then(|| "`tmux` runs a command in a session this reader cannot see".into()),
+        "screen" => (!args
+            .iter()
+            .all(|a| matches!(a.text.as_str(), "-ls" | "-list" | "-v" | "-version")))
+        .then(|| "`screen` runs a command in a session this reader cannot see".into()),
+        _ => None,
+    }
+}
+
+/// Whether a `sed` invocation's script may run a command (GNU's `e` command
+/// or `s///e` flag), or is somewhere this reader cannot see.
+fn sed_runs(args: &[Word]) -> bool {
+    let short = |t: &str, c: char| {
+        t.starts_with('-') && !t.starts_with("--") && !t.starts_with("-i") && t.contains(c)
+    };
+    let mut scripts: Vec<&Word> = Vec::new();
+    let mut given = false;
+    let mut operand = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let t = a.text.as_str();
+        if let Some(v) = t.strip_prefix("--expression=") {
+            given = true;
+            if a.expands || sed_script_runs(v) {
+                return true;
+            }
+        } else if t == "--expression" || (short(t, 'e') && t.ends_with('e')) {
+            given = true;
+            match it.next() {
+                Some(w) => scripts.push(w),
+                None => return true,
+            }
+        } else if t == "--file" || t.starts_with("--file=") || short(t, 'f') || short(t, 'e') {
+            return true; // a script in a file nobody read, or a bundle not followed
+        } else if matches!(t, "-l" | "--line-length") {
+            it.next();
+        } else if !t.starts_with('-') && operand.is_none() {
+            operand = Some(a);
+        }
+    }
+    if !given {
+        scripts.extend(operand);
+    }
+    scripts
+        .iter()
+        .any(|w| w.expands || sed_script_runs(&w.text))
+}
+
+/// Reads a sed script far enough to find an `e` command or an `s///e`.
+fn sed_script_runs(script: &str) -> bool {
+    let b: Vec<char> = script.chars().collect();
+    // Past a field closed by `d`, starting at `i`.
+    let field = |mut i: usize, d: char| {
+        while i < b.len() && b[i] != d {
+            i += if b[i] == '\\' { 2 } else { 1 };
+        }
+        i + 1
+    };
+    let until = |mut i: usize, stop: &[char]| {
+        while i < b.len() && !stop.contains(&b[i]) {
+            i += 1;
+        }
+        i
+    };
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        // Addresses, separators and blocks: lines, `$`, ranges, `/re/`, `\cREc`.
+        if c.is_whitespace()
+            || c.is_ascii_digit()
+            || matches!(c, ';' | '$' | ',' | '~' | '!' | '+' | '{' | '}' | 'I' | 'M')
+        {
+            i += 1;
+            continue;
+        }
+        match c {
+            '/' => i = field(i + 1, '/'),
+            '\\' if i + 1 < b.len() => i = field(i + 2, b[i + 1]),
+            'e' => return true,
+            's' | 'y' if i + 1 < b.len() => {
+                let d = b[i + 1];
+                i = field(field(i + 2, d), d).min(b.len());
+                let end = until(i, &[';', '\n', '}', 'w']);
+                if c == 's' && b[i..end].contains(&'e') {
+                    return true;
+                }
+                // `s/a/b/w file`: the file name runs to the end of the line.
+                i = if b.get(end) == Some(&'w') {
+                    until(end, &['\n'])
+                } else {
+                    end
+                };
+            }
+            'a' | 'i' | 'c' | 'r' | 'R' | 'w' | 'W' => i = until(i, &['\n']),
+            'b' | 't' | 'T' | ':' | 'q' | 'Q' | 'l' | 'L' => i = until(i, &[';', '\n']),
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 /// Consumes one wrapper flag and its value; `false` for an unknown flag.

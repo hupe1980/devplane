@@ -68,6 +68,8 @@
   import Empty from "../../lib/ui/Empty.svelte";
   import { safeHref } from "../../lib/href";
   import { ago, listed, plural } from "../../lib/text";
+  import Skeleton from "../../lib/Skeleton.svelte";
+  import { cursor } from "../../lib/cursor";
 
   let {
     issues = [],
@@ -114,6 +116,21 @@
   /// Counts only for data: a failure state has none.
   const counted = $derived(loaded && !failed && !blocking && !allElsewhere && !stale);
   let selected = $state<string | null>(null);
+  let order = $state<string[]>([]);
+  const openRow = (url: string) => {
+    const to = safeHref(url);
+    if (to) window.open(to, "_blank", "noopener");
+  };
+  // The registry's list keys: `j`/`k` select, Enter opens it on GitHub.
+  $effect(() =>
+    cursor({
+      scope: "github",
+      size: () => order.length,
+      at: () => order.indexOf(selected ?? ""),
+      go: (i) => (selected = order[i]),
+      open: (i) => openRow(order[i]),
+    }),
+  );
   const columns: Column<Row>[] = [
     { key: "you", label: "", width: 36 },
     { key: "title", label: "Title", width: 520, sort: (r) => r.title },
@@ -132,7 +149,7 @@
 <div class="page">
   <header class="head">
     <h1>Issues and pull requests</h1>
-    {#if coverage && !blocking}<span class="cov">{coverage.configured} of {coverage.projects} projects are on GitHub{absent ? ` — ${absent} not seen here` : ""}</span>{/if}
+    {#if coverage && !blocking}<span class="cov">{coverage.configured} {plural(coverage.configured, "project", "projects")} on GitHub{absent ? ` · ${absent} not, and not seen here` : ""}</span>{/if}
   </header>
   <Tabs
     tabs={[
@@ -143,7 +160,7 @@
     label="what to show"
   />
   {#if !loaded}
-    <p class="quiet">Asking GitHub…</p>
+    <Skeleton />
   {:else if failed}
     <Empty icon="alert" title="The forge could not be read" body={failed} />
   {:else if says && blocking}
@@ -175,10 +192,7 @@
       <Empty icon="forge" title={showing === "issues" ? "No open issue" : "No open pull request"} body="Across every registered project that has a GitHub remote." limit={absent ? `${absent} projects have no GitHub remote and are not counted.` : ""} />
     {:else}
       <div class="frame">
-        <Grid id="forge" {columns} rows={shown} key={(r) => r.url} group={(r) => (r.needs_you ? "Needs you" : "Everything else")} bind:selected open={(r) => {
-          const to = safeHref(r.url);
-          if (to) window.open(to, "_blank", "noopener");
-        }} label={showing}>
+        <Grid id="forge" {columns} rows={shown} key={(r) => r.url} group={(r) => (r.needs_you ? "Needs you" : "Everything else")} bind:selected bind:order open={(r) => openRow(r.url)} label={showing}>
           {#snippet cell(r, c)}
             {#if c.key === "you"}{#if r.needs_you}<span class="you" title="needs you"><Icon name="person" size={13} /></span>{/if}
             {:else if c.key === "title"}<span class="t">{r.title}</span>

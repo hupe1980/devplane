@@ -768,7 +768,7 @@ fn summarise_tool(tool: &str, input: &serde_json::Value) -> String {
 /// Records that a question left the inbox unanswered. Only for questions not
 /// answerable from here: a driven ask has its own durable `asks` row. Blind
 /// spot: the vendor's auto-continue timer submits, so it looks exactly like an
-/// answer; `devplane modes` covers that half.
+/// answer; `devplane status --modes` covers that half.
 fn abandon_open_question(
     run: &mut crate::core::Run,
     at: jiff::Timestamp,
@@ -907,19 +907,24 @@ pub mod facts {
                     out.push_str(&format!("  {}  {}  {}\n", s.run.as_str(), s.agent, s.at));
                 }
             }
-            // Said even when zero: "none" differs from "did not look".
-            out.push_str(&format!(
-                "It leaves {} session{} running in their own terminals untouched",
-                self.leaves,
-                if self.leaves == 1 { "" } else { "s" }
-            ));
-            if self.delegated > 0 {
-                out.push_str(&format!(
-                    ", and {} delegated to a provider's own daemon",
-                    self.delegated
-                ));
+            // What it leaves running, said only when there is something.
+            match (self.leaves, self.delegated) {
+                (0, 0) => {}
+                (0, d) => out.push_str(&format!(
+                    "It leaves {d} session{} delegated to a provider's own daemon untouched.\n",
+                    if d == 1 { "" } else { "s" }
+                )),
+                (n, d) => {
+                    out.push_str(&format!(
+                        "It leaves {n} session{} running in their own terminals untouched",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                    if d > 0 {
+                        out.push_str(&format!(", and {d} delegated to a provider's own daemon"));
+                    }
+                    out.push_str(".\n");
+                }
             }
-            out.push_str(".\n");
             if self.unanswered > 0 {
                 out.push_str(&format!(
                     "{} question{} waiting for you stay{} open: the agent's session is on disk, \
@@ -1000,10 +1005,13 @@ mod quitting_says {
             "{s}"
         );
         assert!(
-            s.contains("It leaves 0 sessions running"),
-            "zero is said: {s}"
+            !s.contains("running in their own terminals"),
+            "no terminal session is left, so none is spoken of: {s}"
         );
-        assert!(s.contains("1 delegated"), "{s}");
+        assert!(
+            s.contains("It leaves 1 session delegated to a provider's own daemon"),
+            "{s}"
+        );
         assert!(s.contains("3 questions waiting for you stay open"), "{s}");
 
         let none = Quitting::default().says();
@@ -2732,6 +2740,7 @@ mod currency_tests {
         CommitStamp {
             commit: Some("c0ffee".into()),
             tree: tree.map(str::to_string),
+            tree_unknown: None,
             branch: Some("main".into()),
             clean,
             changed_files: if clean { 0 } else { 1 },

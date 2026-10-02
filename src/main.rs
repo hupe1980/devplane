@@ -23,10 +23,24 @@ async fn main() {
         }
         return;
     }
-    let cli = devplane::cli::Cli::parse();
+    let cli = match devplane::cli::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // A name the command line had before it was reorganised by noun
+            // is refused like any unknown one, with where it went.
+            if e.kind() == clap::error::ErrorKind::InvalidSubcommand
+                && let Some(word) = std::env::args().skip(1).find(|a| !a.starts_with('-'))
+                && let Some(now) = devplane::cli::renamed(&word)
+            {
+                eprintln!("error: {now}");
+                std::process::exit(2);
+            }
+            e.exit();
+        }
+    };
     // Read before the command consumes the arguments: an error under `--json`
     // is printed as JSON.
-    let json = cli.json();
+    let json = cli.json;
     if let Err(e) = devplane::cli::run(cli).await {
         std::process::exit(devplane::cli::report_error(&e, json));
     }

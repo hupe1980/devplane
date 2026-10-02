@@ -8,52 +8,15 @@ use devplane::acp::{AcpEvent, AgentSpec};
 use std::path::PathBuf;
 use std::time::Duration;
 
-fn repo_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
-}
-
 /// A working directory per test, so the fixture's session files stay out of
 /// the repository.
 fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "vp-conformance-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+    common::scratch("conformance")
 }
 
-/// The fixture agent, next to the test binary, refused if older than its source.
+/// The fixture agent; this suite is about it, so its absence fails rather than skips.
 fn echo_agent() -> AgentSpec {
-    let exe = std::env::current_exe().expect("test binary path");
-    // target/debug/deps/conformance-<hash> → target/debug/examples/echo_agent
-    let dir = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("target/debug")
-        .join("examples");
-    let bin = dir.join("echo_agent");
-    assert!(
-        bin.exists(),
-        "build the fixture first: cargo build --examples ({} missing)",
-        bin.display()
-    );
-
-    // `cargo test` does not rebuild examples, so a stale agent would silently
-    // test the previous behaviour.
-    let src = repo_root().join("examples/echo_agent.rs");
-    if let (Ok(b), Ok(s)) = (
-        std::fs::metadata(&bin).and_then(|m| m.modified()),
-        std::fs::metadata(&src).and_then(|m| m.modified()),
-    ) && s > b
-    {
-        panic!(
-            "the fixture agent is older than its source: run `cargo build --examples`.\n\
-             Testing a stale agent passes for the wrong reason, which is worse than failing."
-        );
-    }
-    AgentSpec::new("echo", "Echo", bin.to_str().unwrap())
+    common::echo_spec().expect("build the fixture first: cargo build --examples")
 }
 
 async fn collect(
@@ -74,7 +37,6 @@ async fn collect(
 
 #[tokio::test]
 async fn a_prompt_runs_a_turn_and_streams_the_answer() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .expect("spawning the agent");
@@ -102,7 +64,6 @@ async fn a_prompt_runs_a_turn_and_streams_the_answer() {
 
 #[tokio::test]
 async fn a_tool_call_is_reported() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -137,7 +98,6 @@ async fn a_tool_call_is_reported() {
 /// waiting out the grace period into a kill.
 #[tokio::test]
 async fn a_stop_answers_a_pending_permission_before_cancelling_the_turn() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -174,7 +134,6 @@ async fn a_stop_answers_a_pending_permission_before_cancelling_the_turn() {
 
 #[tokio::test]
 async fn a_permission_request_blocks_until_it_is_answered() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -221,7 +180,6 @@ async fn a_permission_request_blocks_until_it_is_answered() {
 
 #[tokio::test]
 async fn refusing_a_permission_also_lets_the_turn_finish() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -246,7 +204,6 @@ async fn refusing_a_permission_also_lets_the_turn_finish() {
 
 #[tokio::test]
 async fn a_refusal_is_reported_as_the_stop_reason() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -263,7 +220,6 @@ async fn a_refusal_is_reported_as_the_stop_reason() {
 
 #[tokio::test]
 async fn several_turns_run_on_one_session() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -285,7 +241,6 @@ async fn several_turns_run_on_one_session() {
 /// repeating the agent's own `authMethods` instruction.
 #[tokio::test]
 async fn an_agent_that_needs_a_login_says_how() {
-    let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
     spec.command = format!("env DEVPLANE_ECHO_NEEDS_AUTH=1 {}", spec.command);
 
@@ -316,7 +271,6 @@ async fn an_agent_that_needs_a_login_says_how() {
 /// Copilot does) can still be continued, keeping its session id.
 #[tokio::test]
 async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
-    let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
     spec.command = format!("env DEVPLANE_ECHO_NO_RESUME=1 {}", spec.command);
     let cwd = std::env::temp_dir();
@@ -354,7 +308,6 @@ async fn a_session_can_be_continued_by_load_where_resume_is_not_offered() {
 
 #[tokio::test]
 async fn a_missing_agent_fails_loudly_rather_than_hanging() {
-    let _serial = common::one_agent_at_a_time();
     let spec = AgentSpec::new("nope", "nope", "/definitely/not/an/agent --acp");
     match devplane::acp::spawn(&spec, scratch(), &[], None).await {
         Err(e) => assert!(!e.to_string().is_empty()),
@@ -378,7 +331,6 @@ async fn a_missing_agent_fails_loudly_rather_than_hanging() {
 /// (`stop_reason: cancelled`), not with the client's timeout.
 #[tokio::test]
 async fn a_cancelled_turn_is_acknowledged_rather_than_timed_out() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -411,7 +363,6 @@ async fn a_cancelled_turn_is_acknowledged_rather_than_timed_out() {
 /// A question is held open until answered, and the agent receives the answer.
 #[tokio::test]
 async fn a_question_reaches_a_person_and_the_answer_reaches_the_agent() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -465,7 +416,6 @@ async fn a_question_reaches_a_person_and_the_answer_reaches_the_agent() {
 /// A typed answer is sent under the custom field, not the selection.
 #[tokio::test]
 async fn a_typed_answer_reaches_the_agent_under_the_custom_field() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -493,7 +443,6 @@ async fn a_typed_answer_reaches_the_agent_under_the_custom_field() {
 /// Several questions in one form keep their order and their own fields.
 #[tokio::test]
 async fn a_form_with_two_questions_keeps_them_in_order() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -531,7 +480,6 @@ async fn a_form_with_two_questions_keeps_them_in_order() {
 /// reported as unrenderable, not raised as a question or dropped silently.
 #[tokio::test]
 async fn an_elicitation_that_cannot_be_rendered_is_reported_not_swallowed() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -557,7 +505,6 @@ async fn an_elicitation_that_cannot_be_rendered_is_reported_not_swallowed() {
 /// adapter would treat a decline as "answered with nothing").
 #[tokio::test]
 async fn a_question_nobody_answers_is_cancelled_rather_than_answered_with_nothing() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -597,7 +544,6 @@ async fn a_question_nobody_answers_is_cancelled_rather_than_answered_with_nothin
 /// ordinary refusal (e.g. two open tabs).
 #[tokio::test]
 async fn two_answers_to_one_question_deliver_once() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut events) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -641,7 +587,6 @@ async fn two_answers_to_one_question_deliver_once() {
 /// pins why the client must declare `elicitation.form`.
 #[tokio::test]
 async fn an_agent_asks_in_prose_when_the_client_cannot_render_a_question() {
-    let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
     spec.command = format!("env DEVPLANE_ECHO_NO_FORMS=1 {}", spec.command);
 
@@ -670,7 +615,6 @@ async fn an_agent_asks_in_prose_when_the_client_cannot_render_a_question() {
 /// verbatim as the agent's own string, never mapped onto a vendor's modes.
 #[tokio::test]
 async fn an_agent_declares_its_own_session_mode_and_it_is_not_a_vendor_s() {
-    let _serial = common::one_agent_at_a_time();
     let mut spec = echo_agent();
     spec.command = format!("env DEVPLANE_ECHO_MODE=echo-supervised {}", spec.command);
     let cwd = std::env::temp_dir();
@@ -710,8 +654,6 @@ async fn an_agent_declares_its_own_session_mode_and_it_is_not_a_vendor_s() {
 /// differently-configured agents produce different records.
 #[tokio::test]
 async fn what_an_agent_supports_is_read_from_its_own_handshake() {
-    let _serial = common::one_agent_at_a_time();
-
     let caps = |extra: &str| {
         let mut spec = echo_agent();
         if !extra.is_empty() {
@@ -812,7 +754,6 @@ async fn drain(rx: &mut tokio::sync::mpsc::Receiver<AcpEvent>) -> Vec<AcpEvent> 
 /// the process, rather than waiting for a handshake that may never come.
 #[tokio::test]
 async fn a_stop_during_setup_tears_the_agent_down() {
-    let _serial = common::one_agent_at_a_time();
     let pids = scratch().join("pids");
     let (session, mut rx) = devplane::acp::spawn(
         &echo_agent(),
@@ -853,7 +794,6 @@ async fn a_stop_during_setup_tears_the_agent_down() {
 /// the connection goes.
 #[tokio::test]
 async fn a_stop_closes_the_session_when_the_agent_offers_it() {
-    let _serial = common::one_agent_at_a_time();
     let dir = scratch();
     let (session, mut rx) = devplane::acp::spawn(&echo_agent(), dir.clone(), &[], None)
         .await
@@ -886,7 +826,6 @@ async fn a_stop_closes_the_session_when_the_agent_offers_it() {
 /// reported as that, and nothing is left waiting on an answer.
 #[tokio::test]
 async fn a_withdrawn_permission_is_reported_and_forgotten() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut rx) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -920,7 +859,6 @@ async fn a_withdrawn_permission_is_reported_and_forgotten() {
 /// fragment that came first.
 #[tokio::test]
 async fn a_tool_calls_diff_arrives_whole_before_the_call_ends() {
-    let _serial = common::one_agent_at_a_time();
     let (session, mut rx) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
         .await
         .unwrap();
@@ -954,7 +892,6 @@ async fn a_tool_calls_diff_arrives_whole_before_the_call_ends() {
 /// `session/resume`, as a stdio server with its own environment.
 #[tokio::test]
 async fn devplanes_mcp_server_is_offered_on_new_and_on_resume() {
-    let _serial = common::one_agent_at_a_time();
     let dir = scratch();
     let offer = devplane::acp::McpOffer {
         name: "devplane".into(),

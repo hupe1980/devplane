@@ -52,11 +52,36 @@ export function all(): readonly Binding[] {
   return bindings;
 }
 
-/// What `?` prints for a surface: the globals, then the surface's own.
+/// A surface's current mode, where one region of it takes keys the rest of
+/// it binds differently: a change's Review tab moves hunks with `j`/`k` while
+/// its list moves changes with them. A mode is a scope `<surface>:<mode>`
+/// whose bindings win over the surface's own while it is set.
+const modes = new Map<string, string>();
+
+/// Sets a surface's mode; returns the clear, for an `$effect`.
+export function setMode(surface: string, mode: string): () => void {
+  modes.set(surface, mode);
+  return () => {
+    if (modes.get(surface) === mode) modes.delete(surface);
+  };
+}
+
+/// The scopes a key on `surface` is looked up in, most specific first.
+function scopes(surface: string): string[] {
+  const m = modes.get(surface);
+  return [...(m ? [`${surface}:${m}`] : []), surface, "global"];
+}
+
+/// What `?` prints for a surface: the globals, then the surface's own, then
+/// its current mode's — a key the mode rebinds is listed once, as the mode's.
 export function help(surface: string): Binding[] {
+  const m = modes.get(surface);
+  const own = m ? bindings.filter((b) => b.surface === `${surface}:${m}`) : [];
+  const taken = new Set(own.map((b) => b.combo));
   return [
     ...bindings.filter((b) => b.surface === "global"),
-    ...bindings.filter((b) => b.surface === surface),
+    ...bindings.filter((b) => b.surface === surface && !taken.has(b.combo)),
+    ...own,
   ];
 }
 
@@ -219,16 +244,23 @@ export function dispatch(surface: string, e: KeyboardEvent): boolean {
   // An IME is composing: the key belongs to the composition.
   if (e.isComposing) return false;
   const c = combo(e);
-  const scoped = (x: Binding) => x.surface === surface || x.surface === "global";
+  const within = scopes(surface);
+  /// Runs the combo in the most specific scope that binds it and takes it; a
+  /// mode's listener that declines falls through to the surface's key.
+  const fire = (k: string): boolean => {
+    for (const s of within) {
+      const hit = bindings.find((b) => b.surface === s && b.combo === k);
+      if (hit && run(hit.action, surface)) {
+        e.preventDefault();
+        return true;
+      }
+    }
+    return false;
+  };
   if (typing(e)) {
     if (!fromField(c)) return false;
     pending = null;
-    const hit = bindings.find((b) => scoped(b) && b.combo === c);
-    if (hit && run(hit.action, surface)) {
-      e.preventDefault();
-      return true;
-    }
-    return false;
+    return fire(c);
   }
   if (native(e, c)) return false;
 
@@ -236,23 +268,15 @@ export function dispatch(surface: string, e: KeyboardEvent): boolean {
   if (pending && now - pendingAt < CHORD_MS) {
     const chord = `${pending} ${c}`;
     pending = null;
-    const hit = bindings.find((b) => scoped(b) && b.combo === chord);
-    if (hit && run(hit.action, surface)) {
-      e.preventDefault();
-      return true;
-    }
+    if (fire(chord)) return true;
   }
   pending = null;
 
   // Only a key a listener took is kept from the page; one nobody answered
   // (a list key with no list on screen) scrolls or types as it would.
-  const hit = bindings.find((b) => scoped(b) && b.combo === c);
-  if (hit && run(hit.action, surface)) {
-    e.preventDefault();
-    return true;
-  }
+  if (fire(c)) return true;
   // The first half of a chord this surface knows.
-  if (bindings.some((b) => scoped(b) && b.combo.startsWith(`${c} `))) {
+  if (bindings.some((b) => within.includes(b.surface) && b.combo.startsWith(`${c} `))) {
     pending = c;
     pendingAt = now;
     e.preventDefault();
@@ -260,6 +284,7 @@ export function dispatch(surface: string, e: KeyboardEvent): boolean {
   }
   return false;
 }
+
 
 // The keys every surface has. `?` and `Esc` are the shell's; the palette's
 // opener is bound here and answered by the palette, which subscribes to it.

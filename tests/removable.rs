@@ -2,7 +2,7 @@
 //! nothing tracked depends on the Devplane home. Runs in a sandbox and never
 //! launches a vendor agent. Two planted-violation tests prove the harness can fail.
 
-// Only the sandbox: pulling in all of `common` would make unused parts dead code.
+mod common;
 #[path = "common/sandbox.rs"]
 mod sandbox;
 

@@ -78,7 +78,6 @@ impl Double {
             .route("/user", get(user))
             .route("/graphql", post(graphql))
             .route("/repos/{o}/{r}/pulls", post(create_pull))
-            .route("/repos/{o}/{r}/issues", post(create_issue))
             .with_state(s);
         tokio::spawn(async move { axum::serve(listener, app).await.ok() });
         Self {
@@ -352,28 +351,6 @@ async fn create_pull(
             "html_url": format!("https://{}/{o}/{r}/pull/77", s.name),
             "head": {"ref": body["head"]}, "user": {"login": "octocat"}
         })),
-    )
-        .into_response()
-}
-
-async fn create_issue(
-    State(s): State<S>,
-    headers: HeaderMap,
-    Path((o, r)): Path<(String, String)>,
-    Json(body): Json<Value>,
-) -> Response {
-    note(&s, format!("POST /repos/{o}/{r}/issues"), &headers);
-    if let Some(x) = refused(&s, &headers) {
-        return x;
-    }
-    s.seen
-        .lock()
-        .unwrap()
-        .created
-        .push(("issue".into(), body.clone()));
-    (
-        StatusCode::CREATED,
-        Json(json!({"number": 7, "html_url": format!("https://{}/{o}/{r}/issues/7", s.name)})),
     )
         .into_response()
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
   // What needs a person, and answering it: the item the address names.
+  import Inline from "../../lib/ui/Inline.svelte";
   import { ago } from "../../lib/text";
   import { cursor } from "../../lib/cursor";
   import { onAction } from "../../lib/keys";
@@ -111,7 +112,7 @@
     reread();
     void narrow.reload();
   }
-  const act = (item: Item, action: string, reason?: string) => report(item, () => actions.act(item, action, reason));
+  const act = (item: Item, action: string) => report(item, () => actions.act(item, action));
   const answer = (item: Item, what: Answer) => report(item, () => actions.answer(item, what));
   const snooze = (item: Item) => report(item, () => actions.snooze(item));
   /// Takes back the last snooze; cleared whether or not it succeeds.
@@ -164,7 +165,9 @@
     if (said.id === current?.id) return said.text;
     return shown.some((x) => x.id === said!.id) ? "" : `${said.title}: ${said.text}`;
   });
-  const undoHere = $derived(undo && undo.id === current?.id ? undo : null);
+  /// The undo, over the item it is about, or once that item has left the list
+  /// (a snooze hides it, so the next item is on screen).
+  const undoHere = $derived(undo && (undo.id === current?.id || !shown.some((x) => x.id === undo!.id)) ? undo : null);
 
   // The list keys: j/k and the arrows move the address, Enter moves into the
   // item's controls, g g and G go to the ends.
@@ -190,10 +193,24 @@
     };
   }
   $effect(() => {
-    const offs = [onAction("inbox-allow", keyed("allow")), onAction("inbox-deny", keyed("deny"))];
+    const offs = [
+      onAction("inbox-allow", keyed("allow")),
+      onAction("inbox-deny", keyed("deny")),
+      // Declines where the item has no snooze, or nothing is waiting to undo.
+      onAction("inbox-snooze", (surface) => {
+        if (surface !== "inbox" || !current || pending.busy || !(current.actions ?? []).includes("snooze")) return false;
+        void snooze(current);
+        return true;
+      }),
+      onAction("inbox-undo", (surface) => {
+        if (surface !== "inbox" || !undoHere || pending.busy) return false;
+        void takeBack();
+        return true;
+      }),
+    ];
     return () => offs.forEach((off) => off());
   });
-  const keysHere = $derived((current?.actions ?? []).filter((a) => a === "allow" || a === "deny"));
+  const keysHere = $derived((current?.actions ?? []).filter((a) => a === "allow" || a === "deny" || a === "snooze"));
 
   let now = $state(Date.now());
   $effect(() => {
@@ -206,8 +223,8 @@
 <section class="detail" aria-label="the item">
   <!-- Mounted always, so a screen reader hears the first sentence too. -->
   <p class="said" class:empty={!sentence && !undoHere} role="status" aria-live="polite">
-    {sentence}
-    {#if undoHere}<button class="undo" onclick={takeBack} disabled={!!pending.busy}>{undoHere.says}</button>{/if}
+    <Inline text={sentence} />
+    {#if undoHere}<button class="undo" onclick={takeBack} disabled={!!pending.busy}>{undoHere.says} <kbd>z</kbd></button>{/if}
   </p>
   {#if sentence && said?.commands?.length}<Commands commands={said.commands} />{/if}
 
@@ -231,7 +248,7 @@
       {#if shownClose?.quiet}
         <p>Nothing needed you, and nothing was decided for you.</p>
       {:else}
-        {#each shownClose?.sentences ?? [] as s, si (si)}<p>{s}</p>{/each}
+        {#each shownClose?.sentences ?? [] as s, si (si)}<p><Inline text={s} /></p>{/each}
       {/if}
       {#if shownClose?.next}<p class="dim">Next · {shownClose.next}</p>{/if}
       {#if shownClose?.keeps_running}<p class="dim">{shownClose.keeps_running}</p>{/if}
@@ -251,7 +268,7 @@
       <span class="kind">{current.kind.replace(/_/g, " ")}</span>
       {#if current.project_name}<span class="proj"><Icon name="folder" size={12} /> {current.project_name}</span>{/if}
       {#if current.since}<span class="age" title={current.since}>{ago(Math.max(0, (now - Date.parse(current.since)) / 1000))} ago</span>{/if}
-      <span class="pos">{position + 1} of {shown.length}</span>
+      <span class="pos">item {position + 1} · {shown.length} in the list</span>
     </header>
     <!-- Keyed by the item: what was typed, picked or given as a reason
          belongs to one item and never carries to the next. The fieldset
@@ -267,7 +284,7 @@
       {#if current.change_id}<a href={`#change/${encodeURIComponent(current.change_id)}`}><Icon name="change" size={13} /> Open the change</a>{/if}
       <span class="keys"
         ><kbd>j</kbd> <kbd>k</kbd> move between items · <kbd>Enter</kbd> moves into this one, <kbd>Tab</kbd> to its controls{#if keysHere.includes("allow")}
-          · <kbd>a</kbd> allow{/if}{#if keysHere.includes("deny")} · <kbd>d</kbd> deny{/if}</span
+          · <kbd>a</kbd> allow{/if}{#if keysHere.includes("deny")} · <kbd>d</kbd> deny{/if}{#if keysHere.includes("snooze")} · <kbd>s</kbd> snooze{/if}{#if undoHere} · <kbd>z</kbd> undo{/if}</span
       >
     </footer>
   {/if}

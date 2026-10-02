@@ -1461,7 +1461,7 @@ impl Policy {
                 rule: r.raw.clone(),
             };
         }
-        let constraining = self.constraining(tool);
+        let constraining = self.constraining(tool, line.as_ref());
         if content.is_some() && !constraining.is_empty() {
             let mut by = constraining
                 .iter()
@@ -1472,9 +1472,14 @@ impl Policy {
             if constraining.len() > 3 {
                 by = format!("{by}` and {} more `", constraining.len() - 3);
             }
+            // One rule constrains; several constrain.
+            let verb = match constraining.len() {
+                1 => "constrains",
+                _ => "constrain",
+            };
             if let Some(why) = line.as_ref().and_then(|l| l.barrier.clone()) {
                 return Verdict::Unresolved {
-                    why: format!("{why}; `{by}` constrains what {tool} may run"),
+                    why: format!("{why}; `{by}` {verb} what {tool} may run"),
                 };
             }
             if let Some(l) = &line
@@ -1486,7 +1491,7 @@ impl Policy {
                 return Verdict::Unresolved {
                     why: format!(
                         "PowerShell is read only as literal tokens, and none of them matched; \
-                         `{by}` constrains what {tool} may run"
+                         `{by}` {verb} what {tool} may run"
                     ),
                 };
             }
@@ -1499,6 +1504,17 @@ impl Policy {
     fn could_apply(&self, ctx: &Context<'_>, tool: &str, line: &Line) -> Option<String> {
         let rules = || self.deny.iter().chain(&self.ask).filter(|r| !r.negated);
         for c in &line.commands {
+            // `./x.sh`: a file anybody could have written runs whatever it holds.
+            if c.by_path
+                && let Some(r) = rules()
+                    .find(|r| matches!(r.spec, Spec::Command(_)) && r.command_tool_applies(tool))
+            {
+                return Some(format!(
+                    "`{}` is a program named by its path, whose contents this reader cannot \
+                     see; `{}` constrains what {tool} may run",
+                    c.program, r.raw
+                ));
+            }
             for r in rules() {
                 if let Spec::Command(spec) = &r.spec
                     && r.command_tool_applies(tool)
@@ -1552,19 +1568,36 @@ impl Policy {
         None
     }
 
-    /// Non-exception rules about what this shell tool may run or reach.
-    fn constraining(&self, tool: &str) -> Vec<&str> {
-        self.deny
-            .iter()
-            .chain(&self.ask)
-            .filter(|r| !r.negated)
+    /// Non-exception rules about what this shell tool may run or reach — only
+    /// those about a program the line runs, where the line was read and some
+    /// are: a rule about `rm` says nothing about `pnpm test`.
+    fn constraining(&self, tool: &str, line: Option<&Line>) -> Vec<&str> {
+        let rules = || self.deny.iter().chain(&self.ask).filter(|r| !r.negated);
+        let all: Vec<&Rule> = rules()
             .filter(|r| match &r.spec {
                 Spec::Command(_) => r.command_tool_applies(tool),
                 Spec::Path(_) => is_shell(tool) && is_shell_rule_tool(r.tool.as_str()),
                 _ => false,
             })
-            .map(|r| r.raw.as_str())
-            .collect()
+            .collect();
+        let about: Vec<&Rule> = match line.filter(|l| l.barrier.is_none()) {
+            Some(l) => all
+                .iter()
+                .copied()
+                .filter(|r| match &r.spec {
+                    Spec::Command(spec) => l
+                        .commands
+                        .iter()
+                        .any(|c| wildcard(&spec.program, &c.program.to_ascii_lowercase())),
+                    _ => false,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        match about.is_empty() {
+            true => all.into_iter().map(|r| r.raw.as_str()).collect(),
+            false => about.into_iter().map(|r| r.raw.as_str()).collect(),
+        }
     }
 
     pub fn problems(&self) -> Vec<(bool, String)> {
@@ -1723,6 +1756,32 @@ mod tests {
         "watch rm -rf /",
         "script -qc 'rm -rf /' /dev/null",
         "sudo --made-up-flag x rm -rf /",
+        "git config alias.x '!rm -rf /' && git x",
+        "git config --global core.pager 'rm -rf /'; git log",
+        "tar -xf a.tar --to-command='rm -rf /'",
+        "tar -cf a.tar --checkpoint=1 --checkpoint-action=exec='rm -rf /' .",
+        "sed -n '1e rm -rf /' f",
+        "sed -e '1e rm -rf /' f",
+        "sed 's/.*/rm -rf \\//e' f",
+        "sed -f x.sed f",
+        "zip -TT 'rm -rf /' a.zip f",
+        "zip --unzip-command='rm -rf /' -T a.zip f",
+        "less +'!rm -rf /' f",
+        "LESSOPEN='|rm -rf /' less f",
+        "man -P 'rm -rf /' ls",
+        "MANPAGER='rm -rf /' man ls",
+        "tmux new 'rm -rf /'",
+        "tmux send-keys 'rm -rf /' Enter",
+        "screen -X stuff 'rm -rf /'",
+        "ssh localhost rm -rf /",
+        "watch -n 1 'rm -rf /'",
+        "stdbuf -oL rm -rf /",
+        "setsid rm -rf /",
+        "perl -e 'system(\"rm -rf /\")'",
+        "ruby -e 'x'",
+        "./x.sh",
+        "/tmp/x",
+        "~/bin/x",
     ];
 
     #[test]
@@ -1755,6 +1814,13 @@ mod tests {
             "cargo test",
             "python --version",
             "echo rm -rf /",
+            "sed -i s/a/b/ f",
+            "sed -n '/end/p;s/e/x/g' f",
+            "git config --get alias.x",
+            "git config user.name x",
+            "tar -xzf a.tgz",
+            "less +G f",
+            "/usr/bin/git status",
         ] {
             assert_eq!(bash(&p, cmd), Verdict::Undecided, "{cmd:?}");
         }
@@ -1959,7 +2025,7 @@ mod tests {
 
     #[test]
     fn a_rule_set_that_would_not_load_asks_about_every_call() {
-        let p = Policy::unloadable("/repo/devplane.toml is not valid: unknown field `never_autoo`");
+        let p = Policy::unloadable("/repo/devplane.toml is not valid: unknown field `denyy`");
         assert!(!p.is_empty());
         assert!(p.speaks_about("Read"));
         for (tool, input) in [

@@ -1212,7 +1212,7 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
         SessionUpdate::CurrentModeUpdate(m) => vec![AcpEvent::ModeChanged {
             mode: m.current_mode_id.to_string(),
         }],
-        // Command lists are not consumed yet.
+        // Command lists are not consumed.
         _ => Vec::new(),
     }
 }

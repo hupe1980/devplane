@@ -1,11 +1,11 @@
 //! The app: the host with a window.
 //!
-//! `devplane app` runs the same host as `devplane serve`, in-process, and
+//! `devplane up --window` runs the same host as `devplane up --no-browser`, in-process, and
 //! opens a window on the page it serves; nothing crosses Tauri's IPC on the
 //! data path. Tauri supplies only native pieces: notifications, the tray
 //! count and dock badge, one global shortcut, deep links, and opening a
 //! worktree. Closing the window keeps hosting; quitting tears down like
-//! `devplane quit`. Nothing is installed and nothing starts at login.
+//! `devplane down`. Nothing is installed and nothing starts at login.
 
 pub mod links;
 pub mod quit;

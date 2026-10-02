@@ -1,0 +1,8 @@
+
+  .quit.svelte-1pz5pdz { padding: var(--s-3) var(--s-4); }
+  h2.svelte-1pz5pdz { font-size: var(--t-md); margin: 0 0 var(--s-2); }
+  /* The sentence as the CLI prints it, line for line. */
+  .says.svelte-1pz5pdz { white-space: pre-wrap; font: inherit; margin: 0 0 var(--s-3); max-width: 60ch; }
+  .warn.svelte-1pz5pdz { color: var(--fail); }
+  .dim.svelte-1pz5pdz { color: var(--dim); }
+  .acts.svelte-1pz5pdz { display: flex; gap: var(--s-2); }

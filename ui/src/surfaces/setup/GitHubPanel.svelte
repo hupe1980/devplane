@@ -40,6 +40,8 @@
   // Sign in to GitHub from the window: the code shown large, GitHub's device
   // page as a link, a copy button — and sign out, which says where to revoke
   // the grant at GitHub, because deleting the local copy does not.
+  import Inline from "../../lib/ui/Inline.svelte";
+  import Skeleton from "../../lib/Skeleton.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import { safeHref } from "../../lib/href";
 
@@ -82,7 +84,7 @@
         <p class="said">{h.said}</p>
       {/if}
       {#if !(h.device_flow ?? clientId) && h.state !== "signed_in"}
-        <p class="quiet">No GitHub app is registered for {h.host}, so the window cannot start a sign-in. In a terminal, <code>gh auth token | devplane login github --with-token{h.host === "github.com" ? "" : ` --host ${h.host}`}</code> signs in with GitHub CLI's token, or pipe a fine-grained personal access token to the same command.</p>
+        <p class="quiet">No GitHub app is registered for {h.host}, so the window cannot start a sign-in. In a terminal, <code>gh auth token | devplane auth login --with-token{h.host === "github.com" ? "" : ` --host ${h.host}`}</code> signs in with GitHub CLI's token, or pipe a fine-grained personal access token to the same command.</p>
       {/if}
       {#if h.state === "pending" && h.user_code}
         <div class="code">
@@ -93,10 +95,10 @@
       {/if}
     </div>
   {:else}
-    <p class="quiet">Reading the sign-in…</p>
+    <Skeleton rows={2} />
   {/each}
   {#if busy}<p class="quiet">{busy}…</p>{/if}
-  {#if said}<p class="said">{said}</p>{/if}
+  {#if said}<p class="said"><Inline text={said} /></p>{/if}
   <p class="quiet">The token is kept only in this machine's credential store — never in a file, a log or this page.</p>
 </section>
 

@@ -2,6 +2,71 @@
 
 Notable changes per release, in the style of [Keep a Changelog](https://keepachangelog.com/). Dates are UTC.
 
+## Unreleased
+
+The command line is a set of nouns, `change offer` commits the tree the gates passed on, and `devplane verify`
+gives the verdict in CI with the checks a change weakened first.
+
+### Breaking
+
+- Commands, noun first: `ls`/`ps` → `status` (`ls` stays an alias; bare `devplane` is `status`); `show`, `watch`,
+  `attach` → `run show|watch|attach`, plus `run list`; `open` → `up`, `serve` → `up --no-browser`, `app` →
+  `up --window`; `quit` → `down`; `answer`, `snooze` → `inbox answer`, `inbox snooze`; `forge prs|issues` →
+  `pr list`, `issue list`; `speckit` → `gate install --speckit`; `check`, `explain` → `config check|explain`;
+  `trust` → `project trust`; `agents`, `connect`, `disconnect` → `agent list|connect|disconnect`; `login github`,
+  `logout github` → `auth login|logout`; the `diagnostics` alias is gone. An old name is refused, naming the new one.
+- `--json` is one global flag, taken by every command. Every change, run and ask id takes a unique prefix.
+- `change offer` writes one commit on the change's branch whose tree is the one the last passing `check` ran
+  against, then pushes as before, and refuses when the tree moved since. `archive` after an offer needs no
+  `--discard-uncommitted`.
+- `gate install --speckit` refuses a repository that declares no gate, unless `--anyway`.
+- `devplane.toml`, in the vendors' words: `[policy] never_auto`/`always_ask` → `deny`/`ask`; `[project]
+  default_agent` → `[agent] default`; `[policy] max_parallel_runs`/`stall_timeout` → `[agent]
+  max_parallel`/`stall_timeout`; `[transcripts] keep` → `[agent] keep_transcripts`; `[gates.named.X]` →
+  `[gates.X]`; `[budget] usd` → `max_usd`. `[gates] on_fail` is gone (failures go back to the agent up to
+  `max_feedback_rounds`, then stop) and so is `[github] draft` (always a draft). Each old key is refused by name.
+- A store written by a newer Devplane is refused, never set aside.
+- `devplane gate` reports `passed`, not `verified`: *verified* is a change's word, against its tree, and
+  only `check`'s. `--json` `state` is `passed`, `failed`, `no_gates` or `config_unreadable`.
+- Agents are denied reading or writing Devplane's own home (`devplane-own-files`), on every vendor's hook.
+- The store is schema 12; an older store is set aside, as before.
+
+### Added
+
+- `devplane verify [--base <ref>] [--summary <path>] [--statement <path>] [--no-base-checks]`: runs the `check`
+  declared in `devplane.toml` at the merge base on this checkout and leads the Markdown summary (to
+  `$GITHUB_STEP_SUMMARY` in CI) with the checks the change weakened. Exit 0 verified, 1 failed or tree moved, 2
+  could not run; a weakened check never fails it. No host, store or network. `action.yml` at the repository root
+  runs it as a composite action. After a pass it runs base checks too (`--no-base-checks` skips them): a base test
+  failing on the change joins the weakened section by name, new tests passing without the change are listed, and
+  the statement carries both at `predicate.devplane.baseChecks` beside `predicate.devplane.verify`.
+- Base checks: the base's tests run on the change (the files that define the checks put back as the base
+  has them) and the change's new tests run on the base, in one throwaway checkout at the merge base. A
+  base test that fails on the change joins the weakened group and holds the offer until seen; *verified*
+  keeps its definition. They run when you offer, on `devplane change verify --base-checks`, from *Run base
+  checks* in the Gates view, or after every passing `check` with `[gates] base_checks = "auto"`.
+- `[gates] junit` names the JUnit XML files `check` writes, so failing and new tests are named.
+- How many tests ran is shown beside *verified*, read from the runner's own summary (cargo test, nextest,
+  pytest, jest, vitest, go test via gotestsum or `-v`) over the whole output; a summary that was not read
+  is said, never shown as zero.
+- The workbench leads a change with its evidence, keeps one cursor model across lists, puts the open view in
+  the address, and fits a narrow window.
+
+### Fixed
+
+- Ways a change could read *verified* with no weakened row: an edit the index was told to ignore, a diff
+  attribute hiding a test file's lines, an ignore rule not yet committed, an embedded repository with
+  uncommitted work, a restored modification time, and a weakening past the view's bound.
+- The gate's policy reader could be walked past; an answer's origin is decided by the host, and a client proves
+  the host holds the token before sending it. An older run snapshot no longer overwrites a newer one.
+- A file named by a task sent to the agent is no longer reported as not asked for.
+- The change timeline prints dates as `2026-09-26 06:56`, not in the browser's locale.
+
+### Removed
+
+- Reports between projects (`devplane report`, `[reports]`), `devplane rewind`, `devplane modes` (now
+  `status --modes`) and `devplane attention` (now in `doctor`).
+
 ## 0.11.0 — 2026-09-26
 
 Devplane signs in to GitHub itself, and this release closes the ways an agent could steer its own

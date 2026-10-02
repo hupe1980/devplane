@@ -145,7 +145,6 @@ impl ApiUsage {
 // Exported because `AbandonedQuestion` carries a `Vec<Choice>`; a type
 // reachable from an exported one must be exported too.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Choice {
     /// The protocol's id for this option. Absent for an observed session,
     /// whose dialog belongs to the provider and cannot be answered from here.

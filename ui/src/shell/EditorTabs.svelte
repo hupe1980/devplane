@@ -1,5 +1,7 @@
 <script lang="ts">
-  // The editor's tab strip. A preview tab is italic until something pins it;
+  // The editor's tab strip. A preview — one thing glanced at from a list,
+  // which the next glance replaces — is italic until something pins it; a
+  // place (a surface with nothing focused) is never a preview in type;
   // the close control is a real button; the middle button closes, as in every
   // editor; a double-click pins.
   import Icon from "../lib/ui/Icon.svelte";
@@ -29,7 +31,7 @@
     <div
       class="tab"
       class:on={i === active}
-      class:preview={!t.pinned}
+      class:preview={!t.pinned && !!t.focus}
       role="tab"
       tabindex={i === active ? 0 : -1}
       aria-selected={i === active}

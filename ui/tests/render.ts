@@ -10,6 +10,7 @@ import "./render/honest";
 import "./render/controls";
 import "./render/places";
 import "./render/behaviour";
+import "./render/words";
 import { finish } from "./harness";
 
 finish();

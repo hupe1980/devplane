@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 # The pinned figures.
 TARGET=x86_64-unknown-linux-musl
-WANT_TOTAL=233
+WANT_TOTAL=234
 WANT_ONLY_SQLX=21
 WANT_TOTAL_APP=430
 WANT_ONLY_SQLX_APP=16

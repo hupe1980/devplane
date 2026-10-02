@@ -6,7 +6,7 @@
 import { all, combo, dispatch, onAction, run, spell } from "../../src/lib/keys";
 import "../../src/shell/keys";
 import { safeHref } from "../../src/lib/href";
-import { markKey } from "../../src/surfaces/review/marks";
+import { markKey } from "../../src/surfaces/change/review/marks";
 import Failed from "../../src/lib/Failed.svelte";
 import { fail, html, source, visible, walk } from "../harness";
 
@@ -86,7 +86,7 @@ const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKe
 
 // ── A failure says why and what tells more ───────────────────────────────
 {
-  const out = visible(html(Failed, { what: "the projects", failure: { says: "database is locked", tell: "devplane doctor" } }));
+  const out = visible(html(Failed, { what: "the projects", failure: { says: "database is locked", tell: "devplane doctor" } })).replace(/\s+/g, " ");
   if (!/Could not read the projects: database is locked/.test(out) || !out.includes("devplane doctor")) fail("a failed read does not say why and what tells more");
   const stale = visible(html(Failed, { what: "the projects", failure: { says: "x", tell: "y" }, at: Date.now() - 60_000, stale: true }));
   if (!/as read 1m ago/.test(stale)) fail("a stale region does not say when it was read");

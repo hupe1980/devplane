@@ -1,0 +1,25 @@
+
+  .failed.svelte-fezoay {
+    margin: var(--s-2) 0;
+    padding: var(--s-2) var(--s-3);
+    border: 1px solid var(--fail);
+    border-radius: var(--radius);
+    color: var(--fail);
+    font-size: var(--t-sm);
+  }
+  .failed.stale.svelte-fezoay {
+    border-style: dashed;
+  }
+  .failed.down.svelte-fezoay {
+    border: 0;
+    padding: var(--s-1) 0;
+    color: var(--dim);
+  }
+  .tell.svelte-fezoay {
+    color: var(--dim);
+  }
+  code.svelte-fezoay,
+  .failed.svelte-fezoay code {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+  }

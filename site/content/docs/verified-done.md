@@ -6,84 +6,63 @@ weight = 12
 group = "guide"
 +++
 
-“The agent says it is done” is a claim; your test suite exiting zero is evidence. A **change** is an
-isolated checkout, an agent in it, and your own gate as the definition of done.
+A **change** is an isolated checkout, an agent in it, and your own gate as the definition of done.
 
 ```sh
-devplane trust .
+devplane project trust .
 devplane change start "fix the flaky login test"
 devplane change show <id>
 ```
 
 ## What `verified` means
 
-A change is **verified** when both are true:
+A change is **verified** when the latest `[gates] check` passed **and** the tree it ran against is
+the tree now.
 
-1. the latest run of your `[gates] check` passed, and
-2. the tree it ran against is the tree now.
+- "The tree" is the git tree of the working tree, **including uncommitted and untracked files**
+  (ignored files excluded), computed with a temporary index. Files are hashed as bytes on disk: no
+  clean filter, end-of-line conversion or stat cache is used. Without filters, re-derive it in a copy
+  of the checkout with `git add -A && git write-tree`.
+- **Uncommitted work can be verified.** `change offer` writes the one commit, from the tree that passed.
+- **Touch any file and it is stale**, both digests shown. Changing `check` in your checkout's
+  `devplane.toml` also makes a pass stale; deleting `check`, or a `devplane.toml` that will not load,
+  means nothing is verified.
+- **A gate that edits the tree it checks cannot verify**: the pass is recorded without a digest.
+- **Only `check` decides.** Named gates (`[gates.<name>]`) are evidence, never verification.
 
-“The tree” is the git tree of the working tree, **including uncommitted and untracked files**
-(ignored files are left out), computed with a temporary index. **Each file is hashed as its bytes
-are on disk**: no clean filter, end-of-line conversion or stat cache is consulted, because the
-checkout's `.git/config` and `.git/info/` are the agent's to write. Where your repository declares no
-filter, re-derive it in a copy of the checkout:
-
-```sh
-git add -A && git write-tree
-```
-
-- **Uncommitted work can be verified.** Agents need not commit.
-- **Touch any file and it is stale**, with both digests shown. Changing the `check` commands in
-  your checkout's `devplane.toml` makes an earlier pass stale too, until `check` runs as declared now;
-  deleting `check`, or a `devplane.toml` that will not load, means nothing is verified.
-- **A gate that edits the tree it checks cannot verify.** If the digest differs before and after the
-  commands, the pass is recorded without a digest.
-- **Only `check` decides.** Named gates (`[gates.named.*]`, `devplane gate --name`) are evidence
-  and never make a change verified. Put everything that defines done in `check`.
-
-The gate standing a change shows is one of **verified**, **stale**, **failed**, **not run** or **no
-gates declared**.
+Gate standing is one of **verified**, **stale**, **failed**, **not run** or **no gates declared**.
 
 ## Declare the definition of done
-
-Committed, so it is reviewed like code:
 
 ```toml
 # devplane.toml
 [gates]
 check               = ["pnpm typecheck", "pnpm lint", "pnpm test -- --run"]
-timeout             = "10m"        # the whole gate, not per command
-on_fail             = "feedback"   # feedback | escalate | ignore
-max_feedback_rounds = 2
+timeout             = "10m"   # the whole gate, not per command
+max_feedback_rounds = 2       # failures back to the agent, then the change stops
 ```
 
 ```sh
-devplane check        # does it parse, does all it names exist, is it safe
-devplane gate         # run check here, now, and exit on the verdict
+devplane config check  # does it parse, does all it names exist, is it safe
+devplane gate          # run check here, now, and exit on the verdict
 ```
 
-Gates:
-
-- **run as children of the host, never through the agent**, so they still run when the agent has
-  crashed;
-- **are read from your checkout's `devplane.toml`, not the agent's branch**, so a `check = ["true"]`
-  committed on the branch is not what runs;
-- **stop at the first failure**;
-- **are never green when empty**: no gates reads *no gates declared*;
-- keep the last 8&nbsp;KiB of output; the recorded byte count and digest cover all of it.
+Gates run as host children, **never through the agent**; are read from **your checkout's**
+`devplane.toml`, not the agent's branch; stop at the first failure; are never green when empty; and
+keep the last 8&nbsp;KiB of output (byte count and digest cover all of it).
 
 ## The loop
 
-`devplane change start` does five things:
+`devplane change start`:
 
-1. **Checks everything first** — trust, a clean checkout, a readable `devplane.toml`, the spec path.
-   With several `--project`s, every refusal is reported before anything is created.
-2. **Makes an isolated checkout** at `.claude/worktrees/<slug>` on its own branch (`--no-worktree`
-   works in place instead, and every surface marks it).
-3. **Prepares it** — copies the files `.worktreeinclude` names, then runs `[workspace] setup`.
-4. **Starts the agent** in it.
-5. **When the agent stops, runs `check`.** Red: the failing lines go back to the same session, up to
-   `max_feedback_rounds`, then to you in the inbox.
+1. **Checks everything first**: trust, clean checkout, readable `devplane.toml`, spec path. With
+   several `--project`s every refusal is reported before anything is created.
+2. **Makes a worktree** at `.claude/worktrees/<slug>` on its own branch (`--no-worktree` works in
+   place, marked everywhere).
+3. **Prepares it**: copies files `.worktreeinclude` names, runs `[workspace] setup`.
+4. **Starts the agent.**
+5. **Runs `check` when the agent stops.** Red goes back to the same session up to
+   `max_feedback_rounds`, then to you in the inbox. `0` stops at the first red.
 
 ```toml
 # devplane.toml
@@ -91,13 +70,11 @@ Gates:
 setup = "pnpm install --frozen-lockfile"
 ```
 
-Setup is recorded separately and is never a gate. A project with a lockfile and no `setup` is warned
-before the change starts. In a Rust project, `share = ["cargo"]` lets every change reuse one build
-cache.
+Setup is never a gate. See [`[workspace]`](@/docs/configuration.md#workspace).
 
 ## The six states
 
-Computed from the record and the tree when read; none is stored.
+Computed from the record and the tree; none is stored.
 
 | State | Glyph | What is true |
 |---|---|---|
@@ -108,7 +85,7 @@ Computed from the record and the tree when read; none is stored.
 | **offered** | `↗` | a pull request exists |
 | **archived** | `▣` | the worktree is gone; the record is kept |
 
-Beside the state a change may be **waiting** — on the gates, on a feedback round, or on a person.
+A change may also be **waiting**: on the gates, a feedback round, or a person.
 
 ## When a change stops
 
@@ -116,16 +93,15 @@ Beside the state a change may be **waiting** — on the gates, on a feedback rou
 |---|---|---|
 | `gate_failed` | `check` stayed red past `max_feedback_rounds` | `devplane change retry <id>` for one more round, or take over |
 | `cost_spike` | the change passed a `[budget]` bound | raise the bound in `devplane.toml`, then retry |
-| `change_broken` | it cannot continue — its worktree is gone | nothing an agent can fix; archive it or start again |
+| `change_broken` | it cannot continue — its worktree is gone | archive it or start again |
 
-`change retry` is offered only while the session that wrote the code still exists. After a host
-restart, `devplane change resume <id>` reconnects to the same agent conversation.
+`change retry` needs the session that wrote the code. After a host restart, `devplane change resume
+<id>` reconnects to the same conversation.
 
 ## Budget
 
-`[budget]` bounds a change by `usd`, `max_turns` and `max_runtime`; passing one raises `cost_spike`.
-Turns and runtime bind every agent; `usd` only an agent that reports cost. See
-[Configuration](@/docs/configuration.md#budget).
+`[budget]` bounds a change by `max_usd`, `max_turns` and `max_runtime`; passing one raises
+`cost_spike`. See [Configuration](@/docs/configuration.md#budget).
 
 ## Review before you merge
 
@@ -134,8 +110,7 @@ devplane change review <id>              # by risk, per [review] roles
 devplane change review <id> --by intent  # grouped by the run that wrote it
 ```
 
-The review leads with **checks weakened or changed**, because an agent stuck on a red test can make
-the test go away. Each row says what it matched, and is one of three kinds:
+The review leads with **checks weakened or changed**. Each row says what it matched:
 
 | Kind | What the change's own diff did |
 |---|---|
@@ -143,61 +118,79 @@ the test go away. Each row says what it matched, and is one of three kinds:
 | test deleted | deleted a test file, or removed a test from a file that stays |
 | gate changed | edited what defines passing: `devplane.toml`, CI, `justfile`, `Makefile`, pre-commit, the test runner's, a linter's, the type checker's or coverage configuration, `package.json` scripts, a `Cargo.toml` profile, or a script a declared gate runs — or masked a failure there (`\|\| true`, `continue-on-error: true`, `--skip`, `-k "not`) |
 
-Only lines the change added (or removed) count: a marker already in the base never does. These are
-signals from the diff text, not verdicts.
-
-*Verified* is still the `check` gate's exit against the tree; a weakened check makes it true and
-insufficient, and every surface says so beside the green: **verified · 1 check weakened**. While any
-row is unseen, **Review** is the change's primary action and offering is refused. Mark a row read in
-the review, or:
-
-```sh
-devplane change review <id> --seen tests/login.test.ts
-```
-
-A mark records that a person read it — never when — and lapses if the row's matched text changes.
-Then the files in the declared order, each with whether a declared test covers it. The
-[workbench](@/docs/workbench.md#the-review) shows the same review as a diff.
-
-Two changes in one repository that touch the same files raise a `conflict` item when either reaches
-review.
+- Only lines the change added or removed count; these are signals from the diff, not verdicts.
+- *Verified* stays the `check` exit. With a weakened row, every surface leads with it:
+  **1 check weakened · verified**. While a row is unseen, **Review** is the primary action and
+  offering is refused.
+- Mark a row read in the review, or `devplane change review <id> --seen tests/login.test.ts`. The mark
+  records that a person read it (not when) and lapses if the matched text changes.
+- Then the files in declared order, each with whether a declared test covers it. The
+  [workbench](@/docs/workbench.md#the-review) shows the same review as a diff.
+- Two changes in one repository touching the same files raise `conflict` when either reaches review.
 
 ## Offering, finishing, archiving
 
 ```sh
-devplane change offer <id>    # push and open the PR, or print the commands
+devplane change offer <id>    # commit the verified tree, push, open the PR
 devplane change finish <id>   # accept; records the basis, removes nothing
 devplane change archive <id>  # remove the worktree; keep branch and record
 ```
 
-- **`offer`**: with `[github] pull_request = true` in your checkout, pushes and opens the pull
-  request under your GitHub sign-in (a draft by default); without it, prints the exact `git push`
-  line and the address of GitHub's compare page for the branch. It refuses,
-  first, while any weakened-check row is unseen — naming every one and the command that marks it
-  read, with exit status `3` — then a worktree with uncommitted changes or a branch with no commits
-  past its base. The certificate states the weakened check either way.
-- `offer`, `finish`, `archive` and `review --seen` are refused from inside an agent's session, by the
-  same check that stops an agent answering its own permission. It narrows the hole and does not close
-  it: an agent that unsets the variable, or calls the host with its token, is not stopped by it.
-- **`finish`** records why the change counts as done: *gates passed*, *gates passed, stale*, *no gate
-  declared*, or *finished by hand*. They never render alike.
-- **`archive`** refuses uncommitted or unmerged work unless told otherwise (`--discard-uncommitted`,
-  `--delete-branch --force`), and deletes the branch only with `--delete-branch`. A merged pull
-  request counts as merged whatever the merge strategy. The record stays.
+**`offer`** writes one commit on the change's branch whose tree is exactly the tree the last passing
+check ran against (the certificate's `gitTree`).
+
+- With `[github] pull_request = true` in your checkout, it pushes and opens a **draft** pull request
+  under your sign-in (or records the one already open). Without it, it prints the `git push` line and
+  GitHub's compare address.
+- Refused first while any weakened-check row is unseen: exit `3`, naming every row and the command
+  that marks it read. Then refused when the tree moved since the last pass (run `devplane change
+  verify`). The certificate states a weakened check either way.
+
+**`finish`** records the basis: *gates passed*, *gates passed, stale*, *no gate declared*, or
+*finished by hand*, each rendered differently.
+
+**`archive`** refuses uncommitted or unmerged work unless told (`--discard-uncommitted`,
+`--delete-branch --force`) and deletes the branch only with `--delete-branch`. After `offer` neither
+is needed. A merged pull request counts as merged whatever the strategy. The record stays.
+
+`offer`, `finish`, `archive` and `review --seen` are refused inside an agent session
+([Security](@/docs/security.md#an-agent-cannot-approve-itself-mostly)).
 
 ```toml
 # devplane.toml
 [github]
 pull_request = true
-draft        = true
 ready_label  = "devplane:ready"
 ```
 
-Checks on an offered pull request are polled with your GitHub sign-in; a red one becomes a `ci_red` item
-even after every session has ended. `devplane change start --issue 7` starts from an issue, whose
-body reaches the agent marked as untrusted text.
+- An offered pull request's checks are polled; a red one becomes `ci_red`, even after every session
+  ended.
+- `devplane change start --issue 7` starts from an issue; its body reaches the agent as untrusted text.
+- A hand-made branch joins with `devplane change adopt <branch>`.
 
-A branch you made by hand joins the same loop with `devplane change adopt <branch>`.
+## Base checks
+
+The agent can edit tests, runner configuration and scripts, so Devplane can run `check` twice more in
+one throwaway checkout at the merge base (under `.claude/worktrees/`, removed afterwards):
+
+| Run | What | Effect |
+|---|---|---|
+| **The base's tests on this change** | the verified tree, with every file defining the checks put back as the base has it: the `tests` role (or the scan's test-file names), runner, build, CI and linter configuration, files a gate command names, and `devplane.toml` | a failing test is named, joins the weakened group and holds `offer` until seen. A timeout, or setup failing with the change's files, holds it too |
+| **This change's new tests on the base** | the base, with the change's `tests`-role files placed on it (nothing without a `tests` role) | a new test that passes here would pass without the change; the header says so. Never holds the offer |
+
+- Test counts come from the runner's summary: *ran 12 → 3* is base tests on the change, then its own
+  `check`. An unread count is said, never shown as zero; counts are not added across runners.
+- Neither run is an input to *verified*.
+- They run once per tree, and not by default:
+
+```sh
+devplane change verify <id> --base-checks   # check, then both runs
+devplane change offer <id>                  # runs them first when the tree has no result
+```
+
+The Gates view has *Run base checks*. `[gates] base_checks = "auto"` runs them after every pass in the
+background; `"off"` never, and every surface says so. Declare `[gates] junit` so tests are named
+rather than counted.
 
 ## The done certificate
 
@@ -206,9 +199,9 @@ devplane change export <id> > cert.md  # paste into the pull request
 devplane change export <id> --json     # same facts as an in-toto statement
 ```
 
-The Gates view's **Copy as markdown** gives the same bytes. The certificate names the repository, the
-commit, the working-tree digest, every command with its exit status and the digest and size of its
-output, the spec folder's fingerprint, and whether the change edited a check. Then:
+The Gates view's **Copy as markdown** gives the same bytes. It names the repository, commit,
+working-tree digest, every command with exit status and output digest and size, the spec folder's
+fingerprint, and whether the change edited a check. Then:
 
 ```
 ## Check this yourself
@@ -220,13 +213,19 @@ output, the spec folder's fingerprint, and whether the change edited a check. Th
     pnpm test -- --run
 ```
 
-A reviewer runs that without Devplane, so the certificate is unsigned. It is evidence that these
-commands ended as recorded against this tree, not that the work is correct. It says when you cannot
-check it: the commit is on no remote, or the gate ran against uncommitted files. Failed, timed out,
-never started and could not be collected are four different outcomes; only the first is a verdict
-about your code.
+- Unsigned: a reviewer re-runs it without Devplane. It shows the commands ended as recorded against
+  this tree, not that the work is correct.
+- It says when it cannot be checked: the commit is on no remote, or the gate ran on uncommitted files.
+- Failed, timed out, never started and could not be collected are distinct; only *failed* is a verdict
+  on your code.
+
+## The same verdict in CI
+
+`devplane verify --base main` runs the base's `check` on a pull request, weakened checks first in the
+job summary. See [CI verify](@/docs/ci.md).
 
 ## Next
 
 - [Working to a specification](@/docs/specs.md) — ticked tasks against checked ones, and the Spec Kit hook.
+- [CI verify](@/docs/ci.md) — the same verdict on every pull request.
 - [Configuration](@/docs/configuration.md) — every key used above.

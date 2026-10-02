@@ -13,8 +13,8 @@ use serde::Deserialize;
 /// needs an OAuth App registered on the host, and a token signs in without
 /// one.
 pub const NO_CLIENT_ID: &str = "no GitHub app is registered for this host, so the device flow \
-cannot start. Sign in with a token instead: `gh auth token | devplane login github --with-token`, \
-or pipe a fine-grained personal access token to `devplane login github --with-token`. An \
+cannot start. Sign in with a token instead: `gh auth token | devplane auth login --with-token`, \
+or pipe a fine-grained personal access token to `devplane auth login --with-token`. An \
 Enterprise server's own app goes in ~/.devplane/app.toml as `[github.hosts.\"<host>\"] client_id`";
 
 /// The scopes asked for: `repo` to read and open pull requests and issues on

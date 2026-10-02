@@ -6,8 +6,7 @@ weight = 13
 group = "guide"
 +++
 
-Write the specification with Spec Kit, OpenSpec, Kiro, or a folder of Markdown. Devplane runs the
-agent, watches it and decides whether the result is done, and adopts no spec format.
+Write specs with Spec Kit, OpenSpec, Kiro or plain Markdown; Devplane adopts no spec format.
 
 ```sh
 devplane change start "password reset" --spec specs/001-password-reset
@@ -16,13 +15,8 @@ devplane change show <id>
 
 ## What Devplane reads
 
-- the spec is **Markdown**, committed to the repository;
-- the unit is a **folder**;
-- the outline is the **headings**;
-- progress is `- [ ]` / `- [x]` in the folder's `tasks.md` only (a `checklists/` folder is not
-  progress).
-
-No section name is recognised. Layouts found automatically:
+Committed **Markdown**, one **folder** per spec, **headings** as outline, and progress as `- [ ]` /
+`- [x]` in `tasks.md` only (not `checklists/`). No section names. Detected layouts:
 
 | Tool | Detected by | Spec folders |
 |---|---|---|
@@ -39,10 +33,8 @@ plans          = "docs/plans"  # where this repository keeps its specs
 open_questions = ["NEEDS CLARIFICATION", "TBD"]
 ```
 
-`open_questions` are the words that mark an unanswered question, matched per line,
-case-insensitively; there is no default. The **Specifications** view in the
-[workbench](@/docs/workbench.md) lists each project's spec folders, task counts, and the lines still
-carrying one of those words.
+`open_questions` has no default. The **Specifications** view lists each project's spec folders, task
+counts, and lines carrying those words.
 
 ## Naming the spec a change answers
 
@@ -51,10 +43,11 @@ devplane change start "password reset" --spec specs/001-password-reset
 devplane change adopt feat/password-reset --spec specs/001-password-reset
 ```
 
-The path is relative to the repository and must exist in the base the worktree branches from; an
-uncommitted spec folder is not in the agent's checkout. Every gate run stamps a fingerprint of the
-folder's Markdown onto the change, so the [certificate](@/docs/verified-done.md#the-done-certificate)
-says *checked against `specs/001-password-reset` at `3f9a…`*.
+- The path is repository-relative and must be committed on the base (an uncommitted folder is not in
+  the agent's checkout).
+- Each gate run stamps a fingerprint of the folder's Markdown on the change, so the
+  [certificate](@/docs/verified-done.md#the-done-certificate) says *checked against
+  `specs/001-password-reset` at `3f9a…`*.
 
 ```console
 $ devplane change show c-3f9a
@@ -64,7 +57,7 @@ $ devplane change show c-3f9a
 
 ## Sending chosen tasks
 
-`--task` picks which lines of the task list go to the agent. Repeat it, or mix the two forms:
+`--task` picks task lines to send; repeat it and mix forms:
 
 ```sh
 # every task line that cites the requirement token REQ-3
@@ -76,18 +69,15 @@ devplane change start "reset: email copy" \
   --spec specs/001-password-reset --task tasks.md:14
 ```
 
-The selected lines travel in the prompt and on the run's record. A selector that matches nothing
-refuses before anything is created.
-
-**Requirement tokens** are a prefix followed by digits: by default `FR-`, `NFR-`, `SC-`, `REQ-`,
-`US-` and `AC-`; `[spec] tokens` replaces the list. A token in a heading and in a task line is an
-edge; a token on only one side is reported as a gap. Spec Kit's `[US1]` marker and Kiro's
-`_Requirements: 1.1, 2.3_` line are read as citations.
+- Selected lines go in the prompt and on the run's record. A selector matching nothing refuses first.
+- **Requirement tokens** are a prefix plus digits (default `FR-`, `NFR-`, `SC-`, `REQ-`, `US-`, `AC-`;
+  [`[spec] tokens`](@/docs/configuration.md#spec) replaces them). A token in a heading and a task line
+  is an edge; one side only is a gap. Spec Kit's `[US1]` and Kiro's `_Requirements: 1.1, 2.3_` are
+  citations.
 
 ## Ticked is not verified
 
-A ticked box is the agent's claim about its own work, so a change that names a spec reports two
-counts and never combines them. Neither is *verified*: only a change is.
+A ticked box is the agent's claim. Two counts are reported, never combined, and neither is *verified*.
 
 ```console
   tasks      11 ticked · 9 seen by a passing check
@@ -96,28 +86,26 @@ counts and never combines them. Neither is *verified*: only a change is.
 ```
 
 - **ticked** — `- [x]` in the task file, read in the change's worktree.
-- **seen by a passing check** — ticked, sent to a run of this change with `--task`, and that run
-  finished before a `check` that passed, so the check ran over its work. It stays true if a later
-  check fails, which is why it is never called verified.
-- A box ticked by hand is listed as *ticked, sent to nobody*. With no gates declared the line reads
-  *11 ticked · no gates declared*, never *0 seen*. No percentage is computed anywhere.
+- **seen by a passing check** — ticked, sent to a run with `--task`, and that run finished before a
+  passing `check`. It stays true after a later failure, so it is never called verified.
+- A box ticked by hand is *ticked, sent to nobody*. With no gates: *11 ticked · no gates declared*.
+  No percentage anywhere.
 
 ## When the spec moves under a run
 
-If the spec folder is edited while an agent works from it, the inbox says so when the run ends
-(*the specification changed 18m into run r-9f2 and the run never saw it*), with two answers:
+An edit to the spec folder during a run is raised when the run ends (*the specification changed 18m
+into run r-9f2 and the run never saw it*):
 
 ```sh
-devplane change drift <id> --run r-9f2 --tell     # tell it what changed
-devplane change drift <id> --run r-9f2 --accept   # work to what the run saw
+devplane change drift <id> --run r-9f2 --tell    # tell it what changed
+devplane change drift <id> --run r-9f2 --accept  # work to what the run saw
 ```
 
-`--tell` prompts the run with the changed files named; `--accept` makes the change work to what the
-run saw. Either is recorded as your decision.
+Either is recorded as your decision.
 
 ## A spec tool's CLI is already a gate
 
-If your spec tool validates from the command line, put it beside your tests:
+Put a spec validator beside your tests:
 
 ```toml
 # devplane.toml
@@ -125,37 +113,31 @@ If your spec tool validates from the command line, put it beside your tests:
 check = ["openspec validate --strict", "pnpm test -- --run"]
 ```
 
-That checks the specs against each other; your tests compare spec and code.
+
 
 ## The gate inside Spec Kit's workflow
 
-Spec Kit's commands look in `.specify/extensions.yml` for hooks, and run and wait for a hook marked
-`optional: false`. Devplane's hook names the skill `devplane-gate`, which runs `devplane gate` and
-reports what it exited with. The agent has to find that skill as a file, so copy it into the project
-(or into `~/.claude/skills/` for every project) first:
+Spec Kit runs and waits for hooks in `.specify/extensions.yml` marked `optional: false`. Devplane's
+hook names the `devplane-gate` skill, which runs `devplane gate`. Copy the skill into the project (or
+`~/.claude/skills/`) first:
 
 ```sh
 mkdir -p .claude/skills/devplane-gate
 curl -LsSf -o .claude/skills/devplane-gate/SKILL.md   https://raw.githubusercontent.com/hupe1980/devplane/main/plugin/skills/devplane-gate/SKILL.md
 
-devplane speckit              # writes .specify/extensions.yml
-devplane speckit --dry-run    # print it, write nothing
-devplane gate                 # what the skill runs
+devplane gate install --speckit            # writes .specify/extensions.yml
+devplane gate install --speckit --dry-run  # print it, write nothing
+devplane gate                              # what the skill runs
 ```
 
-The [Claude Code plugin](@/docs/install.md#inside-claude-code-as-a-plugin) ships the same skill, but
-`devplane speckit` does not look inside a plugin install, so it still refuses until the file is at
-`.claude/skills/devplane-gate/SKILL.md` in the repository or your home.
-
-`speckit` needs Spec Kit initialised here (`.specify/`). If `.specify/extensions.yml` already exists,
-it prints the entry and where to add it instead of editing the file. The hook goes on
-`after_implement` unless you pass `--event`. It refuses when the repository declares no gate (declare
-`[gates] check` first) and when the skill file is missing; `--anyway` writes it regardless, and
-`--dry-run` applies the same refusals.
-
-`devplane gate` runs `[gates] check` and exits 0 only when it passed; *no gates declared* and an
-unreadable `devplane.toml` exit non-zero. It records nothing, and the hook never waits on a person.
-States and flags: [`devplane gate`](@/docs/cli.md#devplane-gate).
+- Needs Spec Kit initialised (`.specify/`). An existing `extensions.yml` is not edited: the entry and
+  where to add it are printed.
+- Hook point `after_implement` unless `--event`.
+- Refused with no `[gates] check`, or no skill at `.claude/skills/devplane-gate/SKILL.md` in the
+  repository or home. The [plugin](@/docs/install.md#inside-claude-code-as-a-plugin)'s copy does not
+  count. `--anyway` overrides; `--dry-run` applies the same refusals.
+- `devplane gate` exits 0 only on a pass, records nothing, and never waits on a person.
+  [States and flags](@/docs/cli.md#devplane-gate).
 
 ## Next
 

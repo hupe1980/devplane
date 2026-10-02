@@ -112,7 +112,7 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
     const takesProps = Object.keys(s.select(recorded, "focus")).length > 0;
     if (!takesProps && !(s.reads ?? []).length) fail(`surface "${s.id}" selects nothing and reads nothing, so it renders its defaults for ever`);
     const dir = `../src/surfaces/${s.id}/`;
-    const code = readdirSync(new URL(dir, import.meta.url)).filter((f) => f !== "index.ts").map((f) => source(dir + f)).join("\n");
+    const code = readdirSync(new URL(dir, import.meta.url)).filter((f) => f !== "index.ts" && f.includes(".")).map((f) => source(dir + f)).join("\n");
     for (const route of s.reads ?? []) {
       if (!served.has(route)) fail(`surface "${s.id}" reads ${route}, which src/api.rs does not serve`);
       if (!code.includes(route)) fail(`surface "${s.id}" declares it reads ${route} and none of its components calls it`);
@@ -140,7 +140,7 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
     if (s?.select({ ...empty, loaded: false }, "").loaded !== false || s?.select({ ...empty, loaded: true }, "").loaded !== true)
       fail(`${id}.select does not carry the feed's phase, so it cannot tell unread from empty`);
   }
-  for (const kind of ["change", "review", "ask", "run"])
+  for (const kind of ["change", "ask", "run"])
     if (surfaces().filter((s) => s.link === kind).length !== 1) fail(`the ${kind} link is not claimed by exactly one surface`);
   if (surfaces().filter((s) => s.holds === "run").length !== 1) fail("no one surface holds a run, so the activity panel opens nothing");
   const marks = surfaces().filter((s) => s.marksLook);

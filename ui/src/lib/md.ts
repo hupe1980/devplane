@@ -2,7 +2,7 @@
 // nothing else — no links, no images, no raw HTML. The result is a list of
 // segments rendered as text nodes by `Inline.svelte`, so nothing here ever
 // becomes markup: text quoted inside a sentence stays inert data. Never used
-// for untrusted content on its own (a report, a spec line): that stays plain.
+// for untrusted content on its own (a spec line): that stays plain.
 
 /// One run of a host sentence: plain text, a code span, or strong text.
 export type Seg = { k: "t" | "code" | "strong"; s: string };

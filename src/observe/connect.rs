@@ -826,7 +826,7 @@ fn probe_dir() -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     std::fs::write(
         dir.join(crate::core::config::CONFIG_FILE),
-        "[project]\nname = \"devplane-probe\"\n\n[policy]\nnever_auto = [\"Read(.devplane-probe)\"]\n",
+        "[project]\nname = \"devplane-probe\"\n\n[policy]\ndeny = [\"Read(.devplane-probe)\"]\n",
     )?;
     Ok(dir)
 }
@@ -1068,7 +1068,7 @@ mod tests {
     #[test]
     fn exactly_the_two_gate_hooks_block_and_they_reach_the_policy() {
         // `PreToolUse` is the only event that fires in auto mode; without it a
-        // `never_auto` rule never runs there. Everything else is async.
+        // `deny` rule never runs there. Everything else is async.
         let s = connected();
         let mut blocking = Vec::new();
         for (event, entries) in s["hooks"].as_object().unwrap() {

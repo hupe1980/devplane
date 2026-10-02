@@ -1,5 +1,12 @@
 import { register } from "../../lib/surfaces";
-import Setup from "./Setup.svelte";
+import { bind, onAction } from "../../lib/keys";
+import { go } from "../../lib/route";
+
+bind({ surface: "global", combo: "g ,", action: "go-setup", label: "go to the setup" });
+onAction("go-setup", () => {
+  go("#setup");
+  return true;
+});
 
 register({
   id: "setup",
@@ -11,5 +18,5 @@ register({
   // Fetched by the surface; declared so the route guard can see it.
   reads: ["/api/setup", "/api/github"],
   select: () => ({}),
-  component: Setup,
+  page: () => import("./Setup.svelte"),
 });

@@ -20,7 +20,7 @@ use std::time::Instant;
 
 pub fn router(state: Shared) -> Router {
     Router::new()
-        // Receivers. The `/devplane/` marker lets `connect` recognise its own
+        // Receivers. The `/devplane/` marker lets `agent connect` recognise its own
         // entries when disconnecting.
         .route("/devplane/otel/v1/logs", post(otel_logs))
         // Claude Code exports log records; GenAI-convention agents (Copilot,
@@ -33,7 +33,6 @@ pub fn router(state: Shared) -> Router {
         .route("/api/board", get(board))
         .route("/api/inbox", get(inbox))
         .route("/api/runs/{id}", get(run_detail))
-        .route("/api/runs/{id}/rewind-gap", get(run_rewind_gap))
         .route("/api/runs/{id}/messages", get(run_messages))
         .route("/api/runs/{id}/snooze", post(snooze))
         .route("/api/runs/{id}/prompt", post(prompt_run))
@@ -49,6 +48,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/changes/{id}/drift/accept", post(accept_drift))
         .route("/api/changes/{id}/drift/tell", post(tell_drift))
         .route("/api/changes/{id}/verify", post(verify_change))
+        .route("/api/changes/{id}/base-checks", post(base_checks_change))
         .route("/api/changes/{id}/finish", post(finish_change))
         .route("/api/changes/{id}/retry", post(retry_change))
         .route("/api/changes/{id}/snooze", post(snooze_change))
@@ -60,12 +60,6 @@ pub fn router(state: Shared) -> Router {
         .route("/api/changes/adopt", post(adopt_change))
         .route("/api/changes/{id}/archive", post(archive_change))
         .route("/api/changes/{id}/offer", post(offer_change))
-        .route("/api/reports", get(list_reports).post(file_report))
-        .route("/api/reports/{id}", get(report_detail))
-        .route("/api/reports/{id}/start", post(start_from_report))
-        .route("/api/reports/{id}/resolve", post(resolve_report))
-        // The one route that writes to a forge; only a person's act calls it.
-        .route("/api/reports/{id}/open", post(open_report))
         .route("/api/projects", get(projects))
         .route("/api/specs", get(specs))
         .route("/api/projects/trust", post(trust_project))
@@ -82,20 +76,41 @@ pub fn router(state: Shared) -> Router {
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/setup", get(setup))
-        .route("/api/attention", get(attention))
         .route("/api/modes", get(modes))
         .route("/api/quitting", get(quitting))
         .route("/api/quit", post(quit))
         .route("/api/stream", get(stream))
         // Open, and names the version: a client refuses a host of another
         // version, since a stale host 404s routes the client expects.
-        .route(
-            "/healthz",
-            get(|| async { concat!("ok ", env!("CARGO_PKG_VERSION")) }),
-        )
+        .route("/healthz", get(healthz))
         .route("/", get(asset))
         .route("/{file}", get(asset))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+struct HealthQuery {
+    nonce: Option<String>,
+}
+
+/// `ok <version>`, and with a client's `nonce` the proof that this process
+/// holds the token ([`crate::config::host_proof`]), which a client checks
+/// before it sends the token to whatever answers on the port.
+async fn healthz(State(state): State<Shared>, Query(q): Query<HealthQuery>) -> String {
+    let ok = concat!("ok ", env!("CARGO_PKG_VERSION"));
+    // Before the port is bound there is nothing to prove, so no proof.
+    match (
+        q.nonce.filter(|n| (16..=128).contains(&n.len())),
+        state.port.get(),
+    ) {
+        (Some(n), Some(port)) => {
+            format!(
+                "{ok} {}",
+                crate::config::host_proof(&state.token, *port, &n)
+            )
+        }
+        _ => ok.to_string(),
+    }
 }
 
 /// A status and a body, for a request that named something unresolvable.
@@ -190,6 +205,18 @@ fn authorised_to_ingest(state: &Shared, headers: &HeaderMap) -> bool {
             .and_then(|v| v.to_str().ok())
             .map(|v| v.strip_prefix("Bearer ").unwrap_or(v))
             .is_some_and(|t| constant_time_eq(t.as_bytes(), state.ingest_token.as_bytes()))
+}
+
+/// Which surface an authorised request came from, as the host can tell it: a
+/// page — the window or a browser tab — sends an `Origin` no script on it can
+/// change; any other holder of the token is a client like the CLI. Never what
+/// a request body says about itself.
+fn surface_of(headers: &HeaderMap) -> &'static str {
+    if headers.contains_key(axum::http::header::ORIGIN) {
+        "board"
+    } else {
+        "cli"
+    }
 }
 
 macro_rules! guard {
@@ -652,7 +679,7 @@ async fn github_logout(
     }
 }
 
-/// Says a sign-in changed outside this host — `devplane login github
+/// Says a sign-in changed outside this host — `devplane auth login
 /// --with-token` stores the token in its own process — so the copy this host
 /// holds is dropped and the forge is read at once.
 async fn github_refresh(
@@ -748,7 +775,7 @@ fn default_limit() -> i64 {
 
 /// What this machine's rules say about one call, without running it.
 /// Reached only by the MCP server (`src/mcp.rs`), which composes routes with
-/// `format!` — removing this is not a compile error. `devplane explain`
+/// `format!` — removing this is not a compile error. `devplane config explain`
 /// computes the same verdict in process.
 #[derive(serde::Deserialize)]
 struct ExplainQuery {
@@ -823,31 +850,6 @@ async fn explain(
     .into_response()
 }
 
-/// Files a shell call in this run named for writing — the class Claude Code's
-/// checkpointing does not cover. "Named for writing" rather than "changed":
-/// the gate saw the call before the tool ran.
-async fn run_rewind_gap(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let id = run_id!(state, id);
-    // Every decision: a limit would silently answer about part of the run.
-    match state.store.decisions(Some(id.as_str()), i64::MAX).await {
-        Ok(rows) => Json(json!({
-            "run": id.to_string(),
-            "files": crate::core::decision::files_a_shell_call_named_for_writing(&rows),
-        }))
-        .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
 /// What a driven agent said, oldest first. Empty for a watched session: its
 /// channels carry no prompt or response text, so `focus` is the way to it.
 async fn run_messages(
@@ -920,9 +922,10 @@ struct AnswerBody {
     /// Which question, when the agent asked several at once.
     #[serde(default)]
     field: Option<String>,
-    /// Which surface this came from.
-    #[serde(default)]
-    from: Option<String>,
+    /// Ignored: which surface answered is what the host can tell from the
+    /// request itself ([`surface_of`]), never what a body claims.
+    #[serde(default, rename = "from")]
+    _from: Option<String>,
     /// Every question's answer at once, for a form that asked several; a row
     /// is answered only once.
     #[serde(default)]
@@ -973,8 +976,7 @@ async fn answer_ask(
         }
     };
 
-    let from = body.from.unwrap_or_else(|| "api".to_string());
-    match crate::driven::answer_ask(&state, &id, answer, &from).await {
+    match crate::driven::answer_ask(&state, &id, answer, surface_of(&headers)).await {
         Ok(a) => {
             acted_on(
                 &state,
@@ -1231,7 +1233,6 @@ async fn start_change(
             worktree: body.worktree,
             spec,
             tasks: body.tasks.clone(),
-            from_report: None,
         };
         match crate::change::start(&state, req).await {
             Ok(id) => {
@@ -1269,6 +1270,8 @@ async fn change_detail(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let id = change_id!(state, id);
+    // One change is read now, not from the last tick: it states *verified*.
+    crate::change::refresh_tree(&state, &id).await;
     let snap = state.snapshot().await;
     match crate::view::change_one(&snap, &state.store, &id).await {
         Some(v) => Json(v).into_response(),
@@ -1361,16 +1364,80 @@ async fn verify_change(
     State(state): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
 ) -> impl IntoResponse {
     guard!(state, headers);
     let id = change_id!(state, id);
+    // `{"base_checks": true}`: after a passing `check`, the pair too, waited
+    // for. The reply's `passed` is still `check`'s alone.
+    let with_base = body
+        .as_ref()
+        .and_then(|b| b.get("base_checks"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     match crate::change::verify(&state, &id).await {
-        Ok(report) => Json(json!({
-            "passed": report.passed(),
-            "summary": report.summary(),
-            "report": report,
-        }))
-        .into_response(),
+        Ok(report) => {
+            let mut reply = json!({
+                "passed": report.passed(),
+                "summary": report.summary(),
+                "report": report,
+            });
+            if with_base && report.passed() {
+                let absent = crate::base_checks::ensure(&state, &id).await;
+                reply["base_checks"] = base_checks_of(&state, &id).await;
+                if let Ok(Some(a)) = absent {
+                    reply["base_checks_refused"] = json!(a.says());
+                }
+            }
+            Json(reply).into_response()
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// A change's base checks as its view composes them.
+async fn base_checks_of(state: &Shared, id: &crate::core::ChangeId) -> serde_json::Value {
+    let change = state.changes.lock().await.get(id).cloned();
+    let config = crate::change::governing_config(state, id)
+        .await
+        .ok()
+        .map(|(_, c)| c);
+    change
+        .and_then(|c| {
+            crate::core::base_checks::View::of(
+                &c,
+                config.as_ref(),
+                crate::base_checks::is_running(id),
+            )
+        })
+        .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Starts base checks for a change's current tree: 202 when started or
+/// already running, 200 when a current result exists, 409 with the sentence
+/// when none may run.
+async fn base_checks_change(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::base_checks::start(&state, &id).await {
+        Ok(crate::base_checks::Started::Running(_)) => {
+            (StatusCode::ACCEPTED, Json(json!({"started": true}))).into_response()
+        }
+        Ok(crate::base_checks::Started::Current) => Json(json!({"current": true})).into_response(),
+        Ok(crate::base_checks::Started::Refused(a)) => (
+            StatusCode::CONFLICT,
+            Json(json!({"refused": a, "says": a.says()})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -1754,210 +1821,6 @@ async fn archive_change(
     }
 }
 
-/// Files a report. No provenance field is read: `run` is resolved against
-/// this host's record, and a person's report says `as_person`. An unknown run
-/// is a 400 naming it.
-async fn file_report(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Json(body): Json<crate::reports::FileRequest>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    match crate::reports::file_and_deliver(&state, body).await {
-        Ok(filed) => (StatusCode::CREATED, Json(filed_json(filed))).into_response(),
-        Err(refusal) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": refusal.says()})),
-        )
-            .into_response(),
-    }
-}
-
-/// What filing answers, on the host and with no host alike.
-pub fn filed_json(filed: crate::reports::Filed) -> serde_json::Value {
-    let routed = match &filed.report.target {
-        crate::core::report::Target::Project { .. } => "inbox",
-        crate::core::report::Target::GitHub { .. } => "drafted",
-        crate::core::report::Target::Source => "kept",
-    };
-    json!({
-        "report": crate::view::ReportView::of(filed.report, jiff::Timestamp::now()),
-        "routed": routed,
-        "says": filed.says,
-        "delivered": filed.delivered,
-    })
-}
-
-async fn list_reports(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Query(q): Query<crate::view::ReportQuery>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let snap = state.snapshot().await;
-    match crate::view::reports(&snap, &state.store, &q).await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-async fn report_detail(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let snap = state.snapshot().await;
-    match crate::view::report(&snap, &state.store, &id).await {
-        Ok(Some(v)) => Json(v).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": format!("no report `{id}`")})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-#[derive(Deserialize, Default)]
-struct StartFromReportBody {
-    #[serde(default)]
-    agent: Option<String>,
-}
-
-/// Starts a change in the target from a report. The person's act, and the
-/// row it answers is recorded as acted on.
-async fn start_from_report(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    body: Option<Json<StartFromReportBody>>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let agent = body.and_then(|Json(b)| b.agent);
-    match crate::reports::start(&state, &id, agent).await {
-        Ok(change) => {
-            report_acted_on(&state, &id).await;
-            Json(json!({"change_id": change})).into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("{e:#}")})),
-        )
-            .into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-struct ResolveBody {
-    #[serde(rename = "as")]
-    how: String,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-/// Answers a report by hand: rejected, deferred, fixed or — a draft —
-/// discarded. The answer is recorded on the change that filed it.
-async fn resolve_report(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(body): Json<ResolveBody>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    let answer = match crate::reports::Answer::parse(&body.how, body.reason) {
-        Ok(a) => a,
-        Err(why) => return (StatusCode::BAD_REQUEST, Json(json!({"error": why}))).into_response(),
-    };
-    match crate::reports::resolve(&state, &id, answer).await {
-        Ok(r) => {
-            report_acted_on(&state, r.id.as_str()).await;
-            Json(crate::view::ReportView::of(r, jiff::Timestamp::now())).into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("{e:#}")})),
-        )
-            .into_response(),
-    }
-}
-
-/// Opens a GitHub draft as the signed-in person. `409` unless it is a draft.
-async fn open_report(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    match state.store.report(&id).await {
-        Ok(Some(r)) if r.state == crate::core::report::State::Drafted => {}
-        Ok(Some(r)) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(
-                    json!({"error": format!("report {} is {}, not a draft", r.id, r.state_says())}),
-                ),
-            )
-                .into_response();
-        }
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": format!("no report `{id}`")})),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
-            )
-                .into_response();
-        }
-    }
-    match crate::reports::open(&state, &id).await {
-        Ok(r) => {
-            report_acted_on(&state, r.id.as_str()).await;
-            let url = match &r.state {
-                crate::core::report::State::Opened { url } => url.clone(),
-                _ => String::new(),
-            };
-            Json(json!({"url": url})).into_response()
-        }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("{e:#}")})),
-        )
-            .into_response(),
-    }
-}
-
-/// A report's row was answered with one of its own actions.
-async fn report_acted_on(state: &Shared, id: &str) {
-    let id = match state.store.report(id).await {
-        Ok(Some(r)) => r.id,
-        _ => return,
-    };
-    acted_on(
-        state,
-        id.as_str(),
-        &[
-            crate::core::AttentionKind::ReportFiled,
-            crate::core::AttentionKind::ReportWaiting,
-        ],
-        crate::core::attention::Resolution::Acted,
-    )
-    .await;
-}
-
 /// Offers a change: pushes and opens the pull request when the person's
 /// configuration allows it, else hands back the commands that would.
 async fn offer_change(
@@ -2010,6 +1873,8 @@ async fn change_certificate(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let id = change_id!(state, id);
+    // Read now, not from the last tick: the certificate states *verified*.
+    crate::change::refresh_tree(&state, &id).await;
     let snap = state.snapshot().await;
     match crate::view::change_certificate(&snap, &state.store, &id).await {
         Some(v) => Json(v).into_response(),
@@ -2157,36 +2022,10 @@ async fn projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoR
     Json(crate::view::projects(&snap)).into_response()
 }
 
-#[derive(Deserialize)]
-struct AttentionQuery {
-    /// How far back to look. A week by default.
-    #[serde(default = "default_attention_days")]
-    days: i64,
-}
-fn default_attention_days() -> i64 {
-    7
-}
-
 async fn modes(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let snap = state.snapshot().await;
     Json(crate::view::modes(&snap)).into_response()
-}
-
-async fn attention(
-    State(state): State<Shared>,
-    headers: HeaderMap,
-    Query(q): Query<AttentionQuery>,
-) -> impl IntoResponse {
-    guard!(state, headers);
-    match crate::view::attention(&state.store, q.days).await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
 }
 
 #[derive(Deserialize)]
@@ -2331,7 +2170,7 @@ async fn quitting(State(state): State<Shared>, headers: HeaderMap) -> impl IntoR
     Json(v).into_response()
 }
 
-/// Asks the host to stop (`devplane quit`). A request rather than a signal
+/// Asks the host to stop (`devplane down`). A request rather than a signal
 /// to the recorded pid, which may since belong to another process; it reaches
 /// the same graceful path as ctrl-c on every platform.
 async fn quit(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
@@ -2352,131 +2191,125 @@ async fn setup(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResp
 }
 
 async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    use crate::view::{
+        AutoModeView, Diagnostics, DiagnosticsForge, DiagnosticsGate, DiagnosticsModes,
+        LeakedAgent, OpenCodeHealth, SkippedProject, UnreadableConfig, UnreadableRow, Unwritten,
+    };
     guard!(state, headers);
     let channels = state.store.channel_health().await.unwrap_or_default();
+    // Not configured is not unhealthy, and the two must not render the same.
     let opencode = match std::env::var(crate::observe::opencode::ENV_SERVER) {
-        Ok(url) => {
+        Ok(server) => {
             let h = state.opencode.lock().await.clone();
-            json!({"server": url, "says": h.says(), "live": matches!(
-                h, crate::observe::opencode::Health::Live { .. }
-            )})
+            Some(OpenCodeHealth {
+                server,
+                says: h.says(),
+                live: matches!(h, crate::observe::opencode::Health::Live { .. }),
+            })
         }
-        // Not configured is not unhealthy, and the two must not render the same.
-        Err(_) => serde_json::Value::Null,
+        Err(_) => None,
     };
     // A `devplane.toml` that will not load keeps cached rules, but a host
-    // restarted against it has none — so that repository's `never_auto` list
-    // is gone, and this says so.
-    let broken: Vec<_> = state
+    // restarted against it has none — so that repository's `deny` list is
+    // gone, and this says so.
+    let unreadable_configs = state
         .policy
         .broken()
         .into_iter()
-        .map(|(root, error)| json!({"project": root.display().to_string(), "error": error}))
+        .map(|(root, error)| UnreadableConfig {
+            project: root.display().to_string(),
+            error,
+        })
         .collect();
     // Rows this build cannot decode are absent from the board. A lost Change
     // row orphans a worktree, so they are counted here.
-    let unreadable_rows: Vec<_> = state
+    let unreadable_rows = state
         .store
         .unreadable()
         .await
         .unwrap_or_default()
         .into_iter()
-        .map(|(row, error)| json!({"row": row, "error": error}))
+        .map(|(row, error)| UnreadableRow { row, error })
         .collect();
     // Before the lock: it shells out.
-    let auto_mode = crate::observe::automode::effective().await;
+    let auto_mode = match crate::observe::automode::effective().await {
+        Ok(cfg) => AutoModeView::Read {
+            configured: !cfg.is_empty(),
+            environment: cfg.environment.len(),
+            allow: cfg.allow.len(),
+            soft_deny: cfg.soft_deny.len(),
+            hard_deny: cfg.hard_deny.len(),
+        },
+        Err(unavailable) => AutoModeView::Unavailable { unavailable },
+    };
+    // Whether the inbox is worth reading: what each kind raised in the last
+    // week and what became of it. Measures the tool, not the person.
+    let attention = crate::view::attention(&state.store, 7).await.ok();
     let forge = {
         let f = state.forge.lock().await;
-        json!({
-            "viewer": f.viewer,
-            "error": f.error,
-            // Per GitHub host: signed in as whom, and when GitHub last
-            // answered. Never the token.
-            "github": state.github.views(),
-            "last_poll_at": f.last_poll_at.map(|t| t.to_string()),
-            "projects": f.projects.len(),
-            "skipped": f.skip.len(),
-            // Which ones, and why: the reason (usually "no GitHub remote")
-            // is what a person can act on.
-            "skipped_projects": f
+        DiagnosticsForge {
+            viewer: f.viewer.clone(),
+            error: f.error.clone(),
+            github: serde_json::to_value(state.github.views()).unwrap_or_default(),
+            last_poll_at: f.last_poll_at.map(|t| t.to_string()),
+            projects: f.projects.len(),
+            skipped: f.skip.len(),
+            // The reason (usually "no GitHub remote") is what a person can act on.
+            skipped_projects: f
                 .skip
                 .iter()
-                .map(|(id, (why, at))| json!({
-                    "project": id.to_string(),
-                    "reason": why,
-                    "at": at.to_string(),
-                }))
-                .collect::<Vec<_>>(),
-        })
+                .map(|(id, (why, at))| SkippedProject {
+                    project: id.to_string(),
+                    reason: why.to_string(),
+                    at: at.to_string(),
+                })
+                .collect(),
+        }
     };
-    let w = state.world.lock().await;
-    // How many live sessions report their version; "nothing reports a
-    // version" is a real diagnostic.
-    let reporting = w
-        .runs()
-        .filter(|r| r.state.is_live() && r.claude_version.is_some())
-        .count();
-    let (lost_events, lost_decisions, last_loss) = state.unwritten.counts();
-    // Agents a previous host abandoned, read once at startup.
-    let leaked: Vec<_> = state
+    let leaked_agents = state
         .leaked_agents
         .lock()
         .await
         .iter()
-        .map(|(pid, command, worktree)| {
-            json!({
-                "pid": pid,
-                "command": command,
-                "worktree": worktree,
-            })
+        .map(|(pid, command, worktree)| LeakedAgent {
+            pid: *pid,
+            command: command.clone(),
+            worktree: worktree.clone(),
         })
         .collect();
-    Json(json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "gate": {
-            "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
-            "sessions_reporting_a_version": reporting,
+    let (lost_events, lost_decisions, last_loss) = state.unwritten.counts();
+    let w = state.world.lock().await;
+    let live = || w.runs().filter(|r| r.state.is_live());
+    Json(Diagnostics {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        gate: DiagnosticsGate {
+            syntax_modelled_on: crate::core::policy::SYNTAX_MODELLED_ON.to_string(),
+            // "Nothing reports a version" is a real diagnostic.
+            sessions_reporting_a_version: live().filter(|r| r.claude_version.is_some()).count(),
         },
-        // Live sessions whose environment Devplane could read — only the
-        // `SessionStart` hook can, so this is the question-clock coverage.
-        "modes": {
-            "clock_read": w.runs().filter(|r| r.state.is_live() && r.question_clock_read.is_some()).count(),
-            "clock_unread": w.runs().filter(|r| r.state.is_live() && r.question_clock_read.is_none()).count(),
+        modes: DiagnosticsModes {
+            clock_read: live().filter(|r| r.question_clock_read.is_some()).count(),
+            clock_unread: live().filter(|r| r.question_clock_read.is_none()).count(),
         },
-        "leaked_agents": leaked,
-        "pid": std::process::id(),
-        "started_at": state.started_at.to_string(),
-        "uptime_seconds": (jiff::Timestamp::now() - state.started_at).get_seconds(),
-        "summary": w.summary(jiff::Timestamp::now()),
-        "channels": channels,
-        // The OpenCode subscription. The feed does not replay, so a dead
-        // subscription looks like a quiet machine. Absent where not asked for.
-        "opencode": opencode,
-        "forge": forge,
-        "stall_seconds": w.attention.stall_seconds,
-        "unreadable_configs": broken,
-        "unreadable_rows": unreadable_rows,
-        // How much of the store never arrived. A failed write is logged and
-        // dropped (losing history beats stalling a blocked hook); this is
-        // where that loss becomes visible.
-        "unwritten": {
-            "events": lost_events,
-            "decisions": lost_decisions,
-            "last_reason": last_loss,
+        leaked_agents,
+        attention,
+        pid: std::process::id(),
+        started_at: state.started_at.to_string(),
+        uptime_seconds: (jiff::Timestamp::now() - state.started_at).get_seconds(),
+        summary: w.summary(jiff::Timestamp::now()),
+        channels,
+        opencode,
+        forge,
+        stall_seconds: w.attention.stall_seconds,
+        unreadable_configs,
+        unreadable_rows,
+        unwritten: Unwritten {
+            events: lost_events,
+            decisions: lost_decisions,
+            last_reason: last_loss,
         },
-        // The other gate: in auto mode a classifier configured elsewhere
-        // decides. Read back, never written.
-        "auto_mode": match auto_mode {
-            Ok(cfg) => json!({
-                "configured": !cfg.is_empty(),
-                "environment": cfg.environment.len(),
-                "allow": cfg.allow.len(),
-                "soft_deny": cfg.soft_deny.len(),
-                "hard_deny": cfg.hard_deny.len(),
-            }),
-            Err(why) => json!({"unavailable": why}),
-        },
-    }))
+        auto_mode,
+    })
     .into_response()
 }
 

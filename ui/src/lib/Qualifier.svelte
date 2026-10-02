@@ -10,7 +10,7 @@
   const shown = $derived(!!q && q.says !== "");
 </script>
 
-{#if shown && q}<span class="qualifier" class:compact title={q.unseen > 0 ? `${q.says} — ${q.unseen} not yet marked seen` : `${q.says} — every one marked seen`}><span class="sep" aria-hidden="true">·</span> {q.says}{#if q.unseen > 0}<span class="unseen">({q.unseen} unseen)</span>{/if}</span>{/if}
+{#if shown && q}<span class="qualifier" class:compact title={q.unseen > 0 ? `${q.says} — ${q.unseen} not yet read` : `${q.says} — every one marked read`}><span class="sep" aria-hidden="true">·</span> {q.says}{#if q.unseen > 0}<span class="unseen">({q.unseen} unread)</span>{:else}<span class="unseen">(read)</span>{/if}</span>{/if}
 
 <style>
   .qualifier {

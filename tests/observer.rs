@@ -255,15 +255,15 @@ async fn a_permission_no_rule_covers_is_left_to_claude_and_shown_to_the_human() 
     );
 }
 
-/// With no host, a prohibition is refused naming its rule, an `always_ask` rule
+/// With no host, a prohibition is refused naming its rule, an `ask` rule
 /// still reaches a person, and an uncovered call is left alone. Nothing approves.
 #[test]
 fn the_gate_decides_with_no_host_running() {
     let home = gate_home("no-host");
     let rules = r#"
 [policy]
-never_auto = ["Bash(rm -rf *)"]
-always_ask = ["Bash(git push *)"]
+deny = ["Bash(rm -rf *)"]
+ask = ["Bash(git push *)"]
 "#;
     let denied = gate(
         &home,
@@ -304,7 +304,7 @@ async fn a_prohibition_answers_and_nothing_is_approved() {
     let home = gate_home("matching");
     let rules = r#"
 [policy]
-never_auto = ["Bash(git push *)"]
+deny = ["Bash(git push *)"]
 "#;
 
     let permitted = gate(
@@ -361,7 +361,7 @@ async fn the_policy_gate_answers_fast_enough_to_be_invisible() {
     let home = gate_home("latency");
     let body = r#"{"hook_event_name":"PermissionRequest","session_id":"s4","cwd":"/tmp/repo",
         "tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#;
-    let rules = "[policy]\nnever_auto = [\"Bash(rm *)\"]\n";
+    let rules = "[policy]\ndeny = [\"Bash(rm *)\"]\n";
 
     // Warm the page cache so the first read of the debug binary is not measured.
     gate(&home, rules, body);
@@ -722,26 +722,10 @@ async fn events_survive_a_restart_and_rebuild_the_same_board() {
 // Driven runs
 // ---------------------------------------------------------------------------
 
-/// The fixture agent from `devplane-acp`, built as a sibling of this binary.
-fn echo_agent_path() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bin = exe
-        .parent()?
-        .parent()?
-        .join("examples")
-        .join(if cfg!(windows) {
-            "echo_agent.exe"
-        } else {
-            "echo_agent"
-        });
-    bin.exists().then(|| bin.to_string_lossy().to_string())
-}
-
 #[tokio::test]
 async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() {
     // The answer happens here rather than in a terminal, end to end.
-    let _serial = common::one_agent_at_a_time();
-    let Some(agent) = echo_agent_path() else {
+    let Some(agent) = common::echo_agent() else {
         eprintln!("skipping: build the fixture with `cargo build -p devplane-acp --examples`");
         return;
     };
@@ -813,7 +797,9 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
     let answered: Value = c
         .post(format!("http://{addr}/api/asks/{ask}/answer"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "option": "allow", "from": "test" }))
+        // A page: the host names the surface from the request, not the body.
+        .header("Origin", format!("http://{addr}"))
+        .json(&serde_json::json!({ "option": "allow", "from": "phone" }))
         .send()
         .await
         .unwrap()
@@ -847,7 +833,7 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         .unwrap();
     let said = again["error"].as_str().unwrap_or_default();
     assert!(
-        said.contains("already answered") && said.contains("test"),
+        said.contains("already answered") && said.contains("board"),
         "the second answer is refused and names the first: {said}"
     );
 
@@ -859,7 +845,10 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         .iter()
         .find(|a| a["id"] == ask.as_str())
         .expect("the ask is on the record");
-    assert_eq!(settled["answered_from"], "test");
+    assert_eq!(
+        settled["answered_from"], "board",
+        "never the body's own claim"
+    );
 
     let mut cleared = false;
     for _ in 0..50 {
@@ -944,8 +933,7 @@ async fn stopping_the_host_is_a_request_rather_than_a_signal() {
 #[tokio::test]
 async fn dispatching_into_a_directory_that_does_not_exist_is_refused() {
     let (addr, token, c) = boot(Policy::default()).await;
-    let _serial = common::one_agent_at_a_time();
-    let Some(agent) = echo_agent_path() else {
+    let Some(agent) = common::echo_agent() else {
         return;
     };
     let res: Value = c
@@ -970,8 +958,8 @@ async fn a_prohibition_reaches_a_session_that_is_never_going_to_prompt() {
     let home = gate_home("auto");
     let rules = r#"
 [policy]
-never_auto = ["Bash(git push *)"]
-always_ask = ["Bash(gh release *)"]
+deny = ["Bash(git push *)"]
+ask = ["Bash(gh release *)"]
 "#;
     let pre = |cmd: &str| {
         format!(
@@ -984,7 +972,7 @@ always_ask = ["Bash(gh release *)"]
     let denied = gate(&home, rules, &pre("git push --force"));
     assert_eq!(
         denied["hookSpecificOutput"]["permissionDecision"], "deny",
-        "a never_auto rule has to reach auto mode or it protects nothing"
+        "a deny rule has to reach auto mode or it protects nothing"
     );
     assert!(
         denied["hookSpecificOutput"]["permissionDecisionReason"]
@@ -1032,7 +1020,7 @@ always_ask = ["Bash(gh release *)"]
 #[tokio::test]
 async fn the_gate_decides_with_no_host_and_files_the_decision_afterwards() {
     let home = gate_home("nohost");
-    let rules = "[policy]\nnever_auto = [\"Read(.env)\"]\n";
+    let rules = "[policy]\ndeny = [\"Read(.env)\"]\n";
     let payload = r#"{"hook_event_name":"PreToolUse","session_id":"offline","cwd":"/tmp/repo",
         "tool_name":"Bash","tool_input":{"command":"cat .env"}}"#;
 
@@ -1087,7 +1075,7 @@ async fn a_file_rule_reaches_the_files_a_shell_command_names() {
     let home = gate_home("filerule");
     let rules = r#"
 [policy]
-never_auto = ["Read(.env)", "Edit(.env)"]
+deny = ["Read(.env)", "Edit(.env)"]
 "#;
     // Globs: the shell expands the operand, so the matcher must treat it as a pattern.
     for cmd in [
@@ -1114,7 +1102,7 @@ never_auto = ["Read(.env)", "Edit(.env)"]
 #[test]
 fn a_prohibition_is_never_walked_past_by_a_spelling() {
     let home = gate_home("spellings");
-    let rules = "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n";
+    let rules = "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n";
     let run = |cmd: &str| {
         let body = serde_json::json!({
             "hook_event_name": "PreToolUse", "session_id": "sp", "cwd": "/tmp/repo",
@@ -1147,6 +1135,20 @@ fn a_prohibition_is_never_walked_past_by_a_spelling() {
         "docker run x rm -rf /",
         "node --eval 'x'",
         "sh <<EOF\nrm -rf /\nEOF",
+        "git config alias.x '!rm -rf /' && git x",
+        "tar -xf a.tar --to-command='rm -rf /'",
+        "tar -cf a.tar --checkpoint-action=exec='rm -rf /' .",
+        "sed -n '1e rm -rf /' f",
+        "zip -TT 'rm -rf /' a.zip f",
+        "less +'!rm -rf /' f",
+        "man -P 'rm -rf /' ls",
+        "tmux new 'rm -rf /'",
+        "tmux send-keys 'rm -rf /' Enter",
+        "screen -X stuff 'rm -rf /'",
+        "ssh localhost rm -rf /",
+        "./x.sh",
+        "/tmp/x",
+        "~/bin/x",
     ] {
         let v = run(cmd);
         let decision = v["hookSpecificOutput"]["permissionDecision"]
@@ -1188,7 +1190,7 @@ fn the_gate_fails_closed_on_every_hole_the_audit_found() {
             .unwrap_or("undecided")
             .to_string()
     };
-    let rm = "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n";
+    let rm = "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n";
     for cmd in [
         "function f { rm -rf /; }; f",
         "coproc rm -rf /",
@@ -1212,11 +1214,11 @@ fn the_gate_fails_closed_on_every_hole_the_audit_found() {
         assert!(d == "deny" || d == "ask", "{cmd:?} was {d}");
     }
 
-    let except = "[policy]\nnever_auto = [\"Bash(git *)\", \"!Bash(git status *)\"]\n";
+    let except = "[policy]\ndeny = [\"Bash(git *)\", \"!Bash(git status *)\"]\n";
     assert_eq!(run(except, "git status && git push --force"), "deny");
     assert_eq!(run(except, "git status"), "undecided");
 
-    let exact = "[policy]\nnever_auto = [\"Bash(rm -rf /)\"]\n";
+    let exact = "[policy]\ndeny = [\"Bash(rm -rf /)\"]\n";
     for cmd in ["rm -rf /", "rm -r -f /", "rm -fr /"] {
         assert_eq!(run(exact, cmd), "deny", "{cmd}");
     }
@@ -1232,7 +1234,7 @@ fn measure_the_gate_on_the_release_binary() {
     let home = gate_home("measure");
     std::fs::write(
         home.join("policy.toml"),
-        "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n",
+        "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n",
     )
     .unwrap();
     let run = |cmd: &str| {
@@ -1377,7 +1379,7 @@ fn doctor_runs_the_gate_rather_than_reading_about_it() {
 async fn probing_the_gate_writes_nothing_down() {
     let probe_session = devplane::observe::hook::PROBE_SESSION;
     let home = gate_home("probe-noop");
-    let rules = "[policy]\nnever_auto = [\"Read(.env)\"]\n";
+    let rules = "[policy]\ndeny = [\"Read(.env)\"]\n";
     let probe = format!(
         r#"{{"hook_event_name":"PreToolUse","session_id":"{probe_session}","cwd":"/tmp/repo",
             "tool_name":"Bash","tool_input":{{"command":"cat .env"}}}}"#
@@ -1460,19 +1462,21 @@ async fn a_gate_that_stopped_answering_reaches_the_inbox() {
     // Nothing is offered: the fix is reinstalling, and settings.json is not rewritten.
     assert!(item["actions"].as_array().unwrap().is_empty());
 
-    // The CLI decodes it too: an item with no session sends `run_id: null`.
-    let decoded: Vec<devplane::render::InboxItem> =
+    // The CLI decodes it too, as the type the host serialised: an item with
+    // no session sends `run_id: null`.
+    let decoded: Vec<devplane::view::WaitingRow> =
         serde_json::from_value(inbox.clone()).expect("the CLI decodes what the API serves");
-    assert!(decoded.iter().any(|i| i.kind == "gate_down"));
+    assert!(decoded.iter().any(|i| i.item.kind.as_str() == "gate_down"));
 
     // A change whose runs have all ended.
     let work_shaped = serde_json::json!([{
-        "kind": "ci_red", "level": "high", "run_id": null,
-        "title": "CI is red", "change_id": "w-1", "actions": ["open_pr"]
+        "id": "c-1:ci_red", "kind": "ci_red", "level": "high", "run_id": null,
+        "project_id": null, "title": "CI is red", "detail": null, "options": [],
+        "change_id": "c-1", "actions": ["open_pr"], "since": "2026-01-01T00:00:00Z"
     }]);
-    let decoded: Vec<devplane::render::InboxItem> =
+    let decoded: Vec<devplane::view::WaitingRow> =
         serde_json::from_value(work_shaped).expect("a change with no run must decode too");
-    assert!(decoded[0].run_id.is_none());
+    assert!(decoded[0].item.run_id.is_none());
 }
 
 #[tokio::test]
@@ -1541,6 +1545,30 @@ async fn the_health_probe_names_the_version_so_a_client_can_refuse_a_stale_host(
         .await
         .unwrap();
     assert_eq!(text, format!("ok {}", env!("CARGO_PKG_VERSION")));
+}
+
+/// A client's nonce is answered with a proof bound to the token and the port,
+/// so whatever else answers the port cannot pass for the host.
+#[tokio::test]
+async fn the_health_probe_proves_the_host_holds_the_token() {
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    state.port.set(addr.port()).unwrap();
+    let nonce = "0123456789abcdef0123";
+    let text = c
+        .get(format!("http://{addr}/healthz?nonce={nonce}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let proof = devplane::config::host_proof(&token, addr.port(), nonce);
+    assert_eq!(text, format!("ok {} {proof}", env!("CARGO_PKG_VERSION")));
+    assert_ne!(
+        proof,
+        devplane::config::host_proof(&token, addr.port() ^ 1, nonce),
+        "a proof relayed from another port names the wrong one"
+    );
 }
 
 /// The forge endpoint: one route, both halves, what needs the person first,
@@ -1751,7 +1779,7 @@ async fn setup_reads_every_registered_repository_and_names_the_one_that_will_not
     }
     std::fs::write(
         good.join("devplane.toml"),
-        "[gates]\ncheck = [\"cargo test\"]\n\n[policy]\nnever_auto = [\"Bash(git push:*)\"]\n",
+        "[gates]\ncheck = [\"cargo test\"]\n\n[policy]\ndeny = [\"Bash(git push:*)\"]\n",
     )
     .unwrap();
     std::fs::write(broken.join("devplane.toml"), "[gates]\ncheck = \"oops\"\n").unwrap();
@@ -2151,8 +2179,7 @@ async fn only_a_live_session_reports_the_release_this_machine_is_running() {
 /// is delivered into a resumed session, which the row names.
 #[tokio::test]
 async fn a_question_outlives_the_host_that_was_holding_it() {
-    let _serial = common::one_agent_at_a_time();
-    let Some(agent) = echo_agent_path() else {
+    let Some(agent) = common::echo_agent() else {
         eprintln!("skipping: build the fixture with `cargo build -p devplane-acp --examples`");
         return;
     };
@@ -2237,7 +2264,7 @@ async fn a_question_outlives_the_host_that_was_holding_it() {
     let answered: Value = c
         .post(format!("http://{addr}/api/asks/{ask_id}/answer"))
         .bearer_auth(&token)
-        .json(&serde_json::json!({ "decision": "allow", "from": "test" }))
+        .json(&serde_json::json!({ "decision": "allow", "from": "window" }))
         .send()
         .await
         .unwrap()
@@ -2245,7 +2272,10 @@ async fn a_question_outlives_the_host_that_was_holding_it() {
         .await
         .unwrap();
     assert_eq!(answered["open"], false, "the answer settles it");
-    assert_eq!(answered["answered_from"], "test");
+    assert_eq!(
+        answered["answered_from"], "cli",
+        "a token-holding client, whatever it says"
+    );
     let outcome = answered["outcome"].as_str().unwrap_or_default();
     assert!(
         outcome.contains("you answered it"),
@@ -2485,7 +2515,7 @@ fn doctor_says_what_is_watched_per_vendor_and_per_channel() {
     );
 }
 
-/// Both empty states of `devplane ls` (Claude Code idle, or not installed) name
+/// Both empty states of `devplane status` (Claude Code idle, or not installed) name
 /// the vendors it cannot see. Driven via env so neither branch depends on the
 /// developer's machine.
 #[test]
@@ -2518,7 +2548,7 @@ fn an_empty_list_names_the_vendors_it_cannot_see() {
     for (what, bin, expect) in cases {
         let home = gate_home("empty-list");
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
-            .arg("ls")
+            .arg("status")
             .env("NO_COLOR", "1")
             .env("DEVPLANE_HOME", &home)
             .env("CLAUDE_CONFIG_DIR", &claude)
@@ -2683,7 +2713,7 @@ async fn both_surfaces_narrow_from_one_computation() {
     assert_eq!(typo["items"].as_array().map(Vec::len).unwrap_or(9), 0);
 }
 
-/// Narrowing is a view: it changes nothing in the `devplane attention` record.
+/// Narrowing is a view: it changes nothing in the attention record `doctor` reads.
 #[tokio::test]
 async fn a_narrowing_does_not_change_what_was_raised() {
     let (addr, token, c, state) = boot_with_state(Policy::default()).await;
@@ -2700,14 +2730,15 @@ async fn a_narrowing_does_not_change_what_was_raised() {
 
     // The record is written by the host's loop, so this checks structurally that
     // the narrowing filter cannot reach this route.
-    let plain = get_json(&c, &addr, "/api/attention?days=7", &token).await;
+    let plain = get_json(&c, &addr, "/api/diagnostics", &token).await["attention"].clone();
     let with_filter = get_json(
         &c,
         &addr,
-        "/api/attention?days=7&project=alpha&needs_you=true",
+        "/api/diagnostics?project=alpha&needs_you=true",
         &token,
     )
-    .await;
+    .await["attention"]
+        .clone();
 
     // Everything but `since`, which moves with the clock.
     for field in ["kinds", "oversight", "agents", "days"] {
@@ -2719,10 +2750,10 @@ async fn a_narrowing_does_not_change_what_was_raised() {
     }
 
     // And narrowing the inbox does not write to it either.
-    let before = get_json(&c, &addr, "/api/attention?days=7", &token).await;
+    let before = get_json(&c, &addr, "/api/diagnostics", &token).await["attention"].clone();
     let _ = get_json(&c, &addr, "/api/inbox?project=nothing-like-this", &token).await;
     let _ = get_json(&c, &addr, "/api/inbox?needs_you=true", &token).await;
-    let after = get_json(&c, &addr, "/api/attention?days=7", &token).await;
+    let after = get_json(&c, &addr, "/api/diagnostics", &token).await["attention"].clone();
     for field in ["kinds", "oversight", "agents", "days"] {
         assert_eq!(
             before[field], after[field],
@@ -2857,13 +2888,12 @@ async fn no_rule_clock_or_default_can_allow_through_a_hold() {
         r#"{"text":"allow"}"#,
     ] {
         let held = hold(&state, "s-x", "rm x", Duration::from_millis(700));
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        let asks = get_json(&c, &addr, "/api/asks", &token).await;
-        if let Some(a) = asks["open"].as_array().and_then(|a| a.first())
-            && let Some(id) = a["id"].as_str()
-        {
-            let _ = post(&c, &addr, &format!("/api/asks/{id}/answer"), &token, answer).await;
-        }
+        let id = common::until("the hold's ask", Duration::from_secs(5), || async {
+            let asks = get_json(&c, &addr, "/api/asks", &token).await;
+            asks["open"][0]["id"].as_str().map(str::to_string)
+        })
+        .await;
+        let _ = post(&c, &addr, &format!("/api/asks/{id}/answer"), &token, answer).await;
         let said = held.await.expect("the hold returns");
         assert!(
             said.is_none(),
@@ -2880,12 +2910,15 @@ async fn an_option_nobody_offered_is_refused_rather_than_recorded_as_an_allow() 
 
     let held = hold(&state, "s-opt", "rm -rf x", Duration::from_millis(1500));
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let asks = get_json(&c, &addr, "/api/asks", &token).await;
-    let id = asks["open"][0]["id"]
-        .as_str()
-        .expect("the hold raised an ask")
-        .to_string();
+    let id = common::until(
+        "the hold to raise an ask",
+        Duration::from_secs(5),
+        || async {
+            let asks = get_json(&c, &addr, "/api/asks", &token).await;
+            asks["open"][0]["id"].as_str().map(str::to_string)
+        },
+    )
+    .await;
 
     let said = post(
         &c,
@@ -2908,12 +2941,11 @@ async fn an_option_nobody_offered_is_refused_rather_than_recorded_as_an_allow() 
 
     // And an option that *was* offered still works, or this is a mute button.
     let held = hold(&state, "s-opt2", "rm -rf x", Duration::from_millis(4000));
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let asks = get_json(&c, &addr, "/api/asks", &token).await;
-    let id = asks["open"][0]["id"]
-        .as_str()
-        .expect("a second ask")
-        .to_string();
+    let id = common::until("a second ask", Duration::from_secs(5), || async {
+        let asks = get_json(&c, &addr, "/api/asks", &token).await;
+        asks["open"][0]["id"].as_str().map(str::to_string)
+    })
+    .await;
     let _ = post(
         &c,
         &addr,
@@ -2936,12 +2968,18 @@ async fn a_held_permission_says_somebody_is_waiting_and_offers_no_editor() {
 
     let held = hold(&state, "s-wait", "git push", Duration::from_millis(3000));
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
-    let row = inbox["items"]
-        .as_array()
-        .and_then(|a| a.iter().find(|i| i["kind"] == "permission"))
-        .expect("the hold reached the inbox");
+    let row = common::until(
+        "the hold to reach the inbox",
+        Duration::from_secs(5),
+        || async {
+            let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+            inbox["items"]
+                .as_array()
+                .and_then(|a| a.iter().find(|i| i["kind"] == "permission"))
+                .cloned()
+        },
+    )
+    .await;
 
     let detail = row["detail"].as_str().unwrap_or("");
     assert!(

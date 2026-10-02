@@ -1,0 +1,6 @@
+[1m============================= test session starts ==============================[0m
+platform darwin -- Python 3.14.7, pytest-9.1.1, pluggy-1.6.0
+rootdir: /work/pyempty
+collected 0 items
+
+[33m============================ [33mno tests ran[0m[33m in 0.00s[0m[33m =============================[0m

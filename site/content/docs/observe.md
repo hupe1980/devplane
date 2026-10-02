@@ -6,22 +6,18 @@ weight = 10
 group = "guide"
 +++
 
-Devplane watches sessions you started yourself, in a terminal or an editor, through documented
-interfaces only. The hooks write straight to the store, so nothing has to be running for the record
-to be kept. Sessions Devplane starts are covered in [Driving agents](@/docs/agents.md). The
-workbench's **Sight** panel shows these channels live.
+Devplane watches sessions you started (terminal or editor) through documented interfaces only. Hooks
+write straight to the store, so nothing has to be running. Sessions Devplane starts:
+[Driving agents](@/docs/agents.md). The workbench's **Sight** panel shows these channels live.
 
 ## The channels
 
-| Channel | Answers | Needs `connect`? | Needs a host? |
+| Channel | Answers | Needs `agent connect`? | Needs a host? |
 |---|---|---|---|
-| **Roster** (`claude agents --json`) | which Claude Code sessions exist, where, since when | no | no — `ls` reads it itself |
+| **Roster** (`claude agents --json`) | which Claude Code sessions exist, where, since when | no | no — `status` reads it itself |
 | **Command hooks** (`devplane hook`) | what a session is doing, when it is blocked, and the permission gate | yes | no — the hook writes to the store |
 | **OpenTelemetry** | cost, tokens, context use | yes | yes — it arrives on a socket |
 | **Status line** (optional) | rate limits and when they reset, model, context window size, cost, lines changed | `--statusline` | no — the shim writes to the store |
-
-A running host tails the hook-written rows every 500 ms. With no host, `devplane ls` and `devplane
-inbox` replay them in memory.
 
 ## Per vendor
 
@@ -38,46 +34,35 @@ inbox` replay them in memory.
 ### Claude Code
 
 ```sh
-devplane connect claude      # diffs ~/.claude/settings.json, then asks (--yes in a script)
-devplane doctor              # is anything arriving?
-devplane disconnect claude   # removes exactly what connect added
+devplane agent connect claude     # diffs ~/.claude/settings.json, then asks (--yes in a script)
+devplane agent disconnect claude  # removes exactly what connect added
 ```
 
-`connect` edits your **user** settings, so every project is covered, and merges beside hooks you
-already have:
+`agent connect` edits your **user** settings (every project), beside hooks you already have:
 
-- **22 command hooks**, each running `devplane hook` by the binary's full path. Two decide:
-  `PermissionRequest` (a session is about to ask you) and `PreToolUse` (every tool call, including in
-  auto mode). They answer deny, ask, or nothing — **never allow**. Every other hook is `async`.
-  Each hook has a five-second bound, except `PermissionRequest`, which may hold a permission for up
-  to two minutes under [`[questions] hold`](@/docs/configuration.md#questions) and is given 150 s.
-- Because the hooks name the binary's path, `connect` refuses one that will disappear (npx's cache,
-  a mounted disk image) and takes `--bin <path>` instead. Move or reinstall the binary and the hooks
-  run nothing: `devplane doctor` reports each such event as **gate off**. Run `connect` again.
-- **OpenTelemetry variables** pointing at the host's loopback port (the running host's, else
-  47831), with the telemetry-only token in `OTEL_EXPORTER_OTLP_HEADERS`: the agent can read that
-  block, so its token opens the telemetry routes and nothing else. An exporter you already configured
-  is left alone. Telemetry reaches only a host on that port, so keep the host there.
-
-The flags that would put prompt or response text into telemetry (`OTEL_LOG_USER_PROMPTS`,
-`OTEL_LOG_ASSISTANT_RESPONSES`, `OTEL_LOG_TOOL_CONTENT`) are never set.
-
-`connect` does not install `WorktreeCreate` (it would replace Claude Code's own worktree logic) or
-create `allowedHttpHookUrls` (it restricts every HTTP hook on the machine; `doctor` reports when a
-managed allowlist blocks loopback).
+- **22 command hooks** running `devplane hook` by full path. `PermissionRequest` and `PreToolUse`
+  decide (deny, ask or nothing — **never allow**); the rest are `async`. Bound: 5 s each, except
+  `PermissionRequest` at 150 s, since [`[questions] hold`](@/docs/configuration.md#questions) may wait
+  up to two minutes.
+- A moved or reinstalled binary leaves hooks running nothing (**gate off** in `doctor`); run
+  `agent connect` again ([the gate is off](@/docs/troubleshooting.md#the-gate-is-off)).
+- **OpenTelemetry variables** for the host's port (the running host's, else 47831) with the
+  telemetry-only token ([Security](@/docs/security.md#loopback-plus-a-bearer-token)). An exporter you
+  configured is left alone. Prompt and response logging flags are never set.
+- Not installed: `WorktreeCreate` (would replace Claude Code's worktree logic) and
+  `allowedHttpHookUrls` (machine-wide); `doctor` reports a managed allowlist blocking loopback.
 
 ### GitHub Copilot
 
 ```sh
-devplane connect copilot     # writes ~/.copilot/hooks/devplane.json
-devplane disconnect copilot  # deletes it
+devplane agent connect copilot     # writes ~/.copilot/hooks/devplane.json
+devplane agent disconnect copilot  # deletes it
 ```
 
-One file, nothing merged. Every event is a `command` hook, because an HTTP `preToolUse` hook in
-Copilot fails open. Copilot's tool names are mapped to the ones rules use (`view` → `Read`, `create` → `Write`, `str_replace_editor` → `Edit`, `bash` →
-`Bash`, `web_fetch` → `WebFetch`), so `never_auto = ["Read(.env)"]` stops a Copilot `view` of `.env`.
-
-Copilot reads telemetry settings from the environment, so `connect` prints the lines to add:
+- One file, nothing merged; every event is a `command` hook (Copilot's HTTP `preToolUse` fails open).
+- Tool names map to rule names (`view` → `Read`, `create` → `Write`, `str_replace_editor` → `Edit`,
+  `bash` → `Bash`, `web_fetch` → `WebFetch`), so `deny = ["Read(.env)"]` stops a `view` of `.env`.
+- Telemetry comes from the environment; `agent connect` prints the lines:
 
 ```sh
 export COPILOT_OTEL_ENABLED=true
@@ -85,25 +70,19 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:47831/devplane/otel
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/telemetry-token)"
 ```
 
-Copilot publishes no roster, so a session appears once it does something.
+No roster: a session appears once it does something.
 
 ### Codex
 
 ```sh
-devplane connect codex       # merges entries into ~/.codex/hooks.json
-devplane disconnect codex    # picks exactly those back out
+devplane agent connect codex     # merges entries into ~/.codex/hooks.json
+devplane agent disconnect codex  # picks exactly those back out
 ```
 
-With `$CODEX_HOME` set, the file is `$CODEX_HOME/hooks.json`.
-
-Codex hooks take Claude Code's payloads and answers, so the same `devplane hook` serves, registered
-as `devplane hook --vendor codex`. Ten of its twelve events are registered. No telemetry is
-installed.
-
-**On Codex, a question is a refusal.** Codex reads an `ask` answer and runs the call anyway, so where
-Devplane would put a call to a person — an `always_ask` rule, a line it cannot read, a
-`devplane.toml` that will not load — it answers `deny` on Codex, saying why. Run the command yourself,
-or change the rule.
+- `$CODEX_HOME/hooks.json` when `$CODEX_HOME` is set.
+- Same payloads as Claude Code: `devplane hook --vendor codex`, ten of twelve events. No telemetry.
+- **On Codex, a question is a refusal.** Codex runs a call answered `ask`, so where Devplane would ask
+  (an `ask` rule, an unreadable line, a broken `devplane.toml`) it answers `deny` and says why.
 
 > [!IMPORTANT]
 > **Codex silently skips any hook you have not approved in its own trust dialog.** Until you approve
@@ -116,26 +95,25 @@ opencode serve --port 4096
 export DEVPLANE_OPENCODE_URL=http://127.0.0.1:4096
 ```
 
-Opt-in: Devplane never scans for a server. The host subscribes to the feed and lists sessions from
-it. A `question.rejected` event is recorded with the authority **nobody**, because it names no cause.
-Questions are shown but cannot be answered from Devplane. The feed does not replay, so a dropped
-connection is a gap; Devplane reports whether it is connected.
+- Opt-in; Devplane never scans for a server. The host lists sessions from the feed.
+- `question.rejected` is recorded with authority **nobody** (it names no cause).
+- Questions are shown, not answerable from Devplane.
+- The feed does not replay: a dropped connection is a gap; the connection state is reported.
 
 ## The status line
 
-Optional, and off by default because it wraps your own status-line command:
+Optional; it wraps your status-line command:
 
 ```sh
-devplane connect --statusline claude
+devplane agent connect --statusline claude
 ```
 
-The shim runs your original command with the same input, so what you see is unchanged;
-`disconnect claude` restores it. It is the only source of **subscription rate limits** (a five-hour,
-seven-day or spend window past 90 % becomes a `rate_limit` inbox item), and also carries the model,
-context window size, cost, lines changed and the Claude Code version:
+Your command still runs with the same input; `agent disconnect claude` restores it. It is the only
+source of **subscription rate limits** (a five-hour, seven-day or spend window past 90 % raises
+`rate_limit`), plus model, context size, cost, lines changed and Claude Code version:
 
 ```console
-$ devplane show 7c
+$ devplane run show 7c
   model      claude-opus-5
   cost       $2.5000 over 41 requests
   changed    +156 −23 lines
@@ -143,27 +121,21 @@ $ devplane show 7c
   harness    Claude Code 2.1.276
 ```
 
-Nothing depends on it; every fact falls back to another channel, or to absent.
-
 ## What the Sessions list shows
 
-The **working set**. A session that is neither doing nor asking for something is counted, not
-listed:
+The **working set**: sessions neither doing nor asking are counted, not listed.
 
 ```console
 8 projects · 23 sessions · 5 working · 2 need you · 4 idle · $4.18
-12 quiet (nothing heard for hours) — devplane ls --all
+12 quiet (nothing heard for hours) — devplane status --all
 ```
 
-A session that is **working** or **asking** is never counted away, however old. Rows are grouped by
-project.
-
-- **Blocked states always reach the inbox.** Every `waitingFor` value the roster reports becomes an
-  item. An item for a session Devplane did not start has no Allow or Deny unless the project sets a
-  [hold](@/docs/permissions.md#answering-a-watched-session-s-permission); otherwise the action is to
-  resume it in a terminal (`devplane attach <run>`) or answer in its own window.
-- **An agent waiting on a command it started** (usually a test suite) is not waiting on you. Devplane
-  reads the process table and shows it as `running a command it started`, off the inbox.
+- A **working** or **asking** session is always listed. Rows group by project.
+- Every roster `waitingFor` becomes an inbox item. A watched session's item has Allow/Deny only with a
+  [hold](@/docs/permissions.md#answering-a-watched-session-s-permission); otherwise `devplane run
+  attach <run>` or its own window.
+- An agent waiting on its own command (a test suite) shows `running a command it started`, off the
+  inbox.
 
 ## What each state means
 
@@ -178,54 +150,34 @@ project.
 | `◌` | `stopped` | **you** stopped it | idle |
 | `⊘` | `interrupted` | **Devplane** stopped it, because the host was quitting | idle |
 
-`interrupted` means the work did not finish. Its branch and worktree are untouched, and where the
-agent can resume, the inbox offers `devplane change resume`.
+`interrupted`: branch and worktree untouched; the inbox offers `devplane change resume` where the agent
+can resume.
 
 ## Modes
 
 ```sh
-devplane modes
+devplane status --modes
 ```
 
-Which projects are deciding without you, least supervised first. For Claude Code it reads the modes
-from the settings files and says who set each. An ACP agent's mode is shown in its own words. A
-session that reported no mode shows as unknown. Devplane never sets a mode.
+Least supervised first. Claude Code modes come from settings files, with who set each; ACP agents'
+in their own words; none reported shows unknown. Devplane never sets a mode.
 
 ## GitHub
 
 ```sh
-devplane forge issues          # every project's open issues, what needs you first
-devplane forge issues --ready  # this repo's issues with [github] ready_label
-devplane forge prs             # every project's open pull requests
+devplane issue list          # every project's open issues, what needs you first
+devplane issue list --ready  # this repo's issues with [github] ready_label
+devplane pr list             # every project's open pull requests
 ```
 
-A running host reads them with your GitHub sign-in (`devplane login github`) after it starts, at
-once after a sign-in, and every five minutes: one request per repository, and one search request per
-host for what needs you. *Needs you* means assigned to you, a review requested from you, or your own
-pull request that is red, has changes requested, or is approved and waiting — found by the search, so
-an issue assigned long ago or a pull request past the first page still counts. Each is also an inbox
-item. Nothing here writes to GitHub.
-
-## `devplane doctor`
-
-The failures that look like a quiet machine:
-
-| Section | Tells you |
-|---|---|
-| host | whether a host answers, and which binary it runs |
-| watched | each vendor channel: read, unproved, not published or not checked |
-| claude code | whether the hooks are installed and the gate **answers** — it runs the installed gate with a probe and times it. **gate off** names an event whose hook runs a binary that is gone |
-| github | per host: signed in as whom, the scopes, when GitHub last answered; each project that is not a GitHub repository |
-| channels | which channels are arriving, how fast, the worst latency |
-| unreadable configuration | a `devplane.toml` that will not load — every gated call there is put in front of a person |
-| unwritten | events and decisions the store refused; the record is missing that much |
-| leaked agents | an agent a killed host left running, still spending. Also a critical inbox item, with the `kill -TERM -<pgid>` to end it |
-| unreadable rows | rows this build cannot decode; read the `change` count first |
+- A running host reads them with your sign-in on start, after a sign-in, and every five minutes: one
+  request per repository plus one search per host.
+- *Needs you*: assigned to you, review requested, or your own PR red, changes requested, or approved
+  and waiting. Found by search, so old or past-first-page items count. Each is an inbox item.
+- Nothing is written to GitHub.
 
 ## Transcripts
 
-A session **you** started has no transcript in Devplane: hooks carry lifecycle and tool inputs,
-telemetry redacts prompts and responses, and the vendor's transcript files are internal. The
-conversation is in the window that owns it (`devplane attach <run>` resumes it in a terminal), and `devplane rewind
-<run>` lists the files its shell commands named for writing, which Claude Code's `/rewind` does not
-restore. Driven runs keep transcripts; see [Driving agents](@/docs/agents.md).
+A session **you** started has no transcript in Devplane (hooks carry lifecycle and tool inputs;
+telemetry is redacted). The conversation is in its own window, or `devplane run attach <run>`. Driven
+runs keep transcripts ([Driving agents](@/docs/agents.md)).

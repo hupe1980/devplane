@@ -56,7 +56,8 @@ pub fn query_for(t: &Target) -> String {
     let esc = crate::core::text::url_escape;
     match t {
         Target::Change(id) => format!("change={}", esc(id.as_str())),
-        Target::Review(id) => format!("review={}", esc(id.as_str())),
+        // The change surface opens `<id>/review` on its Review tab.
+        Target::Review(id) => format!("change={}/review", esc(id.as_str())),
         Target::Ask(id) => format!("ask={}", esc(id.as_str())),
         Target::Run(id) => format!("run={}", esc(id.as_str())),
         Target::Inbox => String::new(),
@@ -252,7 +253,7 @@ mod tests {
         );
         assert_eq!(
             query_for(&Target::Review(ChangeId::new("c-1"))),
-            "review=c-1"
+            "change=c-1/review"
         );
         assert_eq!(query_for(&Target::Run(RunId::new("r-3"))), "run=r-3");
         assert_eq!(query_for(&Target::Inbox), "");

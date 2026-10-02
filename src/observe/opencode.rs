@@ -192,7 +192,7 @@ fn session_id_of(p: &serde_json::Value, key: &str) -> Option<String> {
 ///
 /// Read into the roster's shape, so a session appears before it emits
 /// anything. `cost`, `tokens` and `model` are not read: they are levels, and
-/// the event model has nowhere to put them yet.
+/// the event model has nowhere to put them.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Listed {
     pub id: String,

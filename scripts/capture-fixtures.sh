@@ -18,10 +18,17 @@ rm -r "$out" 2>/dev/null || true
 mkdir -p "$out"
 # Mask the real spelling (`/private/tmp` on macOS) before the short one.
 real=$(cd "$tmp" && pwd -P)
-save() { # route file
-  api GET "$1" | sed -e "s#$real#/home/you/code#g" -e "s#$tmp#/home/you/code#g" -e "s#$PWD#/opt/devplane#g" > "$out/$2.json"
+# A path the host shortened for display ends in `…` before the fixture root is
+# whole; mask what is left of it, or a long scratch directory leaks through.
+clip() {
+  R="$real" T="$tmp" perl -CSD -pe 'for my $p ($ENV{R}, $ENV{T}) {
+    for (my $n = length($p) - 1; $n >= 8; $n--) {
+      my $q = quotemeta(substr($p, 0, $n)); s#$q\x{2026}#/home/you/code/\x{2026}#g } }'
 }
-for r in board inbox changes decisions reports projects specs setup forge agents quitting; do
+save() { # route file
+  api GET "$1" | sed -e "s#$real#/home/you/code#g" -e "s#$tmp#/home/you/code#g" -e "s#$PWD#/opt/devplane#g" | clip > "$out/$2.json"
+}
+for r in board inbox changes decisions projects specs setup forge agents quitting; do
   save "api/$r" "$r" || echo "capture-fixtures: /api/$r did not answer" >&2
 done
 save "api/search?q=Read" search || true
@@ -37,7 +44,7 @@ for id in $(api GET api/changes | grep -oE '"id": *"c-[^"]+"' | grep -oE 'c-[^"]
   refused=$(curl -sS -X POST "http://127.0.0.1:$port/api/changes/$id/offer" \
     -H "Authorization: Bearer $token" -H 'content-type: application/json' -d '{}' || true)
   case "$refused" in
-    *'"refused"'*) printf '%s' "$refused" | sed -e "s#$real#/home/you/code#g" -e "s#$tmp#/home/you/code#g" > "$out/offer-$id.json" ;;
+    *'"refused"'*) printf '%s' "$refused" | sed -e "s#$real#/home/you/code#g" -e "s#$tmp#/home/you/code#g" | clip > "$out/offer-$id.json" ;;
   esac
 done
 for id in $(api GET api/board | grep -oE '"id": *"(acp|cc|run)-[^"]+"' | grep -oE '(acp|cc|run)-[^"]+' | sort -u); do

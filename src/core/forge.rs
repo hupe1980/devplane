@@ -201,7 +201,6 @@ pub fn items_for_forge(
             change_id: None,
             offer: None,
             no_offer: None,
-            report: None,
             since: since_at,
         })
     };

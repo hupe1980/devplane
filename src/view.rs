@@ -56,7 +56,7 @@ impl Snapshot {
     pub fn limits(&self) -> Option<&'static str> {
         (!self.from_host).then_some(
             "read from the store — no host is running, so live sessions, GitHub and the \
-             gate probe are not visible from here; `devplane open` starts one",
+             gate probe are not visible from here; `devplane up` starts one",
         )
     }
 
@@ -163,6 +163,10 @@ pub struct ChangeBrief {
     /// The gates' word (`verified`, `stale`, `failed`, `not run`, `no gates
     /// declared`), or `configuration unreadable` when `devplane.toml` fails.
     pub standing: String,
+    /// When the tree `state` and `standing` read was read: the board shows
+    /// them from the last read, not a read made now. `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_as_of: Option<String>,
 }
 
 /// What the board shows for one run; a view, so domain fields do not leak
@@ -398,6 +402,7 @@ pub fn board(snap: &Snapshot, all: bool, broken: &[(PathBuf, String)]) -> BoardR
                     branch: w.branch.clone(),
                     updated_at: w.updated_at.to_string(),
                     standing: w.verdict(declared, w.tree_now.as_ref()).word().to_string(),
+                    tree_as_of: w.tree_as_of.map(|t| t.to_string()),
                 }
             })
             .collect(),
@@ -525,58 +530,10 @@ pub async fn current_inbox(
         }
         items.push(crate::core::attention::stranded_ask_item(ask, snap.now));
     }
-    // Reports, for whoever decides: the target for an open one, the filer for
-    // a GitHub draft. The target's `[questions] deadline` sets the wait.
-    items.extend(report_items(snap, store).await);
     let mut derived = derived.rank();
     fill_offers(snap, store, policy, &mut derived.items).await;
     derived
 }
-
-/// Every report that needs a person, as inbox rows.
-async fn report_items(
-    snap: &Snapshot,
-    store: &crate::store::Store,
-) -> Vec<crate::core::AttentionItem> {
-    let reports = match store.reports(REPORTS_READ).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not read the reports");
-            return Vec::new();
-        }
-    };
-    let windows: BTreeMap<ProjectId, Option<std::time::Duration>> = snap
-        .world
-        .projects()
-        .map(|p| {
-            let window = crate::core::ProjectConfig::load(&p.root)
-                .ok()
-                .and_then(|c| c.questions.deadline())
-                .and_then(|d| match d {
-                    crate::core::ask::Deadline::Never => None,
-                    crate::core::ask::Deadline::After(s) => {
-                        Some(std::time::Duration::from_secs(s.into()))
-                    }
-                });
-            (p.id.clone(), window)
-        })
-        .collect();
-    reports
-        .iter()
-        .filter_map(|r| {
-            let window = match &r.target {
-                crate::core::report::Target::Project { project, .. } => {
-                    windows.get(project).copied().flatten()
-                }
-                _ => None,
-            };
-            crate::core::attention::report_item_at(r, window, snap.now)
-        })
-        .collect()
-}
-
-/// The most reports one read considers.
-const REPORTS_READ: i64 = 500;
 
 /// The rule to paste, on every permission item that can have one. A query,
 /// so bounded: only when a permission item is open, scoped to its repository.
@@ -699,7 +656,7 @@ pub async fn inbox(
     store: &crate::store::Store,
     policy: &crate::policy_cache::PolicyCache,
     q: &InboxQuery,
-) -> Value {
+) -> InboxView {
     let names = snap.names();
     // Read before the mark advances, so *new* means new when it was opened.
     let mark = store.last_look().await;
@@ -755,10 +712,9 @@ pub async fn inbox(
     // The close is composed here so no surface words a day itself. Empty means
     // nothing raised at all, and it does not render over a narrowed list.
     let nothing_raised = rows.is_empty() && folded.is_empty() && inhibited.is_empty();
-    let close = if narrowing.is_none() {
-        close(snap, store, nothing_raised).await
-    } else {
-        Value::Null
+    let close = match narrowing.is_none() {
+        true => Some(close(snap, store, nothing_raised).await),
+        false => None,
     };
 
     // Recorded after the close, so the boundary reported is the one that held.
@@ -771,16 +727,60 @@ pub async fn inbox(
             .collect();
         let _ = store.mark_folded(&hidden).await;
     }
-    json!({
-        "items": rows,
-        "folded": folded,
-        "inhibited": inhibited,
-        "narrowed": narrowed,
-        // A snooze is a choice; counted so the list does not look like calm.
-        "snoozed": snoozed,
-        "close": close,
-        "limits": snap.limits(),
-    })
+    InboxView {
+        items: rows,
+        folded,
+        inhibited,
+        narrowed,
+        snoozed,
+        close,
+        limits: snap.limits().map(str::to_string),
+    }
+}
+
+/// `/api/inbox`: served by the host, composed by a terminal with no host, and
+/// read back by the terminal as this same type.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InboxView {
+    pub items: Vec<WaitingRow>,
+    #[serde(default)]
+    pub folded: Vec<crate::core::attention::Summary>,
+    #[serde(default)]
+    pub inhibited: Vec<crate::core::attention::Inhibited>,
+    #[serde(default)]
+    pub narrowed: Option<crate::core::attention::Narrowed>,
+    /// A snooze is a choice; counted so the list does not look like calm.
+    #[serde(default)]
+    pub snoozed: usize,
+    /// The boundary and the day's close; absent over a narrowed list.
+    #[serde(default)]
+    pub close: Option<Close>,
+    /// Why the answer is partial, when it was read without a host.
+    #[serde(default)]
+    pub limits: Option<String>,
+}
+
+/// The boundary since the last look and, for an empty inbox, what the day
+/// came to. Every sentence is composed here; surfaces only lay them out.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Close {
+    #[serde(default)]
+    pub since_last_look: Option<String>,
+    #[serde(default)]
+    pub looked_at: Option<String>,
+    /// The day could not be read; never shown as an empty day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet: Option<bool>,
+    #[serde(default)]
+    pub sentences: Vec<String>,
+    #[serde(default)]
+    pub next: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeps_running: Option<String>,
 }
 
 /// The review's leading facts for a change ready to decide, composed from the
@@ -816,13 +816,17 @@ async fn ready_facts(
 }
 
 /// The boundary, and — for an empty inbox — what the day came to.
-pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) -> Value {
+pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) -> Close {
     let now = snap.now;
     let last = store.last_look().await;
     let since = crate::core::close::since_last_look(now, last);
     let looked_at = last.map(|t| t.to_string());
     if !empty {
-        return json!({ "since_last_look": since, "looked_at": looked_at });
+        return Close {
+            since_last_look: since,
+            looked_at,
+            ..Close::default()
+        };
     }
     // Midnight local: the day the person's machine had.
     let start = jiff::Zoned::now()
@@ -834,11 +838,12 @@ pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) ->
     let day = match store.day(&start.to_string()).await {
         Ok(d) => d,
         Err(e) => {
-            return json!({
-                "since_last_look": since,
-                "looked_at": looked_at,
-                "unreadable": e.to_string(),
-            });
+            return Close {
+                since_last_look: since,
+                looked_at,
+                unreadable: Some(e.to_string()),
+                ..Close::default()
+            };
         }
     };
     let (decisions, waited) = day;
@@ -880,15 +885,16 @@ pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) ->
              running and repeats nothing."
         ),
     };
-    json!({
-        "since_last_look": since,
-        "looked_at": looked_at,
-        "clear": true,
-        "quiet": tally.quiet(),
-        "sentences": tally.sentences(),
-        "next": soonest,
-        "keeps_running": keeps_running,
-    })
+    Close {
+        since_last_look: since,
+        looked_at,
+        unreadable: None,
+        clear: true,
+        quiet: Some(tally.quiet()),
+        sentences: tally.sentences(),
+        next: soonest,
+        keeps_running: Some(keeps_running),
+    }
 }
 
 // ── Asks ────────────────────────────────────────────────────────────────────
@@ -1076,123 +1082,26 @@ pub async fn agents(snap: &Snapshot, store: &crate::store::Store) -> Vec<Value> 
         .collect()
 }
 
-// ── Reports ─────────────────────────────────────────────────────────────────
-
-/// One report with every sentence already written. `quoted` is the only
-/// rendering a person reads: attributed, with every line prefixed.
-#[derive(Debug, Serialize)]
-pub struct ReportView {
-    #[serde(flatten)]
-    pub report: crate::core::report::Report,
-    pub quoted: String,
-    pub routed_says: String,
-    pub state_says: String,
-    /// *filed 3h ago*.
-    pub age_says: String,
-    /// *api — claude, run acp-…, change c-…, 14:02*.
-    pub provenance_says: String,
-    pub target_says: String,
-    /// What a person can do about it, in the inbox row's words.
-    pub actions: Vec<crate::core::Action>,
-}
-
-impl ReportView {
-    pub fn of(report: crate::core::report::Report, now: jiff::Timestamp) -> Self {
-        use crate::core::Action;
-        use crate::core::report::{State, Target};
-        let actions = match (&report.state, &report.target) {
-            (State::Open, Target::Project { .. }) => vec![
-                Action::StartFromReport,
-                Action::RejectReport,
-                Action::DeferReport,
-            ],
-            (State::Deferred { .. }, Target::Project { .. }) => vec![Action::StartFromReport],
-            (State::Drafted, _) => vec![Action::OpenDraft, Action::DiscardDraft],
-            _ => Vec::new(),
-        };
-        let secs = (now.as_second() - report.provenance.at.as_second()).max(0);
-        Self {
-            quoted: report.quoted(),
-            routed_says: report.routed_says(),
-            state_says: report.state_says(),
-            age_says: format!("filed {} ago", crate::render::ago(secs)),
-            provenance_says: report.provenance.says(),
-            target_says: report.target_says(),
-            actions,
-            report,
-        }
-    }
-}
-
-/// What a report read asks for: to, from, and whether answered ones count.
-#[derive(Debug, Default, Clone, Deserialize)]
-pub struct ReportQuery {
-    #[serde(default)]
-    pub to: Option<String>,
-    #[serde(default)]
-    pub from: Option<String>,
-    #[serde(default)]
-    pub all: bool,
-}
-
-/// Reports, newest first, narrowed as asked; an unregistered project name
-/// matches nothing.
-pub async fn reports(
-    snap: &Snapshot,
-    store: &crate::store::Store,
-    q: &ReportQuery,
-) -> anyhow::Result<Vec<ReportView>> {
-    let id_of = |named: &str| -> ProjectId {
-        snap.world
-            .projects()
-            .find(|p| p.name == named || p.id.as_str() == named)
-            .map(|p| p.id.clone())
-            .unwrap_or_else(|| ProjectId::new(named))
-    };
-    // Indexed read where one end is named; the bounded whole otherwise.
-    let found = match (q.to.as_deref(), q.from.as_deref()) {
-        (Some(t), _) => store.reports_to(&id_of(t), false).await?,
-        (None, Some(f)) => store.reports_from(&id_of(f), false).await?,
-        (None, None) => store.reports(REPORTS_READ).await?,
-    };
-    Ok(found
-        .into_iter()
-        .filter(|r| {
-            q.from
-                .as_deref()
-                .is_none_or(|f| r.provenance.project == id_of(f))
-        })
-        .filter(|r| q.all || !r.state.is_resolved())
-        .map(|r| ReportView::of(r, snap.now))
-        .collect())
-}
-
-/// One report by id, or the start of one.
-pub async fn report(
-    snap: &Snapshot,
-    store: &crate::store::Store,
-    id: &str,
-) -> anyhow::Result<Option<ReportView>> {
-    Ok(store.report(id).await?.map(|r| ReportView::of(r, snap.now)))
-}
-
 // ── Change ────────────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+/// One change as every surface reads it: the host serialises it, and the
+/// terminal reads it back as the same type. Borrowed where the host builds
+/// it, owned where a client decodes it.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeView<'a> {
     #[serde(flatten)]
-    pub change: &'a Change,
+    pub change: std::borrow::Cow<'a, Change>,
     /// Where it is, computed from the record and the tree last seen.
     pub state: crate::core::ChangeState,
-    pub glyph: &'static str,
+    pub glyph: String,
     /// What it is waiting on, as a phrase, when it is waiting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_says: Option<String>,
     /// Working in the person's own checkout, with the sentence naming what
     /// that gives up (parallel safety, a clean review base).
     pub in_place: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub in_place_says: Option<&'static str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_place_says: Option<String>,
     /// What the gates say now: verified, stale with both digests, failed, not
     /// run, or *no gates declared*.
     pub standing: crate::core::change::Standing,
@@ -1208,12 +1117,12 @@ pub struct ChangeView<'a> {
     pub claim: Option<String>,
     /// Which absence this is: `transcripts_off` or `nothing_said`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub claim_absent: Option<&'static str>,
+    pub claim_absent: Option<String>,
     /// The specification this change answers, as it is on disk now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<crate::spec::Plan>,
     /// Done, and the plan it answers is not. A sentence, never a verdict.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub plan_contradicts_done: bool,
     /// The plan moved under this change. `None` when unknowable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1235,27 +1144,29 @@ pub struct ChangeView<'a> {
     /// Size and where the weight sits (*12 files · 640+ 80− lines · 3 shared ·
     /// 1 security*), or why it was not read. Counts only, no time estimate.
     pub shape_says: String,
-    /// Reports this change filed, and the one it started from, quoted.
-    pub reports: Vec<ReportView>,
     /// What the change's own diff weakened, by kind, beside its state.
     pub qualifier: crate::core::review::Qualifier,
+    /// How many tests ran, and the base checks: beside `standing`, never in
+    /// it. Absent until `check` has run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_checks: Option<crate::core::base_checks::View>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TokenRowView {
     #[serde(flatten)]
     pub row: crate::spec::TokenRow,
     pub says: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DriftView {
     #[serde(flatten)]
     pub drift: crate::core::change::Drift,
     pub says: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RunRowView {
     pub id: String,
     pub sent_says: String,
@@ -1289,10 +1200,10 @@ impl<'a> ChangeView<'a> {
         let (state, standing) = (change.state(declared, now), change.verdict(declared, now));
         Self {
             state,
-            glyph: state.glyph(),
+            glyph: state.glyph().to_string(),
             waiting_says: change.waiting.as_ref().map(crate::core::Waiting::says),
             in_place: change.in_place(),
-            in_place_says: change.in_place_says(),
+            in_place_says: change.in_place_says().map(str::to_string),
             standing_says: standing.says(),
             standing,
             gate: change.check_report().map(|g| GateView {
@@ -1320,9 +1231,9 @@ impl<'a> ChangeView<'a> {
             drifts: Vec::new(),
             run_rows: Vec::new(),
             shape_says: SHAPE_NOT_COMPUTED.to_string(),
-            reports: Vec::new(),
             qualifier: crate::core::review::Qualifier::default(),
-            change,
+            base_checks: None,
+            change: std::borrow::Cow::Borrowed(change),
         }
     }
 
@@ -1480,7 +1391,7 @@ async fn read_diff_facts(
     v: &mut ChangeView<'_>,
     shape: bool,
 ) {
-    let Some((set, config)) = read_set(snap, v.change).await else {
+    let Some((set, config)) = read_set(snap, &v.change).await else {
         let on_disk = v.change.worktree.as_deref().is_some_and(|d| d.is_dir());
         if shape {
             v.shape_says = match on_disk {
@@ -1498,7 +1409,7 @@ async fn read_diff_facts(
         let ordered = crate::core::review::order(&set, config.review.roles.as_ref());
         v.shape_says = crate::core::review::shape(&set, &ordered).says();
     }
-    let rows = weakened_by(&set, &config);
+    let rows = weakened_for(&set, &config, &v.change);
     let seen = store
         .weakened_seen(v.change.id.as_str())
         .await
@@ -1546,7 +1457,12 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
                 .and_then(|root| crate::core::ProjectConfig::load(root).ok());
             // A pass by commands the project no longer declares is not verified.
             let checks = config.as_ref().map(|c| c.gates.check.as_slice());
-            let view = ChangeView::of(w, can_retry, checks);
+            let mut view = ChangeView::of(w, can_retry, checks);
+            view.base_checks = crate::core::base_checks::View::of(
+                w,
+                config.as_ref(),
+                crate::base_checks::is_running(&w.id),
+            );
             match (w.spec.as_deref(), roots.get(&w.project_id), config) {
                 (Some(spec), Some(root), Some(config)) => {
                     // Boxes are read where the agent worked, as the gate is.
@@ -1567,20 +1483,6 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
         })
         .collect();
 
-    let filed = store.reports(REPORTS_READ).await.unwrap_or_default();
-    for view in views.iter_mut() {
-        let id = &view.change.id;
-        view.reports = filed
-            .iter()
-            .filter(|r| {
-                r.provenance.change.as_ref() == Some(id)
-                    || view.change.from_report.as_ref() == Some(&r.id)
-            })
-            .cloned()
-            .map(|r| ReportView::of(r, snap.now))
-            .collect();
-    }
-
     for (view, w) in views.iter_mut().zip(all.iter()) {
         if !w.claim_is_worth_showing() {
             continue;
@@ -1598,12 +1500,15 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
             let keeps = roots
                 .get(&w.project_id)
                 .and_then(|root| crate::core::ProjectConfig::load(root).ok())
-                .map(|c| c.transcripts.keep)
+                .map(|c| c.agent.keep_transcripts)
                 .unwrap_or(true);
-            view.claim_absent = Some(match keeps {
-                true => "nothing_said",
-                false => "transcripts_off",
-            });
+            view.claim_absent = Some(
+                match keeps {
+                    true => "nothing_said",
+                    false => "transcripts_off",
+                }
+                .to_string(),
+            );
         }
     }
     views
@@ -1673,6 +1578,16 @@ pub async fn change_certificate(
     cert.weakened = weakened;
     cert.weakened_unreadable = unreadable;
     cert.weakened_read = all_seen;
+    // The same computation as the change's own view, so they cannot disagree.
+    let config = snap
+        .world
+        .project(&change.project_id)
+        .and_then(|p| crate::core::ProjectConfig::load(&p.root).ok());
+    cert.base_checks = crate::core::base_checks::View::of(
+        change,
+        config.as_ref(),
+        crate::base_checks::is_running(&change.id),
+    );
     Some(json!({
         "finished": cert.is_finished(),
         "markdown": cert.markdown_bounded(),
@@ -1704,18 +1619,43 @@ pub fn weakened_by(
     crate::core::review::weakened(set, config.review.roles.as_ref(), &gate_commands(config))
 }
 
+/// A change's weakened rows: its diff's, then the base tests that fail on it
+/// from a **current** base-checks result (a stale one adds none). The one
+/// list the qualifier, the review's first group, the inbox row, the
+/// certificate and the offer's refusal all read.
+pub fn weakened_for(
+    set: &crate::core::diff::ChangeSet,
+    config: &crate::core::ProjectConfig,
+    change: &Change,
+) -> Vec<crate::core::review::Weakened> {
+    // Observed failures lead: they are what the diff's patterns could miss.
+    let mut rows = crate::core::base_checks::current_rows(change, config);
+    rows.extend(weakened_by(set, config));
+    rows
+}
+
 /// The same, read from a checkout now against its base.
-/// An unreadable diff is an error, never "nothing weakened".
+/// An unreadable diff is an error, never "nothing weakened"; so is an
+/// unreadable `devplane.toml`, whose gates name files the defaults do not.
 pub async fn weakened_in(
     root: Option<&std::path::Path>,
     dir: &std::path::Path,
+    change: Option<&Change>,
 ) -> anyhow::Result<Vec<crate::core::review::Weakened>> {
-    let config = root
-        .and_then(|r| crate::core::ProjectConfig::load(r).ok())
-        .unwrap_or_default();
+    let config = match root {
+        Some(r) => crate::core::ProjectConfig::load(r).map_err(|e| {
+            anyhow::anyhow!("configuration unreadable, so what the gates run is unknown: {e}")
+        })?,
+        None => crate::core::ProjectConfig::default(),
+    };
     let base = base_of(root, dir).await;
-    let set = crate::git::change_set(dir, &base).await?;
-    Ok(weakened_by(&set, &config))
+    let set = crate::git::change_set(dir, &base)
+        .await
+        .map_err(|e| anyhow::anyhow!("the change's diff could not be read: {e:#}"))?;
+    Ok(match change {
+        Some(c) => weakened_for(&set, &config, c),
+        None => weakened_by(&set, &config),
+    })
 }
 
 /// A change's weakened rows, or `None` without a checkout on disk.
@@ -1728,7 +1668,7 @@ pub async fn weakened_of(
         .world
         .project(&change.project_id)
         .map(|p| p.root.clone());
-    Some(weakened_in(root.as_deref(), dir).await)
+    Some(weakened_in(root.as_deref(), dir, Some(change)).await)
 }
 
 /// A change's qualifier: its weakened rows by kind, and how many are unseen.
@@ -1744,7 +1684,7 @@ pub async fn qualifier_of(
     let Some((set, config)) = read_set(snap, change).await else {
         return crate::core::review::Qualifier::unreadable();
     };
-    let rows = weakened_by(&set, &config);
+    let rows = weakened_for(&set, &config, change);
     let seen = store
         .weakened_seen(change.id.as_str())
         .await
@@ -2178,7 +2118,7 @@ async fn review_read(
 
     // Checks weakened or changed come first, before the rest is read as
     // though they meant what they did. Absent, not empty, when none.
-    let weak = weakened_by(&set, &config);
+    let weak = weakened_for(&set, &config, change);
     let seen = store
         .weakened_seen(change.id.as_str())
         .await
@@ -2492,7 +2432,7 @@ pub fn projects(snap: &Snapshot) -> Vec<Value> {
                 "trusted": p.trusted,
                 "sessions": live.get(&p.id).copied().unwrap_or(0),
                 "repo": p.repo_slug(),
-                "default_agent": cfg.as_ref().and_then(|c| c.project.default_agent.clone()),
+                "default_agent": cfg.as_ref().and_then(|c| c.agent.default.clone()),
             })
         })
         .collect()
@@ -2527,7 +2467,6 @@ pub fn setup(snap: &Snapshot) -> Value {
             }),
         }
     });
-    let provider = crate::core::provider::from_env();
     let projects: Vec<Value> = snap
         .world
         .projects()
@@ -2561,19 +2500,128 @@ pub fn setup(snap: &Snapshot) -> Value {
             "home": home.as_ref().map(|h| h.display().to_string()),
             "database": home.as_ref().map(|h| h.join("devplane.db").display().to_string()),
         },
-        "provider": {
-            "name": provider.as_str(),
-            "because": provider.because(),
-            "vendor_supervision": provider.has_vendor_supervision(),
-            "off": provider.missing(),
-            "partial": provider.partial(),
-        },
         "connect": connect,
         "gate": { "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON },
         "machine_policy": machine_policy,
         "projects": projects,
         "agents": snap.agents,
     })
+}
+
+// ── Diagnostics ─────────────────────────────────────────────────────────────
+
+/// `/api/diagnostics`: what only a running host knows about its own health,
+/// read back by `devplane doctor` as this same type.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Diagnostics {
+    pub version: String,
+    pub gate: DiagnosticsGate,
+    /// Live sessions whose environment Devplane could read — only the
+    /// `SessionStart` hook can, so this is the question-clock coverage.
+    pub modes: DiagnosticsModes,
+    /// Agents a previous host started that are still running, unreachable.
+    pub leaked_agents: Vec<LeakedAgent>,
+    /// What each inbox kind raised in the last week and what became of it.
+    pub attention: Option<Value>,
+    pub pid: u32,
+    pub started_at: String,
+    pub uptime_seconds: i64,
+    pub summary: crate::core::BoardSummary,
+    pub channels: Vec<crate::store::ChannelHealth>,
+    /// The OpenCode subscription; absent where it was not asked for.
+    pub opencode: Option<OpenCodeHealth>,
+    pub forge: DiagnosticsForge,
+    pub stall_seconds: i64,
+    /// Projects whose `devplane.toml` will not load, so their rules are gone.
+    pub unreadable_configs: Vec<UnreadableConfig>,
+    /// Stored rows this build cannot decode.
+    pub unreadable_rows: Vec<UnreadableRow>,
+    /// How much of the store never arrived.
+    pub unwritten: Unwritten,
+    /// Claude Code's own auto-mode classifier, read back, never written.
+    pub auto_mode: AutoModeView,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiagnosticsGate {
+    pub syntax_modelled_on: String,
+    pub sessions_reporting_a_version: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiagnosticsModes {
+    pub clock_read: usize,
+    pub clock_unread: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LeakedAgent {
+    pub pid: u32,
+    pub command: String,
+    pub worktree: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OpenCodeHealth {
+    pub server: String,
+    pub says: String,
+    pub live: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiagnosticsForge {
+    pub viewer: Option<String>,
+    pub error: Option<String>,
+    /// Per GitHub host: signed in as whom, and when GitHub last answered.
+    /// Never the token.
+    pub github: Value,
+    pub last_poll_at: Option<String>,
+    pub projects: usize,
+    pub skipped: usize,
+    /// Which projects were ruled out, and why.
+    pub skipped_projects: Vec<SkippedProject>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SkippedProject {
+    pub project: String,
+    pub reason: String,
+    pub at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnreadableConfig {
+    pub project: String,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnreadableRow {
+    pub row: String,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Unwritten {
+    pub events: u64,
+    pub decisions: u64,
+    pub last_reason: Option<String>,
+}
+
+/// The classifier's configuration counted, or why it could not be read.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AutoModeView {
+    Unavailable {
+        unavailable: crate::observe::automode::Unavailable,
+    },
+    Read {
+        configured: bool,
+        environment: usize,
+        allow: usize,
+        soft_deny: usize,
+        hard_deny: usize,
+    },
 }
 
 #[cfg(test)]
@@ -2585,6 +2633,7 @@ mod tests {
         CommitStamp {
             commit: Some(format!("commit-of-{tree}")),
             tree: Some(tree.into()),
+            tree_unknown: None,
             branch: Some("feat/x".into()),
             clean,
             changed_files: changed,
@@ -2602,6 +2651,8 @@ mod tests {
         c.worktree = Some("/repo/.claude/worktrees/x".into());
         c.runs.push(RunId::new("r1"));
         c.gates.push(GateReport {
+            junit: Vec::new(),
+            base_commit: None,
             gate: "check".into(),
             at: jiff::Timestamp::now(),
             duration_ms: 1,
@@ -2611,6 +2662,21 @@ mod tests {
             commit: Some(stamp(tree, true, 0)),
         });
         c
+    }
+
+    /// The terminal reads a change as the very type the host wrote: what is
+    /// serialised reads back, field for field.
+    #[test]
+    fn a_change_view_reads_back_as_the_type_the_host_serialised() {
+        let mut c = passed_at("aaaaaaa111");
+        c.tree_now = Some(stamp("aaaaaaa111", true, 0));
+        let v = ChangeView::of(&c, false, Some(&["cargo test".to_string()]));
+        let wire = serde_json::to_value(&v).unwrap();
+        let back: ChangeView<'static> = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(back.change.as_ref(), &c);
+        assert_eq!(back.state, v.state);
+        assert_eq!(back.standing, v.standing);
+        assert_eq!(serde_json::to_value(&back).unwrap(), wire);
     }
 
     /// A stale pass reaches the surface as stale, naming both trees.

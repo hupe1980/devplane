@@ -1,0 +1,105 @@
+# Devplane verify: runs the base's `check` from devplane.toml on this pull
+# request and leads the job summary with the checks the change weakened.
+# Posts nothing to the pull request and needs no token beyond reading contents.
+# Every input reaches the shell through `env:`, never through an expression in
+# a script.
+name: Devplane verify
+description: >-
+  Runs the base's `check` from devplane.toml on this pull request, leading the job summary with the
+  checks the change weakened. Posts nothing to the pull request.
+author: hupe1980
+branding:
+  icon: check-circle
+  color: gray-dark
+
+inputs:
+  base:
+    description: Branch or commit to compare against. Empty uses `devplane verify`'s default.
+    default: ${{ github.base_ref }}
+  version:
+    description: Release to install (`latest`, or a version such as `0.9.0`).
+    default: latest
+  statement:
+    description: Path to write the in-toto statement to. Empty writes none.
+    default: ""
+  install:
+    description: "`false` uses a `devplane` already on PATH."
+    default: "true"
+
+outputs:
+  verdict:
+    description: verified | failed | could_not_run
+    value: ${{ steps.verify.outputs.verdict }}
+  statement:
+    description: The statement's path, or empty.
+    value: ${{ steps.verify.outputs.statement }}
+
+runs:
+  using: composite
+  steps:
+    - name: Supported runner
+      shell: bash
+      env:
+        OS: ${{ runner.os }}
+        ARCH: ${{ runner.arch }}
+        INSTALL: ${{ inputs.install }}
+      run: |
+        if [ "$INSTALL" != "true" ]; then exit 0; fi
+        case "$OS/$ARCH" in
+          Linux/X64|Linux/ARM64|macOS/ARM64) ;;
+          *)
+            echo "Devplane's installer supports Linux and Apple Silicon macOS runners; this is $OS/$ARCH." >&2
+            exit 2
+            ;;
+        esac
+
+    - name: Install devplane
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        INSTALL: ${{ inputs.install }}
+      run: |
+        if [ "$INSTALL" != "true" ]; then
+          command -v devplane >/dev/null || { echo "install is false and no devplane is on PATH" >&2; exit 2; }
+          devplane --version
+          exit 0
+        fi
+        case "$VERSION" in
+          latest) url="https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh" ;;
+          *[!0-9A-Za-z.+-]*) echo "version must be \`latest\` or a release number such as 0.9.0" >&2; exit 2 ;;
+          *) url="https://github.com/hupe1980/devplane/releases/download/v${VERSION#v}/devplane-installer.sh" ;;
+        esac
+        dir="$RUNNER_TEMP/devplane"
+        mkdir -p "$dir"
+        curl --proto '=https' --tlsv1.2 -LsSf "$url" -o "$RUNNER_TEMP/devplane-installer.sh"
+        # An unmanaged install: this directory only, no shell-profile edits, no updater.
+        DEVPLANE_UNMANAGED_INSTALL="$dir" sh "$RUNNER_TEMP/devplane-installer.sh" --quiet
+        bin="$(dirname "$(find "$dir" -name devplane -type f | head -n 1)")"
+        echo "$bin" >> "$GITHUB_PATH"
+        "$bin/devplane" --version
+
+    - name: Verify
+      id: verify
+      shell: bash
+      env:
+        BASE: ${{ inputs.base }}
+        STATEMENT: ${{ inputs.statement }}
+      run: |
+        args=(verify --json)
+        if [ -n "$BASE" ]; then args+=(--base "$BASE"); else echo "No base given: devplane verify uses origin/HEAD, else main."; fi
+        if [ -n "$STATEMENT" ]; then args+=(--statement "$STATEMENT"); fi
+        out="$RUNNER_TEMP/devplane-verify.json"
+        set +e
+        devplane "${args[@]}" > "$out"
+        status=$?
+        set -e
+        # The document, for the log; the summary is on the run's page.
+        cat "$out"
+        verdict="$(sed -n 's/^  "verdict": "\([a-z_]*\)",\{0,1\}$/\1/p' "$out" | head -n 1)"
+        echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+        if [ -n "$STATEMENT" ] && [ -f "$STATEMENT" ] && [ "$status" != 2 ]; then
+          echo "statement=$STATEMENT" >> "$GITHUB_OUTPUT"
+        else
+          echo "statement=" >> "$GITHUB_OUTPUT"
+        fi
+        exit "$status"

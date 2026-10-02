@@ -143,7 +143,7 @@ impl PullRequest {
     ///
     /// `review_requested` is passed in, not derived from `reviewRequests`: that
     /// list names teams, and only GitHub knows which the person belongs to (see
-    /// [`review_requested_of_me`]).
+    /// [`asks`]).
     pub fn to_forge(
         &self,
         me: Option<&str>,
@@ -215,7 +215,7 @@ impl Issue {
 /// Why GitHub could not be read or written, as the state a surface says.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum Error {
-    #[error("not signed in to GitHub ({0}) — run `devplane login github`, or sign in from Setup")]
+    #[error("not signed in to GitHub ({0}) — run `devplane auth login`, or sign in from Setup")]
     NotSignedIn(String),
     #[error("GitHub sign-in expired ({0}) — GitHub no longer accepts the token; sign in again")]
     Expired(String),
@@ -866,30 +866,6 @@ pub async fn create_pr(
         },
         Err(e) => Err(e),
     }
-}
-
-/// Opens an issue on `owner/name` at `host` and returns its address. Called
-/// only from `reports::open`.
-pub async fn create_issue(
-    hub: &GitHub,
-    host: &str,
-    slug: &str,
-    title: &str,
-    body: &str,
-) -> Result<String, Error> {
-    let path = format!("/repos/{slug}/issues");
-    let payload = serde_json::json!({"title": title, "body": body});
-    hub.call(host, |c| async move {
-        let a = c.rest(reqwest::Method::POST, &path, Some(payload)).await?;
-        a.body["html_url"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| Error::Api {
-                status: 201,
-                message: "GitHub opened the issue but did not say where".into(),
-            })
-    })
-    .await
 }
 
 /// One issue by number, and whether it is open; `None` when there is none.

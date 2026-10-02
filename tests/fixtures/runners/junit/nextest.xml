@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="7" skipped="0" failures="1" errors="0" uuid="a2a98aeb-a5e5-4cb9-95df-6a584560a1bd" timestamp="2026-09-27T07:45:47.588+02:00" time="0.014">
+    <testsuite name="rs::a" tests="2" skipped="0" errors="0" failures="0">
+        <testcase name="a1" classname="rs::a" timestamp="2026-09-27T07:45:47.589+02:00" time="0.010"/>
+        <testcase name="a2" classname="rs::a" timestamp="2026-09-27T07:45:47.589+02:00" time="0.010"/>
+    </testsuite>
+    <testsuite name="rs::b" tests="3" skipped="0" errors="0" failures="0">
+        <testcase name="login_b3" classname="rs::b" timestamp="2026-09-27T07:45:47.589+02:00" time="0.010"/>
+        <testcase name="login_b2" classname="rs::b" timestamp="2026-09-27T07:45:47.589+02:00" time="0.010"/>
+        <testcase name="b1" classname="rs::b" timestamp="2026-09-27T07:45:47.589+02:00" time="0.010"/>
+    </testsuite>
+    <testsuite name="rs" tests="2" skipped="0" errors="0" failures="1">
+        <testcase name="tests::unit_one" classname="rs" timestamp="2026-09-27T07:45:47.589+02:00" time="0.010"/>
+        <testcase name="tests::unit_fails_when_asked" classname="rs" timestamp="2026-09-27T07:45:47.589+02:00" time="0.010">
+            <failure message="thread &apos;tests::unit_fails_when_asked&apos; (346382607) panicked at src/lib.rs:12:42" type="test failure with exit code 101">thread &apos;tests::unit_fails_when_asked&apos; (346382607) panicked at src/lib.rs:12:42:
+asked to fail
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <system-out>
+running 1 test
+test tests::unit_fails_when_asked ... FAILED
+
+failures:
+
+failures:
+    tests::unit_fails_when_asked
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>
+thread &apos;tests::unit_fails_when_asked&apos; (346382607) panicked at src/lib.rs:12:42:
+asked to fail
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+    </testsuite>
+</testsuites>

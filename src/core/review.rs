@@ -236,7 +236,6 @@ pub struct IntentGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "why", rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub enum NotAskedFor {
     /// A hand edit, a watched session, a generated file.
     NoRunWrote,
@@ -247,7 +246,9 @@ pub enum NotAskedFor {
 impl NotAskedFor {
     pub fn says(&self) -> String {
         match self {
-            NotAskedFor::NoRunWrote => "no run Devplane dispatched wrote this".into(),
+            NotAskedFor::NoRunWrote => {
+                "no dispatched run is recorded writing this, and no sent task names it".into()
+            }
             NotAskedFor::RunSentNoTasks { run } => {
                 format!("written by run {run} which was sent no tasks")
             }
@@ -316,7 +317,15 @@ pub fn by_intent(set: &ChangeSet, runs: &[(&Run, Vec<String>)]) -> Intent {
             (None, Some(r)) => {
                 not_asked_for.push((i, NotAskedFor::RunSentNoTasks { run: r.id.clone() }))
             }
-            (None, None) => not_asked_for.push((i, NotAskedFor::NoRunWrote)),
+            // No recorded writer (a shell write, a hand edit): a sent task
+            // that names the path by its full spelling is the ask it answers.
+            (None, None) => match groups
+                .iter()
+                .rposition(|g| g.tasks.iter().any(|t| names_path(&t.text, path)))
+            {
+                Some(g) => groups[g].files.push(i),
+                None => not_asked_for.push((i, NotAskedFor::NoRunWrote)),
+            },
         }
     }
     Intent {
@@ -363,6 +372,9 @@ pub enum WeakKind {
     /// coverage tool's configuration, a script a gate runs, or a failure
     /// masked in one of those.
     Gate,
+    /// A test as the base wrote it fails on this change: the base's tests,
+    /// put back on the change's tree, did not pass. Observed, not matched.
+    BaseTests,
 }
 
 /// One hunk or file that alters a check, with why. A signal from the diff
@@ -396,6 +408,8 @@ pub struct Qualifier {
     pub deleted: u32,
     /// Rows of kind [`WeakKind::Gate`].
     pub gates_changed: u32,
+    /// Rows of kind [`WeakKind::BaseTests`].
+    pub base_tests: u32,
     /// Rows with no current seen mark.
     pub unseen: u32,
     /// *1 check weakened · 1 gate changed*, or empty when nothing was.
@@ -410,6 +424,7 @@ impl Qualifier {
             weakened: count(WeakKind::Skip),
             deleted: count(WeakKind::Deleted),
             gates_changed: count(WeakKind::Gate),
+            base_tests: count(WeakKind::BaseTests),
             unseen: rows
                 .iter()
                 .filter(|w| !seen.contains(&(w.path.clone(), w.matched.clone())))
@@ -431,7 +446,7 @@ impl Qualifier {
 
     /// Nothing weakened, deleted or changed.
     pub fn is_empty(&self) -> bool {
-        self.weakened + self.deleted + self.gates_changed == 0
+        self.weakened + self.deleted + self.gates_changed + self.base_tests == 0
     }
 
     fn compose(&self) -> String {
@@ -444,6 +459,11 @@ impl Qualifier {
             part(self.weakened, "check weakened", "checks weakened"),
             part(self.deleted, "test deleted", "tests deleted"),
             part(self.gates_changed, "gate changed", "gates changed"),
+            part(
+                self.base_tests,
+                "base test fails on this change",
+                "base tests fail on this change",
+            ),
         ]
         .into_iter()
         .flatten()
@@ -518,10 +538,37 @@ pub const SKIP_MARKERS: &[&str] = &[
     "test.only(",
     "describe.only(",
     "it.todo",
+    ".todo(",
+    ".skip.each",
+    ".skipIf",
     "t.Skip(",
+    "t.Skipf(",
+    "t.SkipNow()",
+    "self.skipTest(",
+    "pytest.importorskip",
+    "@unittest.skip",
+    "#[should_panic",
     "@Disabled",
     "@Ignore",
+    // C#: NUnit and MSTest, and xUnit's `Skip =`.
+    "[Ignore]",
+    "[Ignore(",
+    "[Fact(Skip",
+    "[Theory(Skip",
 ];
+
+/// Markers that must start a word: `xit(` is not in `exit(`.
+const SKIP_WORDS: &[&str] = &["xit(", "xdescribe(", "xtest(", "xcontext("];
+
+/// RSpec's `pending` and `skip`, a bare word at the start of a line. Read in
+/// Ruby only, where the word is the call.
+fn rspec_skip(name: &str, t: &str) -> bool {
+    name.ends_with(".rb")
+        && ["pending", "skip"].iter().any(|w| {
+            t.strip_prefix(w)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '(', '"', '\'']))
+        })
+}
 
 /// Comments that silence a linter or a type checker. Matched in added lines
 /// of any file but prose, since documentation may name them.
@@ -581,6 +628,38 @@ fn test_named(name: &str) -> bool {
         || name.contains(".spec.")
 }
 
+/// Which paths hold tests: the declared `tests` role, or, where none is
+/// declared, [`TEST_DIRS`] and [`test_named`]. One definition, read by the
+/// weakened scan and by base checks alike.
+pub(crate) struct TestPaths(Option<Patterns>);
+
+impl TestPaths {
+    pub(crate) fn of(roles: Option<&Roles>) -> Self {
+        TestPaths(
+            roles
+                .filter(|r| !r.tests.is_empty())
+                .map(|r| Patterns::parse(&r.tests.join("\n"))),
+        )
+    }
+
+    /// Whether a `tests` role is declared, rather than the fallback.
+    pub(crate) fn declared(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub(crate) fn matches(&self, path: &str) -> bool {
+        match &self.0 {
+            Some(p) => p.matches(path),
+            None => {
+                TEST_DIRS
+                    .iter()
+                    .any(|d| path.starts_with(d) || path.contains(&format!("/{d}")))
+                    || test_named(path.rsplit('/').next().unwrap_or(path))
+            }
+        }
+    }
+}
+
 /// Documentation, where a marker is a word about a check, not a check.
 fn is_prose(name: &str) -> bool {
     [".md", ".mdx", ".rst", ".txt", ".adoc"]
@@ -588,50 +667,128 @@ fn is_prose(name: &str) -> bool {
         .any(|e| name.ends_with(e))
 }
 
-/// What defines the checks: a hunk here changes what *passing* means.
-fn defines_checks(path: &str) -> Option<String> {
+/// Keys that make a hunk of `package.json` about the checks: the scripts, and
+/// the runners configured in place.
+const PACKAGE_JSON_KEYS: &[&str] = &[
+    "\"scripts\"",
+    "\"test",
+    "\"lint",
+    "\"check",
+    "\"typecheck",
+    "\"jest\"",
+    "\"vitest\"",
+    "\"mocha\"",
+    "\"ava\"",
+];
+
+/// Keys that make a hunk of `Cargo.toml` about the checks: which tests exist,
+/// how they are run, what the lints are, and the profiles they build under.
+const CARGO_TOML_KEYS: &[&str] = &[
+    "[[test]]", "[lib]", "[lints", "harness", "test =", "[profile",
+];
+
+/// Keys that make a hunk of a Maven or Gradle build about the checks.
+const JVM_BUILD_KEYS: &[&str] = &[
+    "skipTests",
+    "maven.test.skip",
+    "testFailureIgnore",
+    "surefire",
+    "failsafe",
+    "test {",
+    "tasks.test",
+    "tasks.named(\"test\"",
+];
+
+/// What defines the checks — the one table: `Some((keys, why))` for a file
+/// whose edits change what *passing* means. `keys` empty is every edit; else
+/// only a hunk naming one of them (in its header or any line) counts, for a
+/// manifest that is mostly about something else.
+fn check_file(path: &str) -> Option<(&'static [&'static str], String)> {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let s = |t: &str| Some(t.to_string());
+    let every = |t: &str| Some((&[][..], t.to_string()));
     if path == "devplane.toml" {
-        s("edits the gates' own definition (`devplane.toml`)")
+        every("edits the gates' own definition (`devplane.toml`)")
     } else if path.starts_with(".github/workflows/") {
-        s("edits a CI workflow")
+        every("edits a CI workflow")
     } else if path == ".gitlab-ci.yml" {
-        s("edits the CI definition (`.gitlab-ci.yml`)")
+        every("edits the CI definition (`.gitlab-ci.yml`)")
+    } else if name == "package.json" {
+        Some((
+            PACKAGE_JSON_KEYS,
+            "edits the `scripts` or a test runner's settings in `package.json`".into(),
+        ))
+    } else if name == "Cargo.toml" {
+        Some((
+            CARGO_TOML_KEYS,
+            "edits the tests, lints or profiles `Cargo.toml` declares".into(),
+        ))
+    } else if name == "pom.xml" || name.starts_with("build.gradle") {
+        Some((JVM_BUILD_KEYS, format!("edits how `{name}` runs the tests")))
+    } else if path.ends_with(".cargo/config.toml") || path.ends_with(".cargo/config") {
+        every("edits `.cargo/config`, which configures every cargo command, tests included")
+    } else if name == "build.rs" {
+        every("edits `build.rs`, which runs before every build and test")
+    } else if name == ".gitattributes" {
+        every("edits `.gitattributes`, which decides how git reads and diffs files")
     } else if name == "pyproject.toml" {
-        s("edits `pyproject.toml`, which configures the test runner")
+        every("edits `pyproject.toml`, which configures the test runner")
     } else if name == "conftest.py" {
-        s("edits `conftest.py`, which configures the test run")
-    } else if name.starts_with("jest.config.") || name.starts_with("vitest.config.") {
-        s("edits the test runner's configuration")
+        every("edits `conftest.py`, which configures the test run")
+    } else if name == "noxfile.py" {
+        every("edits `noxfile.py`, whose sessions run the checks")
+    } else if name.starts_with("jest.config.")
+        || name.starts_with("vitest.config.")
+        || name.starts_with(".mocharc")
+        || name.starts_with("playwright.config.")
+        || name.starts_with("cypress.config.")
+        || name.starts_with("karma.conf")
+    {
+        every("edits the test runner's configuration")
     } else if matches!(name, "justfile" | "Justfile" | ".justfile") {
-        Some(format!("edits `{name}`, whose recipes run the checks"))
+        every(&format!("edits `{name}`, whose recipes run the checks"))
     } else if matches!(name, "Makefile" | "makefile" | "GNUmakefile") {
-        Some(format!("edits `{name}`, whose targets run the checks"))
+        every(&format!("edits `{name}`, whose targets run the checks"))
     } else if name == ".pre-commit-config.yaml" {
-        s("edits `.pre-commit-config.yaml`, which runs the checks before a commit")
+        every("edits `.pre-commit-config.yaml`, which runs the checks before a commit")
     } else if matches!(name, "tox.ini" | "setup.cfg" | "pytest.ini") {
-        Some(format!("edits `{name}`, which configures the test runner"))
+        every(&format!("edits `{name}`, which configures the test runner"))
     } else if matches!(
         name,
         "clippy.toml" | ".clippy.toml" | "deny.toml" | "rustfmt.toml" | ".rustfmt.toml"
     ) || name.starts_with(".eslintrc")
         || name.starts_with("eslint.config.")
+        || name.starts_with(".golangci.")
     {
-        Some(format!("edits `{name}`, which configures a linter"))
+        every(&format!("edits `{name}`, which configures a linter"))
     } else if name.starts_with("tsconfig") && name.ends_with(".json") {
-        Some(format!("edits `{name}`, which configures the type checker"))
+        every(&format!(
+            "edits `{name}`, which configures the type checker"
+        ))
     } else if matches!(name, "codecov.yml" | ".codecov.yml" | ".coveragerc") {
-        Some(format!("edits `{name}`, which configures coverage"))
+        every(&format!("edits `{name}`, which configures coverage"))
     } else {
         None
     }
 }
 
+/// Whether a file is in [`check_file`]'s table at all, whatever it edits.
+pub(crate) fn defines_checks(path: &str) -> Option<String> {
+    check_file(path).map(|(_, why)| why)
+}
+
+/// A removed line that took a test away, wherever it was: Rust's inline test
+/// modules live beside the code they test.
+fn is_test_removal(t: &str) -> bool {
+    is_test_def(t)
+        || ["#[cfg(test)]", "describe("]
+            .iter()
+            .any(|m| t.starts_with(m))
+}
+
 /// The files a declared gate command names, relative to the project root:
 /// `sh ./scripts/test.sh` names `scripts/test.sh`. Directories and flags are
 /// not files.
-fn files_gates_run(commands: &[String]) -> Vec<String> {
+pub(crate) fn files_gates_run(commands: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for c in commands {
         for t in c.split_whitespace() {
@@ -728,7 +885,7 @@ fn is_trivial_assertion(t: &str) -> bool {
 }
 
 /// A line that declares a test.
-fn is_test_def(t: &str) -> bool {
+pub(crate) fn is_test_def(t: &str) -> bool {
     [
         "def test",
         "async def test",
@@ -852,26 +1009,22 @@ fn digest(hunks: &[Hunk]) -> String {
 /// - **skip** — [`SKIP_MARKERS`] and [`SUPPRESSIONS`] added; in a test file, an
 ///   assertion removed with none in its place, one that cannot fail added, a
 ///   test added with no assertion in it, or a line carrying a tolerance changed;
-/// - **deleted** — a test file deleted, or a test removed from one that stays;
-/// - **gate** — an edit to what defines the checks (gates, CI, a runner's,
-///   linter's or coverage configuration, a file a declared gate command names,
-///   `package.json` `scripts`, `Cargo.toml` `[profile…]`), and [`MASKS`] added
-///   there.
+/// - **deleted** — a test file deleted, a test removed from one that stays, or
+///   a test declaration removed from any file (inline test modules);
+/// - **gate** — an edit to what defines the checks ([`check_file`]'s table and
+///   a file a declared gate command names), and [`MASKS`] added there.
+///
+/// It reads the whole change, never the part a view was cut to
+/// ([`ChangeSet::uncut`]). A test or check-defining file whose diff has no
+/// lines to read (binary, or not shown) is a row of its own, and so is a set
+/// cut with nothing whole beside it: what was not read is never "nothing
+/// weakened".
 ///
 /// `gate_commands` are the declared gates' commands, for the files they name.
 pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]) -> Vec<Weakened> {
-    let tests = roles
-        .filter(|r| !r.tests.is_empty())
-        .map(|r| Patterns::parse(&r.tests.join("\n")));
-    let under_tests = |path: &str| match &tests {
-        Some(p) => p.matches(path),
-        None => {
-            TEST_DIRS
-                .iter()
-                .any(|d| path.starts_with(d) || path.contains(&format!("/{d}")))
-                || test_named(path.rsplit('/').next().unwrap_or(path))
-        }
-    };
+    let set = set.uncut();
+    let tests = TestPaths::of(roles);
+    let under_tests = |path: &str| tests.matches(path);
     let gate_files = files_gates_run(gate_commands);
     let mut out: Vec<Weakened> = Vec::new();
     let mut push = |path: &str, kind: WeakKind, why: String, matched: String| {
@@ -885,19 +1038,39 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]
             out.push(w);
         }
     };
+    if let Some(t) = &set.truncated {
+        push(
+            "",
+            WeakKind::Gate,
+            "diff truncated — weakening not read".into(),
+            format!("{} of {} files read", t.files_shown, t.files_total),
+        );
+    }
     for i in path_order(set) {
         let f = &set.files[i];
         let path = f.path.as_str();
         let name = path.rsplit('/').next().unwrap_or(path);
         let deleted = matches!(f.status, crate::core::diff::Status::Deleted);
         let test_file = under_tests(path);
+        // A test file with no lines to read: git called it binary (a planted
+        // `-diff` attribute does that too) or the view did not render it.
+        if test_file && !deleted && !matches!(f.body, crate::core::diff::Body::Hunks(_)) {
+            push(
+                path,
+                WeakKind::Skip,
+                "a test file the diff shows no lines of — not readable, so what it changes is \
+                 not read"
+                    .into(),
+                "not readable".into(),
+            );
+        }
         if deleted && test_file {
             push(
                 path,
                 WeakKind::Deleted,
-                match tests {
-                    Some(_) => "deletes a file under the declared `tests` role".into(),
-                    None => "deletes a test file".into(),
+                match tests.declared() {
+                    true => "deletes a file under the declared `tests` role".into(),
+                    false => "deletes a test file".into(),
                 },
                 path.to_string(),
             );
@@ -929,13 +1102,23 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]
                 );
             }
         }
-        let defines = defines_checks(path).or_else(|| {
-            gate_files
-                .iter()
-                .any(|g| g == path)
-                .then(|| format!("edits `{path}`, which a declared gate runs"))
-        });
         let hunks = hunks_of(&f.body);
+        // In the table, with the hunks it narrows to; else named by a gate.
+        let (keys, defines) = match check_file(path) {
+            Some((keys, why)) => (keys, Some(why)),
+            None => (
+                &[][..],
+                gate_files
+                    .iter()
+                    .any(|g| g == path)
+                    .then(|| format!("edits `{path}`, which a declared gate runs")),
+            ),
+        };
+        let about_checks = keys.is_empty()
+            || hunks.iter().any(|h| {
+                keys.iter()
+                    .any(|k| h.header.contains(k) || h.lines.iter().any(|(_, t)| t.contains(k)))
+            });
         for h in hunks {
             for (kind, text) in &h.lines {
                 if *kind != Kind::Added {
@@ -958,7 +1141,13 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]
                         t.to_string(),
                     );
                 }
-                if let Some(m) = SKIP_MARKERS.iter().find(|m| text.contains(**m)) {
+                let marker = SKIP_MARKERS
+                    .iter()
+                    .find(|m| text.contains(**m))
+                    .or_else(|| SKIP_WORDS.iter().find(|m| at_word(t, m)))
+                    .copied()
+                    .or_else(|| rspec_skip(name, t).then_some(t));
+                if let Some(m) = marker {
                     push(
                         path,
                         WeakKind::Skip,
@@ -984,7 +1173,7 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]
                         t.to_string(),
                     );
                 }
-                if (defines.is_some() || name == "package.json")
+                if defines.is_some()
                     && let Some(m) = MASKS.iter().find(|m| text.contains(**m))
                 {
                     push(
@@ -1023,7 +1212,7 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]
                     t,
                 );
             }
-            for t in unreplaced(hunks, is_test_def) {
+            for t in unreplaced(hunks, is_test_removal) {
                 push(
                     path,
                     WeakKind::Deleted,
@@ -1039,6 +1228,12 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]
                     t,
                 );
             }
+        } else if !test_file && !is_prose(name) {
+            // Outside the test files a test is removed too: an inline
+            // `#[cfg(test)]` module, or a spec beside its code.
+            for t in unreplaced(hunks, is_test_removal) {
+                push(path, WeakKind::Deleted, "a test removed".into(), t);
+            }
         }
         if hunks.is_empty() && !deleted {
             // Binary or past the bound: can still define the checks.
@@ -1047,41 +1242,8 @@ pub fn weakened(set: &ChangeSet, roles: Option<&Roles>, gate_commands: &[String]
             }
             continue;
         }
-        if let Some(why) = defines {
+        if let Some(why) = defines.filter(|_| about_checks) {
             push(path, WeakKind::Gate, why, digest(hunks));
-        }
-        if name == "package.json"
-            && hunks.iter().any(|h| {
-                h.lines.iter().any(|(k, t)| {
-                    t.contains("\"scripts\"")
-                        || (*k != Kind::Context
-                            && ["\"test", "\"lint", "\"check", "\"typecheck"]
-                                .iter()
-                                .any(|key| t.trim_start().starts_with(key)))
-                })
-            })
-        {
-            push(
-                path,
-                WeakKind::Gate,
-                "edits the `scripts` of `package.json`".into(),
-                digest(hunks),
-            );
-        }
-        if name == "Cargo.toml"
-            && hunks.iter().any(|h| {
-                h.header.contains("[profile")
-                    || h.lines
-                        .iter()
-                        .any(|(_, t)| t.trim_start().starts_with("[profile"))
-            })
-        {
-            push(
-                path,
-                WeakKind::Gate,
-                "edits a `[profile]` table of `Cargo.toml`".into(),
-                digest(hunks),
-            );
         }
     }
     out
@@ -1110,7 +1272,6 @@ pub fn weakened_sentence(w: &[Weakened]) -> Option<String> {
 /// How big a change is and where its weight sits, before anybody reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Shape {
     pub files: u32,
     pub added: u32,
@@ -1242,6 +1403,7 @@ mod tests {
             base: "main".into(),
             files,
             truncated: None,
+            whole: None,
         }
     }
 
@@ -1447,7 +1609,7 @@ mod tests {
         );
         assert_eq!(
             i.not_asked_for[0].1.says(),
-            "no run Devplane dispatched wrote this"
+            "no dispatched run is recorded writing this, and no sent task names it"
         );
         assert!(
             i.not_asked_for[1]
@@ -1455,6 +1617,19 @@ mod tests {
                 .says()
                 .contains("which was sent no tasks")
         );
+    }
+
+    #[test]
+    fn a_file_no_writer_was_recorded_for_joins_the_task_that_names_it() {
+        let s = set(vec![plain("tests/login.test.ts"), plain("tests/login.ts")]);
+        let tasked = driven(
+            "r-tasked",
+            Some(vec![task("T003 Test the burst in tests/login.test.ts")]),
+        );
+        let i = by_intent(&s, &[(&tasked, Vec::new())]);
+        assert_eq!(paths(&s, &i.groups[0].files), ["tests/login.test.ts"]);
+        // A prefix of a named path is not the path.
+        assert_eq!(i.not_asked_for, [(1, NotAskedFor::NoRunWrote)]);
     }
 
     #[test]

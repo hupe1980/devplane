@@ -2,6 +2,8 @@
 //! (`tests/fixtures/spec/`). Asserted by name — layouts found, folders listed —
 //! never by count alone.
 
+mod common;
+
 use devplane::core::config::SpecSection;
 use devplane::spec::{
     ChangeFolder, DIALECTS, Detected, NO_LAYOUT, Shape, Spec, changes, confine, detect,
@@ -24,13 +26,7 @@ fn paths(found: &[ChangeFolder]) -> Vec<&str> {
 
 /// A throwaway directory, for the tests that need a link or an escape.
 fn scratch() -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "devplane-dialects-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&d).expect("scratch dir");
-    d
+    common::scratch("dialects")
 }
 
 #[test]

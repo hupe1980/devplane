@@ -81,8 +81,8 @@
       <h3>Verified means verified</h3>
       <p>
         Your committed gate, run by Devplane rather than the agent, against a digest of the working
-        tree — uncommitted files included, hashed byte for byte. Touch one file and it is stale. Only
-        the gate that defines done can make a change verified.
+        tree — uncommitted files included, hashed byte for byte. Touch one file and it is stale. In CI,
+        <code>devplane verify</code> runs the base branch’s <code>check</code> on every pull request.
       </p>
       <a class="more" href="{{ get_url(path='/docs/verified-done/') }}">Verified done</a>
     </article>
@@ -144,8 +144,8 @@
     <h2>Try it on the machine you already have</h2>
     <p class="lede">One binary. It finds your running sessions on the first run.</p>
     <div class="install-line big">
-      <code>curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh &amp;&amp; devplane ls</code>
-      <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh && devplane ls" aria-label="Copy the install command">Copy</button>
+      <code>curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh &amp;&amp; devplane status</code>
+      <button type="button" class="copy" data-copy="curl -LsSf https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh | sh && devplane status" aria-label="Copy the install command">Copy</button>
     </div>
     <p class="cta-row">
       <a class="btn primary" href="{{ get_url(path='/docs/quickstart/') }}">Quickstart</a>

@@ -47,7 +47,11 @@ pub const PAGE_COMMAND_CHARS: usize = 120;
 /// What the artifact claims, in its own words, so it travels with the paste.
 pub const LIMITS: &str = "This is evidence that these commands ended as recorded against this \
 commit. It is not evidence that the work is correct, that the commands check the right things, or \
-that the specification was satisfied. It is unsigned and detects change rather than forgery.";
+that the specification was satisfied. The commands ran code in this tree, including tests and \
+build scripts the change may have edited; the tree was the same before and after the run, which \
+cannot see an edit reverted during the run. The base checks put the base's tests back to see \
+whether they still pass, and their runs are observed beside this evidence, never part of it. It is \
+unsigned and detects change rather than forgery.";
 
 /// Every field a reader can check for themselves — one list shared by both renderings.
 pub const REDERIVABLE: &[&str] = &[
@@ -58,6 +62,12 @@ pub const REDERIVABLE: &[&str] = &[
     "specification.fingerprint",
     "specification.tasks_done",
     "specification.tasks_total",
+    "baseChecks.base",
+    "baseChecks.tree",
+    "baseChecks.onChange.restored",
+    "baseChecks.onBase.placed[].blob",
+    "baseChecks.onChange.commands[].outcome",
+    "baseChecks.onBase.commands[].outcome",
 ];
 
 /// The portable record of one change's completion. Assembled from a `Change`,
@@ -80,6 +90,9 @@ pub struct Certificate<'a> {
     pub weakened_unreadable: Option<String>,
     /// Every weakened row was marked seen by a person before this was read.
     pub weakened_read: bool,
+    /// The counts and base checks, as the change's own view composed them;
+    /// `None` when `check` never ran. Beside the evidence, never in it.
+    pub base_checks: Option<super::base_checks::View>,
 }
 
 impl<'a> Certificate<'a> {
@@ -105,6 +118,7 @@ impl<'a> Certificate<'a> {
             weakened: None,
             weakened_unreadable: None,
             weakened_read: false,
+            base_checks: None,
         }
     }
 
@@ -156,12 +170,7 @@ impl<'a> Certificate<'a> {
 
     /// A digest of the evidence's gate commands, in order.
     pub fn commands_digest(&self) -> Option<String> {
-        let report = self.evidence?;
-        let mut h = super::hash::Rolling::new();
-        for c in &report.commands {
-            h.push_str(&c.command);
-        }
-        Some(h.hex())
+        self.evidence.map(commands_digest)
     }
 
     /// Whether this change is finished. Unfinished is a rendering branch, not an error.
@@ -285,6 +294,101 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// A digest of a report's gate commands, in order.
+pub fn commands_digest(report: &GateReport) -> String {
+    let mut h = super::hash::Rolling::new();
+    for c in &report.commands {
+        h.push_str(&c.command);
+    }
+    h.hex()
+}
+
+/// A statement's `subject`: the tree the commands ran against, and the commit
+/// only when that tree is the commit's own. With no tree there is no subject,
+/// and the second value says why — never an entry with an empty digest.
+fn subject_of(name: &str, commit: Option<&CommitStamp>) -> (serde_json::Value, Option<String>) {
+    use serde_json::json;
+    match commit.and_then(|c| c.tree.as_deref().map(|t| (c, t))) {
+        Some((c, tree)) => {
+            let mut digest = json!({ "gitTree": tree });
+            if let Some(sha) = c.commit.as_deref().filter(|_| c.clean) {
+                digest["gitCommit"] = json!(sha);
+            }
+            (json!([{ "name": name, "digest": digest }]), None)
+        }
+        None => (
+            json!([]),
+            Some(match commit {
+                None => "no gate ran in a repository, so there is no tree to name".to_string(),
+                Some(c) => format!(
+                    "no working-tree digest was recorded{}",
+                    c.tree_unknown
+                        .as_deref()
+                        .map(|w| format!(" — {w}"))
+                        .unwrap_or_default()
+                ),
+            }),
+        ),
+    }
+}
+
+/// The predicate's `evidence` block for one gate run.
+fn evidence_of(r: &GateReport, attempts: u32) -> serde_json::Value {
+    serde_json::json!({
+        // Observed by something the agent does not control.
+        Origin::KEY: Origin::ExternallyObserved.as_str(),
+        "gate": r.gate,
+        "at": r.at,
+        "attempt": r.attempt,
+        "attempts": attempts,
+        "passed": r.passed(),
+        "commit": r.commit,
+        "commands": r.commands,
+        "commands_digest": commands_digest(r),
+    })
+}
+
+/// What `devplane verify` knows when it writes a statement: a gate run and the
+/// rows its diff weakened, with no change record behind them. The statement is
+/// the certificate's own shape — one format, two callers — with `change` and
+/// `completion` absent and a `verify` block naming the base whose definition
+/// ran.
+pub struct VerifyEvidence<'a> {
+    /// The subject's name: the repository or checkout.
+    pub name: &'a str,
+    pub report: &'a GateReport,
+    pub weakened: &'a [super::review::Weakened],
+    /// `{ base, baseCommit, head, definition, definitionChanged }`.
+    pub verify: serde_json::Value,
+    /// `predicate.devplane.baseChecks`, as [`base_checks_json`] writes it.
+    pub base_checks: serde_json::Value,
+}
+
+/// The in-toto statement for a `devplane verify` run. Unsigned.
+pub fn verify_statement(e: &VerifyEvidence<'_>) -> serde_json::Value {
+    use serde_json::json;
+    let (subject, no_subject) = subject_of(e.name, e.report.commit.as_ref());
+    let mut statement = json!({
+        "_type": STATEMENT_TYPE,
+        "subject": subject,
+        "predicateType": PREDICATE_TYPE,
+        "predicate": {
+            "change": null,
+            "completion": null,
+            "evidence": evidence_of(e.report, 1),
+            "checks_altered": e.weakened,
+            "devplane": { "verify": e.verify, "baseChecks": e.base_checks },
+            "rederivable": REDERIVABLE,
+            "limits": LIMITS,
+            "signed": false,
+        }
+    });
+    if let Some(why) = no_subject {
+        statement["subject_missing"] = json!(why);
+    }
+    statement
+}
+
 /// How a command's outcome reads — one function for both renderings.
 pub fn outcome_sentence(c: &CommandResult) -> String {
     match &c.outcome {
@@ -306,10 +410,16 @@ pub fn commit_sentence(c: &CommitStamp) -> String {
     // gets to it.
     let head = match (&c.commit, &c.tree) {
         (Some(sha), Some(tree)) => format!("Commit `{sha}`, working-tree digest `{tree}`"),
-        (Some(sha), None) => format!(
-            "Commit `{sha}`, working-tree digest not recorded — the tree moved while the gate \
-             ran, or could not be read, so this run cannot verify anything"
-        ),
+        (Some(sha), None) => match &c.tree_unknown {
+            Some(why) => format!(
+                "Commit `{sha}`, working-tree digest not recorded — {why} — so this run cannot \
+                 verify anything"
+            ),
+            None => format!(
+                "Commit `{sha}`, working-tree digest not recorded — the tree moved while the \
+                 gate ran, or could not be read, so this run cannot verify anything"
+            ),
+        },
         (None, Some(tree)) => {
             format!("No commit yet — this repository had none; working-tree digest `{tree}`")
         }
@@ -415,6 +525,7 @@ impl Certificate<'_> {
                 o.push_str("No gate has run.\n\n");
             }
             o.push_str(&format!("{}\n\n", inline(&self.weakened_says())));
+            o.push_str(&self.base_checks_markdown());
             o.push_str("There is no completion to certify yet.\n");
             return o;
         };
@@ -486,6 +597,9 @@ impl Certificate<'_> {
                  this does not establish*.\n\n"
             ));
         }
+
+        // Beside the evidence and its steps, never part of them.
+        o.push_str(&self.base_checks_markdown());
 
         if let Some(report) = self.evidence
             && let Some(spec) = report.spec.as_ref()
@@ -573,13 +687,9 @@ impl Certificate<'_> {
     pub fn json(&self) -> serde_json::Value {
         use serde_json::json;
         let w = self.change;
-        let commit = self.evidence.and_then(|r| r.commit.as_ref());
-        // `subject` is what the statement is about: the commit.
-        let subject = match commit.and_then(|c| c.commit.as_deref()) {
-            Some(sha) => json!([{ "name": w.title, "digest": { "gitCommit": sha } }]),
-            None => json!([{ "name": w.title, "digest": {} }]),
-        };
-        json!({
+        let (subject, no_subject) =
+            subject_of(&w.title, self.evidence.and_then(|r| r.commit.as_ref()));
+        let mut statement = json!({
             "_type": STATEMENT_TYPE,
             "subject": subject,
             "predicateType": PREDICATE_TYPE,
@@ -587,19 +697,9 @@ impl Certificate<'_> {
                 "change": { "id": w.id, "title": w.title, "state": self.state.as_str(),
                           "branch": w.branch },
                 "completion": w.completion,
-                "evidence": self.evidence.map(|r| json!({
-                    // Observed by something the agent does not control.
-                    Origin::KEY: Origin::ExternallyObserved.as_str(),
-                    "gate": r.gate,
-                    "at": r.at,
-                    "attempt": r.attempt,
-                    "attempts": self.attempts,
-                    "passed": r.passed(),
-                    "commit": r.commit,
-                    "commands": r.commands,
-                    "commands_digest": self.commands_digest(),
-                })),
+                "evidence": self.evidence.map(|r| evidence_of(r, self.attempts)),
                 "basis_run_missing": self.basis_run_missing(),
+                "devplane": { "baseChecks": self.base_checks_json() },
                 "checks_altered": self.weakened,
                 "specification": self.evidence.and_then(|r| r.spec.clone()),
                 // An object so the origin rides with the text; absent entirely
@@ -616,7 +716,11 @@ impl Certificate<'_> {
                 "limits": LIMITS,
                 "signed": false,
             }
-        })
+        });
+        if let Some(why) = no_subject {
+            statement["subject_missing"] = json!(why);
+        }
+        statement
     }
 
     /// The certificate as a page renders it, every sentence already written, so
@@ -632,6 +736,7 @@ impl Certificate<'_> {
                                       where_it_is(self.change, self.state)),
                 "last_gate": self.evidence.map(|g| g.summary()),
                 "checks_altered": self.weakened_says(),
+                "base_checks": self.base_checks_page(),
             });
         };
 
@@ -661,6 +766,7 @@ impl Certificate<'_> {
                 })).collect::<Vec<_>>(),
             })),
             "no_evidence": self.evidence.is_none().then(|| self.no_evidence()),
+            "base_checks": self.base_checks_page(),
             "commands_digest": self.commands_digest(),
             "checks_altered": self.weakened_says(),
             "claim": self.claim.map(|text| json!({
@@ -702,6 +808,199 @@ impl Certificate<'_> {
     }
 }
 
+impl Certificate<'_> {
+    /// The one sentence about how many tests ran, after the commands table.
+    fn counts_sentence(&self, report: &GateReport) -> String {
+        match &self.base_checks {
+            // The view's, when it describes this run.
+            Some(v) if self.change.check_report().map(|r| r.at) == Some(report.at) => {
+                v.certificate.clone()
+            }
+            _ => super::testcount::compare::certificate_sentence(&report.commands, None),
+        }
+    }
+
+    /// Why there is no current base-checks result, as a sentence; `None` when
+    /// there is one.
+    fn base_checks_absent(&self) -> Option<String> {
+        base_checks_absent(self.base_checks.as_ref())
+    }
+
+    /// The *Base checks* section: both runs, what was put back and placed,
+    /// the named tests, and the steps to redo them — or the one sentence
+    /// saying why there is nothing current. Never omitted.
+    fn base_checks_markdown(&self) -> String {
+        let mut o = String::from("## Base checks\n\n");
+        // How many ran, as the runner printed it: first, since it needs no base run.
+        if let Some(report) = self.evidence {
+            o.push_str(&format!("{}\n\n", inline(&self.counts_sentence(report))));
+        }
+        if let Some(why) = self.base_checks_absent() {
+            o.push_str(&format!("{}\n\n", inline(&why)));
+            return o;
+        }
+        let Some(v) = &self.base_checks else {
+            return o;
+        };
+        let (Some(on_change), Some(on_base)) = (&v.on_change, &v.on_base) else {
+            return o;
+        };
+        let base = v.base.clone().unwrap_or_default();
+        let tree = v.tree.clone().unwrap_or_default();
+        o.push_str(&format!(
+            "`{}: {}` — beside the evidence above, not part of it.\nBase commit {}; tree {} (the \
+             tree `check` verified).\n\n",
+            Origin::KEY,
+            Origin::ExternallyObserved.as_str(),
+            code(&base),
+            code(&tree),
+        ));
+        let list = |items: &[String], more: usize| -> String {
+            let mut s = items.iter().map(|i| code(i)).collect::<Vec<_>>().join(", ");
+            if more > 0 {
+                s.push_str(&format!(" and {more} more"));
+            }
+            s
+        };
+        let table = |o: &mut String, cmds: &[CommandResult]| {
+            if cmds.is_empty() {
+                return;
+            }
+            o.push_str("| Command | Outcome | Tests |\n|---|---|---|\n");
+            for c in cmds {
+                o.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    code(&c.command),
+                    inline(&outcome_sentence(c)),
+                    inline(&c.tests.says())
+                ));
+            }
+            o.push('\n');
+        };
+
+        o.push_str("### The base's tests on this change\n\n");
+        o.push_str(&format!("**{}.**\n\n", inline(&on_change.says)));
+        if !on_change.restored.is_empty() {
+            o.push_str(&format!(
+                "Put back as the base has them: {}.\n\n",
+                list(&on_change.restored, 0)
+            ));
+        }
+        if !on_change.removed.is_empty() {
+            o.push_str(&format!(
+                "Removed, as the base lacks them: {}.\n\n",
+                list(&on_change.removed, 0)
+            ));
+        }
+        table(&mut o, &on_change.commands);
+        if !on_change.failing.is_empty() {
+            o.push_str(&format!(
+                "Failing: {}.\n\n",
+                list(&on_change.failing, on_change.failing_more)
+            ));
+        }
+        if let Some(n) = &on_change.named {
+            if !n.not_run_on_change.is_empty() {
+                o.push_str(&format!(
+                    "Did not run on this change: {}.\n\n",
+                    list(&n.not_run_on_change, n.not_run_on_change_more)
+                ));
+            }
+            if !n.became_skipped.is_empty() {
+                o.push_str(&format!(
+                    "Became skipped: {}.\n\n",
+                    list(&n.became_skipped, n.became_skipped_more)
+                ));
+            }
+        }
+
+        o.push_str("### This change's new tests on the base\n\n");
+        o.push_str(&format!("**{}.**\n\n", inline(&on_base.says)));
+        if !on_base.placed.is_empty() {
+            let placed: Vec<String> = on_base
+                .placed
+                .iter()
+                .map(|p| match &p.blob {
+                    Some(b) => format!("{} (blob {})", code(&p.path), code(b)),
+                    None => code(&p.path),
+                })
+                .collect();
+            o.push_str(&format!("Placed: {}.\n\n", placed.join(", ")));
+        }
+        if !on_base.not_separable.is_empty() {
+            o.push_str(&format!(
+                "Not separable: {}.\n\n",
+                list(&on_base.not_separable, 0)
+            ));
+        }
+        table(&mut o, &on_base.commands);
+        if !on_base.passing.is_empty() {
+            o.push_str(&format!(
+                "Passing without the change: {}.\n\n",
+                list(&on_base.passing, on_base.passing_more)
+            ));
+        }
+        if !on_base.failing.is_empty() {
+            o.push_str(&format!(
+                "Failing without it: {}.\n\n",
+                list(&on_base.failing, on_base.failing_more)
+            ));
+        }
+
+        o.push_str("### To redo both by hand\n\n");
+        let restored = on_change
+            .restored
+            .iter()
+            .map(|p| shell_quote(p))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let placed = on_base
+            .placed
+            .iter()
+            .map(|p| shell_quote(&p.path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut steps = vec![
+            format!("git worktree add --detach /tmp/base-checks {base}"),
+            "cd /tmp/base-checks".to_string(),
+            format!("git read-tree -u --reset {tree}"),
+        ];
+        if !restored.is_empty() {
+            steps.push(format!("git checkout {base} -- {restored}"));
+        }
+        for p in &on_change.removed {
+            steps.push(format!("rm -f {}", shell_quote(p)));
+        }
+        steps.push("# run the commands of the first table".into());
+        steps.push(format!(
+            "git read-tree -u --reset {base} && git clean -ffdx"
+        ));
+        if !placed.is_empty() {
+            steps.push(format!("git checkout {tree} -- {placed}"));
+            steps.push("# run the commands of the second table; compare each placed blob with `git hash-object <path>`".into());
+        }
+        o.push_str(&fenced(&steps.join("\n")));
+        o.push_str("\n\n");
+        o
+    }
+
+    /// `predicate.devplane.baseChecks`.
+    fn base_checks_json(&self) -> serde_json::Value {
+        base_checks_json(self.base_checks.as_ref(), self.base_checks_absent())
+    }
+
+    /// The page's sentences, as the host wrote them.
+    fn base_checks_page(&self) -> serde_json::Value {
+        serde_json::json!({
+            "counts": self.base_checks.as_ref().map(|v| &v.counts_says),
+            "on_change": self.base_checks.as_ref().and_then(|v| v.on_change.as_ref()).map(|o| &o.says),
+            "on_base": self.base_checks.as_ref().and_then(|v| v.on_base.as_ref()).map(|o| &o.says),
+            "absent": self.base_checks_absent(),
+            "stale": self.base_checks.as_ref().is_some_and(|v| v.stale),
+        })
+    }
+}
+
 /// Where an unfinished change is: its state, and what it waits on.
 fn where_it_is(change: &Change, state: ChangeState) -> String {
     match change
@@ -714,6 +1013,90 @@ fn where_it_is(change: &Change, state: ChangeState) -> String {
     }
 }
 
+/// Why there is no current base-checks result, as a sentence; `None` when
+/// there is one.
+pub fn base_checks_absent(view: Option<&super::base_checks::View>) -> Option<String> {
+    match view {
+        None => Some("Base checks not run — `check` has not run on this change.".into()),
+        Some(v) => v.absent.as_ref().map(|a| {
+            let says = match (a.absent, &v.tree) {
+                (super::base_checks::Absent::Stale, Some(t)) => format!(
+                    "base checks stale — they describe tree `{}`, not this one",
+                    super::text::clip(t, 12)
+                ),
+                _ => a.says.clone(),
+            };
+            let mut c = says.chars();
+            match c.next() {
+                Some(f) => format!("{}{}.", f.to_uppercase(), c.as_str()),
+                None => String::new(),
+            }
+        }),
+    }
+}
+
+/// `predicate.devplane.baseChecks`: the whole result when current, else
+/// the sentence and which absence it is. Never `null`.
+pub fn base_checks_json(
+    view: Option<&super::base_checks::View>,
+    absent_says: Option<String>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let origin = Origin::ExternallyObserved.as_str();
+    let Some(v) = view else {
+        return json!({
+            Origin::KEY: origin,
+            "absent": "check_not_run",
+            "says": absent_says,
+        });
+    };
+    if let Some(a) = &v.absent {
+        return json!({
+            Origin::KEY: origin,
+            "absent": a.absent,
+            "says": absent_says,
+            "stale": v.stale,
+        });
+    }
+    let on_change = v.on_change.as_ref();
+    let on_base = v.on_base.as_ref();
+    json!({
+        Origin::KEY: origin,
+        "says": {
+            "counts": v.counts_says,
+            "onChange": on_change.map(|o| &o.says),
+            "onBase": on_base.map(|o| &o.says),
+        },
+        "stale": v.stale,
+        "base": v.base,
+        "tree": v.tree,
+        "onChange": on_change.map(|o| json!({
+            "restored": o.restored,
+            "removed": o.removed,
+            "inline": o.inline,
+            "outcome": o.outcome,
+            "commands": o.commands.iter().map(|c| json!({
+                "command": c.command, "outcome": c.outcome, "tests": c.tests,
+            })).collect::<Vec<_>>(),
+            "failing": o.failing,
+            "failingOmitted": o.failing_more,
+            "named": o.named,
+        })),
+        "onBase": on_base.map(|o| json!({
+            "placed": o.placed,
+            "notSeparable": o.not_separable,
+            "outcome": o.outcome,
+            "commands": o.commands.iter().map(|c| json!({
+                "command": c.command, "outcome": c.outcome, "tests": c.tests,
+            })).collect::<Vec<_>>(),
+            "passing": o.passing,
+            "passingOmitted": o.passing_more,
+            "failing": o.failing,
+            "failingOmitted": o.failing_more,
+        })),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,6 +1104,7 @@ mod tests {
     #[test]
     fn the_four_outcomes_read_differently() {
         let base = CommandResult {
+            tests: Default::default(),
             command: "x".into(),
             outcome: Outcome::Exited { code: 1 },
             duration_ms: 0,

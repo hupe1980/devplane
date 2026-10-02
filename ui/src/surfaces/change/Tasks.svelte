@@ -9,14 +9,16 @@
   import Icon from "../../lib/ui/Icon.svelte";
   import { writer } from "../../lib/write.svelte";
   import Plan from "./Plan.svelte";
-  import type { Detail } from "./types";
+  import Skeleton from "../../lib/Skeleton.svelte";
+  import Inline from "../../lib/ui/Inline.svelte";
+  import { taskLine, type Detail } from "./types";
   import type { Step } from "./pair";
 
   let { d, lastRun, reload = async () => {} }: { d: Detail; lastRun: string; reload?: () => Promise<void> } = $props();
 
   const run = $derived(lastRun);
   const read = resource<{ plan?: Step[] }>(() => (run ? `/api/runs/${encodeURIComponent(run)}` : null), {
-    tell: () => `devplane show ${run}`,
+    tell: () => `devplane run show ${run}`,
   });
   const steps = $derived(read.data?.plan ?? []);
   /// Loaded (or nothing to load): until then the plan's counts are not shown.
@@ -46,15 +48,8 @@
 
 <div class="tasks">
   {#if d.counts}
-    <div class="counts">
-      <div><span class="big">{d.counts.tasks}</span><span class="lbl">tasks</span></div>
-      <div><span class="big">{d.counts.ticked}</span><span class="lbl">ticked by an agent</span></div>
-      <div>
-        {#if d.counts.seen_by_pass == null}<span class="big quiet">—</span><span class="lbl">no gates declared</span>
-        {:else}<span class="big">{d.counts.seen_by_pass}</span><span class="lbl">seen by a passing check</span>{/if}
-      </div>
-      <p class="says">{d.counts_says}</p>
-    </div>
+    <!-- One row of counts, side by side. Ticked is the agent's own word. -->
+    <p class="counts">{taskLine(d)}</p>
     {#if d.counts.ticked_unsent?.length}
       <section class="note wait">
         <h3><Icon name="alert" size={14} /> Ticked, but no run was sent them <span class="n">{d.counts.ticked_unsent.length}</span></h3>
@@ -68,7 +63,7 @@
       </section>
     {/if}
   {:else}
-    <p class="quiet">{d.spec ? `${d.spec} has no task file this change can read.` : "No specification is attached to this change, so there are no tasks to trace."}</p>
+    <p class="quiet">{#if d.counts_says}<Inline text={d.counts_says} />{:else}{d.spec ? `${d.spec} has no task file this change can read.` : "No specification is attached to this change, so there are no tasks to trace."}{/if}</p>
   {/if}
 
   {#if (d.drifts ?? []).length > 0}
@@ -76,12 +71,12 @@
       <h3><Icon name="alert" size={14} /> The specification changed under a run</h3>
       {#each d.drifts ?? [] as x, i (i)}
         <div class="drift">
-          <p>{x.says}</p>
+          <p><Inline text={x.says} /></p>
           <button disabled={!!pending.busy} onclick={() => decide("tell", x.run)}>Tell the run</button>
           <button disabled={!!pending.busy} onclick={() => decide("accept", x.run)}>Accept what it saw</button>
         </div>
       {/each}
-      {#if pending.busy}<p class="said" role="status">{pending.busy}… {pending.elapsed}</p>{:else if said}<p class="said" role="status">{said}</p>{/if}
+      {#if pending.busy}<p class="said" role="status">{pending.busy}… {pending.elapsed}</p>{:else if said}<p class="said" role="status"><Inline text={said} /></p>{/if}
     </section>
   {/if}
 
@@ -89,15 +84,14 @@
     <section>
       <h2>Requirements and the tasks that cite them</h2>
       <table>
-        <thead><tr><th>requirement</th><th>tasks</th><th>ticked</th><th>seen by a passing check</th><th></th></tr></thead>
+        <thead><tr><th>requirement</th><th>tasks</th><th>ticked</th><th>seen by a passing check</th></tr></thead>
         <tbody>
           {#each d.token_rows ?? [] as r (r.token)}
             <tr>
               <td class="mono">{r.token}</td>
               <td>{r.tasks}</td>
               <td>{r.ticked}</td>
-              <td class:quiet={r.seen_by_pass == null}>{r.seen_by_pass ?? "no gates"}</td>
-              <td class="quiet">{r.says ?? ""}</td>
+              <td class:quiet={r.seen_by_pass === null}>{r.seen_by_pass === null ? "no gates declared" : (r.seen_by_pass ?? "")}</td>
             </tr>
           {/each}
         </tbody>
@@ -106,12 +100,12 @@
   {/if}
 
   <section>
-    <h2>What the latest run was sent, and its own plan</h2>
+    <h2>Sent to the latest run</h2>
     {#if read.failure}<Failed what="the run's own plan" failure={read.failure} at={read.at} stale={read.data !== null} />{/if}
     {#if planKnown}
       <Plan tasks={sent.map((t) => ({ text: t.text, path: t.path, line: t.line }))} {steps} />
     {:else}
-      <p class="quiet" aria-busy="true">Reading the run's own plan…</p>
+      <Skeleton rows={3} />
     {/if}
   </section>
 
@@ -119,7 +113,7 @@
     <section>
       <h2>Every run</h2>
       <ul class="runs">
-        {#each d.run_rows ?? [] as r (r.id)}<li><code>{r.id.slice(0, 16)}</code> {r.sent_says}</li>{/each}
+        {#each d.run_rows ?? [] as r (r.id)}<li><code>{r.id.slice(0, 16)}</code> <Inline text={r.sent_says} /></li>{/each}
       </ul>
     </section>
   {/if}
@@ -141,29 +135,10 @@
     max-width: 72rem;
   }
   .counts {
-    display: flex;
-    align-items: flex-end;
-    gap: var(--s-6);
-    flex-wrap: wrap;
-  }
-  .counts div {
-    display: flex;
-    flex-direction: column;
-  }
-  .big {
-    font-size: 1.75rem;
-    font-weight: 650;
-    font-variant-numeric: tabular-nums;
-    line-height: 1.1;
-  }
-  .lbl {
-    font-size: var(--t-xs);
-    color: var(--faint);
-  }
-  .says {
     margin: 0;
-    color: var(--dim);
-    font-size: var(--t-sm);
+    font-size: var(--t-md);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
   h2 {
     font-size: var(--t-xs);

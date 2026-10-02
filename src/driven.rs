@@ -160,8 +160,8 @@ async fn start(
 }
 
 /// The environment an agent Devplane starts is given: its run id in
-/// [`RUN_ENV`], so `devplane report` reads an origin the host set rather than
-/// one the model typed, plus its change's build-cache variables.
+/// [`RUN_ENV`], so a hook it runs knows it is inside an agent's session, plus
+/// its change's build-cache variables.
 async fn agent_env(
     state: &Shared,
     for_change: Option<&crate::core::ChangeId>,
@@ -499,11 +499,7 @@ pub async fn context_for(
 ) -> crate::core::context::Context {
     use crate::core::context::{Context, Field, Value};
     let now = jiff::Timestamp::now();
-    // A project-wide prompt belongs to no change, so it has no answered reports.
-    let mut ctx = Context::default().with(
-        Field::Reports,
-        Value::new(crate::core::context::NO_REPORTS, now),
-    );
+    let mut ctx = Context::default();
 
     {
         let w = state.world.lock().await;
@@ -617,7 +613,7 @@ pub async fn context_for(
 fn transcripts_wanted(cwd: &Path) -> bool {
     let root = crate::repo::governing_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     crate::core::ProjectConfig::load(&root)
-        .map(|c| c.transcripts.keep)
+        .map(|c| c.agent.keep_transcripts)
         // An unparseable file is reported elsewhere; default to keeping.
         .unwrap_or(true)
 }
@@ -638,14 +634,14 @@ pub async fn require_trust(state: &Shared, cwd: &Path) -> Result<()> {
     }
     anyhow::bail!(
         "{} is not trusted yet. Starting an agent there runs that repository's own hooks \
-         and MCP servers without asking. Run `devplane trust {}` if you meant to.",
+         and MCP servers without asking. Run `devplane project trust {}` if you meant to.",
         root.display(),
         root.display()
     )
 }
 
 /// Refuses when a project already has as many agents running as its
-/// `max_parallel_runs` allows.
+/// `[agent] max_parallel` allows.
 async fn require_capacity(
     state: &Shared,
     cwd: &Path,
@@ -656,7 +652,7 @@ async fn require_capacity(
     let Ok(config) = crate::core::ProjectConfig::load(&root) else {
         return Ok(());
     };
-    let Some(limit) = config.policy.max_parallel_runs else {
+    let Some(limit) = config.agent.max_parallel else {
         return Ok(());
     };
 
@@ -687,7 +683,7 @@ async fn require_capacity(
     if live >= limit {
         anyhow::bail!(
             "{} already has {live} change(s) with an agent in them and allows \
-             {limit}. Finish one, or raise max_parallel_runs in devplane.toml.",
+             {limit}. Finish one, or raise `[agent] max_parallel` in devplane.toml.",
             root.display()
         );
     }
@@ -695,10 +691,6 @@ async fn require_capacity(
 }
 
 /// Sends a prompt to a driven run.
-///
-/// Reports its change filed that were answered since it last heard are
-/// appended (unless the prompt carries them via `{reports}`) and marked told
-/// once the prompt has gone, so each verdict arrives once.
 pub async fn prompt(state: &Shared, run: &RunId, text: String) -> Result<()> {
     send_prompt(state, run, text, true).await
 }
@@ -737,28 +729,6 @@ async fn send_prompt(state: &Shared, run: &RunId, text: String, supersede: bool)
             .await;
         }
     }
-    let change = state.change_of_run.lock().await.get(run).cloned();
-    let owed = match &change {
-        Some(c) => crate::reports::owed(state, c).await,
-        None => Vec::new(),
-    };
-    let fresh: Vec<&String> = owed
-        .iter()
-        .map(|(_, p)| p)
-        .filter(|p| !text.contains(p.as_str()))
-        .collect();
-    let text = match fresh.is_empty() {
-        true => text,
-        false => format!(
-            "{}\n\nWhat became of reports this change filed about other projects:\n\n{}\n",
-            text.trim_end(),
-            fresh
-                .iter()
-                .map(|p| p.as_str())
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        ),
-    };
     state
         .ingest(
             run.clone(),
@@ -786,12 +756,6 @@ async fn send_prompt(state: &Shared, run: &RunId, text: String, supersede: bool)
             .await;
     }
     session.prompt(text).await?;
-    if let Some(c) = &change
-        && !owed.is_empty()
-    {
-        let ids: Vec<crate::core::ReportId> = owed.into_iter().map(|(id, _)| id).collect();
-        crate::reports::told(state, c, &ids).await;
-    }
     Ok(())
 }
 
@@ -959,7 +923,7 @@ impl FieldAnswer {
 /// What a surface said, turned into an [`Answer`] the row can take — or the
 /// sentence saying why it cannot.
 ///
-/// The one parser for every surface (API and host-less `devplane answer`): a
+/// The one parser for every surface (API and host-less `devplane inbox answer`): a
 /// permission with nothing said is refused, and an option must be one the
 /// request offered.
 pub fn parse_answer(

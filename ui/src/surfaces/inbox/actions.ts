@@ -49,56 +49,9 @@ export const ROUTES: Record<
   },
 };
 
-/// The routes behind a report row's controls, addressed by the report.
-/// `open_draft` is the one control that writes to a forge, under the
-/// person's own GitHub sign-in.
-export const REPORT_ROUTES: Record<string, { route: string; says: string; body?: (reason: string) => unknown }> = {
-  start_from_report: {
-    route: "/api/reports/{id}/start",
-    says: "started a change from it — the report is attached, and is answered as fixed when that change is offered or finished",
-  },
-  reject_report: {
-    route: "/api/reports/{id}/resolve",
-    says: "rejected — the project that filed it is told why",
-    body: (reason) => ({ as: "rejected", reason }),
-  },
-  defer_report: {
-    route: "/api/reports/{id}/resolve",
-    says: "deferred — the project that filed it is told why",
-    body: (reason) => ({ as: "deferred", reason }),
-  },
-  open_draft: {
-    route: "/api/reports/{id}/open",
-    says: "opened on GitHub under your sign-in, in your name",
-  },
-  discard_draft: {
-    route: "/api/reports/{id}/resolve",
-    says: "discarded — nothing was sent",
-    body: () => ({ as: "discarded" }),
-  },
-};
-
 const failed = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/// A report row's control. A rejection or a deferral carries the reason the
-/// filer is owed; the host refuses one without.
-async function actOnReport(item: Item, action: string, reason: string): Promise<Outcome> {
-  const r = REPORT_ROUTES[action];
-  if (!r || !item.report) return { said: `${action} cannot be done from here`, undo: null };
-  try {
-    const res = await api<Answered>(r.route.replace("{id}", encodeURIComponent(item.report)), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(r.body ? r.body(reason) : {}),
-    });
-    return outcome(res, r.says);
-  } catch (e) {
-    return { said: `${action.replace(/_/g, " ")} did not land: ${failed(e)}`, undo: null };
-  }
-}
-
-export async function act(item: Item, action: string, reason = ""): Promise<Outcome> {
-  if (REPORT_ROUTES[action]) return actOnReport(item, action, reason);
+export async function act(item: Item, action: string): Promise<Outcome> {
   const r = ROUTES[action];
   const id = r?.of === "change" ? item.change_id : item.run_id;
   if (!r || !id) return { said: `${action} cannot be done from here`, undo: null };

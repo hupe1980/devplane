@@ -139,7 +139,7 @@ pub fn load_or_create_token() -> Result<String> {
 pub const INGEST_TOKEN_FILE: &str = "telemetry-token";
 
 /// Writes the telemetry-only token for `control` at `p`, owner-only, when it
-/// is missing or differs. Best effort: `connect` writes it where it is needed.
+/// is missing or differs. Best effort: `agent connect` writes it where it is needed.
 fn write_ingest_token(p: &std::path::Path, control: &str) {
     let want = ingest_token(control);
     if std::fs::read_to_string(p).is_ok_and(|t| t.trim() == want) {
@@ -216,6 +216,36 @@ pub fn ingest_token(control: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// What the host answers a client's challenge with: HMAC-SHA256 keyed by the
+/// control token over the port it listens on and the client's nonce, hex.
+/// Only the process that holds the token can say it, so a client proves the
+/// port before it sends the token there; the proof is worth nothing for any
+/// other nonce, and a process relaying it from another port names the wrong one.
+pub fn host_proof(token: &str, port: u16, nonce: &str) -> String {
+    hmac_sha256(token, &format!("{port} {nonce}"))
+}
+
+fn hmac_sha256(token: &str, message: &str) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut key = [0u8; BLOCK];
+    if token.len() > BLOCK {
+        key[..32].copy_from_slice(&Sha256::digest(token.as_bytes()));
+    } else {
+        key[..token.len()].copy_from_slice(token.as_bytes());
+    }
+    let pad = |byte: u8| key.map(|k| k ^ byte);
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(message.as_bytes())
+        .finalize();
+    let outer = Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize();
+    outer.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// 244 random bits from the OS RNG, hex-encoded: two v4 UUIDs (122 random
 /// bits each), which require a cryptographic source, without adding `rand`.
 fn generate_token() -> String {
@@ -244,7 +274,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             shortcut: "CmdOrCtrl+Shift+Space".into(),
-            // The port `connect` writes into the vendor's telemetry settings,
+            // The port `agent connect` writes into the vendor's telemetry settings,
             // so an agent's telemetry reaches the window's host too. `0`
             // (pick one) left every exporter pointing at nothing.
             port: DEFAULT_PORT,
@@ -485,8 +515,8 @@ impl crate::core::GlobalConfig {
                 ));
             }
         };
-        toml::from_str(&text)
-            .map_err(|e| crate::core::ConfigError::Parse(path.display().to_string(), e.to_string()))
+        Self::parse(&text)
+            .map_err(|e| crate::core::ConfigError::Parse(path.display().to_string(), e))
     }
 }
 
@@ -514,6 +544,19 @@ impl crate::core::ProjectConfig {
 mod tests {
     use super::*;
 
+    /// RFC 4231's test case 2, and a key longer than a block (Python's `hmac`).
+    #[test]
+    fn the_host_proof_is_hmac_sha256() {
+        assert_eq!(
+            hmac_sha256("Jefe", "what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hmac_sha256(&"k".repeat(100), "nonce"),
+            "638c2bedd5e2404a0f89677ca47de73c0699f030eb81befb19127be3167d4cb5"
+        );
+    }
+
     /// No file is the ordinary state and means the defaults; a file that will
     /// not parse is said by path rather than silently replaced by them.
     #[test]
@@ -529,7 +572,7 @@ mod tests {
         let (cfg, problems) = app_config_from(&path);
         assert_eq!(cfg, AppConfig::default());
         assert_eq!(cfg.shortcut, "CmdOrCtrl+Shift+Space");
-        // The port `connect` writes into the telemetry settings.
+        // The port `agent connect` writes into the telemetry settings.
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert!(problems.is_empty());
 

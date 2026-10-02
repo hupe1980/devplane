@@ -6,84 +6,10 @@ mod common;
 #[path = "common/sandbox.rs"]
 mod sandbox;
 
-use devplane::core::Policy;
-use devplane::host::{AppState, Shared};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// A host for one test; its agents end with it.
-struct Host(Shared, #[allow(dead_code)] common::AgentSerial);
-impl std::ops::Deref for Host {
-    type Target = Shared;
-    fn deref(&self) -> &Shared {
-        &self.0
-    }
-}
-impl Drop for Host {
-    fn drop(&mut self) {
-        for _ in 0..100 {
-            if let Ok(mut map) = self.0.sessions.try_lock() {
-                for (_, session) in map.drain() {
-                    session.stop();
-                }
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-}
-
-async fn boot() -> (std::net::SocketAddr, reqwest::Client, Host) {
-    let serial = common::one_agent_at_a_time();
-    let db = std::env::temp_dir().join(format!("vp-review-{}.db", uuid::Uuid::new_v4().simple()));
-    let state = AppState::new(
-        db.clone(),
-        "tok".into(),
-        Policy::default(),
-        db.parent().unwrap().to_path_buf(),
-    )
-    .await
-    .unwrap();
-    let app = devplane::api::router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
-    (addr, reqwest::Client::new(), Host(state, serial))
-}
-
-async fn get(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str) -> Value {
-    c.get(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn post(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str, body: Value) -> Value {
-    c.post(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .json(&body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn trust(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) {
-    let res = post(
-        c,
-        addr,
-        "/api/projects/trust",
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(res["trusted"], true, "{res}");
-}
+use common::{boot, echo_agent, get, post, trust};
 
 /// The fixture's branch, adopted as a change.
 async fn adopted(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) -> String {
@@ -96,12 +22,6 @@ async fn adopted(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) 
     .await;
     assert!(v["error"].is_null(), "{v}");
     v["change_id"].as_str().unwrap().to_string()
-}
-
-fn echo_agent() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bin = exe.parent()?.parent()?.join("examples").join("echo_agent");
-    bin.exists().then(|| bin.to_string_lossy().to_string())
 }
 
 /// Every file in reading order, across the role groups.
@@ -410,7 +330,7 @@ async fn a_file_nobody_asked_for_is_under_its_own_heading() {
         serde_json::json!([{
             "path": "src/by_hand.rs",
             "why": {"why": "no_run_wrote"},
-            "says": "no run Devplane dispatched wrote this",
+            "says": "no dispatched run is recorded writing this, and no sent task names it",
         }]),
         "{intent}"
     );
@@ -424,7 +344,7 @@ async fn a_file_nobody_asked_for_is_under_its_own_heading() {
     );
     assert_eq!(
         file(&r, "src/by_hand.rs")["task_says"],
-        "not asked for — no run Devplane dispatched wrote this"
+        "not asked for — no dispatched run is recorded writing this, and no sent task names it"
     );
 
     // A change whose only run was observed, not started, cannot be grouped and says so.
@@ -466,41 +386,59 @@ fn the_review_computes_no_percentage_ratio_or_score() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/core/review.rs");
     let source = std::fs::read_to_string(&path).expect("src/core/review.rs is the review");
     assert!(source.contains("pub fn by_intent"), "not the review module");
+    // The counts and base checks sit beside the review's first group: held
+    // to the same rule.
+    let mut sources = vec![("review.rs", source)];
+    for rel in [
+        "src/core/base_checks.rs",
+        "src/core/testcount/mod.rs",
+        "src/core/testcount/runners.rs",
+        "src/core/testcount/compare.rs",
+        "src/core/testcount/junit.rs",
+    ] {
+        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
+            .unwrap_or_else(|_| panic!("{rel} is where counts are composed"));
+        sources.push((rel, text));
+    }
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
     let mut hits = Vec::new();
-    for (n, line) in source.lines().enumerate() {
-        let code = line.split("//").next().unwrap_or("");
-        // The tests below the module plant the words they refuse.
-        if code.contains("#[cfg(test)]") {
-            break;
-        }
-        if code.contains('%') {
-            hits.push(format!("{}: `%`", n + 1));
-        }
-        if code.contains(" / ") || code.contains("as f32") || code.contains("as f64") {
-            hits.push(format!("{}: a division — {}", n + 1, code.trim()));
-        }
-        for word in [
-            "percent",
-            "percentage",
-            "ratio",
-            "score",
-            "grade",
-            "confidence",
-        ] {
-            let lower = code.to_lowercase();
-            let mut from = 0;
-            while let Some(i) = lower[from..].find(word) {
-                let at = from + i;
-                let before = lower[..at].chars().next_back().is_none_or(|c| !is_word(c));
-                let after = lower[at + word.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !is_word(c));
-                if before && after {
-                    hits.push(format!("{}: `{word}` — {}", n + 1, code.trim()));
+    for (file, source) in &sources {
+        for (n, line) in source.lines().enumerate() {
+            let n = n + 1;
+            let n = format!("{file}:{n}");
+            let code = line.split("//").next().unwrap_or("");
+            // The tests below the module plant the words they refuse.
+            if code.contains("#[cfg(test)]") {
+                break;
+            }
+            if code.contains('%') {
+                hits.push(format!("{n}: `%`"));
+            }
+            if code.contains(" / ") || code.contains("as f32") || code.contains("as f64") {
+                hits.push(format!("{n}: a division — {}", code.trim()));
+            }
+            for word in [
+                "percent",
+                "percentage",
+                "ratio",
+                "score",
+                "grade",
+                "confidence",
+            ] {
+                let lower = code.to_lowercase();
+                let mut from = 0;
+                while let Some(i) = lower[from..].find(word) {
+                    let at = from + i;
+                    let before = lower[..at].chars().next_back().is_none_or(|c| !is_word(c));
+                    let after = lower[at + word.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !is_word(c));
+                    if before && after {
+                        hits.push(format!("{n}: `{word}` — {}", code.trim()));
+                    }
+                    from = at + word.len();
                 }
-                from = at + word.len();
             }
         }
     }
@@ -894,7 +832,13 @@ mod weakening {
                 "+}",
             ],
         ));
-        assert!(r.is_empty(), "{r:?}");
+        // An expected panic is an oracle, so not hollow; but it is a marker
+        // that turns a failure into a pass, so it is named as one.
+        assert!(!has(&r, WeakKind::Skip, "no assertion"), "{r:?}");
+        assert!(
+            has(&r, WeakKind::Skip, "skip marker `#[should_panic`"),
+            "{r:?}"
+        );
     }
 
     #[test]
@@ -1087,5 +1031,170 @@ mod weakening {
             &[" fn a() {", "+    let b = v.iter().skip(1);"],
         ));
         assert!(r.is_empty(), "{r:?}");
+    }
+
+    /// Every runner's way of turning a test off, and none that is a word in
+    /// ordinary code.
+    #[test]
+    fn every_runners_skip_is_a_skip_marker() {
+        for (path, line) in [
+            ("tests/a.rs", "+#[should_panic]"),
+            ("pkg/a_test.go", "+\tt.Skipf(\"later %d\", 1)"),
+            ("pkg/a_test.go", "+\tt.SkipNow()"),
+            ("src/a.test.ts", "+xit(\"a\", () => {});"),
+            ("src/a.test.ts", "+xdescribe(\"a\", () => {});"),
+            ("src/a.test.ts", "+xtest(\"a\", () => {});"),
+            ("src/a.test.ts", "+it.skip.each([1])(\"a\", () => {});"),
+            ("src/a.test.ts", "+it.skipIf(ci)(\"a\", () => {});"),
+            ("src/a.test.ts", "+test.todo(\"a\");"),
+            ("tests/test_a.py", "+        self.skipTest(\"x\")"),
+            ("tests/test_a.py", "+np = pytest.importorskip(\"numpy\")"),
+            ("tests/test_a.py", "+@unittest.skip(\"x\")"),
+            ("tests/test_a.py", "+@pytest.mark.xfail"),
+            ("spec/a_spec.rb", "+    pending \"later\""),
+            ("spec/a_spec.rb", "+    skip"),
+            ("src/test/java/ATest.java", "+  @Disabled"),
+            ("src/test/java/ATest.java", "+  @Ignore"),
+            ("Tests/ATests.cs", "+    [Ignore]"),
+            ("Tests/ATests.cs", "+    [Fact(Skip = \"flaky\")]"),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(
+                has(&r, WeakKind::Skip, "skip marker"),
+                "{path} {line}: {r:?}"
+            );
+        }
+        for (path, line) in [
+            ("src/main.rs", "+    std::process::exit(1);"),
+            ("lib/jobs.rb", "+    pending_jobs = 1"),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(r.is_empty(), "{path} {line}: {r:?}");
+        }
+    }
+
+    /// Rust's tests live beside the code: a test removed from `src/` is a
+    /// test removed, whatever the path.
+    #[test]
+    fn a_test_removed_outside_the_test_files_is_named() {
+        let r = rows(&modified(
+            "src/lib.rs",
+            &[
+                " pub fn a() {}",
+                "-#[cfg(test)]",
+                "-mod tests {",
+                "-    #[test]",
+                "-    fn a() { super::a(); }",
+                "-}",
+            ],
+        ));
+        assert!(has(&r, WeakKind::Deleted, "a test removed"), "{r:?}");
+        let r = rows(&modified(
+            "src/a.js",
+            &[" export const a = 1;", "-describe(\"a\", () => {});"],
+        ));
+        assert!(has(&r, WeakKind::Deleted, "a test removed"), "{r:?}");
+        // Moved within the file is not removed.
+        let r = rows(&modified(
+            "src/lib.rs",
+            &["-#[test]", " fn a() {}", "+#[test]"],
+        ));
+        assert!(r.is_empty(), "{r:?}");
+    }
+
+    /// Runner configuration is what defines passing too; a manifest only
+    /// where the hunk is about the tests.
+    #[test]
+    fn a_runners_configuration_is_a_gate() {
+        for path in [
+            ".cargo/config.toml",
+            "crates/a/.cargo/config",
+            "build.rs",
+            ".mocharc.yml",
+            "playwright.config.ts",
+            "cypress.config.js",
+            "karma.conf.js",
+            "noxfile.py",
+            ".golangci.yml",
+            ".gitattributes",
+            "src/deep/conftest.py",
+        ] {
+            let r = rows(&modified(path, &[" a", "-b", "+c"]));
+            assert!(r.iter().any(|w| w.kind == WeakKind::Gate), "{path}: {r:?}");
+        }
+        for (path, line) in [
+            ("Cargo.toml", "+harness = false"),
+            ("Cargo.toml", "+[[test]]"),
+            ("Cargo.toml", "+[lints.rust]"),
+            ("crates/a/Cargo.toml", "+test = false"),
+            (
+                "package.json",
+                "+  \"jest\": { \"testPathIgnorePatterns\": [\"auth\"] },",
+            ),
+            ("package.json", "+    \"test\": \"exit 0\","),
+            ("pom.xml", "+    <skipTests>true</skipTests>"),
+            ("build.gradle.kts", "+tasks.test { enabled = false }"),
+            ("build.gradle", "+test {"),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(
+                r.iter().any(|w| w.kind == WeakKind::Gate),
+                "{path} {line}: {r:?}"
+            );
+        }
+        for (path, line) in [
+            ("Cargo.toml", "+serde = \"1\""),
+            ("package.json", "+    \"left-pad\": \"^1.0.0\","),
+            ("pom.xml", "+    <version>2.0</version>"),
+        ] {
+            let r = rows(&modified(path, &[" a", line]));
+            assert!(r.is_empty(), "{path} {line}: {r:?}");
+        }
+    }
+
+    /// The view is cut at a bound; what looks for weakened checks is not.
+    #[test]
+    fn a_weakening_past_the_views_bound_is_still_read() {
+        let mut diff: String = (0..devplane::core::diff::MAX_FILES + 5)
+            .map(|i| modified(&format!("a/f{i:03}.txt"), &[" a", "+b"]))
+            .collect();
+        diff += &modified("tests/z.rs", &[" #[test]", "+#[ignore]"]);
+        let set = parse("main", &diff, "git diff");
+        assert!(set.truncated.is_some());
+        assert!(!set.files.iter().any(|f| f.path == "tests/z.rs"));
+        let r = weakened(&set, None, &[]);
+        assert!(has(&r, WeakKind::Skip, "skip marker"), "{r:?}");
+
+        // Long enough that its own lines are cut from the view.
+        let mut long: Vec<String> = (0..devplane::core::diff::MAX_LINES + 10)
+            .map(|i| format!("+// {i}"))
+            .collect();
+        long.push("+#[ignore]".into());
+        let long: Vec<&str> = long.iter().map(String::as_str).collect();
+        let set = parse("main", &modified("tests/long.rs", &long), "git diff");
+        let r = weakened(&set, None, &[]);
+        assert!(has(&r, WeakKind::Skip, "skip marker"), "{r:?}");
+
+        // A cut set with nothing whole beside it is never "nothing weakened".
+        let mut cut = parse("main", &diff, "git diff");
+        cut.whole = None;
+        let r = weakened(&cut, None, &[]);
+        assert!(
+            has(&r, WeakKind::Gate, "diff truncated — weakening not read"),
+            "{r:?}"
+        );
+    }
+
+    /// A test file git shows no lines of cannot be read for what it weakens.
+    #[test]
+    fn a_binary_test_file_is_not_readable() {
+        let diff = "diff --git a/tests/a.rs b/tests/a.rs\nindex 1111111..2222222 100644\n\
+                    Binary files a/tests/a.rs and b/tests/a.rs differ\n";
+        let r = rows(diff);
+        assert!(
+            r.iter()
+                .any(|w| w.path == "tests/a.rs" && w.matched == "not readable"),
+            "{r:?}"
+        );
     }
 }

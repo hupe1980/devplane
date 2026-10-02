@@ -29,11 +29,7 @@ pub enum Field {
     /// One `- <text>` line each; bound only when some were chosen, so naming it
     /// with none refuses rather than sending an empty block.
     Tasks,
-    /// Never refuses: none resolved is stated as [`NO_REPORTS`].
-    Reports,
 }
-
-pub const NO_REPORTS: &str = "no reports have been resolved for this change";
 
 /// The last sentence of every sent prompt: a sanctioned way to say *I cannot*,
 /// so a stuck agent does not make the checks pass by editing or skipping them.
@@ -66,7 +62,6 @@ impl Field {
         Field::LastAuthority,
         Field::UnansweredQuestion,
         Field::Tasks,
-        Field::Reports,
     ];
 
     /// What a prompt writes between the braces.
@@ -85,7 +80,6 @@ impl Field {
             Field::LastAuthority => "decision.authority",
             Field::UnansweredQuestion => "question.unanswered",
             Field::Tasks => "tasks",
-            Field::Reports => "reports",
         }
     }
 
@@ -104,7 +98,6 @@ impl Field {
             Field::LastAuthority => "on whose authority it was taken",
             Field::UnansweredQuestion => "a question an agent asked and nobody answered",
             Field::Tasks => "the tasks this dispatch sends, one line each",
-            Field::Reports => "what became of the reports this change filed about other projects",
         }
     }
 
@@ -331,23 +324,6 @@ mod tests {
             "a fenced example is not a placement"
         );
         assert_eq!(Field::parse("tasks"), Some(Field::Tasks));
-    }
-
-    #[test]
-    fn the_reports_field_carries_what_it_is_given_and_says_so_when_empty() {
-        let quiet = ctx().with(Field::Reports, Value::new(NO_REPORTS, at()));
-        let out = resolve("Since last time: {reports}", &quiet).expect("bound");
-        assert!(out.ends_with(NO_REPORTS), "{out}");
-        let told = ctx().with(
-            Field::Reports,
-            Value::new(
-                "Report rp-1 to core-lib — rejected\n> reason: by design",
-                at(),
-            ),
-        );
-        let out = resolve("{reports}", &told).expect("bound");
-        assert!(out.contains("> reason: by design"), "{out}");
-        assert_eq!(Field::parse("reports"), Some(Field::Reports));
     }
 
     #[test]

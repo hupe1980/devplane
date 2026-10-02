@@ -14,43 +14,11 @@ use std::path::{Path, PathBuf};
 const SETTLE: std::time::Duration = std::time::Duration::from_secs(90);
 const POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
-fn scratch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "vp-app-{tag}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use common::{echo_agent, get, post, trust};
 
 /// A trusted repository with one gate.
 fn scratch_repo(tag: &str) -> PathBuf {
-    let dir = scratch_dir(&format!("repo-{tag}"));
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .output()
-            .expect("git");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.email", "t@example.com"]);
-    git(&["config", "user.name", "Test"]);
-    std::fs::write(
-        dir.join("devplane.toml"),
-        "[gates]\ncheck = [\"true\"]\ntimeout = \"30s\"\n",
-    )
-    .unwrap();
-    git(&["add", "-A"]);
-    git(&["commit", "-qm", "init"]);
-    dir.canonicalize().unwrap()
-}
-
-fn echo_agent() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let bin = exe.parent()?.parent()?.join("examples").join("echo_agent");
-    bin.exists().then(|| bin.to_string_lossy().to_string())
+    common::scratch_repo(tag, common::PASSING)
 }
 
 async fn state_in(home: &Path) -> devplane::host::Shared {
@@ -80,40 +48,6 @@ async fn boot(
     (addr, reqwest::Client::new(), state)
 }
 
-async fn post(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str, body: Value) -> Value {
-    c.post(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .json(&body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn get(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str) -> Value {
-    c.get(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn trust(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) {
-    let res = post(
-        c,
-        addr,
-        "/api/projects/trust",
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(res["trusted"], true, "{res}");
-}
-
 /// Polls the *needs you* list for a row.
 async fn await_needs_you(
     c: &reqwest::Client,
@@ -134,12 +68,16 @@ async fn await_needs_you(
     None
 }
 
-fn echo_pids() -> std::collections::HashSet<u32> {
-    devplane::observe::procs::snapshot()
-        .into_iter()
-        .filter(|p| p.command.contains("echo_agent"))
-        .map(|p| p.pid)
-        .collect()
+/// The pids of the fixture agents that opened a session in `repo` (each
+/// writes `.devplane/pids/<pid>` there). Per repository, because other tests'
+/// agents run concurrently in this same process.
+fn echo_pids(repo: &Path) -> std::collections::HashSet<u32> {
+    std::fs::read_dir(repo.join(".devplane/pids"))
+        .map(|d| {
+            d.filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Waiting time is measured from the question, not from when the app opened.
@@ -148,7 +86,7 @@ async fn a_question_asked_an_hour_ago_reads_as_an_hour_old_not_as_new() {
     use devplane::core::ask::{Ask, Asked, Deadline, Kind};
     use devplane::core::ids::{AskId, RunId};
 
-    let home = scratch_dir("since");
+    let home = common::scratch("since");
     let an_hour_ago = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
     {
         let store = devplane::store::Store::open(&home.join("devplane.db"))
@@ -189,8 +127,7 @@ async fn a_question_asked_an_hour_ago_reads_as_an_hour_old_not_as_new() {
 #[tokio::test]
 async fn answering_through_the_answer_surface_names_the_person_and_releases_the_run() {
     let Some(agent) = echo_agent() else { return };
-    let _serial = common::one_agent_at_a_time();
-    let home = scratch_dir("answer");
+    let home = common::scratch("answer");
     let repo = scratch_repo("answer");
     let (addr, c, state) = boot(&home).await;
     trust(&c, &addr, &repo).await;
@@ -267,8 +204,7 @@ async fn answering_through_the_answer_surface_names_the_person_and_releases_the_
 #[tokio::test]
 async fn the_browser_is_handed_the_path_to_open_itself() {
     let Some(agent) = echo_agent() else { return };
-    let _serial = common::one_agent_at_a_time();
-    let home = scratch_dir("open");
+    let home = common::scratch("open");
     let repo = scratch_repo("open");
     let (addr, c, state) = boot(&home).await;
     trust(&c, &addr, &repo).await;
@@ -364,9 +300,8 @@ fn autostart_listing() -> Vec<String> {
 #[tokio::test]
 async fn quitting_from_the_app_names_the_agent_leaves_nothing_and_installs_nothing() {
     let Some(agent) = echo_agent() else { return };
-    let _serial = common::one_agent_at_a_time();
     let autostart_before = autostart_listing();
-    let home = scratch_dir("quit");
+    let home = common::scratch("quit");
     let repo = scratch_repo("quit");
     let state = state_in(&home).await;
     let (serving, port) = serve_in(&home, &state).await;
@@ -374,7 +309,7 @@ async fn quitting_from_the_app_names_the_agent_leaves_nothing_and_installs_nothi
     let c = reqwest::Client::new();
     trust(&c, &addr, &repo).await;
 
-    let before = echo_pids();
+    let before = echo_pids(&repo);
     let spec = devplane::acp::resolve(&agent, &state.agents).expect("the echo agent resolves");
     let run =
         devplane::driven::dispatch(&state, &spec, repo.clone(), Some("slow".into()), Vec::new())
@@ -384,7 +319,7 @@ async fn quitting_from_the_app_names_the_agent_leaves_nothing_and_installs_nothi
     let mut agent_pid = None;
     for _ in 0..100 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Some(new) = echo_pids().difference(&before).copied().next() {
+        if let Some(new) = echo_pids(&repo).difference(&before).copied().next() {
             agent_pid = Some(new);
             break;
         }

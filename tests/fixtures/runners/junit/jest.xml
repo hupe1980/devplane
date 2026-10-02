@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests" tests="4" failures="1" errors="0" time="0.119">
+  <testsuite name="undefined" errors="0" failures="1" skipped="1" timestamp="2026-09-27T05:45:12" time="0.058" tests="4">
+    <testcase classname=" one" name=" one" time="0.001" file="jt/a.test.js">
+    </testcase>
+    <testcase classname=" two" name=" two" time="0" file="jt/a.test.js">
+    </testcase>
+    <testcase classname=" fails when asked" name=" fails when asked" time="0.001" file="jt/a.test.js">
+      <failure>Error: expect(received).toBeUndefined()
+
+Received: &quot;1&quot;
+    at Object.toBeUndefined (/work/js/jt/a.test.js:3:57)
+    at Promise.finally.completed (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:1834:28)
+    at new Promise (&lt;anonymous&gt;)
+    at callAsyncCircusFn (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:1774:10)
+    at _callCircusTest (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:1167:40)
+    at _runTestInContext (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:1103:3)
+    at runTestWithContext (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:996:5)
+    at _runTestsForDescribeBlockOnce (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:1008:11)
+    at _runTestsForDescribeBlock (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:824:5)
+    at run (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:789:3)
+    at runAndTransformResultsToJestFormat (/work/js/node_modules/jest-circus/build/jestAdapterInit.js:2300:21)
+    at jestAdapter (/work/js/node_modules/jest-circus/build/runner.js:111:19)
+    at runTestInternal (/work/js/node_modules/jest-runner/build/index.js:247:16)
+    at runTest (/work/js/node_modules/jest-runner/build/index.js:315:7)</failure>
+    </testcase>
+    <testcase classname=" skipped" name=" skipped" time="0" file="jt/a.test.js">
+      <skipped/>
+    </testcase>
+    <testcase classname=" later" name=" later" time="0" file="jt/a.test.js">
+    </testcase>
+  </testsuite>
+</testsuites>

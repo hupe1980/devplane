@@ -8,6 +8,7 @@
 
 pub mod ask;
 pub mod attention;
+pub mod base_checks;
 pub mod caches;
 pub mod certificate;
 pub mod change;
@@ -24,20 +25,19 @@ pub mod forge;
 pub mod genai;
 pub mod hash;
 pub mod ids;
-pub mod markers;
 pub mod offer;
 pub mod policy;
 pub mod preflight;
 pub mod project;
-pub mod provider;
 pub mod question;
 pub mod reduce;
-pub mod report;
 pub mod review;
 pub mod run;
+pub mod testcount;
 pub mod text;
 pub mod transcript;
 pub mod vendors;
+pub mod verify;
 pub mod worktreeinclude;
 pub mod world;
 
@@ -47,7 +47,7 @@ pub use config::{ConfigError, GlobalConfig, Problem, ProjectConfig};
 pub use decision::{Authority, DecidedEnvelope, Decision};
 pub use event::{ApiUsage, Choice, Event, EventEnvelope, Source, WaitingFor};
 pub use forge::{ForgeCounts, ForgeIssue, ForgePullRequest, ProjectForge};
-pub use ids::{AskId, AttentionId, ChangeId, ProjectId, ReportId, RunId, SessionId};
+pub use ids::{AskId, AttentionId, ChangeId, ProjectId, RunId, SessionId};
 pub use policy::{Policy, Rule, Verdict};
 pub use project::Project;
 pub use run::{

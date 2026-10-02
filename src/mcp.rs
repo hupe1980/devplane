@@ -7,7 +7,7 @@
 //! a question (`every_tool_is_a_question`); `readOnlyHint` would bind no
 //! server. Payloads are other people's text, so each is framed as a report,
 //! never as instructions. An agent's `explain` goes through the host and is
-//! recorded in `devplane audit`; the CLI's offline `explain` is not.
+//! recorded in `devplane audit`; the CLI's offline `config explain` is not.
 
 use crate::local::Reader;
 use rmcp::handler::server::ServerHandler;
@@ -31,7 +31,7 @@ struct Question {
     schema: &'static str,
 }
 
-/// The whole surface: five questions.
+/// The whole surface: four questions.
 const TOOLS: &[Question] = &[
     Question {
         name: "inbox",
@@ -65,18 +65,6 @@ const TOOLS: &[Question] = &[
                       happen', not 'what happened'.",
         schema: r#"{"type":"object","properties":{"about":{"type":"string",
                    "description":"A run or change id. Omit for the most recent decisions."}}}"#,
-    },
-    // A question and never a filing: an agent files a report through its
-    // shell, where the host can check the run it came from.
-    Question {
-        name: "reports",
-        description: "What was filed against and from a project, and what became of each — \
-                      fixed, rejected with a reason, deferred, still open. Ask before filing \
-                      one: somebody may have already. To file, run `devplane report file` in \
-                      your shell.",
-        schema: r#"{"type":"object","properties":{
-                   "to":{"type":"string","description":"Reports filed against this project."},
-                   "from":{"type":"string","description":"Reports this project filed."}}}"#,
     },
 ];
 
@@ -187,15 +175,6 @@ impl ServerHandler for Server {
                 Some(id) => self.ask_filtered("/api/changes", &id).await,
                 None => self.ask("/api/changes").await,
             },
-            "reports" => {
-                let mut path = String::from("/api/reports?all=true");
-                for key in ["to", "from"] {
-                    if let Some(v) = s(key) {
-                        path.push_str(&format!("&{key}={}", enc(&v)));
-                    }
-                }
-                self.ask(&path).await
-            }
             "audit" => match s("about") {
                 Some(a) => self.ask(&format!("/api/decisions?about={}", enc(&a))).await,
                 None => self.ask("/api/decisions").await,

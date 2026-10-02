@@ -74,6 +74,8 @@ pub struct PolicyCache {
     home: Option<PathBuf>,
     /// `~/.devplane`, whose files no agent call may change.
     devplane_home: Option<PathBuf>,
+    /// The same, as it was given, when that differs (`/var` for `/private/var`).
+    devplane_home_given: Option<PathBuf>,
     projects: Mutex<HashMap<PathBuf, Entry>>,
 }
 
@@ -84,13 +86,16 @@ impl PolicyCache {
             global_root,
             home,
             devplane_home: None,
+            devplane_home_given: None,
             projects: Mutex::new(HashMap::new()),
         }
     }
 
     /// Protects Devplane's own files under `dir` (see [`own_files`]).
     pub fn with_devplane_home(mut self, dir: PathBuf) -> Self {
-        self.devplane_home = Some(canonical(&dir));
+        let real = canonical(&dir);
+        self.devplane_home_given = (real != dir).then_some(dir);
+        self.devplane_home = Some(real);
         self
     }
 
@@ -162,10 +167,11 @@ impl PolicyCache {
         Verdict::Undecided
     }
 
-    /// The built-in prohibition, beneath every rule a person writes: an agent
-    /// may not change the rules that gate it, the ledger that records its
-    /// permissions or the host's credentials — nor read the token, with which
-    /// it could answer its own questions. Reading the rest stays allowed.
+    /// The built-in prohibition ([`OWN_RULE`]), in force whether or not any
+    /// rule is: an agent may not read or change anything under `~/.devplane` —
+    /// the rules that gate it, the ledger its answers are written to, the
+    /// host's token — nor change the governing project's `devplane.toml`. It
+    /// runs as the same user, so this narrows the hole and does not close it.
     fn own_files(
         &self,
         dir: &Path,
@@ -174,23 +180,13 @@ impl PolicyCache {
         input: &serde_json::Value,
     ) -> Option<Verdict> {
         use crate::core::policy::{Class, Rule};
-        const WHY: &str = "built in: an agent may not change Devplane's own rules, records or \
-                           credentials, nor read its token";
         let mut edits: Vec<String> = Vec::new();
         let mut reads: Vec<String> = Vec::new();
         let mut repo: Vec<String> = Vec::new();
-        if let Some(h) = &self.devplane_home {
-            let h = h.display();
-            for f in [
-                "policy.toml",
-                "agents.toml",
-                "devplane.db*",
-                "token",
-                "host.json",
-            ] {
-                edits.push(format!("Edit(/{h}/{f})"));
-            }
-            reads.push(format!("Read(/{h}/token)"));
+        for h in self.devplane_home.iter().chain(&self.devplane_home_given) {
+            // The whole home: its store holds the answers, its token opens the host.
+            edits.push(format!("Edit(/{}/**)", h.display()));
+            reads.push(format!("Read(/{}/**)", h.display()));
         }
         if let Some(r) = root {
             repo.push(format!(
@@ -208,9 +204,11 @@ impl PolicyCache {
         if edits.is_empty() && repo.is_empty() {
             return None;
         }
-        let ctx = Context::at(dir).with_home(self.home.as_deref());
+        let ctx = Context::at(dir)
+            .with_home(self.home.as_deref())
+            .with_realpath(realpath);
         let deny = |r: &Rule| Verdict::Deny {
-            rule: format!("{r} ({WHY})"),
+            rule: format!("{OWN_RULE}: {r} ({OWN_WHY})"),
         };
         if !crate::core::policy::is_shell(tool) {
             if let Some(r) = edits
@@ -224,10 +222,13 @@ impl PolicyCache {
             return None;
         }
         let command = crate::core::policy::rule_content(tool, input)?;
-        let own = Own::new(self.devplane_home.as_deref(), root);
-        let why = |what: &str| format!("{what} ({WHY})");
+        let mut own = Own::new(self.devplane_home.as_deref(), root);
+        own.given = self.devplane_home_given.clone();
+        let why = |what: &str| format!("{what} ({OWN_WHY})");
         match own.judge(&command, dir, self.home.as_deref()) {
-            Judged::Deny(what) => Some(Verdict::Deny { rule: why(&what) }),
+            Judged::Deny(what) => Some(Verdict::Deny {
+                rule: format!("{OWN_RULE}: {}", why(&what)),
+            }),
             Judged::Unresolved(what) => Some(Verdict::Unresolved { why: why(&what) }),
             Judged::Clear => None,
         }
@@ -237,10 +238,19 @@ impl PolicyCache {
     /// process's cwd, which may be another repository).
     pub fn restrictive_global_only(&self, tool: &str, input: &serde_json::Value) -> Verdict {
         forget_resolved();
+        // No directory is known, so a relative path is read from the root:
+        // only an absolute or `~` path can name the home.
+        let own = self.own_files(Path::new("/"), None, tool, input);
+        if let Some(v @ Verdict::Deny { .. }) = own {
+            return v;
+        }
         let ctx = Context::at(&self.global_root)
             .with_home(self.home.as_deref())
             .with_realpath(realpath);
-        self.global.restrictive(&ctx, tool, input)
+        match self.global.restrictive(&ctx, tool, input) {
+            Verdict::Undecided => own.unwrap_or(Verdict::Undecided),
+            v => v,
+        }
     }
 
     /// The allow rule to paste into the agent's own settings so this call is
@@ -324,8 +334,8 @@ impl PolicyCache {
         let rules = match ProjectConfig::load(&root) {
             Ok(c) => Rules {
                 policy: c.policy(),
-                stall_seconds: c.policy.stall_timeout.map(|d| d.as_secs() as i64),
-                // A hold that will not parse is no hold: `devplane check`
+                stall_seconds: c.agent.stall_timeout.map(|d| d.as_secs() as i64),
+                // A hold that will not parse is no hold: `devplane config check`
                 // names it, and holding for an unintended time is worse.
                 hold: c.questions.hold().ok().flatten().map(|h| h.0),
             },
@@ -380,6 +390,8 @@ struct Own {
     home: Option<PathBuf>,
     /// The governing project's `devplane.toml`.
     repo: Option<PathBuf>,
+    /// `~/.devplane` as it was given, where that differs from `home`.
+    given: Option<PathBuf>,
 }
 
 enum Judged {
@@ -393,6 +405,11 @@ enum Held {
     Above(String),
 }
 
+/// The name every built-in refusal of Devplane's own files carries.
+pub const OWN_RULE: &str = "devplane-own-files";
+const OWN_WHY: &str = "built in: an agent may not read or change Devplane's own rules, records \
+                       or credentials";
+
 /// The files under `~/.devplane` no agent may change; `devplane.db` also
 /// covers its `-wal`, `-shm` and `-journal` siblings.
 const OWN_NAMES: &[&str] = &["policy.toml", "agents.toml", "token", "host.json"];
@@ -405,6 +422,7 @@ impl Own {
         Self {
             home: home.map(Path::to_path_buf),
             repo: root.map(|r| r.join(crate::core::config::CONFIG_FILE)),
+            given: None,
         }
     }
 
@@ -456,6 +474,19 @@ impl Own {
 
     fn judge(&self, command: &str, dir: &Path, user_home: Option<&Path>) -> Judged {
         use crate::core::command::{Access, ArgKind};
+        // Naming the home at all, however the shell would spell it.
+        let lower = command.to_ascii_lowercase();
+        let named = ["~/.devplane", "$home/.devplane", "${home}/.devplane"]
+            .iter()
+            .any(|s| lower.contains(s))
+            || self
+                .home
+                .iter()
+                .chain(&self.given)
+                .any(|h| command.contains(&*h.to_string_lossy()));
+        if named {
+            return Judged::Deny("names Devplane's home".into());
+        }
         let line = crate::core::command::read(command);
         // Every directory a command on this line may run in; `None` once a
         // `cd` goes somewhere the reader cannot name.
@@ -556,6 +587,9 @@ impl Own {
                     }) else {
                         continue;
                     };
+                    if self.home.as_deref().is_some_and(|h| path.starts_with(h)) {
+                        return Judged::Deny(format!("reaches `{}`", path.display()));
+                    }
                     if let Some((f, read_too)) = self.file(&path) {
                         let home_file = self.repo.as_deref() != Some(path.as_path());
                         match t.access {
@@ -616,7 +650,6 @@ impl Own {
             ));
         }
         // Spelled so the reader cannot name it: a person looks.
-        let lower = command.to_ascii_lowercase();
         let mentions = lower.contains(".devplane")
             || lower.contains(crate::core::config::CONFIG_FILE)
             || lower.contains(OWN_DB);
@@ -707,13 +740,13 @@ mod tests {
 
     #[test]
     fn a_project_sets_its_own_stall_timeout_and_a_worktree_inherits_it() {
-        let dir = repo("stall", "[policy]\nstall_timeout = \"12m\"\n");
+        let dir = repo("stall", "[agent]\nstall_timeout = \"12m\"\n");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(cache.stall_seconds(&dir), Some(720));
         let wt = dir.join(".claude/worktrees/fix-login");
         std::fs::create_dir_all(&wt).unwrap();
         assert_eq!(cache.stall_seconds(&wt), Some(720));
-        let silent = repo("stall-silent", "[policy]\nnever_auto = [\"Read(.env)\"]\n");
+        let silent = repo("stall-silent", "[policy]\ndeny = [\"Read(.env)\"]\n");
         assert_eq!(
             cache.stall_seconds(&silent),
             None,
@@ -723,7 +756,7 @@ mod tests {
 
     #[test]
     fn a_projects_own_rules_decide_its_agents_and_not_its_neighbours() {
-        let a = repo("own-a", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let a = repo("own-a", "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n");
         let b = repo("own-b", "");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(
@@ -742,7 +775,7 @@ mod tests {
 
     #[test]
     fn deny_wins_in_both_directions_and_ask_reaches_from_either_file() {
-        let dir = repo("deny", "[policy]\nalways_ask = [\"Bash(git push *)\"]\n");
+        let dir = repo("deny", "[policy]\nask = [\"Bash(git push *)\"]\n");
         let cache = PolicyCache::new(
             Policy::rules(&["Bash(git push *)".into()], &[]),
             PathBuf::from("/"),
@@ -752,7 +785,7 @@ mod tests {
             cache.restrictive(&dir, "Bash", &sh("git push origin main")),
             Verdict::Deny { .. }
         ));
-        let dir2 = repo("deny2", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
+        let dir2 = repo("deny2", "[policy]\ndeny = [\"Bash(ls *)\"]\n");
         let cache2 = PolicyCache::new(
             Policy::rules(&[], &["Bash(ls *)".into()]),
             PathBuf::from("/"),
@@ -762,7 +795,7 @@ mod tests {
             cache2.restrictive(&dir2, "Bash", &sh("ls -la")),
             Verdict::Deny { .. }
         ));
-        let dir3 = repo("askglobal", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let dir3 = repo("askglobal", "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n");
         let cache3 = PolicyCache::new(
             Policy::rules(&[], &["Bash(git push *)".into()]),
             PathBuf::from("/"),
@@ -783,12 +816,12 @@ mod tests {
 
     #[test]
     fn an_agent_cannot_widen_its_rules_from_the_worktree_it_works_in() {
-        let root = repo("escalate", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let root = repo("escalate", "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n");
         let wt = root.join(".claude/worktrees/feature-a");
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(
             wt.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nnever_auto = []\n",
+            "[policy]\ndeny = []\n",
         )
         .unwrap();
         let cache = PolicyCache::for_projects_only();
@@ -810,7 +843,7 @@ mod tests {
 
     #[test]
     fn a_linked_worktree_is_governed_by_its_repository_only_when_git_agrees() {
-        let root = repo("linked", "[policy]\nnever_auto = [\"Bash(rm -rf *)\"]\n");
+        let root = repo("linked", "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n");
         let wt = root
             .parent()
             .unwrap()
@@ -844,7 +877,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             wt.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nnever_auto = []\n",
+            "[policy]\ndeny = []\n",
         )
         .unwrap();
         cache.clear();
@@ -874,7 +907,7 @@ mod tests {
 
     #[test]
     fn an_edit_takes_effect_and_a_broken_file_asks_about_everything() {
-        let dir = repo("edit", "[policy]\nnever_auto = []\n");
+        let dir = repo("edit", "[policy]\ndeny = []\n");
         let cache = PolicyCache::for_projects_only();
         assert_eq!(
             cache.restrictive(&dir, "Bash", &sh("ls -la")),
@@ -882,7 +915,7 @@ mod tests {
         );
         std::fs::write(
             dir.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nnever_auto = [\"Bash(ls *)\"]\n",
+            "[policy]\ndeny = [\"Bash(ls *)\"]\n",
         )
         .unwrap();
         cache.clear();
@@ -892,7 +925,7 @@ mod tests {
         ));
         std::fs::write(
             dir.join(crate::core::config::CONFIG_FILE),
-            "[policy]\nnever_autoo = [",
+            "[policy]\ndenyy = [",
         )
         .unwrap();
         std::thread::sleep(RECHECK);
@@ -944,7 +977,7 @@ mod tests {
     fn repeated_checks_are_cheap() {
         use std::sync::atomic::Ordering;
         let _counted = COUNTED.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = repo("fast", "[policy]\nnever_auto = [\"Bash(ls *)\"]\n");
+        let dir = repo("fast", "[policy]\ndeny = [\"Bash(ls *)\"]\n");
         let cache = PolicyCache::for_projects_only();
         cache.restrictive(&dir, "Bash", &sh("ls -la"));
         PARSED.store(0, Ordering::Relaxed);
@@ -965,10 +998,7 @@ mod tests {
         let distinct: String = (0..10)
             .map(|i| format!("  \"Read(never-matches-{i}/deep/**)\",\n"))
             .collect();
-        let dir = repo(
-            "realpath",
-            &format!("[policy]\nnever_auto = [\n{distinct}]\n"),
-        );
+        let dir = repo("realpath", &format!("[policy]\ndeny = [\n{distinct}]\n"));
         let file = dir.join("f.txt");
         std::fs::write(&file, "x").ok();
         let cache = PolicyCache::for_projects_only();
@@ -985,10 +1015,7 @@ mod tests {
         let same: String = (0..10)
             .map(|i| format!("  \"Read(secrets/deep/x{i}/**)\",\n"))
             .collect();
-        let dir = repo(
-            "realpath-same",
-            &format!("[policy]\nnever_auto = [\n{same}]\n"),
-        );
+        let dir = repo("realpath-same", &format!("[policy]\ndeny = [\n{same}]\n"));
         let file = dir.join("f.txt");
         std::fs::write(&file, "x").ok();
         let call = json!({"file_path": file.to_str().unwrap()});

@@ -68,6 +68,12 @@ pub struct ChangeSet {
     pub files: Vec<FileChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<Truncation>,
+    /// The whole change this one was cut from, every file and every line;
+    /// `None` when nothing was cut. Never sent: what reads the change for
+    /// weakened checks reads this, so a bound on the view is never a bound on
+    /// what is looked for.
+    #[serde(skip)]
+    pub whole: Option<std::sync::Arc<ChangeSet>>,
 }
 
 impl ChangeSet {
@@ -77,6 +83,11 @@ impl ChangeSet {
         self.files.is_empty()
     }
 
+    /// Every file and every line: the set itself, or what it was cut from.
+    pub fn uncut(&self) -> &ChangeSet {
+        self.whole.as_deref().unwrap_or(self)
+    }
+
     pub fn totals(&self) -> (u32, u32) {
         self.files
             .iter()
@@ -84,8 +95,30 @@ impl ChangeSet {
     }
 }
 
-/// Reads `git diff` output into a change set, without interpreting it.
+/// Reads `git diff` output into a change set, without interpreting it. Past
+/// [`MAX_FILES`] or [`MAX_LINES`] the set is cut, and carries the whole one
+/// beside it ([`ChangeSet::whole`]).
 pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
+    let mut set = parse_within(base, text, command, MAX_FILES, MAX_LINES);
+    let cut = set.truncated.is_some()
+        || set
+            .files
+            .iter()
+            .any(|f| matches!(f.body, Body::Skipped { .. }));
+    if cut {
+        let whole = parse_within(base, text, command, usize::MAX, usize::MAX);
+        set.whole = Some(std::sync::Arc::new(whole));
+    }
+    set
+}
+
+fn parse_within(
+    base: &str,
+    text: &str,
+    command: &str,
+    max_files: usize,
+    max_lines: usize,
+) -> ChangeSet {
     let mut files: Vec<FileChange> = Vec::new();
     let mut total = 0usize;
     let mut lines_rendered = 0usize;
@@ -107,7 +140,7 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
             flush_hunk(&mut hunk, &mut hunks);
             if let Some(mut f) = cur.take() {
                 f.body = finish_body(f.body, std::mem::take(&mut hunks));
-                push(&mut files, f, &mut total);
+                push(&mut files, f, &mut total, max_files);
             }
             hunks = Vec::new();
             left = (0, 0);
@@ -157,7 +190,7 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
                     left.1 = left.1.saturating_sub(1);
                 }
             }
-            if lines_rendered < MAX_LINES {
+            if lines_rendered < max_lines {
                 h.lines.push((kind, body.to_string()));
                 lines_rendered += 1;
             } else if !matches!(f.body, Body::Skipped { .. }) {
@@ -179,7 +212,7 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
     flush_hunk(&mut hunk, &mut hunks);
     if let Some(mut f) = cur.take() {
         f.body = finish_body(f.body, hunks);
-        push(&mut files, f, &mut total);
+        push(&mut files, f, &mut total, max_files);
     }
 
     let truncated = (total > files.len()).then(|| Truncation {
@@ -191,6 +224,7 @@ pub fn parse(base: &str, text: &str, command: &str) -> ChangeSet {
         base: base.to_string(),
         files,
         truncated,
+        whole: None,
     }
 }
 
@@ -219,9 +253,9 @@ fn finish_body(body: Body, hunks: Vec<Hunk>) -> Body {
     }
 }
 
-fn push(files: &mut Vec<FileChange>, f: FileChange, total: &mut usize) {
+fn push(files: &mut Vec<FileChange>, f: FileChange, total: &mut usize, max: usize) {
     *total += 1;
-    if files.len() < MAX_FILES {
+    if files.len() < max {
         files.push(f);
     }
 }

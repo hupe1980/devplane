@@ -7,7 +7,9 @@
   import Props from "../../lib/ui/Props.svelte";
   import Timeline, { type Mark } from "../../lib/ui/Timeline.svelte";
   import { STATES } from "../../lib/State.svelte";
-  import { exit, ago, type Detail } from "./types";
+  import { weakLeads } from "../../lib/ChangeState.svelte";
+  import { exit, ago, taskLine, type Detail } from "./types";
+  import Inline from "../../lib/ui/Inline.svelte";
 
   type Decision = { id: string; at: string; authority: string; action: string; outcome: string; subject: string };
   let { d, go }: { d: Detail; go: (view: string) => void } = $props();
@@ -47,7 +49,7 @@
       {#if !d.gate}
         <span class="v quiet">No gate has run against this change.</span>
       {:else if d.gate.passed}
-        <span class="v" class:done={d.state === STATES.verified.word}>{d.gate.name} passed · attempt {d.gate.attempt}</span>
+        <span class="v" class:done={d.state === STATES.verified.word && !weakLeads(d.qualifier)}>{d.gate.name} exited zero · attempt {d.gate.attempt}</span>
       {:else}
         <span class="v fail">{d.gate.name} failed · {failing.length} of {d.gate.commands?.length ?? 0} commands</span>
         {#each failing.slice(0, 2) as c (c.command)}<code class="cmd">{c.command} — {exit(c.outcome)}</code>{/each}
@@ -56,8 +58,7 @@
     <button class="card" onclick={() => go("tasks")}>
       <span class="k"><Icon name="spec" size={14} /> Tasks</span>
       {#if d.counts}
-        <span class="v"><b>{d.counts.tasks}</b> tasks · <b>{d.counts.ticked}</b> ticked · {#if d.counts.seen_by_pass == null}no gates declared{:else}<b>{d.counts.seen_by_pass}</b> seen by a passing check{/if}</span>
-        {#if d.counts_says}<span class="s">{d.counts_says}</span>{/if}
+        <span class="v">{taskLine(d)}</span>
         {#if d.counts.ticked_unsent?.length}<span class="s wait">{d.counts.ticked_unsent.length} ticked that no run was sent</span>{/if}
       {:else}
         <span class="v quiet">{d.spec ? "The specification has no tasks." : "No specification is attached."}</span>
@@ -66,10 +67,11 @@
     <button class="card" onclick={() => go("ledger")}>
       <span class="k"><Icon name="ledger" size={14} /> Decisions</span>
       {#if read.phase === "failed" && read.failure}
-        <span class="v fail">Not read: {read.failure.says}</span>
-        <span class="s"><code>{read.failure.tell}</code> tells more</span>
+        {#if read.failure.down}<span class="v quiet">Not read.</span>
+        {:else}<span class="v fail">Not read: <Inline text={read.failure.says} /></span>
+        <span class="s"><code>{read.failure.tell}</code> tells more</span>{/if}
       {:else if read.phase === "loading"}
-        <span class="v quiet">Reading…</span>
+        <span class="v quiet" aria-busy="true">…</span>
       {:else if decisions.length === 0}
         <span class="v quiet">Nothing has been decided about it.</span>
       {:else if decisions.length >= LIMIT}
@@ -92,7 +94,7 @@
       <Icon name="alert" size={16} />
       <div>
         <b>The specification moved under a run.</b>
-        {#each d.drifts ?? [] as x, i (i)}<p>{x.says}</p>{/each}
+        {#each d.drifts ?? [] as x, i (i)}<p><Inline text={x.says} /></p>{/each}
         <button onclick={() => go("tasks")}>Decide in Tasks</button>
       </div>
     </section>
@@ -120,21 +122,10 @@
     <h2>History</h2>
     <!-- The decisions lane is empty because it was not read, not because
          nothing was decided. -->
-    {#if read.failure}<Failed what="the decisions" failure={read.failure} at={read.at} stale={read.data !== null} />{/if}
+    {#if read.failure && !(read.failure.down && read.data === null)}<Failed what="the decisions" failure={read.failure} at={read.at} stale={read.data !== null} />{/if}
     <Timeline {marks} lanes={["change", "gates", "decisions"]} />
   </section>
 
-  {#if (d.reports ?? []).length > 0}
-    <section class="reports">
-      <h2>Reports filed <span class="n">{d.reports?.length}</span></h2>
-      {#each d.reports ?? [] as r (r.id)}
-        <div class="report">
-          <span>to <b>{r.target_says}</b> — {r.state_says}</span> <span class="quiet">{r.age_says}</span>
-          <pre>{r.quoted}</pre>
-        </div>
-      {/each}
-    </section>
-  {/if}
 </div>
 
 <style>
@@ -146,8 +137,7 @@
   }
   .cards,
   .alert,
-  .history,
-  .reports {
+  .history {
     grid-column: 1;
   }
   .facts {
@@ -238,22 +228,6 @@
   .alert button {
     margin-top: var(--s-2);
     font-size: var(--t-sm);
-  }
-  .report {
-    padding: var(--s-2) 0;
-    border-bottom: 1px solid var(--line);
-    font-size: var(--t-sm);
-  }
-  .report pre {
-    margin: var(--s-1) 0 0;
-    padding-left: var(--s-3);
-    border-left: 2px solid var(--line);
-    color: var(--dim);
-    font-size: var(--t-xs);
-    white-space: pre-wrap;
-  }
-  .n {
-    color: var(--faint);
   }
   @container (max-width: 70rem) {
     .grid {

@@ -1,9 +1,9 @@
-import { bind, onAction } from "../../lib/keys";
+import { bind, bindList, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
 import { register } from "../../lib/surfaces";
-import Why from "./Why.svelte";
 
 bind({ surface: "global", combo: "g l", action: "go-ledger", label: "go to the ledger" });
+bindList("why", "open the change the decision is about");
 onAction("go-ledger", () => {
   go("#why");
   return true;
@@ -20,5 +20,5 @@ register({
   link: "run",
   // The focus is the run this ledger is about.
   select: (_feed, focus) => ({ about: focus }),
-  component: Why,
+  page: () => import("./Why.svelte"),
 });

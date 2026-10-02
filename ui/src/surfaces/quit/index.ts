@@ -1,5 +1,4 @@
 import { register } from "../../lib/surfaces";
-import Quit from "./Quit.svelte";
 
 register({
   id: "quit",
@@ -13,5 +12,5 @@ register({
   bare: true,
   reads: ["/api/quitting"],
   select: () => ({}),
-  component: Quit,
+  page: () => import("./Quit.svelte"),
 });

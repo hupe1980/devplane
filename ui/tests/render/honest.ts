@@ -9,7 +9,7 @@ import Palette from "../../src/surfaces/palette/Palette.svelte";
 import PlanList from "../../src/surfaces/plan/List.svelte";
 import PlanDoc from "../../src/surfaces/plan/Doc.svelte";
 import Inbox from "../../src/surfaces/inbox/Inbox.svelte";
-import Pane from "../../src/surfaces/review/Pane.svelte";
+import Pane from "../../src/surfaces/change/review/Pane.svelte";
 import { specs, key } from "../../src/surfaces/plan/store.svelte";
 import { inline, blocks } from "../../src/lib/md";
 import Inline from "../../src/lib/ui/Inline.svelte";
@@ -29,13 +29,15 @@ const review: Json = recorded("review", TITLE);
 const quiet: Json = recorded("change", "Drop the v1 API");
 const WEAK = "1 check weakened";
 
-/// The words beside the green: *verified*, then the qualifier, on one line.
+/// Evidence first: while a weakened row is unread, the weakening leads and
+/// *verified* follows it, on one line — never the green first.
 function qualified(markup: string, where: string) {
   const text = bare(markup).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
-  if (!/verified · 1 check weakened/.test(text)) fail(`${where} shows verified without "· ${WEAK}" beside it`);
+  if (!/1 check weakened · verified/.test(text)) fail(`${where} does not lead with "${WEAK}" before verified`);
+  if (/verified · 1 check weakened/.test(text)) fail(`${where} says verified before "${WEAK}"`);
 }
 
-// ── The recording is the defect the audit found ─────────────────────────────
+// ── The recording is verified with one check weakened ───────────────────────
 {
   if (rate.state !== "verified") fail(`the rate-limit recording is ${rate.state}, not verified — recapture`);
   if (rate.qualifier?.weakened !== 1 || rate.qualifier?.says !== WEAK)
@@ -43,7 +45,7 @@ function qualified(markup: string, where: string) {
   if (quiet.qualifier?.says !== "") fail("a change that weakened nothing carries a qualifier");
 }
 
-// ── SC-001: five surfaces of five carry the qualifier beside verified ──────
+// ── Five surfaces of five carry the qualifier beside verified ──────────────
 {
   // 1. The change's own header.
   const doc = html(Doc, { id: rate.id, detail: rate, loaded: true });
@@ -67,7 +69,7 @@ function qualified(markup: string, where: string) {
   else {
     const out = html(Inbox, { items: [ready], loaded: true });
     if (!out.includes(WEAK)) fail(`the inbox's ready item does not say "${WEAK}"`);
-    if (!/0 of \d+ hunks? marked/.test(bare(out))) fail("the ready item does not say how many hunks were marked");
+    if (!/\d+ hunks? unread · 1 weakened/.test(bare(out).replace(/<[^>]*>/g, " ").replace(/\s+/g, " "))) fail("the ready item does not say what is unread in the words the review uses");
     for (const s of ready.facts?.says ?? []) if (!out.includes(s)) fail(`the ready item drops "${s}"`);
   }
   // Nothing extra where nothing was weakened.
@@ -91,7 +93,7 @@ function qualified(markup: string, where: string) {
   if (!pane.includes("not yet read") || !pane.includes("I have read this")) fail("the review does not show an unseen weakened row with a way to mark it read");
 }
 
-// ── SC-003: the inbox never offers in fewer steps than the review ──────────
+// ── The inbox never offers in fewer steps than the review ──────────────────
 {
   for (const i of inbox.items as Json[]) {
     if ((i.actions ?? []).includes("offer")) fail(`the inbox offers "${i.title}"`);
@@ -101,13 +103,13 @@ function qualified(markup: string, where: string) {
   if (ready) {
     const out = html(Inbox, { items: [ready], loaded: true });
     if (/offer this change/i.test(out)) fail("the ready item has a one-step offer");
-    const rev = out.indexOf(`href="#review/${encodeURIComponent(ready.change_id ?? "")}"`);
+    const rev = out.indexOf(`href="#change/${encodeURIComponent(ready.change_id ?? "")}/review"`);
     if (rev === -1) fail("the ready item's review does not open the review");
-    if (!/class="[^"]*\bact primary\b[^"]*" href="#review\//.test(out)) fail("review is not the ready item's primary action");
+    if (!/class="[^"]*\bact primary\b[^"]*" href="#change\/[^"]*\/review"/.test(out)) fail("review is not the ready item's primary action");
   }
 }
 
-// ── SC-004: no literal backtick or ** in anything a surface renders ────────
+// ── No literal backtick or ** in anything a surface renders ────────────────
 {
   /// Visible text outside <code>, <strong> and <pre> (verbatim output, which is
   /// somebody else's bytes and is shown as it was).

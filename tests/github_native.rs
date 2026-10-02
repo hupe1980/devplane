@@ -3,8 +3,11 @@
 //! Enterprise host. The token store is in memory; nothing reaches the network
 //! or the machine's credential store, and a `gh` on `PATH` records any run.
 
+mod common;
 #[path = "common/github_double.rs"]
 mod double;
+
+use common::{git, scratch, until};
 
 use devplane::core::Policy;
 use devplane::github::{self, Error, GitHub, Memory, Secret};
@@ -31,16 +34,6 @@ impl Drop for World {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.home);
     }
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "dp-ghn-{tag}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
 }
 
 /// A host whose GitHub hosts are the doubles given, `app.toml` as written.
@@ -150,32 +143,6 @@ impl World {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let ok = std::process::Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap()
-        .status
-        .success();
-    assert!(ok, "git {args:?}");
-}
-
-async fn until<T, F, Fut>(what: &str, within: Duration, mut f: F) -> T
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Option<T>>,
-{
-    let start = Instant::now();
-    loop {
-        if let Some(v) = f().await {
-            return v;
-        }
-        assert!(start.elapsed() < within, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 fn host_view<'a>(all: &'a Value, host: &str) -> &'a Value {
     all["hosts"]
         .as_array()
@@ -282,7 +249,7 @@ async fn without_a_client_id_only_a_token_signs_in() {
     assert_eq!(v["error"], devplane::github::auth::NO_CLIENT_ID);
     // The refusal names a way in that works without a registered app.
     for says in [
-        "gh auth token | devplane login github --with-token",
+        "gh auth token | devplane auth login --with-token",
         "personal access token",
     ] {
         assert!(v["error"].as_str().unwrap().contains(says), "{v}");
@@ -362,17 +329,11 @@ async fn every_operation_goes_through_the_adapter_and_no_gh_runs() {
     assert!(!opened.existed);
     assert_eq!(opened.pull_request.number, 77);
     assert!(opened.pull_request.is_draft);
-    let url = github::create_issue(hub, "github.com", "acme/core-lib", "a report", "> quoted")
-        .await
-        .unwrap();
-    assert_eq!(url, "https://github.com/acme/core-lib/issues/7");
 
     let created = gh.created();
     assert_eq!(created[0].0, "pull");
     assert_eq!(created[0].1["draft"], true, "offered as a draft");
     assert_eq!(created[0].1["head"], "feat/x");
-    assert_eq!(created[1].0, "issue");
-    assert_eq!(created[1].1["body"], "> quoted");
     assert!(
         gh.authorization()
             .iter()
@@ -911,7 +872,9 @@ async fn a_withdrawn_sign_in_says_cancelled() {
     let p = w.hub().start("github.com").await.unwrap();
     let hub = w.state.clone();
     let waiting = tokio::spawn(async move { hub.github.wait(p).await });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // `wait` re-checks the pending code after every interval, so a withdrawal
+    // before or during the wait ends it the same way; no need to time it.
+    tokio::task::yield_now().await;
     assert_eq!(w.hub().logout("github.com").await.unwrap(), None);
     assert_eq!(waiting.await.unwrap().unwrap_err(), Error::Cancelled);
 }

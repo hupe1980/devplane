@@ -42,7 +42,7 @@ const run = (over: Record<string, unknown> = {}) => ({
   if (!out.includes("&lt;script")) fail("the value was dropped rather than escaped");
 }
 
-// ── The board reads its thresholds from the host, as `devplane ls` does ───
+// ── The board reads its thresholds from the host, as `devplane status` does ───
 {
   const over = html(Board, { loaded: true, runs: [run({ context_percent: 89 })], thresholds: { context_high_percent: 85 } });
   if (!/class="ctx[^"]*hot/.test(over)) fail("a context window past the host's threshold is not marked");

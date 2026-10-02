@@ -12,7 +12,7 @@ test.
 
 ## Prerequisites
 
-- Rust stable (the minimum supported version is 1.90), [`just`](https://just.systems) and bash.
+- Rust stable (the minimum supported version is 1.94), [`just`](https://just.systems) and bash.
 - Node 22 or later, for the interface in `ui/`.
 - [Zola](https://www.getzola.org) 0.23, for `just site-build site-check`.
 - On Linux, `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`:
@@ -21,10 +21,10 @@ test.
 ## Before a pull request
 
 ```sh
-just check          # fmt, clippy, build, test — the Rust half of CI
-just ui-build ui-check wire   # the interface, its type check, the generated wire types
-just verify         # check, then deps (dependency count), site-build and site-check (Zola links)
-just notes          # checks over the maintainer's gitignored notes; says "skipped" where absent
+just check                   # fmt, clippy, build, test — the Rust half of CI
+just ui-build ui-check wire  # the interface, its type check, the generated wire types
+just verify                  # check, then deps (dependency count), site-build and site-check (Zola links)
+just notes                   # checks over the maintainer's gitignored notes; says "skipped" where absent
 ```
 
 CI also fails when `ui/dist` or `ui/src/wire` differs from what those recipes produce, so commit any
@@ -42,12 +42,12 @@ produced it. A dependency bump is a reviewed change: agents and packages are pin
 `ui/` is a Svelte project built to a bundle the binary embeds at compile time.
 
 ```sh
-cd ui && npm install     # Node 22+
-npm run build            # → ui/dist/, embedded into the binary
-npm run dev              # a dev server that proxies /api to a running host (`devplane serve`)
-npm run check            # svelte-check over TypeScript and every component
-npm run render           # renders every surface and asserts on the result
-npm run dev:fixtures     # the interface over recorded host responses, no host needed (POSIX shells)
+cd ui && npm install  # Node 22+
+npm run build         # → ui/dist/, embedded into the binary
+npm run dev           # a dev server that proxies /api to a running host (`devplane up --no-browser`)
+npm run check         # svelte-check over TypeScript and every component
+npm run render        # renders every surface and asserts on the result
+npm run dev:fixtures  # the interface over recorded host responses, no host needed (POSIX shells)
 ```
 
 - **`ui/dist/` is committed**, because `cargo publish` packages what is in git. Change a surface, run
@@ -71,7 +71,7 @@ npm run dev:fixtures     # the interface over recorded host responses, no host n
 ## The window
 
 ```sh
-just app                 # cargo run --features app -- app
+just app                 # cargo run --features app -- up --window
 ```
 
 The app is the cargo feature `app`, off by default; on Linux it needs the packages under

@@ -5,7 +5,9 @@
   import State from "../../lib/State.svelte";
   import { clip } from "../../lib/text";
   import Qualifier from "../../lib/Qualifier.svelte";
-  import { markedFor } from "../review/marks";
+  import { markedFor } from "../change/review/marks";
+  import { unreadSays } from "../change/review/unread.svelte";
+  import Inline from "../../lib/ui/Inline.svelte";
   import { safeHref } from "../../lib/href";
   import type { ReadyFacts } from "../../wire/ReadyFacts";
 
@@ -51,8 +53,6 @@
     answer_in?: string | null;
     new_to_you?: boolean;
     since?: string;
-    /// The report a report row is about — what its controls address.
-    report?: string | null;
     /// On a *ready to decide* row: what its review leads with.
     facts?: ReadyFacts | null;
   };
@@ -81,7 +81,7 @@
     current?: boolean;
     age?: string;
     answer: (item: Item, what: Answer) => Promise<void>;
-    act: (item: Item, action: string, reason?: string) => Promise<void>;
+    act: (item: Item, action: string) => Promise<void>;
     snooze: (item: Item) => Promise<void>;
     copyRule: (rule: string) => Promise<void>;
     /// Reports a refusal this row makes on its own, such as an empty reply.
@@ -104,18 +104,6 @@
   /// Free-text answers: one box per row and per field.
   let typed = $state("");
   let custom = $state<Record<string, string>>({});
-
-  /// The reason a rejection or deferral carries back to the filing project.
-  /// Refused when empty, as the host refuses it.
-  let reason = $state("");
-  function answerReport(action: "reject_report" | "defer_report") {
-    const why = reason.trim();
-    if (!why) {
-      say("say why first — the project that filed it is told the reason");
-      return;
-    }
-    void act(item, action, why);
-  }
 
   /// An empty reply is refused here rather than sent.
   function reply(field?: string) {
@@ -173,13 +161,10 @@
         {#if age}<span title={item.since}>{age}</span>{/if}
       </span>
     </div>
-    <!-- A report is somebody else's words: shown whole and quoted as the host
-         sent it, never clipped. Other detail is clipped, whole in the title. -->
-    {#if item.detail && item.report}
-      <pre class="quoted" aria-label="the report, quoted as it was filed">{item.detail}</pre>
-    {:else if item.detail}
+    <!-- Detail is clipped, whole in the title. -->
+    {#if item.detail}
       <p class="d" title={item.detail.length > DETAIL_CHARS ? item.detail : undefined}>
-        {clip(item.detail, DETAIL_CHARS)}
+        <Inline text={clip(item.detail, DETAIL_CHARS)} />
       </p>
     {/if}
 
@@ -188,8 +173,8 @@
     {#if item.facts}
       <p class="facts">
         <Qualifier q={item.facts.qualifier} />
-        <span title="hunks marked in this browser's review">{markedHunks} of {item.facts.hunks} {item.facts.hunks === 1 ? "hunk" : "hunks"} marked</span>
-        {#each item.facts.says as s (s)}<span>· {s}</span>{/each}
+        <span class="unread" title="hunks not marked in this browser's review, and weakened rows not recorded as read">· {unreadSays({ hunks: item.facts.hunks - markedHunks, weakened: item.facts.qualifier.unseen })}</span>
+        {#each item.facts.says as s (s)}<span>· <Inline text={s} /></span>{/each}
       </p>
     {/if}
 
@@ -226,7 +211,7 @@
       {#if form.length > 1}
         <div class="reply">
           <button onclick={send} disabled={outstanding > 0}>
-            {outstanding > 0 ? `${outstanding} of ${form.length} still to answer` : `send ${form.length} answers`}
+            {outstanding > 0 ? `${outstanding} still to answer` : `send ${form.length} answers`}
           </button>
         </div>
       {/if}
@@ -261,7 +246,7 @@
     <!-- The rule to paste, printed, never written; or the host's reason there is none. -->
     {#if item.offer}
       <p class="offer">
-        <span class="dim">never asked again:</span>
+        <span class="dim">To stop being asked, paste this rule:</span>
         <code>{item.offer.rule}</code>
         <button onclick={() => copyRule(item.offer!.rule)}>copy</button>
         <span class="dim"
@@ -271,11 +256,11 @@
         >
       </p>
     {:else if item.no_offer}
-      <p class="elsewhere">{item.no_offer.sentence}</p>
+      <p class="elsewhere"><Inline text={item.no_offer.sentence} /></p>
     {/if}
 
     <!-- A watched session has no protocol request, so nothing here can grant it. -->
-    {#if item.answer_in}<p class="elsewhere">{item.answer_in}</p>{/if}
+    {#if item.answer_in}<p class="elsewhere"><Inline text={item.answer_in} /></p>{/if}
 
     <div class="acts">
       {#if has("allow")}
@@ -291,7 +276,7 @@
         <button onclick={() => act(item, "resume")}>resume</button>
       {/if}
       {#if has("review") && item.change_id}
-        <a class="act primary" href={`#review/${encodeURIComponent(item.change_id)}`}>review</a>
+        <a class="act primary" href={`#change/${encodeURIComponent(item.change_id)}/review`}>review</a>
       {/if}
       <!-- A drift: tell the run which files moved, or accept it. Either is recorded. -->
       {#if has("tell_run")}
@@ -317,37 +302,12 @@
       {#if launch}
         <a class="act" href={launch}>open an agent with this typed</a>
       {/if}
-      {#if has("start_from_report")}
-        <button onclick={() => act(item, "start_from_report")}>start a change from this</button>
-      {/if}
-      {#if has("reject_report") || has("defer_report")}
-        <input
-          class="why"
-          type="text"
-          bind:value={reason}
-          placeholder="why — the filer is told"
-          aria-label="why, for the project that filed it"
-        />
-        {#if has("reject_report")}
-          <button onclick={() => answerReport("reject_report")}>reject</button>
-        {/if}
-        {#if has("defer_report")}
-          <button onclick={() => answerReport("defer_report")}>defer</button>
-        {/if}
-      {/if}
-      <!-- A draft nothing sends until this is pressed, by you, under your GitHub sign-in. -->
-      {#if has("open_draft")}
-        <button onclick={() => act(item, "open_draft")}>open on GitHub</button>
-      {/if}
-      {#if has("discard_draft")}
-        <button onclick={() => act(item, "discard_draft")}>discard the draft</button>
-      {/if}
       {#if has("snooze")}
         <button onclick={() => snooze(item)}>snooze 1h</button>
       {/if}
       <!-- A browser cannot attach, so show the command. -->
       {#if has("attach") && item.run_id}
-        <code class="cmd">devplane attach {item.run_id}</code>
+        <code class="cmd">devplane run attach {item.run_id}</code>
       {/if}
     </div>
   </div>
@@ -509,18 +469,6 @@
   .reply input {
     flex: 1;
     max-width: 36rem;
-  }
-  .quoted {
-    margin: 0;
-    color: var(--dim);
-    font-size: var(--t-sm);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    border-left: 2px solid var(--line);
-    padding-left: var(--s-3);
-  }
-  .why {
-    max-width: 20rem;
   }
   .offer {
     margin: 0;

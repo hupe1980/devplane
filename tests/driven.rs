@@ -3,104 +3,16 @@
 
 mod common;
 
-use devplane::core::{Policy, RunId, RunState};
-use devplane::host::{AppState, Shared};
+use devplane::core::{RunId, RunState};
+use devplane::host::Shared;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// A git repository with a `devplane.toml`, trusted by the host.
+use common::{boot, echo_spec as echo_agent, post, trust};
+
 fn scratch_repo(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "vp-driven-{tag}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .output()
-            .expect("git");
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["config", "user.email", "t@example.com"]);
-    git(&["config", "user.name", "Test"]);
-    std::fs::write(dir.join("devplane.toml"), "[gates]\ncheck = [\"true\"]\n").unwrap();
-    git(&["add", "-A"]);
-    git(&["commit", "-qm", "init"]);
-    dir.canonicalize().unwrap()
-}
-
-fn echo_agent() -> Option<devplane::acp::AgentSpec> {
-    let exe = std::env::current_exe().ok()?;
-    let bin = exe.parent()?.parent()?.join("examples").join("echo_agent");
-    bin.exists()
-        .then(|| devplane::acp::AgentSpec::new("echo", "Echo", &bin.to_string_lossy()))
-}
-
-/// A host for one test; its agents end with it.
-struct Host(Shared, #[allow(dead_code)] common::AgentSerial);
-impl std::ops::Deref for Host {
-    type Target = Shared;
-    fn deref(&self) -> &Shared {
-        &self.0
-    }
-}
-impl Drop for Host {
-    fn drop(&mut self) {
-        for _ in 0..100 {
-            if let Ok(mut map) = self.0.sessions.try_lock() {
-                for (_, session) in map.drain() {
-                    session.stop();
-                }
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-}
-
-async fn boot() -> (std::net::SocketAddr, reqwest::Client, Host) {
-    let serial = common::one_agent_at_a_time();
-    let db = std::env::temp_dir().join(format!("vp-driven-{}.db", uuid::Uuid::new_v4().simple()));
-    let state = AppState::new(
-        db.clone(),
-        "tok".into(),
-        Policy::default(),
-        db.parent().unwrap().to_path_buf(),
-    )
-    .await
-    .unwrap();
-    let app = devplane::api::router(state.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.ok() });
-    (addr, reqwest::Client::new(), Host(state, serial))
-}
-
-async fn post(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str, body: Value) -> Value {
-    c.post(format!("http://{addr}{path}"))
-        .bearer_auth("tok")
-        .json(&body)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
-}
-
-async fn trust(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) {
-    let res = post(
-        c,
-        addr,
-        "/api/projects/trust",
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(res["trusted"], true, "{res}");
+    common::scratch_repo(tag, common::PASSING)
 }
 
 /// Polls the run until `want` holds, or says what it was doing instead.
@@ -985,7 +897,7 @@ async fn a_reported_diff_is_not_kept_where_transcripts_are_not() {
     let repo = scratch_repo("diff-unkept");
     std::fs::write(
         repo.join("devplane.toml"),
-        "[gates]\ncheck = [\"true\"]\n\n[transcripts]\nkeep = false\n",
+        "[gates]\ncheck = [\"true\"]\n\n[agent]\nkeep_transcripts = false\n",
     )
     .unwrap();
     trust(&c, &addr, &repo).await;

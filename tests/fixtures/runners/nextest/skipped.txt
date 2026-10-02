@@ -1,0 +1,12 @@
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+────────────
+[32;1m Nextest run[0m ID [1m14c0770d-ec2d-41c9-b470-d0621cebfdca[0m with nextest profile: [1mdefault[0m
+[32;1m    Starting[0m [1m6[0m tests across [1m3[0m binaries ([1m2[0m tests [33;1mskipped[0m)
+[32;1m        PASS[0m [   0.011s] (1/6) [35;1mrs[0m [36mtests[0m[36m::[0m[34;1munit_one[0m
+[32;1m        PASS[0m [   0.011s] (2/6) [35;1mrs[0m [36mtests[0m[36m::[0m[34;1munit_ignored[0m
+[32;1m        PASS[0m [   0.012s] (3/6) [35;1mrs::a[0m [34;1ma2[0m
+[32;1m        PASS[0m [   0.012s] (4/6) [35;1mrs::b[0m [34;1mb1[0m
+[32;1m        PASS[0m [   0.012s] (5/6) [35;1mrs[0m [36mtests[0m[36m::[0m[34;1munit_fails_when_asked[0m
+[32;1m        PASS[0m [   0.012s] (6/6) [35;1mrs::a[0m [34;1ma1[0m
+────────────
+[32;1m     Summary[0m [   0.013s] [1m6[0m tests run: [1m6[0m [32;1mpassed[0m, [1m2[0m [33;1mskipped[0m

@@ -115,12 +115,15 @@ pub struct AppState {
     pub ingest_token: String,
     /// Broadcasts state changes and driven agents' output, as separate frames.
     pub tx: broadcast::Sender<crate::core::Frame>,
-    /// Flipped by `POST /api/quit`, so `devplane quit` asks with the token
+    /// Flipped by `POST /api/quit`, so `devplane down` asks with the token
     /// rather than signalling a pid that may have been reused. A `watch`, not a
     /// `Notify`, so every open `/api/stream` ends when it flips, not only
     /// those already waiting.
     pub stopping: tokio::sync::watch::Sender<bool>,
     pub started_at: jiff::Timestamp,
+    /// The port this host listens on, set once bound: the challenge on
+    /// `/healthz` names it, so a proof relayed from another port fails.
+    pub port: std::sync::OnceLock<u16>,
     /// Set once by the app; absent in the CLI host. See [`Opener`].
     pub opener: std::sync::OnceLock<Opener>,
 }
@@ -281,6 +284,7 @@ impl AppState {
             tx,
             stopping: tokio::sync::watch::Sender::new(false),
             started_at: jiff::Timestamp::now(),
+            port: std::sync::OnceLock::new(),
             opener: std::sync::OnceLock::new(),
         }))
     }
@@ -518,6 +522,7 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     let app: Router = crate::api::router(state.clone());
     let listener = bind(port).await?;
     let bound = listener.local_addr()?;
+    let _ = state.port.set(bound.port());
 
     crate::config::write_host(&crate::config::HostRecord {
         pid: std::process::id(),
@@ -552,6 +557,11 @@ pub async fn serve(state: Shared, port: u16) -> Result<()> {
     let forge = tokio::spawn(crate::poller::forge_watch(state.clone()));
     // Each open change's tree, so a hand edit makes *verified* false.
     let trees = tokio::spawn(crate::poller::tree_watch(state.clone()));
+    // Throwaway base-checks checkouts a stopped host left behind.
+    {
+        let state = state.clone();
+        tokio::spawn(async move { crate::base_checks::sweep_all(&state).await });
+    }
 
     let asked = state.clone();
     let result = axum::serve(listener, app)
@@ -641,7 +651,7 @@ pub async fn bind(port: u16) -> Result<tokio::net::TcpListener> {
             "port {port} on 127.0.0.1 is taken by another process{}, so the host did not start. \
              Devplane will not listen elsewhere: the agents' settings send the bearer token to \
              port {port}, and whatever holds it would receive the token. Stop that process, or \
-             pick a free port with `--port <n>` (or DEVPLANE_PORT) and run `devplane connect` \
+             pick a free port with `--port <n>` (or DEVPLANE_PORT) and run `devplane agent connect` \
              again so the settings follow.",
             holder_of(port)
                 .map(|h| format!(" ({h})"))

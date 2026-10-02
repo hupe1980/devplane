@@ -3,7 +3,7 @@
 /**
  * On whose authority something happened. There is no `classifier` (no channel
  * attributes a single call to a model's approval; an `auto` session is a mode,
- * reported by `devplane modes`) and no `unknown`: a row whose authority cannot
+ * reported by `devplane status --modes`) and no `unknown`: a row whose authority cannot
  * be established must not be written.
  */
 export type Authority = "person" | "rule" | "timer" | "nobody" | "devplane";

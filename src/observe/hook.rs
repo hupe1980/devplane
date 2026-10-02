@@ -554,8 +554,8 @@ impl PreToolUseResponse {
         Self::decide("deny", reason.into())
     }
 
-    /// Force a prompt, in every mode. The only way a project's `always_ask`
-    /// rule reaches a session running in auto mode.
+    /// Force a prompt, in every mode. The only way a project's `ask` rule
+    /// reaches a session running in auto mode.
     pub fn ask(reason: impl Into<String>) -> Self {
         Self::decide("ask", reason.into())
     }

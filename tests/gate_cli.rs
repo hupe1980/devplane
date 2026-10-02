@@ -2,17 +2,14 @@
 //! an unchecked repository and an unreadable config must each be distinguishable
 //! from a pass.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 /// A scratch directory with whatever `devplane.toml` the caller wants, or none.
 fn scratch(tag: &str, config: Option<&str>) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "vp-gate-{tag}-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::scratch(&format!("gate-{tag}"));
     if let Some(c) = config {
         std::fs::write(dir.join("devplane.toml"), c).unwrap();
     }
@@ -152,7 +149,7 @@ fn a_configuration_that_will_not_parse_reports_the_parsers_error_and_runs_nothin
     assert_ne!(v["summary"], gate_json(&scratch("cmp", None)).0["summary"]);
 }
 
-/// A named gate is declared, validated by `devplane check`, listed, and run by name.
+/// A named gate is declared, validated by `devplane config check`, listed, and run by name.
 #[test]
 fn a_named_gate_can_be_run_by_name() {
     let dir = scratch(
@@ -165,10 +162,10 @@ name = "named-gate"
 [gates]
 check = ["true"]
 
-[gates.named.docs]
+[gates.docs]
 run = ["true"]
 
-[gates.named.failing]
+[gates.failing]
 run = ["false"]
 "#,
         ),

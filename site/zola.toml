@@ -44,7 +44,7 @@ include_content = true
 tagline = "Know when an agent's work is actually done."
 repo = "https://github.com/hupe1980/devplane"
 acp = "https://agentclientprotocol.com"
-version = "0.11.0"
+version = "0.12.0"
 og_image = "/og.png"
 
 [[extra.nav]]

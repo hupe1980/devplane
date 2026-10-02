@@ -4,6 +4,7 @@
 # and photographed. Needs Chrome and a debug build.
 #
 #   bash scripts/make-board.sh
+#   PLAYWRIGHT=/path/to/node_modules/playwright-core bash scripts/make-board.sh
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -26,10 +27,34 @@ fi
 # Shared with anything else that photographs the interface.
 . "$(dirname "$0")/seed-host.sh"
 
+# With `PLAYWRIGHT` naming a playwright-core install, Chrome is driven through it:
+# a headless `--screenshot` of a page holding an SSE stream open can hang or
+# photograph the page before it has drawn.
+shoot_pw() { # file-name  url  height  scheme  width  touch
+  NAME="$tmp/$1.png" URL="$2" H="$3" SCHEME="$4" W="$5" TOUCH="$6" CHROME="$CHROME" \
+  node --input-type=module -e '
+    const e = process.env;
+    const pw = await import(new URL("index.mjs", "file://" + e.PLAYWRIGHT.replace(/\/?$/, "/")).href);
+    const b = await pw.chromium.launch({ executablePath: e.CHROME, headless: true });
+    const p = await b.newPage({ viewport: { width: +e.W, height: +e.H },
+      colorScheme: e.SCHEME || "no-preference", hasTouch: !!e.TOUCH });
+    await p.goto(e.URL, { waitUntil: "domcontentloaded" });
+    await p.waitForTimeout(2500);
+    await p.screenshot({ path: e.NAME });
+    await b.close();'
+}
+
 # One picture per surface, addressed by hash so no script is injected. No
 # `--virtual-time-budget`: the open SSE stream would make Chrome wait for ever.
 shoot() { # file-name  hash  height  [light|dark]  [width]  [touch]
   local name="$1" hash="$2" height="${3:-940}" scheme="${4:-}" width="${5:-1240}" touch="${6:-}"
+  if [ -n "${PLAYWRIGHT:-}" ]; then
+    shoot_pw "$name" "http://127.0.0.1:$port/?token=$token#$hash" "$height" "$scheme" "$width" "$touch"
+    [ -s "$tmp/$name.png" ] || { echo "make-board: Playwright produced nothing for $name" >&2; return 1; }
+    mv "$tmp/$name.png" "site/static/$name.png"
+    echo "make-board: site/static/$name.png ($(du -k "site/static/$name.png" | cut -f1) KB)"
+    return
+  fi
   # Headless Chrome reports dark and a mouse; set the scheme and a coarse pointer
   # (`primaryPointerType=2`) explicitly so the light and phone shots test their rules.
   local blink=()
@@ -55,7 +80,7 @@ change=$(printf '%s' "$rate" | grep -oE '"change_id": *"c-[0-9a-f]+"' | head -1 
 # Cropped to what each screen shows, at a width that stays legible scaled: a change, its review, the sessions,
 # what needs you, and the ledger.
 shoot workbench "change/$change" 560 dark 1200
-shoot review "review/$change" 470 dark 1200
+shoot review "change/$change/review" 470 dark 1200
 shoot sessions board 560 dark 1200
 [ "${SHOTS:-all}" = board ] || {
   shoot inbox inbox 450 dark 1200

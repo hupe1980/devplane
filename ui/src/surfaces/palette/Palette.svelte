@@ -1,30 +1,40 @@
 <script lang="ts" module>
-  export type Kind = "change" | "surface" | "action" | "project";
+  export type Kind = "here" | "change" | "surface" | "action" | "project";
   export type Entry = { kind: Kind; label: string; hint?: string; icon: string; go: () => void; qualifier?: import("../../wire/Qualifier").Qualifier | null };
 
-  /// Letters in order; a lower score is a better match, `null` is no match.
-  /// A prefix of the label, then the start of a word, then anywhere
-  /// contiguous, then letters in order with the fewest gaps.
+  /// A lower score is a better match, `null` is no match. A prefix of the
+  /// label, then the start of a word, then anywhere contiguous, then letters
+  /// that each continue the last one or start a word (*rlr* for *Rate-limit
+  /// the login route*), fewest jumps first. Letters scattered inside words
+  /// match nothing: *rate* is not *show or hide the activity panel*.
   export function score(q: string, text: string): number | null {
     const t = text.toLowerCase();
     if (!q) return 0;
     const at = t.indexOf(q);
     if (at === 0) return 0;
     if (at > 0) return /\W/.test(t[at - 1]) ? 1 : 2;
-    let i = 0;
-    let gaps = 0;
+    const starts = (k: number) => k === 0 || /[^\p{L}\p{N}]/u.test(t[k - 1]);
     let last = -1;
-    for (const ch of q) {
-      const j = t.indexOf(ch, i);
+    let jumps = 0;
+    for (const ch of q.replace(/\s+/g, "")) {
+      if (last !== -1 && t[last + 1] === ch) {
+        last += 1;
+        continue;
+      }
+      let j = -1;
+      for (let k = last + 1; k < t.length; k++)
+        if (t[k] === ch && starts(k)) {
+          j = k;
+          break;
+        }
       if (j === -1) return null;
-      if (last !== -1 && j !== last + 1) gaps++;
+      jumps += 1;
       last = j;
-      i = j + 1;
     }
-    return 3 + gaps;
+    return 3 + jumps;
   }
 
-  export const ORDER: Kind[] = ["change", "surface", "action", "project"];
+  export const ORDER: Kind[] = ["here", "change", "surface", "action", "project"];
 
   /// What the palette shows for what was typed: grouped by kind in `ORDER`,
   /// best match first within each. A leading `>` narrows to actions.
@@ -42,7 +52,8 @@
 </script>
 
 <script lang="ts">
-  import Qualifier from "../../lib/Qualifier.svelte";
+  import ChangeState from "../../lib/ChangeState.svelte";
+  import { here } from "../../lib/offered.svelte";
   // The command palette: changes, places, actions and projects by name,
   // floating over the current page. Fuzzy (see `score`); `>` narrows to
   // actions; every action shows its key.
@@ -81,6 +92,20 @@
 
   const entries = $derived.by((): Entry[] => {
     const out: Entry[] = [];
+    // The page under the palette's own actions, each run by that page (a
+    // change offers itself only through its own guard).
+    for (const c of here.list) {
+      out.push({
+        kind: "here",
+        icon: c.icon,
+        label: c.label,
+        hint: c.hint,
+        go: () => {
+          go(from || "");
+          setTimeout(c.run, 0);
+        },
+      });
+    }
     for (const c of fetchedChanges ?? changes ?? []) {
       const to = opensChange?.id;
       if (!to) continue;
@@ -111,7 +136,7 @@
     return out;
   });
 
-  const TITLES: Record<Kind, string> = { change: "Changes", surface: "Go to", action: "Actions", project: "Projects" };
+  const TITLES = $derived<Record<Kind, string>>({ here: here.title ? `This change: ${here.title}` : "Here", change: "Changes", surface: "Go to", action: "Actions", project: "Projects" });
   /// The surface that searches every session, if one is registered.
   const searcher = $derived(surfaces().find((s) => s.takesQuery));
   const shown = $derived.by(() => {
@@ -175,7 +200,7 @@
         <button tabindex="-1" onclick={e.go} onmouseenter={() => (at = i)}>
           <Icon name={e.icon} size={14} />
           <span class="label">{e.label}</span>
-          {#if e.hint}<span class="hint" class:kbd={e.kind === "action"}>{e.hint}</span>{/if}<Qualifier q={e.qualifier} />
+          {#if e.kind === "change" && e.hint}<ChangeState state={e.hint} q={e.qualifier} />{:else if e.hint}<span class="hint" class:kbd={e.kind === "action"}>{e.hint}</span>{/if}
         </button>
       </li>
     {/each}

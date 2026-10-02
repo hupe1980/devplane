@@ -6,16 +6,15 @@ weight = 3
 group = "start"
 +++
 
-The workbench is one page served by the host on loopback, laid out like an editor: a title bar, an
-activity bar, a sidebar list, tabs, a bottom panel and a status bar. Nothing is fetched from the
-internet and nothing needs an account.
+One page served by the host on loopback, laid out like an editor. Nothing is fetched from the internet;
+no account.
 
 ```sh
-devplane open     # in your browser
-devplane app      # in its own window (--features app)
+devplane up           # in your browser
+devplane up --window  # in its own window (--features app)
 ```
 
-Press `?` anywhere to list the keys bound on the current surface.
+`?` lists the keys bound here.
 
 ![A change open in the workbench: the changes by project in the sidebar, the change as a document with its lifecycle, six views and the evidence cards](../../workbench.png)
 
@@ -41,35 +40,37 @@ Press `?` anywhere to list the keys bound on the current surface.
 | **Sessions** | `g b` | every agent session on the machine, watched or driven |
 | **Specifications** | `g s` | each project's spec folders, task counts and open questions |
 | **Ledger** | `g l` | every decision, and on whose authority it was made |
-| **Forge** | | open GitHub issues and pull requests across registered projects |
-| **Reports** | `g r` | findings one project filed about another |
-| **Setup** | | this machine's channels, and each repository's `devplane.toml` read back |
+| **Forge** | `g f` | open GitHub issues and pull requests across registered projects |
+| **Setup** | `g ,` | this machine's channels, and each repository's `devplane.toml` read back |
 
-A zero count shows nothing; a count is always a number, never a colour alone.
+A zero count shows nothing; a count is always a number, never colour alone.
 
 ### Tabs
 
-A click on a list row opens a **preview tab** (title in italics) that the next click replaces.
-Double-click or `Enter` pins it. Tabs are kept per browser tab and sent nowhere. The address always
-names what is showing, so a link opens the same view.
+- A click opens a **preview tab** (italic title) that the next click replaces; double-click or
+  `Enter` pins it.
+- Tabs are kept per browser tab and sent nowhere. The address names what is showing, so a link
+  reopens it.
 
 ## A change
 
-Open a change from **Changes**, the palette, or a `devplane://change/<id>` link (in the app). The
-header shows the title, state, project, branch, spec folder and the gate standing in one sentence,
-for example *`check` exited zero against the working tree as it stands*. Beside the state, when the
-change's own diff weakened a check, the header reads **verified · 1 check weakened** — the same words
-in the Changes list, the palette, the Specifications page and the inbox. The toolbar holds **Review**,
-**Run gates**, **Offer as pull request** (only when verified), **Finish**, **Archive**, and **Editor** /
-**Terminal** to open the worktree. While a weakened row is unseen, Review is the primary action, and
-pressing Offer is refused with each unseen row named and a button that opens it.
+Open from **Changes**, the palette, or a `devplane://change/<id>` link (in the app).
+
+- **Header**: title, state, project, branch, spec folder, and the gate standing as a sentence
+  (*`check` exited zero against the working tree as it stands*).
+- **Weakened check**: the header reads **1 check weakened · verified** — the weakening first, verified
+  as its qualifier — and the green standing sentence is hidden while a weakened row is unread. The
+  Changes list, palette, Specifications page and inbox use the same words.
+- **Toolbar**: **Review**, **Run gates**, **Offer as pull request** (verified only), **Finish**,
+  **Archive**, **Editor** / **Terminal**. While a weakened row is unseen, Review is primary and Offer
+  is refused, naming each row with a button to open it.
 
 | View | What it shows |
 |---|---|
-| **Overview** | cards for gates, tasks, ledger and agent; the facts; the history; reports it filed |
+| **Overview** | cards for gates, tasks, ledger and agent; the facts; the history |
 | **Tasks** | ticked and seen-by-a-passing-check counts, tasks ticked but sent to nobody, requirements and the tasks citing them, spec drift with **Tell the run** / **Accept what it saw** |
 | **Review** | the diff, below |
-| **Gates** | every gate run with its commands and exit codes, and the certificate with **Copy as markdown** |
+| **Gates** | every gate run with its commands and exit codes, **Run base checks**, and the certificate with **Copy as markdown** |
 | **Ledger** | this change's decisions, filterable by authority |
 | **Agent** | the latest run's conversation, a composer to prompt it, **Stop…**, and the files it wrote and commands it ran |
 
@@ -81,16 +82,13 @@ Only *verified* is green. See [Verified done](@/docs/verified-done.md).
 
 A file tree beside a diff against the merge base, uncommitted and untracked files included.
 
-- **Checks weakened or changed** comes first when there is anything under it: an added skip marker, a
-  removed assertion, a deleted test, a lint suppression, an edit to the gates, CI or a checker's
-  configuration ([the full list](@/docs/verified-done.md#review-before-you-merge)). Each row says what
-  it matched and whether you have read it; **I have read this** (or marking a hunk seen in that file)
-  records it, and an offer waits for every one.
-- Then the files in the order `[review] roles` declares (shared, logic, security, integration,
-  wiring, tests), each with whether a declared test covers it. With no roles declared, files are in
-  path order and the view says so.
-- **By risk** / **By intent** switches to grouping by the run that wrote each file and the tasks it
-  was sent. Files no run was asked for sit under their own heading.
+- **Checks weakened or changed** first ([the kinds](@/docs/verified-done.md#review-before-you-merge)),
+  each with what it matched and whether you read it. **I have read this** (or marking a hunk in that
+  file seen) records it; an offer waits for every one.
+- Then files in `[review] roles` order, each with whether a declared test covers it; without roles,
+  path order, and the view says so.
+- **By risk** / **By intent**: intent groups by the run that wrote each file and its tasks; unrequested
+  files get their own heading.
 - Formatting-only hunks are collapsed and counted.
 
 | Key | Does |
@@ -103,47 +101,41 @@ A file tree beside a diff against the merge base, uncommitted and untracked file
 | `v` | unified or side by side |
 | `1` / `2` | by risk / by intent |
 
-*Seen* on a hunk is a mark in this browser only, keyed by the hunk's content, so a hunk the agent
-rewrites is unseen again; it is sent nowhere and decides nothing. Reading a weakened-check row is the
-one mark the host keeps, because an offer waits for it. The same pane is a change's Review view and
-`#review/<id>`. On the command line: `devplane change review
-<id> [--by intent]`.
+- A hunk's *seen* mark lives in this browser, keyed by content (a rewritten hunk is unseen again), and
+  decides nothing. Only a weakened-check row's mark is kept by the host.
+- `#change/<id>/review` or `devplane://review/<id>` opens this view. CLI: `devplane change review <id>
+  [--by intent]`.
 
 ## Sessions
 
-Every session on the machine, watched or driven, in one grid. The state counts above it are its
-filters; group by project or by state; select a row for its detail.
+Every session, watched or driven, in one grid. State counts are filters; group by project or state.
 
 ![Every session in one grid, grouped by project](../../sessions.png)
 
 ## Starting a change
 
-**New change** (title bar, or `Alt+N`) opens a form: one or more projects, an optional specification,
-a title (also the branch name), the first prompt, the agent, and whether to use an isolated worktree.
-Before anything is created it shows what would happen in each project, including every refusal: an
-untrusted repository, a dirty checkout, a `devplane.toml` that will not load. It is the same preflight
-`devplane change start` runs.
+**New change** (title bar, `Alt+N`): projects, optional spec, title (also the branch), first prompt,
+agent, and worktree or in place. Before creating anything it shows each project's preflight and every
+refusal, as `devplane change start` does.
 
 ## The palette
 
-`⌘K` (or `Ctrl+K`) finds changes, surfaces (*Go to …*), actions and projects by name. Start with `>`
-to list only actions. Any other text can also be searched across every session's tool calls,
-questions and errors, as `devplane search` does.
+`⌘K` / `Ctrl+K` finds changes, surfaces, actions and projects. `>` lists only actions. Other text
+also searches every session's tool calls, questions and errors, like `devplane search`.
 
 ## The bottom panel
 
-**Activity** is every session, newest event first, one line each: time, project, agent (and whether
-Devplane drives it), state, what it is doing, context used. Click a line to open the session.
+**Activity**: every session, newest event first: time, project, agent (driven or not), state, action,
+context used.
 
-**Sight** is the limit of what this machine can see:
+**Sight**: what this machine can and cannot see. An empty Sessions list is not proof nothing runs.
 
-- **Watched end to end**: vendors whose sessions Devplane has proved it can follow.
-- **Read, not proved against a live session**: channels that are wired but unverified.
-- **Seen only when Devplane starts them**: agents it can drive but not watch.
-- **Projects whose configuration cannot be read**, when there are any.
+- **Watched end to end**: vendors proved followable.
+- **Read, not proved against a live session**: wired, unverified.
+- **Seen only when Devplane starts them**: drivable, not watchable.
+- **Projects whose configuration cannot be read**, if any.
 
-An empty Sessions list does not mean nothing is running; Sight says what is not watched. See
-[Watching sessions](@/docs/observe.md).
+See [Watching sessions](@/docs/observe.md).
 
 ## Keys
 
@@ -165,8 +157,6 @@ No key fires while you type in a field, except `Esc`.
 
 ## The window
 
-`devplane app` hosts in-process and adds a notification when an agent asks or gives up, a count in
-the menu bar, and one global shortcut (`⌘⇧Space` by default; `[app] shortcut` in
-`~/.devplane/app.toml`) that shows the topmost thing that needs you over whatever you are doing.
-Answer it, press `Esc`, and focus goes back. Closing the window keeps hosting; quitting from the tray
-says what it stops first. Nothing starts at login. See [Install](@/docs/install.md#the-window).
+`devplane up --window` adds a notification when an agent asks or gives up, a menu-bar count, and a
+global shortcut (`⌘⇧Space`; `[app] shortcut`) that shows the top item over whatever you are doing;
+`Esc` returns focus. See [Install](@/docs/install.md#the-window).

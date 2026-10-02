@@ -6,9 +6,9 @@ template = "section.html"
 page_template = "page.html"
 +++
 
-Devplane tells you when an agent's work is actually done. Run any ACP agent in its own worktree,
-verify its change with your own checks run outside the agent, see the weakened tests first, and keep
-the record of who decided what while you were not looking. One binary, local-first.
+Run any ACP agent in its own worktree, verify its change with your own checks, see weakened tests
+first, and keep a record of who decided what. One local binary.
 
-Start with the [quickstart](@/docs/quickstart.md), then take [the workbench](@/docs/workbench.md) tour.
-When something looks wrong, [Troubleshooting](@/docs/troubleshooting.md) goes from symptom to command.
+Start with the [quickstart](@/docs/quickstart.md) and [the workbench](@/docs/workbench.md).
+[Troubleshooting](@/docs/troubleshooting.md) maps symptoms to commands; [CI verify](@/docs/ci.md)
+brings the verdict to pull requests.

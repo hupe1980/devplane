@@ -6,37 +6,33 @@ weight = 11
 group = "guide"
 +++
 
-A session Devplane **watches** is one it can show you. A session it **drives**, started with
-`devplane change start`, is one it can also answer, prompt, stop and resume. Both appear on the same
-board and in the same inbox; for a driven run the project's `[policy]` rules decide first.
+A **driven** session (started by `devplane change start`) can be answered, prompted, stopped and
+resumed; a **watched** one only shown. Both share the board and inbox; `[policy]` decides first.
 
 ```sh
-devplane trust .                                     # once per repository
-devplane agents                                      # what can be driven
+devplane project trust .                             # once per repository
+devplane agent list                                  # what can be driven
 devplane change start "add rate limiting to /login"  # Claude Code
 devplane change start --agent codex "review the auth change"
-devplane watch <run>                                 # follow what it says
+devplane run watch <run>                             # follow what it says
 devplane change prompt <change> "use the existing middleware"
-devplane answer <ask> --allow                        # <ask>: from the inbox
+devplane inbox answer <ask> --allow                  # <ask>: from the inbox
 ```
-
-Each change runs in an isolated worktree. The `<ask>` id is the one `devplane inbox` prints.
 
 ## Trust comes first
 
 ```sh
-devplane trust --dry-run ../someone-elses-repo   # show it, trust nothing
-devplane trust .
+devplane project trust --dry-run ../someone-elses-repo   # show it, trust nothing
+devplane project trust .
 ```
 
-A headless agent runs the repository's own hooks and MCP servers without asking, so Devplane starts
-none in a directory you have not trusted. `trust` prints what is there before it asks. A worktree
-inherits the trust of the checkout that owns it.
+No agent starts in an untrusted repository; `project trust` shows its hooks and MCP servers first
+([Security](@/docs/security.md#the-trust-gate)).
 
 ## Which agents
 
 ```console
-$ devplane agents
+$ devplane agent list
 claude     Claude Code    npx -y @agentclientprotocol/claude-agent-acp@0.81.2
 codex      Codex          npx -y @agentclientprotocol/codex-acp@1.13.1
 opencode   OpenCode       opencode acp
@@ -44,13 +40,12 @@ copilot    GitHub Copilot npx -y @github/copilot@1.0.88 --acp
 gemini     Gemini CLI     npx -y @google/gemini-cli@0.61.0 --acp
 ```
 
-The agents launched through `npx` are pinned to exact versions, and need Node (with `npx`) and
-network access to npm the first time; OpenCode runs the `opencode` on your `PATH`. What an agent supports (`resume`, `load`, `modes`, sign-in) is
-advertised when it starts, so `devplane agents` lists it only for agents that have run, with the date.
-*Not probed* and *not supported* are different facts.
-
-Most agents sign in through their own terminal. When starting a session fails, Devplane shows the
-sign-in methods the agent advertised (for example, *Run `copilot login` in the terminal*).
+- `npx` agents are pinned and need Node and npm access the first time; OpenCode runs the `opencode`
+  on your `PATH`.
+- Capabilities (`resume`, `load`, `modes`, sign-in) are listed only for agents that have run, with the
+  date. *Not probed* differs from *not supported*.
+- Agents sign in in their own terminal; a failed start shows the advertised methods (*Run `copilot
+  login` in the terminal*).
 
 ## Adding an agent
 
@@ -63,86 +58,75 @@ name    = "Kimi"
 command = "npx -y @moonshot/kimi-acp@1.2.0"
 ```
 
-An entry with a built-in id replaces the built-in, which is how you re-pin one. A file that will not
-parse adds nothing and says so in the log. Or point straight at a command:
+A built-in id replaces the built-in (to re-pin it). An unparsable file adds nothing and logs why. Or
+name a command:
 
 ```sh
 devplane change start --agent '/opt/my-agent --acp' "…"
 ```
 
-A bare word that is not a known id is an error, never a launch attempt.
+An unknown bare word is an error, never a launch.
 
 ## Steering a run
 
 | Command | Does |
 |---|---|
-| `devplane change start --agent <id> "<prompt>"` | a change: an isolated checkout, the agent in it, the gates when it says it is done |
-| `devplane change start … --project a --project b` | the same prompt in several projects; every refusal is reported before anything is created |
-| `devplane change prompt <change\|run> <text>` | another message, without stopping it; queued until the turn ends |
-| `devplane watch <run>` | the conversation as it arrives; `--thinking` includes the reasoning |
-| `devplane show <run>` | the run in detail, with its last lines |
-| `devplane change stop <run>` | stop it; says first what survives (the change, worktree, branch and record), then asks — `--yes` where nobody can answer |
-| `devplane answer <ask>` | answer a permission (`--allow` / `--deny`) or a question (`--option`, `--custom`) |
+| `devplane change start --agent <id> "<prompt>"` | worktree, agent, gates when it finishes |
+| `devplane change start … --project a --project b` | one prompt, several projects |
+| `devplane change prompt <change\|run> <text>` | message it without stopping; queued mid-turn |
+| `devplane run watch <run>` | the conversation live; `--thinking` adds reasoning |
+| `devplane run show <run>` | detail and last lines |
+| `devplane change stop <run>` | stop; says what survives, then asks (`--yes` in scripts) |
+| `devplane inbox answer <ask>` | `--allow` / `--deny`, or `--option` / `--custom` |
 
-**An ask outlives the agent that made it.** Quit the host with a question waiting and it stays in the
-inbox, answerable with `devplane answer`; the next host delivers the answer by resuming the session.
-Only [`[questions] deadline`](@/docs/configuration.md#questions) ends an unanswered ask.
+**An ask outlives its agent.** It survives quitting the host; the next host delivers the answer by
+resuming the session. Only [`[questions] deadline`](@/docs/configuration.md#questions) ends it
+unanswered.
 
 ## What a driven agent is given
 
-- **Devplane's read-only MCP server.** Every session is offered `devplane mcp` (the same five tools as
-  the [plugin](@/docs/cli.md#devplane-mcp): inbox, change, explain, audit, reports), so the agent can
-  read the inbox or its own change's standing. None of them acts.
-- **`DEVPLANE_RUN`** in its environment, which `devplane report file` reads as the origin.
-- **A clean ending.** Stopping a run, or quitting the host, closes the session over the protocol
-  (`session/close`) where the agent offers it, before its processes are ended.
-- **Withdrawn questions leave the inbox.** When the agent cancels a permission request it had put to
-  you (it moved on, or the turn ended), the item goes away rather than waiting for an answer nothing
-  will read.
+- **The read-only MCP server** ([`devplane mcp`](@/docs/cli.md#devplane-mcp)): inbox, change,
+  explain, audit.
+- **`DEVPLANE_RUN`** in its environment, marking an agent session.
+- **A clean ending**: `session/close` where offered, before its processes end.
+- **Withdrawn questions leave the inbox** when the agent cancels a request.
 
 ## Transcripts
 
-A driven run has no window of its own, so Devplane keeps what the agent says on this machine. A
-repository can decline:
+Devplane keeps what a driven agent says, on this machine. To decline:
 
 ```toml
 # devplane.toml
-[transcripts]
-keep = false
+[agent]
+keep_transcripts = false
 ```
 
 ## Cost and context
 
-The protocol reports a running cost total and a context-window level. Devplane records the deltas,
-so cost adds up and context does not. The window size is the agent's own figure.
+Cost is recorded as deltas of the reported total; context is the agent's own level and window size.
 
 > [!WARNING]
-> The protocol makes cost **optional**. An agent that never reports it cannot be stopped by
-> `[budget] usd`, so `devplane change show` prints *not reported by this agent — a [budget] ceiling
-> cannot bite* rather than `$0.00`.
+> Cost is **optional** in ACP. An agent that never reports it cannot be stopped by `[budget] max_usd`;
+> `change show` prints *not reported by this agent — a [budget] ceiling cannot bite*.
 
 ## Resuming after a restart
 
-Quitting the host ends every agent process it drives; the branch, the worktree and the agent's own
-conversation survive, and the run is marked `interrupted`. To continue the same conversation:
+Quitting the host ends driven agents; branch, worktree and conversation survive, and the run is
+`interrupted`. To continue:
 
 ```sh
 devplane change resume <change>
 ```
 
-Devplane uses `session/resume` where the agent offers it, and `session/load` (replay suppressed)
-where it offers only that, as GitHub Copilot does. An agent that offers neither is told so; a fresh
-session is never passed off as a resume. Resuming is never automatic: it spends money.
+Uses `session/resume`, else `session/load` with replay suppressed (GitHub Copilot). With neither it
+says so; a fresh session is never passed off as a resume. Never automatic.
 
 ## Handing over
 
 ```sh
-devplane attach <run>    # this process becomes `claude --resume <session>`
+devplane run attach <run>    # this process becomes `claude --resume <session>`
 ```
 
-On Unix `attach` uses `exec`, so ctrl-C, resize and the alternate screen behave as without Devplane;
-on Windows it starts `claude` and waits. It needs the `claude` binary
-([finding it](@/docs/install.md#finding-the-claude-binary)).
-
-Watching sessions you started yourself covers a different set of vendors: see
+On Unix it `exec`s, so terminal behaviour is native; on Windows it starts `claude` and waits. Needs
+`claude` ([finding it](@/docs/install.md#finding-the-claude-binary)). Watching your own sessions:
 [Watching sessions](@/docs/observe.md).

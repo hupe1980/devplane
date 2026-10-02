@@ -4,6 +4,10 @@
 //! fail open. Nor may it read the clock or the disk: `now` and whatever a
 //! file said arrive as values, so the same inputs always derive the same
 //! board. Test modules (`#[cfg(test)]` onward) may do both.
+//!
+//! Also held over the record's shape: no stored metric about the person who
+//! answered, and `verified` is computed from gate exits, never stored. Those
+//! guards read the SQL and structs directly and carry a planted name.
 
 use std::path::Path;
 
@@ -551,7 +555,7 @@ fn the_speckit_gate_never_becomes_a_second_decider() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
 
     // The two command bodies, cut from the file they share.
-    let cli = std::fs::read_to_string(root.join("src/cli/change.rs")).expect("the CLI");
+    let cli = std::fs::read_to_string(root.join("src/cli/gate.rs")).expect("the CLI");
     let mut bodies = Vec::new();
     for name in ["pub async fn cmd_gate_run", "pub fn cmd_speckit_install"] {
         let start = cli
@@ -800,8 +804,19 @@ fn no_surface_branches_on_which_vendor_it_is() {
         "src/api.rs",
         "src/cli/board.rs",
         "src/cli/inbox.rs",
-        "src/cli/change.rs",
+        "src/cli/change/mod.rs",
+        "src/cli/change/start.rs",
+        "src/cli/change/read.rs",
+        "src/cli/change/review.rs",
+        "src/cli/change/steer.rs",
+        "src/cli/change/decide.rs",
         "src/cli/admin.rs",
+        "src/cli/agent.rs",
+        "src/cli/conf.rs",
+        "src/cli/doctor.rs",
+        "src/cli/forge.rs",
+        "src/cli/gate.rs",
+        "src/cli/project.rs",
         "src/render.rs",
     ];
 
@@ -982,6 +997,16 @@ fn every_read_of_a_stored_gate_report_is_honest_about_its_tree() {
             "the prompt context",
             "reads only a failure, and a stale failure still happened",
         ),
+        (
+            "src/core/base_checks.rs",
+            "base checks' key and counts",
+            "checks currency via Change::verdict; a result for another tree is stale",
+        ),
+        (
+            "src/base_checks.rs",
+            "the pair's JUnit comparison",
+            "runs only after key_now found the report current",
+        ),
     ];
 
     let mut readers = 0;
@@ -1056,30 +1081,30 @@ fn a_cost_that_was_never_received_is_not_rendered_as_an_amount() {
     );
 }
 
-/// `devplane quit` reads and says what it will end before stopping the host.
+/// `devplane down` reads and says what it will end before stopping the host.
 /// Checked in source because stdout order cannot show it.
 #[test]
 fn what_a_quit_ends_is_said_before_it_ends_it() {
     let src = std::fs::read_to_string("src/cli/mod.rs").expect("cli/mod.rs");
     let quit = src
-        .find("async fn cmd_quit")
-        .expect("`cmd_quit` is gone; update this guard or delete it");
+        .find("async fn cmd_down")
+        .expect("`cmd_down` is gone; update this guard or delete it");
     let body = &src[quit..];
     let stops = body
         .find("stop_and_wait()")
-        .expect("`cmd_quit` no longer stops anything; update this guard");
+        .expect("`cmd_down` no longer stops anything; update this guard");
     // The sentence is `Quitting::says`.
     let told = body[..stops].find(".says()");
     assert!(
         told.is_some(),
-        "`cmd_quit` asks the host to stop before it has said what that ends. \
+        "`cmd_down` asks the host to stop before it has said what that ends. \
          A person cannot consent to what they were not told."
     );
     // The inventory must be read before the stop too.
     let read = body[..stops].find("/api/quitting");
     assert!(
         read.is_some(),
-        "`cmd_quit` reads what it would stop only after stopping it"
+        "`cmd_down` reads what it would stop only after stopping it"
     );
 }
 
@@ -1158,91 +1183,44 @@ fn the_six_state_words_are_spelled_once_and_the_table_carries_them() {
     );
 }
 
-/// A report's finding and evidence are read only through `Report::quoted`, so
-/// they always render attributed and quoted. The store is exempt.
-#[test]
-fn a_reports_finding_is_read_only_where_it_is_quoted() {
-    let allowed = ["src/core/report.rs", "src/store.rs"];
-    let mut scanned = 0;
-    let mut offenders = Vec::new();
-    for file in walk("src") {
-        let text = std::fs::read_to_string(&file).expect("source");
-        if !text.contains("report::") && !text.contains("mod report") {
-            continue;
-        }
-        scanned += 1;
-        if allowed.iter().any(|a| file.ends_with(a)) {
-            continue;
-        }
-        let prod = production(&text);
-        for (n, line) in prod.lines().enumerate() {
-            for field in [".finding", ".evidence"] {
-                let hit = line.match_indices(field).any(|(i, _)| {
-                    !line[i + field.len()..]
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                });
-                if hit {
-                    offenders.push(format!("{file}:{}: {}", n + 1, line.trim()));
-                }
-            }
-        }
-    }
-    assert!(
-        scanned >= 6,
-        "the scan found {scanned} files that use reports, so it is not reading the crate"
-    );
-    assert!(
-        offenders.is_empty(),
-        "a report's finding or evidence is read outside `Report::quoted` — render it through \
-         that, or it can reach somebody unquoted: {offenders:?}"
-    );
-}
-
-/// The two forge writes — `github::create_issue` and `github::create_pr` —
-/// are each called once: the issue from `reports::open`, the pull request from
-/// `change::offer`, both reached only from a person's command or button. No
+/// The forge write — `github::create_pr` — is called once, from
+/// `change::offer`, reached only from a person's command or button. No
 /// program is run to write to a forge.
 #[test]
 fn nothing_writes_to_a_forge_but_a_persons_open() {
     let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-    for (write, home, within) in [
-        ("github::create_issue(", "src/reports.rs", "pubasyncfnopen("),
-        ("github::create_pr(", "src/change.rs", "pubasyncfnoffer("),
-    ] {
-        let mut sites = Vec::new();
-        for file in walk("src") {
-            let prod = squash(&production(
-                &std::fs::read_to_string(&file).expect("source"),
-            ));
-            let n = prod.matches(write).count();
-            if n > 0 {
-                sites.push((file, n, prod));
-            }
+    let (write, home, within) = ("github::create_pr(", "src/change.rs", "pubasyncfnoffer(");
+    let mut sites = Vec::new();
+    for file in walk("src") {
+        let prod = squash(&production(
+            &std::fs::read_to_string(&file).expect("source"),
+        ));
+        let n = prod.matches(write).count();
+        if n > 0 {
+            sites.push((file, n, prod));
         }
-        assert_eq!(
-            sites
-                .iter()
-                .map(|(f, n, _)| (f.as_str(), *n))
-                .collect::<Vec<_>>(),
-            [(home, 1)],
-            "`{write}…)` must be called exactly once, in {home}"
-        );
-        let (_, _, body) = &sites[0];
-        let open_at = body
-            .find(within)
-            .unwrap_or_else(|| panic!("{within} exists in {home}"));
-        let create_at = body.find(write).expect("the call");
-        let next_fn = body[open_at + 1..]
-            .find("pubasyncfn")
-            .map(|i| open_at + 1 + i)
-            .unwrap_or(body.len());
-        assert!(
-            (open_at..next_fn).contains(&create_at),
-            "the forge write `{write}…)` is not inside {within}…)"
-        );
     }
+    assert_eq!(
+        sites
+            .iter()
+            .map(|(f, n, _)| (f.as_str(), *n))
+            .collect::<Vec<_>>(),
+        [(home, 1)],
+        "`{write}…)` must be called exactly once, in {home}"
+    );
+    let (_, _, body) = &sites[0];
+    let open_at = body
+        .find(within)
+        .unwrap_or_else(|| panic!("{within} exists in {home}"));
+    let create_at = body.find(write).expect("the call");
+    let next_fn = body[open_at + 1..]
+        .find("pubasyncfn")
+        .map(|i| open_at + 1 + i)
+        .unwrap_or(body.len());
+    assert!(
+        (open_at..next_fn).contains(&create_at),
+        "the forge write `{write}…)` is not inside {within}…)"
+    );
     // Nothing starts a forge's command-line tool, for any purpose.
     for file in walk("src") {
         let prod = squash(&production(
@@ -1253,38 +1231,192 @@ fn nothing_writes_to_a_forge_but_a_persons_open() {
             "{file} runs `gh`"
         );
     }
+}
 
-    // Its callers: the route, and nothing else.
-    let mut callers = Vec::new();
-    for file in walk("src") {
-        let prod = production(&std::fs::read_to_string(&file).expect("source"));
-        if prod.contains("reports::open(") {
-            callers.push(file.clone());
+// ── The record's shape: the person is never measured, `verified` never stored ──
+
+/// Every column name in `schema.sql`, table by table.
+fn columns() -> Vec<(String, String)> {
+    let sql = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/schema.sql"))
+        .expect("schema.sql");
+    let mut out = Vec::new();
+    let mut table: Option<String> = None;
+    for raw in sql.lines() {
+        let line = raw.split("--").next().unwrap_or("").trim();
+        if let Some(rest) = line.strip_prefix("CREATE TABLE IF NOT EXISTS ") {
+            table = rest.split(['(', ' ']).next().map(str::to_string);
+            continue;
+        }
+        if line.starts_with(')') {
+            table = None;
+            continue;
+        }
+        if let Some(t) = &table
+            && let Some(name) = line.split_whitespace().next()
+            && name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+            && !matches!(name, "primary" | "unique" | "foreign" | "check")
+        {
+            out.push((t.clone(), name.to_string()));
         }
     }
-    assert_eq!(
-        callers,
-        ["src/api.rs"],
-        "reports::open is reached from somewhere but its route"
-    );
-    let api = production(&std::fs::read_to_string("src/api.rs").expect("api"));
-    assert_eq!(
-        api.matches("reports::open(").count(),
-        1,
-        "reports::open is called from more than one place in the API"
-    );
-    // And the route is named by the person's command and nothing else in src.
-    let mut named = Vec::new();
-    for file in walk("src") {
-        let prod = production(&std::fs::read_to_string(&file).expect("source"));
-        if prod.contains("/open\"") && prod.contains("reports/") {
-            named.push(file);
+    out
+}
+
+/// Every `pub <name>:` field in a struct under `src/core/`, with its file.
+fn core_fields() -> Vec<(String, String)> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).expect("src/core") {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
         }
     }
-    named.sort();
-    assert_eq!(
-        named,
-        ["src/api.rs", "src/cli/report.rs"],
-        "the open route is called from somewhere but `devplane report open`"
+    let mut files = Vec::new();
+    walk(
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/core")),
+        &mut files,
     );
+    let mut out = Vec::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap();
+        for line in text.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("pub ")
+                && let Some((name, _)) = rest.split_once(':')
+                && !rest.starts_with("fn ")
+                && !rest.starts_with("const ")
+                && !rest.starts_with("static ")
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+            {
+                out.push((f.display().to_string(), name.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// A name that measures the person rather than the tool or the question.
+fn measures_the_person(name: &str) -> bool {
+    const TELLS: &[&str] = &[
+        "response_time",
+        "answer_time",
+        "time_to_answer",
+        "answered_in",
+        "answer_rate",
+        "response_rate",
+        "streak",
+        "longest_wait",
+        "review_time",
+        "reviewed_for",
+        "time_spent",
+        "attention_score",
+        "reviewer_speed",
+        "review_duration",
+        "time_to_decision",
+        "reviewed_in",
+    ];
+    TELLS.iter().any(|t| name.contains(t))
+}
+
+#[test]
+fn the_record_measures_the_question_and_never_the_person() {
+    let cols = columns();
+    let fields = core_fields();
+    assert!(
+        cols.len() > 30,
+        "the schema reader found {} columns",
+        cols.len()
+    );
+    assert!(
+        fields.len() > 100,
+        "the field reader found {} fields",
+        fields.len()
+    );
+    // The guard notices what it is for.
+    assert!(measures_the_person("answer_rate"));
+    assert!(measures_the_person("longest_wait_secs"));
+    assert!(!measures_the_person("asked_at"));
+
+    let offending: Vec<String> = cols
+        .iter()
+        .map(|(t, c)| format!("{t}.{c}"))
+        .chain(fields.iter().map(|(f, n)| format!("{f}: {n}")))
+        .filter(|name| measures_the_person(name))
+        .collect();
+    assert!(
+        offending.is_empty(),
+        "a measurement of the person is being kept: {offending:?}"
+    );
+}
+
+#[test]
+fn verified_is_never_a_stored_value() {
+    let cols = columns();
+    assert!(!cols.is_empty());
+    assert!(
+        !cols.iter().any(|(_, c)| c == "verified"),
+        "a column called verified would be a flag somebody clears"
+    );
+    let fields = core_fields();
+    assert!(!fields.is_empty());
+    let stored: Vec<_> = fields.iter().filter(|(_, n)| n == "verified").collect();
+    assert!(
+        stored.is_empty(),
+        "verified is computed from gate exits against the tree, not carried as a field: {stored:?}"
+    );
+    // The sentence the principle uses is the one the certificate computes.
+    let work = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/core/change.rs"))
+        .unwrap();
+    assert!(
+        work.contains("pub fn of_at(\n        change: &Change,\n        declared: Declared<'_>,"),
+        "the completion is derived by a function of the work and the tree"
+    );
+}
+
+/// The review measures the change, never its reader: nothing on the review path
+/// names a review duration or reads a clock.
+#[test]
+fn the_review_times_nobody() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(measures_the_person("review_duration_secs"));
+    assert!(measures_the_person("time_to_decision"));
+
+    let mut sources: Vec<(String, String)> = vec![(
+        "src/core/review.rs".into(),
+        std::fs::read_to_string(root.join("src/core/review.rs")).expect("the review module"),
+    )];
+    let ui = root.join("ui/src/surfaces/change/review");
+    for e in std::fs::read_dir(&ui)
+        .expect("the review surface")
+        .flatten()
+    {
+        let p = e.path();
+        if p.is_file() {
+            sources.push((
+                p.display().to_string(),
+                std::fs::read_to_string(&p).unwrap_or_default(),
+            ));
+        }
+    }
+    assert!(
+        sources.len() >= 3,
+        "the sweep found {} files",
+        sources.len()
+    );
+    for (name, text) in &sources {
+        for word in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+            assert!(
+                !measures_the_person(&word.to_lowercase()),
+                "{name} names `{word}`, a measurement of the person reviewing"
+            );
+        }
+        for clock in ["Date.now()", "performance.now()", "new Date("] {
+            assert!(!text.contains(clock), "{name} reads a clock: `{clock}`");
+        }
+    }
 }

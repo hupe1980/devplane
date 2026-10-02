@@ -6,19 +6,14 @@ weight = 2
 group = "start"
 +++
 
-This walks one change from nothing to **verified** in a practice repository, so nothing of yours is
-at stake. About ten minutes once your agent is signed in.
+One change from nothing to **verified**, in a practice repository. About ten minutes.
 
 ## What you need
 
 - **git** and a POSIX shell (macOS or Linux; see the [platform table](@/docs/install.md#platforms)).
-- **Node 18 or later, with `npx`.** The built-in agents are npm packages Devplane starts with `npx`,
-  so the first start needs network access to npm.
-- **An agent, signed in.** This page uses Claude Code: install it and run `claude` once to log in.
-  Any [other agent](@/docs/agents.md) works with `--agent`.
-- **Two terminals.** The first runs the host; the second is where you work.
-- A GitHub sign-in (`devplane login github`), only if you want the Forge view or pull requests. Not
-  needed here.
+- **Node 18+ with `npx`**, and npm access on first start.
+- **An agent, signed in.** Here Claude Code (run `claude` once); [others](@/docs/agents.md) via `--agent`.
+- **Two terminals**: one for the host, one to work in.
 
 ## 1. Install and check
 
@@ -28,19 +23,17 @@ devplane --version
 devplane doctor
 ```
 
-Other ways in (npm, cargo, Windows) are on [Install](@/docs/install.md). `doctor` will say *host: not
-running* and *hooks: not installed*. Both are expected at this point.
+Other methods: [Install](@/docs/install.md). `doctor` says *host: not running* and *hooks: not
+installed*; both are expected.
 
 ## 2. Start the host (terminal 1)
 
 ```sh
-devplane open
+devplane up
 ```
 
-With no host running, this terminal **becomes** the host until `ctrl-c`, and your browser opens the
-workbench on the **Inbox**. Leave it running. Everything that starts or steers an agent needs it.
-
-If it says the port is taken, see [Troubleshooting](@/docs/troubleshooting.md#the-port-is-taken).
+This terminal **becomes** the host until `ctrl-c`, and the browser opens the workbench. Leave it
+running. Port taken? [Troubleshooting](@/docs/troubleshooting.md#the-port-is-taken).
 
 ## 3. Make a practice repository (terminal 2)
 
@@ -71,13 +64,12 @@ EOF
 check = ["sh test.sh"]
 ```
 
-Save that as `devplane.toml`, then commit everything: a change starts from a clean checkout, and the
-gate is read from what you committed, not from the agent's branch.
+Commit everything: a change needs a clean checkout, and the gate is read from your commit.
 
 ```sh
 git add -A && git commit -m "a greeting and its test"
-devplane check      # what the file will do
-devplane gate       # run the check here, now
+devplane config check  # what the file will do
+devplane gate          # run the check here, now
 ```
 
 ```console
@@ -87,17 +79,15 @@ failed    sh test.sh              exit 1
 check failed: sh test.sh
 ```
 
-Red, as it should be: that is the work.
+Red: that is the work.
 
 ## 5. Trust the repository
 
 ```sh
-devplane trust .
+devplane project trust .
 ```
 
-A headless agent runs a repository's own hooks and MCP servers without asking, so Devplane starts no
-agent in a repository you have not trusted. `trust` lists what is there (here: nothing), asks, and
-needs the host from step 2.
+It lists the repository's hooks and MCP servers (here none), then asks.
 
 ## 6. Start a change
 
@@ -112,25 +102,22 @@ started make greet.sh print 'Hello, <name>' …
   devplane change verify c-3f9a…
 ```
 
-Devplane made an isolated worktree on its own branch, started Claude Code in it with your sentence
-as the prompt, and will **run your `check` when the agent says it is finished**. Your own checkout is
-untouched. The last line carries the change's id; any unambiguous prefix of it works below, and
-`devplane change list` shows it again.
+A worktree on its own branch, Claude Code in it with your sentence, and **your `check` when it
+finishes**. Your checkout is untouched. Any unique prefix of the change id works; `devplane change
+list` shows it again.
 
 ## 7. Supervise
 
-The agent may ask before it edits a file or runs a command. Those questions land in the Inbox in the
-browser, and in the terminal:
+The agent's questions land in the browser's Inbox and here:
 
 ```sh
 devplane inbox
-devplane answer <ask> --allow          # the id is the one `inbox` prints
-devplane change show <id>              # state, runs, what the checks said
-devplane watch <run>                   # follow the agent, like tail -f (the run id is in `change show`)
+devplane inbox answer <ask> --allow  # the id is the one `inbox` prints
+devplane change show <id>            # state, runs, what the checks said
+devplane run watch <run>             # follow the agent, like tail -f (the run id is in `change show`)
 ```
 
-If the check is red when the agent stops, the failing lines go back to the same agent, a bounded
-number of times, then to you.
+A red check goes back to the agent a bounded number of times, then to you.
 
 ## 8. Verified
 
@@ -142,31 +129,29 @@ make greet.sh print 'Hello, <name>' …  c-3f9a…
   branch     change/make-greet-sh-print-hello-3f9a1c
 ```
 
-**Verified** means your `check` passed, and the tree it ran against (uncommitted files included) is
-the tree now. The agent saying it is done is not enough. Edit any file in the worktree and it reads
-*stale* until the check runs again (`devplane change verify <id>`). The state line says
-**verified · 1 check weakened** if the agent's diff loosened a test instead of fixing the code. See
+**Verified**: your `check` passed and the tree it ran against (uncommitted files included) is the tree
+now. Edit a file and it is *stale* until `devplane change verify <id>`. If the diff loosened a test
+instead of fixing the code, it reads **1 check weakened · verified**. See
 [Verified done](@/docs/verified-done.md).
 
 ## 9. Review, offer, finish
 
 ```sh
-devplane change review <id>     # weakened checks first, then every file
-devplane change offer <id>      # opens a pull request, or prints the push and the address
-devplane change export <id>     # the certificate: what ran, against which commit
-devplane change finish <id>     # accept it; removes nothing
-devplane change archive <id>    # remove the worktree; keep the branch and the record
+devplane change review <id>   # weakened checks first, then every file
+devplane change offer <id>    # commits the verified tree, then opens a pull request or prints how
+devplane change export <id>   # the certificate: what ran, against which commit
+devplane change finish <id>   # accept it; removes nothing
+devplane change archive <id>  # remove the worktree; keep the branch and the record
 ```
 
-The practice repository has no remote and no `[github] pull_request = true`, so `offer` pushes
-nothing and prints the `git push` line and the address that opens the pull request. In the workbench the same change is under
-**Changes**, with its Review, Gates and Ledger.
+With no remote and no `[github] pull_request = true`, `offer` commits and prints the `git push` line.
+The workbench shows the change under **Changes**.
 
 ## 10. Ask afterwards
 
 ```sh
-devplane audit                # everything, newest first
-devplane audit --without-me   # only what a rule, a clock or nobody decided instead of you
+devplane audit               # everything, newest first
+devplane audit --without-me  # only what a rule, a clock or nobody decided instead of you
 ```
 
 ```console
@@ -175,21 +160,17 @@ devplane audit --without-me   # only what a rule, a clock or nobody decided inst
 2026-09-26T18:02:40 person   agent:tool.use    Edit: greet.sh
 ```
 
-Every decision names its authority (`person`, `rule`, `timer`, `nobody` or `devplane`). See
-[The decision log](@/docs/decisions.md).
+See [The decision log](@/docs/decisions.md).
+
+## 11. Stop
+
+`devplane down` in any terminal, or **Quit** (⌘Q or the tray) in the desktop window. Either says what it stops first; a
+run it stops resumes with `devplane change resume`.
 
 ## Next
 
-- **Your own repositories.** The same steps: a `devplane.toml` with your real `check`, committed,
-  then `trust` and `change start`. Add prohibitions with [`[policy]`](@/docs/permissions.md).
-- **Sessions you start yourself.** `devplane connect claude` installs hooks into your Claude Code
-  user settings (it shows the diff and asks), so `devplane ls` and the Inbox show your terminal and
-  editor sessions too, with cost and context. See [Watching sessions](@/docs/observe.md).
-- **A spec.** `devplane change start --spec specs/001-… --task REQ-3 "…"`. See
-  [Working to a specification](@/docs/specs.md).
-- **The window, surface by surface.** [The workbench tour](@/docs/workbench.md) — the Inbox,
-  Changes, Sessions, Specifications, the Ledger, Forge, Reports and Setup.
-- **Something wrong?** [Troubleshooting](@/docs/troubleshooting.md).
-
-Reading commands (`ls`, `inbox`, `audit`, `change show`, …) work with the host stopped; a command
-that starts, steers or answers a driven agent needs it and says so.
+- **Your repositories**: the same steps with your real `check`; prohibitions in [`[policy]`](@/docs/permissions.md).
+- **Your own sessions**: `devplane agent connect claude` ([Watching sessions](@/docs/observe.md)).
+- **A spec**: [Working to a specification](@/docs/specs.md).
+- **The interface**: [the workbench tour](@/docs/workbench.md).
+- **Something wrong**: [Troubleshooting](@/docs/troubleshooting.md).

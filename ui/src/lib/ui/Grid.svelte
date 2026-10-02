@@ -41,10 +41,13 @@
 <script lang="ts" generics="T">
   // The data grid every workbench list uses. Columns sort and resize (widths
   // remembered per grid); rows group with a count in each header, and a fold
-  // never hides without its number; ↑/↓, j/k and Enter walk rows when focused.
+  // never hides without its number. The keys are not the grid's: a surface
+  // answers the registry's list keys (`bindList`, `lib/cursor`) over `order`,
+  // the rows as shown, so `j`/`k` work with focus anywhere on the page.
   //
-  // It never re-sorts the host's ranking unless a person clicks a header.
-  import type { Snippet } from "svelte";
+  // It never re-sorts the host's ranking unless a person clicks a header. A
+  // cell cut short says itself whole on hover.
+  import { untrack, type Snippet } from "svelte";
   import Icon from "./Icon.svelte";
 
 
@@ -57,6 +60,7 @@
     group = undefined,
     groupLabel = undefined,
     selected = $bindable(null),
+    order = $bindable([]),
     open = undefined,
     empty = undefined,
     dense = false,
@@ -70,6 +74,9 @@
     group?: (row: T) => string;
     groupLabel?: Snippet<[string, number]>;
     selected?: string | null;
+    /// The keys of the rows as shown — sorted, grouped, folds skipped — for
+    /// the surface's list keys to walk.
+    order?: string[];
     open?: (row: T) => void;
     empty?: Snippet;
     dense?: boolean;
@@ -140,26 +147,29 @@
   });
   const visible = $derived(groups.flatMap((g) => (folded[g.name] ? [] : g.rows)));
 
-  // ── the keyboard ─────────────────────────────────────────────────────────
+  // ── the rows as shown, for the keys; the selection kept in view ──────────
   let body: HTMLElement | undefined = $state();
-  function keydown(e: KeyboardEvent) {
-    if (visible.length === 0) return;
-    const i = visible.findIndex((r) => key(r) === selected);
-    let next = i;
-    if (e.key === "ArrowDown" || e.key === "j") next = Math.min(visible.length - 1, i + 1);
-    else if (e.key === "ArrowUp" || e.key === "k") next = Math.max(0, i === -1 ? 0 : i - 1);
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = visible.length - 1;
-    else if (e.key === "Enter" && i !== -1) {
-      e.preventDefault();
-      open?.(visible[i]);
-      return;
-    } else return;
-    e.preventDefault();
-    selected = key(visible[next]);
-    queueMicrotask(() =>
-      body?.querySelector<HTMLElement>(`[data-key="${CSS.escape(selected ?? "")}"]`)?.scrollIntoView({ block: "nearest" }),
-    );
+  $effect(() => {
+    const next = visible.map(key);
+    if (next.join("\u0000") !== untrack(() => order).join("\u0000")) order = next;
+  });
+  $effect(() => {
+    const at = selected;
+    if (!at || !body) return;
+    body.querySelector<HTMLElement>(`[data-key="${CSS.escape(at)}"]`)?.scrollIntoView({ block: "nearest" });
+  });
+
+  /// A cell cut short carries its whole text as a title, read when the
+  /// pointer arrives so a resize is accounted for.
+  function whole(el: HTMLElement) {
+    const on = () => {
+      const cut = el.scrollWidth > el.clientWidth;
+      const text = el.textContent?.trim() ?? "";
+      if (cut && text) el.title = text;
+      else el.removeAttribute("title");
+    };
+    el.addEventListener("pointerenter", on);
+    return { destroy: () => el.removeEventListener("pointerenter", on) };
   }
 </script>
 
@@ -170,7 +180,6 @@
   aria-label={label}
   aria-rowcount={rows.length}
   tabindex="0"
-  onkeydown={keydown}
   style="--cols: {template}"
 >
   <div class="head" role="row">
@@ -220,6 +229,7 @@
         {/if}
         {#if !folded[g.name]}
           {#each g.rows as r (key(r))}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div
               class="row"
               role="row"
@@ -228,10 +238,9 @@
               tabindex="-1"
               onclick={() => (selected = key(r))}
               ondblclick={() => open?.(r)}
-              onkeydown={() => {}}
             >
               {#each columns as c (c.key)}
-                <div class="td" class:end={c.align === "end"} class:mono={c.mono} role="gridcell">
+                <div class="td" class:end={c.align === "end"} class:mono={c.mono} role="gridcell" use:whole>
                   {@render cell(r, c)}
                 </div>
               {/each}

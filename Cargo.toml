@@ -1,9 +1,9 @@
 [package]
 name = "devplane"
 description = "Know when an agent's work is actually done. Run any ACP agent in its own worktree, verify its change with your own checks run outside the agent, see the weakened tests first, and keep the record of who decided what. Local-first, one binary, no account."
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hupe1980/devplane"
 homepage = "https://hupe1980.github.io/devplane"
@@ -93,6 +93,9 @@ keyring = { version = "3", default-features = false, features = ["apple-native",
 rmcp = { version = "3.4.0", features = ["server", "transport-io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The JUnit XML a project's `check` writes, read to name tests. Default
+# features off: no encoding tables, no serde; it depends only on `memchr`.
+quick-xml = { version = "0.42", default-features = false }
 # One-way derivation of the telemetry-only token from the control token.
 sha2 = "0.10"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "json"] }

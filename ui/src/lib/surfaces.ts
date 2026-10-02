@@ -109,8 +109,11 @@ export type Surface = {
   /// The sidebar list for a collection surface, given the same props plus
   /// `focus` and `open(focus, pin)`; the pick opens as an editor tab. Without
   /// one the surface fills the editor.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  side?: Component<any>;
+  side?: Loader;
+  /// Whether a focus opens a document that wants the room: in a window under
+  /// 1100 px the sidebar folds away while one is open (a change, a
+  /// specification), and the sidebar toggle brings it back.
+  document?: boolean;
 
   /// What a tab showing this surface on `focus` is called — a change's title
   /// rather than its id. Defaults to the surface's title.
@@ -124,9 +127,18 @@ export type Surface = {
   /// the region asks the registry instead of naming a surface.
   holds?: string;
 
+  /// The page, loaded when it is first shown: each surface is its own chunk,
+  /// so the first paint carries only the frame and the surface it opens on.
+  page?: Loader;
+  /// The page, already loaded — for a surface that is not split out. One of
+  /// `page` and `component` is given.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  component: Component<any>;
+  component?: Component<any>;
 };
+
+/// A component loaded on first use — `() => import("./Page.svelte")`.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type Loader = () => Promise<{ default: Component<any> }>;
 
 /// One fact in the status bar.
 export type StatusItem = {

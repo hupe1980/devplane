@@ -50,13 +50,15 @@ jobs:
       - name: Build the interface
         run: cd ui && npm ci && npm run build && git status --porcelain -- dist && test -z "$(git status --porcelain -- dist)"
 
-      # Fails when the checked-in wire types differ from what Rust generates —
-      # a new type included: `git diff` alone never sees an untracked file.
+      # Fails when the checked-in wire types differ from what Rust generates:
+      # a type missing, drifted, or checked in but no longer generated. The same
+      # diff as `just wire-check`; it is not part of `cargo test` because it
+      # compiles the crate a second time.
       - name: Check the generated wire types
         run: |
-          TS_RS_EXPORT_DIR=ui/src cargo test --features typescript --quiet export_bindings
-          git status --porcelain -- ui/src/wire
-          test -z "$(git status --porcelain -- ui/src/wire)"
+          tmp=$(mktemp -d)
+          TS_RS_EXPORT_DIR="$tmp" cargo test --locked --features typescript --quiet export_bindings
+          diff -r ui/src/wire "$tmp/wire"
 
       - name: Type-check the interface
         run: cd ui && npx svelte-check --tsconfig ./tsconfig.json
@@ -74,6 +76,70 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  # `devplane verify` on this repository's own pull requests: the base's
+  # `check` from devplane.toml, the weakened checks first in the job summary.
+  # Until a release carries `verify`, the binary is built from the merge base —
+  # never from the pull request's own code, which would let it change the
+  # verifier that judges it — and the action runs with `install: "false"`.
+  # Once a release carries it, the build steps go and `version:` pins it.
+  verify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the merge base must be in the checkout
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: verify
+          workspaces: |
+            . -> target
+            ${{ runner.temp }}/devplane-base -> target
+
+      - name: Install the app's Linux libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the interface's dependencies
+        run: cd ui && npm ci
+
+      - name: Build devplane from the merge base
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          from="$(git merge-base "origin/$BASE" HEAD)"
+          git worktree add --detach "$RUNNER_TEMP/devplane-base" "$from"
+          cd "$RUNNER_TEMP/devplane-base"
+          cargo build --release --locked --bin devplane
+          echo "$RUNNER_TEMP/devplane-base/target/release" >> "$GITHUB_PATH"
+
+      # The pull request that adds `verify` is judged by a base that has none.
+      - name: Does the base's build carry verify
+        id: carries
+        run: |
+          if devplane verify --help > /dev/null 2>&1; then
+            echo "verify=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::The base's build has no \`devplane verify\` yet; it runs from the next pull request."
+            echo "verify=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: ./
+        if: steps.carries.outputs.verify == 'true'
+        with:
+          install: "false"
 
   # The `app` feature, on macOS (no display server needed; the tests open no window).
   app:

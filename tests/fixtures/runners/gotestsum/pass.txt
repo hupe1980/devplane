@@ -1,0 +1,15 @@
+PASS a.TestOne (0.00s)
+PASS a.TestSub/x (0.00s)
+PASS a.TestSub/y (0.00s)
+PASS a.TestSub (0.00s)
+SKIP a.TestSkip (0.00s)
+PASS a.TestFails (0.00s)
+PASS a
+PASS b.TestB (0.00s)
+PASS b
+
+=== Skipped
+=== SKIP: a TestSkip (0.00s)
+    a_test.go:5: later
+
+DONE 7 tests, 1 skipped in 0.278s

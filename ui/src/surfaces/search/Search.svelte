@@ -1,6 +1,7 @@
 <script lang="ts">
   // Search every session's tool calls, questions and errors. It says that
   // prompts and replies are never recorded, so cannot be found.
+  import Inline from "../../lib/ui/Inline.svelte";
   import { untrack } from "svelte";
   import { api } from "../../lib/api";
   import { failure } from "../../lib/resource.svelte";
@@ -72,7 +73,7 @@
     <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
   </form>
   <p class="note">Tool calls, questions and errors from every session. Prompts and replies are never recorded, so they are never found.</p>
-  {#if said}<p class="fail">{said}</p>{/if}
+  {#if said}<p class="fail"><Inline text={said} /></p>{/if}
 
   {#if ran && hits.length === 0 && !busy}
     <Empty icon="search" title="Nothing matched" body={`Nothing any session recorded contains “${ranFor}”.`} />

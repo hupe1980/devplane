@@ -51,7 +51,7 @@ impl Default for Health<'_> {
     }
 }
 
-/// Everything `devplane modes` and `/api/modes` say: which projects decide
+/// Everything `devplane status --modes` and `/api/modes` say: which projects decide
 /// without you, and what can answer in your name. One type for writer and
 /// reader, so a renamed field is a compile error.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -66,7 +66,7 @@ pub struct Modes {
     /// What can answer a question in your name on this machine, if anything.
     pub question_clock: Option<crate::core::clock::ClockLine>,
     /// Live sessions whose environment was read; one started before
-    /// `devplane connect` has no reading.
+    /// `devplane agent connect` has no reading.
     pub clock_read: usize,
     pub clock_unread: usize,
 }
@@ -1360,7 +1360,7 @@ mod tests {
         let detail = item.detail.as_deref().unwrap_or_default();
         assert!(detail.contains("line 12"), "{detail}");
         assert!(
-            detail.contains("devplane check /repos/payments-api"),
+            detail.contains("devplane config check /repos/payments-api"),
             "{detail}"
         );
         // Nothing to click: committed rules are not rewritten from the inbox.

@@ -1,0 +1,36 @@
+[1m[92m   Compiling[0m rs v0.1.0 (/work/rs)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 0.49s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/rs-19626d093cde6369)
+
+running 3 tests
+test tests::unit_ignored ... ignored
+test tests::unit_fails_when_asked ... ok
+test tests::unit_one ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/a.rs (target/debug/deps/a-5ee722162dcae8b3)
+
+running 2 tests
+test a1 ... ok
+test a2 ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/b.rs (target/debug/deps/b-8750219761fb9925)
+
+running 3 tests
+test b1 ... ok
+test login_b2 ... ok
+test login_b3 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m rs
+
+running 1 test
+test src/lib.rs - add (line 3) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.46s; merged doctests compilation took 0.19s

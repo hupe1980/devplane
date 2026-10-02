@@ -31,15 +31,15 @@ it `0600`.
   says which process holds the port.
 - The telemetry receiver needs a token too, because a forged observation corrupts the record — but
   **not the one above.** Claude Code hands its settings' `env` block to every tool call, so whatever
-  `connect` writes there the agent can read. It writes a **telemetry-only token**, derived one way
+  `agent connect` writes there the agent can read. It writes a **telemetry-only token**, derived one way
   from the real one and kept in `~/.devplane/telemetry-token`: it is accepted on the telemetry
   routes and refused everywhere else, so an agent holding it can report telemetry and nothing more.
-  `devplane connect claude` writes the endpoint and `OTEL_EXPORTER_OTLP_HEADERS` together;
-  `disconnect` removes both.
+  `devplane agent connect claude` writes the endpoint and `OTEL_EXPORTER_OTLP_HEADERS` together;
+  `agent disconnect` removes both.
 - The workbench is served with a Content-Security-Policy of `'self'` only, `no-referrer` and
   `nosniff`: the page renders agent-written text, and a script that got in could reach no other
   origin.
-- `devplane open` hands the token to the workbench once in the URL; the page removes it from the
+- `devplane up` hands the token to the workbench once in the URL; the page removes it from the
   address bar and sends it as a header from then on.
 
 To point Claude Code at Devplane by hand, set both:
@@ -52,13 +52,13 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer $(cat ~/.devplane/teleme
 ## The trust gate
 
 ```sh
-devplane trust --dry-run ~/src/someone-elses-repo   # show, trust nothing
-devplane trust .                                    # show, then ask
-devplane trust --yes .                              # a directory you wrote
+devplane project trust --dry-run ~/src/someone-elses-repo  # show, trust nothing
+devplane project trust .                                   # show, then ask
+devplane project trust --yes .                             # a directory you wrote
 ```
 
 A headless agent runs **the repository's own hooks and MCP servers** with no dialog, so `devplane
-change start` refuses an untrusted repository. `trust` first shows every `command` hook and its
+change start` refuses an untrusted repository. `project trust` first shows every `command` hook and its
 event, every MCP server (unpinned ones named), every skill that pre-approves the shell, and every
 allow rule in the repository's agent settings that grants more than it looks like. A worktree
 inherits the trust of the checkout that owns it. Untrusted projects are still observed.
@@ -81,11 +81,11 @@ The rules are in [Permissions](@/docs/permissions.md). For security:
 **No hook can enforce its own presence**: a timed-out or uninstalled hook does not block. So
 `devplane doctor` probes the installed gate, and a running host does the same on a timer and raises a
 critical item when it stops answering. Codex skips a hook you have not approved in its own dialog;
-`devplane connect codex` says so.
+`devplane agent connect codex` says so.
 
 ## An agent cannot approve itself — mostly
 
-`devplane answer --allow` is refused inside an agent session: when `CLAUDECODE`,
+`devplane inbox answer --allow` is refused inside an agent session: when `CLAUDECODE`,
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `DEVPLANE_RUN`, or a Codex or Copilot session
 variable (`CODEX_SANDBOX`, `CODEX_THREAD_ID`, `COPILOT_CLI`, …) is set. `--deny` still works.
 `change offer`, `change finish`, `change archive` and `change review --seen` are refused the same
@@ -97,8 +97,8 @@ reading its token, or editing its repository's `devplane.toml` — by a file too
 
 **The limit:** the token in `~/.devplane/token` is readable by the agent's user, which is you. The
 built-in rule reads the command line a gated tool call runs; a script the agent runs that opens the
-file itself is not stopped, and neither is an agent that unsets those variables. A `never_auto` rule
-on `Bash(devplane answer *)` narrows the gap; it does not close it.
+file itself is not stopped, and neither is an agent that unsets those variables. A `deny` rule
+on `Bash(devplane inbox answer *)` narrows the gap; it does not close it.
 
 ## Gates and setup are project-authored
 
@@ -124,13 +124,13 @@ outside the checkout, a symlink pointing out of the repository (`config/local.en
 ## Telemetry stays local and redacted
 
 Devplane never sets `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_ASSISTANT_RESPONSES` or
-`OTEL_LOG_TOOL_CONTENT`, and drops account and email attributes at ingest. `connect` shows the
+`OTEL_LOG_TOOL_CONTENT`, and drops account and email attributes at ingest. `agent connect` shows the
 environment block before writing it and does not override a collector you configured.
 
 ## Transcripts
 
 What a **driven** agent says is stored in `~/.devplane/devplane.db` and pruned after 30 days by the
-sweep a host runs when it starts. A repository can opt out with `[transcripts] keep = false`. Watched sessions carry no prose.
+sweep a host runs when it starts. A repository can opt out with `[agent] keep_transcripts = false`. Watched sessions carry no prose.
 
 ## Agent supply chain
 

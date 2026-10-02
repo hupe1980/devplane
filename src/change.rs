@@ -45,10 +45,6 @@ pub struct StartRequest {
     /// Which tasks of the specification to send: a token, or `file:line`.
     /// Resolved before anything is created, so an unknown selector refuses.
     pub tasks: Vec<String>,
-    /// The report a person started this from. Its prompt is the report,
-    /// quoted and never resolved as a template, so a `{placeholder}` in it is
-    /// text and cannot refuse the start.
-    pub from_report: Option<crate::core::ReportId>,
 }
 
 /// The tasks a set of selectors names in a specification folder.
@@ -142,11 +138,7 @@ pub async fn preflight(
         let agent_id = ask
             .agent
             .map(str::to_string)
-            .or_else(|| {
-                config
-                    .as_ref()
-                    .and_then(|c| c.project.default_agent.clone())
-            })
+            .or_else(|| config.as_ref().and_then(|c| c.agent.default.clone()))
             .unwrap_or_else(|| "claude".into());
         let agent_available = crate::acp::resolve(&agent_id, &state.agents).is_some();
         // Unreadable is not clean: defaulting to clean would reassure on the
@@ -388,12 +380,9 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<ChangeId> {
     // Resolved before the change exists, so the preflight, the agent and the
     // record see the same prompt and an unfillable placeholder refuses here.
     // Tasks go in via `{tasks}` or are appended as a block.
-    let prompt = match req.from_report {
-        Some(_) => crate::core::context::with_stop_and_say(&req.prompt),
-        None => crate::driven::resolve_prompt(state, &root, &req.prompt, &sent)
-            .await
-            .map_err(crate::driven::cannot_send)?,
-    };
+    let prompt = crate::driven::resolve_prompt(state, &root, &req.prompt, &sent)
+        .await
+        .map_err(crate::driven::cannot_send)?;
     let mut change = Change::new(project_id.clone(), req.title.clone(), prompt.clone());
     change.spec = req.spec.clone();
     // The plan at start, read from the repository root (the worktree does not
@@ -401,7 +390,6 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<ChangeId> {
     change.spec_at_start = req.spec.as_deref().and_then(|spec| {
         crate::spec::Spec::read(&root, spec, &config.spec.open_questions).fingerprint()
     });
-    change.from_report = req.from_report.clone();
 
     // Named the way Claude Code names its own worktrees, so its cleanup sweep
     // understands both.
@@ -422,6 +410,7 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<ChangeId> {
         change.worktree = Some(dir.clone());
         change.branch = Some(branch);
         change.tree_now = crate::git::commit_stamp(&dir).await;
+        change.tree_as_of = Some(jiff::Timestamp::now());
 
         // `.worktreeinclude` is the vendor's file, so the behaviour survives
         // uninstalling Devplane.
@@ -451,7 +440,10 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<ChangeId> {
                 &dir,
                 config.gates.timeout,
                 1,
-                &crate::core::caches::env_for(&root, &config.workspace.share),
+                &crate::gates::GateInput::env(crate::core::caches::env_for(
+                    &root,
+                    &config.workspace.share,
+                )),
             )
             .await;
             if !report.passed() {
@@ -477,7 +469,7 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<ChangeId> {
 
     let agent_id = req
         .agent
-        .or_else(|| config.project.default_agent.clone())
+        .or_else(|| config.agent.default.clone())
         .unwrap_or_else(|| "claude".into());
     let spec = crate::acp::resolve(&agent_id, &state.agents)
         .with_context(|| format!("unknown agent `{agent_id}`"))?;
@@ -578,6 +570,7 @@ pub async fn adopt(state: &Shared, req: AdoptRequest) -> Result<ChangeId> {
         change.spec = Some(spec);
     }
     change.tree_now = crate::git::commit_stamp(&dir).await;
+    change.tree_as_of = Some(jiff::Timestamp::now());
     change.worktree = Some(dir);
     change.updated_at = jiff::Timestamp::now();
 
@@ -704,16 +697,20 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
         &dir,
         config.gates.timeout,
         attempt,
-        &crate::core::caches::env_for(&root, &config.workspace.share),
+        &check_input(&root, &config),
     )
     .await;
     stamp_spec(state, &change_id, &mut report, &dir, &config).await;
+    report.base_commit = merge_base_of(&root, &dir).await;
     let passed = report.passed();
     let feedback = report.feedback();
     let summary = report.summary();
 
     record_gate(state, &change_id, &report).await;
     push_gate(state, &change_id, report).await;
+    // Before every return below: in auto mode base checks follow a passing
+    // `check`, in the background, and nothing here waits on them.
+    crate::base_checks::after_check(state, &change_id, &config, passed);
 
     if passed {
         tracing::info!(change = %change_id, "gates passed");
@@ -723,21 +720,8 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
         return;
     }
 
-    use crate::core::config::OnFail;
-    match config.gates.on_fail {
-        OnFail::Ignore => set_waiting(state, &change_id, Some(Waiting::Person)).await,
-        OnFail::Escalate => {
-            tracing::info!(change = %change_id, %summary, "gates failed; asking a human");
-            stop(
-                state,
-                &change_id,
-                Stopped::GateFailed {
-                    gate: "check".into(),
-                },
-            )
-            .await;
-        }
-        OnFail::Feedback if rounds < config.gates.max_feedback_rounds => {
+    match rounds < config.gates.max_feedback_rounds {
+        true => {
             // Back to the same session, which still has the context.
             let round = {
                 let mut changes = state.changes.lock().await;
@@ -762,7 +746,7 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
                 .await;
             }
         }
-        OnFail::Feedback => {
+        false => {
             // Budget spent: an agent and a gate can disagree forever.
             tracing::info!(change = %change_id, %summary, "feedback budget spent");
             stop(
@@ -999,12 +983,46 @@ pub(crate) fn may_run_gates(c: &Change) -> bool {
     !matches!(c.waiting, Some(Waiting::Gates)) && !c.is_settled()
 }
 
-/// Appends a gate report and takes its tree as the current tree.
+/// What `check` runs with: the shared caches and the declared JUnit paths.
+pub(crate) fn check_input(root: &Path, config: &ProjectConfig) -> crate::gates::GateInput {
+    crate::gates::GateInput {
+        env: crate::core::caches::env_for(root, &config.workspace.share),
+        junit: config.gates.junit.clone(),
+    }
+}
+
+/// Where the checkout at `dir` left the base branch the review reads it
+/// against: stamped on every `check` report, its one home. `None` when they
+/// share no history.
+pub(crate) async fn merge_base_of(root: &Path, dir: &Path) -> Option<String> {
+    let base = crate::view::base_of(Some(root), dir).await;
+    crate::git::merge_base(dir, &base)
+        .await
+        .ok()
+        .map(|(_, from)| from)
+}
+
+/// Appends a gate report and takes its tree as the current tree. Only the
+/// latest `check` report keeps JUnit test names; older ones keep their counts.
 pub(crate) async fn push_gate(state: &Shared, id: &ChangeId, report: crate::core::GateReport) {
     let mut changes = state.changes.lock().await;
     if let Some(c) = changes.get_mut(id) {
+        if report.gate == crate::core::change::CHECK {
+            for g in c.gates.iter_mut().filter(|g| g.gate == report.gate) {
+                for j in &mut g.junit {
+                    if let crate::core::testcount::junit::JunitRead::Read { cases, dropped, .. } =
+                        &mut j.read
+                        && !cases.is_empty()
+                    {
+                        cases.clear();
+                        *dropped = true;
+                    }
+                }
+            }
+        }
         if report.commit.is_some() {
             c.tree_now = report.commit.clone();
+            c.tree_as_of = Some(report.at);
         }
         c.gates.push(report);
         c.updated_at = jiff::Timestamp::now();
@@ -1034,14 +1052,20 @@ pub(crate) async fn refresh_tree(state: &Shared, id: &ChangeId) {
     };
     let Some(dir) = dir else { return };
     let stamp = crate::git::commit_stamp(&dir).await;
+    let read_at = jiff::Timestamp::now();
     let saved = {
         let mut changes = state.changes.lock().await;
         match changes.get_mut(id) {
             Some(c) if c.tree_now != stamp => {
                 c.tree_now = stamp;
+                c.tree_as_of = Some(read_at);
                 Some(c.clone())
             }
-            _ => None,
+            Some(c) => {
+                c.tree_as_of = Some(read_at);
+                None
+            }
+            None => None,
         }
     };
     if let Some(c) = saved {
@@ -1090,10 +1114,21 @@ pub(crate) async fn record_gate(state: &Shared, id: &ChangeId, report: &crate::c
 pub enum Offer {
     /// The branch was pushed and the pull request opened, as the person's
     /// configuration allows.
-    Opened { pull_request: PullRequestRef },
+    Opened {
+        pull_request: PullRequestRef,
+        /// The commit this offer wrote, when the checked tree was not yet one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        committed: Option<String>,
+    },
     /// The push command to paste and the address that opens the pull request
     /// in a browser, because the configuration does not allow Devplane to push.
-    Commands { push: String, create: String },
+    Commands {
+        push: String,
+        create: String,
+        /// The commit this offer wrote, when the checked tree was not yet one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        committed: Option<String>,
+    },
 }
 
 /// The refusal to offer a change whose diff weakened a check no person has
@@ -1133,13 +1168,26 @@ impl std::fmt::Display for WeakenedUnseen {
 
 impl std::error::Error for WeakenedUnseen {}
 
-/// Offers a change: pushes the branch and opens the pull request (or records
-/// the one already open for the branch), or hands back the push command and
-/// the address that opens the pull request in a browser.
+/// Offers a change: commits the checked tree, then pushes the branch and
+/// opens the pull request (or records the one already open for the branch),
+/// or hands back the push command and the address that opens the pull request
+/// in a browser.
 ///
 /// Always a person's action, and it pushes only when the person's checkout
-/// sets `[github] pull_request = true`.
+/// sets `[github] pull_request = true`. Agents do not commit, so the offer
+/// does: one commit whose tree is exactly the one the last passing `check`
+/// ran against, which is what makes the certificate checkable against the
+/// pull request's head.
 pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
+    // The tree as it is now, not as the last tick saw it.
+    refresh_tree(state, id).await;
+    // Base checks first, once per tree, unless the project turned them off:
+    // a base test that fails on this change is a row of the refusal below.
+    // Anything that stops them from running is said on the change and does
+    // not stop the offer.
+    if let Err(e) = crate::base_checks::ensure(state, id).await {
+        tracing::warn!(change = %id, error = %e, "base checks did not run before the offer");
+    }
     let change = {
         let changes = state.changes.lock().await;
         changes.get(id).cloned().context("no such change")?
@@ -1149,10 +1197,9 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
     // clicked, so a second window cannot get past it.
     if let Some(dir) = change.worktree.as_deref().filter(|d| d.is_dir()) {
         let root = governing_root(state, id).await;
-        // An unreadable diff refuses: it is not "nothing weakened".
-        let rows = crate::view::weakened_in(root.as_deref(), dir)
-            .await
-            .map_err(|e| anyhow::anyhow!("the change's diff could not be read: {e:#}"))?;
+        // An unreadable diff or configuration refuses: it is not "nothing
+        // weakened".
+        let rows = crate::view::weakened_in(root.as_deref(), dir, Some(&change)).await?;
         let seen = state
             .store
             .weakened_seen(id.as_str())
@@ -1185,17 +1232,11 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
         Some(b) => b.clone(),
         None => crate::git::base_branch(&root).await,
     };
-    // Refused, naming which: a dirty worktree would offer a branch without the
-    // work the gates saw; a branch with nothing past its base offers nothing.
-    let st = crate::git::status(&dir)
-        .await
-        .context("reading the worktree's status")?;
-    if !st.is_clean() {
-        bail!(
-            "the worktree has {} uncommitted or untracked file(s); commit them on `{branch}` \
-             before offering, or the pull request will not carry the work",
-            st.changed_files + st.untracked_files
-        );
+    // The tree the gates saw becomes the branch's head, or the offer is
+    // refused; a branch with nothing past its base offers nothing.
+    let committed = commit_checked_tree(&change, &dir, &branch).await?;
+    if committed.is_some() {
+        refresh_tree(state, id).await;
     }
     let ahead = crate::git::commits_ahead(&dir, &base).await?;
     if ahead == 0 {
@@ -1204,8 +1245,6 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
     let body = pr_body(state, id).await;
 
     if !config.github.pull_request {
-        // Offered either way, and a report this change answers is answered.
-        crate::reports::fixed_by(state, id).await;
         // GitHub's own "open a pull request" page for the branch, prefilled:
         // the person pressing *Create* there is the person pressing the button.
         let create = match crate::github::remote::of_dir(&dir).await {
@@ -1215,6 +1254,7 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
             }
         };
         return Ok(Offer::Commands {
+            committed,
             push: format!(
                 "git -C {} push --set-upstream origin {}",
                 shell_word(&dir.display().to_string()),
@@ -1268,7 +1308,7 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
         &base,
         &change.title,
         &body,
-        config.github.draft,
+        true,
     )
     .await
     .context("opening the pull request")?;
@@ -1286,11 +1326,10 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
                 pr.url.clone(),
                 "done",
             )
-            .because(match (offered.existed, config.github.draft) {
+            .because(match offered.existed {
                 // Opened by hand or by an earlier offer: recorded, not reopened.
-                (true, _) => "offered; the branch already had this pull request open",
-                (false, true) => "offered as a draft",
-                (false, false) => "offered",
+                true => "offered; the branch already had this pull request open",
+                false => "offered as a draft",
             })
             .for_change(id),
         )
@@ -1317,8 +1356,65 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
         persist(state, &c).await;
         state.notify_changed();
     }
-    crate::reports::fixed_by(state, id).await;
-    Ok(Offer::Opened { pull_request })
+    Ok(Offer::Opened {
+        pull_request,
+        committed,
+    })
+}
+
+/// Makes the tree the last passing `check` ran against the head of the
+/// change's branch: one commit, written by the person's offer, whose tree is
+/// that digest — `None` when the head already is it. Refused, saying why,
+/// when the files moved since that check or no passing check saw them.
+async fn commit_checked_tree(
+    change: &Change,
+    dir: &std::path::Path,
+    branch: &str,
+) -> Result<Option<String>> {
+    let id = change.id.as_str();
+    // Re-stamped now, with its objects stored so the tree can be committed.
+    let now = crate::git::digest_stored(dir)
+        .await
+        .context("reading the worktree to commit it")?;
+    let head_tree = crate::git::head_tree(dir).await;
+    let report = change.check_report();
+    let checked = report
+        .filter(|r| r.passed())
+        .and_then(|r| r.commit.as_ref())
+        .and_then(|c| c.tree.clone());
+    let Some(checked) = checked else {
+        // Nothing to commit, and nothing claimed: offered as it stands.
+        if head_tree.as_deref() == Some(now.tree.as_str()) {
+            return Ok(None);
+        }
+        bail!(
+            "refused: the worktree holds work no passing check has run against, so there is \
+             no checked tree to commit — `devplane change verify {id}`, then offer again"
+        );
+    };
+    if checked != now.tree {
+        bail!(
+            "refused: the files moved since the last passing check (it ran against tree {}, \
+             the worktree is now {}), so committing them would offer work nobody checked — \
+             `devplane change verify {id}`, then offer again",
+            crate::core::text::clip(&checked, 12),
+            crate::core::text::clip(&now.tree, 12)
+        );
+    }
+    if head_tree.as_deref() == Some(checked.as_str()) {
+        return Ok(None);
+    }
+    let passed = report.expect("a checked tree comes from a report");
+    let message = format!(
+        "{}\n\nDevplane change {id}; certificate: `check` passed on attempt {} at {} \
+         against this tree ({checked}). `devplane change export {id}` prints it.\n",
+        change.title, passed.attempt, passed.at
+    );
+    let commit = crate::git::commit_tree_on_head(dir, &checked, &message)
+        .await
+        .with_context(|| format!("committing the checked tree on `{branch}`"))?;
+    tracing::info!(change = %id, %commit, "committed the checked tree");
+    Ok(Some(commit))
 }
 
 /// A word a shell reads back as itself.
@@ -1540,7 +1636,7 @@ pub(crate) async fn retire_runs(state: &Shared, id: &ChangeId) {
         let _ = crate::driven::retire(state, run).await;
     }
     // Awaited, bounded: the next step may spawn an agent, and overlapping a
-    // dying one races and miscounts `max_parallel_runs`. The bound keeps a
+    // dying one races and miscounts `max_parallel`. The bound keeps a
     // wedged agent from holding up the change.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
@@ -1695,16 +1791,18 @@ pub async fn verify(state: &Shared, id: &ChangeId) -> Result<crate::core::GateRe
             &dir,
             config.gates.timeout,
             attempt,
-            &crate::core::caches::env_for(&root, &config.workspace.share),
+            &check_input(&root, &config),
         )
         .await
     };
     if !gone {
         stamp_spec(state, id, &mut report, &dir, &config).await;
+        report.base_commit = merge_base_of(&root, &dir).await;
     }
     let passed = report.passed();
     record_gate(state, id, &report).await;
     push_gate(state, id, report.clone()).await;
+    crate::base_checks::after_check(state, id, &config, passed && !gone);
     if gone {
         // The stamp on the report is empty; the tree is now unknown.
         if let Some(c) = state.changes.lock().await.get_mut(id) {
@@ -1833,7 +1931,7 @@ pub async fn retry(state: &Shared, id: &ChangeId) -> Result<()> {
         match &change.stopped {
             Some(Stopped::Broken { detail }) => bail!(
                 "that change stopped because it could not continue ({detail}), which is not \
-                 something the agent can fix. `devplane check` reads the file the same way \
+                 something the agent can fix. `devplane config check` reads the file the same way \
                  this did."
             ),
             None => {
@@ -1844,7 +1942,7 @@ pub async fn retry(state: &Shared, id: &ChangeId) -> Result<()> {
             }
             _ if !live => bail!(
                 "the agent that wrote this code is gone, and a fresh one would have to \
-                 learn it all again. Pick it up yourself with `devplane attach {run}`, \
+                 learn it all again. Pick it up yourself with `devplane run attach {run}`, \
                  or start a new change."
             ),
             Some(other) => bail!("that change cannot be handed back: {}", other.headline()),
@@ -1950,7 +2048,6 @@ pub async fn finish(state: &Shared, id: &ChangeId) -> Result<()> {
 
     retire_runs(state, id).await;
     mark_done(state, id, basis, now_stamp).await;
-    crate::reports::fixed_by(state, id).await;
     Ok(())
 }
 
@@ -1968,6 +2065,7 @@ async fn mark_done(
             Some(c) => {
                 c.completion = Some(basis.clone());
                 c.tree_now = tree_now;
+                c.tree_as_of = Some(jiff::Timestamp::now());
                 c.waiting = None;
                 c.updated_at = jiff::Timestamp::now();
                 Some(c.clone())

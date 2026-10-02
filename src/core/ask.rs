@@ -17,10 +17,7 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 // Renamed on the wire: ts-rs exports one flat namespace, and two `Kind.ts`
 // files would silently overwrite each other.
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "AskKind", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "AskKind"))]
 pub enum Kind {
     Permission,
     Question,
@@ -49,10 +46,7 @@ impl Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "AskDeadline", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "AskDeadline"))]
 pub enum Deadline {
     /// It waits; the run shows as waiting on a person.
     #[default]
@@ -123,10 +117,7 @@ pub fn parse_deadline(s: &str) -> Option<Deadline> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "AskEnded", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "AskEnded"))]
 pub enum Ended {
     /// A person answered.
     Person,
@@ -171,10 +162,7 @@ impl Ended {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(
-    feature = "typescript",
-    ts(rename = "AskDelivery", export, export_to = "wire/")
-)]
+#[cfg_attr(feature = "typescript", ts(rename = "AskDelivery"))]
 pub enum Delivery {
     /// Straight down the connection the ask arrived on.
     Live,
@@ -208,7 +196,6 @@ impl Delivery {
 /// never the session, which may be gone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
 pub struct Ask {
     pub id: AskId,
     pub kind: Kind,

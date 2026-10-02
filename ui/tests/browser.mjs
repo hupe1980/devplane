@@ -46,7 +46,7 @@ const mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const executablePath = process.env.CHROME ?? (existsSync(mac) ? mac : undefined);
 const browser = await chromium.launch({ executablePath, headless: true });
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
-const CHANGE = "c-01a0dbe60c9b76e6936cf1fc4701a22f";
+const CHANGE = "c-01a0dc12268a7698b161b6b53f4264f5";
 
 let failures = 0;
 /** @param {string} name @param {boolean} ok @param {string} [detail] */
@@ -145,7 +145,7 @@ try {
     p.on("request", (/** @type {any} */ r) => {
       if (r.url().includes("/api/board")) boards += 1;
     });
-    for (const h of ["#change", "#board", "#plan", "#inbox", "#setup", "#change", "#board", "#inbox", "#reports", "#board"]) {
+    for (const h of ["#change", "#board", "#plan", "#inbox", "#setup", "#change", "#board", "#inbox", "#plan", "#board"]) {
       await p.evaluate((/** @type {string} */ h) => (location.hash = h), h);
       await sleep(300);
     }
@@ -222,6 +222,48 @@ try {
     const offered = await p.locator(".head").innerText();
     check("an offer that handed back commands shows them", offered.includes("git push -u origin change/x") && offered.includes("gh pr create"));
     check("…and does not say it was offered", !/offer made/.test(offered));
+    await p.context().close();
+  }
+
+  // 7. The list keys on a fresh load; the view in the address; the header's height.
+  {
+    const p = await page();
+    await p.goto(`${BASE}#change`);
+    await p.locator(".side [id^=change-row]").first().waitFor();
+    await p.keyboard.press("j");
+    await sleep(300);
+    check("j on a fresh Changes opens the first change", /^#change\/c-/.test(await p.evaluate(() => location.hash)), await p.evaluate(() => location.hash));
+    await p.goto(`${BASE}#change/${CHANGE}`);
+    await p.locator(".doc").waitFor();
+    await p.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+    await p.evaluate(() => dispatchEvent(new KeyboardEvent("keydown", { key: "£", code: "Digit3", altKey: true, bubbles: true })));
+    await sleep(300);
+    check("⌥3 shows the review and the address says so", (await p.evaluate(() => location.hash)) === `#change/${CHANGE}/review`, await p.evaluate(() => location.hash));
+    await p.reload();
+    await p.locator(".doc").waitFor();
+    check("a reload returns to the view", (await selectedTab(p)).startsWith("Review"), await selectedTab(p));
+    const head = await p.locator(".doc .head").boundingBox();
+    check("the change header stays under 120 px", !!head && head.height <= 120, `${head?.height}px`);
+    const texts = (await p.locator(".doc").innerText()).replace(/\s+/g, " ");
+    const words = /(\d+ hunks? unread · 1 weakened)/.exec(texts)?.[1] ?? "";
+    check("header, tab and pane say one unread", !!words && texts.split(words).length - 1 >= 3, words);
+    for (const [where, rows] of [["#board", ".frame [role=row][data-key]"], ["#plan", ".side [data-spec]"], ["#why", ".frame [role=row][data-key]"]]) {
+      await p.goto(`${BASE}${where}`);
+      const first = p.locator(rows).first();
+      const has = await first.waitFor({ timeout: 4000 }).then(() => true, () => false);
+      if (!has) continue;
+      await p.keyboard.press("j");
+      await sleep(300);
+      const moved = where === "#plan" ? /^#plan\/./.test(await p.evaluate(() => location.hash)) : (await p.locator("[role=row][aria-selected=true]").count()) === 1;
+      check(`j on a fresh ${where} moves its cursor`, moved);
+    }
+    await p.setViewportSize({ width: 900, height: 700 });
+    await p.goto(`${BASE}#change/${CHANGE}`);
+    await p.locator(".doc").waitFor();
+    check("under 1100 px an open change folds the sidebar", (await p.locator(".side [role=option]").count()) === 0 || !(await p.locator(".side").isVisible()));
+    check("the title bar's New change is an icon at 900 px", !(await p.locator(".title .primary .label").isVisible()));
+    const clip = await p.evaluate(() => { const t = document.querySelector(".doc [role=tablist]"); return t ? t.scrollWidth > t.clientWidth && getComputedStyle(t).overflowX : "none"; });
+    check("the view tabs scroll rather than clip", clip === false || clip === "auto", String(clip));
     await p.context().close();
   }
 } catch (e) {

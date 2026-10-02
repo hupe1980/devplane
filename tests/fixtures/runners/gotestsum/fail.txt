@@ -1,0 +1,12 @@
+✖  a (2.451s)
+✓  b (2.585s)
+
+=== Skipped
+=== SKIP: a TestSkip (0.00s)
+    a_test.go:5: later
+
+=== Failed
+=== FAIL: a TestFails (0.00s)
+    a_test.go:6: asked
+
+DONE 7 tests, 1 skipped, 1 failure in 2.603s

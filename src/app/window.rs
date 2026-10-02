@@ -1,6 +1,6 @@
 //! The two windows, both on the host's own page.
 //!
-//! `main` is the page `devplane open` shows, framed; closing hides it and the
+//! `main` is the page `devplane up` shows, framed; closing hides it and the
 //! host keeps running. `answer` is small and on top: the shortcut raises it on
 //! the topmost waiting item, and `Esc`, an answer or Keep running hides it and
 //! returns focus.

@@ -1,8 +1,6 @@
 import { register, phase } from "../../lib/surfaces";
 import { bind, bindList, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
-import Inbox from "./Inbox.svelte";
-import List from "./List.svelte";
 import { address } from "./place.svelte";
 
 // The list keys (answered by `Inbox.svelte` through `lib/cursor`), and the
@@ -10,6 +8,11 @@ import { address } from "./place.svelte";
 bindList("inbox", "move into the item (Tab then reaches its controls)");
 bind({ surface: "inbox", combo: "a", action: "inbox-allow", label: "allow the permission on screen" });
 bind({ surface: "inbox", combo: "d", action: "inbox-deny", label: "deny the permission on screen" });
+// Hiding is the one reversible action, and `z` takes it back. There is no
+// dismiss or mark-read: the host has neither for an inbox item. No key here
+// offers a change — offering is the change's own, after its review.
+bind({ surface: "inbox", combo: "s", action: "inbox-snooze", label: "snooze the item on screen for an hour" });
+bind({ surface: "inbox", combo: "z", action: "inbox-undo", label: "undo: put the snoozed item back" });
 bind({ surface: "global", combo: "g i", action: "go-inbox", label: "go to the inbox" });
 onAction("go-inbox", () => {
   go("#inbox");
@@ -41,7 +44,7 @@ register({
       ...(s?.asks_waiting ? [{ n: s.asks_waiting, word: "asked, session gone", icon: "question", tone: "wait" as const, end: true }] : []),
     ];
   },
-  // The badge is everything in the inbox — failed gates and reports too —
+  // The badge is everything in the inbox — failed gates too —
   // and is labelled as such beside the icon.
   count: (feed) => {
     const i = feed.inbox as { items?: unknown[] } | null;
@@ -77,6 +80,6 @@ register({
     const { item, project } = address(focus, items);
     return items.find((i) => i.id === item)?.title ?? (project ? `Inbox: ${project}` : "Inbox");
   },
-  side: List,
-  component: Inbox,
+  side: () => import("./List.svelte"),
+  page: () => import("./Inbox.svelte"),
 });
