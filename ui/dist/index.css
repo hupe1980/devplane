@@ -949,8 +949,16 @@ ul, ol { margin: 0; padding: 0; }
   .help.svelte-1n46o8q dd:where(.svelte-1n46o8q) {
     margin: 0;
   }
-  .dim.svelte-1n46o8q {
-    color: var(--faint);
+  .help.svelte-1n46o8q h3:where(.svelte-1n46o8q) {
+    margin: var(--s-4) 0 var(--s-2);
+    font-size: var(--t-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+  }
+  .help.svelte-1n46o8q h3:where(.svelte-1n46o8q):first-of-type {
+    margin-top: 0;
   }
   kbd.svelte-1n46o8q {
     font-family: var(--mono);

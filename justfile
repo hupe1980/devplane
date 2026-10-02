@@ -83,6 +83,11 @@ notes:
 # Everything that runs on a clean clone: check, the dependency count, the site build and link check.
 verify: check deps site-build site-check
 
+# Needs a browser (`npx playwright-core install chromium`), so it is not in `verify`.
+# The UX bars, each against its own budget: `just bars`, or `just bars --bar 3`.
+bars *ARGS: build
+    cd ui && npm run bars -- {{ARGS}}
+
 # ── The two pictures ─────────────────────────────────────────────────────────
 
 # The Open Graph card — what every shared link shows.

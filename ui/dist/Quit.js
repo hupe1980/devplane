@@ -1,5 +1,5 @@
 import { E as if_block, F as delegated, H as user_effect, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, et as pop, i as api, it as reset, j as from_html, k as append, o as prop, q as sibling, tt as push } from "./api.js";
-import { D as onAction, h as resource, m as failure } from "./app.js";
+import { O as onAction, h as resource, m as failure } from "./app.js";
 import { t as hideWindow } from "./frame.js";
 //#region src/surfaces/quit/Quit.svelte
 var root = from_html(`<pre class="says svelte-1pz5pdz"> </pre>`);

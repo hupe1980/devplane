@@ -1,0 +1,1 @@
+{"projects":[{"project_id":"/home/you/code/empty","project":"empty","root":"/home/you/code/empty","declares_markers":false,"declares_plans":false,"layouts":[],"no_layout":"this project has no specification layout; Devplane recognises Spec Kit (`.specify/`), OpenSpec (`openspec/config.yaml`) and Kiro (`.kiro/`); `[spec] plans` declares another","plans":[]}],"omitted":0}

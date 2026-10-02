@@ -39,15 +39,31 @@ export CLAUDE_CONFIG_DIR="$tmp/claude" DEVPLANE_HOME="$home"
 export GIT_AUTHOR_NAME=Seed GIT_AUTHOR_EMAIL=seed@example.com
 export GIT_COMMITTER_NAME=Seed GIT_COMMITTER_EMAIL=seed@example.com
 
+# A phase recording (`capture-fixtures.sh --phase`) wants a bare host, not the
+# populated one: `empty` saw one session start and end, `nothing-visible` saw
+# nothing at all. Both stop after the host is up.
+SEED_PHASE="${SEED_PHASE:-}"
+case "$SEED_PHASE" in
+  "" | empty | nothing-visible) ;;
+  *) echo "seed-host: unknown phase $SEED_PHASE (empty, nothing-visible)" >&2; exit 2 ;;
+esac
+
+if [ -n "$SEED_PHASE" ]; then
+  mkdir -p "$tmp/empty"
+  git -C "$tmp/empty" init -q -b main
+  printf '# empty\n' > "$tmp/empty/README.md"
+  git -C "$tmp/empty" add -A && git -C "$tmp/empty" commit -qm init
+fi
+
 # Five repositories, because the board groups by project. `saas` is a Spec Kit
 # project with a real specification and real gates; the rest are watched only.
-for name in saas core-lib ai-tool mobile infra; do
+for name in $([ -z "$SEED_PHASE" ] && echo saas core-lib ai-tool mobile infra); do
   mkdir -p "$tmp/$name"
   git -C "$tmp/$name" init -q -b main
   # The fixture agent's own log must not show up in a review.
   printf '.devplane/\n' > "$tmp/$name/.gitignore"
 done
-(
+[ -n "$SEED_PHASE" ] || (
   cd "$tmp/saas"
   mkdir -p .specify src/routes tests specs/042-login-rate-limit specs/043-drop-v1-api
   cat > devplane.toml <<'TOML'
@@ -110,13 +126,13 @@ MD
   printf '# Tasks\n\n- [ ] T001 [US1] Return 410 from every v1 route\n- [ ] T002 [US1] Remove the v1 client\n' > specs/043-drop-v1-api/tasks.md
   git add -A && git commit -qm "the login route, its gates and two specifications"
 )
-for name in core-lib ai-tool mobile infra; do
+for name in $([ -z "$SEED_PHASE" ] && echo core-lib ai-tool mobile infra); do
   printf '# %s\n' "$name" > "$tmp/$name/README.md"
   git -C "$tmp/$name" add -A && git -C "$tmp/$name" commit -qm init
 done
 
 # Started from inside the fixture, because the host registers its start directory.
-(cd "$tmp" && exec "$BIN" up --no-browser) >"$tmp/host.log" 2>&1 &
+(cd "$tmp${SEED_PHASE:+/empty}" && exec "$BIN" up --no-browser) >"$tmp/host.log" 2>&1 &
 pid=$!
 for _ in $(seq 1 50); do [ -s "$home/host.json" ] && break; sleep 0.2; done
 [ -s "$home/host.json" ] || { echo "seed-host: the host did not start"; cat "$tmp/host.log"; exit 1; }
@@ -143,6 +159,17 @@ session() { # id project tool input pct cost
     \"context_window\":{\"used_percentage\":$5,\"context_window_size\":200000},
     \"cost\":{\"total_cost_usd\":$6},\"workspace\":{\"current_dir\":\"$tmp/$2\"}}"
 }
+
+# The phase recordings stop here. `empty`: the Claude Code channel reported one
+# session, which ended, so the host can see sessions and holds none.
+if [ -n "$SEED_PHASE" ]; then
+  if [ "$SEED_PHASE" = empty ]; then
+    hook "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"0e0e0e0e\",\"cwd\":\"$tmp/empty\",\"source\":\"startup\"}"
+    hook "{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"0e0e0e0e\",\"cwd\":\"$tmp/empty\",\"reason\":\"exit\"}"
+  fi
+  sleep 2
+  return 0
+fi
 
 session 2b3c4d5e saas     Bash '{"command":"pnpm test --run"}'             62 1.92
 session c19d02aa saas     Read '{"file_path":"src/routes/session.ts"}'     41 0.38
@@ -187,6 +214,19 @@ printf 'test("login", () => {});\nit.skip("rejects the sixth attempt in a minute
 # One that stops to ask the person something.
 api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Drop the v1 API\",
   \"agent\":\"$ECHO\",\"spec\":\"specs/043-drop-v1-api\",\"prompt\":\"question: which clients still call v1?\"}" >/dev/null
+# A permission Devplane itself holds: the agent asks over the protocol, so the
+# answer is the window's to give (the inbox's answerable permission).
+api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Clear the build cache\",
+  \"agent\":\"$ECHO\",\"prompt\":\"permission\"}" >/dev/null
+# Forty generated files in one change, the subject of hunk-to-hunk timing.
+forty=$(api POST api/changes "{\"cwd\":\"$tmp/core-lib\",\"title\":\"Forty files\",
+  \"agent\":\"$ECHO\",\"prompt\":\"write-file src/gen/f00.rs\"}")
+fwt=$(printf '%s' "$forty" | grep -oE '"worktree": *"[^"]+"' | head -1 | sed 's/.*"worktree": *"//; s/"$//')
+[ -n "$fwt" ] && [ -d "$fwt" ] || { echo "seed-host: the forty-file change has no worktree: $forty" >&2; exit 1; }
+mkdir -p "$fwt/src/gen"
+for i in $(seq -w 0 39); do
+  printf 'pub fn f%s(x: u32) -> u32 {\n    x + %d\n}\n' "$i" "$((10#$i))" > "$fwt/src/gen/f$i.rs"
+done
 # One in flight on another project.
 api POST api/changes "{\"cwd\":\"$tmp/core-lib\",\"title\":\"Retry only on 5xx\",
   \"agent\":\"$ECHO\",\"prompt\":\"slowish plan\"}" >/dev/null

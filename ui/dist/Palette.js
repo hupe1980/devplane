@@ -1,5 +1,5 @@
 import { B as effect, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, I as event, K as only_child, L as get, O as set_text, P as delegate, R as tick, V as template_effect, W as child, X as state, Y as set, Z as user_derived, b as action, et as pop, f as bind_value, it as reset, j as from_html, k as append, m as set_attribute, o as prop, p as remove_input_defaults, q as sibling, rt as next, tt as push, v as set_class } from "./api.js";
-import { A as spell, E as help, M as listed, N as surfaces, O as run, T as all, h as resource, j as landing, n as Icon, w as go } from "./app.js";
+import { D as help, E as all, M as landing, N as listed, P as surfaces, h as resource, j as spell, k as run, n as Icon, w as go } from "./app.js";
 import { t as Failed } from "./Failed.js";
 import { t as ChangeState } from "./ChangeState.js";
 import { t as here } from "./offered.svelte.js";

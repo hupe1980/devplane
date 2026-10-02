@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["Answer.js","api.js","frame.js","write.svelte.js","Failed.js","Failed.css","unread.svelte.js","unread.css","actions.js","Qualifier.js","Qualifier.css","href.js","actions.css","Answer.css","Board.js","Grid.js","Grid.css","Empty.js","Empty.css","Props.js","Props.css","cursor.js","Board.css","List.js","ChangeState.js","ChangeState.css","List.css","Doc.js","offered.svelte.js","Tabs.js","Tabs.css","Doc.css","Github.js","Github.css","List2.js","narrow.svelte.js","List2.css","Inbox.js","Inbox.css","New.js","New.css","Palette.js","Palette.css","List3.js","store.svelte.js","List3.css","Doc2.js","Doc2.css","Quit.js","Quit.css","Search.js","Search.css","Setup.js","Setup.css","Why.js","Why.css"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["Answer.js","api.js","frame.js","cursor.js","write.svelte.js","Failed.js","Failed.css","unread.svelte.js","unread.css","actions.js","Qualifier.js","Qualifier.css","href.js","actions.css","Answer.css","Board.js","Grid.js","Grid.css","Empty.js","Empty.css","Props.js","Props.css","Board.css","List.js","ChangeState.js","ChangeState.css","List.css","Doc.js","offered.svelte.js","Tabs.js","Tabs.css","Doc.css","Github.js","Github.css","List2.js","narrow.svelte.js","List2.css","Inbox.js","Inbox.css","New.js","New.css","Palette.js","Palette.css","List3.js","store.svelte.js","List3.css","Doc2.js","Doc2.css","Quit.js","Quit.css","Search.js","Search.css","Setup.js","Setup.css","Why.js","Why.css"])))=>i.map(i=>d[i]);
 import { A as comment, C as each, D as mount, E as if_block, F as delegated, G as first_child, H as user_effect, I as event, J as proxy, K as only_child, L as get, M as from_svg, N as text, O as set_text, P as delegate, S as snippet, V as template_effect, W as child, X as state, Y as set, Z as user_derived, _ as set_style, a as claimToken, at as noop, b as action, c as spread_props, et as pop, i as api, it as reset, j as from_html, k as append, m as set_attribute, n as Unauthorised, nt as snapshot, o as prop, q as sibling, r as Unreachable, rt as next, s as rest_props, tt as push, v as set_class, w as index, x as component, z as untrack } from "./api.js";
 //#region \0vite/modulepreload-polyfill.js
 (function polyfill() {
@@ -66,93 +66,23 @@ function landing() {
 	return surfaces()[0];
 }
 //#endregion
-//#region \0vite/preload-helper.js
-var scriptRel = "modulepreload";
-var assetsURL = function(dep) {
-	return "/" + dep;
-};
-var seen = {};
-var __vitePreload = function preload(baseModule, deps, importerUrl) {
-	let promise = Promise.resolve();
-	if (deps && deps.length > 0) {
-		const links = document.getElementsByTagName("link");
-		const cspNonceMeta = document.querySelector("meta[property=csp-nonce]");
-		const cspNonce = cspNonceMeta?.nonce || cspNonceMeta?.getAttribute("nonce");
-		function allSettled(promises) {
-			return Promise.all(promises.map((p) => Promise.resolve(p).then((value) => ({
-				status: "fulfilled",
-				value
-			}), (reason) => ({
-				status: "rejected",
-				reason
-			}))));
-		}
-		function importMetaResolve(specifier) {
-			if (import.meta.resolve) return import.meta.resolve(specifier);
-			return new URL(
-				specifier,
-				/** #__KEEP__ */
-				import.meta.url
-			).href;
-		}
-		promise = allSettled(deps.map((dep) => {
-			dep = assetsURL(dep, importerUrl);
-			dep = importMetaResolve(dep);
-			if (dep in seen) return;
-			seen[dep] = true;
-			const isCss = dep.endsWith(".css");
-			for (let i = links.length - 1; i >= 0; i--) {
-				const link = links[i];
-				if (link.href === dep && (!isCss || link.rel === "stylesheet")) return;
-			}
-			const link = document.createElement("link");
-			link.rel = isCss ? "stylesheet" : scriptRel;
-			if (!isCss) link.as = "script";
-			link.crossOrigin = "";
-			link.href = dep;
-			if (cspNonce) link.setAttribute("nonce", cspNonce);
-			document.head.appendChild(link);
-			if (isCss) return new Promise((res, rej) => {
-				link.addEventListener("load", res);
-				link.addEventListener("error", () => rej(/* @__PURE__ */ new Error(`Unable to preload CSS for ${dep}`)));
-			});
-		}).filter((p) => p !== void 0));
-	}
-	function handlePreloadError(err) {
-		const e = new Event("vite:preloadError", { cancelable: true });
-		e.payload = err;
-		window.dispatchEvent(e);
-		if (!e.defaultPrevented) throw err;
-	}
-	return promise.then((res) => {
-		for (const item of res || []) {
-			if (item.status !== "rejected") continue;
-			handlePreloadError(item.reason);
-		}
-		return baseModule().catch(handlePreloadError);
-	});
-};
-//#endregion
-//#region src/surfaces/answer/index.ts
-register({
-	id: "answer",
-	title: "Answer",
-	heading: "The one thing that needs you",
-	band: "attention",
-	order: 9,
-	nav: false,
-	bare: true,
-	reads: ["/api/inbox"],
-	select: () => ({}),
-	page: () => __vitePreload(() => import("./Answer.js"), __vite__mapDeps([0,1,2,3,4,5,6,7,8,9,10,11,12,13]))
-});
-//#endregion
 //#region src/lib/keys.ts
+var RESERVED = [
+	"Mod+w",
+	"Mod+t",
+	"Mod+n",
+	"Mod+l",
+	"Mod+r",
+	"Mod+q",
+	"Mod+Tab"
+];
 var bindings = [];
 var listeners = /* @__PURE__ */ new Map();
 function bind(b) {
 	if (!b.label.trim()) throw new Error(`${b.surface}: ${b.combo} (${b.action}) has no label`);
 	const combo = normalise(b.combo);
+	const reserved = RESERVED.find((r) => r.toLowerCase() === combo.toLowerCase());
+	if (reserved) throw new Error(`${b.surface}: ${b.combo} ("${b.label}") takes ${reserved}, which the browser keeps for itself`);
 	const same = bindings.find((x) => x.combo === combo && x.surface === b.surface);
 	if (same) throw new Error(`${b.combo} is bound twice in ${b.surface}: "${same.label}" (${same.action}) and "${b.label}" (${b.action})`);
 	const global = bindings.find((x) => x.combo === combo && x.surface === "global");
@@ -192,6 +122,35 @@ function help(surface) {
 		...own
 	];
 }
+function sheet(surface) {
+	const rows = (keys) => {
+		const out = [];
+		for (const b of keys) {
+			const same = out.find((r) => r.surface === b.surface && r.action === b.action && r.label === b.label);
+			if (same) same.combos.push(b.combo);
+			else out.push({
+				...b,
+				combos: [b.combo]
+			});
+		}
+		return out;
+	};
+	const keys = help(surface);
+	return [
+		{
+			title: "This item",
+			keys: rows(keys.filter((b) => b.surface !== "global" && b.item))
+		},
+		{
+			title: "This surface",
+			keys: rows(keys.filter((b) => b.surface !== "global" && !b.item))
+		},
+		{
+			title: "Everywhere",
+			keys: rows(keys.filter((b) => b.surface === "global"))
+		}
+	].filter((g) => g.keys.length > 0);
+}
 function onAction(action, fn) {
 	let set = listeners.get(action);
 	if (!set) {
@@ -203,10 +162,10 @@ function onAction(action, fn) {
 		set?.delete(fn);
 	};
 }
-function run(action, surface) {
+function run(action, surface, combo = "") {
 	const set = listeners.get(action);
 	if (!set || set.size === 0) return false;
-	for (const fn of set) if (fn(surface) === true) return true;
+	for (const fn of set) if (fn(surface, combo) === true) return true;
 	return false;
 }
 var pending = null;
@@ -299,7 +258,7 @@ function dispatch(surface, e) {
 	const fire = (k) => {
 		for (const s of within) {
 			const hit = bindings.find((b) => b.surface === s && b.combo === k);
-			if (hit && run(hit.action, surface)) {
+			if (hit && run(hit.action, surface, k)) {
 				e.preventDefault();
 				return true;
 			}
@@ -391,6 +350,236 @@ function bindList(surface, open) {
 	});
 }
 //#endregion
+//#region src/surfaces/inbox/keys.ts
+var ITEM_KEYS = [
+	...[
+		1,
+		2,
+		3,
+		4,
+		5,
+		6,
+		7,
+		8,
+		9
+	].map((n) => ({
+		combo: String(n),
+		action: "item-option",
+		label: "choose the option with that number"
+	})),
+	{
+		combo: "t",
+		action: "item-type",
+		label: "type an answer in your own words"
+	},
+	{
+		combo: "Mod+Enter",
+		action: "item-send",
+		label: "send the typed answer (from inside the field)"
+	},
+	{
+		combo: "a",
+		action: "item-allow",
+		label: "allow the permission, once"
+	},
+	{
+		combo: "d",
+		action: "item-deny",
+		label: "deny the permission"
+	},
+	{
+		combo: "w",
+		action: "item-session",
+		label: "reach the session the vendor owns: open its link, or copy its resume command"
+	},
+	{
+		combo: "s",
+		action: "item-snooze",
+		label: "snooze the item for an hour"
+	},
+	{
+		combo: "o",
+		action: "item-open",
+		label: "open the change or session the item is about"
+	},
+	{
+		combo: "r",
+		action: "item-review",
+		label: "open the change's review"
+	},
+	{
+		combo: "z",
+		action: "item-undo",
+		label: "undo: take back the answer before it is sent, or put a snoozed item back"
+	}
+];
+function bindItemKeys(surface) {
+	for (const k of ITEM_KEYS) bind({
+		surface,
+		...k,
+		item: true
+	});
+}
+function owner(item) {
+	return /^(.+?) owns this dialog/.exec(item.answer_in ?? "")?.[1] ?? "the agent's own window";
+}
+function optionCount(item, picked = /* @__PURE__ */ new Set()) {
+	const has = (a) => (item.actions ?? []).includes(a);
+	if (!has("choose") && !(item.form ?? []).length) return 0;
+	const field = (item.form ?? []).find((q) => !picked.has(q.field));
+	if (item.form?.length) return field?.options.length ?? 0;
+	return (item.options ?? []).filter((o) => o.id).length;
+}
+function whyNot(item, action, n = 0) {
+	const acts = item.actions ?? [];
+	const has = (a) => acts.includes(a);
+	const vendor = !!item.answer_in;
+	const reach = item.session_link || item.resume_command ? " — w reaches its session" : "";
+	const kind = item.kind.replace(/_/g, " ");
+	switch (action) {
+		case "item-option": {
+			const count = optionCount(item);
+			if (vendor) return `${owner(item)} owns this question: answer it there${reach}`;
+			if (count === 0) return `this ${kind} has no options to choose`;
+			if (n > count) return `there ${count === 1 ? "is 1 option" : `are ${count} options`}; ${n} picks nothing`;
+			return "";
+		}
+		case "item-type":
+		case "item-send":
+			if (has("reply") || (item.form ?? []).some((q) => q.custom_field)) return "";
+			return vendor ? `${owner(item)} owns this question: answer it there${reach}` : `this ${kind} takes no answer in words`;
+		case "item-allow":
+		case "item-deny":
+			if (has(action === "item-allow" ? "allow" : "deny")) return "";
+			if (vendor) return `${owner(item)} owns this permission: Devplane cannot answer it${reach}`;
+			return `${action === "item-allow" ? "a" : "d"} answers a permission; this is a ${kind}`;
+		case "item-session":
+			if (vendor && (item.session_link || item.resume_command)) return "";
+			if (vendor) return `${owner(item)} documents no way to reach this session from here`;
+			return "w is for a dialog the vendor owns; this one is answered here";
+		case "item-snooze":
+			if (has("snooze")) return "";
+			if (item.kind === "permission" || item.kind.startsWith("question")) return "a question or a permission is never snoozed: it waits for an answer";
+			return `this ${kind} cannot be snoozed`;
+		case "item-open": return (has("open") || has("review")) && (item.change_id || item.run_id) ? "" : `this ${kind} is about nothing that opens`;
+		case "item-review": return has("review") && item.change_id ? "" : "r opens the review of a change ready to decide";
+		default: return "";
+	}
+}
+function answerItemKeys(scope, root, item, say) {
+	const control = (k) => root()?.querySelector(`[data-key="${k}"]`) ?? null;
+	const press = (action, run) => (surface, combo) => {
+		if (surface !== scope) return false;
+		const el = control(combo);
+		if (el && (el.disabled || el.closest("fieldset:disabled"))) return true;
+		if (el) (run ?? ((x) => x.click()))(el);
+		else say(whyNot(item(), action, Number(combo) || 0) || `${spell(combo)} does nothing on this item right now`);
+		return true;
+	};
+	const offs = [
+		onAction("item-option", press("item-option")),
+		onAction("item-type", press("item-type", (el) => el.focus())),
+		onAction("item-send", (surface) => {
+			if (surface !== scope) return false;
+			const field = document.activeElement;
+			const send = field && root()?.contains(field) ? field.closest(".reply")?.querySelector("[data-send]") : null;
+			if (send) send.click();
+			else say(whyNot(item(), "item-send") || "this sends from inside the answer field — t puts you there");
+			return true;
+		}),
+		onAction("item-allow", press("item-allow")),
+		onAction("item-deny", press("item-deny")),
+		onAction("item-session", press("item-session")),
+		onAction("item-snooze", press("item-snooze")),
+		onAction("item-open", press("item-open")),
+		onAction("item-review", press("item-review"))
+	];
+	return () => offs.forEach((off) => off());
+}
+//#endregion
+//#region \0vite/preload-helper.js
+var scriptRel = "modulepreload";
+var assetsURL = function(dep) {
+	return "/" + dep;
+};
+var seen = {};
+var __vitePreload = function preload(baseModule, deps, importerUrl) {
+	let promise = Promise.resolve();
+	if (deps && deps.length > 0) {
+		const links = document.getElementsByTagName("link");
+		const cspNonceMeta = document.querySelector("meta[property=csp-nonce]");
+		const cspNonce = cspNonceMeta?.nonce || cspNonceMeta?.getAttribute("nonce");
+		function allSettled(promises) {
+			return Promise.all(promises.map((p) => Promise.resolve(p).then((value) => ({
+				status: "fulfilled",
+				value
+			}), (reason) => ({
+				status: "rejected",
+				reason
+			}))));
+		}
+		function importMetaResolve(specifier) {
+			if (import.meta.resolve) return import.meta.resolve(specifier);
+			return new URL(
+				specifier,
+				/** #__KEEP__ */
+				import.meta.url
+			).href;
+		}
+		promise = allSettled(deps.map((dep) => {
+			dep = assetsURL(dep, importerUrl);
+			dep = importMetaResolve(dep);
+			if (dep in seen) return;
+			seen[dep] = true;
+			const isCss = dep.endsWith(".css");
+			for (let i = links.length - 1; i >= 0; i--) {
+				const link = links[i];
+				if (link.href === dep && (!isCss || link.rel === "stylesheet")) return;
+			}
+			const link = document.createElement("link");
+			link.rel = isCss ? "stylesheet" : scriptRel;
+			if (!isCss) link.as = "script";
+			link.crossOrigin = "";
+			link.href = dep;
+			if (cspNonce) link.setAttribute("nonce", cspNonce);
+			document.head.appendChild(link);
+			if (isCss) return new Promise((res, rej) => {
+				link.addEventListener("load", res);
+				link.addEventListener("error", () => rej(/* @__PURE__ */ new Error(`Unable to preload CSS for ${dep}`)));
+			});
+		}).filter((p) => p !== void 0));
+	}
+	function handlePreloadError(err) {
+		const e = new Event("vite:preloadError", { cancelable: true });
+		e.payload = err;
+		window.dispatchEvent(e);
+		if (!e.defaultPrevented) throw err;
+	}
+	return promise.then((res) => {
+		for (const item of res || []) {
+			if (item.status !== "rejected") continue;
+			handlePreloadError(item.reason);
+		}
+		return baseModule().catch(handlePreloadError);
+	});
+};
+//#endregion
+//#region src/surfaces/answer/index.ts
+bindList("answer", "move into the item (Tab then reaches its controls)");
+bindItemKeys("answer");
+register({
+	id: "answer",
+	title: "Answer",
+	heading: "The one thing that needs you",
+	band: "attention",
+	order: 9,
+	nav: false,
+	bare: true,
+	reads: ["/api/inbox"],
+	select: () => ({}),
+	page: () => __vitePreload(() => import("./Answer.js"), __vite__mapDeps([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]))
+});
+//#endregion
 //#region src/lib/route.ts
 function go(hash) {
 	history.replaceState({}, "", hash || "#");
@@ -446,7 +635,7 @@ register({
 			...phase(feed)
 		};
 	},
-	page: () => __vitePreload(() => import("./Board.js"), __vite__mapDeps([14,1,15,16,17,18,19,20,21,22]))
+	page: () => __vitePreload(() => import("./Board.js"), __vite__mapDeps([15,1,3,16,17,18,19,20,21,22]))
 });
 //#endregion
 //#region src/lib/State.svelte
@@ -667,9 +856,9 @@ register({
 			loaded: phase(feed).loaded
 		};
 	},
-	side: () => __vitePreload(() => import("./List.js"), __vite__mapDeps([23,1,4,5,21,24,9,10,25,26])),
+	side: () => __vitePreload(() => import("./List.js"), __vite__mapDeps([23,1,3,5,6,24,10,11,25,26])),
 	document: true,
-	page: () => __vitePreload(() => import("./Doc.js"), __vite__mapDeps([27,1,3,4,5,6,7,15,16,17,18,19,20,24,9,10,25,28,29,30,31]))
+	page: () => __vitePreload(() => import("./Doc.js"), __vite__mapDeps([27,1,4,5,6,7,8,16,17,18,19,20,21,24,10,11,25,28,29,30,31]))
 });
 //#endregion
 //#region src/surfaces/github/index.ts
@@ -705,7 +894,7 @@ register({
 			configured: Object.keys(b.forge ?? {}).length
 		} };
 	},
-	page: () => __vitePreload(() => import("./Github.js"), __vite__mapDeps([32,1,4,5,11,15,16,17,18,21,29,30,33]))
+	page: () => __vitePreload(() => import("./Github.js"), __vite__mapDeps([32,1,3,5,6,12,16,17,18,19,29,30,33]))
 });
 //#endregion
 //#region src/surfaces/inbox/place.svelte.ts
@@ -773,30 +962,7 @@ function place(shown, a) {
 //#endregion
 //#region src/surfaces/inbox/index.ts
 bindList("inbox", "move into the item (Tab then reaches its controls)");
-bind({
-	surface: "inbox",
-	combo: "a",
-	action: "inbox-allow",
-	label: "allow the permission on screen"
-});
-bind({
-	surface: "inbox",
-	combo: "d",
-	action: "inbox-deny",
-	label: "deny the permission on screen"
-});
-bind({
-	surface: "inbox",
-	combo: "s",
-	action: "inbox-snooze",
-	label: "snooze the item on screen for an hour"
-});
-bind({
-	surface: "inbox",
-	combo: "z",
-	action: "inbox-undo",
-	label: "undo: put the snoozed item back"
-});
+bindItemKeys("inbox");
 bind({
 	surface: "global",
 	combo: "g i",
@@ -848,6 +1014,8 @@ register({
 			folded: b?.folded ?? [],
 			inhibited: b?.inhibited ?? [],
 			close: b?.close ?? null,
+			held: b?.held ?? null,
+			landed: b?.landed ?? null,
 			project,
 			item,
 			wanted,
@@ -861,7 +1029,7 @@ register({
 		return items.find((i) => i.id === item)?.title ?? (project ? `Inbox: ${project}` : "Inbox");
 	},
 	side: () => __vitePreload(() => import("./List2.js"), __vite__mapDeps([34,1,35,36])),
-	page: () => __vitePreload(() => import("./Inbox.js"), __vite__mapDeps([37,1,3,4,5,6,7,8,9,10,11,12,21,35,38]))
+	page: () => __vitePreload(() => import("./Inbox.js"), __vite__mapDeps([37,1,3,4,5,6,7,8,9,10,11,12,13,35,38]))
 });
 //#endregion
 //#region src/surfaces/new/index.ts
@@ -897,7 +1065,7 @@ register({
 		"/api/changes/preflight"
 	],
 	select: () => ({ changeSurface: surfaces().find((s) => s.link === "change")?.id ?? "" }),
-	page: () => __vitePreload(() => import("./New.js"), __vite__mapDeps([39,1,3,4,5,40]))
+	page: () => __vitePreload(() => import("./New.js"), __vite__mapDeps([39,1,4,5,6,40]))
 });
 //#endregion
 //#region src/surfaces/palette/index.ts
@@ -924,7 +1092,7 @@ register({
 	transient: true,
 	reads: ["/api/changes", "/api/projects"],
 	select: () => ({ from }),
-	page: () => __vitePreload(() => import("./Palette.js"), __vite__mapDeps([41,1,4,5,24,9,10,25,28,42]))
+	page: () => __vitePreload(() => import("./Palette.js"), __vite__mapDeps([41,1,5,6,24,10,11,25,28,42]))
 });
 //#endregion
 //#region src/surfaces/plan/index.ts
@@ -949,9 +1117,9 @@ register({
 	reads: ["/api/specs"],
 	tab: (_feed, focus) => focus.split("/").filter(Boolean).pop() ?? "Specification",
 	select: () => ({}),
-	side: () => __vitePreload(() => import("./List3.js"), __vite__mapDeps([43,1,21,24,9,10,25,44,45])),
+	side: () => __vitePreload(() => import("./List3.js"), __vite__mapDeps([43,1,3,24,10,11,25,44,45])),
 	document: true,
-	page: () => __vitePreload(() => import("./Doc2.js"), __vite__mapDeps([46,1,17,18,24,9,10,25,44,47]))
+	page: () => __vitePreload(() => import("./Doc2.js"), __vite__mapDeps([46,1,18,19,24,10,11,25,44,47]))
 });
 //#endregion
 //#region src/surfaces/quit/index.ts
@@ -969,6 +1137,7 @@ register({
 });
 //#endregion
 //#region src/surfaces/search/index.ts
+bindList("search", "open the session the match is from");
 register({
 	id: "search",
 	icon: "search",
@@ -980,10 +1149,11 @@ register({
 	takesQuery: true,
 	reads: ["/api/search"],
 	select: (_feed, focus) => ({ q: focus }),
-	page: () => __vitePreload(() => import("./Search.js"), __vite__mapDeps([50,1,15,16,17,18,51]))
+	page: () => __vitePreload(() => import("./Search.js"), __vite__mapDeps([50,1,3,16,17,18,19,51]))
 });
 //#endregion
 //#region src/surfaces/setup/index.ts
+bindList("setup", "open the inbox narrowed to the project");
 bind({
 	surface: "global",
 	combo: "g ,",
@@ -1003,7 +1173,7 @@ register({
 	order: 0,
 	reads: ["/api/setup", "/api/github"],
 	select: () => ({}),
-	page: () => __vitePreload(() => import("./Setup.js"), __vite__mapDeps([52,1,4,5,11,15,16,19,20,53]))
+	page: () => __vitePreload(() => import("./Setup.js"), __vite__mapDeps([52,1,3,5,6,12,16,17,20,21,53]))
 });
 //#endregion
 //#region src/surfaces/why/index.ts
@@ -1027,7 +1197,7 @@ register({
 	order: 4,
 	link: "run",
 	select: (_feed, focus) => ({ about: focus }),
-	page: () => __vitePreload(() => import("./Why.js"), __vite__mapDeps([54,1,4,5,15,16,17,18,21,55]))
+	page: () => __vitePreload(() => import("./Why.js"), __vite__mapDeps([54,1,3,5,6,16,17,18,19,55]))
 });
 //#endregion
 //#region src/lib/resource.svelte.ts
@@ -2390,10 +2560,11 @@ var root_3 = from_html(`<p class="notice svelte-1n46o8q" role="status"> </p>`);
 var root_4 = from_html(`<p>No surface is registered.</p>`);
 var root_5 = from_html(`<!> <main id="surface" class="editor svelte-1n46o8q" tabindex="-1"><!> <!> <!></main>`, 1);
 var root_6 = from_html(`<div class="scrim svelte-1n46o8q" role="presentation"></div> <div class="overlay svelte-1n46o8q" role="dialog" aria-modal="true"><!></div>`, 1);
-var root_7 = from_html(`<span class="dim svelte-1n46o8q">· everywhere</span>`);
-var root_8 = from_html(`<dt><kbd class="svelte-1n46o8q"> </kbd></dt> <dd class="svelte-1n46o8q"> <!></dd>`, 1);
-var root_9 = from_html(`<div class="scrim svelte-1n46o8q" role="presentation"></div> <div class="help svelte-1n46o8q" role="dialog" aria-modal="true" aria-label="keys bound here"><header class="svelte-1n46o8q"><!> <h2 class="svelte-1n46o8q">Keys bound here</h2></header> <dl class="svelte-1n46o8q"></dl></div>`, 1);
-var root_10 = from_html(`<button class="skip svelte-1n46o8q">Skip to content</button> <div class="wb svelte-1n46o8q"><!> <div class="mid svelte-1n46o8q"><!> <!></div> <!></div> <!> <!>`, 1);
+var root_7 = from_html(`<!><kbd class="svelte-1n46o8q"> </kbd>`, 1);
+var root_8 = from_html(`<dt></dt> <dd class="svelte-1n46o8q"> </dd>`, 1);
+var root_9 = from_html(`<h3 class="svelte-1n46o8q"> </h3> <dl class="svelte-1n46o8q"></dl>`, 1);
+var root_10 = from_html(`<div class="scrim svelte-1n46o8q" role="presentation"></div> <div class="help svelte-1n46o8q" role="dialog" aria-modal="true" aria-label="keys bound here"><header class="svelte-1n46o8q"><!> <h2 class="svelte-1n46o8q">Keys bound here</h2></header> <!></div>`, 1);
+var root_11 = from_html(`<button class="skip svelte-1n46o8q">Skip to content</button> <div class="wb svelte-1n46o8q"><!> <div class="mid svelte-1n46o8q"><!> <!></div> <!></div> <!> <!>`, 1);
 function App($$anchor, $$props) {
 	push($$props, true);
 	let current = state(proxy(landing()?.id ?? ""));
@@ -2583,7 +2754,7 @@ function App($$anchor, $$props) {
 		title: s.title
 	}))));
 	const runsAt = user_derived(() => surfaces().find((s) => s.holds === "run")?.id ?? "");
-	const keys = user_derived(() => get(helpOpen) ? help(get(current)) : []);
+	const groups = user_derived(() => get(helpOpen) ? sheet(get(current)) : []);
 	const under = user_derived(() => {
 		if (!get(showing)?.transient) return {
 			s: get(showing),
@@ -2651,7 +2822,7 @@ function App($$anchor, $$props) {
 		append($$anchor, main);
 	};
 	var alternate_1 = ($$anchor) => {
-		var fragment_1 = root_10();
+		var fragment_1 = root_11();
 		var button = first_child(fragment_1);
 		var div = sibling(button, 2);
 		var node_4 = child(div);
@@ -2905,7 +3076,7 @@ function App($$anchor, $$props) {
 		});
 		var node_16 = sibling(node_14, 2);
 		var consequent_10 = ($$anchor) => {
-			var fragment_10 = root_9();
+			var fragment_10 = root_10();
 			var div_4 = first_child(fragment_10);
 			var div_5 = sibling(div_4, 2);
 			var header = child(div_5);
@@ -2915,31 +3086,42 @@ function App($$anchor, $$props) {
 			});
 			next(2);
 			reset(header);
-			var dl = sibling(header, 2);
-			each(dl, 21, () => get(keys), (k) => k.surface + k.combo, ($$anchor, k) => {
-				var fragment_11 = root_8();
-				var dt = first_child(fragment_11);
-				var kbd = child(dt);
-				var text_1 = only_child(kbd, true);
-				reset(dt);
-				var dd = sibling(dt, 2);
-				var text_2 = child(dd, true);
-				var node_18 = sibling(text_2);
-				var consequent_9 = ($$anchor) => {
-					var span = root_7();
-					append($$anchor, span);
-				};
-				if_block(node_18, ($$render) => {
-					if (get(k).surface === "global") $$render(consequent_9);
+			var node_18 = sibling(header, 2);
+			each(node_18, 17, () => get(groups), (g) => g.title, ($$anchor, g) => {
+				const keys = user_derived(() => get(g).keys);
+				var fragment_11 = root_9();
+				var h3 = first_child(fragment_11);
+				var text_1 = only_child(h3, true);
+				var dl = sibling(h3, 2);
+				each(dl, 21, () => get(keys), (k) => k.surface + k.combo, ($$anchor, k) => {
+					var fragment_12 = root_8();
+					var dt = first_child(fragment_12);
+					each(dt, 22, () => get(k).combos, (c) => c, ($$anchor, c, ci) => {
+						var fragment_13 = root_7();
+						var node_19 = first_child(fragment_13);
+						var consequent_9 = ($$anchor) => {
+							var text_2 = text();
+							text_2.nodeValue = " ";
+							append($$anchor, text_2);
+						};
+						if_block(node_19, ($$render) => {
+							if (get(ci) > 0) $$render(consequent_9);
+						});
+						var kbd = sibling(node_19);
+						var text_3 = only_child(kbd, true);
+						template_effect(($0) => set_text(text_3, $0), [() => spell(c)]);
+						append($$anchor, fragment_13);
+					});
+					reset(dt);
+					var dd = sibling(dt, 2);
+					var text_4 = only_child(dd, true);
+					template_effect(() => set_text(text_4, get(k).label));
+					append($$anchor, fragment_12);
 				});
-				reset(dd);
-				template_effect(($0) => {
-					set_text(text_1, $0);
-					set_text(text_2, get(k).label);
-				}, [() => spell(get(k).combo)]);
+				reset(dl);
+				template_effect(() => set_text(text_1, get(g).title));
 				append($$anchor, fragment_11);
 			});
-			reset(dl);
 			reset(div_5);
 			action(div_5, ($$node) => trap?.($$node));
 			delegated("click", div_4, () => set(helpOpen, false));
@@ -2965,6 +3147,6 @@ var target = document.getElementById("app");
 if (!target) throw new Error("no #app to mount into");
 mount(App, { target });
 //#endregion
-export { spell as A, State as C, onAction as D, help as E, listed$1 as M, surfaces as N, run as O, STATES as S, all as T, address as _, Inline as a, remember as b, clip as c, shape as d, reread as f, same$1 as g, resource as h, Skeleton as i, landing as j, setMode as k, listed as l, failure as m, Icon as n, blocks as o, copyText as p, Split as r, ago as s, Pill as t, plural as u, itemFocus as v, go as w, LIFE as x, place as y };
+export { setMode as A, State as C, help as D, all as E, landing as M, listed$1 as N, onAction as O, surfaces as P, STATES as S, answerItemKeys as T, address as _, Inline as a, remember as b, clip as c, shape as d, reread as f, same$1 as g, resource as h, Skeleton as i, spell as j, run as k, listed as l, failure as m, Icon as n, blocks as o, copyText as p, Split as r, ago as s, Pill as t, plural as u, itemFocus as v, go as w, LIFE as x, place as y };
 
 //# sourceMappingURL=app.js.map

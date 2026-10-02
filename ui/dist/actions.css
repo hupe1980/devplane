@@ -150,6 +150,34 @@
   .reply.svelte-kz8fai {
     display: flex;
     gap: var(--s-2);
+    align-items: center;
+  }
+  /* A control and the key that presses it, side by side. */
+  .keyed.svelte-kz8fai {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  kbd.svelte-kz8fai {
+    font-family: var(--mono);
+    font-size: 0.625rem;
+    color: var(--faint);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0 0.25rem;
+  }
+  .session.svelte-kz8fai {
+    margin: 0;
+    display: flex;
+    gap: var(--s-2);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .primary.svelte-kz8fai {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--chrome);
+    font-weight: 600;
   }
   .reply.svelte-kz8fai input:where(.svelte-kz8fai) {
     flex: 1;

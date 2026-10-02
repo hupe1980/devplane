@@ -1,0 +1,49 @@
+# Bar 3, latency: the p95 of each interaction against its own budget, nightly.
+# It reports and never blocks a change — a missed budget is printed, and the
+# job fails only when the harness itself could not start.
+name: bars-nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  latency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bars
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Answer to unblocked runs over a real host and the echo agent.
+      - name: Build the host and the echo agent
+        run: cargo build --locked --example echo_agent && cargo build --locked
+      - name: Install the interface and a browser
+        run: |
+          cd ui
+          npm ci
+          npm install --no-save --save-exact playwright-core@1.62.1
+          npx playwright-core install --with-deps chromium
+      - name: Bar 3
+        run: cd ui && npm run bars -- --bar 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: latency-report
+          path: ui/.bars/report.json
+          if-no-files-found: ignore

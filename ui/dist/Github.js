@@ -1,10 +1,10 @@
 import { A as comment, E as if_block, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, O as set_text, V as template_effect, W as child, X as state, Y as set, Z as user_derived, at as noop, et as pop, it as reset, j as from_html, k as append, m as set_attribute, o as prop, q as sibling, rt as next, tt as push } from "./api.js";
 import { h as resource, i as Skeleton, l as listed, n as Icon, s as ago, u as plural } from "./app.js";
+import { t as cursor } from "./cursor.js";
 import { t as Failed } from "./Failed.js";
 import { t as safeHref } from "./href.js";
 import { t as Grid } from "./Grid.js";
 import { t as Empty } from "./Empty.js";
-import { t as cursor } from "./cursor.js";
 import { t as Tabs } from "./Tabs.js";
 //#region src/surfaces/github/GithubList.svelte
 var act = ($$anchor, kind = noop) => {

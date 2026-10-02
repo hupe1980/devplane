@@ -1,7 +1,7 @@
 import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, et as pop, f as bind_value, it as reset, j as from_html, k as append, m as set_attribute, o as prop, ot as to_array, p as remove_input_defaults, q as sibling, rt as next, tt as push, z as untrack } from "./api.js";
-import { O as run, h as resource, n as Icon } from "./app.js";
-import { t as Failed } from "./Failed.js";
+import { h as resource, k as run, n as Icon } from "./app.js";
 import { t as cursor } from "./cursor.js";
+import { t as Failed } from "./Failed.js";
 import { t as ChangeState } from "./ChangeState.js";
 //#region src/surfaces/change/List.svelte
 var root = from_html(`<div class="fail"><!></div>`);

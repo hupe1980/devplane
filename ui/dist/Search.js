@@ -1,5 +1,6 @@
 import { A as comment, E as if_block, G as first_child, H as user_effect, I as event, J as proxy, K as only_child, L as get, N as text, O as set_text, V as template_effect, W as child, X as state, Y as set, Z as user_derived, at as noop, et as pop, f as bind_value, i as api, it as reset, j as from_html, k as append, m as set_attribute, o as prop, p as remove_input_defaults, q as sibling, tt as push, z as untrack } from "./api.js";
-import { a as Inline, m as failure, n as Icon } from "./app.js";
+import { a as Inline, m as failure, n as Icon, w as go } from "./app.js";
+import { t as cursor } from "./cursor.js";
 import { t as Grid } from "./Grid.js";
 import { t as Empty } from "./Empty.js";
 //#region src/surfaces/search/Search.svelte
@@ -49,6 +50,18 @@ function Search($$anchor, $$props) {
 			if (mine === gen) set(busy, false);
 		}
 	}
+	const keyOf = (h) => h.run_id + h.at + h.text;
+	let order = state(proxy([]));
+	user_effect(() => cursor({
+		scope: "search",
+		size: () => get(order).length,
+		at: () => get(order).indexOf(get(selected) ?? ""),
+		go: (i) => set(selected, get(order)[i], true),
+		open: (i) => {
+			const h = get(hits).find((x) => keyOf(x) === get(order)[i]);
+			if (h) go(`#why/${encodeURIComponent(h.run_id)}`);
+		}
+	}));
 	const columns = [
 		{
 			key: "at",
@@ -150,13 +163,19 @@ function Search($$anchor, $$props) {
 				get rows() {
 					return get(hits);
 				},
-				key: (h) => h.run_id + h.at + h.text,
+				key: keyOf,
 				label: "matches",
 				get selected() {
 					return get(selected);
 				},
 				set selected($$value) {
 					set(selected, $$value, true);
+				},
+				get order() {
+					return get(order);
+				},
+				set order($$value) {
+					set(order, $$value, true);
 				},
 				cell,
 				$$slots: { cell: true }

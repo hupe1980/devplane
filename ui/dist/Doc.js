@@ -1,5 +1,5 @@
 import { $ as remove_textarea_child, A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, I as event, J as proxy, K as only_child, L as get, N as text, O as set_text, P as delegate, Q as autofocus, U as user_pre_effect, V as template_effect, W as child, X as state, Y as set, Z as user_derived, _ as set_style, at as noop, et as pop, f as bind_value, i as api, it as reset, j as from_html, k as append, m as set_attribute, o as prop, ot as to_array, q as sibling, rt as next, t as Refused, tt as push, v as set_class, w as index, y as clsx, z as untrack } from "./api.js";
-import { D as onAction, S as STATES, a as Inline, d as shape, h as resource, i as Skeleton, k as setMode, m as failure, n as Icon, o as blocks, p as copyText, r as Split, t as Pill, x as LIFE } from "./app.js";
+import { A as setMode, O as onAction, S as STATES, a as Inline, d as shape, h as resource, i as Skeleton, m as failure, n as Icon, o as blocks, p as copyText, r as Split, t as Pill, x as LIFE } from "./app.js";
 import { t as writer } from "./write.svelte.js";
 import { t as Failed } from "./Failed.js";
 import { c as Commands, i as markKey, n as unreadSays, o as prune, r as writeMark, s as readMark, t as unread } from "./unread.svelte.js";

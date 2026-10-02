@@ -1,9 +1,9 @@
 import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, N as text, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, at as noop, et as pop, g as init_select, h as bind_select_value, it as reset, j as from_html, k as append, m as set_attribute, o as prop, ot as to_array, q as sibling, rt as next, tt as push, u as bind_element_size, v as set_class, y as clsx } from "./api.js";
-import { N as surfaces, a as Inline, i as Skeleton, n as Icon, p as copyText, t as Pill, w as go } from "./app.js";
+import { P as surfaces, a as Inline, i as Skeleton, n as Icon, p as copyText, t as Pill, w as go } from "./app.js";
+import { t as cursor } from "./cursor.js";
 import { t as Grid } from "./Grid.js";
 import { t as Empty } from "./Empty.js";
 import { t as Props } from "./Props.js";
-import { t as cursor } from "./cursor.js";
 //#region src/surfaces/board/Board.svelte
 var root = from_html(`<button> <span class="svelte-13ck13b"> </span></button>`);
 var root_1 = from_html(`<div class="chips svelte-13ck13b" role="group" aria-label="by state"><button>all <span class="svelte-13ck13b"> </span></button> <!></div>`);

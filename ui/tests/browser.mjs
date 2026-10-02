@@ -7,55 +7,29 @@
 //
 //   PLAYWRIGHT=/path/to/node_modules/playwright-core node tests/browser.mjs
 //
-// `CHROME` names a browser binary (default: the system Chrome on macOS, else
-// Playwright's own). It starts `vite` with `DEVPLANE_FIXTURES=1` on a free
-// port, or uses `BASE` (e.g. http://localhost:5290/) if one is running.
-// `npm run render` stays the CI check; this is the one a person runs.
+// Start-up is the bars' (`tests/bars/driver.mjs`): `CHROME` names a browser
+// binary, and `BASE` a running `npm run dev:fixtures`; otherwise Vite is
+// started with `DEVPLANE_FIXTURES=1` on a free port. `npm run render` is the
+// check every build runs; this one runs beside the bars.
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { HarnessError, SUBJECT, recorded as find, sleep, start } from "./bars/driver.mjs";
 
-const here = resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
-const where = process.env.PLAYWRIGHT;
-if (!where) {
-  console.log("browser: skipped — set PLAYWRIGHT to a playwright-core install to run it");
-  process.exit(0);
-}
-/** @type {any} */
-let pw;
+/** @type {import("./bars/driver.mjs").Driver} */
+let driver;
 try {
-  pw = await import(existsSync(where) ? pathToFileURL(resolve(where, existsSync(resolve(where, "index.mjs")) ? "index.mjs" : "index.js")).href : where);
+  driver = await start();
 } catch (e) {
-  console.log(`browser: skipped — ${where} could not be loaded (${e instanceof Error ? e.message : String(e)})`);
+  if (!(e instanceof HarnessError)) throw e;
+  console.log(`browser: skipped — ${e.message}`);
   process.exit(0);
 }
-const chromium = pw.chromium ?? pw.default?.chromium;
-
-/** @type {{ close(): Promise<void> } | null} */
-let server = null;
-let BASE = process.env.BASE ?? "";
-if (!BASE) {
-  process.env.DEVPLANE_FIXTURES = "1";
-  const { createServer } = await import("vite");
-  const s = await createServer({ root: here, configFile: resolve(here, "vite.config.ts"), logLevel: "error", server: { port: 0, host: "127.0.0.1" } });
-  await s.listen();
-  server = s;
-  BASE = s.resolvedUrls?.local[0] ?? "";
-}
-const mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const executablePath = process.env.CHROME ?? (existsSync(mac) ? mac : undefined);
-const browser = await chromium.launch({ executablePath, headless: true });
-const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
-// The recorded change, found by its title as `fixtures.ts` finds it: the
-// file names carry ids that change on every capture.
-const fixtures = resolve(here, "fixtures");
-const recorded = readdirSync(fixtures)
-  .filter((f) => f.startsWith("change-") && f.endsWith(".json"))
-  .map((f) => JSON.parse(readFileSync(resolve(fixtures, f), "utf8")))
-  .find((d) => d.title === "Rate-limit the login route");
+const BASE = driver.base;
+// The recorded change, found by its title: the file names carry ids that
+// change on every capture.
+const recorded = find("change", SUBJECT);
 if (!recorded) {
-  console.error("browser: no recorded change titled \"Rate-limit the login route\" — run scripts/capture-fixtures.sh");
+  console.error(`browser: no recorded change titled "${SUBJECT}" — run scripts/capture-fixtures.sh`);
+  await driver.close();
   process.exit(1);
 }
 /** @type {string} */
@@ -68,8 +42,7 @@ function check(name, ok, detail = "") {
   if (!ok) failures += 1;
 }
 async function page() {
-  const c = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  const p = await c.newPage();
+  const p = await driver.page();
   p.on("pageerror", (/** @type {Error} */ e) => check(`no page error`, false, e.message));
   return p;
 }
@@ -320,8 +293,7 @@ try {
 } catch (e) {
   check("the check ran to the end", false, e instanceof Error ? e.message.split("\n")[0] : String(e));
 } finally {
-  await browser.close();
-  await server?.close();
+  await driver.close();
 }
 
 if (failures) {

@@ -5489,7 +5489,7 @@ async function hmac(key, message) {
 async function windowProof(path, opts) {
 	const key = windowKey();
 	if (!key || !writes(opts) || !crypto?.subtle) return {};
-	const asked = /^\/api\/asks\/([^/?#]+)\/answer$/.exec(path);
+	const asked = /^\/api\/asks\/([^/?#]+)\/(?:answer|undo)$/.exec(path);
 	if (asked) return { "X-Devplane-Ask-Proof": await hmac(key, `ask ${decodeURIComponent(asked[1])}`) };
 	if (path === "/api/projects/trust" && typeof opts.body === "string") {
 		const repo = JSON.parse(opts.body).path;

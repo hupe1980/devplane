@@ -1,0 +1,1 @@
+[{"id":"01a0fba6-9f20-76a5-bfdb-4024f49116f7","run_id":"acp-01a0fba69ee676929ad23a494e907097","at":"2026-10-02T08:06:36.06498Z","role":"user","text":"question: which clients still call v1?\n\nIf the specification cannot be satisfied, stop and say so plainly rather than making the checks pass another way.\n"}]

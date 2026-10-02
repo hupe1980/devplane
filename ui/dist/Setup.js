@@ -1,5 +1,6 @@
-import { A as comment, C as each, E as if_block, F as delegated, G as first_child, K as only_child, L as get, N as text, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, at as noop, et as pop, i as api, it as reset, j as from_html, k as append, m as set_attribute, o as prop, q as sibling, rt as next, tt as push, v as set_class } from "./api.js";
-import { a as Inline, h as resource, i as Skeleton, n as Icon, p as copyText, t as Pill } from "./app.js";
+import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, N as text, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, at as noop, et as pop, i as api, it as reset, j as from_html, k as append, m as set_attribute, o as prop, q as sibling, rt as next, tt as push, v as set_class } from "./api.js";
+import { a as Inline, h as resource, i as Skeleton, n as Icon, p as copyText, t as Pill, w as go } from "./app.js";
+import { t as cursor } from "./cursor.js";
 import { t as Failed } from "./Failed.js";
 import { t as safeHref } from "./href.js";
 import { t as Grid } from "./Grid.js";
@@ -222,6 +223,17 @@ function Setup($$anchor, $$props) {
 	const hooks = user_derived(() => get(data)?.connect?.hooks_installed ?? []);
 	const policy = user_derived(() => get(data)?.machine_policy ?? null);
 	let selected = state(null);
+	let order = state(proxy([]));
+	user_effect(() => cursor({
+		scope: "setup",
+		size: () => get(order).length,
+		at: () => get(order).indexOf(get(selected) ?? ""),
+		go: (i) => set(selected, get(order)[i], true),
+		open: (i) => {
+			const p = (get(data)?.projects ?? []).find((x) => x.id === get(order)[i]);
+			if (p) go(`#inbox/${encodeURIComponent(p.name)}`);
+		}
+	}));
 	const columns = [
 		{
 			key: "name",
@@ -548,6 +560,12 @@ function Setup($$anchor, $$props) {
 					},
 					set selected($$value) {
 						set(selected, $$value, true);
+					},
+					get order() {
+						return get(order);
+					},
+					set order($$value) {
+						set(order, $$value, true);
 					},
 					cell,
 					$$slots: { cell: true }

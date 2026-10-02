@@ -235,6 +235,49 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo clippy --locked --target ${{ matrix.target }} -- -D warnings
 
+  # The UX bars over the recorded fixtures, each against its own budget (bar 1
+  # over a real host and the echo agent). Only the bars on the blocking list
+  # in ui/tests/bars/budgets.mjs fail this job; the others are reported in
+  # full, as is the browser suite beside them. Latency (bar 3) runs nightly.
+  bars:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bars
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The CLI build links no GUI library; the echo agent is bar 1's agent.
+      - name: Build the host and the echo agent
+        run: cargo build --locked --example echo_agent && cargo build --locked
+      # playwright-core at an exact version, outside the lockfile, and the
+      # one browser it drives. Nothing is fetched once the bars start.
+      - name: Install the interface and a browser
+        run: |
+          cd ui
+          npm ci
+          npm install --no-save --save-exact playwright-core@1.62.1
+          npx playwright-core install --with-deps chromium
+      - name: The bars
+        run: cd ui && npm run bars
+      - name: The browser suite (reported, not blocking)
+        if: always()
+        continue-on-error: true
+        run: cd ui && npm run browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bars-report
+          path: ui/.bars/report.json
+          if-no-files-found: ignore
+
   # Separate so a failure reads as "a dependency arrived", not "this commit is wrong".
   # Checks that need the gitignored concepts/ run via `just notes`, not here.
   deps:

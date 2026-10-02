@@ -96,6 +96,22 @@
   .undo.svelte-ytvk4v {
     font-size: var(--t-xs);
   }
+  .held.svelte-ytvk4v {
+    display: flex;
+    align-items: center;
+    gap: var(--s-3);
+    margin: 0 0 var(--s-4);
+    padding: var(--s-2) var(--s-3);
+    border-left: 2px solid var(--wait);
+    background: var(--panel);
+    font-size: var(--t-sm);
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .held.failed.svelte-ytvk4v {
+    border-left-color: var(--fail);
+    color: var(--ink);
+  }
   .close.svelte-ytvk4v {
     display: flex;
     flex-direction: column;
