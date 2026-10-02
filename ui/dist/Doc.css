@@ -1265,6 +1265,49 @@
     color: var(--dim);
   }
 
+  .refusal.svelte-1wz92j1 {
+    font-size: var(--t-sm);
+    padding: var(--s-2) var(--s-3);
+    border-left: 2px solid var(--wait);
+    background: var(--panel);
+    display: grid;
+    gap: var(--s-1);
+  }
+  .refusal.svelte-1wz92j1 p:where(.svelte-1wz92j1),
+  .refusal.svelte-1wz92j1 ul:where(.svelte-1wz92j1) {
+    margin: 0;
+  }
+  .refusal.svelte-1wz92j1 ul:where(.svelte-1wz92j1) {
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: var(--s-1);
+  }
+  .refusal.svelte-1wz92j1 li:where(.svelte-1wz92j1) {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+  }
+  .refusal.svelte-1wz92j1 li:where(.svelte-1wz92j1) span:where(.svelte-1wz92j1) {
+    color: var(--wait);
+  }
+  .refusal.svelte-1wz92j1 button:where(.svelte-1wz92j1) {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    height: 1.6rem;
+    padding: 0 0.5rem;
+    font-size: var(--t-xs);
+  }
+  .refusal.svelte-1wz92j1 .how:where(.svelte-1wz92j1) {
+    color: var(--dim);
+  }
+  code.svelte-1wz92j1 {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+  }
+
   .doc.svelte-178dv07 {
     container: doc / inline-size;
     display: flex;
@@ -1364,7 +1407,14 @@
   .counts.svelte-178dv07 .w-absent:where(.svelte-178dv07) {
     color: var(--faint);
   }
-  /* Narrower still, the quiet actions keep their icon and lose their word. */
+  /* Narrower still, or with a held Offer's reason to make room for, the
+     quiet actions keep their icon and lose their word. */
+  .toolbar.held-offer.svelte-178dv07 .quiet:where(.svelte-178dv07) {
+    padding: 0 0.45rem;
+  }
+  .toolbar.held-offer.svelte-178dv07 .quiet:where(.svelte-178dv07) .label:where(.svelte-178dv07) {
+    display: none;
+  }
   @container doc (max-width: 900px) {
     .toolbar.svelte-178dv07 .quiet:where(.svelte-178dv07) {
       padding: 0 0.45rem;
@@ -1408,52 +1458,15 @@
     border-color: transparent;
     color: var(--dim);
   }
+  .held.svelte-178dv07 {
+    font-size: var(--t-xs);
+    color: var(--wait);
+    white-space: nowrap;
+  }
   .count.svelte-178dv07 {
     margin-left: 0.3rem;
     font-size: var(--t-xs);
     font-weight: 600;
-  }
-  .refusal.svelte-178dv07 {
-    font-size: var(--t-sm);
-    padding: var(--s-2) var(--s-3);
-    border-left: 2px solid var(--wait);
-    background: var(--panel);
-    display: grid;
-    gap: var(--s-1);
-  }
-  .refusal.svelte-178dv07 p:where(.svelte-178dv07),
-  .refusal.svelte-178dv07 ul:where(.svelte-178dv07) {
-    margin: 0;
-  }
-  .refusal.svelte-178dv07 ul:where(.svelte-178dv07) {
-    padding: 0;
-    list-style: none;
-    display: grid;
-    gap: var(--s-1);
-  }
-  .refusal.svelte-178dv07 li:where(.svelte-178dv07) {
-    display: flex;
-    align-items: center;
-    gap: var(--s-2);
-    flex-wrap: wrap;
-  }
-  .refusal.svelte-178dv07 li:where(.svelte-178dv07) span:where(.svelte-178dv07) {
-    color: var(--wait);
-  }
-  .refusal.svelte-178dv07 button:where(.svelte-178dv07) {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    height: 1.6rem;
-    padding: 0 0.5rem;
-    font-size: var(--t-xs);
-  }
-  .refusal.svelte-178dv07 .how:where(.svelte-178dv07) {
-    color: var(--dim);
-  }
-  code.svelte-178dv07 {
-    font-family: var(--mono);
-    font-size: var(--t-xs);
   }
   .said.svelte-178dv07 {
     margin: 0;

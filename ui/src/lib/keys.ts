@@ -232,13 +232,14 @@ export function typing(e: KeyboardEvent): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
 }
 
-/// Whether a combo still fires while text is being typed: `Esc`, and a
-/// chord held with ⌘/Ctrl or ⌥/Alt, which types nothing. A bare key never
-/// does, and a modified one only when it is bound — ⌘C stays the field's.
-const fromField = (c: string) => c === "Esc" || c.startsWith("Mod+") || c.startsWith("Alt+");
+/// Whether a combo still fires while text is being typed: `Esc`, and a bound
+/// ⌘/Ctrl chord, which types nothing — ⌘C stays the field's because it is not
+/// bound. A bare key never does, and neither does an ⌥/Alt chord: on a Mac ⌥
+/// composes a character (⌥3 is `£`, ⌥W is `∑`), so the field owns it.
+export const fromField = (c: string): boolean => c === "Esc" || c.startsWith("Mod+");
 
 /// Dispatches one key event for the surface on screen; returns whether a
-/// binding took it. While an input has focus only `Esc` and bound ⌘/⌥
+/// binding took it. While an input has focus only `Esc` and bound ⌘/Ctrl
 /// chords fire.
 export function dispatch(surface: string, e: KeyboardEvent): boolean {
   // An IME is composing: the key belongs to the composition.

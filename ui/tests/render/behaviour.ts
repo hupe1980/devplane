@@ -3,7 +3,7 @@
 // its own Enter, which links are allowed, how a review mark is keyed, and the
 // source shapes that keep a page's state through a poll. The browser check
 // (`tests/browser.mjs`) drives the same bugs in a real page.
-import { all, combo, dispatch, onAction, run, spell } from "../../src/lib/keys";
+import { all, bind, combo, dispatch, fromField, onAction, run, spell } from "../../src/lib/keys";
 import "../../src/shell/keys";
 import { safeHref } from "../../src/lib/href";
 import { markKey } from "../../src/surfaces/change/review/marks";
@@ -13,7 +13,7 @@ import { fail, html, source, visible, walk } from "../harness";
 type Ev = Parameters<typeof combo>[0];
 const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...e });
 
-// ── ⌥ chords are read from the physical key (spec 048 FR-004) ────────────
+// ── ⌥ chords are read from the physical key ──────────────────────────────
 {
   // What macOS Chrome and WKWebView send: Option composes a character.
   const mac: Array<[Ev, string]> = [
@@ -63,6 +63,53 @@ const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKe
   const declines = onAction("check-decline", () => false);
   if (run("check-decline", "inbox")) fail("run() says a key was taken when every listener declined");
   declines();
+}
+
+// ── A text field owns its keys: no bare key and no ⌥ chord leaves it ─────
+//
+// On a Mac ⌥3 types `£` and ⌥W types `∑`; taken by the registry they would
+// switch to the review or close the tab under a half-typed draft.
+{
+  // The real ⌥3 and ⌥W, whose listeners live in components this render
+  // never mounts, and a scope of this check's own for the rest.
+  bind({ surface: "field-check", combo: "j", action: "field-check-bare", label: "a key a field must keep" });
+  bind({ surface: "field-check", combo: "Mod+e", action: "field-check-mod", label: "a command chord" });
+  const took: string[] = [];
+  const offs = ["view-review", "close-tab", "field-check-bare", "field-check-mod"].map((a) =>
+    onAction(a, () => (took.push(a), true)),
+  );
+  const ev = (e: Partial<Ev>, target: { tagName: string; isContentEditable?: boolean }) =>
+    ({
+      ...key(e),
+      isComposing: false,
+      target: { isContentEditable: false, closest: () => null, ...target },
+      preventDefault: () => {},
+    }) as unknown as KeyboardEvent;
+  const fields = [{ tagName: "INPUT" }, { tagName: "TEXTAREA" }, { tagName: "DIV", isContentEditable: true }];
+  const kept: Array<[string, string, Partial<Ev>]> = [
+    ["⌥3", "change", { altKey: true, key: "£", code: "Digit3" }],
+    ["⌥W", "change", { altKey: true, key: "∑", code: "KeyW" }],
+    ["j", "field-check", { key: "j", code: "KeyJ" }],
+  ];
+  for (const t of fields) {
+    const where = t.isContentEditable ? "a contenteditable" : t.tagName === "INPUT" ? "an input" : "a textarea";
+    for (const [name, surface, e] of kept) {
+      took.length = 0;
+      if (dispatch(surface, ev(e, t)) || took.length) fail(`${name} in ${where} was taken by the registry (${took.join()})`);
+    }
+    took.length = 0;
+    if (!dispatch("field-check", ev({ key: "e", code: "KeyE", metaKey: true }, t)) || !took.includes("field-check-mod"))
+      fail(`a bound ⌘ chord in ${where} does not fire`);
+  }
+  if (!fromField("Esc")) fail("Esc in a field no longer leaves");
+  if (!fromField("Mod+k")) fail("⌘K in a field no longer opens the palette");
+  // The same keys on the page still fire: the field is the only thing that
+  // keeps them.
+  for (const [name, surface, e] of kept) {
+    took.length = 0;
+    if (!dispatch(surface, ev(e, { tagName: "DIV" })) || took.length !== 1) fail(`${name} on the page does nothing`);
+  }
+  offs.forEach((off) => off());
 }
 
 // ── Host links: an allowlist of schemes, in one helper ───────────────────

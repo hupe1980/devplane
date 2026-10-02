@@ -55,6 +55,19 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   const verified = doc({ ...stale, state: "verified", qualifier: { ...rate.qualifier, unseen: 0 }, standing_says: "verified · every declared gate exited zero" });
   if (!verified.includes("Offer as pull request")) fail("a verified change is not offered as a pull request");
   if (!/class="standing done/.test(verified)) fail("a verified standing is not the verified green");
+  // A weakened row unread: Offer is held, and says why beside it. The
+  // recording has one such row; the host refuses that offer. The button is
+  // found by its label (held) or its words (live).
+  const offer = (markup: string) =>
+    markup.match(/<button[^>]*aria-label="Offer as pull request"[^>]*>|<button[^>]*>(?:(?!<\/button>)[\s\S])*?Offer as pull request/)?.[0] ?? "";
+  if (rate.qualifier?.unseen !== 1) fail("the recorded change no longer has one unread weakened row, so this check guards nothing");
+  const held = doc(rate);
+  if (!offer(held)) fail("a verified change with an unread weakened row has no Offer at all");
+  if (!/\bdisabled\b/.test(offer(held).split(">")[0])) fail("Offer is live while a weakened row is unread");
+  if (!visible(held).includes("Read 1 weakened check first")) fail("a held Offer does not say why beside it");
+  if (!/aria-describedby="offer-held"/.test(offer(held))) fail("a held Offer's reason is not tied to the button");
+  if (!offer(verified) || /\bdisabled\b/.test(offer(verified).split(">")[0])) fail("Offer is held with every weakened row read");
+  if (visible(verified).includes("weakened check first")) fail("Offer gives a reason to wait with nothing unread");
   const stopped = doc({ ...stale, stopped: { at: "x" }, can_retry: true });
   if (!stopped.includes("Pick it back up") || !stopped.includes("Try again")) fail("a stopped change cannot be resumed or retried");
   if (doc({ ...stale, worktree: null }).includes("Run gates")) fail("a change with no worktree offers to run gates");

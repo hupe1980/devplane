@@ -1,9 +1,24 @@
-import { $ as push, B as user_effect, C as each, E as if_block, F as delegated, G as sibling, H as child, I as event, J as state, L as get, O as set_text, P as delegate, Q as pop, U as first_child, W as only_child, X as autofocus, Y as user_derived, f as bind_value, j as from_html, k as append, m as set_attribute, nt as reset, o as prop, p as remove_input_defaults, q as set, tt as next, v as set_class, w as index, z as template_effect } from "./api.js";
+import { B as effect, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, I as event, K as only_child, L as get, O as set_text, P as delegate, R as tick, V as template_effect, W as child, X as state, Y as set, Z as user_derived, b as action, et as pop, f as bind_value, it as reset, j as from_html, k as append, m as set_attribute, o as prop, p as remove_input_defaults, q as sibling, rt as next, tt as push, v as set_class } from "./api.js";
 import { A as spell, E as help, M as listed, N as surfaces, O as run, T as all, h as resource, j as landing, n as Icon, w as go } from "./app.js";
 import { t as Failed } from "./Failed.js";
 import { t as ChangeState } from "./ChangeState.js";
 import { t as here } from "./offered.svelte.js";
 //#region src/surfaces/palette/Palette.svelte
+function unique(entries) {
+	const kept = /* @__PURE__ */ new Map();
+	for (const e of entries) {
+		const have = kept.get(e.id);
+		if (!have) kept.set(e.id, e);
+		else if (!have.hint && e.hint) kept.set(e.id, {
+			...have,
+			hint: e.hint
+		});
+	}
+	return [...kept.values()];
+}
+function focusOnMount(node) {
+	tick().then(() => node.focus());
+}
 function score(q, text) {
 	const t = text.toLowerCase();
 	if (!q) return 0;
@@ -28,6 +43,80 @@ function score(q, text) {
 		last = j;
 	}
 	return 3 + jumps;
+}
+var LIST_ACTIONS = /* @__PURE__ */ new Set([
+	"next",
+	"prev",
+	"first",
+	"last",
+	"open"
+]);
+function commands(on) {
+	const out = [];
+	for (const c of on.here) out.push({
+		id: `here:${c.label}`,
+		kind: "here",
+		icon: c.icon,
+		label: c.label,
+		hint: c.hint,
+		go: () => {
+			on.back();
+			setTimeout(c.run, 0);
+		}
+	});
+	for (const c of on.changes) {
+		const to = on.opensChange;
+		if (!to) continue;
+		out.push({
+			id: `change:${c.id}`,
+			kind: "change",
+			icon: "change",
+			label: c.title || c.id,
+			hint: c.state,
+			qualifier: c.qualifier,
+			go: () => go(`#${to}/${encodeURIComponent(c.id)}`)
+		});
+	}
+	const place = (title) => `go to the ${title.toLowerCase()}`;
+	for (const s of on.places) {
+		const key = on.keys.find((b) => b.surface === "global" && b.label === place(s.title));
+		out.push({
+			id: `place:${s.id}`,
+			kind: "surface",
+			icon: s.icon ?? "right",
+			label: `Go to ${s.title}`,
+			hint: key ? spell(key.combo) : void 0,
+			go: () => go(`#${s.id}`)
+		});
+	}
+	for (const b of on.keys) {
+		if (b.action === "open-palette" || b.action === "leave" || LIST_ACTIONS.has(b.action)) continue;
+		const to = b.surface === "global" ? on.places.find((s) => b.label === place(s.title)) : void 0;
+		out.push({
+			id: to ? `place:${to.id}` : `action:${b.action}`,
+			kind: "action",
+			icon: "keyboard",
+			label: b.label.charAt(0).toUpperCase() + b.label.slice(1),
+			hint: spell(b.combo),
+			go: () => {
+				on.back();
+				setTimeout(() => run(b.action, on.over), 0);
+			}
+		});
+	}
+	for (const p of on.projects) {
+		const to = on.landing;
+		if (!to) continue;
+		out.push({
+			id: `project:${p.id}`,
+			kind: "project",
+			icon: "folder",
+			label: p.name,
+			hint: "narrow to this project",
+			go: () => go(`#${to}/${encodeURIComponent(p.name)}`)
+		});
+	}
+	return unique(out);
 }
 var ORDER = [
 	"here",
@@ -59,71 +148,19 @@ function Palette($$anchor, $$props) {
 	const projectsRead = resource(() => "/api/projects", { tell: () => "devplane doctor" });
 	const fetchedChanges = user_derived(() => Array.isArray(changesRead.data) ? changesRead.data : null);
 	const fetchedProjects = user_derived(() => Array.isArray(projectsRead.data) ? projectsRead.data : null);
-	const LIST_ACTIONS = /* @__PURE__ */ new Set([
-		"next",
-		"prev",
-		"first",
-		"last",
-		"open"
-	]);
 	const over = user_derived(() => from().replace(/^#/, "").split("/")[0] || landing()?.id || "");
 	const opensChange = user_derived(() => surfaces().find((s) => s.link === "change"));
-	const entries = user_derived(() => {
-		const out = [];
-		for (const c of here.list) out.push({
-			kind: "here",
-			icon: c.icon,
-			label: c.label,
-			hint: c.hint,
-			go: () => {
-				go(from() || "");
-				setTimeout(c.run, 0);
-			}
-		});
-		for (const c of get(fetchedChanges) ?? changes() ?? []) {
-			const to = get(opensChange)?.id;
-			if (!to) continue;
-			out.push({
-				kind: "change",
-				icon: "change",
-				label: c.title || c.id,
-				hint: c.state,
-				qualifier: c.qualifier,
-				go: () => go(`#${to}/${encodeURIComponent(c.id)}`)
-			});
-		}
-		for (const s of listed()) out.push({
-			kind: "surface",
-			icon: s.icon ?? "right",
-			label: `Go to ${s.title}`,
-			go: () => go(`#${s.id}`)
-		});
-		for (const b of help(get(over))) {
-			if (b.action === "open-palette" || b.action === "leave" || LIST_ACTIONS.has(b.action)) continue;
-			out.push({
-				kind: "action",
-				icon: "keyboard",
-				label: b.label.charAt(0).toUpperCase() + b.label.slice(1),
-				hint: spell(b.combo),
-				go: () => {
-					go(from() || "");
-					setTimeout(() => run(b.action, get(over)), 0);
-				}
-			});
-		}
-		for (const p of get(fetchedProjects) ?? projects() ?? []) {
-			const to = landing()?.id;
-			if (!to) continue;
-			out.push({
-				kind: "project",
-				icon: "folder",
-				label: p.name,
-				hint: "narrow to this project",
-				go: () => go(`#${to}/${encodeURIComponent(p.name)}`)
-			});
-		}
-		return out;
-	});
+	const entries = user_derived(() => commands({
+		here: here.list,
+		changes: get(fetchedChanges) ?? changes() ?? [],
+		opensChange: get(opensChange)?.id,
+		places: listed(),
+		keys: help(get(over)),
+		projects: get(fetchedProjects) ?? projects() ?? [],
+		landing: landing()?.id,
+		over: get(over),
+		back: () => go(from() || "")
+	}));
 	const TITLES = user_derived(() => ({
 		here: here.title ? `This change: ${here.title}` : "Here",
 		change: "Changes",
@@ -136,6 +173,7 @@ function Palette($$anchor, $$props) {
 		const raw = get(query).trim();
 		const actions = raw.startsWith(">");
 		return rank(get(entries), raw).concat(raw && !actions && get(searcher) ? [{
+			id: "search",
 			kind: "surface",
 			icon: "search",
 			label: `Search every session for “${raw}”`,
@@ -163,20 +201,21 @@ function Palette($$anchor, $$props) {
 	const bound = user_derived(() => all().length);
 	var section = root_5();
 	var label = sibling(child(section), 2);
-	var node = child(label);
-	Icon(node, {
+	var node_1 = child(label);
+	Icon(node_1, {
 		name: "search",
 		size: 16
 	});
-	var input = sibling(node, 2);
+	var input = sibling(node_1, 2);
 	remove_input_defaults(input);
-	autofocus(input, true);
+	effect(() => bind_value(input, () => get(query), ($$value) => set(query, $$value)));
+	action(input, ($$node) => focusOnMount?.($$node));
 	reset(label);
-	var node_1 = sibling(label, 2);
+	var node_2 = sibling(label, 2);
 	var consequent = ($$anchor) => {
 		var div = root();
-		var node_2 = child(div);
-		Failed(node_2, {
+		var node_3 = child(div);
+		Failed(node_3, {
 			what: "the changes, so none are listed",
 			get failure() {
 				return changesRead.failure;
@@ -185,14 +224,14 @@ function Palette($$anchor, $$props) {
 		reset(div);
 		append($$anchor, div);
 	};
-	if_block(node_1, ($$render) => {
+	if_block(node_2, ($$render) => {
 		if (changesRead.failure && !changesRead.data) $$render(consequent);
 	});
-	var node_3 = sibling(node_1, 2);
+	var node_4 = sibling(node_2, 2);
 	var consequent_1 = ($$anchor) => {
 		var div_1 = root();
-		var node_4 = child(div_1);
-		Failed(node_4, {
+		var node_5 = child(div_1);
+		Failed(node_5, {
 			what: "the projects, so none are listed",
 			get failure() {
 				return projectsRead.failure;
@@ -201,36 +240,35 @@ function Palette($$anchor, $$props) {
 		reset(div_1);
 		append($$anchor, div_1);
 	};
-	if_block(node_3, ($$render) => {
+	if_block(node_4, ($$render) => {
 		if (projectsRead.failure && !projectsRead.data) $$render(consequent_1);
 	});
-	var ul = sibling(node_3, 2);
-	var node_5 = child(ul);
-	each(node_5, 17, () => get(shown), index, ($$anchor, e, i) => {
+	var ul = sibling(node_4, 2);
+	var node_6 = child(ul);
+	each(node_6, 19, () => get(shown), (e) => e.id, ($$anchor, e, i) => {
 		var fragment = root_3();
-		var node_6 = first_child(fragment);
+		var node_7 = first_child(fragment);
 		var consequent_2 = ($$anchor) => {
 			var li = root_1();
 			var text_1 = only_child(li, true);
 			template_effect(() => set_text(text_1, get(TITLES)[get(e).kind]));
 			append($$anchor, li);
 		};
-		if_block(node_6, ($$render) => {
-			if (i === 0 || get(shown)[i - 1].kind !== get(e).kind) $$render(consequent_2);
+		if_block(node_7, ($$render) => {
+			if (get(i) === 0 || get(shown)[get(i) - 1].kind !== get(e).kind) $$render(consequent_2);
 		});
-		var li_1 = sibling(node_6, 2);
-		set_attribute(li_1, "id", `palette-opt-${i}`);
+		var li_1 = sibling(node_7, 2);
 		var button = child(li_1);
-		var node_7 = child(button);
-		Icon(node_7, {
+		var node_8 = child(button);
+		Icon(node_8, {
 			get name() {
 				return get(e).icon;
 			},
 			size: 14
 		});
-		var span = sibling(node_7, 2);
+		var span = sibling(node_8, 2);
 		var text_2 = only_child(span, true);
-		var node_8 = sibling(span, 2);
+		var node_9 = sibling(span, 2);
 		var consequent_3 = ($$anchor) => {
 			ChangeState($$anchor, {
 				get state() {
@@ -246,35 +284,36 @@ function Palette($$anchor, $$props) {
 			let classes;
 			var text_3 = only_child(span_1, true);
 			template_effect(() => {
-				classes = set_class(span_1, 1, "hint svelte-d7fgwz", null, classes, { kbd: get(e).kind === "action" });
+				classes = set_class(span_1, 1, "hint svelte-d7fgwz", null, classes, { kbd: get(e).kind === "action" || get(e).kind === "surface" });
 				set_text(text_3, get(e).hint);
 			});
 			append($$anchor, span_1);
 		};
-		if_block(node_8, ($$render) => {
+		if_block(node_9, ($$render) => {
 			if (get(e).kind === "change" && get(e).hint) $$render(consequent_3);
 			else if (get(e).hint) $$render(consequent_4, 1);
 		});
 		reset(button);
 		reset(li_1);
 		template_effect(() => {
-			set_attribute(li_1, "aria-selected", i === get(at));
+			set_attribute(li_1, "id", `palette-opt-${get(i) ?? ""}`);
+			set_attribute(li_1, "aria-selected", get(i) === get(at));
 			set_text(text_2, get(e).label);
 		});
 		delegated("click", button, function(...$$args) {
 			get(e).go?.apply(this, $$args);
 		});
-		event("mouseenter", button, () => set(at, i, true));
+		event("mouseenter", button, () => set(at, get(i), true));
 		append($$anchor, fragment);
 	});
-	var node_9 = sibling(node_5, 2);
+	var node_10 = sibling(node_6, 2);
 	var consequent_5 = ($$anchor) => {
 		var li_2 = root_4();
 		var text_4 = only_child(li_2);
 		template_effect(() => set_text(text_4, `Nothing by that name — ${get(entries).length ?? ""} things and ${get(bound) ?? ""} keys are here.`));
 		append($$anchor, li_2);
 	};
-	if_block(node_9, ($$render) => {
+	if_block(node_10, ($$render) => {
 		if (get(shown).length === 0) $$render(consequent_5);
 	});
 	reset(ul);
@@ -282,12 +321,11 @@ function Palette($$anchor, $$props) {
 	reset(section);
 	template_effect(() => set_attribute(input, "aria-activedescendant", get(shown)[get(at)] ? `palette-opt-${get(at)}` : void 0));
 	delegated("keydown", input, typed);
-	bind_value(input, () => get(query), ($$value) => set(query, $$value));
 	append($$anchor, section);
 	pop();
 }
 delegate(["keydown", "click"]);
 //#endregion
-export { ORDER, Palette as default, rank, score };
+export { ORDER, commands, Palette as default, focusOnMount, rank, score, unique };
 
 //# sourceMappingURL=Palette.js.map

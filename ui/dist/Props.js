@@ -1,4 +1,4 @@
-import { A as comment, C as each, E as if_block, G as sibling, H as child, L as get, O as set_text, S as snippet, U as first_child, W as only_child, j as from_html, k as append, nt as reset, v as set_class, y as clsx, z as template_effect } from "./api.js";
+import { A as comment, C as each, E as if_block, G as first_child, K as only_child, L as get, O as set_text, S as snippet, V as template_effect, W as child, it as reset, j as from_html, k as append, q as sibling, v as set_class, y as clsx } from "./api.js";
 //#region src/lib/ui/Props.svelte
 var root = from_html(`<dt class="svelte-1gth30k"> </dt> <dd> </dd>`, 1);
 var root_1 = from_html(`<dl class="props svelte-1gth30k"><!> <!></dl>`);

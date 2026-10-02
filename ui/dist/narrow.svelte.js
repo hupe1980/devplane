@@ -1,4 +1,4 @@
-import { B as user_effect, K as proxy, L as get, Y as user_derived, et as snapshot, i as api } from "./api.js";
+import { H as user_effect, J as proxy, L as get, Z as user_derived, i as api, nt as snapshot } from "./api.js";
 import { g as same, m as failure } from "./app.js";
 //#region src/surfaces/inbox/narrow.svelte.ts
 var EVERY_MS = 2e3;

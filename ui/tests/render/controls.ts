@@ -5,7 +5,9 @@ import Grid, { nextSort, sorted, type Column } from "../../src/lib/ui/Grid.svelt
 import Tabs, { step } from "../../src/lib/ui/Tabs.svelte";
 import Pill, { tone } from "../../src/lib/ui/Pill.svelte";
 import Timeline from "../../src/lib/ui/Timeline.svelte";
-import Palette, { rank, score, type Entry } from "../../src/surfaces/palette/Palette.svelte";
+import Palette, { commands, rank, score, unique, type Entry } from "../../src/surfaces/palette/Palette.svelte";
+import { help, spell } from "../../src/lib/keys";
+import { landing, listed } from "../../src/lib/surfaces";
 import New, { startable, type Target } from "../../src/surfaces/new/New.svelte";
 import { fail, html, source, visible, walk } from "../harness";
 
@@ -83,7 +85,7 @@ import { fail, html, source, visible, walk } from "../harness";
 
 // ── The palette: fuzzy, in a stable order, and `>` narrows to actions ────
 {
-  const e = (kind: Entry["kind"], label: string): Entry => ({ kind, label, icon: "dot", go: () => {} });
+  const e = (kind: Entry["kind"], label: string): Entry => ({ id: `${kind}:${label}`, kind, label, icon: "dot", go: () => {} });
   const entries = [e("project", "saas"), e("action", "Start a new change"), e("change", "Rate-limit the login route"),
     e("surface", "Go to Sessions"), e("action", "Go to the changes"), e("change", "Retry only on 5xx")];
   // Prefix beats word start beats inside beats word initials.
@@ -103,6 +105,40 @@ import { fail, html, source, visible, walk } from "../harness";
   const out = html(Palette, { from: "#inbox", changes: [{ id: "c9", title: "the route" }], projects: [{ id: "p", name: "saas" }] });
   for (const want of ["the route", "saas", "Go to"]) if (!out.includes(want)) fail(`the palette cannot reach ${want}`);
   if (!/role="listbox"/.test(out) || !/aria-label="find by name"/.test(out)) fail("the palette's field or list is unlabelled");
+}
+
+// ── The palette lists each command once, and a place carries its chord ───
+{
+  for (const over of ["inbox", "change", "board"]) {
+    const rows = commands({
+      here: [{ label: "Review", icon: "split", run: () => {} }, { label: "Run gates", icon: "gate", run: () => {} }],
+      changes: [{ id: "c9", title: "the route" }],
+      opensChange: "change",
+      places: listed(),
+      keys: help(over),
+      projects: [{ id: "p", name: "saas" }],
+      landing: landing()?.id,
+      over,
+      back: () => {},
+    });
+    const ids = rows.map((r) => r.id);
+    const twice = ids.filter((id, i) => ids.indexOf(id) !== i);
+    if (twice.length) fail(`the palette over ${over} lists a command twice: ${twice.join(", ")}`);
+    const labels = rows.map((r) => r.label.toLowerCase().replace(/^go to (the )?/, ""));
+    const said = labels.filter((l, i) => labels.indexOf(l) !== i);
+    if (said.length) fail(`the palette over ${over} names one destination twice: ${said.join(", ")}`);
+    const sessions = rows.filter((r) => /sessions$/i.test(r.label) && r.label.startsWith("Go to"));
+    if (sessions.length !== 1) fail(`the palette over ${over} has ${sessions.length} rows going to the sessions`);
+    else if (sessions[0].hint !== spell("g b")) fail(`"Go to Sessions" does not carry its chord: ${sessions[0].hint}`);
+    for (const b of help(over).filter((x) => x.surface === "global" && x.action.startsWith("go-")))
+      if (rows.some((r) => r.kind === "action" && r.label.toLowerCase() === b.label)) fail(`"${b.label}" is an action row beside its place`);
+  }
+  if (unique([{ id: "a", kind: "surface", label: "A", icon: "", go: () => {} }, { id: "a", kind: "action", label: "a", hint: "g a", icon: "", go: () => {} }])
+    .map((r) => `${r.kind}:${r.hint}`).join() !== "surface:g a") fail("two rows with one id are not merged into the first, with the key");
+  // The field takes focus once it is on the page: `autofocus` alone loses to
+  // whatever had focus when ⌘K was pressed.
+  const pal = source("../src/surfaces/palette/Palette.svelte");
+  if (!/<input\b(?:(?!\/>)[\s\S])*use:focusOnMount/.test(pal)) fail("the palette's field is not focused when it opens");
 }
 
 // ── A new change: Start is enabled only when nothing is refused ──────────

@@ -5473,8 +5473,33 @@ var Refused = class extends Error {
 	}
 };
 var writes = (opts) => !!opts.method && !/^(GET|HEAD)$/i.test(opts.method);
+function windowKey() {
+	const k = window.__devplane_window_key;
+	return typeof k === "string" ? k : "";
+}
+async function hmac(key, message) {
+	const enc = new TextEncoder();
+	const k = await crypto.subtle.importKey("raw", enc.encode(key), {
+		name: "HMAC",
+		hash: "SHA-256"
+	}, false, ["sign"]);
+	const sig = new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(message)));
+	return Array.from(sig, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function windowProof(path, opts) {
+	const key = windowKey();
+	if (!key || !writes(opts) || !crypto?.subtle) return {};
+	const asked = /^\/api\/asks\/([^/?#]+)\/answer$/.exec(path);
+	if (asked) return { "X-Devplane-Ask-Proof": await hmac(key, `ask ${decodeURIComponent(asked[1])}`) };
+	if (path === "/api/projects/trust" && typeof opts.body === "string") {
+		const repo = JSON.parse(opts.body).path;
+		if (typeof repo === "string") return { "X-Devplane-Trust-Proof": await hmac(key, `trust ${repo}`) };
+	}
+	return {};
+}
 async function api(path, opts = {}) {
 	const token = claimToken();
+	const proof = await windowProof(path, opts).catch(() => ({}));
 	const timeout = writes(opts) ? {} : { signal: AbortSignal.timeout(READ_TIMEOUT_MS) };
 	let res;
 	try {
@@ -5483,6 +5508,7 @@ async function api(path, opts = {}) {
 			headers: {
 				...opts.body ? { "content-type": "application/json" } : {},
 				...opts.headers ?? {},
+				...proof,
 				Authorization: `Bearer ${token}`
 			},
 			...timeout
@@ -5505,6 +5531,6 @@ async function api(path, opts = {}) {
 	return await res.json();
 }
 //#endregion
-export { push as $, comment as A, user_effect as B, each as C, mount as D, if_block as E, delegated as F, sibling as G, child as H, event as I, state as J, proxy as K, get as L, from_svg as M, text as N, set_text as O, delegate as P, pop as Q, untrack as R, snippet as S, key as T, first_child as U, user_pre_effect as V, only_child as W, autofocus as X, user_derived as Y, remove_textarea_child as Z, set_style as _, claimToken as a, action as b, spread_props as c, bind_checked as d, snapshot as et, bind_value as f, init_select as g, bind_select_value as h, api as i, to_array as it, from_html as j, append as k, bind_this as l, set_attribute as m, Unauthorised as n, reset as nt, prop as o, remove_input_defaults as p, set as q, Unreachable as r, noop as rt, rest_props as s, Refused as t, next as tt, bind_element_size as u, set_class as v, index as w, component as x, clsx as y, template_effect as z };
+export { remove_textarea_child as $, comment as A, effect as B, each as C, mount as D, if_block as E, delegated as F, first_child as G, user_effect as H, event as I, proxy as J, only_child as K, get as L, from_svg as M, text as N, set_text as O, delegate as P, autofocus as Q, tick as R, snippet as S, key as T, user_pre_effect as U, template_effect as V, child as W, state as X, set as Y, user_derived as Z, set_style as _, claimToken as a, noop as at, action as b, spread_props as c, bind_checked as d, pop as et, bind_value as f, init_select as g, bind_select_value as h, api as i, reset as it, from_html as j, append as k, bind_this as l, set_attribute as m, Unauthorised as n, snapshot as nt, prop as o, to_array as ot, remove_input_defaults as p, sibling as q, Unreachable as r, next as rt, rest_props as s, Refused as t, push as tt, bind_element_size as u, set_class as v, index as w, component as x, clsx as y, untrack as z };
 
 //# sourceMappingURL=api.js.map

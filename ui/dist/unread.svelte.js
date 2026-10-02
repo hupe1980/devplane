@@ -1,4 +1,4 @@
-import { $ as push, E as if_block, F as delegated, G as sibling, H as child, J as state, K as proxy, L as get, O as set_text, P as delegate, Q as pop, W as only_child, j as from_html, k as append, nt as reset, q as set, z as template_effect } from "./api.js";
+import { E as if_block, F as delegated, J as proxy, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, et as pop, it as reset, j as from_html, k as append, q as sibling, tt as push } from "./api.js";
 import { p as copyText } from "./app.js";
 //#region src/lib/Commands.svelte
 var root = from_html(`<span class="note svelte-1hip6z1" role="status">Copied.</span>`);

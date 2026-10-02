@@ -31,6 +31,7 @@
   import Agent from "./Agent.svelte";
   import Tasks from "./Tasks.svelte";
   import Pane from "./review/Pane.svelte";
+  import Refusal, { type OfferRefusal, type Row } from "./Refusal.svelte";
   import { unread, unreadSays } from "./review/unread.svelte";
   import type { ReviewBody } from "./review/types";
   import type { Detail } from "./types";
@@ -85,9 +86,8 @@
     local = v;
     showView?.(v === "overview" ? "" : v);
   }
-  type Row = { path: string; why: string; matched: string };
   /// The host's refusal to offer, naming every unseen row.
-  let refusal = $state<{ says: string; rows: Row[]; seen_with: string } | null>(null);
+  let refusal = $state<OfferRefusal | null>(null);
   /// The row a refusal's action opens in the review.
   let reviewAt = $state("");
 
@@ -259,6 +259,8 @@
   /// Can be offered: the host's own guard, said here as the same test the
   /// toolbar uses. The host still refuses an offer over an unread row.
   const canOffer = $derived(verified && unseen === 0);
+  /// Why Offer is held, said beside it; empty when it is not.
+  const offerHeld = $derived(verified && unseen > 0 ? `Read ${unseen} weakened ${unseen === 1 ? "check" : "checks"} first` : "");
   // The palette's *this change* commands, each through this document's code.
   $effect(() => {
     if (!d) return;
@@ -305,13 +307,20 @@
         <p class="counts">{d.base_checks.counts_says}{#if d.base_checks.on_base && !d.base_checks.stale}<span class="w-{d.base_checks.on_base.weight}"> · {d.base_checks.on_base.says}</span>{/if}</p>
       {/if}
 
-      <div class="toolbar" role="toolbar" aria-label="what you can do to this change">
+      <div class="toolbar" class:held-offer={!!offerHeld} role="toolbar" aria-label="what you can do to this change">
         <button class:primary={unseen > 0 || !verified} onclick={() => setView("review")}><Icon name="split" size={14} /> Review{#if unreadNow}<span class="count">{unreadNow}</span>{/if}</button>
         {#if d.worktree}
           <button onclick={() => act("verify")} disabled={!!pending.busy}><Icon name="gate" size={14} /> Run gates</button>
         {/if}
         {#if verified}
-          <button class:primary={unseen === 0} onclick={() => act("offer")} disabled={!!pending.busy}><Icon name="forge" size={14} /> Offer as pull request</button>
+          <!-- Held while a weakened row is unread, with why beside it: the host
+               refuses that offer, so the button does not pretend otherwise. -->
+          {#if offerHeld}
+            <button disabled aria-label="Offer as pull request" aria-describedby="offer-held"><Icon name="forge" size={14} /> Offer</button>
+            <span class="held" id="offer-held">{offerHeld}</span>
+          {:else}
+            <button class:primary={unseen === 0} onclick={() => act("offer")} disabled={!!pending.busy}><Icon name="forge" size={14} /> Offer as pull request</button>
+          {/if}
         {/if}
         {#if d.stopped}
           <button onclick={() => act("resume")} disabled={!!pending.busy}><Icon name="play" size={14} /> Pick it back up</button>
@@ -335,20 +344,7 @@
       </p>
       {#if commands.length && !pending.busy}<Commands {commands} />{/if}
       {#if read.phase === "stale" && read.failure}<Failed what="this change" failure={read.failure} at={read.at} stale />{/if}
-      {#if refusal}
-        <div class="refusal" role="alert">
-          <p><b>Not offered</b> — <Inline text={refusal.says} />. Nothing was pushed.</p>
-          <ul>
-            {#each refusal.rows as row (row.path + row.matched)}
-              <li>
-                <code>{row.path}</code> <span><Inline text={row.why} /></span>
-                <button onclick={() => readRow(row.path)}><Icon name="split" size={13} /> Read it</button>
-              </li>
-            {/each}
-          </ul>
-          <p class="how">Mark each row read in the review, or from a terminal of your own: <code>{refusal.seen_with}</code></p>
-        </div>
-      {/if}
+      {#if refusal}<Refusal {refusal} read={readRow} />{/if}
     </header>
 
     <div class="tabbar"><Tabs {tabs} bind:active={() => view, setView} label="views of this change" /></div>
@@ -471,7 +467,14 @@
   .counts .w-absent {
     color: var(--faint);
   }
-  /* Narrower still, the quiet actions keep their icon and lose their word. */
+  /* Narrower still, or with a held Offer's reason to make room for, the
+     quiet actions keep their icon and lose their word. */
+  .toolbar.held-offer .quiet {
+    padding: 0 0.45rem;
+  }
+  .toolbar.held-offer .quiet .label {
+    display: none;
+  }
   @container doc (max-width: 900px) {
     .toolbar .quiet {
       padding: 0 0.45rem;
@@ -515,52 +518,15 @@
     border-color: transparent;
     color: var(--dim);
   }
+  .held {
+    font-size: var(--t-xs);
+    color: var(--wait);
+    white-space: nowrap;
+  }
   .count {
     margin-left: 0.3rem;
     font-size: var(--t-xs);
     font-weight: 600;
-  }
-  .refusal {
-    font-size: var(--t-sm);
-    padding: var(--s-2) var(--s-3);
-    border-left: 2px solid var(--wait);
-    background: var(--panel);
-    display: grid;
-    gap: var(--s-1);
-  }
-  .refusal p,
-  .refusal ul {
-    margin: 0;
-  }
-  .refusal ul {
-    padding: 0;
-    list-style: none;
-    display: grid;
-    gap: var(--s-1);
-  }
-  .refusal li {
-    display: flex;
-    align-items: center;
-    gap: var(--s-2);
-    flex-wrap: wrap;
-  }
-  .refusal li span {
-    color: var(--wait);
-  }
-  .refusal button {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    height: 1.6rem;
-    padding: 0 0.5rem;
-    font-size: var(--t-xs);
-  }
-  .refusal .how {
-    color: var(--dim);
-  }
-  code {
-    font-family: var(--mono);
-    font-size: var(--t-xs);
   }
   .said {
     margin: 0;

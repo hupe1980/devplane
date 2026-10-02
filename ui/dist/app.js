@@ -1,5 +1,5 @@
 const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["Answer.js","api.js","frame.js","write.svelte.js","Failed.js","Failed.css","unread.svelte.js","unread.css","actions.js","Qualifier.js","Qualifier.css","href.js","actions.css","Answer.css","Board.js","Grid.js","Grid.css","Empty.js","Empty.css","Props.js","Props.css","cursor.js","Board.css","List.js","ChangeState.js","ChangeState.css","List.css","Doc.js","offered.svelte.js","Tabs.js","Tabs.css","Doc.css","Github.js","Github.css","List2.js","narrow.svelte.js","List2.css","Inbox.js","Inbox.css","New.js","New.css","Palette.js","Palette.css","List3.js","store.svelte.js","List3.css","Doc2.js","Doc2.css","Quit.js","Quit.css","Search.js","Search.css","Setup.js","Setup.css","Why.js","Why.css"])))=>i.map(i=>d[i]);
-import { $ as push, A as comment, B as user_effect, C as each, D as mount, E as if_block, F as delegated, G as sibling, H as child, I as event, J as state, K as proxy, L as get, M as from_svg, N as text, O as set_text, P as delegate, Q as pop, R as untrack, S as snippet, U as first_child, W as only_child, Y as user_derived, _ as set_style, a as claimToken, b as action, c as spread_props, et as snapshot, i as api, j as from_html, k as append, m as set_attribute, n as Unauthorised, nt as reset, o as prop, q as set, r as Unreachable, rt as noop, s as rest_props, tt as next, v as set_class, w as index, x as component, z as template_effect } from "./api.js";
+import { A as comment, C as each, D as mount, E as if_block, F as delegated, G as first_child, H as user_effect, I as event, J as proxy, K as only_child, L as get, M as from_svg, N as text, O as set_text, P as delegate, S as snippet, V as template_effect, W as child, X as state, Y as set, Z as user_derived, _ as set_style, a as claimToken, at as noop, b as action, c as spread_props, et as pop, i as api, it as reset, j as from_html, k as append, m as set_attribute, n as Unauthorised, nt as snapshot, o as prop, q as sibling, r as Unreachable, rt as next, s as rest_props, tt as push, v as set_class, w as index, x as component, z as untrack } from "./api.js";
 //#region \0vite/modulepreload-polyfill.js
 (function polyfill() {
 	const relList = document.createElement("link").relList;
@@ -291,7 +291,7 @@ function typing(e) {
 	const tag = t.tagName;
 	return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
 }
-var fromField = (c) => c === "Esc" || c.startsWith("Mod+") || c.startsWith("Alt+");
+var fromField = (c) => c === "Esc" || c.startsWith("Mod+");
 function dispatch(surface, e) {
 	if (e.isComposing) return false;
 	const c = combo(e);

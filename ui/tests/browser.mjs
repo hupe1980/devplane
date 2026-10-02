@@ -1,8 +1,9 @@
 // The interface in a real browser, over the recorded fixtures: the bugs a
 // server render cannot see (a poll that resets a tab, a reply that carries to
 // the next item, Enter on a focused button, a ⌥ chord on a Mac, a failure
-// drawn as calm, a long write cut off). Playwright is not a dependency of this
-// package; this runs where it is installed and says so where it is not.
+// drawn as calm, a long write cut off, a palette that opens without focus).
+// Playwright is not a dependency of this package; this runs where it is
+// installed and says so where it is not.
 //
 //   PLAYWRIGHT=/path/to/node_modules/playwright-core node tests/browser.mjs
 //
@@ -11,7 +12,7 @@
 // port, or uses `BASE` (e.g. http://localhost:5290/) if one is running.
 // `npm run render` stays the CI check; this is the one a person runs.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
@@ -46,7 +47,19 @@ const mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const executablePath = process.env.CHROME ?? (existsSync(mac) ? mac : undefined);
 const browser = await chromium.launch({ executablePath, headless: true });
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
-const CHANGE = "c-01a0dc12268a7698b161b6b53f4264f5";
+// The recorded change, found by its title as `fixtures.ts` finds it: the
+// file names carry ids that change on every capture.
+const fixtures = resolve(here, "fixtures");
+const recorded = readdirSync(fixtures)
+  .filter((f) => f.startsWith("change-") && f.endsWith(".json"))
+  .map((f) => JSON.parse(readFileSync(resolve(fixtures, f), "utf8")))
+  .find((d) => d.title === "Rate-limit the login route");
+if (!recorded) {
+  console.error("browser: no recorded change titled \"Rate-limit the login route\" — run scripts/capture-fixtures.sh");
+  process.exit(1);
+}
+/** @type {string} */
+const CHANGE = recorded.id;
 
 let failures = 0;
 /** @param {string} name @param {boolean} ok @param {string} [detail] */
@@ -64,20 +77,25 @@ const selectedTab = async (/** @type {any} */ p) =>
   ((await p.locator(".doc [role=tab][aria-selected=true]").allTextContents()).join("")).replace(/\s+/g, " ").trim();
 
 try {
-  // 1. The change page keeps its tab and its result through the poll.
+  // 1. Offer is held while a weakened row is unread; the page keeps its tab
+  //    and its result through the poll.
   {
     const p = await page();
+    await p.route(`**/api/changes/${CHANGE}/verify`, (/** @type {any} */ r) => r.fulfill({ json: { passed: true, summary: "check passed" } }));
     await p.goto(`${BASE}#change/${CHANGE}`);
     await p.locator(".doc").waitFor();
-    await p.getByRole("button", { name: /Offer as pull request/ }).click();
-    await sleep(500);
-    check("an offer's refusal is shown", (await p.locator(".refusal").count()) === 1);
+    const offer = p.getByRole("button", { name: /Offer as pull request/ });
+    check("Offer is held while a weakened row is unread", recorded.qualifier?.unseen > 0 && (await offer.isDisabled()));
+    const why = (await p.locator(".doc .toolbar").innerText()).replace(/\s+/g, " ");
+    check("…and says why beside it", why.includes(`Read ${recorded.qualifier?.unseen} weakened check`), why);
+    await p.getByRole("button", { name: /Run gates/ }).click();
+    await sleep(800);
     let reads = 0;
     p.on("request", (/** @type {any} */ r) => {
       if (new URL(r.url()).pathname === `/api/changes/${CHANGE}`) reads += 1;
     });
     await sleep(5000);
-    check("the refusal is still shown after 5 s", (await p.locator(".refusal").count()) === 1);
+    check("a result is still shown after 5 s", /The gates exited zero/.test(await p.locator(".said").first().innerText()));
     check("the change is not re-read while nothing moved", reads === 0, `${reads} reads in 5 s`);
     await p.locator(".doc [role=tab]", { hasText: "Gates" }).click();
     await sleep(5000);
@@ -204,6 +222,10 @@ try {
     await p.route(`**/api/changes/${CHANGE}/offer`, (/** @type {any} */ r) =>
       r.fulfill({ json: { offer: "commands", push: "git push -u origin change/x", create: "gh pr create --head change/x" } }),
     );
+    // Every weakened row read, so Offer is live.
+    await p.route(`**/api/changes/${CHANGE}`, (/** @type {any} */ r) =>
+      r.fulfill({ json: { ...recorded, qualifier: { ...recorded.qualifier, unseen: 0 } } }),
+    );
     await p.goto(`${BASE}#change/${CHANGE}`);
     await p.locator(".doc").waitFor();
     await p.locator(".doc [role=tab]", { hasText: "Agent" }).click();
@@ -264,6 +286,35 @@ try {
     check("the title bar's New change is an icon at 900 px", !(await p.locator(".title .primary .label").isVisible()));
     const clip = await p.evaluate(() => { const t = document.querySelector(".doc [role=tablist]"); return t ? t.scrollWidth > t.clientWidth && getComputedStyle(t).overflowX : "none"; });
     check("the view tabs scroll rather than clip", clip === false || clip === "auto", String(clip));
+    await p.context().close();
+  }
+
+  // 8. ⌘K puts focus in the palette's field, from the page and from a field,
+  //    and lists each place once with its chord.
+  {
+    const p = await page();
+    for (const [from, focus] of [["#inbox", null], ["#search/x", "input[type=search]"]]) {
+      await p.goto(`${BASE}${from}`);
+      await sleep(600);
+      if (focus) await p.locator(focus).first().focus();
+      else await p.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+      await p.keyboard.press("Meta+k");
+      await p.locator(".palette input").waitFor();
+      await sleep(200);
+      const on = await p.evaluate(() => document.activeElement?.closest(".palette") ? document.activeElement.tagName : document.activeElement?.tagName ?? "none");
+      check(`⌘K from ${from}${focus ? "'s field" : ""} focuses the palette's field`, on === "INPUT", on);
+      await p.keyboard.type("rate");
+      await sleep(200);
+      check(`…and what is typed lands in it (${from})`, (await p.locator(".palette input").inputValue()) === "rate");
+      await p.keyboard.press("Escape");
+      await sleep(300);
+    }
+    await p.keyboard.press("Meta+k");
+    await p.locator(".palette [role=option]").first().waitFor();
+    const labels = (await p.locator(".palette [role=option] .label").allTextContents()).map((t) => t.trim().toLowerCase());
+    const twice = labels.filter((l, i) => labels.indexOf(l) !== i);
+    check("the palette lists each row once", twice.length === 0, twice.join(", "));
+    check("the sessions are one row, with their chord", labels.filter((l) => /^go to (the )?sessions$/.test(l)).length === 1);
     await p.context().close();
   }
 } catch (e) {

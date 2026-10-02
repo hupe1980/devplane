@@ -1,4 +1,4 @@
-import { K as proxy } from "./api.js";
+import { J as proxy } from "./api.js";
 //#region src/lib/offered.svelte.ts
 var here = proxy({
 	title: "",

@@ -1,4 +1,4 @@
-import { $ as push, A as comment, C as each, E as if_block, F as delegated, G as sibling, H as child, J as state, K as proxy, L as get, O as set_text, P as delegate, Q as pop, U as first_child, W as only_child, Y as user_derived, f as bind_value, i as api, j as from_html, k as append, m as set_attribute, nt as reset, o as prop, p as remove_input_defaults, q as set, v as set_class, w as index, z as template_effect } from "./api.js";
+import { A as comment, C as each, E as if_block, F as delegated, G as first_child, J as proxy, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, et as pop, f as bind_value, i as api, it as reset, j as from_html, k as append, m as set_attribute, o as prop, p as remove_input_defaults, q as sibling, tt as push, v as set_class, w as index } from "./api.js";
 import { C as State, a as Inline, c as clip, p as copyText } from "./app.js";
 import { a as markedFor, n as unreadSays } from "./unread.svelte.js";
 import { t as Qualifier } from "./Qualifier.js";
@@ -558,10 +558,7 @@ async function answer(item, what) {
 		await api(`/api/asks/${encodeURIComponent(ask)}/answer`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				...what,
-				from: "board"
-			})
+			body: JSON.stringify(what)
 		});
 		return {
 			said: "answered — on the record and on its way to the agent. That cannot be taken back.",
