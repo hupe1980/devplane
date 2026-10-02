@@ -3899,7 +3899,15 @@ async fn a_declared_cache_is_shared_between_changes() {
         expected.to_string_lossy(),
         "the second change builds where the first did"
     );
-    assert_eq!(seen(&three), "", "nothing declared, nothing redirected");
+    // Nothing declared, nothing redirected: the setup sees only what the
+    // host's own environment already held, which is empty unless the runner
+    // set it.
+    let inherited = std::env::var("CARGO_TARGET_DIR").unwrap_or_default();
+    assert_eq!(
+        seen(&three),
+        inherited,
+        "nothing declared, nothing redirected"
+    );
 
     for r in [&one, &two, &three] {
         await_rest_of(
