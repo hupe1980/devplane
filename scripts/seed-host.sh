@@ -168,7 +168,14 @@ statusline "{\"session_id\":\"a1b2c3d4\",\"model\":{\"display_name\":\"Opus 5\"}
   \"context_window\":{\"used_percentage\":89,\"context_window_size\":200000},\"cost\":{\"total_cost_usd\":0.41}}"
 
 # Changes, driven by the protocol fixture over the host's own API.
-for name in saas core-lib; do api POST api/projects/trust "{\"path\":\"$tmp/$name\"}" >/dev/null; done
+# Trusting is a person's decision: the host's route takes it only from the window,
+# so the seed trusts as a person does, from a terminal. The agent variables are
+# cleared because this script is often run from inside an agent's session.
+for name in saas core-lib; do
+  env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_ENTRYPOINT -u DEVPLANE_RUN \
+    -u CODEX_SANDBOX -u CODEX_SANDBOX_NETWORK_DISABLED -u CODEX_THREAD_ID -u COPILOT_CLI \
+    "$BIN" project trust "$tmp/$name" >/dev/null
+done
 
 # One that reaches its gates having skipped the burst test; the review must lead with it.
 rate=$(api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Rate-limit the login route\",

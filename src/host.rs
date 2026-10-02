@@ -126,6 +126,12 @@ pub struct AppState {
     pub port: std::sync::OnceLock<u16>,
     /// Set once by the app; absent in the CLI host. See [`Opener`].
     pub opener: std::sync::OnceLock<Opener>,
+    /// The window's key ([`crate::config::window_key`]), set once by the app
+    /// before it opens a window; absent in the CLI host, where no request can
+    /// prove it came from the window, so every answer is recorded `cli` and the
+    /// trust route refuses. In memory only: never in `host.json`, the store,
+    /// the log or a vendor's settings.
+    pub window_key: std::sync::OnceLock<String>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -286,6 +292,7 @@ impl AppState {
             started_at: jiff::Timestamp::now(),
             port: std::sync::OnceLock::new(),
             opener: std::sync::OnceLock::new(),
+            window_key: std::sync::OnceLock::new(),
         }))
     }
 

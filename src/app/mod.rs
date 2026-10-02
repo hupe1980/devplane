@@ -44,7 +44,17 @@ impl Hosted {
 pub async fn run(port: Option<u16>) -> Result<()> {
     crate::cli::init_tracing();
     // Held for the app's whole life, like `serve`'s.
-    let _lock = crate::cli::refuse_if_hosting().await?;
+    let _lock = match crate::cli::refuse_if_hosting().await {
+        Ok(lock) => lock,
+        Err(refused) => {
+            // A second launch — on Linux and Windows a `devplane://` link
+            // starts one — hands its arguments to the app already running and
+            // exits there. Only when the holder is a plain `devplane up` does
+            // it come back here, and then the refusal stands.
+            forward_to_running_app();
+            return Err(refused);
+        }
+    };
     let (cfg, problems) = crate::config::app_config()?;
     for p in &problems {
         tracing::warn!(at = %p.where_, "{}", p.what);
@@ -60,6 +70,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // loop. The port is read back from `host.json`, like any client.
     let serving = tokio::spawn(crate::host::serve(state.clone(), port));
     let base = wait_for_host(&serving).await?;
+    // The window's key, minted before either window exists and held in
+    // memory only: the windows prove an answer or a trust came from them with
+    // it. Never written to `host.json`, the store or the log.
+    let _ = state.window_key.set(crate::config::window_key());
     let hosted = Hosted {
         state: state.clone(),
         base,
@@ -82,7 +96,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             setup(app.handle(), &cfg.shortcut);
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context())
         .context("building the window")?;
 
     // When the host finishes (`/api/quit`, a signal, a failure) the app
@@ -115,6 +129,25 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
     });
     Ok(())
+}
+
+/// The app's configuration, embedded once: the macro defines a symbol and
+/// may be expanded only once per binary.
+fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
+/// Hands this process's arguments to an app instance already running, and
+/// exits the process when there is one. Builds nothing but the single-instance
+/// plugin, whose setup does the handing over; with no app instance to take
+/// them, it returns and the caller says why it cannot start.
+fn forward_to_running_app() {
+    let built = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
+        .build(context());
+    if let Err(e) = built {
+        tracing::debug!(error = %e, "no running app to hand the arguments to");
+    }
 }
 
 /// Blocks until `host.json` names this process, or the host gave up.

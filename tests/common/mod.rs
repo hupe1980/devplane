@@ -5,8 +5,6 @@
 //! No lock serialises them: a test that looks for "its" agent among the
 //! machine's processes filters by parent pid (the host `exec`s the agent
 //! through `sh`, so the host is the parent), never by "new since I looked".
-//! An earlier global `flock` here was blamed on `async-process`'s reactor; the
-//! one failure it actually hid was that pid race.
 
 #![allow(dead_code)] // each test binary uses a different part of this
 
@@ -140,8 +138,18 @@ impl Drop for Host {
     }
 }
 
+/// The window key a [`boot`] host holds, as the app's would: the trust route
+/// and a window answer need a proof made with it.
+pub const WINDOW_KEY: &str = "test-window-key";
+
+/// Gives a test's host [`WINDOW_KEY`], as the app gives its own, so
+/// [`trust`] can prove it is the window.
+pub fn as_the_app(state: &Shared) {
+    state.window_key.set(WINDOW_KEY.into()).ok();
+}
+
 /// A host with a fresh database and the default policy, serving on a free
-/// loopback port with bearer token `tok`.
+/// loopback port with bearer token `tok`, holding [`WINDOW_KEY`].
 pub async fn boot() -> (SocketAddr, reqwest::Client, Host) {
     let db = std::env::temp_dir().join(format!("dp-host-{}.db", uuid::Uuid::new_v4().simple()));
     let state = AppState::new(
@@ -152,6 +160,7 @@ pub async fn boot() -> (SocketAddr, reqwest::Client, Host) {
     )
     .await
     .unwrap();
+    as_the_app(&state);
     let app = devplane::api::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -182,16 +191,44 @@ pub async fn post(c: &reqwest::Client, addr: &SocketAddr, path: &str, body: Valu
         .unwrap()
 }
 
-/// Trusts `repo` through the API, as a person would.
+/// Trusts `repo` through the API, as the window would: with its proof.
 pub async fn trust(c: &reqwest::Client, addr: &SocketAddr, repo: &Path) {
-    let res = post(
-        c,
-        addr,
-        "/api/projects/trust",
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
+    let path = repo.to_string_lossy();
+    let res: Value = c
+        .post(format!("http://{addr}/api/projects/trust"))
+        .bearer_auth("tok")
+        .header(
+            "X-Devplane-Trust-Proof",
+            devplane::config::trust_proof(WINDOW_KEY, &path),
+        )
+        .json(&serde_json::json!({ "path": path }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(res["trusted"], true, "{res}");
+}
+
+/// Trusts `repo` as a person does at their own terminal: `devplane project
+/// trust`, against the home `home`, with no agent session's variables set.
+/// It writes the store and has a running host re-read it.
+pub fn trust_from_a_terminal(home: &Path, repo: &Path) {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"));
+    cmd.args(["project", "trust", "--yes"])
+        .arg(repo)
+        .env("DEVPLANE_HOME", home);
+    for var in devplane::hook::AGENT_SESSION_VARS {
+        cmd.env_remove(var);
+    }
+    let out = cmd.output().expect("devplane project trust");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 // ── Waiting ──────────────────────────────────────────────────────────────────

@@ -309,3 +309,119 @@ async fn a_cancelled_gate_kills_its_group() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Trust lets a headless agent run a repository's own hooks and MCP servers,
+/// and the control token is in a file an agent's tools can read: so the trust
+/// route refuses a request carrying only the token — or the token and a page's
+/// `Origin`, which any token holder can send — and takes only the window's
+/// proof for that path.
+#[tokio::test]
+async fn the_trust_route_refuses_the_control_token_alone() {
+    let (addr, c, host) = common::boot().await;
+    let repo = scratch("trust-route");
+    let path = repo.to_string_lossy().to_string();
+    let send = |extra: Option<(&'static str, String)>| {
+        let mut req = c
+            .post(format!("http://{addr}/api/projects/trust"))
+            .bearer_auth("tok")
+            .json(&serde_json::json!({ "path": path }));
+        if let Some((k, v)) = extra {
+            req = req.header(k, v);
+        }
+        req.send()
+    };
+    assert_eq!(send(None).await.unwrap().status(), 403, "the token alone");
+    assert_eq!(
+        send(Some(("Origin", format!("http://{addr}"))))
+            .await
+            .unwrap()
+            .status(),
+        403,
+        "the token and an Origin header"
+    );
+    assert!(
+        host.store
+            .load_projects()
+            .await
+            .unwrap()
+            .iter()
+            .all(|p| !p.trusted),
+        "nothing was trusted"
+    );
+    let proof = devplane::config::trust_proof(common::WINDOW_KEY, &path);
+    assert_eq!(
+        send(Some(("X-Devplane-Trust-Proof", proof)))
+            .await
+            .unwrap()
+            .status(),
+        200,
+        "the window's proof for this path"
+    );
+}
+
+/// No command and no surface reaches the trust route without the window's
+/// proof: the CLI writes trust itself, and the page's one HTTP client adds the
+/// proof where the app gave it a key.
+#[test]
+fn nothing_reaches_the_trust_route_without_the_windows_proof() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut stack = vec![root.join("src/cli")];
+    let mut cli = vec![root.join("src/client.rs"), root.join("src/local.rs")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                cli.push(p);
+            }
+        }
+    }
+    for f in &cli {
+        let body = std::fs::read_to_string(f).unwrap_or_default();
+        assert!(
+            !body.contains("/api/projects/trust"),
+            "{} calls the trust route, which takes only the window's proof",
+            f.display()
+        );
+    }
+    let client = std::fs::read_to_string(root.join("ui/src/lib/api.ts")).unwrap();
+    assert!(
+        client.contains("X-Devplane-Trust-Proof") && client.contains("/api/projects/trust"),
+        "the page's HTTP client no longer proves a trust request came from the window"
+    );
+}
+
+/// `devplane project trust` is a person's command: refused inside an agent's
+/// session, as `inbox answer --allow` is, and working from a terminal of
+/// their own with no host running.
+#[test]
+fn trusting_from_inside_an_agent_session_is_refused() {
+    let home = scratch("trust-home");
+    let repo = scratch("trust-repo");
+    let run = |agent: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_devplane"));
+        cmd.args(["project", "trust", "--yes"])
+            .arg(&repo)
+            .env("DEVPLANE_HOME", &home);
+        for var in devplane::hook::AGENT_SESSION_VARS {
+            cmd.env_remove(var);
+        }
+        if agent {
+            cmd.env(devplane::driven::RUN_ENV, "run-1");
+        }
+        cmd.output().unwrap()
+    };
+    let refused = run(true);
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && said.contains("refused"),
+        "trusted from inside an agent session: {said}"
+    );
+    let ok = run(false);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+}

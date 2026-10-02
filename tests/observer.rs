@@ -46,14 +46,22 @@ async fn boot_shared(policy: Policy, db: &Path) -> (SocketAddr, String, reqwest:
 }
 
 async fn boot_with_db(db: &Path, token: String, policy: Policy) -> Shared {
-    AppState::new(
+    let state = AppState::new(
         db.to_path_buf(),
         token,
         policy,
         db.parent().unwrap().to_path_buf(),
     )
     .await
-    .expect("host state")
+    .expect("host state");
+    // As the app's host: the trust route takes only the window's proof.
+    state.window_key.set(common::WINDOW_KEY.into()).ok();
+    state
+}
+
+/// The window's proof for trusting `path`, as the request names it.
+fn trust_proof(path: &str) -> String {
+    devplane::config::trust_proof(common::WINDOW_KEY, path)
 }
 
 /// Serves on an ephemeral port and returns the address.
@@ -739,6 +747,7 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
     // Every path that starts an agent goes through the trust gate.
     c.post(format!("http://{addr}/api/projects/trust"))
         .bearer_auth(&token)
+        .header("X-Devplane-Trust-Proof", trust_proof(&cwd))
         .json(&serde_json::json!({ "path": cwd }))
         .send()
         .await
@@ -797,8 +806,12 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
     let answered: Value = c
         .post(format!("http://{addr}/api/asks/{ask}/answer"))
         .bearer_auth(&token)
-        // A page: the host names the surface from the request, not the body.
-        .header("Origin", format!("http://{addr}"))
+        // The window: the host names the path from its proof for this ask,
+        // never from the body.
+        .header(
+            "X-Devplane-Ask-Proof",
+            devplane::config::ask_proof(common::WINDOW_KEY, &ask),
+        )
         .json(&serde_json::json!({ "option": "allow", "from": "phone" }))
         .send()
         .await
@@ -833,7 +846,7 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         .unwrap();
     let said = again["error"].as_str().unwrap_or_default();
     assert!(
-        said.contains("already answered") && said.contains("board"),
+        said.contains("already answered") && said.contains("window"),
         "the second answer is refused and names the first: {said}"
     );
 
@@ -846,7 +859,7 @@ async fn a_driven_run_joins_the_same_board_and_its_permission_can_be_answered() 
         .find(|a| a["id"] == ask.as_str())
         .expect("the ask is on the record");
     assert_eq!(
-        settled["answered_from"], "board",
+        settled["answered_from"], "window",
         "never the body's own claim"
     );
 
@@ -878,6 +891,10 @@ async fn an_unknown_agent_is_refused_by_name() {
     let cwd = std::env::temp_dir().canonicalize().unwrap();
     c.post(format!("http://{addr}/api/projects/trust"))
         .bearer_auth(&token)
+        .header(
+            "X-Devplane-Trust-Proof",
+            trust_proof(&cwd.to_string_lossy()),
+        )
         .json(&serde_json::json!({ "path": cwd }))
         .send()
         .await
@@ -1787,6 +1804,7 @@ async fn setup_reads_every_registered_repository_and_names_the_one_that_will_not
     for d in [&broken, &good] {
         c.post(format!("http://{addr}/api/projects/trust"))
             .bearer_auth(&token)
+            .header("X-Devplane-Trust-Proof", trust_proof(&d.to_string_lossy()))
             .json(&serde_json::json!({ "path": d.to_string_lossy() }))
             .send()
             .await
@@ -2199,6 +2217,7 @@ async fn a_question_outlives_the_host_that_was_holding_it() {
         let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
         c.post(format!("http://{addr}/api/projects/trust"))
             .bearer_auth(&token)
+            .header("X-Devplane-Trust-Proof", trust_proof(&cwd))
             .json(&serde_json::json!({ "path": cwd }))
             .send()
             .await

@@ -225,6 +225,26 @@ pub fn host_proof(token: &str, port: u16, nonce: &str) -> String {
     hmac_sha256(token, &format!("{port} {nonce}"))
 }
 
+/// A fresh key for the window: minted by the app at start, held in its memory
+/// and handed to its own webviews, never written anywhere — not `host.json`,
+/// not the log, not a vendor's settings. A restart voids every proof made
+/// with the last one.
+pub fn window_key() -> String {
+    generate_token()
+}
+
+/// What the window sends with an answer to ask `ask_id`: HMAC-SHA256 keyed by
+/// the window key over `ask <id>`, hex. Worth nothing for any other ask.
+pub fn ask_proof(window_key: &str, ask_id: &str) -> String {
+    hmac_sha256(window_key, &format!("ask {ask_id}"))
+}
+
+/// What the window sends to trust the repository at `path`, exactly as the
+/// request names it: HMAC-SHA256 keyed by the window key over `trust <path>`.
+pub fn trust_proof(window_key: &str, path: &str) -> String {
+    hmac_sha256(window_key, &format!("trust {path}"))
+}
+
 fn hmac_sha256(token: &str, message: &str) -> String {
     use sha2::{Digest, Sha256};
     const BLOCK: usize = 64;
@@ -555,6 +575,19 @@ mod tests {
             hmac_sha256(&"k".repeat(100), "nonce"),
             "638c2bedd5e2404a0f89677ca47de73c0699f030eb81befb19127be3167d4cb5"
         );
+    }
+
+    /// Each proof names what it is for, so one is worth nothing for another
+    /// ask, another path, or the other kind of request.
+    #[test]
+    fn a_window_proof_is_bound_to_its_ask_or_path() {
+        let key = window_key();
+        assert_eq!(key.len(), 64);
+        assert_ne!(key, window_key(), "minted fresh each time");
+        assert_eq!(ask_proof(&key, "a"), hmac_sha256(&key, "ask a"));
+        assert_ne!(ask_proof(&key, "a"), ask_proof(&key, "b"));
+        assert_ne!(ask_proof(&key, "a"), ask_proof(&window_key(), "a"));
+        assert_ne!(ask_proof(&key, "/r"), trust_proof(&key, "/r"));
     }
 
     /// No file is the ordinary state and means the defaults; a file that will

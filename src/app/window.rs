@@ -15,6 +15,29 @@ pub const ANSWER: &str = "answer";
 /// navigation is cancelled here. Asking by navigation needs no IPC.
 const HIDE: &str = "devplane-app://hide";
 
+/// Hands the window's key to the host's own page, in memory: defined only
+/// when the page's origin is the host's, so another page in this webview —
+/// which [`on_host`] refuses to load anyway — never sees it. Not on the
+/// loopback surface at all: the served page, the URL and every route lack it.
+fn key_script(app: &AppHandle) -> String {
+    let hosted = app.state::<Hosted>();
+    let key = hosted.state.window_key.get().cloned().unwrap_or_default();
+    format!(
+        "if (location.origin === {base:?} && {key:?}) {{ \
+           Object.defineProperty(window, '__devplane_window_key', \
+             {{ value: {key:?}, writable: false, configurable: false, enumerable: false }}); \
+         }}",
+        base = hosted.base,
+    )
+}
+
+/// Whether `url` is on the host's own origin: the only place either window
+/// may go. Anything else is refused in-frame, and the main window opens it
+/// in the person's browser instead.
+fn on_host(base: &str, url: &tauri::Url) -> bool {
+    tauri::Url::parse(base).is_ok_and(|b| b.origin() == url.origin())
+}
+
 fn page(app: &AppHandle, query: &str) -> tauri::Result<tauri::Url> {
     app.state::<Hosted>()
         .page(query)
@@ -24,9 +47,26 @@ fn page(app: &AppHandle, query: &str) -> tauri::Result<tauri::Url> {
 
 /// The main window, on the inbox or on whatever `query` names.
 pub fn open_main(app: &AppHandle, query: &str) -> tauri::Result<WebviewWindow> {
+    let base = app.state::<Hosted>().base.clone();
+    let opener = app.clone();
     let w = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::External(page(app, query)?))
         .title("Devplane")
         .inner_size(1200.0, 800.0)
+        .initialization_script(key_script(app))
+        .on_navigation(move |url| {
+            if on_host(&base, url) {
+                return true;
+            }
+            // Never in-frame: the key's script runs in every page this
+            // webview loads, so it loads only the host's.
+            use tauri_plugin_opener::OpenerExt;
+            if matches!(url.scheme(), "http" | "https" | "mailto")
+                && let Err(e) = opener.opener().open_url(url.as_str(), None::<&str>)
+            {
+                tracing::warn!(error = %e, "could not open a link");
+            }
+            false
+        })
         .build()?;
     // Hidden, not destroyed: the host is still the host with the window gone.
     let hidden = w.clone();
@@ -66,6 +106,7 @@ pub fn open_answer(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         return Ok(w);
     }
     let hider = app.clone();
+    let base = app.state::<Hosted>().base.clone();
     WebviewWindowBuilder::new(
         app,
         ANSWER,
@@ -81,6 +122,7 @@ pub fn open_answer(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .initialization_script(format!(
         "window.__devplane_hide = function () {{ location.assign({HIDE:?}); }};"
     ))
+    .initialization_script(key_script(app))
     .on_navigation(move |url| {
         if url.as_str() == HIDE {
             // Deferred: this runs inside the webview's own navigation
@@ -89,7 +131,8 @@ pub fn open_answer(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             let _ = hider.run_on_main_thread(move || hide_answer(&app));
             return false;
         }
-        true
+        // Only the host's page: the key's script runs in whatever loads here.
+        on_host(&base, url)
     })
     .build()
 }

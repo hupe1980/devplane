@@ -75,7 +75,7 @@ export async function answer(item: Item, what: Answer): Promise<Outcome> {
     await api(`/api/asks/${encodeURIComponent(ask)}/answer`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...what, from: "board" }),
+      body: JSON.stringify(what),
     });
     // No undo: the answer is on the record and with the agent.
     return {

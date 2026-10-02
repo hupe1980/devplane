@@ -63,6 +63,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/projects", get(projects))
         .route("/api/specs", get(specs))
         .route("/api/projects/trust", post(trust_project))
+        .route("/api/projects/reload", post(reload_projects))
         .route("/api/projects/{id}/snooze", post(snooze_project))
         .route("/api/issues", post(list_issues))
         .route("/api/forge", get(forge))
@@ -207,16 +208,49 @@ fn authorised_to_ingest(state: &Shared, headers: &HeaderMap) -> bool {
             .is_some_and(|t| constant_time_eq(t.as_bytes(), state.ingest_token.as_bytes()))
 }
 
-/// Which surface an authorised request came from, as the host can tell it: a
-/// page — the window or a browser tab — sends an `Origin` no script on it can
-/// change; any other holder of the token is a client like the CLI. Never what
-/// a request body says about itself.
-fn surface_of(headers: &HeaderMap) -> &'static str {
-    if headers.contains_key(axum::http::header::ORIGIN) {
-        "board"
+/// Where an authorised answer came from, as the host can tell it: `window`
+/// only when the request carries the window's proof for this very ask
+/// ([`crate::config::ask_proof`]), which only the app's own webviews can make;
+/// every other holder of the control token — the CLI, a script, a browser tab
+/// on `devplane up`, which is handed no key — is `cli`. The `Origin` header
+/// and the body are not read: any token holder can send either.
+///
+/// This narrows the hole and does not close it: an agent that can drive the
+/// desktop (scripting, accessibility) can press the window's buttons, and a
+/// process running as the person can read the key out of the app's memory.
+fn path_of(state: &Shared, headers: &HeaderMap, ask_id: &str) -> &'static str {
+    if window_proved(state, headers, ASK_PROOF, |key| {
+        crate::config::ask_proof(key, ask_id)
+    }) {
+        "window"
     } else {
         "cli"
     }
+}
+
+/// The header carrying the window's proof for an answer.
+const ASK_PROOF: &str = "x-devplane-ask-proof";
+/// The header carrying the window's proof for trusting a repository.
+const TRUST_PROOF: &str = "x-devplane-trust-proof";
+
+/// Whether `header` holds the proof `make` computes from the window key.
+/// False when the host holds no key (the CLI host), whatever the request says.
+fn window_proved(
+    state: &Shared,
+    headers: &HeaderMap,
+    header: &str,
+    make: impl FnOnce(&str) -> String,
+) -> bool {
+    let Some(key) = state.window_key.get() else {
+        return false;
+    };
+    let Some(sent) = headers.get(header).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    constant_time_eq(
+        sent.trim().to_ascii_lowercase().as_bytes(),
+        make(key).as_bytes(),
+    )
 }
 
 macro_rules! guard {
@@ -922,8 +956,8 @@ struct AnswerBody {
     /// Which question, when the agent asked several at once.
     #[serde(default)]
     field: Option<String>,
-    /// Ignored: which surface answered is what the host can tell from the
-    /// request itself ([`surface_of`]), never what a body claims.
+    /// Ignored: where an answer came from is what the host can prove
+    /// ([`path_of`]), never what a body claims.
     #[serde(default, rename = "from")]
     _from: Option<String>,
     /// Every question's answer at once, for a form that asked several; a row
@@ -976,7 +1010,7 @@ async fn answer_ask(
         }
     };
 
-    match crate::driven::answer_ask(&state, &id, answer, surface_of(&headers)).await {
+    match crate::driven::answer_ask(&state, &id, answer, path_of(&state, &headers, &id)).await {
         Ok(a) => {
             acted_on(
                 &state,
@@ -1895,12 +1929,36 @@ struct TrustBody {
     path: String,
 }
 
+/// Trusting from the window. The control token is not enough: it sits in a
+/// file an agent's tools can read, and trust lets a headless agent run the
+/// repository's own code. So the route also wants the window's proof for this
+/// path ([`crate::config::trust_proof`]); a host with no window refuses every
+/// request, and a person trusts with `devplane project trust` in a terminal of
+/// their own, which writes the store and has the host re-read it
+/// ([`reload_projects`]). This narrows the hole and does not close it: an
+/// agent that can drive the desktop can press the window's button.
 async fn trust_project(
     State(state): State<Shared>,
     headers: HeaderMap,
     Json(body): Json<TrustBody>,
 ) -> impl IntoResponse {
     guard!(state, headers);
+    if !window_proved(&state, &headers, TRUST_PROOF, |key| {
+        crate::config::trust_proof(key, &body.path)
+    }) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": format!(
+                    "trusting a repository is a person's decision, and this request cannot show \
+                     it came from the Devplane window. In a terminal of your own:\n\n  \
+                     devplane project trust {}",
+                    body.path
+                )
+            })),
+        )
+            .into_response();
+    }
     let Ok(root) = std::path::PathBuf::from(&body.path).canonicalize() else {
         return (
             StatusCode::BAD_REQUEST,
@@ -1958,6 +2016,30 @@ async fn trust_project(
         )
             .into_response(),
     }
+}
+
+/// Re-reads the projects the store records, so trust a person wrote with
+/// `devplane project trust` while this host runs takes effect at once rather
+/// than at the next start. Grants nothing the store does not already say, and
+/// takes nothing back: a project's trust only ever merges in.
+async fn reload_projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let projects = match state.store.load_projects().await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("could not read the projects: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    let mut w = state.world.lock().await;
+    let n = projects.len();
+    for p in projects {
+        w.upsert_project(p);
+    }
+    Json(json!({"projects": n})).into_response()
 }
 
 /// Issues a repository is offering as work.

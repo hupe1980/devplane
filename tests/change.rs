@@ -1488,6 +1488,7 @@ async fn a_restart_does_not_lose_the_conversation_the_change_was_having() {
         )
         .await
         .unwrap();
+        common::as_the_app(&state);
         let app = devplane::api::router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1677,6 +1678,7 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
         )
         .await
         .unwrap();
+        common::as_the_app(&state);
         let app = devplane::api::router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2502,6 +2504,7 @@ async fn a_graceful_stop_records_interrupted_and_never_completed() {
         )
         .await
         .unwrap();
+        common::as_the_app(&state);
         let app = devplane::api::router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2624,12 +2627,7 @@ async fn quitting_from_the_command_line_names_the_agent_and_leaves_nothing_behin
         }
     };
 
-    let trusted = send(
-        "/api/projects/trust".into(),
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(trusted["trusted"], true, "{trusted}");
+    common::trust_from_a_terminal(&home, &repo);
 
     // `echo_agent` pids this host started (`sh` execs the agent, so the host is
     // its parent): other tests' agents run concurrently and must not count.
@@ -3346,13 +3344,7 @@ async fn a_killed_host_is_recovered_by_the_next_one() {
                 .unwrap()
         }
     };
-    let trusted = post_to(
-        port,
-        "/api/projects/trust".into(),
-        serde_json::json!({ "path": repo.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(trusted["trusted"], true, "{trusted}");
+    common::trust_from_a_terminal(&home, &repo);
 
     let echoes = || -> std::collections::HashSet<u32> {
         devplane::observe::procs::snapshot()

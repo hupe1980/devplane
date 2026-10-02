@@ -187,6 +187,7 @@ async fn boot() -> (std::net::SocketAddr, reqwest::Client, Host) {
     )
     .await
     .unwrap();
+    common::as_the_app(&state);
     let app = devplane::api::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -224,14 +225,7 @@ async fn get(c: &reqwest::Client, addr: &std::net::SocketAddr, path: &str) -> Va
 
 /// Trusts the repository and adopts `feat/work`; the change's id and worktree.
 async fn adopt(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Repo) -> (String, PathBuf) {
-    let (_, t) = post(
-        c,
-        addr,
-        "/api/projects/trust",
-        json!({ "path": repo.root.to_string_lossy() }),
-    )
-    .await;
-    assert_eq!(t["trusted"], true, "{t}");
+    common::trust(c, addr, &repo.root).await;
     let (_, adopted) = post(
         c,
         addr,

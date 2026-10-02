@@ -66,10 +66,53 @@ export class Refused extends Error {
 /// Whether a request writes: anything but a GET or HEAD.
 const writes = (opts: RequestInit) => !!opts.method && !/^(GET|HEAD)$/i.test(opts.method);
 
+/// The window's key, which the app hands its own webviews in memory and only
+/// on the host's origin. A browser tab has none, so the host records its
+/// answers as from the cli, and its trust requests are refused.
+function windowKey(): string {
+  const k = (window as unknown as { __devplane_window_key?: unknown }).__devplane_window_key;
+  return typeof k === "string" ? k : "";
+}
+
+/// `hex(HMAC-SHA256(key, message))`, as the host computes it.
+async function hmac(key: string, message: string): Promise<string> {
+  const enc = new TextEncoder();
+  const k = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(message)));
+  return Array.from(sig, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/// The window's proof for the two requests the host takes only from it: an
+/// answer to one ask, and trusting one repository. Bound to that ask or that
+/// path, so it is worth nothing for another. Empty outside the window.
+async function windowProof(path: string, opts: RequestInit): Promise<Record<string, string>> {
+  const key = windowKey();
+  if (!key || !writes(opts) || !crypto?.subtle) return {};
+  const asked = /^\/api\/asks\/([^/?#]+)\/answer$/.exec(path);
+  if (asked) {
+    const id = decodeURIComponent(asked[1]);
+    return { "X-Devplane-Ask-Proof": await hmac(key, `ask ${id}`) };
+  }
+  if (path === "/api/projects/trust" && typeof opts.body === "string") {
+    const repo = (JSON.parse(opts.body) as { path?: unknown }).path;
+    if (typeof repo === "string") {
+      return { "X-Devplane-Trust-Proof": await hmac(key, `trust ${repo}`) };
+    }
+  }
+  return {};
+}
+
 /// One request, with auth and error handling in one place. A 401 is its own
 /// error: the tab lost its token, and retrying cannot fix that.
 export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const token = claimToken();
+  const proof = await windowProof(path, opts).catch(() => ({}));
   const timeout = writes(opts) ? {} : { signal: AbortSignal.timeout(READ_TIMEOUT_MS) };
   let res: Response;
   try {
@@ -79,6 +122,7 @@ export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
       headers: {
         ...(opts.body ? { "content-type": "application/json" } : {}),
         ...(opts.headers ?? {}),
+        ...proof,
         Authorization: `Bearer ${token}`,
       },
       ...timeout,

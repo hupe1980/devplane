@@ -6,9 +6,8 @@ weight = 14
 group = "guide"
 +++
 
-The event log records what happened **to** Devplane. The decision log records what Devplane **did**
-or refused, and on whose authority, so *why did that command run without anybody being asked?* and
-*why is there a pull request on this branch?* stay answerable months later.
+What Devplane **did** or refused, and on whose authority: *why did that command run unasked?* and *why
+is there a pull request on this branch?*, answerable months later.
 
 ```sh
 devplane audit                  # the latest 50 decisions
@@ -33,55 +32,47 @@ devplane audit --otel           # OpenTelemetry GenAI log records on stdout
                      ↳ the run ended under the question
 ```
 
-The same rows are in the workbench's **Ledger**, and on each change's Ledger tab.
+The same rows are in the workbench's **Ledger** and each change's Ledger tab.
 
 ![The ledger: what Devplane recorded as decided, when, on whose authority, and the rule behind each verdict](../../audit.png)
 
 ## What a row says
 
-The **authority**, the **action** (`agent:tool.use`, `agent:question`, `gate:run`, `git:push`,
-`github:pr.create`, `change:archive`), the **subject**, the **outcome**, and the **reason**: not
-"refused" but "refused by `Bash(rm *)`".
+**Authority**, **action** (`agent:tool.use`, `agent:question`, `gate:run`, `git:push`,
+`github:pr.create`, `change:archive`), **subject**, **outcome**, and **reason** ("refused by
+`Bash(rm *)`").
 
 | Authority | What it means |
 |---|---|
-| `person` | somebody was asked and answered — in the workbench or with `devplane inbox answer` |
+| `person` | somebody was asked and answered — in the workbench or with `devplane inbox answer`. The reason says *answered from the window* only for the app's window, which proves it per question; anything else holding the token, a browser tab on `devplane up` included, is *the cli* |
 | `rule` | a `deny` or `ask` rule matched. The rule is in the reason, and re-evaluating it reproduces the verdict |
 | `timer` | nobody answered before the deadline your project set in [`[questions]`](@/docs/configuration.md#questions); the duration and file are in the reason |
 | `nobody` | asked, never answered, and the moment passed — the run ended under the question, or a held permission lapsed. Quitting the host cleanly does **not** produce this: the question survives |
 | `devplane` | Devplane doing what your project wrote down: running a gate, stopping a change at its budget. A push and a pull request are `person`: you offered the change |
 
-There is no `unknown`: a row whose authority cannot be established is not written. `--without-me`
-leaves out `person` and `devplane` rows. With `--otel`, the authority rides on each
-`gen_ai.tool.call.decision` record; nothing is sent anywhere.
-[`devplane status --modes`](@/docs/cli.md#devplane-status) shows which sessions run with no prompts at all.
+- No `unknown`: a row without an established authority is not written.
+- `--without-me` drops `person` and `devplane` rows. `--otel` puts the authority on each
+  `gen_ai.tool.call.decision` record; nothing is sent.
+- [`devplane status --modes`](@/docs/cli.md#devplane-status) shows sessions that never prompt.
 
 ## Decisions are never pruned
 
-When a host starts, events, telemetry and transcripts older than 30 days, and finished runs older
-than 7 days, are pruned. Decisions and asks are appended and kept.
-
-An upgrade that changes the store's schema is the exception: the whole file is moved aside as
-`~/.devplane/devplane.v<n>.<time>.bak` (never deleted by Devplane) and a new store starts, so
-`devplane audit` and the Ledger start empty. The old log is still in that file, readable with
-`sqlite3`. See [Troubleshooting](@/docs/troubleshooting.md#the-ledger-is-empty-after-an-upgrade).
-
-The hook writes its decision straight to the store, so no host has to be running. If the store will
-not open, the decision goes to `~/.devplane/pending-decisions.jsonl`; `devplane doctor` counts what
-is waiting there, and the next host files it, marked as filed late.
+- Events, telemetry and transcripts are pruned after 30 days, finished runs after 7; decisions and
+  asks are kept.
+- A schema change starts a new store and the Ledger starts empty; the old log stays readable
+  ([Troubleshooting](@/docs/troubleshooting.md#the-ledger-is-empty-after-an-upgrade)).
+- The hook writes decisions directly, no host needed. If the store will not open they go to
+  `~/.devplane/pending-decisions.jsonl`; `doctor` counts them and the next host files them, marked
+  late.
 
 ## What is not in the log
 
-- **An undecided call.** When no rule matches, your agent shows its own dialog. Devplane does not see
-  your answer there, so it writes nothing.
-- **Calls under a standing "allow always".** That choice lives in the agent's session. When you choose
-  it in a run Devplane drives, the row's outcome says `allow_always`, so you know later matching calls
-  will not appear.
+- **An undecided call**: your agent's own dialog answers it, unseen.
+- **Calls under "allow always"**: in a driven run the choosing row says `allow_always`; later matching
+  calls do not appear.
 
 ## Limits
 
-Devplane's own actions are accounted for; the agents' actions are supervised. The log is
-append-only in a local SQLite file, not tamper-evident. See [Security](@/docs/security.md).
-
-Everything Devplane does to the world is safe to repeat: a gate is a read, pushing a branch twice is
-one branch, and an existing pull request is looked up before one is opened.
+- Append-only in a local SQLite file, not tamper-evident ([Security](@/docs/security.md)).
+- Devplane's actions are safe to repeat: a gate is a read, a branch pushed twice is one branch, an
+  existing pull request is looked up first.

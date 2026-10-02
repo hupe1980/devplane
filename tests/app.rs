@@ -22,14 +22,17 @@ fn scratch_repo(tag: &str) -> PathBuf {
 }
 
 async fn state_in(home: &Path) -> devplane::host::Shared {
-    AppState::new(
+    let state = AppState::new(
         home.join("devplane.db"),
         "tok".into(),
         Policy::default(),
         home.to_path_buf(),
     )
     .await
-    .unwrap()
+    .unwrap();
+    // The app's host holds the window's key.
+    common::as_the_app(&state);
+    state
 }
 
 /// The host as a router on a port, with no `host.json`.

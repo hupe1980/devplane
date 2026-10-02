@@ -81,17 +81,22 @@ pub async fn cmd_trust(path: PathBuf, yes: bool, dry_run: bool, json: bool) -> R
 }
 
 async fn trust_call(root: &Path) -> Result<serde_json::Value> {
-    // Through the host where one runs, so its world hears it at once;
-    // otherwise straight into the store, which a host reads when it starts.
-    // Trusting is a person's record, and needs nothing running.
-    if let Ok(c) = client::Client::connect_running().await {
-        return c
-            .post_json(
-                "/api/projects/trust",
-                &serde_json::json!({ "path": root.to_string_lossy() }),
-            )
-            .await;
+    // A person's decision: refused from inside an agent's session, which
+    // would otherwise trust the repository it is about to run in. Checked by
+    // the session's environment, which narrows the hole and does not close
+    // it: an agent that unsets the variable, or writes the store itself, is
+    // not stopped by it.
+    if let Some(var) = crate::hook::agent_session() {
+        anyhow::bail!(
+            "refused: `{var}` is set, so this is running inside an agent's session, and an agent \
+             may not trust a repository for itself. Trust it from a terminal of your own. This \
+             check narrows the hole and does not close it: an agent that unsets the variable is \
+             not stopped by it."
+        );
     }
+    // Straight into the store, host or no host: the host's own route wants
+    // the window's proof, which no terminal has. A running host is then told
+    // to re-read the store, so its world hears the trust at once.
     let root = root
         .canonicalize()
         .with_context(|| format!("{} does not exist", root.display()))?;
@@ -106,6 +111,29 @@ async fn trust_call(root: &Path) -> Result<serde_json::Value> {
             project.root.display()
         )
     })?;
+    // Trust lets a headless agent run this repository's own hooks and MCP
+    // servers, so it is a decision, and the record says who.
+    store
+        .append_decision(&crate::core::Decision::new(
+            crate::core::Authority::Person,
+            "project:trust",
+            project.root.display().to_string(),
+            "trusted",
+        ))
+        .await
+        .context("recording the decision")?;
+    if let Ok(c) = client::Client::connect_running().await {
+        let v: serde_json::Value = c
+            .post_json("/api/projects/reload", &serde_json::json!({}))
+            .await?;
+        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+            anyhow::bail!(
+                "{} is trusted in the store, and the running host could not re-read it: {e}. \
+                 It takes effect when the host restarts.",
+                project.root.display()
+            );
+        }
+    }
     Ok(serde_json::json!({ "trusted": true, "project": project }))
 }
 
