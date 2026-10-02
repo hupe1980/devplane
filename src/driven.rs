@@ -178,16 +178,51 @@ pub const RUN_ENV: &str = "DEVPLANE_RUN";
 /// The variable Devplane's MCP server reads the change it serves from.
 pub const CHANGE_ENV: &str = "DEVPLANE_CHANGE";
 
-/// Devplane's own read-only MCP server, as a stdio server the agent launches:
-/// this executable's `mcp`, told the run and the change it belongs to. Every
-/// ACP agent must accept stdio servers, so it is always offered; the agent's
-/// own configured servers stay as they are.
+/// The variable the stop tool proves its run with: a secret minted for each
+/// offer of Devplane's MCP server, in that server's environment only — never
+/// the agent's own ([`agent_env`]) — and held by the host beside the session.
+/// The agent can read its own; another run's server does not have it.
+pub const CLAIM_KEY_ENV: &str = "DEVPLANE_CLAIM_KEY";
+
+/// The key minted for each run's current offer, by run. In memory only: never
+/// stored, logged or serialised, and replaced on every start and resume.
+static CLAIM_KEYS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<RunId, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Whether `key` is the one minted for `run`'s current session. Compared over
+/// every byte, with no early exit.
+pub fn claim_key_matches(run: &RunId, key: &str) -> bool {
+    let keys = CLAIM_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(minted) = keys.get(run) else {
+        return false;
+    };
+    minted.len() == key.len()
+        && minted
+            .bytes()
+            .zip(key.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+}
+
+/// Devplane's own MCP server, as a stdio server the agent launches: this
+/// executable's `mcp`, told the run and the change it belongs to and the key
+/// its stop tool proves the run with. Every ACP agent must accept stdio
+/// servers, so it is always offered; the agent's own configured servers stay
+/// as they are.
 fn mcp_offer(run: &RunId, change: Option<&crate::core::ChangeId>) -> Option<crate::acp::McpOffer> {
     let command = std::env::current_exe().ok()?;
     let mut env = vec![(RUN_ENV.to_string(), run.to_string())];
     if let Some(c) = change {
         env.push((CHANGE_ENV.to_string(), c.to_string()));
     }
+    // 128 random bits per offer, so a resumed session's server holds a key
+    // the previous one's does not.
+    let key = uuid::Uuid::new_v4().simple().to_string();
+    CLAIM_KEYS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(run.clone(), key.clone());
+    env.push((CLAIM_KEY_ENV.to_string(), key));
     Some(crate::acp::McpOffer {
         name: "devplane".into(),
         command,
@@ -1700,6 +1735,44 @@ pub async fn retire(state: &Shared, run: &RunId) -> Result<()> {
 /// run as a person's doing.
 const STOPPED_BY_PERSON: &str = "stopped";
 
+/// What [`stop_claimed`] tells the session: the agent ended its own run by
+/// saying the spec and the tests conflict. Nobody decided it.
+pub(crate) const AGENT_CLAIMED: &str = "claimed";
+
+/// Stops a run whose agent has just recorded a stop claim. Not a person's
+/// stop and nobody's decision: no row is written, and the pump ends the run
+/// as the agent's own doing, then runs the change's `check` once.
+pub async fn stop_claimed(state: &Shared, run: &RunId) {
+    let lock = lifecycle(run);
+    let _owned = lock.lock().await;
+    let session = state.sessions.lock().await.get(run).cloned();
+    match session {
+        // A person's stop that got there first wins.
+        Some(s) if !s.is_stopping() => s.stop_because(AGENT_CLAIMED),
+        Some(_) => {}
+        None => tracing::info!(run = %run, "the run that claimed had already ended"),
+    }
+}
+
+/// Whether `run` is one this host drives and is being stopped, read before a
+/// claim is recorded: `None` when this host has no session for it.
+pub async fn stopping(state: &Shared, run: &RunId) -> Option<bool> {
+    state
+        .sessions
+        .lock()
+        .await
+        .get(run)
+        .map(|s| s.is_stopping())
+}
+
+/// Takes the run's lifecycle lock, so a claim is recorded while no start,
+/// resume or stop of the same run is half done.
+pub(crate) async fn hold_lifecycle<T>(run: &RunId, f: impl std::future::Future<Output = T>) -> T {
+    let lock = lifecycle(run);
+    let _owned = lock.lock().await;
+    f.await
+}
+
 /// What to call a tool call on the board: the policy vocabulary (`Bash`,
 /// `Edit`, ...) where the call maps into it, so the board and the audit log
 /// agree; the agent's title otherwise.
@@ -1726,6 +1799,9 @@ struct Pump {
     /// Written to the log when the call ends; always empty when the
     /// repository keeps no transcript.
     diffs: std::collections::HashMap<String, Vec<crate::acp::ReportedDiff>>,
+    /// Whether a turn ended while the session was being stopped: that turn
+    /// end already sent the change to its gates.
+    turn_ended_stopping: bool,
 }
 
 /// Writes the diffs one call reported to the run's log, each as the agent's
@@ -2264,6 +2340,7 @@ async fn handle(
         }
 
         AcpEvent::TurnEnded { stop_reason } => {
+            pump.turn_ended_stopping |= session.is_stopping();
             flush_transcript(state, run, pump).await;
             keep_all_diffs(state, run, cwd, pump).await;
             match stop_reason.as_str() {
@@ -2380,13 +2457,19 @@ async fn handle(
             // are closed first so the ending cannot overwrite them.
             let tearing_down = state.tearing_down.load(std::sync::atomic::Ordering::SeqCst);
             let by_person = session.stopped_because().as_deref() == Some(STOPPED_BY_PERSON);
+            // The agent stopped itself by claiming: its asks end as any run's
+            // that ends on its own, under nobody.
+            let claimed = session.stopped_because().as_deref() == Some(AGENT_CLAIMED);
             if !tearing_down {
                 end_open_asks(
                     state,
                     run,
-                    match by_person {
-                        true => crate::core::ask::Ended::Stopped,
-                        false => crate::core::ask::Ended::Nobody {
+                    match (by_person, claimed) {
+                        (true, _) => crate::core::ask::Ended::Stopped,
+                        (false, true) => crate::core::ask::Ended::Nobody {
+                            because: "the agent stopped before anybody answered".into(),
+                        },
+                        (false, false) => crate::core::ask::Ended::Nobody {
                             because: "the run ended before anybody answered".into(),
                         },
                     },
@@ -2442,7 +2525,21 @@ async fn handle(
                     })
                     .await
                 }
+                None if claimed => {
+                    ingest(Event::SessionEnded {
+                        reason: Some(AGENT_CLAIMED.into()),
+                    })
+                    .await
+                }
                 None => ingest(Event::SessionEnded { reason: None }).await,
+            }
+            // A stopped run has no turn end of its own unless the agent
+            // acknowledged the cancel: the change's `check` runs once either
+            // way, on the tree the agent left, and hands nothing back.
+            if claimed && !tearing_down && !pump.turn_ended_stopping {
+                let state = state.clone();
+                let run = run.clone();
+                tokio::spawn(async move { crate::change::on_turn_ended(&state, &run).await });
             }
         }
     }

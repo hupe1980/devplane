@@ -604,8 +604,10 @@ async fn the_browser_shell_is_served_and_needs_no_token_of_its_own() {
     );
 }
 
+/// A question waits for an answer: a snooze on it is refused, naming the
+/// kind, and hides nothing.
 #[tokio::test]
-async fn a_snooze_takes_a_run_out_of_the_inbox_and_gives_it_back() {
+async fn a_snooze_on_a_question_is_refused_and_hides_nothing() {
     let (addr, token, c, state) = boot_with_state(Policy::default()).await;
     hook(
         &state,
@@ -623,37 +625,139 @@ async fn a_snooze_takes_a_run_out_of_the_inbox_and_gives_it_back() {
         1
     );
 
-    c.post(format!("http://{addr}/api/runs/s9/snooze?minutes=60"))
+    for query in ["minutes=60", "until=activity"] {
+        let res = c
+            .post(format!("http://{addr}/api/runs/s9/snooze?{query}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::CONFLICT, "{query}");
+        let body: Value = res.json().await.unwrap();
+        assert_eq!(body["kinds"], serde_json::json!(["question"]), "{body}");
+        assert_eq!(body["says"], "a question or a permission is never snoozed");
+    }
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    assert_eq!(
+        inbox["items"].as_array().unwrap().len(),
+        1,
+        "nothing was hidden"
+    );
+    assert_eq!(inbox["snoozed"], 0);
+}
+
+/// A context warning snoozed until activity stays out of the list — listed
+/// and counted as snoozed — until the session writes again, and then it is
+/// back. Minutes and `minutes=0` still work as they did.
+#[tokio::test]
+async fn a_snooze_until_activity_ends_when_the_session_writes_again() {
+    use devplane::core::event::{Event, StatusSample};
+    use devplane::core::{RunId, Source};
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    hook(
+        &state,
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"s7","cwd":"/tmp/repo",
+            "prompt":"go"}"#,
+    )
+    .await;
+    let full = || {
+        let state = state.clone();
+        async move {
+            state
+                .ingest(
+                    RunId::new("s7"),
+                    Source::Hook,
+                    Event::StatusSample(StatusSample {
+                        context_used_percent: Some(92.0),
+                        ..Default::default()
+                    }),
+                    None,
+                    devplane::core::RunMode::Observed,
+                )
+                .await;
+        }
+    };
+    full().await;
+    let kinds = |v: &Value| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["kind"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    assert!(
+        kinds(&inbox).contains(&"context_high".to_string()),
+        "{inbox}"
+    );
+    let before = inbox["items"].as_array().unwrap().len();
+
+    let res = c
+        .post(format!(
+            "http://{addr}/api/runs/s7/snooze?until=activity&kind=context_high"
+        ))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
+    assert!(res.status().is_success(), "{}", res.text().await.unwrap());
+
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
     assert!(
-        inbox_items(&c, &addr, &token)
-            .await
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "a snoozed run is out of the queue"
+        !kinds(&inbox).contains(&"context_high".to_string()),
+        "{inbox}"
     );
+    assert_eq!(inbox["count"], before - 1, "the one count drops with it");
+    assert_eq!(inbox["snoozed"], 1, "hidden, and counted");
+    let rows = inbox["snoozed_rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "and listed");
+    assert_eq!(rows[0]["kind"], "context_high");
+    assert_eq!(rows[0]["returns"], "activity");
+    assert_eq!(
+        rows[0]["back"],
+        "/api/runs/s7/snooze?minutes=0&kind=context_high"
+    );
+
+    // The session writes again.
+    full().await;
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    assert!(
+        kinds(&inbox).contains(&"context_high".to_string()),
+        "back once the session wrote again: {inbox}"
+    );
+    assert_eq!(inbox["snoozed"], 0);
+    assert!(inbox["snoozed_rows"].as_array().unwrap().is_empty());
+
+    // Snoozed for minutes, then brought back by its own route.
+    c.post(format!(
+        "http://{addr}/api/runs/s7/snooze?minutes=60&kind=context_high"
+    ))
+    .bearer_auth(&token)
+    .send()
+    .await
+    .unwrap();
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    assert_eq!(inbox["snoozed"], 1);
+    let back = inbox["snoozed_rows"][0]["back"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    c.post(format!("http://{addr}{back}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let inbox = get_json(&c, &addr, "/api/inbox", &token).await;
+    assert!(
+        kinds(&inbox).contains(&"context_high".to_string()),
+        "{inbox}"
+    );
+    assert_eq!(inbox["snoozed"], 0);
 
     // But still on the board: snoozing hides a request, not a session.
     let board = get_json(&c, &addr, "/api/board", &token).await;
     assert_eq!(board["summary"]["runs"], 1);
-
-    c.post(format!("http://{addr}/api/runs/s9/snooze?minutes=0"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        inbox_items(&c, &addr, &token)
-            .await
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
 }
 
 #[test]

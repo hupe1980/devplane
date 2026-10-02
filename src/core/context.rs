@@ -31,10 +31,15 @@ pub enum Field {
     Tasks,
 }
 
-/// The last sentence of every sent prompt: a sanctioned way to say *I cannot*,
-/// so a stuck agent does not make the checks pass by editing or skipping them.
-pub const STOP_AND_SAY: &str = "If the specification cannot be satisfied, stop and say so \
-plainly rather than making the checks pass another way.";
+/// The last sentence of every implementation prompt and every round of gate
+/// feedback: a sanctioned channel for disclosing a defect, so a stuck agent
+/// says *I cannot* rather than make the checks pass by editing or skipping
+/// them. It names the stop tool on Devplane's own server, and says what to do
+/// where that tool was not loaded.
+pub const STOP_AND_SAY: &str = "If the specification and the tests cannot both be satisfied, \
+call the `spec_and_tests_conflict` tool on the `devplane` MCP server with what conflicts and \
+leave the tests as they are — that is a defect worth reporting, not a failure — and if you do not \
+have that tool, stop and say so plainly rather than make the checks pass another way.";
 
 /// `prompt`, ending with [`STOP_AND_SAY`] exactly once.
 pub fn with_stop_and_say(prompt: &str) -> String {
@@ -283,6 +288,12 @@ mod tests {
         assert_eq!(twice.matches(STOP_AND_SAY).count(), 1);
         assert_eq!(without_stop_and_say(&once), "Do the thing.");
         assert_eq!(STOP_AND_SAY.matches(". ").count(), 0, "one sentence");
+        // It names the tool on Devplane's server, and what to do without it.
+        assert!(STOP_AND_SAY.contains(crate::core::claim::TOOL));
+        assert!(STOP_AND_SAY.contains("`devplane`"));
+        assert!(STOP_AND_SAY.contains("if you do not have that tool"));
+        // A prompt is shown beside counts, and nothing in it reads as one.
+        assert!(!STOP_AND_SAY.contains(" of "));
     }
 
     fn at() -> jiff::Timestamp {

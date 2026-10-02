@@ -196,7 +196,7 @@ impl ForgeState {
             let snoozed = self.snoozed.get(&f.project_id).unwrap_or(&none);
             let d = crate::core::forge::items_for_forge(f, snoozed, &own, now);
             out.items.extend(d.items);
-            out.snoozed += d.snoozed;
+            out.snoozed.extend(d.snoozed);
         }
         out
     }

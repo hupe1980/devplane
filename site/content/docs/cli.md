@@ -159,10 +159,14 @@ an answer given tomorrow reaches the agent through a resumed session.
 #### `devplane inbox snooze <id>`
 
 Hide a run's or change's current inbox items for a while; new kinds still show. The run keeps running.
+A question or a permission is never snoozed: the host refuses, naming it, and hides nothing.
 
 | Flag | What |
 |---|---|
 | `--minutes <n>` | default 60; `0` un-snoozes; capped at 30 days |
+| `--until-activity` | until the session next reports activity (for a change: a run event, a check result or a moved tree); not with `--minutes` |
+
+`devplane inbox` counts what is snoozed and lists each item with when it comes back.
 
 ### `devplane audit [about]`
 
@@ -242,7 +246,9 @@ running*, *feedback round 2*, *needs you*). Alias `ls`.
 #### `devplane change show <change>`
 
 State, gate standing (*verified*, *stale* with both tree digests, *failed*, *not run*, *no gates
-declared*), runs, cost against budget, and each check's output. With a spec, task counts and drift:
+declared*), runs, cost against budget, and each check's output. An agent's open claim that the spec
+and the tests conflict is printed after the state and before the gates, quoted and attributed. With a
+spec, task counts and drift:
 
 ```console
 tasks      11 ticked · 9 seen by a passing check
@@ -280,6 +286,12 @@ resume; never automatic.
 #### `devplane change prompt <change|run> [text]...`
 
 Message the agent without stopping it (a change: its latest run). Queued mid-turn.
+
+#### `devplane change claim-read <change>`
+
+Mark the agent's open claim that the spec and the tests conflict read. It stays on the change under
+its run; no decision is recorded. Refused inside an agent session (an advisory check). To answer the
+agent instead: `devplane change resume <change>`, then `devplane change prompt <change> "…"`.
 
 #### `devplane change stop <change|run>`
 
@@ -560,7 +572,8 @@ See [Install](@/docs/install.md#shell-completion).
 
 ### `devplane mcp`
 
-Hidden. Devplane's **read-only** surface over MCP on stdio; the plugin registers it. By hand:
+Hidden. Devplane's surface over MCP on stdio: four questions and one claim. The plugin registers it,
+and every agent Devplane drives is offered it. By hand:
 
 ```json
 { "mcpServers": { "devplane": { "command": "devplane", "args": ["mcp"] } } }
@@ -572,8 +585,22 @@ Hidden. Devplane's **read-only** surface over MCP on stdio; the plugin registers
 | `change` | a change's state, gate verdicts and spec; all open changes without an `id` |
 | `explain` | what the gate would decide about a call, and which rule |
 | `audit` | what Devplane decided, and on whose authority |
+| `spec_and_tests_conflict` | **not a question**: the calling agent says the specification and the tests of its change cannot both be satisfied |
 
-No tool acts. It asks a host, else reads the store. An `explain` here **is** recorded in `devplane audit`.
+The questions act on nothing: they ask a host, else read the store. What the server writes is a
+short list — an `explain` here **is** recorded in `devplane audit`, and `spec_and_tests_conflict`
+records the agent's claim on its own change and stops its run
+([what follows](@/docs/agents.md#when-the-spec-and-the-tests-conflict)).
+
+`spec_and_tests_conflict` takes exactly `reason` (1 to 1024 bytes) and `paths` (at most 10, each at
+most 512 bytes, inside the project or the change's worktree); no argument names a run, a change or
+anybody. The run, its change and a per-session key come from the environment Devplane gave the
+server when it offered it, and the host checks them. Refused, with a sentence and nothing recorded:
+a session Devplane did not start (*tell your person in your reply instead*), no host running, a run
+this host does not drive, a run with no change, a server started for another run's session or
+change, a run already stopping, a second claim before you answer the first, an empty or oversized
+field, a path outside both roots, an argument it does not take. Devplane never allows the call on
+its own; where the agent's own permission prompt asks, a person (or their rule) answers it.
 
 ## The host
 
@@ -597,7 +624,7 @@ refused with the running one's port and uptime.
 
 #### `devplane up --window`
 
-The host with a native window: tray *needs you* count, notifications, one global shortcut (`[app]
+The host with a native window: the tray's *need you* count (the inbox badge's number), notifications, one global shortcut (`[app]
 shortcut`), and `devplane://` links to a change, review, ask or run. Closing the window keeps hosting;
 quitting from the tray says what it stops. Nothing starts at login. Needs a build with the `app`
 feature (`cargo install devplane --features app`); otherwise the flag is hidden and refused.

@@ -27,8 +27,8 @@
   <button
     class="act"
     class:on={s.id === current}
-    title={n ? `${s.title} — ${n}` : s.title}
-    aria-label={n ? `${s.title}, ${n}` : s.title}
+    title={n ? `${s.title} — ${n}${s.countWord ? ` ${s.countWord}` : ""}` : s.title}
+    aria-label={n ? `${s.title}, ${n}${s.countWord ? ` ${s.countWord}` : ""}` : s.title}
     aria-current={s.id === current ? "page" : undefined}
     onclick={() => pick(s.id)}
   >

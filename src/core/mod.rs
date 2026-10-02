@@ -13,6 +13,7 @@ pub mod caches;
 pub mod candidates;
 pub mod certificate;
 pub mod change;
+pub mod claim;
 pub mod clock;
 pub mod close;
 pub mod command;

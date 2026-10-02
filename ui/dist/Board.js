@@ -1,9 +1,11 @@
-import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, P as text, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, b as clsx, g as init_select, h as bind_select_value, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, ot as noop, q as only_child, st as to_array, tt as pop, u as bind_element_size, w as each, y as set_class } from "./api.js";
-import { O as go, R as surfaces, a as Inline, i as Skeleton, n as Icon, p as copyText, t as Pill } from "./app.js";
+import { $ as user_effect, A as clsx, B as append, E as init_select, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, T as bind_select_value, V as comment, W as text, _t as to_array, at as proxy, b as bind_element_size, ct as user_derived, dt as pop, ft as push, g as prop, gt as noop, h as spell, ht as reset, it as sibling, k as set_class, mt as next, nt as first_child, ot as set, rt as only_child, st as state, tt as child, w as set_attribute, z as set_text } from "./api.js";
+import { t as copyText } from "./resource.svelte.js";
+import { O as surfaces, a as Inline, i as Skeleton, n as Icon, t as Pill, w as go } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as Grid } from "./Grid.js";
 import { t as Empty } from "./Empty.js";
 import { t as Props } from "./Props.js";
+import { n as offerCommands } from "./offered.svelte.js";
 //#region src/surfaces/board/Board.svelte
 var root = from_html(`<button> <span class="svelte-13ck13b"> </span></button>`);
 var root_1 = from_html(`<div class="chips svelte-13ck13b" role="group" aria-label="by state"><button>all <span class="svelte-13ck13b"> </span></button> <!></div>`);
@@ -154,6 +156,20 @@ function Board($$anchor, $$props) {
 	async function copy(t) {
 		set(said, await copyText(t) ? `Copied: ${t}` : `Nothing was copied — this page has no clipboard: ${t}`, true);
 	}
+	user_effect(() => {
+		const p = get(pick);
+		if (!p) return;
+		return offerCommands(p.name ?? p.agent ?? p.id, [...get(runPage) ? [{
+			label: "open its decisions",
+			icon: "keyboard",
+			hint: spell("Enter"),
+			run: () => go(`#${get(runPage)}/${encodeURIComponent(p.id)}`)
+		}] : [], {
+			label: "copy the attach command",
+			icon: "right",
+			run: () => void copy(`devplane run attach ${p.id}`)
+		}], "This session");
+	});
 	var div = root_17();
 	var header = child(div);
 	var node = sibling(child(header), 2);
@@ -237,8 +253,8 @@ function Board($$anchor, $$props) {
 		Skeleton($$anchor, {});
 	};
 	var consequent_4 = ($$anchor) => {
-		var p = root_4();
-		append($$anchor, p);
+		var p_1 = root_4();
+		append($$anchor, p_1);
 	};
 	var consequent_5 = ($$anchor) => {
 		Empty($$anchor, {
@@ -404,10 +420,10 @@ function Board($$anchor, $$props) {
 				append($$anchor, fragment_2);
 			};
 			const empty = ($$anchor) => {
-				var p_1 = root_13();
-				var text_13 = only_child(p_1, true);
+				var p_2 = root_13();
+				var text_13 = only_child(p_2, true);
 				template_effect(() => set_text(text_13, get(only) ? `No session is ${get(only)}.` : "No session."));
-				append($$anchor, p_1);
+				append($$anchor, p_2);
 			};
 			let $0 = user_derived(() => get(groupBy) === "none" ? void 0 : get(groupBy) === "project" ? (r) => r.project_name ?? "no project" : bucket);
 			Grid(node_5, {
@@ -536,13 +552,13 @@ function Board($$anchor, $$props) {
 			reset(div_3);
 			var node_20 = sibling(div_3, 2);
 			var consequent_17 = ($$anchor) => {
-				var p_2 = root_14();
-				var node_21 = child(p_2);
+				var p_3 = root_14();
+				var node_21 = child(p_3);
 				Inline(node_21, { get text() {
 					return get(said);
 				} });
-				reset(p_2);
-				append($$anchor, p_2);
+				reset(p_3);
+				append($$anchor, p_3);
 			};
 			if_block(node_20, ($$render) => {
 				if (get(said)) $$render(consequent_17);

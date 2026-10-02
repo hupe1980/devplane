@@ -1,10 +1,10 @@
 //! The tray item: the number, and the two things a menu needs.
 //!
-//! A number, never a dot: the inbox's *needs you* count, the same figure
-//! `devplane inbox --needs-you` prints. Zero shows nothing, not `0`.
+//! A number, never a dot: the inbox's one count — the figure the activity
+//! bar's inbox badge and the status bar's *need you* show, read from the same
+//! composition (`view::inbox_count`). Zero shows nothing, not `0`.
 
 use super::{quit, window};
-use crate::core::AttentionItem;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Manager};
@@ -34,11 +34,21 @@ impl Count {
     }
 }
 
-/// The count: the rows a person can answer from here.
-///
-/// The same predicate `--needs-you` narrows by: has an answer path.
-pub fn needs_you(items: &[AttentionItem]) -> Count {
-    Count(items.iter().filter(|i| i.has_answer_path()).count())
+/// The count: the inbox's one number as the host has it now, without the
+/// item a held answer belongs to — the figure `/api/inbox` carries as
+/// `count`.
+pub async fn count(state: &crate::host::Shared) -> Count {
+    let snap = state.snapshot().await;
+    let held = state.hold.held();
+    Count(
+        crate::view::inbox_count(
+            &snap,
+            &state.store,
+            &state.policy,
+            held.as_ref().map(|h| h.ask.as_str()),
+        )
+        .await,
+    )
 }
 
 const OPEN: &str = "open";
@@ -82,34 +92,6 @@ pub fn apply(app: &AppHandle, count: Count) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::attention::{Action, AttentionKind};
-    use crate::core::ids::{AttentionId, RunId};
-
-    fn item(id: &str, actions: Vec<Action>) -> AttentionItem {
-        AttentionItem {
-            id: AttentionId::new(id),
-            kind: AttentionKind::Question,
-            level: AttentionKind::Question.default_level(),
-            run_id: Some(RunId::new("r")),
-            project_id: None,
-            title: "Keep the legacy route?".into(),
-            detail: None,
-            answer_in: None,
-            options: vec![],
-            actions,
-            ask: None,
-            request_id: None,
-            form: None,
-            url: None,
-            launch: None,
-            change_id: None,
-            offer: None,
-            no_offer: None,
-            resume_command: None,
-            session_link: None,
-            since: jiff::Timestamp::now(),
-        }
-    }
 
     #[test]
     fn zero_shows_nothing_and_three_shows_three() {
@@ -120,17 +102,5 @@ mod tests {
         assert_eq!(Count(3).badge(), Some(3));
         assert_eq!(Count(3).tooltip(), "3 need you");
         assert_eq!(Count(1).tooltip(), "1 needs you");
-    }
-
-    #[test]
-    fn the_count_is_the_answerable_rows() {
-        assert_eq!(needs_you(&[]), Count(0));
-        let answerable = || item("a", vec![Action::Allow, Action::Deny]);
-        // A row with nothing to press is not something to answer.
-        let mute = item("m", vec![]);
-        assert_eq!(
-            needs_you(&[answerable(), answerable(), answerable(), mute]),
-            Count(3)
-        );
     }
 }

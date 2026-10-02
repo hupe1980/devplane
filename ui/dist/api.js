@@ -3798,7 +3798,7 @@ function mount(component, options) {
 	return _mount(component, options);
 }
 /** @type {Map<EventTarget, Map<string, number>>} */
-var listeners = /* @__PURE__ */ new Map();
+var listeners$1 = /* @__PURE__ */ new Map();
 /**
 * @template {Record<string, any>} Exports
 * @param {ComponentType<SvelteComponent<any>> | Component<any>} Component
@@ -3838,10 +3838,10 @@ function _mount(Component, { target, anchor, props = {}, events, context, intro 
 				registered_events.add(event_name);
 				var passive = is_passive_event(event_name);
 				for (const node of [target, document]) {
-					var counts = listeners.get(node);
+					var counts = listeners$1.get(node);
 					if (counts === void 0) {
 						counts = /* @__PURE__ */ new Map();
-						listeners.set(node, counts);
+						listeners$1.set(node, counts);
 					}
 					var count = counts.get(event_name);
 					if (count === void 0) {
@@ -3855,12 +3855,12 @@ function _mount(Component, { target, anchor, props = {}, events, context, intro 
 		root_event_handles.add(event_handle);
 		return () => {
 			for (var event_name of registered_events) for (const node of [target, document]) {
-				var counts = listeners.get(node);
+				var counts = listeners$1.get(node);
 				var count = counts.get(event_name);
 				if (--count == 0) {
 					node.removeEventListener(event_name, handle_event_propagation);
 					counts.delete(event_name);
-					if (counts.size === 0) listeners.delete(node);
+					if (counts.size === 0) listeners$1.delete(node);
 				} else counts.set(event_name, count);
 			}
 			root_event_handles.delete(event_handle);
@@ -5433,6 +5433,302 @@ if (typeof HTMLElement === "function");
 //#region node_modules/svelte/src/internal/disclose-version.js
 if (typeof window !== "undefined") ((window.__svelte ??= {}).v ??= /* @__PURE__ */ new Set()).add("5");
 //#endregion
+//#region src/lib/keys.ts
+var RESERVED = [
+	"Mod+w",
+	"Mod+t",
+	"Mod+n",
+	"Mod+l",
+	"Mod+r",
+	"Mod+q",
+	"Mod+Tab"
+];
+var bindings = [];
+var listeners = /* @__PURE__ */ new Map();
+function bind(b) {
+	if (!b.label.trim()) throw new Error(`${b.surface}: ${b.combo} (${b.action}) has no label`);
+	const combo = normalise(b.combo);
+	const reserved = RESERVED.find((r) => r.toLowerCase() === combo.toLowerCase());
+	if (reserved) throw new Error(`${b.surface}: ${b.combo} ("${b.label}") takes ${reserved}, which the browser keeps for itself`);
+	const same = bindings.find((x) => x.combo === combo && x.surface === b.surface);
+	if (same) throw new Error(`${b.combo} is bound twice in ${b.surface}: "${same.label}" (${same.action}) and "${b.label}" (${b.action})`);
+	const global = bindings.find((x) => x.combo === combo && x.surface === "global");
+	if (global && b.surface !== "global") throw new Error(`${b.surface} rebinds ${b.combo}, which is global: "${global.label}" (${global.action}) against "${b.label}" (${b.action})`);
+	const [parent, mode] = b.surface.split(":");
+	const over = mode ? bindings.find((x) => x.surface === parent && x.combo === combo) : bindings.find((x) => x.surface.startsWith(`${b.surface}:`) && x.combo === combo);
+	if (over && !LIST_COMBOS.includes(combo)) throw new Error(`${b.combo} is bound in ${b.surface} ("${b.label}", ${b.action}) and in ${over.surface} ("${over.label}", ${over.action}); a mode may rebind only its surface's list keys`);
+	const shadowed = b.surface === "global" ? bindings.find((x) => x.combo === combo) : void 0;
+	if (shadowed) throw new Error(`global ${b.combo} ("${b.label}", ${b.action}) is already bound in ${shadowed.surface}: "${shadowed.label}" (${shadowed.action})`);
+	bindings.push({
+		...b,
+		combo
+	});
+}
+function all() {
+	return bindings;
+}
+var modes = /* @__PURE__ */ new Map();
+function setMode(surface, mode) {
+	modes.set(surface, mode);
+	return () => {
+		if (modes.get(surface) === mode) modes.delete(surface);
+	};
+}
+function scopes(surface) {
+	const m = modes.get(surface);
+	return [
+		...m ? [`${surface}:${m}`] : [],
+		surface,
+		"global"
+	];
+}
+function help(surface) {
+	const m = modes.get(surface);
+	const own = m ? bindings.filter((b) => b.surface === `${surface}:${m}`) : [];
+	const taken = new Set(own.map((b) => b.combo));
+	return [
+		...bindings.filter((b) => b.surface === "global"),
+		...bindings.filter((b) => b.surface === surface && !taken.has(b.combo)),
+		...own
+	];
+}
+function sheet(surface) {
+	const rows = (keys) => {
+		const out = [];
+		for (const b of keys) {
+			const same = out.find((r) => r.surface === b.surface && r.action === b.action && r.label === b.label);
+			if (same) same.combos.push(b.combo);
+			else out.push({
+				...b,
+				combos: [b.combo]
+			});
+		}
+		return out;
+	};
+	const keys = help(surface);
+	return [
+		{
+			title: "This item",
+			keys: rows(keys.filter((b) => b.surface !== "global" && b.item))
+		},
+		{
+			title: "This surface",
+			keys: rows(keys.filter((b) => b.surface !== "global" && !b.item))
+		},
+		{
+			title: "Everywhere",
+			keys: rows(keys.filter((b) => b.surface === "global"))
+		}
+	].filter((g) => g.keys.length > 0);
+}
+function onAction(action, fn) {
+	let set = listeners.get(action);
+	if (!set) {
+		set = /* @__PURE__ */ new Set();
+		listeners.set(action, set);
+	}
+	set.add(fn);
+	return () => {
+		set?.delete(fn);
+	};
+}
+function run(action, surface, combo = "") {
+	const set = listeners.get(action);
+	if (!set || set.size === 0) return false;
+	for (const fn of set) if (fn(surface, combo) === true) return true;
+	return false;
+}
+var pending = null;
+var pendingAt = 0;
+var CHORD_MS = 800;
+function combo(e) {
+	const parts = [];
+	if (e.metaKey || e.ctrlKey) parts.push("Mod");
+	if (e.altKey) parts.push("Alt");
+	const key = (e.altKey ? fromCode(e.code) : null) ?? keyName(e.key);
+	if (e.shiftKey && key.length > 1) parts.push("Shift");
+	parts.push(key);
+	return parts.join("+");
+}
+function keyName(key) {
+	switch (key) {
+		case "Escape": return "Esc";
+		case "ArrowUp": return "Up";
+		case "ArrowDown": return "Down";
+		case "ArrowLeft": return "Left";
+		case "ArrowRight": return "Right";
+		case " ": return "Space";
+		default: return key;
+	}
+}
+var CODES = {
+	BracketLeft: "[",
+	BracketRight: "]",
+	Minus: "-",
+	Equal: "=",
+	Comma: ",",
+	Period: ".",
+	Slash: "/",
+	Semicolon: ";",
+	Quote: "'",
+	Backquote: "`",
+	Backslash: "\\"
+};
+function fromCode(code) {
+	if (!code) return null;
+	const letter = /^Key([A-Z])$/.exec(code);
+	if (letter) return letter[1].toLowerCase();
+	const digit = /^Digit([0-9])$/.exec(code);
+	if (digit) return digit[1];
+	return CODES[code] ?? null;
+}
+function mac() {
+	if (typeof navigator === "undefined") return false;
+	const n = navigator;
+	return /mac/i.test(n.userAgentData?.platform ?? n.userAgent ?? "");
+}
+function spell(c) {
+	const onMac = mac();
+	return c.split(" ").map((chord) => {
+		const parts = chord.split("+");
+		const key = parts.pop() ?? "";
+		const mods = parts.map((m) => m === "Mod" ? onMac ? "⌘" : "Ctrl" : m === "Alt" ? onMac ? "⌥" : "Alt" : m === "Shift" ? onMac ? "⇧" : "Shift" : m);
+		const k = parts.length && key.length === 1 ? key.toUpperCase() : key;
+		return onMac ? mods.join("") + k : [...mods, k].join("+");
+	}).join(" ");
+}
+function normalise(c) {
+	return c.split(" ").map((part) => part.split("+").map((k) => k === "Escape" ? "Esc" : k === "Cmd" || k === "Ctrl" || k === "Meta" ? "Mod" : k).join("+")).join(" ");
+}
+var NATIVE_KEYS = /* @__PURE__ */ new Set([
+	"Enter",
+	"Space",
+	"Up",
+	"Down",
+	"Left",
+	"Right"
+]);
+function native(e, c) {
+	if (!NATIVE_KEYS.has(c)) return false;
+	const t = e.target;
+	if (!t || typeof t.closest !== "function") return false;
+	return !!t.closest("button, a[href], summary, [role=button], [role=link], [role=tab], [role=option], [role=menuitem], [role=separator], [role=checkbox], [role=radio], [role=switch]");
+}
+function typing(e) {
+	const t = e.target;
+	if (!t) return false;
+	const tag = t.tagName;
+	return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
+}
+var fromField = (c) => c === "Esc" || c.startsWith("Mod+");
+function dispatch(surface, e) {
+	if (e.isComposing) return false;
+	const c = combo(e);
+	const within = scopes(surface);
+	const fire = (k) => {
+		for (const s of within) {
+			const hit = bindings.find((b) => b.surface === s && b.combo === k);
+			if (hit && run(hit.action, surface, k)) {
+				e.preventDefault();
+				return true;
+			}
+		}
+		return false;
+	};
+	if (typing(e)) {
+		if (!fromField(c)) return false;
+		pending = null;
+		return fire(c);
+	}
+	if (native(e, c)) return false;
+	const now = Date.now();
+	if (pending && now - pendingAt < CHORD_MS) {
+		const chord = `${pending} ${c}`;
+		pending = null;
+		if (fire(chord)) return true;
+	}
+	pending = null;
+	if (fire(c)) return true;
+	if (bindings.some((b) => within.includes(b.surface) && b.combo.startsWith(`${c} `))) {
+		pending = c;
+		pendingAt = now;
+		e.preventDefault();
+		return true;
+	}
+	return false;
+}
+bind({
+	surface: "global",
+	combo: "Mod+k",
+	action: "open-palette",
+	label: "command palette"
+});
+bind({
+	surface: "global",
+	combo: "?",
+	action: "help",
+	label: "keys bound here"
+});
+bind({
+	surface: "global",
+	combo: "Esc",
+	action: "leave",
+	label: "leave: close the help, the palette or the new-change form"
+});
+var LIST_COMBOS = [
+	"Down",
+	"j",
+	"Up",
+	"k",
+	"Enter",
+	"g g",
+	"G"
+];
+function bindList(surface, open) {
+	bind({
+		surface,
+		combo: "Down",
+		action: "next",
+		label: "next"
+	});
+	bind({
+		surface,
+		combo: "j",
+		action: "next",
+		label: "next"
+	});
+	bind({
+		surface,
+		combo: "Up",
+		action: "prev",
+		label: "previous"
+	});
+	bind({
+		surface,
+		combo: "k",
+		action: "prev",
+		label: "previous"
+	});
+	bind({
+		surface,
+		combo: "Enter",
+		action: "open",
+		label: open
+	});
+	bind({
+		surface,
+		combo: "g g",
+		action: "first",
+		label: "first"
+	});
+	bind({
+		surface,
+		combo: "G",
+		action: "last",
+		label: "last"
+	});
+}
+//#endregion
 //#region src/lib/api.ts
 var KEY = "vp_token";
 function claimToken() {
@@ -5533,6 +5829,6 @@ async function api(path, opts = {}) {
 	return await res.json();
 }
 //#endregion
-export { autofocus as $, append as A, untrack as B, snippet as C, if_block as D, key as E, delegate as F, child as G, template_effect as H, delegated as I, sibling as J, first_child as K, event as L, from_html as M, from_svg as N, mount as O, text as P, user_derived as Q, get as R, component as S, index as T, user_effect as U, effect as V, user_pre_effect as W, set as X, proxy as Y, state as Z, set_selected as _, claimToken as a, reset as at, clsx as b, spread_props as c, bind_checked as d, remove_textarea_child as et, bind_value as f, init_select as g, bind_select_value as h, api as i, next as it, comment as j, set_text as k, bind_this as l, set_attribute as m, Unauthorised as n, push as nt, prop as o, noop as ot, remove_input_defaults as p, only_child as q, Unreachable as r, snapshot as rt, rest_props as s, to_array as st, Refused as t, pop as tt, bind_element_size as u, set_style as v, each as w, action as x, set_class as y, tick as z };
+export { user_effect as $, clsx as A, append as B, remove_input_defaults as C, set_selected as D, init_select as E, index as F, delegate as G, from_html as H, key as I, get as J, delegated as K, if_block as L, component as M, snippet as N, set_style as O, each as P, template_effect as Q, mount as R, bind_value as S, bind_select_value as T, from_svg as U, comment as V, text as W, untrack as X, tick as Y, effect as Z, rest_props as _, to_array as _t, claimToken as a, proxy as at, bind_element_size as b, bindList as c, user_derived as ct, onAction as d, pop as dt, user_pre_effect as et, run as f, push as ft, prop as g, noop as gt, spell as h, reset as ht, api as i, sibling as it, action as j, set_class as k, dispatch as l, autofocus as lt, sheet as m, next as mt, Unauthorised as n, first_child as nt, all as o, set as ot, setMode as p, snapshot as pt, event as q, Unreachable as r, only_child as rt, bind as s, state as st, Refused as t, child as tt, help as u, remove_textarea_child as ut, spread_props as v, set_attribute as w, bind_checked as x, bind_this as y, set_text as z };
 
 //# sourceMappingURL=api.js.map

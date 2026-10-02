@@ -164,11 +164,29 @@ async fn facts(state: &Shared, chosen: Option<&str>) -> Facts {
     Facts {
         sessions,
         cannot_see,
-        updates: Updates::NotThisBuild,
+        updates: updates_fact(),
         agents,
         trusted: trusted.iter().map(|p| p.name.clone()).collect(),
         github_unsigned,
         project,
+    }
+}
+
+/// The update question as the checklist reads it: nothing to ask where this
+/// host has no update check (no window, or a build without a release key),
+/// else the person's answer in `app.toml`.
+fn updates_fact() -> Updates {
+    use crate::update::UpdateState;
+    match crate::update::current() {
+        UpdateState::NotThisBuild | UpdateState::Unavailable { .. } => Updates::NotThisBuild,
+        _ => match crate::config::app_config()
+            .ok()
+            .and_then(|(c, _)| c.updates)
+        {
+            None => Updates::NotAsked,
+            Some(crate::config::UpdatePref::On) => Updates::On,
+            Some(crate::config::UpdatePref::Off) => Updates::Off,
+        },
     }
 }
 

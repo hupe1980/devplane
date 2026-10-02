@@ -306,6 +306,7 @@
       {openIn}
       {copy}
       review={() => setView("review")}
+      reload={() => void read.reload()}
     />
     <!-- Mounted always, so the first sentence is announced too. -->
     <p class="said" class:empty={!said && !pending.busy && !lost} role="status" aria-live="polite">

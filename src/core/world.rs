@@ -2,7 +2,9 @@
 //! Surfaces read this rather than reconstructing state from events; the
 //! reducer is pure and this struct is the only thing that mutates.
 
-use crate::core::attention::{AttentionConfig, AttentionItem, Derived, run_items_at};
+use crate::core::attention::{
+    AttentionConfig, AttentionItem, AttentionKind, Derived, run_items_at,
+};
 use crate::core::event::{Event, EventEnvelope};
 use crate::core::ids::{ProjectId, RunId, SessionId};
 use crate::core::project::Project;
@@ -292,12 +294,16 @@ impl World {
                     .iter()
                     .find(|(p, _)| *p == w.project_id)
                     .map(|(_, c)| c.as_slice());
+                let mark = crate::core::attention::ActivityMark::of_change(w, |r| {
+                    self.runs.get(r).map(|r| r.last_event_at)
+                });
                 crate::core::attention::change_items_in(
                     w,
                     can_drive,
                     can_resume,
                     repo.as_deref(),
                     checks,
+                    &mark,
                     now,
                 )
             })
@@ -324,8 +330,9 @@ impl World {
         });
         let mut all = Derived {
             items: from_runs.items,
-            snoozed: from_runs.snoozed + from_change.snoozed,
+            snoozed: from_runs.snoozed,
         };
+        all.snoozed.extend(from_change.snoozed);
         all.items.extend(from_change.items);
         all.items.extend(gate);
         all.items.extend(configs);
@@ -527,30 +534,33 @@ impl World {
         }
     }
 
-    /// Hides the run's *current* inbox item kinds until `until`, or shows
-    /// everything when `None`. A kind that appears later is shown
-    /// ([`Snoozed`](crate::core::attention::Snoozed)).
+    /// Hides the run's *current* inbox item kinds (or the one named) until
+    /// a moment or its next activity, or brings them back. A kind that
+    /// appears later is shown ([`Snoozed`](crate::core::attention::Snoozed)).
+    /// `None` when there is no such run.
     pub fn snooze(
         &mut self,
         run: &RunId,
-        until: Option<jiff::Timestamp>,
+        kind: Option<&str>,
+        how: crate::core::attention::SnoozeFor,
         now: jiff::Timestamp,
         stall_seconds: i64,
-    ) -> bool {
-        let Some(existing) = self.runs.get(run) else {
-            return false;
-        };
+    ) -> Option<Result<Vec<AttentionKind>, crate::core::attention::NeverSnoozed>> {
+        let existing = self.runs.get(run)?;
         let kinds: Vec<_> = run_items_at(existing, &self.attention, stall_seconds, now)
             .items
             .into_iter()
             .map(|i| i.kind)
             .collect();
+        let mark = crate::core::attention::ActivityMark::of_run(existing);
         let r = self.runs.get_mut(run).expect("checked above");
-        match until {
-            Some(t) => r.snoozed.hide(kinds, t),
-            None => r.snoozed.clear(),
-        }
-        true
+        Some(crate::core::attention::snooze(
+            &mut r.snoozed,
+            kinds,
+            kind,
+            how,
+            mark,
+        ))
     }
 
     /// Loads persisted runs. The caller must [`reconcile`](Self::reconcile)

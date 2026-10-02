@@ -182,3 +182,60 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   const unread = html(ChangeList, { open: () => {} });
   if (/class="n[^"]*">0</.test(unread)) fail("the changes sidebar prints 0 before it has read anything");
 }
+
+// ── The agent's stop claim: its words, after the weakened checks, before the gates ─
+//
+// Quoted under the agent's name, never markup and never a link; read after
+// the state and its weakened checks, never first; and it moves neither the
+// state nor the host's sentence about the check.
+{
+  const claim = {
+    id: "sc-1",
+    says: "the agent says the spec and the tests conflict",
+    reason: "The spec says 30 days; <script>alert(1)</script> [see](https://x.example) **now**",
+    paths: ["specs/043-sessions/spec.md", "tests/session_test.rs"],
+    agent: "echo",
+    run: "acp-claimed",
+    at: "2026-09-27T10:02:00Z",
+    origin_says: "saas — echo, run acp-claimed, change c-1, 2026-09-27 10:02 UTC",
+    quoted: "",
+    ending: "the agent stopped: it says the spec and the tests conflict",
+    state: "open",
+    can_tell: true,
+  };
+  const d = { ...stale, stop_claim: claim, claim_history: [claim] };
+  const out = doc(d);
+  // What a person reads: tags gone, entities read back, spaces collapsed.
+  const words = (m: string) =>
+    visible(m)
+      .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ");
+  const text = words(out);
+  const at = (s: string) => text.indexOf(s);
+  if (at(claim.says) < 0) fail("the change document does not carry the agent's claim");
+  if (at(claim.says) < at(d.title)) fail("the claim is read before the change's title");
+  const qualifier = rate.qualifier?.says ?? "";
+  if (qualifier && at(qualifier) > at(claim.says)) fail("the claim is read before the weakened checks");
+  const standing = "passed against tree 327517c";
+  if (at(standing) < 0 || at(standing) < at(claim.says)) fail("the gates' sentence is read before the claim");
+  if (/<script>alert/.test(out) || /href="https:\/\/x\.example"/.test(out) || /<strong>now/.test(out))
+    fail("the agent's reason is rendered as markup");
+  if (!text.includes("<script>alert(1)</script> [see](https://x.example) **now**")) fail("the agent's reason is not shown as its own text");
+  if (!text.includes("specs/043-sessions/spec.md")) fail("the claim's paths are not shown");
+  if (!/echo, run acp-claimed/.test(text)) fail("the claim is not attributed to its agent and run");
+  if (!out.includes("Mark read") || !out.includes("Tell the agent")) fail("the claim offers no way out");
+  if (doc({ ...d, stop_claim: { ...claim, can_tell: false } }).includes("Tell the agent")) fail("Tell the agent is offered where the run cannot be resumed");
+  // The verdict is the gate's: the state and its sentence are the same with and without it.
+  const without = words(doc(stale));
+  if (!without.includes(standing) || !text.includes(standing)) fail("the claim moved the host's sentence about the check");
+  const code = source("../src/surfaces/change/Claim.svelte");
+  if (/\{@html|<Inline|<Md\b/.test(code)) fail("the claim is rendered through markup");
+  // The list row: after the state, as the agent's.
+  const list = words(html(ChangeList, { open: () => {}, rows: [{ id: "c-1", title: "Keep sessions for 30 days", state: "in flight", project_id: "/p/saas", stop_claim: { says: claim.says } }] }));
+  if (!list.includes(claim.says)) fail("the change list does not carry the agent's claim");
+  if (list.indexOf(claim.says) < list.indexOf("in flight")) fail("the change list reads the claim before the state");
+  // The overview keeps every claim in its history, under its run.
+  const over = html(Overview, { d: { ...d, claim_history: [{ ...claim, state: "closed", closed_says: "a person marked it read" }] }, go: () => {} });
+  if (!/aria-label="the agent says the spec and the tests conflict — run acp-claimed · closed: a person marked it read/.test(over))
+    fail("a closed claim is not kept in the change's history");
+}

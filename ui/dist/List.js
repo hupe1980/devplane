@@ -1,5 +1,6 @@
-import { A as append, B as untrack, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, f as bind_value, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, p as remove_input_defaults, q as only_child, st as to_array, tt as pop, w as each } from "./api.js";
-import { N as run, h as resource, n as Icon } from "./app.js";
+import { $ as user_effect, B as append, C as remove_input_defaults, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, S as bind_value, V as comment, X as untrack, _t as to_array, at as proxy, ct as user_derived, dt as pop, f as run, ft as push, g as prop, ht as reset, it as sibling, mt as next, nt as first_child, ot as set, rt as only_child, st as state, tt as child, w as set_attribute, z as set_text } from "./api.js";
+import { r as resource } from "./resource.svelte.js";
+import { n as Icon } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as Failed } from "./Failed.js";
 import { t as ChangeState } from "./ChangeState.js";
@@ -10,11 +11,12 @@ var root_2 = from_html(`<p class="quiet svelte-3ehcwp">No change has been starte
 var root_3 = from_html(`<p class="quiet svelte-3ehcwp"> </p>`);
 var root_4 = from_html(`<span class="wait svelte-3ehcwp"> </span>`);
 var root_5 = from_html(`<span class="dim svelte-3ehcwp">in place</span>`);
-var root_6 = from_html(`<span class="branch svelte-3ehcwp"><!> </span>`);
-var root_7 = from_html(`<div class="row svelte-3ehcwp" role="option" tabindex="-1"><span class="title svelte-3ehcwp"> </span> <span class="meta svelte-3ehcwp"><!> <!> <!></span> <!></div>`);
-var root_8 = from_html(`<button class="group svelte-3ehcwp"><!> <!> <span> </span> <span class="n svelte-3ehcwp"> </span></button> <!>`, 1);
-var root_9 = from_html(`<button class="foot svelte-3ehcwp"> </button>`);
-var root_10 = from_html(`<div class="list svelte-3ehcwp"><header class="svelte-3ehcwp"><span class="t svelte-3ehcwp">Changes</span> <span class="n svelte-3ehcwp"> </span> <button class="icon svelte-3ehcwp" title="Start a new change (Alt+N)" aria-label="start a new change"><!></button></header> <label class="filter svelte-3ehcwp"><!> <input placeholder="Filter by title, branch, project, state" aria-label="filter the changes" class="svelte-3ehcwp"/></label> <div class="rows svelte-3ehcwp" role="listbox" aria-label="changes" tabindex="0"><!></div> <!></div>`);
+var root_6 = from_html(`<span class="claimed svelte-3ehcwp"> </span>`);
+var root_7 = from_html(`<span class="branch svelte-3ehcwp"><!> </span>`);
+var root_8 = from_html(`<div class="row svelte-3ehcwp" role="option" tabindex="-1"><span class="title svelte-3ehcwp"> </span> <span class="meta svelte-3ehcwp"><!> <!> <!></span> <!> <!></div>`);
+var root_9 = from_html(`<button class="group svelte-3ehcwp"><!> <!> <span> </span> <span class="n svelte-3ehcwp"> </span></button> <!>`, 1);
+var root_10 = from_html(`<button class="foot svelte-3ehcwp"> </button>`);
+var root_11 = from_html(`<div class="list svelte-3ehcwp"><header class="svelte-3ehcwp"><span class="t svelte-3ehcwp">Changes</span> <span class="n svelte-3ehcwp"> </span> <button class="icon svelte-3ehcwp" title="Start a new change (Alt+N)" aria-label="start a new change"><!></button></header> <label class="filter svelte-3ehcwp"><!> <input placeholder="Filter by title, branch, project, state" aria-label="filter the changes" class="svelte-3ehcwp"/></label> <div class="rows svelte-3ehcwp" role="listbox" aria-label="changes" tabindex="0"><!></div> <!></div>`);
 function List($$anchor, $$props) {
 	push($$props, true);
 	let all = prop($$props, "all", 19, () => []), focus = prop($$props, "focus", 3, ""), planted = prop($$props, "rows", 3, null);
@@ -56,7 +58,7 @@ function List($$anchor, $$props) {
 	}));
 	const optionId = (id) => `change-row-${id.replace(/[^\w-]/g, "_")}`;
 	const active = user_derived(() => get(visible).some((r) => r.id === focus()) ? optionId(focus()) : void 0);
-	var div = root_10();
+	var div = root_11();
 	var header = child(div);
 	var span = sibling(child(header), 2);
 	var text = only_child(span, true);
@@ -134,7 +136,7 @@ function List($$anchor, $$props) {
 			var $$array = user_derived(() => to_array(get($$item), 2));
 			let g = () => get($$array)[0];
 			let rs = () => get($$array)[1];
-			var fragment_2 = root_8();
+			var fragment_2 = root_9();
 			var button_2 = first_child(fragment_2);
 			var node_6 = child(button_2);
 			{
@@ -157,11 +159,11 @@ function List($$anchor, $$props) {
 			var text_3 = only_child(span_2, true);
 			reset(button_2);
 			var node_8 = sibling(button_2, 2);
-			var consequent_7 = ($$anchor) => {
+			var consequent_8 = ($$anchor) => {
 				var fragment_3 = comment();
 				var node_9 = first_child(fragment_3);
 				each(node_9, 17, rs, (r) => r.id, ($$anchor, r) => {
-					var div_4 = root_7();
+					var div_4 = root_8();
 					var span_3 = child(div_4);
 					var text_4 = only_child(span_3, true);
 					var span_4 = sibling(span_3, 2);
@@ -196,18 +198,28 @@ function List($$anchor, $$props) {
 					var node_13 = sibling(span_4, 2);
 					var consequent_6 = ($$anchor) => {
 						var span_7 = root_6();
-						var node_14 = child(span_7);
-						Icon(node_14, {
-							name: "change",
-							size: 11
-						});
-						var text_6 = sibling(node_14);
-						reset(span_7);
-						template_effect(() => set_text(text_6, ` ${get(r).branch ?? ""}`));
+						var text_6 = only_child(span_7, true);
+						template_effect(() => set_text(text_6, get(r).stop_claim.says));
 						append($$anchor, span_7);
 					};
 					if_block(node_13, ($$render) => {
-						if (get(r).branch) $$render(consequent_6);
+						if (get(r).stop_claim) $$render(consequent_6);
+					});
+					var node_14 = sibling(node_13, 2);
+					var consequent_7 = ($$anchor) => {
+						var span_8 = root_7();
+						var node_15 = child(span_8);
+						Icon(node_15, {
+							name: "change",
+							size: 11
+						});
+						var text_7 = sibling(node_15);
+						reset(span_8);
+						template_effect(() => set_text(text_7, ` ${get(r).branch ?? ""}`));
+						append($$anchor, span_8);
+					};
+					if_block(node_14, ($$render) => {
+						if (get(r).branch) $$render(consequent_7);
 					});
 					reset(div_4);
 					template_effect(($0) => {
@@ -223,7 +235,7 @@ function List($$anchor, $$props) {
 				append($$anchor, fragment_3);
 			};
 			if_block(node_8, ($$render) => {
-				if (!get(folded)[g()]) $$render(consequent_7);
+				if (!get(folded)[g()]) $$render(consequent_8);
 			});
 			template_effect(() => {
 				set_attribute(button_2, "aria-expanded", !get(folded)[g()]);
@@ -246,16 +258,16 @@ function List($$anchor, $$props) {
 		else $$render(alternate, -1);
 	});
 	reset(div_1);
-	var node_15 = sibling(div_1, 2);
-	var consequent_8 = ($$anchor) => {
-		var button_3 = root_9();
-		var text_7 = only_child(button_3);
-		template_effect(() => set_text(text_7, `${get(showArchived) ? "Hide" : "Show"} ${get(archived) ?? ""} archived`));
+	var node_16 = sibling(div_1, 2);
+	var consequent_9 = ($$anchor) => {
+		var button_3 = root_10();
+		var text_8 = only_child(button_3);
+		template_effect(() => set_text(text_8, `${get(showArchived) ? "Hide" : "Show"} ${get(archived) ?? ""} archived`));
 		delegated("click", button_3, () => set(showArchived, !get(showArchived)));
 		append($$anchor, button_3);
 	};
-	if_block(node_15, ($$render) => {
-		if (get(archived) > 0) $$render(consequent_8);
+	if_block(node_16, ($$render) => {
+		if (get(archived) > 0) $$render(consequent_9);
 	});
 	reset(div);
 	template_effect(() => {

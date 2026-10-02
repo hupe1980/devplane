@@ -15,6 +15,8 @@
   import Icon from "../../lib/ui/Icon.svelte";
   import type { Answer, Item } from "./Item.svelte";
   import * as actions from "./actions";
+  import Snoozed from "./Snoozed.svelte";
+  import { offerCommands } from "../../lib/offered.svelte";
 
   type Close = {
     since_last_look?: string | null;
@@ -43,6 +45,8 @@
     blind = "",
     held = null,
     landed = null,
+    snoozed = 0,
+    snoozed_rows = [],
     open = () => {},
   }: {
     /// What this host cannot see, when no session has reported to it.
@@ -70,6 +74,9 @@
     held?: actions.Held | null;
     /// What the last held answer came to once it was sent.
     landed?: actions.Landed | null;
+    /// What a snooze keeps off the list: counted, and listed on request.
+    snoozed?: number;
+    snoozed_rows?: actions.SnoozedRow[];
     /// Moves the address to a row (the shell's `open`).
     open?: (focus: string) => void;
   } = $props();
@@ -125,6 +132,7 @@
   const act = (item: Item, action: string) => report(item, () => actions.act(item, action));
   const answer = (item: Item, what: Answer) => report(item, () => actions.answer(item, what));
   const snooze = (item: Item) => report(item, () => actions.snooze(item));
+  const snoozeHour = (item: Item) => report(item, () => actions.snoozeHour(item));
   /// Takes back the last snooze; cleared whether or not it succeeds.
   async function takeBack() {
     if (!undo) return;
@@ -242,6 +250,18 @@
     }),
   );
 
+  // `⌘K` lists the item's own actions first, each with its key: the same
+  // set its controls carry, run by pressing that control, so the palette,
+  // the key and the button cannot do two different things.
+  $effect(() => {
+    const it = current;
+    if (!it) return;
+    const list = actions.rowCommands(it, (a) => {
+      if (!actions.pressAction(document.querySelector(".detail .one"), a.id)) say(`${a.label} is not on this item any more`);
+    });
+    return offerCommands(it.title, list, "This item");
+  });
+
   /// The keys that apply to the item on screen, as the footer prints them.
   const keysHere = $derived.by(() => {
     const a = current?.actions ?? [];
@@ -253,7 +273,7 @@
     if (a.includes("deny")) out.push(["d", "deny"]);
     if (current?.answer_in && (current.session_link || current.resume_command))
       out.push(["w", current.session_link ? "open the session" : "copy the resume command"]);
-    if (a.includes("snooze")) out.push(["s", "snooze"]);
+    if (a.includes("snooze")) out.push(["s", current && actions.untilActivity(current) ? "snooze until new activity" : "snooze for an hour"]);
     if ((a.includes("open") || a.includes("review")) && (current?.change_id || current?.run_id)) out.push(["o", "open"]);
     if (a.includes("review") && current?.change_id) out.push(["r", "review"]);
     return out;
@@ -318,6 +338,7 @@
       {/if}
       {#if shownClose?.next}<p class="dim">Next · {shownClose.next}</p>{/if}
       {#if shownClose?.keeps_running}<p class="dim">{shownClose.keeps_running}</p>{/if}
+      {#if snoozed > 0}<div class="snoozed-close"><Snoozed count={snoozed} rows={snoozed_rows} /></div>{/if}
       {#if blind}<p class="dim blind"><Inline text={blind} /></p>
       {:else if unseen}<p class="dim">Sessions in {unseen} are not on this board unless Devplane started them.</p>{/if}
     </div>
@@ -343,7 +364,7 @@
     <fieldset class="bare" disabled={!!pending.busy}>
       <ul role="list" class="one" class:stale={!!error} tabindex="-1" aria-label="the item: {current.title}">
         {#key current.id}
-          <Row item={current} current={true} age="" {answer} {act} {snooze} {copyRule} {say} keys="inbox" />
+          <Row item={current} current={true} age="" {answer} {act} {snooze} {snoozeHour} {copyRule} {say} keys="inbox" />
         {/key}
       </ul>
     </fieldset>

@@ -227,6 +227,11 @@ mkdir -p "$fwt/src/gen"
 for i in $(seq -w 0 39); do
   printf 'pub fn f%s(x: u32) -> u32 {\n    x + %d\n}\n' "$i" "$((10#$i))" > "$fwt/src/gen/f$i.rs"
 done
+# One whose agent says the specification and the tests conflict, through the
+# stop tool on Devplane's own server: the claim reads after the weakened checks
+# and above the gates, and the gate's verdict is its own.
+api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Keep sessions for 30 days\",
+  \"agent\":\"$ECHO\",\"prompt\":\"conflict\"}" >/dev/null
 # One in flight on another project.
 api POST api/changes "{\"cwd\":\"$tmp/core-lib\",\"title\":\"Retry only on 5xx\",
   \"agent\":\"$ECHO\",\"prompt\":\"slowish plan\"}" >/dev/null

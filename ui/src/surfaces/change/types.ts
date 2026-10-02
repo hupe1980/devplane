@@ -144,6 +144,30 @@ export type Detail = {
   review_files?: number | null;
   /// How many tests ran and the base checks, beside the standing.
   base_checks?: BaseChecksView | null;
+  /// The open stop claim: the agent says the spec and the tests conflict.
+  stop_claim?: ClaimView | null;
+  /// Every stop claim, newest first, open or closed.
+  claim_history?: ClaimView[];
+};
+
+/// What an agent said through the stop tool, as the host renders it. The
+/// agent's words: shown as text, never markup, never a link.
+export type ClaimView = {
+  id: string;
+  says: string;
+  reason: string;
+  paths: string[];
+  agent: string;
+  run: string;
+  at: string;
+  origin_says: string;
+  quoted: string;
+  ending: string;
+  state: "open" | "closed";
+  /// Why it closed, as the host names it; `closed_says` is the sentence.
+  closed_by?: string | null;
+  closed_says?: string | null;
+  can_tell?: boolean;
 };
 
 /// The tasks, as one line of counts side by side, never one over another:

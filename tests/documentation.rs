@@ -1145,8 +1145,10 @@ fn every_route_the_mcp_server_asks_for_is_one_the_host_serves() {
 
     let mut missing = Vec::new();
     for path in &asked {
-        // Literal match only: the MCP server uses no `{id}` routes.
-        if !api.contains(&format!("\"{path}\"")) {
+        // A `{}` the server fills in is the router's `{id}`: the one such
+        // route is the stop claim's, about the caller's own run.
+        let route = path.replace("{}", "{id}");
+        if !api.contains(&format!("\"{route}\"")) {
             missing.push(path.clone());
         }
     }

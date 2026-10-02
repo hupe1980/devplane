@@ -31,6 +31,18 @@ async fn main() {
         }
         return;
     }
+    // An app build started by the operating system (Finder, the Start menu, a
+    // launcher) has no argument and no terminal: it is the window.
+    if cfg!(feature = "app") {
+        use std::io::IsTerminal;
+        let args: Vec<_> = std::env::args_os().collect();
+        if devplane::cli::opens_window(&args, std::io::stdin().is_terminal()) {
+            if let Err(e) = devplane::cli::open_window().await {
+                std::process::exit(devplane::cli::report_error(&e, false));
+            }
+            return;
+        }
+    }
     let cli = match devplane::cli::Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

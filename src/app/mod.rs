@@ -7,10 +7,12 @@
 //! worktree. Closing the window keeps hosting; quitting tears down like
 //! `devplane down`. Nothing is installed and nothing starts at login.
 
+pub mod elsewhere;
 pub mod links;
 pub mod quit;
 pub mod shortcut;
 pub mod tray;
+pub mod update;
 pub mod window;
 
 use crate::host::Shared;
@@ -50,8 +52,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             // A second launch — on Linux and Windows a `devplane://` link
             // starts one — hands its arguments to the app already running and
             // exits there. Only when the holder is a plain `devplane up` does
-            // it come back here, and then the refusal stands.
+            // it come back here. From a terminal the refusal stands, said on
+            // stderr; started by the operating system there is no stderr to
+            // read, so a window says it and offers that host's page.
             forward_to_running_app();
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal()
+                && let Some(host) = crate::config::read_host().ok().flatten()
+            {
+                return elsewhere::show(host.port);
+            }
             return Err(refused);
         }
     };
@@ -90,10 +100,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        // Registered always, asked only by `update` once the person said so;
+        // the plugin itself contacts nothing.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(shortcut::plugin())
         .manage(hosted)
         .setup(move |app| {
-            setup(app.handle(), &cfg.shortcut);
+            setup(app.handle(), &cfg.shortcut, cfg.updates);
             Ok(())
         })
         .build(context())
@@ -114,6 +127,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 1
             }
         };
+        // Stopped to install a verified update: install it and restart.
+        update::finish(&handle);
         handle.exit(code);
     });
 
@@ -170,7 +185,7 @@ async fn wait_for_host(serving: &tokio::task::JoinHandle<Result<()>>) -> Result<
 }
 
 /// Everything the window needs once the host is up, in the order it needs it.
-fn setup(app: &tauri::AppHandle, shortcut: &str) {
+fn setup(app: &tauri::AppHandle, shortcut: &str, updates: Option<crate::config::UpdatePref>) {
     let hosted = app.state::<Hosted>();
     // Notifications go through the app from here on, not `osascript`.
     crate::notify::choose(crate::notify::Sink::Tauri(app.clone()));
@@ -191,6 +206,9 @@ fn setup(app: &tauri::AppHandle, shortcut: &str) {
         tracing::warn!(shortcut, "{why}");
     }
     links::install(app);
+    // After the window: the update check is off the startup path, and makes
+    // no request unless the person switched it on.
+    update::start(app, updates);
 
     // Opening a path is the app's; without it the route answers with the
     // path alone.
@@ -203,16 +221,14 @@ fn setup(app: &tauri::AppHandle, shortcut: &str) {
     tokio::spawn(shortcut::watch(app.clone()));
 }
 
-/// Keeps the tray's number and the badge at the inbox's *needs you* count.
+/// Keeps the tray's number and the badge at the inbox's one count
+/// ([`tray::count`]), the figure the window's badge and status bar show.
 ///
 /// Recomputed from the host's inbox at most four times a second, so a burst
 /// of events is one update.
 async fn count_loop(app: tauri::AppHandle, state: Shared) {
     let mut rx = state.tx.subscribe();
-    let apply = |items: Vec<crate::core::AttentionItem>| {
-        tray::apply(&app, tray::needs_you(&items));
-    };
-    apply(state.current_inbox().await);
+    tray::apply(&app, tray::count(&state).await);
     loop {
         match rx.recv().await {
             Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -220,6 +236,6 @@ async fn count_loop(app: tauri::AppHandle, state: Shared) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         while rx.try_recv().is_ok() {}
-        apply(state.current_inbox().await);
+        tray::apply(&app, tray::count(&state).await);
     }
 }

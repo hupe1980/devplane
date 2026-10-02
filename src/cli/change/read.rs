@@ -183,6 +183,25 @@ fn print_change(w: &ChangeView<'_>) {
     if let Some(at) = c.archived_at {
         println!("  archived   {at}");
     }
+    // The agent's claim: after the weakened checks on the state line, before
+    // the gates, and never in the gates' words.
+    if let Some(claim) = &w.stop_claim {
+        println!("  claim      {}", paint(render::YELLOW, &claim.says));
+        for line in claim.quoted.lines() {
+            println!("             {line}");
+        }
+        println!(
+            "             {}",
+            paint(
+                DIM,
+                &format!(
+                    "mark it read: devplane change claim-read {id}   ·   answer the agent: \
+                     devplane change resume {id}, then devplane change prompt {id} \"<your words>\"",
+                    id = c.id
+                )
+            )
+        );
+    }
     println!("  shape      {}", w.shape_says);
     println!(
         "  gates      {}",

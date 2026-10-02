@@ -43,6 +43,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
         ChangeCmd::Offer { .. } => refuse_from_agent("offer")?,
         ChangeCmd::Finish { .. } => refuse_from_agent("finish")?,
         ChangeCmd::Archive { .. } => refuse_from_agent("archive")?,
+        ChangeCmd::ClaimRead { .. } => refuse_from_agent("mark read the claim on")?,
         ChangeCmd::Review { seen, .. } if !seen.is_empty() => {
             refuse_from_agent("mark hunks seen in")?
         }
@@ -100,6 +101,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
             tell,
         } => steer::cmd_drift(&change, &run, accept, tell, json).await,
         ChangeCmd::Offer { change } => decide::cmd_offer(&change, json).await,
+        ChangeCmd::ClaimRead { change } => decide::cmd_claim_read(&change, json).await,
         ChangeCmd::Finish { change } => decide::cmd_finish(&change, json).await,
         ChangeCmd::Archive {
             change,

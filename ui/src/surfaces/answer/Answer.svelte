@@ -22,8 +22,8 @@
     blind = "",
   }: { items?: Item[] | null; blind?: string } = $props();
 
-  /// The host's needs-you list (as `devplane inbox --needs-you`), so this
-  /// window agrees with the tray's number.
+  /// The host's needs-you list (as `devplane inbox --needs-you`): only what
+  /// can be answered in this window. The tray's number is the whole inbox's.
   const read = resource<{ items?: Item[]; held?: actions.Held | null; landed?: actions.Landed | null }>(() => "/api/inbox?needs_you=true", {
     every: 2_000,
     tell: () => "devplane inbox --needs-you",
@@ -105,6 +105,7 @@
   const answer = (item: Item, what: Answer) => report(() => actions.answer(item, what));
   const act = (item: Item, action: string) => report(() => actions.act(item, action));
   const snooze = (item: Item) => report(() => actions.snooze(item));
+  const snoozeHour = (item: Item) => report(() => actions.snoozeHour(item));
   async function copyRule(rule: string) {
     said = (await actions.copyRule(rule)).said;
   }
@@ -145,6 +146,7 @@
             {answer}
             {act}
             {snooze}
+            {snoozeHour}
             {copyRule}
             say={(s) => (said = s)}
             keys="answer"

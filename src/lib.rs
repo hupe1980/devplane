@@ -71,6 +71,9 @@ pub mod spec;
 pub(crate) mod stamp;
 /// The observation store: SQLite, WAL, rebuildable.
 pub mod store;
+/// Whether a newer version exists, as the window's update check found it.
+/// No network here: the check is the app's, and only once the person said so.
+pub mod update;
 /// `devplane verify`: the verdict where merges are decided, with no host.
 pub mod verify;
 /// What the surfaces show, composed once for every caller.

@@ -72,6 +72,9 @@ export type Surface = {
   /// How many things are in it, for the nav to show; `null` where a count is
   /// meaningless. The surface counts itself so the shell stays ignorant of it.
   count?: (feed: Feed) => number | null;
+  /// What `count` counts, beside the number in the badge's label (*need
+  /// you*), so the badge and the status bar say it in the same words.
+  countWord?: string;
   /// Whether opening this surface counts as looking. A poll or a tab becoming
   /// visible is not a look: only the surface that draws the hairline advances it.
   marksLook?: boolean;

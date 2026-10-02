@@ -413,4 +413,68 @@ fn the_app_never_names_an_autostart_mechanism() {
         !manifest.contains("tauri-plugin-autostart"),
         "the autostart plugin is a dependency"
     );
+    // Nor can the bundle's configuration add one.
+    let conf =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json"))
+            .unwrap()
+            .to_lowercase();
+    for word in ["autostart", "launchagents", "runatload", "login"] {
+        assert!(
+            !conf.contains(word),
+            "tauri.conf.json names `{word}`; the app installs nothing that starts at login"
+        );
+    }
+}
+
+/// The command line never checks for updates: the updater is named only
+/// under `src/app/`, which only the window's build compiles, and the plugin is
+/// a dependency of that build alone.
+#[test]
+fn only_the_window_can_check_for_updates() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&root.join("src"), &mut files);
+    let app = root.join("src/app");
+    let mut in_app = 0;
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let names = text.contains("tauri_plugin_updater") || text.contains(".updater()");
+        if f.starts_with(&app) {
+            in_app += usize::from(names);
+        } else {
+            assert!(
+                !names,
+                "{} names the updater; only the window's process may check for updates",
+                f.display()
+            );
+        }
+    }
+    assert!(
+        in_app > 0,
+        "the guard found the updater nowhere, so it checks nothing"
+    );
+    let manifest: toml::Value =
+        toml::from_str(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["dependencies"]["tauri-plugin-updater"]["optional"].as_bool(),
+        Some(true),
+        "the updater must be optional, so the command line's build has none"
+    );
+    let app_feature: Vec<&str> = manifest["features"]["app"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(app_feature.contains(&"dep:tauri-plugin-updater"));
 }

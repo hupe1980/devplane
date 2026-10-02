@@ -1,4 +1,4 @@
-import { M as onAction } from "./app.js";
+import { d as onAction } from "./api.js";
 //#region src/lib/cursor.ts
 function cursor(c) {
 	const clamp = (i) => Math.min(Math.max(i, 0), c.size() - 1);

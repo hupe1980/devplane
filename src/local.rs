@@ -116,7 +116,7 @@ impl Local {
                     project: q("project"),
                     needs_you: flag("needs_you"),
                 };
-                serde_json::to_value(view::inbox(&snap, &self.store, &self.policy, &q).await)?
+                serde_json::to_value(view::inbox(&snap, &self.store, &self.policy, &q, None).await)?
             }
             ["api", "asks"] => {
                 let recent = self.store.asks(50).await.unwrap_or_default();

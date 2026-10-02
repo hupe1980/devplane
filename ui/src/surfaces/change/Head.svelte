@@ -5,13 +5,17 @@
   // size), open from the state. Outside the review a second line carries the
   // host's sentence about the check and the base checks' counts; in the
   // review the diff starts right under the view tabs. Each count is said
-  // once on the screen: the unread hunks on the Review tab, not here.
+  // once on the screen: the unread hunks on the Review tab, not here. An
+  // agent's stop claim sits between the two lines: after the weakened checks
+  // the state carries, before the check's sentence — never first, and never
+  // in the gates' words.
   import ChangeState from "../../lib/ChangeState.svelte";
   import Inline from "../../lib/ui/Inline.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
   import Pill from "../../lib/ui/Pill.svelte";
   import { shape } from "../../lib/text";
   import Stepper from "./Stepper.svelte";
+  import Claim from "./Claim.svelte";
   import NoCheck, { declaresNoCheck } from "../../lib/NoCheck.svelte";
   import type { Detail } from "./types";
 
@@ -30,6 +34,7 @@
     openIn,
     copy,
     review,
+    reload = () => {},
   }: {
     d: Detail;
     view: string;
@@ -45,6 +50,8 @@
     openIn: (place: "editor" | "terminal") => void;
     copy: (text: string, what: string) => void;
     review: () => void;
+    /// Reads the change again after the claim's own actions.
+    reload?: () => void;
   } = $props();
 
   const project = $derived((d.project_id ?? "").split("/").filter(Boolean).pop() ?? "");
@@ -125,6 +132,9 @@
       {/if}
     </div>
   </div>
+  {#if !reviewing && d.stop_claim}
+    <Claim claim={d.stop_claim} change={d.id} done={reload} />
+  {/if}
   {#if !reviewing && (standing || d.base_checks)}
     <p class="sub">
       {#if standing}<span class="standing {verified && !leads ? 'done' : ''}"><Inline text={standing} /></span>{/if}

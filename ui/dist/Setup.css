@@ -375,6 +375,37 @@
     font-size: var(--t-sm);
   }
 
+  .updates.svelte-kayi80 {
+    display: grid;
+    gap: var(--s-2);
+  }
+  p.svelte-kayi80 {
+    margin: 0;
+  }
+  .quiet.svelte-kayi80 {
+    color: var(--dim);
+  }
+  .fail.svelte-kayi80 {
+    color: var(--fail);
+  }
+  .actions.svelte-kayi80 {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2);
+  }
+  .notes.svelte-kayi80,
+  .stops.svelte-kayi80 {
+    margin: 0;
+    padding: var(--s-2);
+    max-height: 14rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: var(--t-xs);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg);
+  }
+
   .checklist.svelte-vlt0ea {
     display: grid;
     gap: var(--s-2);

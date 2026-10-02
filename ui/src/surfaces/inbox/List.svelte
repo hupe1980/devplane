@@ -8,6 +8,8 @@
   import type { Item } from "./Item.svelte";
   import { narrowed, type Summary, type Inhibited } from "./narrow.svelte";
   import { address, place, itemFocus } from "./place.svelte";
+  import Snoozed from "./Snoozed.svelte";
+  import type { SnoozedRow } from "./actions";
 
   let {
     items = [],
@@ -18,6 +20,8 @@
     focus = "",
     loaded = false,
     error = null,
+    snoozed = 0,
+    snoozed_rows = [],
     open,
   }: {
     items?: Item[];
@@ -29,6 +33,9 @@
     focus?: string;
     loaded?: boolean;
     error?: string | null;
+    /// What a snooze keeps off the list: counted at the foot, listed on request.
+    snoozed?: number;
+    snoozed_rows?: SnoozedRow[];
     open: (id: string, pin?: boolean) => void;
   } = $props();
 
@@ -51,6 +58,9 @@
   const nothingRaised = $derived(shown.length === 0 && shownFolded.length === 0 && shownInhibited.length === 0);
   /// The host knows no project by that name: said, never *Nothing needs you*.
   const missing = $derived(narrow.missing);
+  /// How many items the narrowing leaves out, said beside the list so a
+  /// narrowed list never reads as the whole inbox.
+  const leftOut = $derived(narrow.on ? (narrow.data?.narrowed?.count ?? 0) : 0);
   /// The same row the item pane shows, by the same rule.
   const selected = $derived(place(shown, address(focus, items)).current?.id ?? "");
   const optionId = (id: string) => `inbox-row-${id.replace(/[^\w-]/g, "_")}`;
@@ -73,6 +83,7 @@
     <!-- No count until one is known: a list being read has no size yet. -->
     <span class="n">{ready && !missing && !(narrow.on && narrow.failure && !narrow.data) ? shown.length : ""}</span>
   </header>
+  {#if leftOut > 0}<p class="since">{leftOut} more in other projects, not shown here</p>{/if}
   {#if close?.since_last_look}<p class="since"><Icon name="clock" size={12} /> since you last looked · {close.since_last_look}</p>{/if}
   {#if projects.length > 1 || project}
     <div class="chips" role="group" aria-label="narrow to one project">
@@ -133,6 +144,7 @@
     {#each shownInhibited as s (s.cause)}
       <div class="folded"><Icon name="more" size={13} /> {s.count} more counted <span>{s.because}</span></div>
     {/each}
+    <Snoozed count={snoozed} rows={snoozed_rows} whole={narrow.on} />
   </div>
 </div>
 

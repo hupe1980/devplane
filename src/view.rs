@@ -437,7 +437,7 @@ pub async fn current_inbox(
         .as_ref()
         .map(|f| f.items.clone())
         .unwrap_or_default();
-    let forge_snoozed = forge.snoozed;
+    let mut snoozed = forge.snoozed;
     let forge_items = forge.items;
 
     // Unanswered questions in committed spec files, one item per project that
@@ -473,21 +473,29 @@ pub async fn current_inbox(
     };
 
     // Spec drift under a run, for every open change; its snooze covers it.
-    let mut drifts_snoozed = 0;
     {
         let runs: Vec<&Run> = snap.world.runs().collect();
+        let drifted = crate::core::attention::AttentionKind::SpecDrifted;
         for w in changes.iter().filter(|w| !w.is_settled()) {
+            let mark = crate::core::attention::ActivityMark::of_change(w, |r| {
+                snap.world.run(r).map(|r| r.last_event_at)
+            });
             for d in w.drifts(&runs) {
-                if w.snoozed.hides(
-                    &crate::core::attention::AttentionKind::SpecDrifted,
-                    snap.now,
-                ) {
-                    drifts_snoozed += 1;
+                let item = crate::core::attention::spec_drifted_item_at(w, &d, snap.now);
+                if w.snoozed.hides(&drifted, snap.now, &mark)
+                    && let Some(until) = w.snoozed.until(&drifted)
+                {
+                    snoozed.push(crate::core::attention::SnoozedRow::new(
+                        item.id.as_str().to_string(),
+                        &drifted,
+                        item.title,
+                        until,
+                        &format!("/api/changes/{}", w.id.as_str()),
+                        !w.current_run().is_some_and(|r| snap.live.contains(r)),
+                    ));
                     continue;
                 }
-                from_disk.push(crate::core::attention::spec_drifted_item_at(
-                    w, &d, snap.now,
-                ));
+                from_disk.push(item);
             }
         }
     }
@@ -520,7 +528,7 @@ pub async fn current_inbox(
         forge_items,
         from_disk,
     );
-    derived.snoozed += forge_snoozed + drifts_snoozed;
+    derived.snoozed.extend(snoozed);
     let items = &mut derived.items;
     // Asks that outlived the process that asked them, only where the run is
     // not live (a live run already produced its own item).
@@ -650,12 +658,28 @@ pub struct InboxQuery {
     pub needs_you: bool,
 }
 
+/// The inbox's one number ([`crate::core::attention::count`]) as of `snap`,
+/// with `held` the ask a held answer belongs to. What the tray and the dock
+/// badge show; `/api/inbox` carries the same figure as `count`.
+pub async fn inbox_count(
+    snap: &Snapshot,
+    store: &crate::store::Store,
+    policy: &crate::policy_cache::PolicyCache,
+    held: Option<&str>,
+) -> usize {
+    let derived = current_inbox(snap, store, policy).await;
+    crate::core::attention::count(derived.items, held)
+}
+
 /// The inbox as a person sees it: narrowed, inhibited, folded, with the close.
+/// `held` is the ask a held answer belongs to: its item is out of the list
+/// and out of the count while it waits.
 pub async fn inbox(
     snap: &Snapshot,
     store: &crate::store::Store,
     policy: &crate::policy_cache::PolicyCache,
     q: &InboxQuery,
+    held: Option<&str>,
 ) -> InboxView {
     let names = snap.names();
     // Read before the mark advances, so *new* means new when it was opened.
@@ -668,9 +692,17 @@ pub async fn inbox(
         project: q.project.as_deref(),
         needs_you: q.needs_you,
     };
-    let derived = current_inbox(snap, store, policy).await;
+    let mut derived = current_inbox(snap, store, policy).await;
+    if let Some(h) = held {
+        derived
+            .items
+            .retain(|i| i.ask.as_ref().is_none_or(|a| a.as_str() != h));
+    }
+    // The whole inbox's number, whatever this read narrows to.
+    let count = crate::core::attention::count(derived.items.clone(), None);
     let raised = derived.items.len();
-    let snoozed = derived.snoozed;
+    let snoozed = derived.snoozed.len();
+    let snoozed_rows = derived.snoozed;
     let (in_scope, narrowed) = crate::core::attention::narrow(
         derived.items,
         &narrowing,
@@ -732,7 +764,9 @@ pub async fn inbox(
         folded,
         inhibited,
         narrowed,
+        count,
         snoozed,
+        snoozed_rows,
         close,
         limits: snap.limits().map(str::to_string),
         held: None,
@@ -751,9 +785,18 @@ pub struct InboxView {
     pub inhibited: Vec<crate::core::attention::Inhibited>,
     #[serde(default)]
     pub narrowed: Option<crate::core::attention::Narrowed>,
+    /// The inbox's one number, of the whole inbox even when this read is
+    /// narrowed ([`crate::core::attention::count`]): what the badge, the
+    /// activity bar and the status bar show.
+    #[serde(default)]
+    pub count: usize,
     /// A snooze is a choice; counted so the list does not look like calm.
     #[serde(default)]
     pub snoozed: usize,
+    /// What the snooze keeps off the list, one row per item, each with its
+    /// way back: `snoozed` is their number.
+    #[serde(default)]
+    pub snoozed_rows: Vec<crate::core::attention::SnoozedRow>,
     /// The boundary and the day's close; absent over a narrowed list.
     #[serde(default)]
     pub close: Option<Close>,
@@ -777,6 +820,8 @@ impl InboxView {
         held: Option<crate::hold::HeldView>,
         landed: Option<crate::hold::Landed>,
     ) {
+        // The item it answers was left out of the list and the count when the
+        // inbox was composed ([`inbox`]'s `held`).
         if let Some(h) = &held {
             self.items
                 .retain(|r| r.item.ask.as_ref().is_none_or(|a| a.as_str() != h.ask));
@@ -1179,6 +1224,71 @@ pub struct ChangeView<'a> {
     /// it. Absent until `check` has run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_checks: Option<crate::core::base_checks::View>,
+    /// The open stop claim: what an agent said through the stop tool, quoted
+    /// and attributed. Read after the weakened checks and before the gates,
+    /// and never an input to `standing` or `state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_claim: Option<ClaimView>,
+    /// Every stop claim on the change, newest first, open or closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claim_history: Vec<ClaimView>,
+}
+
+/// A stop claim as every surface shows it: the one label, the agent's words
+/// as text, and who said it. Nothing here is named like a verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimView {
+    pub id: String,
+    /// Always *the agent says the spec and the tests conflict*.
+    pub says: String,
+    /// The agent's reason, control characters made visible. Text, never markup.
+    pub reason: String,
+    pub paths: Vec<String>,
+    pub agent: String,
+    pub run: String,
+    pub at: jiff::Timestamp,
+    /// *saas — echo, run acp-…, change c-…, 2026-09-27 10:02 UTC*.
+    pub origin_says: String,
+    /// The whole claim as quoted lines, for a terminal.
+    pub quoted: String,
+    /// How the run that claimed ended.
+    pub ending: String,
+    /// `open` or `closed`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<crate::core::claim::ClosedBy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_says: Option<String>,
+    /// Whether the claiming run's conversation can be resumed, so a person's
+    /// own words can reach it.
+    #[serde(default)]
+    pub can_tell: bool,
+}
+
+impl ClaimView {
+    pub fn of(c: &crate::core::claim::StopClaim) -> Self {
+        use crate::core::claim::{ClaimState, visible};
+        let (state, closed_by) = match &c.state {
+            ClaimState::Open => ("open", None),
+            ClaimState::Closed { by, .. } => ("closed", Some(*by)),
+        };
+        Self {
+            id: c.id.to_string(),
+            says: c.says().to_string(),
+            reason: visible(&c.reason),
+            paths: c.paths.iter().map(|p| visible(p)).collect(),
+            agent: c.origin.agent().to_string(),
+            run: c.origin.run().to_string(),
+            at: c.origin.at(),
+            origin_says: c.origin.says(),
+            quoted: c.quoted(),
+            ending: crate::core::claim::ENDING.to_string(),
+            state: state.to_string(),
+            closed_by,
+            closed_says: closed_by.map(|b| b.says().to_string()),
+            can_tell: false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1262,6 +1372,8 @@ impl<'a> ChangeView<'a> {
             shape_says: SHAPE_NOT_COMPUTED.to_string(),
             qualifier: crate::core::review::Qualifier::default(),
             base_checks: None,
+            stop_claim: change.open_claim().map(ClaimView::of),
+            claim_history: change.stop_claims.iter().rev().map(ClaimView::of).collect(),
             change: std::borrow::Cow::Borrowed(change),
         }
     }
@@ -1288,6 +1400,14 @@ impl<'a> ChangeView<'a> {
             .iter()
             .filter_map(|id| runs.iter().copied().find(|r| r.id == *id))
             .collect();
+        // A person's words reach a claiming run by resuming its conversation.
+        let resumable = |run: &str| {
+            mine.iter()
+                .any(|r| r.id.as_str() == run && r.agent_session.is_some())
+        };
+        if let Some(c) = self.stop_claim.as_mut() {
+            c.can_tell = resumable(&c.run);
+        }
         let stale = matches!(
             self.standing,
             crate::core::change::Standing::Stale { .. }

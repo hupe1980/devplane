@@ -85,11 +85,42 @@ unanswered.
 
 ## What a driven agent is given
 
-- **The read-only MCP server** ([`devplane mcp`](@/docs/cli.md#devplane-mcp)): inbox, change,
-  explain, audit.
+- **Devplane's MCP server** ([`devplane mcp`](@/docs/cli.md#devplane-mcp)): four questions — inbox,
+  change, explain, audit — and one claim, `spec_and_tests_conflict` (below).
+- **A way to say the spec and the tests conflict.** Every implementation prompt and every round of
+  gate feedback ends with one sentence: if the specification and the tests cannot both be
+  satisfied, call `spec_and_tests_conflict` with what conflicts and leave the tests as they are, and
+  without that tool, say so plainly.
 - **`DEVPLANE_RUN`** in its environment, marking an agent session.
 - **A clean ending**: `session/close` where offered, before its processes end.
 - **Withdrawn questions leave the inbox** when the agent cancels a request.
+
+## When the spec and the tests conflict
+
+An agent that cannot satisfy both the specification and the tests has two moves: say so, or make
+the checks pass another way. Devplane makes the first one cheap. A driven agent calls
+`spec_and_tests_conflict` with a reason and the files involved, and:
+
+- **The claim lands on the change as the agent's**: *the agent says the spec and the tests
+  conflict*, the reason quoted as plain text, the agent and run named. It is read after the
+  weakened checks and before the gates — in the change's header, the change list and `devplane
+  change show` — and kept in the change's history once it closes.
+- **The run stops.** The agent's turn is cancelled and its process ended; its open asks end
+  under *nobody*. Devplane writes no decision for the claim or the stop.
+- **`check` runs once** on the tree the agent left, and nothing is handed back: no feedback round
+  follows a claim. The change waits for you.
+- **It is not a failure, and it is not evidence.** The change is not marked failed, and
+  *verified* reads exactly what the gate says, with or without a claim.
+
+You answer it by telling the agent — your own words, sent after its conversation is resumed — or by
+marking it read (`devplane change claim-read`). A claim closes when you do either, when a run goes
+back to work on the change, or when the change is finished or archived. The claim's text is never
+sent to any agent.
+
+The claim is bounded: a reason of 1 to 1024 bytes, at most 10 paths of at most 512 bytes, each
+inside the project or the change's worktree. Only an agent Devplane started for a change can make
+one, about its own run, once until you answer; anything else is refused with a sentence and nothing
+is recorded.
 
 ## Transcripts
 

@@ -974,3 +974,19 @@ ul, ol { margin: 0; padding: 0; }
     padding: 0 0.35rem;
     background: var(--bg);
   }
+
+  .elsewhere.svelte-1pcxrm7 {
+    padding: var(--s-4) var(--s-5);
+    display: grid;
+    gap: var(--s-2);
+    font-size: var(--t-sm);
+  }
+  p.svelte-1pcxrm7 {
+    margin: 0;
+  }
+  .quiet.svelte-1pcxrm7 {
+    color: var(--dim);
+  }
+  .open.svelte-1pcxrm7 {
+    font-weight: 600;
+  }

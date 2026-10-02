@@ -424,9 +424,13 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
                 (Some("error") | Some("failed"), _, _) => RunState::Failed,
                 // The host tearing down (`driven.rs`) is not the work finishing.
                 (Some("interrupted"), _, _) => RunState::Interrupted,
-                // `stopped` is a person ending a driven run.
+                // `stopped` is a person ending a driven run; `claimed`, the
+                // agent ending its own after saying the spec and tests conflict.
                 (
-                    Some("clear" | "resume" | "logout" | "prompt_input_exit" | "other" | "stopped"),
+                    Some(
+                        "clear" | "resume" | "logout" | "prompt_input_exit" | "other" | "stopped"
+                        | "claimed",
+                    ),
                     _,
                     _,
                 ) => RunState::Stopped,
@@ -656,6 +660,8 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
         // Kept in the log for review; what the agent claims it edited changes
         // nothing about where the run is.
         Event::EditReported { .. } => {}
+        // The agent's claim lives on its change; the stop that follows ends the run.
+        Event::StopClaimed { .. } => {}
 
         // Tells subscribers to re-read; not about a run.
         Event::Refresh => {}

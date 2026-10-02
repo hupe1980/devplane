@@ -1,4 +1,4 @@
-import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, M as from_html, R as get, at as reset, k as set_text, m as set_attribute, nt as push, o as prop, q as only_child, tt as pop, w as each, y as set_class } from "./api.js";
+import { B as append, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, dt as pop, ft as push, g as prop, ht as reset, it as sibling, k as set_class, rt as only_child, tt as child, w as set_attribute, z as set_text } from "./api.js";
 import { n as Icon } from "./app.js";
 //#region src/lib/ui/Tabs.svelte
 function step(ids, active, key) {

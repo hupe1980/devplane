@@ -1,5 +1,6 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["Answer.js","api.js","frame.js","cursor.js","write.svelte.js","Failed.js","Failed.css","unread.svelte.js","unread.css","actions.js","Qualifier.js","Qualifier.css","href.js","actions.css","Answer.css","Board.js","Grid.js","Grid.css","Empty.js","Empty.css","Props.js","Props.css","Board.css","List.js","ChangeState.js","ChangeState.css","List.css","Doc.js","offered.svelte.js","Tabs.js","Tabs.css","Doc.css","Github.js","Github.css","List2.js","narrow.svelte.js","List2.css","Inbox.js","Inbox.css","New.js","New.css","Palette.js","Palette.css","List3.js","store.svelte.js","List3.css","Doc2.js","Doc2.css","Quit.js","Quit.css","Search.js","Search.css","Setup.js","Setup.css","Why.js","Why.css"])))=>i.map(i=>d[i]);
-import { A as append, B as untrack, C as snippet, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, L as event, M as from_html, N as from_svg, O as mount, P as text, Q as user_derived, R as get, S as component, T as index, U as user_effect, X as set, Y as proxy, Z as state, a as claimToken, at as reset, c as spread_props, i as api, it as next, j as comment, k as set_text, m as set_attribute, n as Unauthorised, nt as push, o as prop, ot as noop, q as only_child, r as Unreachable, rt as snapshot, s as rest_props, t as Refused, tt as pop, v as set_style, w as each, x as action, y as set_class } from "./api.js";
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["Answer.js","api.js","resource.svelte.js","frame.js","cursor.js","write.svelte.js","Failed.js","Failed.css","unread.svelte.js","unread.css","actions.js","href.js","Item.js","Qualifier.js","Qualifier.css","Item.css","Answer.css","Board.js","Grid.js","Grid.css","Empty.js","Empty.css","Props.js","Props.css","offered.svelte.js","Board.css","List.js","ChangeState.js","ChangeState.css","List.css","Doc.js","Tabs.js","Tabs.css","Doc.css","Github.js","Github.css","List2.js","Snoozed.js","Snoozed.css","List2.css","Inbox.js","Inbox.css","New.js","New.css","Palette.js","Palette.css","List3.js","store.svelte.js","List3.css","Doc2.js","Doc2.css","Quit.js","Quit.css","Search.js","Search.css","Setup.js","Setup.css","Why.js","Why.css"])))=>i.map(i=>d[i]);
+import { $ as user_effect, B as append, F as index, G as delegate, H as from_html, J as get, K as delegated, L as if_block, M as component, N as snippet, O as set_style, P as each, Q as template_effect, R as mount, U as from_svg, V as comment, W as text, X as untrack, _ as rest_props, a as claimToken, at as proxy, c as bindList, ct as user_derived, d as onAction, dt as pop, f as run, ft as push, g as prop, gt as noop, h as spell, ht as reset, i as api, it as sibling, j as action, k as set_class, l as dispatch, m as sheet, mt as next, n as Unauthorised, nt as first_child, ot as set, pt as snapshot, q as event, rt as only_child, s as bind, st as state, tt as child, v as spread_props, w as set_attribute, z as set_text } from "./api.js";
+import { i as same$1 } from "./resource.svelte.js";
 //#region \0vite/modulepreload-polyfill.js
 (function polyfill() {
 	const relList = document.createElement("link").relList;
@@ -88,302 +89,6 @@ function unseen(board) {
 	].filter(Boolean).join(" ");
 }
 //#endregion
-//#region src/lib/keys.ts
-var RESERVED = [
-	"Mod+w",
-	"Mod+t",
-	"Mod+n",
-	"Mod+l",
-	"Mod+r",
-	"Mod+q",
-	"Mod+Tab"
-];
-var bindings = [];
-var listeners = /* @__PURE__ */ new Map();
-function bind(b) {
-	if (!b.label.trim()) throw new Error(`${b.surface}: ${b.combo} (${b.action}) has no label`);
-	const combo = normalise(b.combo);
-	const reserved = RESERVED.find((r) => r.toLowerCase() === combo.toLowerCase());
-	if (reserved) throw new Error(`${b.surface}: ${b.combo} ("${b.label}") takes ${reserved}, which the browser keeps for itself`);
-	const same = bindings.find((x) => x.combo === combo && x.surface === b.surface);
-	if (same) throw new Error(`${b.combo} is bound twice in ${b.surface}: "${same.label}" (${same.action}) and "${b.label}" (${b.action})`);
-	const global = bindings.find((x) => x.combo === combo && x.surface === "global");
-	if (global && b.surface !== "global") throw new Error(`${b.surface} rebinds ${b.combo}, which is global: "${global.label}" (${global.action}) against "${b.label}" (${b.action})`);
-	const [parent, mode] = b.surface.split(":");
-	const over = mode ? bindings.find((x) => x.surface === parent && x.combo === combo) : bindings.find((x) => x.surface.startsWith(`${b.surface}:`) && x.combo === combo);
-	if (over && !LIST_COMBOS.includes(combo)) throw new Error(`${b.combo} is bound in ${b.surface} ("${b.label}", ${b.action}) and in ${over.surface} ("${over.label}", ${over.action}); a mode may rebind only its surface's list keys`);
-	const shadowed = b.surface === "global" ? bindings.find((x) => x.combo === combo) : void 0;
-	if (shadowed) throw new Error(`global ${b.combo} ("${b.label}", ${b.action}) is already bound in ${shadowed.surface}: "${shadowed.label}" (${shadowed.action})`);
-	bindings.push({
-		...b,
-		combo
-	});
-}
-function all() {
-	return bindings;
-}
-var modes = /* @__PURE__ */ new Map();
-function setMode(surface, mode) {
-	modes.set(surface, mode);
-	return () => {
-		if (modes.get(surface) === mode) modes.delete(surface);
-	};
-}
-function scopes(surface) {
-	const m = modes.get(surface);
-	return [
-		...m ? [`${surface}:${m}`] : [],
-		surface,
-		"global"
-	];
-}
-function help(surface) {
-	const m = modes.get(surface);
-	const own = m ? bindings.filter((b) => b.surface === `${surface}:${m}`) : [];
-	const taken = new Set(own.map((b) => b.combo));
-	return [
-		...bindings.filter((b) => b.surface === "global"),
-		...bindings.filter((b) => b.surface === surface && !taken.has(b.combo)),
-		...own
-	];
-}
-function sheet(surface) {
-	const rows = (keys) => {
-		const out = [];
-		for (const b of keys) {
-			const same = out.find((r) => r.surface === b.surface && r.action === b.action && r.label === b.label);
-			if (same) same.combos.push(b.combo);
-			else out.push({
-				...b,
-				combos: [b.combo]
-			});
-		}
-		return out;
-	};
-	const keys = help(surface);
-	return [
-		{
-			title: "This item",
-			keys: rows(keys.filter((b) => b.surface !== "global" && b.item))
-		},
-		{
-			title: "This surface",
-			keys: rows(keys.filter((b) => b.surface !== "global" && !b.item))
-		},
-		{
-			title: "Everywhere",
-			keys: rows(keys.filter((b) => b.surface === "global"))
-		}
-	].filter((g) => g.keys.length > 0);
-}
-function onAction(action, fn) {
-	let set = listeners.get(action);
-	if (!set) {
-		set = /* @__PURE__ */ new Set();
-		listeners.set(action, set);
-	}
-	set.add(fn);
-	return () => {
-		set?.delete(fn);
-	};
-}
-function run(action, surface, combo = "") {
-	const set = listeners.get(action);
-	if (!set || set.size === 0) return false;
-	for (const fn of set) if (fn(surface, combo) === true) return true;
-	return false;
-}
-var pending = null;
-var pendingAt = 0;
-var CHORD_MS = 800;
-function combo(e) {
-	const parts = [];
-	if (e.metaKey || e.ctrlKey) parts.push("Mod");
-	if (e.altKey) parts.push("Alt");
-	const key = (e.altKey ? fromCode(e.code) : null) ?? keyName(e.key);
-	if (e.shiftKey && key.length > 1) parts.push("Shift");
-	parts.push(key);
-	return parts.join("+");
-}
-function keyName(key) {
-	switch (key) {
-		case "Escape": return "Esc";
-		case "ArrowUp": return "Up";
-		case "ArrowDown": return "Down";
-		case "ArrowLeft": return "Left";
-		case "ArrowRight": return "Right";
-		case " ": return "Space";
-		default: return key;
-	}
-}
-var CODES = {
-	BracketLeft: "[",
-	BracketRight: "]",
-	Minus: "-",
-	Equal: "=",
-	Comma: ",",
-	Period: ".",
-	Slash: "/",
-	Semicolon: ";",
-	Quote: "'",
-	Backquote: "`",
-	Backslash: "\\"
-};
-function fromCode(code) {
-	if (!code) return null;
-	const letter = /^Key([A-Z])$/.exec(code);
-	if (letter) return letter[1].toLowerCase();
-	const digit = /^Digit([0-9])$/.exec(code);
-	if (digit) return digit[1];
-	return CODES[code] ?? null;
-}
-function mac() {
-	if (typeof navigator === "undefined") return false;
-	const n = navigator;
-	return /mac/i.test(n.userAgentData?.platform ?? n.userAgent ?? "");
-}
-function spell(c) {
-	const onMac = mac();
-	return c.split(" ").map((chord) => {
-		const parts = chord.split("+");
-		const key = parts.pop() ?? "";
-		const mods = parts.map((m) => m === "Mod" ? onMac ? "⌘" : "Ctrl" : m === "Alt" ? onMac ? "⌥" : "Alt" : m === "Shift" ? onMac ? "⇧" : "Shift" : m);
-		const k = parts.length && key.length === 1 ? key.toUpperCase() : key;
-		return onMac ? mods.join("") + k : [...mods, k].join("+");
-	}).join(" ");
-}
-function normalise(c) {
-	return c.split(" ").map((part) => part.split("+").map((k) => k === "Escape" ? "Esc" : k === "Cmd" || k === "Ctrl" || k === "Meta" ? "Mod" : k).join("+")).join(" ");
-}
-var NATIVE_KEYS = /* @__PURE__ */ new Set([
-	"Enter",
-	"Space",
-	"Up",
-	"Down",
-	"Left",
-	"Right"
-]);
-function native(e, c) {
-	if (!NATIVE_KEYS.has(c)) return false;
-	const t = e.target;
-	if (!t || typeof t.closest !== "function") return false;
-	return !!t.closest("button, a[href], summary, [role=button], [role=link], [role=tab], [role=option], [role=menuitem], [role=separator], [role=checkbox], [role=radio], [role=switch]");
-}
-function typing(e) {
-	const t = e.target;
-	if (!t) return false;
-	const tag = t.tagName;
-	return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable;
-}
-var fromField = (c) => c === "Esc" || c.startsWith("Mod+");
-function dispatch(surface, e) {
-	if (e.isComposing) return false;
-	const c = combo(e);
-	const within = scopes(surface);
-	const fire = (k) => {
-		for (const s of within) {
-			const hit = bindings.find((b) => b.surface === s && b.combo === k);
-			if (hit && run(hit.action, surface, k)) {
-				e.preventDefault();
-				return true;
-			}
-		}
-		return false;
-	};
-	if (typing(e)) {
-		if (!fromField(c)) return false;
-		pending = null;
-		return fire(c);
-	}
-	if (native(e, c)) return false;
-	const now = Date.now();
-	if (pending && now - pendingAt < CHORD_MS) {
-		const chord = `${pending} ${c}`;
-		pending = null;
-		if (fire(chord)) return true;
-	}
-	pending = null;
-	if (fire(c)) return true;
-	if (bindings.some((b) => within.includes(b.surface) && b.combo.startsWith(`${c} `))) {
-		pending = c;
-		pendingAt = now;
-		e.preventDefault();
-		return true;
-	}
-	return false;
-}
-bind({
-	surface: "global",
-	combo: "Mod+k",
-	action: "open-palette",
-	label: "command palette"
-});
-bind({
-	surface: "global",
-	combo: "?",
-	action: "help",
-	label: "keys bound here"
-});
-bind({
-	surface: "global",
-	combo: "Esc",
-	action: "leave",
-	label: "leave: close the help, the palette or the new-change form"
-});
-var LIST_COMBOS = [
-	"Down",
-	"j",
-	"Up",
-	"k",
-	"Enter",
-	"g g",
-	"G"
-];
-function bindList(surface, open) {
-	bind({
-		surface,
-		combo: "Down",
-		action: "next",
-		label: "next"
-	});
-	bind({
-		surface,
-		combo: "j",
-		action: "next",
-		label: "next"
-	});
-	bind({
-		surface,
-		combo: "Up",
-		action: "prev",
-		label: "previous"
-	});
-	bind({
-		surface,
-		combo: "k",
-		action: "prev",
-		label: "previous"
-	});
-	bind({
-		surface,
-		combo: "Enter",
-		action: "open",
-		label: open
-	});
-	bind({
-		surface,
-		combo: "g g",
-		action: "first",
-		label: "first"
-	});
-	bind({
-		surface,
-		combo: "G",
-		action: "last",
-		label: "last"
-	});
-}
-//#endregion
 //#region src/surfaces/inbox/keys.ts
 var ITEM_KEYS = [
 	...[
@@ -429,7 +134,7 @@ var ITEM_KEYS = [
 	{
 		combo: "s",
 		action: "item-snooze",
-		label: "snooze the item for an hour"
+		label: "snooze the item until there is new activity (an hour for a pull request or an issue)"
 	},
 	{
 		combo: "o",
@@ -611,7 +316,7 @@ register({
 	bare: true,
 	reads: ["/api/inbox"],
 	select: (feed) => ({ blind: unseen(feed.board) }),
-	page: () => __vitePreload(() => import("./Answer.js"), __vite__mapDeps([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]))
+	page: () => __vitePreload(() => import("./Answer.js"), __vite__mapDeps([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]))
 });
 //#endregion
 //#region src/lib/route.ts
@@ -669,7 +374,7 @@ register({
 			...phase(feed)
 		};
 	},
-	page: () => __vitePreload(() => import("./Board.js"), __vite__mapDeps([15,1,3,16,17,18,19,20,21,22]))
+	page: () => __vitePreload(() => import("./Board.js"), __vite__mapDeps([17,1,2,4,18,19,20,21,22,23,24,25]))
 });
 //#endregion
 //#region src/lib/State.svelte
@@ -744,7 +449,7 @@ var LIFE = [
 	"archived"
 ];
 var isArchived = (state) => state === STATES.archived.word;
-var root$13 = from_html(`<span class="sr-only"> </span>`);
+var root$14 = from_html(`<span class="sr-only"> </span>`);
 var root_1$12 = from_html(`<span><span class="glyph svelte-10029po" aria-hidden="true"> </span><!></span>`);
 function State($$anchor, $$props) {
 	let quiet = prop($$props, "quiet", 3, false);
@@ -756,7 +461,7 @@ function State($$anchor, $$props) {
 	var node = sibling(span_1);
 	var consequent = ($$anchor) => {};
 	var consequent_1 = ($$anchor) => {
-		var span_2 = root$13();
+		var span_2 = root$14();
 		var text_1 = only_child(span_2, true);
 		template_effect(() => set_text(text_1, get(said)));
 		append($$anchor, span_2);
@@ -895,9 +600,9 @@ register({
 			loaded: phase(feed).loaded
 		};
 	},
-	side: () => __vitePreload(() => import("./List.js"), __vite__mapDeps([23,1,3,5,6,24,10,11,25,26])),
+	side: () => __vitePreload(() => import("./List.js"), __vite__mapDeps([26,1,2,4,6,7,27,13,14,28,29])),
 	document: true,
-	page: () => __vitePreload(() => import("./Doc.js"), __vite__mapDeps([27,1,4,5,6,7,8,16,17,18,19,20,21,24,10,11,25,28,29,30,31]))
+	page: () => __vitePreload(() => import("./Doc.js"), __vite__mapDeps([30,1,2,5,6,7,8,9,18,19,20,21,22,23,24,27,13,14,28,31,32,33]))
 });
 //#endregion
 //#region src/surfaces/github/index.ts
@@ -933,7 +638,7 @@ register({
 			configured: Object.keys(b.forge ?? {}).length
 		} };
 	},
-	page: () => __vitePreload(() => import("./Github.js"), __vite__mapDeps([32,1,3,5,6,12,16,17,18,19,29,30,33]))
+	page: () => __vitePreload(() => import("./Github.js"), __vite__mapDeps([34,1,2,4,6,7,11,18,19,20,21,31,32,35]))
 });
 //#endregion
 //#region src/surfaces/inbox/place.svelte.ts
@@ -1000,6 +705,12 @@ function place(shown, a) {
 }
 //#endregion
 //#region src/surfaces/inbox/index.ts
+function inboxCount(feed) {
+	const i = feed.inbox;
+	if (!i?.items) return null;
+	return typeof i.count === "number" ? i.count : i.items.length;
+}
+var COUNT_WORD = "need you";
 bindList("inbox", "move into the item (Tab then reaches its controls)");
 bindItemKeys("inbox");
 bind({
@@ -1021,26 +732,25 @@ register({
 	order: 0,
 	marksLook: true,
 	status: (feed) => {
-		const i = feed.inbox;
-		if (!i?.items) return [];
+		const n = inboxCount(feed);
+		if (n === null) return [];
 		const s = feed.board?.summary;
 		return [{
-			n: i.items.filter((x) => !!x.ask || (x.options ?? []).length > 0 || (x.actions ?? []).some((a) => a !== "open" && a !== "snooze")).length,
-			word: "need you",
+			n,
+			word: COUNT_WORD,
 			icon: "inbox",
 			tone: "wait",
 			end: true
 		}, ...s?.asks_waiting ? [{
 			n: s.asks_waiting,
-			word: "asked, session gone",
+			word: "asks that outlived their sessions",
 			icon: "question",
 			tone: "wait",
 			end: true
 		}] : []];
 	},
-	count: (feed) => {
-		return feed.inbox?.items?.length ?? null;
-	},
+	count: inboxCount,
+	countWord: COUNT_WORD,
 	link: "ask",
 	linkFocus: (id) => `ask=${id}`,
 	select: (feed, focus) => {
@@ -1055,6 +765,8 @@ register({
 			close: b?.close ?? null,
 			held: b?.held ?? null,
 			landed: b?.landed ?? null,
+			snoozed: b?.snoozed ?? 0,
+			snoozed_rows: b?.snoozed_rows ?? [],
 			project,
 			item,
 			wanted,
@@ -1068,8 +780,8 @@ register({
 		const { item, project } = address(focus, items);
 		return items.find((i) => i.id === item)?.title ?? (project ? `Inbox: ${project}` : "Inbox");
 	},
-	side: () => __vitePreload(() => import("./List2.js"), __vite__mapDeps([34,1,35,36])),
-	page: () => __vitePreload(() => import("./Inbox.js"), __vite__mapDeps([37,1,3,4,5,6,7,8,9,10,11,12,13,35,38]))
+	side: () => __vitePreload(() => import("./List2.js"), __vite__mapDeps([36,1,37,2,10,11,38,39])),
+	page: () => __vitePreload(() => import("./Inbox.js"), __vite__mapDeps([40,1,4,5,6,7,8,2,9,10,11,12,13,14,15,24,37,38,41]))
 });
 //#endregion
 //#region src/surfaces/new/index.ts
@@ -1105,7 +817,7 @@ register({
 		"/api/changes/preflight"
 	],
 	select: () => ({ changeSurface: surfaces().find((s) => s.link === "change")?.id ?? "" }),
-	page: () => __vitePreload(() => import("./New.js"), __vite__mapDeps([39,1,4,5,6,40]))
+	page: () => __vitePreload(() => import("./New.js"), __vite__mapDeps([42,1,2,5,6,7,43]))
 });
 //#endregion
 //#region src/surfaces/palette/index.ts
@@ -1132,7 +844,7 @@ register({
 	transient: true,
 	reads: ["/api/changes", "/api/projects"],
 	select: () => ({ from }),
-	page: () => __vitePreload(() => import("./Palette.js"), __vite__mapDeps([41,1,5,6,24,10,11,25,28,42]))
+	page: () => __vitePreload(() => import("./Palette.js"), __vite__mapDeps([44,1,2,6,7,24,27,13,14,28,45]))
 });
 //#endregion
 //#region src/surfaces/plan/index.ts
@@ -1157,9 +869,9 @@ register({
 	reads: ["/api/specs"],
 	tab: (_feed, focus) => focus.split("/").filter(Boolean).pop() ?? "Specification",
 	select: () => ({}),
-	side: () => __vitePreload(() => import("./List3.js"), __vite__mapDeps([43,1,3,24,10,11,25,44,45])),
+	side: () => __vitePreload(() => import("./List3.js"), __vite__mapDeps([46,1,4,27,13,14,28,47,48])),
 	document: true,
-	page: () => __vitePreload(() => import("./Doc2.js"), __vite__mapDeps([46,1,18,19,24,10,11,25,44,47]))
+	page: () => __vitePreload(() => import("./Doc2.js"), __vite__mapDeps([49,1,20,21,27,13,14,28,47,50]))
 });
 //#endregion
 //#region src/surfaces/quit/index.ts
@@ -1173,7 +885,7 @@ register({
 	bare: true,
 	reads: ["/api/quitting"],
 	select: () => ({}),
-	page: () => __vitePreload(() => import("./Quit.js"), __vite__mapDeps([48,1,2,49]))
+	page: () => __vitePreload(() => import("./Quit.js"), __vite__mapDeps([51,1,2,3,52]))
 });
 //#endregion
 //#region src/surfaces/search/index.ts
@@ -1192,7 +904,7 @@ register({
 		q: focus,
 		blind: unseen(feed.board)
 	}),
-	page: () => __vitePreload(() => import("./Search.js"), __vite__mapDeps([50,1,3,16,17,18,19,51]))
+	page: () => __vitePreload(() => import("./Search.js"), __vite__mapDeps([53,1,2,4,18,19,20,21,54]))
 });
 //#endregion
 //#region src/surfaces/setup/checklist.ts
@@ -1261,7 +973,7 @@ register({
 		}
 	},
 	select: () => ({ changeSurface: surfaces().find((s) => s.link === "change")?.id ?? "" }),
-	page: () => __vitePreload(() => import("./Setup.js"), __vite__mapDeps([52,1,3,5,6,12,16,17,20,21,53]))
+	page: () => __vitePreload(() => import("./Setup.js"), __vite__mapDeps([55,1,2,4,6,7,11,18,19,22,23,56]))
 });
 //#endregion
 //#region src/surfaces/why/index.ts
@@ -1288,120 +1000,8 @@ register({
 		about: focus,
 		blind: unseen(feed.board)
 	}),
-	page: () => __vitePreload(() => import("./Why.js"), __vite__mapDeps([54,1,3,5,6,16,17,18,19,55]))
+	page: () => __vitePreload(() => import("./Why.js"), __vite__mapDeps([57,1,2,4,6,7,18,19,20,21,58]))
 });
-//#endregion
-//#region src/lib/resource.svelte.ts
-function failure(e, tell = "devplane doctor") {
-	if (e instanceof Unauthorised) return {
-		says: "this tab has no token",
-		tell: "devplane up",
-		down: true
-	};
-	if (e instanceof Unreachable) return {
-		says: e.message,
-		tell: e.kind === "refused" ? "devplane up --no-browser" : "devplane doctor",
-		down: true
-	};
-	if (e instanceof Refused) {
-		const body = typeof e.body === "string" ? e.body : e.body === null ? "" : JSON.stringify(e.body);
-		return {
-			says: e.message,
-			tell,
-			raw: `${e.path ? `${e.path} → ` : ""}${e.status}${body ? ` ${body}` : ""}`
-		};
-	}
-	return {
-		says: e instanceof Error ? e.message : String(e),
-		tell
-	};
-}
-function same$1(a, b) {
-	if (a === b) return true;
-	try {
-		return JSON.stringify(a) === JSON.stringify(b);
-	} catch {
-		return false;
-	}
-}
-function resource(url, opts = {}) {
-	let data = state(null);
-	let fail = state(null);
-	let at = state(null);
-	const key = user_derived(url);
-	let gen = 0;
-	let seq = 0;
-	let landed = 0;
-	let pending = 0;
-	async function read(want, mine) {
-		const n = ++seq;
-		pending += 1;
-		try {
-			const r = await api(want);
-			if (mine !== gen || n < landed) return;
-			landed = n;
-			if (!same$1(get(data), r)) set(data, r);
-			set(fail, null);
-			set(at, Date.now(), true);
-		} catch (e) {
-			if (mine !== gen || n < landed) return;
-			landed = n;
-			set(fail, {
-				...failure(e, opts.tell?.()),
-				retry: reload
-			});
-		} finally {
-			if (mine === gen) pending = Math.max(0, pending - 1);
-		}
-	}
-	user_effect(() => {
-		const want = get(key);
-		const mine = untrack(() => {
-			gen += 1;
-			pending = 0;
-			landed = seq;
-			set(data, null);
-			set(fail, null);
-			set(at, null);
-			return gen;
-		});
-		if (!want) return;
-		read(want, mine);
-		if (!opts.every) return;
-		const t = setInterval(() => {
-			if (!document.hidden && pending === 0) read(want, mine);
-		}, opts.every);
-		return () => clearInterval(t);
-	});
-	async function reload() {
-		const want = untrack(() => get(key));
-		if (want) await read(want, gen);
-	}
-	return {
-		get phase() {
-			return get(data) !== null ? get(fail) ? "stale" : "ok" : get(fail) ? "failed" : "loading";
-		},
-		get data() {
-			return get(data);
-		},
-		get failure() {
-			return get(fail);
-		},
-		get at() {
-			return get(at);
-		},
-		reload
-	};
-}
-async function copyText(text) {
-	try {
-		if (!navigator.clipboard?.writeText) return false;
-		await navigator.clipboard.writeText(text);
-		return true;
-	} catch {
-		return false;
-	}
-}
 //#endregion
 //#region src/lib/live.svelte.ts
 var EVERY_MS = 2e3;
@@ -1635,7 +1235,7 @@ function blocks(text) {
 }
 //#endregion
 //#region src/lib/ui/Inline.svelte
-var root$12 = from_html(`<code> </code>`);
+var root$13 = from_html(`<code> </code>`);
 var root_1$11 = from_html(`<strong> </strong>`);
 function Inline($$anchor, $$props) {
 	push($$props, true);
@@ -1647,7 +1247,7 @@ function Inline($$anchor, $$props) {
 		var fragment_1 = comment();
 		var node_1 = first_child(fragment_1);
 		var consequent = ($$anchor) => {
-			var code = root$12();
+			var code = root$13();
 			var text_1 = only_child(code, true);
 			template_effect(() => set_text(text_1, get(p).s));
 			append($$anchor, code);
@@ -1675,7 +1275,7 @@ function Inline($$anchor, $$props) {
 }
 //#endregion
 //#region src/lib/Stale.svelte
-var root$11 = from_html(`<span class="age svelte-uf40wk"> </span>`);
+var root$12 = from_html(`<span class="age svelte-uf40wk"> </span>`);
 var root_1$10 = from_html(`<span class="age svelte-uf40wk">· nothing has been read yet</span>`);
 var root_2$5 = from_html(`<p class="stale svelte-uf40wk"><span role="status"><!></span> <!></p>`);
 function Stale($$anchor, $$props) {
@@ -1695,7 +1295,7 @@ function Stale($$anchor, $$props) {
 	reset(span);
 	var node_1 = sibling(span, 2);
 	var consequent = ($$anchor) => {
-		var span_1 = root$11();
+		var span_1 = root$12();
 		var text = only_child(span_1);
 		template_effect(() => set_text(text, `· showing what was read ${get(age) ?? ""} ago`));
 		append($$anchor, span_1);
@@ -1714,7 +1314,7 @@ function Stale($$anchor, $$props) {
 }
 //#endregion
 //#region src/lib/Skeleton.svelte
-var root$10 = from_html(`<p class="unread svelte-1xuy3ds" role="status">Not read — nothing here is current.</p>`);
+var root$11 = from_html(`<p class="unread svelte-1xuy3ds" role="status">Not read — nothing here is current.</p>`);
 var root_1$9 = from_html(`<div class="row svelte-1xuy3ds"><span class="bar svelte-1xuy3ds"></span></div>`);
 var root_2$4 = from_html(`<div class="skeleton svelte-1xuy3ds" aria-busy="true" aria-label="reading"></div>`);
 function Skeleton($$anchor, $$props) {
@@ -1723,7 +1323,7 @@ function Skeleton($$anchor, $$props) {
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent = ($$anchor) => {
-		var p = root$10();
+		var p = root$11();
 		append($$anchor, p);
 	};
 	var alternate = ($$anchor) => {
@@ -1755,7 +1355,7 @@ var rest_excludes = /* @__PURE__ */ new Set([
 	"load",
 	"component"
 ]);
-var root$9 = from_html(`<p class="failed svelte-1gb5hex" role="alert"> </p>`);
+var root$10 = from_html(`<p class="failed svelte-1gb5hex" role="alert"> </p>`);
 var root_1$8 = from_html(`<div class="wait svelte-1gb5hex"><!></div>`);
 function Lazy($$anchor, $$props) {
 	push($$props, true);
@@ -1791,7 +1391,7 @@ function Lazy($$anchor, $$props) {
 		append($$anchor, fragment_1);
 	};
 	var consequent_1 = ($$anchor) => {
-		var p = root$9();
+		var p = root$10();
 		var text = only_child(p);
 		template_effect(() => set_text(text, `This page did not load: ${get(failed) ?? ""}. Reload the window.`));
 		append($$anchor, p);
@@ -1851,7 +1451,7 @@ function trap(node) {
 }
 //#endregion
 //#region src/lib/ui/Split.svelte
-var root$8 = from_html(`<div class="pane svelte-l5jdby"><!></div>  <div class="handle svelte-l5jdby" role="separator" tabindex="0" aria-label="resize"></div>`, 1);
+var root$9 = from_html(`<div class="pane svelte-l5jdby"><!></div>  <div class="handle svelte-l5jdby" role="separator" tabindex="0" aria-label="resize"></div>`, 1);
 var root_1$7 = from_html(`<div><!> <div class="rest svelte-l5jdby"><!></div></div>`);
 function Split($$anchor, $$props) {
 	let axis = prop($$props, "axis", 3, "x"), initial = prop($$props, "size", 3, 280), min = prop($$props, "min", 3, 160), max = prop($$props, "max", 3, 640), side = prop($$props, "side", 3, "start"), collapsed = prop($$props, "collapsed", 3, false);
@@ -1902,7 +1502,7 @@ function Split($$anchor, $$props) {
 	let classes;
 	var node = child(div);
 	var consequent = ($$anchor) => {
-		var fragment = root$8();
+		var fragment = root$9();
 		var div_1 = first_child(fragment);
 		var node_1 = child(div_1);
 		snippet(node_1, () => $$props.pane);
@@ -1990,11 +1590,11 @@ var PATHS = {
 	eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
 	skip: "M5 4l10 8-10 8zM19 5v14"
 };
-var root$7 = from_svg(`<svg class="icon svelte-jf3o41" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path></path></svg>`);
+var root$8 = from_svg(`<svg class="icon svelte-jf3o41" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path></path></svg>`);
 function Icon($$anchor, $$props) {
 	let size = prop($$props, "size", 3, 16), label = prop($$props, "label", 3, ""), stroke = prop($$props, "stroke", 3, 1.75);
 	const d = user_derived(() => PATHS[$$props.name] ?? PATHS.dot);
-	var svg = root$7();
+	var svg = root$8();
 	var path = only_child(svg);
 	template_effect(() => {
 		set_attribute(svg, "width", size());
@@ -2009,7 +1609,7 @@ function Icon($$anchor, $$props) {
 }
 //#endregion
 //#region src/shell/TitleBar.svelte
-var root$6 = from_html(`<span><!><span class="word svelte-whzgc7"> </span></span>`);
+var root$7 = from_html(`<span><!><span class="word svelte-whzgc7"> </span></span>`);
 var root_1$6 = from_html(`<header class="title svelte-whzgc7"><div class="brand svelte-whzgc7"><svg class="mark svelte-whzgc7" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="5" fill="var(--accent)"></rect><path d="M8 7h4.5a5 5 0 0 1 0 10H8z" fill="none" stroke="var(--chrome)" stroke-width="2.2"></path></svg> <b class="name svelte-whzgc7">Devplane</b> <span class="crumbs svelte-whzgc7"></span></div> <button class="find svelte-whzgc7" aria-label="find anything — changes, sessions, commands"><!> <span class="svelte-whzgc7">Find a change, a session, a command…</span> <kbd class="svelte-whzgc7"> </kbd></button> <div class="acts svelte-whzgc7"><button class="primary svelte-whzgc7" aria-label="New change"><!> <span class="label svelte-whzgc7">New change</span></button> <button aria-label="toggle the sidebar"><!></button> <button aria-label="toggle the activity panel"><!></button></div></header>`);
 function TitleBar($$anchor, $$props) {
 	push($$props, true);
@@ -2017,7 +1617,7 @@ function TitleBar($$anchor, $$props) {
 	var div = child(header);
 	var span = sibling(child(div), 4);
 	each(span, 21, () => $$props.crumbs, index, ($$anchor, c, i) => {
-		var span_1 = root$6();
+		var span_1 = root$7();
 		let classes;
 		let styles;
 		var node = child(span_1);
@@ -2105,7 +1705,7 @@ function TitleBar($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region src/shell/ActivityBar.svelte
-var root$5 = from_html(`<b> </b>`);
+var root$6 = from_html(`<b> </b>`);
 var root_1$5 = from_html(`<span> </span>`);
 var root_2$3 = from_html(`<button><!> <!></button>`);
 var root_3$2 = from_html(`<div class="band svelte-w2jox2" role="group"></div>`);
@@ -2127,7 +1727,7 @@ function ActivityBar($$anchor, $$props) {
 			});
 		};
 		var alternate = ($$anchor) => {
-			var b_1 = root$5();
+			var b_1 = root$6();
 			var text = only_child(b_1, true);
 			template_effect(($0) => set_text(text, $0), [() => s().title.slice(0, 1)]);
 			append($$anchor, b_1);
@@ -2153,8 +1753,8 @@ function ActivityBar($$anchor, $$props) {
 		reset(button);
 		template_effect(() => {
 			classes = set_class(button, 1, "act svelte-w2jox2", null, classes, { on: s().id === $$props.current });
-			set_attribute(button, "title", get(n) ? `${s().title} — ${get(n)}` : s().title);
-			set_attribute(button, "aria-label", get(n) ? `${s().title}, ${get(n)}` : s().title);
+			set_attribute(button, "title", get(n) ? `${s().title} — ${get(n)}${s().countWord ? ` ${s().countWord}` : ""}` : s().title);
+			set_attribute(button, "aria-label", get(n) ? `${s().title}, ${get(n)}${s().countWord ? ` ${s().countWord}` : ""}` : s().title);
 			set_attribute(button, "aria-current", s().id === $$props.current ? "page" : void 0);
 		});
 		delegated("click", button, () => $$props.pick(s().id));
@@ -2191,13 +1791,13 @@ function ActivityBar($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region src/shell/EditorTabs.svelte
-var root$4 = from_html(`<div role="tab"><!> <span class="name svelte-1h63k4l"> </span> <button class="x svelte-1h63k4l"><!></button></div>`);
+var root$5 = from_html(`<div role="tab"><!> <span class="name svelte-1h63k4l"> </span> <button class="x svelte-1h63k4l"><!></button></div>`);
 var root_1$4 = from_html(`<div class="strip svelte-1h63k4l" role="tablist" aria-label="open tabs"></div>`);
 function EditorTabs($$anchor, $$props) {
 	push($$props, true);
 	var div = root_1$4();
 	each(div, 23, () => $$props.list, (t) => t.surface + "/" + t.focus, ($$anchor, t, i) => {
-		var div_1 = root$4();
+		var div_1 = root$5();
 		let classes;
 		var node = child(div_1);
 		var consequent = ($$anchor) => {
@@ -2260,13 +1860,13 @@ delegate([
 ]);
 //#endregion
 //#region src/shell/StatusBar.svelte
-var root$3 = from_html(`<button><!> </button>`);
+var root$4 = from_html(`<button><!> </button>`);
 var root_1$3 = from_html(`<span class="item svelte-1xut7e1"> </span>`);
 var root_2$2 = from_html(`<footer class="status svelte-1xut7e1" aria-label="status"><span role="status"><span class="dot svelte-1xut7e1"></span> </span> <!> <!> <span class="gap svelte-1xut7e1"></span> <!> <button class="item svelte-1xut7e1" title="theme"><!> </button> <button class="item svelte-1xut7e1" aria-label="keys bound here"><!></button></footer>`);
 function StatusBar($$anchor, $$props) {
 	push($$props, true);
 	const fact = ($$anchor, i = noop) => {
-		var button = root$3();
+		var button = root$4();
 		let classes;
 		var node = child(button);
 		var consequent = ($$anchor) => {
@@ -2362,7 +1962,7 @@ function tone(word) {
 	for (const [t, re] of TONES) if (re.test(word)) return t;
 	return "none";
 }
-var root$2 = from_html(`<span class="dot svelte-ueztnz" aria-hidden="true"></span>`);
+var root$3 = from_html(`<span class="dot svelte-ueztnz" aria-hidden="true"></span>`);
 var root_1$2 = from_html(`<span><!> </span>`);
 function Pill($$anchor, $$props) {
 	let as = prop($$props, "as", 3, void 0), dot = prop($$props, "dot", 3, true), title = prop($$props, "title", 3, void 0);
@@ -2370,7 +1970,7 @@ function Pill($$anchor, $$props) {
 	var span = root_1$2();
 	var node = child(span);
 	var consequent = ($$anchor) => {
-		var span_1 = root$2();
+		var span_1 = root$3();
 		append($$anchor, span_1);
 	};
 	if_block(node, ($$render) => {
@@ -2387,7 +1987,7 @@ function Pill($$anchor, $$props) {
 }
 //#endregion
 //#region src/shell/Panel.svelte
-var root$1 = from_html(`<p class="quiet fail svelte-9fbpju"> </p>`);
+var root$2 = from_html(`<p class="quiet fail svelte-9fbpju"> </p>`);
 var root_1$1 = from_html(`<p class="quiet svelte-9fbpju">No session has reported anything yet.</p>`);
 var root_2$1 = from_html(`<span class="ctx svelte-9fbpju"> </span>`);
 var root_3$1 = from_html(`<li><button class="svelte-9fbpju"><time class="svelte-9fbpju"> </time> <span class="proj svelte-9fbpju"> </span> <span class="agent svelte-9fbpju"> </span> <!> <span class="what svelte-9fbpju"> </span> <!></button></li>`);
@@ -2423,7 +2023,7 @@ function Panel($$anchor, $$props) {
 		var fragment = comment();
 		var node_1 = first_child(fragment);
 		var consequent = ($$anchor) => {
-			var p = root$1();
+			var p = root$2();
 			var text_2 = only_child(p);
 			template_effect(() => set_text(text_2, `The sessions could not be read: ${error() ?? ""}`));
 			append($$anchor, p);
@@ -2676,7 +2276,7 @@ bind({
 });
 //#endregion
 //#region src/App.svelte
-var root = from_html(`<p class="problem svelte-1n46o8q" role="alert"><!></p>`);
+var root$1 = from_html(`<p class="problem svelte-1n46o8q" role="alert"><!></p>`);
 var root_1 = from_html(`<main id="surface" class="bare svelte-1n46o8q"><!> <!></main>`);
 var root_2 = from_html(`<aside class="side svelte-1n46o8q"><!></aside>`);
 var root_3 = from_html(`<p class="notice svelte-1n46o8q" role="status"> </p>`);
@@ -2923,7 +2523,7 @@ function App($$anchor, $$props) {
 		var main = root_1();
 		var node_1 = child(main);
 		var consequent = ($$anchor) => {
-			var p = root();
+			var p = root$1();
 			Inline(child(p), { get text() {
 				return feed.error;
 			} });
@@ -3070,7 +2670,7 @@ function App($$anchor, $$props) {
 								var main_1 = sibling(node_8, 2);
 								var node_9 = child(main_1);
 								var consequent_4 = ($$anchor) => {
-									var p_1 = root();
+									var p_1 = root$1();
 									Inline(child(p_1), { get text() {
 										return feed.error;
 									} });
@@ -3265,11 +2865,31 @@ function App($$anchor, $$props) {
 }
 delegate(["click"]);
 //#endregion
+//#region src/Elsewhere.svelte
+var root = from_html(`<main class="elsewhere svelte-1pcxrm7"><p class="svelte-1pcxrm7"> </p> <p class="quiet svelte-1pcxrm7">It was started outside this app — <code>devplane up</code> in a terminal, say. Its page has everything this window would.</p> <p class="svelte-1pcxrm7"><a class="open svelte-1pcxrm7">Open that page</a></p></main>`);
+function Elsewhere($$anchor, $$props) {
+	var main = root();
+	var p = child(main);
+	var text = only_child(p);
+	var p_1 = sibling(p, 4);
+	var a = only_child(p_1);
+	reset(main);
+	template_effect(() => {
+		set_text(text, `A host is already serving this home on port ${$$props.port ?? ""}.`);
+		set_attribute(a, "href", `http://127.0.0.1:${$$props.port ?? ""}/`);
+	});
+	append($$anchor, main);
+}
+//#endregion
 //#region src/main.ts
 var target = document.getElementById("app");
 if (!target) throw new Error("no #app to mount into");
-mount(App, { target });
+var elsewhere = Number(new URLSearchParams(location.search).get("elsewhere"));
+Number.isInteger(elsewhere) && elsewhere > 0 ? mount(Elsewhere, {
+	target,
+	props: { port: elsewhere }
+}) : mount(App, { target });
 //#endregion
-export { all as A, place as C, State as D, STATES as E, spell as F, landing as I, listed$1 as L, onAction as M, run as N, go as O, setMode as P, surfaces as R, itemFocus as S, LIFE as T, TITLES as _, Inline as a, skippedSteps as b, clip as c, shape as d, reread as f, same$1 as g, resource as h, Skeleton as i, help as j, answerItemKeys as k, listed as l, failure as m, Icon as n, blocks as o, copyText as p, Split as r, ago as s, Pill as t, plural as u, incomplete as v, remember as w, address as x, keepSkipped as y };
+export { State as C, listed$1 as D, landing as E, surfaces as O, STATES as S, answerItemKeys as T, address as _, Inline as a, remember as b, clip as c, shape as d, reread as f, skippedSteps as g, keepSkipped as h, Skeleton as i, listed as l, incomplete as m, Icon as n, blocks as o, TITLES as p, Split as r, ago as s, Pill as t, plural as u, itemFocus as v, go as w, LIFE as x, place as y };
 
 //# sourceMappingURL=app.js.map

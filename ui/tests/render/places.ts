@@ -2,6 +2,8 @@
 // quit question — and the rules every source in the interface keeps.
 import GithubList from "../../src/surfaces/github/GithubList.svelte";
 import GitHubPanel from "../../src/surfaces/setup/GitHubPanel.svelte";
+import Updates from "../../src/surfaces/setup/Updates.svelte";
+import Elsewhere from "../../src/Elsewhere.svelte";
 import Why from "../../src/surfaces/why/Why.svelte";
 import Answer from "../../src/surfaces/answer/Answer.svelte";
 import Quit from "../../src/surfaces/quit/Quit.svelte";
@@ -75,6 +77,34 @@ import { fail, html, source, walk } from "../harness";
   if (!/denied at GitHub/.test(denied)) fail("a denied attempt over a standing sign-in is not said");
   const setup = source("../src/surfaces/setup/Setup.svelte");
   if (!/resource<[^>]*>\(\(\) => "\/api\/github"/.test(setup)) fail("setup does not read the sign-in through the shared resource");
+}
+
+// ── Setup: update checks, asked before anything is fetched ───────────────
+{
+  const url = "https://github.com/hupe1980/devplane/releases/latest/download/latest.json";
+  const asked = html(Updates, { shown: { state: "not_asked", fetches: url, sends: "nothing about you, this machine or your projects" } });
+  if (!asked.includes(url)) fail("the update question does not name the address it fetches");
+  if (!/sends nothing about you, this machine or your projects/.test(asked)) fail("the update question does not say it sends nothing");
+  if (!/Yes, check/.test(asked) || !/No —/.test(asked)) fail("the update question offers no answer");
+  if (/Install and restart<\/button>/.test(asked)) fail("an install is offered before anything was found");
+  const offer = html(Updates, { shown: { state: "offer", version: "0.13.0", notes: "**x** <b>y</b>", running: "0.12.0" } });
+  if (!offer.includes("**x**") || offer.includes("<b>y</b>")) fail("release notes are rendered as markup, not as text");
+  if (!/Install and restart<\/button>/.test(offer) || !/Not now<\/button>/.test(offer)) fail("an offer has no Install and restart, or no Not now");
+  const cannot = html(Updates, { shown: { state: "cannot_replace", version: "0.13.0", why: "installed by the system's package manager, which updates it", where: "https://github.com/hupe1980/devplane/releases" } });
+  if (/Install and restart/.test(cannot)) fail("an install that cannot replace itself offers Install and restart");
+  if (!cannot.includes("https://github.com/hupe1980/devplane/releases")) fail("cannot replace does not say where to get it");
+  const off = html(Updates, { shown: { state: "off", releases: "https://github.com/hupe1980/devplane/releases" } });
+  if (!/Update checks off/.test(off)) fail("checks off does not say so");
+  if (/Install and restart/.test(html(Updates, { shown: { state: "not_this_build" } }))) fail("the browser's host offers an update");
+}
+
+// ── The second start: a host the app does not own already serves ─────────
+{
+  const out = html(Elsewhere, { port: 47831 });
+  if (!/A host is already serving this home on port 47831/.test(out)) fail("the second start does not name the port");
+  if (!/href="http:\/\/127.0.0.1:47831\/"[^>]*>Open that page</.test(out)) fail("the second start offers no way to that host's page");
+  if (/\/api\//.test(source("../src/Elsewhere.svelte"))) fail("the second start reads the API of a host it does not own");
+  if (!/elsewhere/.test(source("../src/main.ts"))) fail("the entry point never mounts the second start");
 }
 
 // ── The ledger: every decision with its authority, and latest by default ──

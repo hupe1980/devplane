@@ -12,6 +12,8 @@
   import Props from "../../lib/ui/Props.svelte";
   import Skeleton from "../../lib/Skeleton.svelte";
   import { cursor } from "../../lib/cursor";
+  import { spell } from "../../lib/keys";
+  import { offerCommands } from "../../lib/offered.svelte";
   import { go } from "../../lib/route";
   import { surfaces } from "../../lib/surfaces";
 
@@ -173,6 +175,21 @@
   async function copy(t: string) {
     said = (await copyText(t)) ? `Copied: ${t}` : `Nothing was copied — this page has no clipboard: ${t}`;
   }
+
+  // `⌘K` lists the selected session's actions first: the drawer's, and
+  // Enter's.
+  $effect(() => {
+    const p = pick;
+    if (!p) return;
+    return offerCommands(
+      p.name ?? p.agent ?? p.id,
+      [
+        ...(runPage ? [{ label: "open its decisions", icon: "keyboard", hint: spell("Enter"), run: () => go(`#${runPage}/${encodeURIComponent(p.id)}`) }] : []),
+        { label: "copy the attach command", icon: "right", run: () => void copy(`devplane run attach ${p.id}`) },
+      ],
+      "This session",
+    );
+  });
 </script>
 
 <div class="board" bind:clientWidth={width}>

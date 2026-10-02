@@ -14,6 +14,7 @@
   import Connect from "./Connect.svelte";
   import Trust from "./Trust.svelte";
   import Declare from "./Declare.svelte";
+  import Updates from "./Updates.svelte";
   import { TITLES, incomplete, keepSkipped, skippedSteps, type FirstRun, type Step } from "./checklist";
 
   let { changeSurface = "", ongithub }: { changeSurface?: string; ongithub?: () => void } = $props();
@@ -103,13 +104,15 @@
             {/if}
           </div>
           {#if s.id === "updates" && s.state === "done"}
-            <!-- This build has no updater, so there is no question to answer:
-                 the row says so and moves on without an input. -->
+            <!-- Answered, or this build has no update check: the row says so
+                 and moves on without an input. -->
             <span class="sr-only" data-first-run-step="update" data-first-run-done="true">update checks: {s.says}</span>
           {/if}
           {#if s.id === open}
             <div class="body">
-              {#if s.id === "connect"}
+              {#if s.id === "updates"}
+                <Updates onchanged={reload} />
+              {:else if s.id === "connect"}
                 <Connect agents={data.agents} firstRun onchanged={reload} onskip={() => skip("connect")} />
               {:else if s.id === "trust"}
                 <Trust firstRun ontrusted={reload} />

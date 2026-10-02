@@ -721,6 +721,22 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
     // `check`, in the background, and nothing here waits on them.
     crate::base_checks::after_check(state, &change_id, &config, passed);
 
+    // The agent said the spec and the tests conflict: the gate's verdict is
+    // recorded as it is, and nothing is handed back — the person reads the
+    // claim and answers. Not a failure, so the change is not stopped either.
+    let claimed = state
+        .changes
+        .lock()
+        .await
+        .get(&change_id)
+        .is_some_and(|c| c.open_claim_for(run).is_some());
+    if claimed && !passed {
+        tracing::info!(change = %change_id, "the agent claimed a conflict; nothing handed back");
+        set_waiting(state, &change_id, Some(Waiting::Person)).await;
+        retire_runs(state, &change_id).await;
+        return;
+    }
+
     if passed {
         tracing::info!(change = %change_id, "gates passed");
         // Nothing opens a pull request here; that is `change offer`.
@@ -743,6 +759,9 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
                 }
             };
             set_waiting(state, &change_id, Some(Waiting::Feedback { round })).await;
+            // A feedback round is where the pressure to edit a test is
+            // highest, so it ends with the same sentence a first prompt does.
+            let feedback = crate::core::context::with_stop_and_say(&feedback);
             if let Err(e) = crate::driven::prompt(state, run, feedback).await {
                 tracing::warn!(error = %e, "could not hand the failures back");
                 stop(
@@ -1885,7 +1904,9 @@ pub async fn resume(state: &Shared, id: &ChangeId) -> Result<()> {
         let changes = state.changes.lock().await;
         let c = changes.get(id).context("no such change")?;
         (
-            !c.is_settled() && !c.needs_a_person(),
+            // A run that stopped itself by claiming waits on a person, and
+            // the person answers it by resuming it.
+            !c.is_settled() && (!c.needs_a_person() || c.open_claim().is_some()),
             c.current_run().cloned(),
         )
     };
@@ -1894,6 +1915,7 @@ pub async fn resume(state: &Shared, id: &ChangeId) -> Result<()> {
     }
     let run = run.context("that change never had an agent — start it again instead")?;
     crate::driven::resume(state, &run).await?;
+    close_claims(state, id, crate::core::claim::ClosedBy::Resumed).await;
 
     // The next event is the agent's turn ending, which sends it to the gates.
     set_waiting(state, id, None).await;
@@ -1964,6 +1986,7 @@ pub async fn deliver_prompt(
                     .unwrap_or(crate::core::run::Delivery::Sent)
             };
             crate::driven::prompt(state, &run, text).await?;
+            close_claims(state, id, crate::core::claim::ClosedBy::Prompted).await;
             return Ok((
                 match delivery {
                     crate::core::run::Delivery::Queued => Delivered::Queued,
@@ -1976,6 +1999,7 @@ pub async fn deliver_prompt(
             Ok(_) => {
                 set_waiting(state, id, None).await;
                 crate::driven::prompt(state, &run, text).await?;
+                close_claims(state, id, crate::core::claim::ClosedBy::Prompted).await;
                 return Ok((Delivered::Resumed, run));
             }
             Err(e) => why_not_resumed = Some(e),
@@ -2031,7 +2055,132 @@ pub async fn deliver_prompt(
         .await
         .insert(run.clone(), id.clone());
     crate::driven::prompt(state, &run, text).await?;
+    close_claims(state, id, crate::core::claim::ClosedBy::Prompted).await;
     Ok((Delivered::Started, run))
+}
+
+/// Closes a change's open stop claims and writes the row. Writes no decision:
+/// what closed it (a person's prompt, a resume, a mark read) is recorded where
+/// that act is.
+pub(crate) async fn close_claims(state: &Shared, id: &ChangeId, by: crate::core::claim::ClosedBy) {
+    let saved = {
+        let mut changes = state.changes.lock().await;
+        match changes.get_mut(id) {
+            Some(c) => c
+                .close_claims(by, jiff::Timestamp::now())
+                .then(|| c.clone()),
+            None => None,
+        }
+    };
+    if let Some(c) = saved {
+        persist(state, &c).await;
+        state.notify_changed();
+    }
+}
+
+/// Records what a driven agent said through the stop tool: that the
+/// specification and the tests of its change cannot both be satisfied.
+///
+/// Every refusal is decided here, in the contract's order, under the run's
+/// lifecycle lock so two calls record one claim; nothing is written for any
+/// refusal. The origin is built from the run this host drives — never from
+/// the request. The caller stops the run once it has answered.
+pub async fn record_claim(
+    state: &Shared,
+    run: &RunId,
+    draft: crate::core::claim::ClaimDraft,
+    change_hint: Option<String>,
+    key: &str,
+) -> std::result::Result<crate::core::claim::StopClaim, crate::core::claim::ClaimRefusal> {
+    use crate::core::claim::{ClaimId, ClaimOrigin, ClaimRefusal, StopClaim};
+    crate::driven::hold_lifecycle(run, async {
+        let Some(stopping) = crate::driven::stopping(state, run).await else {
+            return Err(ClaimRefusal::NotDriven(run.to_string()));
+        };
+        let change_id = state
+            .change_of_run
+            .lock()
+            .await
+            .get(run)
+            .cloned()
+            .ok_or(ClaimRefusal::NoChange)?;
+        if change_hint.is_some_and(|h| h != change_id.as_str()) {
+            return Err(ClaimRefusal::WrongChange(run.to_string()));
+        }
+        if !crate::driven::claim_key_matches(run, key) {
+            return Err(ClaimRefusal::BadKey);
+        }
+        if stopping {
+            return Err(ClaimRefusal::Stopping);
+        }
+        let root = governing_root(state, &change_id).await;
+        let (project, worktree) = {
+            let changes = state.changes.lock().await;
+            let c = changes.get(&change_id).ok_or(ClaimRefusal::NoChange)?;
+            if let Some(open) = c.open_claim_for(run) {
+                return Err(ClaimRefusal::AlreadyOpen {
+                    at: open.origin.at(),
+                });
+            }
+            (c.project_id.clone(), c.worktree.clone())
+        };
+        let (project_name, agent) = {
+            let w = state.world.lock().await;
+            (
+                w.project(&project)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| project.to_string()),
+                w.run(run).map(|r| r.agent.clone()).unwrap_or_default(),
+            )
+        };
+        let origin = ClaimOrigin::of_run(
+            project.clone(),
+            project_name,
+            change_id.clone(),
+            run.clone(),
+            agent,
+            jiff::Timestamp::now(),
+        );
+        // Inside the project or the change's worktree, by the rule spec paths
+        // use; a path that escapes both is refused by name.
+        let roots: Vec<PathBuf> = root.into_iter().chain(worktree).collect();
+        let confine = |named: &str| -> std::result::Result<(), String> {
+            let mut why = format!("`{named}` is outside the project");
+            for r in &roots {
+                match crate::spec::confine(r, named) {
+                    Ok(_) => return Ok(()),
+                    Err(e) => why = e,
+                }
+            }
+            Err(why)
+        };
+        let id = ClaimId::new(format!("sc-{}", uuid::Uuid::now_v7().simple()));
+        let claim = StopClaim::new(id, draft, origin, confine)?;
+        let saved = {
+            let mut changes = state.changes.lock().await;
+            let c = changes.get_mut(&change_id).ok_or(ClaimRefusal::NoChange)?;
+            c.push_claim(claim.clone())?;
+            c.updated_at = jiff::Timestamp::now();
+            c.clone()
+        };
+        persist(state, &saved).await;
+        state
+            .ingest(
+                run.clone(),
+                crate::core::Source::Host,
+                crate::core::Event::StopClaimed {
+                    claim: claim.id.to_string(),
+                    reason: claim.reason.clone(),
+                    paths: claim.paths.clone(),
+                },
+                None,
+                crate::core::run::RunMode::Driven,
+            )
+            .await;
+        state.notify_changed();
+        Ok(claim)
+    })
+    .await
 }
 
 /// Hands the failures back to the agent once more, past the project's bound.
@@ -2143,7 +2292,13 @@ pub async fn retry(state: &Shared, id: &ChangeId) -> Result<()> {
         .await;
 
     set_waiting(state, id, Some(Waiting::Feedback { round: rounds })).await;
-    crate::driven::prompt(state, &run, feedback).await
+    close_claims(state, id, crate::core::claim::ClosedBy::Resumed).await;
+    crate::driven::prompt(
+        state,
+        &run,
+        crate::core::context::with_stop_and_say(&feedback),
+    )
+    .await
 }
 
 /// Stops a change, recording why in the same breath, so the inbox never has
@@ -2221,6 +2376,10 @@ async fn mark_done(
         match changes.get_mut(id) {
             Some(c) => {
                 c.completion = Some(basis.clone());
+                c.close_claims(
+                    crate::core::claim::ClosedBy::Finished,
+                    jiff::Timestamp::now(),
+                );
                 c.tree_now = tree_now;
                 c.tree_as_of = Some(jiff::Timestamp::now());
                 c.waiting = None;
@@ -2346,6 +2505,7 @@ pub async fn archive(state: &Shared, id: &ChangeId, how: ArchiveHow) -> Result<A
         match changes.get_mut(id) {
             Some(c) => {
                 c.archived_at = Some(at);
+                c.close_claims(crate::core::claim::ClosedBy::Archived, at);
                 c.waiting = None;
                 c.tree_now = None;
                 c.updated_at = at;

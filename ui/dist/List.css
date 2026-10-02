@@ -130,6 +130,13 @@
   .wait.svelte-3ehcwp {
     color: var(--wait);
   }
+  .claimed.svelte-3ehcwp {
+    color: var(--wait);
+    font-size: var(--t-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .dim.svelte-3ehcwp {
     color: var(--faint);
   }

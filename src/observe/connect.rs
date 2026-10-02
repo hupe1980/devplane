@@ -583,14 +583,25 @@ fn is_shim_command(cmd: &str) -> bool {
                 let head = head.trim().trim_matches('\'').trim_matches('"');
                 let is_ours = std::path::Path::new(head)
                     .file_name()
-                    .map(|f| f == "devplane" || f == "devplane.exe")
-                    .unwrap_or(false);
+                    .is_some_and(|f| is_our_binary_name(&f.to_string_lossy()));
                 // `statusline --then ...` has a tail; `hook` must not, or a
                 // script called `hook-something` would match.
                 is_ours && (tail.is_empty() || tail.starts_with(' ') || tail.starts_with(" --"))
             })
             .unwrap_or(false)
     })
+}
+
+/// Whether a file name is a devplane binary: the CLI's (`devplane`,
+/// `devplane.exe`, which is also the name inside the macOS and Windows app),
+/// or an AppImage, which `agent connect` writes by its own file name
+/// (`Devplane_0.12.0_amd64.AppImage`) because its executable sits in a mount
+/// that vanishes when it quits.
+fn is_our_binary_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "devplane"
+        || lower == "devplane.exe"
+        || (lower.starts_with("devplane") && lower.ends_with(".appimage"))
 }
 
 /// Quotes a path for a shell command line.
@@ -1116,6 +1127,58 @@ pub fn write_whole(file: &Path, contents: &str) -> Result<()> {
         .with_context(|| format!("writing {}", file.display()))
 }
 
+/// The binaries a vendor's hooks of ours run that no longer exist, each once.
+///
+/// Claude Code and Codex share one `hooks` shape (`command` lines); Copilot's
+/// file is wholly ours and names the binary as `exec`. A vendor runs nothing
+/// for such a hook, so its gate is off however the settings read.
+pub fn missing_hook_binaries(agent: Agent, text: &str, path: &Path) -> Vec<String> {
+    let doc = json_doc(text, path).unwrap_or_default();
+    let mut out: Vec<String> = match agent {
+        Agent::Claude | Agent::Codex => missing_binaries(&doc)
+            .into_iter()
+            .map(|(_, bin)| bin)
+            .collect(),
+        Agent::Copilot => doc
+            .get("hooks")
+            .and_then(|h| h.as_object())
+            .into_iter()
+            .flat_map(|hooks| hooks.values())
+            .filter_map(|v| v.as_array())
+            .flatten()
+            .filter_map(|h| h.get("exec").and_then(|e| e.as_str()))
+            .filter(|bin| !Path::new(bin).exists())
+            .map(str::to_string)
+            .collect(),
+    };
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// One connected vendor whose hooks run a binary that is gone: what `doctor`
+/// reports as *gate off*, by agent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GateOff {
+    pub agent: Agent,
+    pub name: &'static str,
+    pub path: String,
+}
+
+/// Every vendor's *gate off*, read as [`connections`] reads them.
+pub fn gate_off() -> Vec<GateOff> {
+    connections()
+        .into_iter()
+        .flat_map(|c| {
+            c.gate_off.into_iter().map(move |path| GateOff {
+                agent: c.agent,
+                name: c.name,
+                path,
+            })
+        })
+        .collect()
+}
+
 /// Whether each vendor is connected, and whether its gate is off because the
 /// binary its hooks name is gone: what the first-run checklist and Setup read.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1125,7 +1188,7 @@ pub struct AgentConnection {
     pub settings_path: String,
     /// Some hook of ours is present.
     pub connected: bool,
-    /// Hooks of ours whose binary no longer exists, by event.
+    /// The binaries hooks of ours run that no longer exist, each once.
     pub gate_off: Vec<String>,
     /// The vendor's own directory exists: it is installed here, or was.
     pub present: bool,
@@ -1139,21 +1202,18 @@ pub fn connections() -> Vec<AgentConnection> {
             let path = agent.settings_file().ok()?;
             let text = read_existing(&path).unwrap_or_default();
             let present = path.parent().is_some_and(|d| d.exists());
-            let (connected, gate_off) = match agent {
+            let connected = match agent {
                 Agent::Claude => {
                     let s = json_doc(&text, &path).unwrap_or_default();
-                    let st = inspect(&s, &path);
-                    (
-                        !st.hooks_installed.is_empty(),
-                        st.gate_off.into_iter().map(|(e, _)| e).collect(),
-                    )
+                    !inspect(&s, &path).hooks_installed.is_empty()
                 }
                 Agent::Codex => {
                     let d = json_doc(&text, &path).unwrap_or_default();
-                    (!crate::observe::codex::installed(&d).is_empty(), Vec::new())
+                    !crate::observe::codex::installed(&d).is_empty()
                 }
-                Agent::Copilot => (!text.trim().is_empty(), Vec::new()),
+                Agent::Copilot => !text.trim().is_empty(),
             };
+            let gate_off = missing_hook_binaries(agent, &text, &path);
             Some(AgentConnection {
                 agent,
                 name: agent.name(),
@@ -1199,11 +1259,26 @@ pub fn stable_binary(bin: Option<std::path::PathBuf>) -> anyhow::Result<std::pat
         }
         return Ok(bin);
     }
+    let exe = std::env::current_exe().context("finding the devplane binary")?;
+    binary_to_write(
+        std::env::var_os("APPIMAGE").map(std::path::PathBuf::from),
+        exe,
+        |p| p.is_file(),
+    )
+}
+
+/// [`stable_binary`] without `--bin`, over its inputs: `$APPIMAGE`, this
+/// executable, and how to ask whether a path is a file.
+fn binary_to_write(
+    appimage: Option<std::path::PathBuf>,
+    exe: std::path::PathBuf,
+    is_file: impl Fn(&std::path::Path) -> bool,
+) -> anyhow::Result<std::path::PathBuf> {
     // `$APPIMAGE` is set by the AppImage runtime; trusted only when it names
-    // the file, since any process can set a variable.
-    if let Some(image) = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty()) {
-        let image = std::path::PathBuf::from(image);
-        if image.is_file() {
+    // the file, since any process can set a variable. The executable itself
+    // is inside the AppImage's mount, which is gone once it quits.
+    if let Some(image) = appimage.filter(|v| !v.as_os_str().is_empty()) {
+        if is_file(&image) {
             return Ok(image);
         }
         anyhow::bail!(
@@ -1211,13 +1286,13 @@ pub fn stable_binary(bin: Option<std::path::PathBuf>) -> anyhow::Result<std::pat
             image.display()
         );
     }
-    let exe = std::env::current_exe().context("finding the devplane binary")?;
     match transient_binary(&exe) {
         None => Ok(exe),
-        Some(why) if is_app_mount(&exe) => anyhow::bail!(
-            "not connecting: every hook runs the binary's path, and {} is {why}, so the hooks \
-             — and the gate — would stop working without a word when it goes. Move Devplane \
-             to Applications, open it from there, and connect again.",
+        Some(_) if is_app_mount(&exe) => anyhow::bail!(
+            "refused: Devplane is running from a disk image or a quarantined copy ({}), so the \
+             path it would write into the agent's settings disappears when it quits — and the \
+             gate with it. Nothing was written.\n\
+             Move Devplane to Applications, open it from there, and connect again.",
             exe.display()
         ),
         Some(why) => anyhow::bail!(
@@ -1771,5 +1846,128 @@ mod tests {
         ] {
             assert_eq!(super::transient_binary(Path::new(p)), None, "{p}");
         }
+    }
+
+    /// Codex and Copilot hooks whose binary was deleted are *gate off* by
+    /// agent, as Claude Code's are; a binary that exists is not.
+    #[test]
+    fn every_vendor_reports_a_hook_whose_binary_is_gone() {
+        let gone = Path::new("/nonexistent/devplane-moved/devplane");
+        let here = std::env::current_exe().unwrap();
+        let p = Path::new("/tmp/hooks.json");
+
+        let mut codex = Map::new();
+        crate::observe::codex::install(&mut codex, gone);
+        let text = serde_json::to_string(&codex).unwrap();
+        assert_eq!(
+            missing_hook_binaries(Agent::Codex, &text, p),
+            vec![gone.display().to_string()],
+            "one line per agent, not per event"
+        );
+
+        let copilot = crate::observe::copilot::hooks_file(gone).to_string();
+        assert_eq!(
+            missing_hook_binaries(Agent::Copilot, &copilot, p),
+            vec![gone.display().to_string()]
+        );
+
+        let mut claude = Map::new();
+        connect(&mut claude, "http://127.0.0.1:47831", "tok", gone);
+        let text = serde_json::to_string(&claude).unwrap();
+        assert_eq!(
+            missing_hook_binaries(Agent::Claude, &text, p),
+            vec![gone.display().to_string()]
+        );
+
+        // Present binaries, and an unconnected vendor, report nothing.
+        let mut codex = Map::new();
+        crate::observe::codex::install(&mut codex, &here);
+        let text = serde_json::to_string(&codex).unwrap();
+        assert!(missing_hook_binaries(Agent::Codex, &text, p).is_empty());
+        let copilot = crate::observe::copilot::hooks_file(&here).to_string();
+        assert!(missing_hook_binaries(Agent::Copilot, &copilot, p).is_empty());
+        assert!(missing_hook_binaries(Agent::Copilot, "", p).is_empty());
+    }
+
+    /// `agent connect` from an AppImage writes the AppImage's file name, not
+    /// `devplane`; its hooks are still ours, so `doctor` sees them, reports
+    /// them as gate off when the file is gone, and `disconnect` removes them.
+    #[test]
+    fn a_hook_written_from_an_appimage_is_ours() {
+        let image = Path::new("/nonexistent/Apps/Devplane_0.12.0_amd64.AppImage");
+        let mut s = Map::new();
+        connect(&mut s, "http://127.0.0.1:47831", "tok", image);
+        let state = inspect(&s, Path::new("/tmp/s.json"));
+        assert!(!state.hooks_installed.is_empty(), "the hooks read as ours");
+        assert!(
+            state
+                .gate_off
+                .iter()
+                .all(|(_, bin)| bin == &image.display().to_string())
+                && !state.gate_off.is_empty()
+        );
+        disconnect(&mut s);
+        assert!(
+            inspect(&s, Path::new("/tmp/s.json"))
+                .hooks_installed
+                .is_empty()
+        );
+
+        for name in [
+            "devplane",
+            "devplane.exe",
+            "Devplane.AppImage",
+            "devplane-x86_64.appimage",
+        ] {
+            assert!(is_our_binary_name(name), "{name}");
+        }
+        for name in ["devplane.sh", "Other.AppImage", "devplaner", "hook"] {
+            assert!(!is_our_binary_name(name), "{name}");
+        }
+    }
+
+    /// The macOS app run from its disk image or translocated is told to move
+    /// to Applications, and nothing is chosen to write.
+    #[test]
+    fn a_translocated_or_mounted_app_is_told_to_move_to_applications() {
+        use std::path::PathBuf;
+        for exe in [
+            "/private/var/folders/x/T/AppTranslocation/ABC/d/Devplane.app/Contents/MacOS/devplane",
+            "/Volumes/Devplane/Devplane.app/Contents/MacOS/devplane",
+        ] {
+            let e = super::binary_to_write(None, PathBuf::from(exe), |_| true)
+                .expect_err(exe)
+                .to_string();
+            assert!(
+                e.contains("Move Devplane to Applications, open it from there, and connect again"),
+                "{exe}: {e}"
+            );
+            assert!(e.contains("Nothing was written"), "{exe}: {e}");
+        }
+        let fine = PathBuf::from("/Applications/Devplane.app/Contents/MacOS/devplane");
+        assert_eq!(
+            super::binary_to_write(None, fine.clone(), |_| true).unwrap(),
+            fine
+        );
+    }
+
+    /// Inside an AppImage the executable is under a mount that vanishes; the
+    /// hook names the AppImage file itself, and only when it is a file.
+    #[test]
+    fn an_appimage_writes_its_own_path_never_the_mount() {
+        use std::path::PathBuf;
+        let image = PathBuf::from("/home/u/Apps/Devplane.AppImage");
+        let exe = PathBuf::from("/tmp/.mount_DevplaXYZ/usr/bin/devplane");
+        let chosen =
+            super::binary_to_write(Some(image.clone()), exe.clone(), |p| p == image.as_path())
+                .unwrap();
+        assert_eq!(chosen, image);
+        // A `$APPIMAGE` naming nothing is refused rather than trusted.
+        let e = super::binary_to_write(Some(image.clone()), exe.clone(), |_| false)
+            .expect_err("a missing AppImage")
+            .to_string();
+        assert!(e.contains("$APPIMAGE"), "{e}");
+        // Without `$APPIMAGE`, the mount itself is refused.
+        assert!(super::binary_to_write(None, exe, |_| true).is_err());
     }
 }

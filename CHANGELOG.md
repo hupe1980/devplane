@@ -6,6 +6,32 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Added
 
+- The desktop app as packages: a disk image for Apple Silicon Macs, a per-user Windows installer, a
+  `.deb` that declares its WebKitGTK dependency and an AppImage that carries its own, each with a
+  `.sha256` and registering `devplane://`. Signed and notarised when the release has the signing
+  credentials; otherwise every file says `-unsigned`, no update manifest is published, and the release
+  never displaces a signed one as the default download. Pull requests bundle all four, unsigned. The
+  command line's archives and installers are unchanged.
+- Update checks in the app, off until you answer in Setup or the first-run checklist: one request per
+  launch to a fixed address, nothing sent about you, nothing downloaded before **Install and restart**,
+  and the download verified against the release key before anything is replaced. The command line
+  never checks.
+- Started from Finder, the Start menu or a launcher, the app's executable opens the window; typed in a
+  terminal it is the command line. Opened while another host serves the home, it says so and offers
+  that host's page instead of exiting unseen.
+- `devplane doctor` says whether this binary carries the window, whether it is a signed build, and
+  whether update checks are on, and reports *gate off* by agent for Codex and Copilot as for Claude
+  Code. Hooks written from an AppImage are recognised as Devplane's.
+- The certificate ends with the change's `devplane://` link and `devplane change show <id>`, as plain
+  text.
+
+- A driven agent can say the specification and the tests conflict: `spec_and_tests_conflict` on
+  Devplane's MCP server records its claim on the change — quoted, attributed to the agent and run,
+  read after the weakened checks and before the gates — stops the run, and runs `check` once with
+  nothing handed back. The claim never changes *verified* and is not a failure. It is the server's
+  one write besides `explain`'s audit row, bounded, and only about the caller's own run. Every
+  implementation prompt and feedback round now names the tool. `devplane change claim-read` marks a
+  claim read.
 - A first-run checklist in Setup, opened first while a step is left: sessions already running, update
   checks, connect an agent, trust a repository, declare a check, the spec dialect, and a first change
   that reads *verified*. Each step is read from the machine, can be skipped and brought back, and
@@ -96,6 +122,13 @@ commits the tree the gates passed on.
   recorded. Answering another item sends the held one at once. The host holds it, so closing the page still sends
   it; quitting drops it, says so first, and leaves the question open. `devplane inbox answer` is never held.
 - `?` lists the keys for the item first, then the surface's, then those that work everywhere.
+- `s` snoozes an inbox item until its session (or change) next reports activity, not for an hour; **for an hour**
+  sits beside it. Snoozed items are counted at the foot of the list and listed with a way back each.
+  `devplane inbox snooze <id> --until-activity` does the same from a terminal. A snooze that would hide a question
+  or a permission is refused, naming it.
+- One count: the inbox badge, the status bar's *need you* and the tray and dock badge show the same number — the
+  whole inbox, without a held answer. Asks that outlived their sessions keep their own noun.
+- `⌘K` over an inbox item lists that item's actions first, with their keys.
 
 ### Security
 

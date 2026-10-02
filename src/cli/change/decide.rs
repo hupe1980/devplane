@@ -1,4 +1,5 @@
-//! A person's decisions about a change: offer it, finish it, archive it.
+//! A person's decisions about a change: offer it, finish it, archive it, mark
+//! its agent's claim read.
 
 use super::{REFUSED, host_and_change, said_error};
 use crate::render::{self, BOLD, DIM, paint};
@@ -151,5 +152,24 @@ pub(super) async fn cmd_archive(
             )
         ),
     }
+    Ok(())
+}
+
+/// Marks the change's open stop claim read. It stays on the change.
+pub(super) async fn cmd_claim_read(change: &str, json: bool) -> Result<()> {
+    let (c, id) = host_and_change(change).await?;
+    let v: serde_json::Value = c
+        .post_json(
+            &format!("/api/changes/{id}/claim/read"),
+            &serde_json::json!({}),
+        )
+        .await?;
+    if json {
+        return crate::cli::print_json(&v);
+    }
+    if let Some(e) = said_error(&v) {
+        anyhow::bail!("{e}");
+    }
+    println!("{}", v["says"].as_str().unwrap_or("marked read"));
     Ok(())
 }

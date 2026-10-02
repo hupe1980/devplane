@@ -5,6 +5,34 @@ use crate::render::{BOLD, DIM, clip, paint};
 use crate::{client, config, render};
 use anyhow::Result;
 
+/// Whether the release workflow built this binary with every signing
+/// credential present. How it was built, not a check of its signature now.
+const SIGNED: bool = option_env!("DEVPLANE_SIGNED").is_some();
+
+/// The update preference as `doctor` names it: `on`, `off` or `not_asked`.
+fn updates_word(pref: Option<config::UpdatePref>) -> &'static str {
+    pref.map_or("not_asked", config::UpdatePref::as_str)
+}
+
+/// The `app` line: which binary this is, how it was built, and whether the
+/// window may check for updates.
+fn app_line(window: bool, signed: bool, updates: &str) -> String {
+    format!(
+        "window: {} · {} · update checks: {}",
+        if window {
+            "in this binary"
+        } else {
+            "not in this binary (the desktop app has it)"
+        },
+        if signed {
+            "signed build"
+        } else {
+            "unsigned build"
+        },
+        updates.replace('_', " "),
+    )
+}
+
 /// The `app` section of `doctor`: whether this binary has the window, the
 /// shortcut (validated by the plugin's own parser where built in), and the port.
 fn app_section() -> serde_json::Value {
@@ -15,6 +43,9 @@ fn app_section() -> serde_json::Value {
     let valid = serde_json::Value::Null;
     serde_json::json!({
         "built": cfg!(feature = "app"),
+        "window": cfg!(feature = "app"),
+        "signed": SIGNED,
+        "updates": updates_word(cfg.updates),
         "shortcut": cfg.shortcut,
         "shortcut_valid": valid,
         "port": cfg.port,
@@ -122,6 +153,8 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
 
     let provider = off_subscription(|k| std::env::var(k).ok());
     let app = app_section();
+    // Every connected vendor whose hooks run a binary that is gone.
+    let gate_off = crate::observe::connect::gate_off();
     if json {
         println!(
             "{}",
@@ -131,6 +164,7 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
                 "app": app,
                 "connect": state,
                 "gate": probe,
+                "gate_off": gate_off,
                 "measurement": {
                     "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
                 },
@@ -177,12 +211,21 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
     }
 
     println!("\n{}", paint(BOLD, "app"));
-    if app["built"] == true {
-        println!("  built     with the app feature — `devplane up --window` opens the window");
-    } else {
+    println!(
+        "  app       {}",
+        app_line(
+            app["window"] == true,
+            app["signed"] == true,
+            app["updates"].as_str().unwrap_or("not_asked")
+        )
+    );
+    if app["window"] != true {
         println!(
-            "  built     {} — `cargo install devplane --features app` for the window",
-            paint(DIM, "without the app feature")
+            "            {}",
+            paint(
+                DIM,
+                "download the desktop app from https://github.com/hupe1980/devplane/releases"
+            )
         );
     }
     match app["problems"].as_array() {
@@ -332,20 +375,23 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
             paint(DIM, "— they are enforced; start the host to file them")
         );
     }
-    // A hook whose binary is gone runs nothing: that event is ungated,
-    // whatever else the settings say.
-    for (event, bin) in &state.gate_off {
+    // A hook whose binary is gone runs nothing: that agent is ungated,
+    // whatever else its settings say. One line per agent and missing path.
+    for off in &gate_off {
         println!(
-            "  gate      {} for {event} — its hook runs {bin}, which no longer exists",
-            paint(render::RED, "off"),
+            "  {} {} — its hooks run {}, which no longer exists",
+            paint(render::RED, "gate off"),
+            off.name,
+            off.path
         );
-    }
-    if !state.gate_off.is_empty() {
         println!(
             "            {}",
             paint(
                 DIM,
-                "run `devplane agent connect claude` from an installed devplane (or pass `--bin <path>`)"
+                &format!(
+                    "connect again from where Devplane is now: devplane agent connect {}",
+                    off.agent.id()
+                )
             )
         );
     }
@@ -635,6 +681,22 @@ mod tests {
     use super::started_from;
 
     /// Speaks only when the binaries differ.
+    #[test]
+    fn the_app_line_names_the_binary_the_build_and_the_update_answer() {
+        assert_eq!(
+            super::app_line(true, true, "on"),
+            "window: in this binary · signed build · update checks: on"
+        );
+        assert_eq!(
+            super::app_line(false, false, super::updates_word(None)),
+            "window: not in this binary (the desktop app has it) · unsigned build · update checks: not asked"
+        );
+        assert_eq!(
+            super::updates_word(Some(crate::config::UpdatePref::Off)),
+            "off"
+        );
+    }
+
     #[test]
     fn the_started_from_line_speaks_only_when_the_binaries_differ() {
         assert_eq!(

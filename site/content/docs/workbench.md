@@ -156,6 +156,10 @@ refusal, as `devplane change start` does.
 `⌘K` / `Ctrl+K` finds changes, surfaces, actions and projects. `>` lists only actions. Other text
 also searches every session's tool calls, questions and errors, like `devplane search`.
 
+Over an inbox item, the palette lists that item's actions first, each with its key — the same
+actions its buttons offer, including those with no key of their own (*snooze for an hour*, *copy the
+rule*, *copy the attach command*). Over a change, it lists the change's own actions first.
+
 ## The bottom panel
 
 **Activity**: every session, newest event first: time, project, agent (driven or not), state, action,
@@ -199,7 +203,7 @@ not apply to the item says why instead of doing nothing.
 | `t` · `⌘↵` / `Ctrl+Enter` | type an answer in your own words · send it |
 | `a` · `d` | allow, once · deny — a permission Devplane holds |
 | `w` | a dialog the vendor owns: open its session (VS Code) or copy its resume command |
-| `s` | snooze for an hour — never a question or a permission |
+| `s` | snooze until the session (or change) next reports activity — an hour for a pull request or an issue; never a question or a permission |
 | `o` · `r` | open what the item is about · open the change's review |
 | `z` | take back the answer before it is sent, or put a snoozed item back |
 
@@ -208,6 +212,13 @@ counts down, and `z` takes it back with nothing sent and nothing recorded. Answe
 sends the held one at once. Closing the page does not stop it being sent; quitting does — the quit
 question says so — and the question is waiting again at the next start. `devplane inbox answer`
 sends at once.
+
+A snoozed item leaves the list and is counted at its foot — *2 snoozed* — with **list them** showing
+each one, when it comes back, and **bring back**. **for an hour**, beside `s`, snoozes on the clock
+instead.
+
+The inbox badge, the status bar's *need you* and the menu-bar count are one number: the items in the
+whole inbox, without an answer being held. A list narrowed to one project says how many it leaves out.
 
 ## The window
 

@@ -81,9 +81,10 @@
     const out: Entry[] = [];
     // The page under the palette's own actions, each run by that page (a
     // change offers itself only through its own guard).
-    for (const c of on.here) {
+    // Two options may share a label; each is its own command.
+    for (const [i, c] of on.here.entries()) {
       out.push({
-        id: `here:${c.label}`,
+        id: `here:${i}:${c.label}`,
         kind: "here",
         icon: c.icon,
         label: c.label,
@@ -193,7 +194,7 @@
     }),
   );
 
-  const TITLES = $derived<Record<Kind, string>>({ here: here.title ? `This change: ${here.title}` : "Here", change: "Changes", surface: "Go to", action: "Actions", project: "Projects" });
+  const TITLES = $derived<Record<Kind, string>>({ here: here.title ? `${here.noun || "This change"}: ${here.title}` : "Here", change: "Changes", surface: "Go to", action: "Actions", project: "Projects" });
   /// The surface that searches every session, if one is registered.
   const searcher = $derived(surfaces().find((s) => s.takesQuery));
   const shown = $derived.by(() => {
@@ -256,7 +257,7 @@
         <button tabindex="-1" onclick={e.go} onmouseenter={() => (at = i)}>
           <Icon name={e.icon} size={14} />
           <span class="label">{e.label}</span>
-          {#if e.kind === "change" && e.hint}<ChangeState state={e.hint} q={e.qualifier} />{:else if e.hint}<span class="hint" class:kbd={e.kind === "action" || e.kind === "surface"}>{e.hint}</span>{/if}
+          {#if e.kind === "change" && e.hint}<ChangeState state={e.hint} q={e.qualifier} />{:else if e.hint}<span class="hint" class:kbd={e.kind === "action" || e.kind === "surface" || (e.kind === "here" && e.icon === "keyboard")}>{e.hint}</span>{/if}
         </button>
       </li>
     {/each}

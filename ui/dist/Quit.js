@@ -1,5 +1,5 @@
-import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, M as from_html, Q as user_derived, R as get, U as user_effect, X as set, Z as state, at as reset, i as api, k as set_text, nt as push, o as prop, q as only_child, tt as pop } from "./api.js";
-import { M as onAction, h as resource, m as failure } from "./app.js";
+import { $ as user_effect, B as append, G as delegate, H as from_html, J as get, K as delegated, L as if_block, Q as template_effect, ct as user_derived, d as onAction, dt as pop, ft as push, g as prop, ht as reset, i as api, it as sibling, ot as set, rt as only_child, st as state, tt as child, z as set_text } from "./api.js";
+import { n as failure, r as resource } from "./resource.svelte.js";
 import { t as hideWindow } from "./frame.js";
 //#region src/surfaces/quit/Quit.svelte
 var root = from_html(`<pre class="says svelte-1pz5pdz"> </pre>`);

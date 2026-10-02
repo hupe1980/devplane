@@ -17,6 +17,7 @@
   import { go } from "../../lib/route";
   import Checklist from "./Checklist.svelte";
   import Declare from "./Declare.svelte";
+  import Updates from "./Updates.svelte";
 
   let {
     focus = "",
@@ -165,6 +166,11 @@
             ]}
           />
         {/if}
+      </section>
+
+      <section class="card" aria-label="update checks">
+        <h2><Icon name="refresh" size={14} /> Update checks</h2>
+        <Updates />
       </section>
 
       {#if github.phase === "failed" && github.failure}

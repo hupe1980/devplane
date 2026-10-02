@@ -19,7 +19,20 @@
 //! | `twin-asks`     | asks two permissions at once, each with its own options |
 //! | `withdraw`      | asks a permission, then withdraws it (`$/cancel_request`) |
 //! | `diff-edit`     | reports an edit call whose diff arrives whole in a status-less update |
+//! | `conflict`      | calls `spec_and_tests_conflict` on the offered `devplane` server, then waits to be cancelled |
 //! | anything else   | streams the prompt back and ends the turn |
+//!
+//! The behaviour is chosen from the prompt without Devplane's closing sentence
+//! (which names the stop tool, and so says `conflict` itself).
+//!
+//! `conflict` launches the stdio MCP server named `devplane` it was offered,
+//! with that server's command, arguments and environment, and calls the stop
+//! tool with a fixed reason and two paths; the tool's answer is written to
+//! `.devplane/claim-result.txt`. `DEVPLANE_ECHO_CLAIM_REASON` replaces the
+//! reason, `DEVPLANE_ECHO_CLAIM_PATHS` (a JSON list) the paths,
+//! `DEVPLANE_ECHO_CLAIM_TWICE=1` calls twice at once, and
+//! `DEVPLANE_ECHO_CLAIM_ENV=<json object>` replaces the server's offered
+//! environment (to plant another run's id or drop the key).
 //!
 //! Every prompt is appended to `.devplane/heard.log` in the session's working
 //! directory (prompt text is never stored in the event log), and `DEVPLANE_RUN`
@@ -78,6 +91,10 @@ fn one_of(title: &str, options: &[(&str, &str)]) -> serde_json::Value {
 /// The working directory the client gave this session.
 static CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
+/// The MCP servers the client offered on the last `session/new`, resume or
+/// load, as JSON.
+static OFFERED: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
 /// Sessions the client has asked to stop. `session/cancel` is a notification,
 /// not JSON-RPC cancellation, so the agent must track it itself.
 static CANCELLED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -124,6 +141,7 @@ fn knows(session: &str) -> bool {
 /// Leaves what a test reads to count this agent's processes and see what
 /// it was offered.
 fn note_session(mcp: &[agent_client_protocol::schema::v1::McpServer]) {
+    *OFFERED.lock().expect("offered") = serde_json::to_value(mcp).ok();
     let Some(root) = CWD.lock().expect("cwd").clone() else {
         return;
     };
@@ -359,6 +377,11 @@ async fn take_turn(
         )
     };
 
+    // Chosen from the prompt without Devplane's closing sentence, which names
+    // the stop tool and would otherwise select `conflict` and `tool` on every
+    // turn.
+    let wanted = devplane::core::context::without_stop_and_say(&text);
+
     // A fresh session says `turn 1`; a resumed one continues its count.
     let turn = turns_for(&req.session_id.to_string());
     connection.send_notification(say(format!("echo: {text} [turn {turn}]")))?;
@@ -389,7 +412,7 @@ async fn take_turn(
     }
 
     // ACP usage is a running session total; cost is optional.
-    if text.contains("expensive") {
+    if wanted.contains("expensive") {
         connection.send_notification(SessionNotification::new(
             req.session_id.clone(),
             SessionUpdate::UsageUpdate(
@@ -398,7 +421,7 @@ async fn take_turn(
         ))?;
     }
 
-    if text.contains("tool") {
+    if wanted.contains("tool") {
         // Pending, then updates under the same id without repeating the title.
         connection.send_notification(SessionNotification::new(
             req.session_id.clone(),
@@ -418,7 +441,7 @@ async fn take_turn(
         }
     }
 
-    if text.contains("plan") {
+    if wanted.contains("plan") {
         connection.send_notification(SessionNotification::new(
             req.session_id.clone(),
             SessionUpdate::Plan(Plan::new(vec![
@@ -438,7 +461,7 @@ async fn take_turn(
 
     // Writes the file for real and reports an `Edit` call. `write-file`, not
     // `write`, because prompts use that word.
-    if let Some(rest) = text.split_once("write-file ").map(|(_, r)| r)
+    if let Some(rest) = wanted.split_once("write-file ").map(|(_, r)| r)
         && let Some(path) = rest.split_whitespace().next()
         && let Some(root) = CWD.lock().expect("cwd").clone()
     {
@@ -465,7 +488,7 @@ async fn take_turn(
     }
 
     // Two calls asking at once, each with its own options.
-    if text.contains("twin-asks") {
+    if wanted.contains("twin-asks") {
         let ask = |call: &str, title: &str| {
             connection
                 .send_request(RequestPermissionRequest::new(
@@ -496,7 +519,7 @@ async fn take_turn(
 
     // Asks, then thinks better of it: dropping the request sends
     // `$/cancel_request`.
-    if text.contains("withdraw") {
+    if wanted.contains("withdraw") {
         let asked = connection
             .send_request(RequestPermissionRequest::new(
                 req.session_id.clone(),
@@ -523,7 +546,7 @@ async fn take_turn(
 
     // An edit whose diff arrives in pieces: a partial one with the call, then
     // the whole one in a status-less update, then the ending.
-    if text.contains("diff-edit")
+    if wanted.contains("diff-edit")
         && let Some(root) = CWD.lock().expect("cwd").clone()
     {
         let file = root.join("a.txt");
@@ -556,12 +579,29 @@ async fn take_turn(
         ))?;
     }
 
+    // Says the spec and the tests conflict through the offered server, then
+    // waits to be stopped, as an agent that has said so should.
+    if wanted.contains("conflict") {
+        let said = claim_conflict().await;
+        if let Some(root) = CWD.lock().expect("cwd").clone() {
+            std::fs::write(root.join(".devplane/claim-result.txt"), &said).ok();
+        }
+        connection.send_notification(say(format!("claim: {said}")))?;
+        let id = req.session_id.to_string();
+        for _ in 0..3000 {
+            if is_cancelled(&id) {
+                return Ok(StopReason::Cancelled);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     // A turn long enough to be cancelled.
-    if text.contains("slow") {
+    if wanted.contains("slow") {
         let id = req.session_id.to_string();
         // 30 s outlasts the client's 5 s cancel grace yet cannot hang a suite;
         // `slowish` ends itself after 3 s, enough for a mid-turn message.
-        let ceiling: usize = if text.contains("slowish") {
+        let ceiling: usize = if wanted.contains("slowish") {
             3 * 100
         } else {
             30 * 100
@@ -575,7 +615,7 @@ async fn take_turn(
         }
     }
 
-    if text.contains("permission") {
+    if wanted.contains("permission") {
         // Blocks the turn until the client answers.
         let answer = connection
             .send_request(RequestPermissionRequest::new(
@@ -606,7 +646,7 @@ async fn take_turn(
         }
     }
 
-    if text.contains("question") || text.contains("unrenderable") {
+    if wanted.contains("question") || wanted.contains("unrenderable") {
         // A client that cannot render forms gets prose, as from a real agent.
         if !CAN_RENDER_FORMS.load(std::sync::atomic::Ordering::SeqCst) {
             connection.send_notification(say(
@@ -614,11 +654,11 @@ async fn take_turn(
                     .to_string(),
             ))?;
         } else {
-            let schema = if text.contains("unrenderable") {
+            let schema = if wanted.contains("unrenderable") {
                 // A valid form with no options: not presentable as a question.
                 serde_json::json!({ "type": "object",
                     "properties": { "name": { "type": "string", "title": "Your name" } } })
-            } else if text.contains("question2") {
+            } else if wanted.contains("question2") {
                 serde_json::json!({ "type": "object", "properties": {
                     "question_0": one_of("Language", &[("Rust", "Fast."), ("Go", "Simple.")]),
                     "question_1": one_of("Runtime", &[("Tokio", "Big."), ("smol", "Small.")]) } })
@@ -644,9 +684,153 @@ async fn take_turn(
         }
     }
 
-    Ok(if text.contains("fail") {
+    Ok(if wanted.contains("fail") {
         StopReason::Refusal
     } else {
         StopReason::EndTurn
     })
+}
+
+/// Launches the offered `devplane` server over stdio and calls the stop tool,
+/// returning what it answered (each answer on its own line when called twice).
+async fn claim_conflict() -> String {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let offered = OFFERED.lock().expect("offered").clone();
+    let Some(server) = offered
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.iter().find(|s| s["name"] == "devplane"))
+        .cloned()
+    else {
+        return "no devplane server was offered".into();
+    };
+    let Some(command) = server["command"].as_str() else {
+        return format!("the devplane server is not a stdio one: {server}");
+    };
+    let args: Vec<String> = server["args"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut env: Vec<(String, String)> = server["env"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    Some((
+                        e["name"].as_str()?.to_string(),
+                        e["value"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(over) = std::env::var("DEVPLANE_ECHO_CLAIM_ENV")
+        .ok()
+        .and_then(|j| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&j).ok())
+    {
+        env = over
+            .into_iter()
+            .filter_map(|(k, v)| Some((k, v.as_str()?.to_string())))
+            .collect();
+    }
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(&args)
+        // What the server knows of its run is what it was offered, nothing
+        // inherited from this agent's own shell.
+        .env_remove("DEVPLANE_RUN")
+        .env_remove("DEVPLANE_CHANGE")
+        .env_remove("DEVPLANE_CLAIM_KEY")
+        .envs(env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return format!("could not start the devplane server: {e}"),
+    };
+    let mut stdin = child.stdin.take().expect("piped");
+    let mut lines = tokio::io::BufReader::new(child.stdout.take().expect("piped")).lines();
+    let reason = std::env::var("DEVPLANE_ECHO_CLAIM_REASON").unwrap_or_else(|_| {
+        "The spec says sessions last 30 days; tests/session_test.rs asserts 7.".into()
+    });
+    let paths: serde_json::Value = std::env::var("DEVPLANE_ECHO_CLAIM_PATHS")
+        .ok()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_else(|| {
+            serde_json::json!(["specs/043-sessions/spec.md", "tests/session_test.rs"])
+        });
+    let twice = std::env::var_os("DEVPLANE_ECHO_CLAIM_TWICE").is_some();
+    let mut send = Vec::new();
+    send.push(
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "echo-agent", "version": "0"}}}),
+    );
+    send.push(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let calls: Vec<u64> = if twice { vec![2, 3] } else { vec![2] };
+    for id in &calls {
+        send.push(
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+            "name": "spec_and_tests_conflict",
+            "arguments": {"reason": reason, "paths": paths}}}),
+        );
+    }
+    let mut answers = std::collections::BTreeMap::new();
+    // `initialize` is answered before anything else is sent.
+    for (i, msg) in send.iter().enumerate() {
+        if stdin
+            .write_all(format!("{msg}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            return "the devplane server closed its input".into();
+        }
+        if i == 0 {
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(l)) => {
+                        let v: serde_json::Value = serde_json::from_str(&l).unwrap_or_default();
+                        if v["id"] == 1 {
+                            break;
+                        }
+                    }
+                    _ => return "the devplane server did not answer `initialize`".into(),
+                }
+            }
+        }
+    }
+    let _ = stdin.flush().await;
+    let wait = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while answers.len() < calls.len() {
+            match lines.next_line().await {
+                Ok(Some(l)) => {
+                    let v: serde_json::Value = serde_json::from_str(&l).unwrap_or_default();
+                    if let Some(id) = v["id"].as_u64().filter(|id| calls.contains(id)) {
+                        let text = v["result"]["content"][0]["text"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| v.to_string());
+                        let error = v["result"]["isError"] == true;
+                        answers.insert(
+                            id,
+                            format!("{}{text}", if error { "refused: " } else { "" }),
+                        );
+                    }
+                }
+                _ => break,
+            }
+        }
+    })
+    .await;
+    drop(stdin);
+    let _ = child.kill().await;
+    if wait.is_err() {
+        return "the devplane server did not answer the call".into();
+    }
+    answers.into_values().collect::<Vec<_>>().join("\n")
 }

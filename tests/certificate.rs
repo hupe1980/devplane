@@ -2025,3 +2025,57 @@ mod base_checks {
         );
     }
 }
+
+/// The certificate ends with the change's link and the command that opens the
+/// same change, as plain text, finished or not, and the bounded form keeps
+/// them past its cut.
+#[test]
+fn the_certificate_ends_with_its_link_and_the_command() {
+    let lines = |w: &Change| {
+        let id = w.id.as_str().to_string();
+        (
+            format!("devplane://change/{id}"),
+            format!("devplane change show {id}"),
+        )
+    };
+    let tail = |md: &str| {
+        md.lines()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(2)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+
+    let w = passing();
+    let (link, show) = lines(&w);
+    assert_eq!(
+        tail(&cert_of(&w, None).markdown()),
+        vec![show.clone(), link.clone()]
+    );
+
+    let unfinished = change();
+    let (ulink, ushow) = lines(&unfinished);
+    assert_eq!(
+        tail(&cert_of(&unfinished, None).markdown()),
+        vec![ushow, ulink]
+    );
+
+    let mut huge = change();
+    huge.gates.push(report(
+        "check",
+        1,
+        vec![CommandResult::exited("x".repeat(2 * MAX_BYTES), 0)],
+    ));
+    let basis = basis_of(
+        &huge,
+        true,
+        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+    );
+    let huge = finished(huge, basis);
+    let (hlink, hshow) = lines(&huge);
+    let bounded = cert_of(&huge, None).markdown_bounded();
+    assert!(bounded.len() <= MAX_BYTES, "{} bytes", bounded.len());
+    assert!(bounded.contains("was truncated"), "the cut is not said");
+    assert_eq!(tail(&bounded), vec![hshow, hlink]);
+}

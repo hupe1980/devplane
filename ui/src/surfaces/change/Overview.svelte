@@ -1,6 +1,8 @@
 <script lang="ts">
   // The overview of a change: evidence in four cards, facts in a grid, history
   // on one axis. Each card states a fact and links the tab that holds the rest.
+  // An agent's stop claims are on the history's *agent* lane, open or closed;
+  // the open one is read in the header, above this.
   import { resource } from "../../lib/resource.svelte";
   import Failed from "../../lib/Failed.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
@@ -33,6 +35,14 @@
       return { at: g.at, lane: "gates", label: `${g.gate} attempt ${g.attempt}: ${ok ? "passed" : "failed"}`, tone: ok ? ("done" as const) : ("fail" as const) };
     }),
     ...decisions.map((x) => ({ at: x.at, lane: "decisions", label: `${x.authority} · ${x.action} · ${x.outcome}`, tone: tone(x.authority) })),
+    // Every stop claim stays in the history under its run, open or closed:
+    // the agent's words, so the label says whose.
+    ...(d.claim_history ?? []).map((c) => ({
+      at: c.at,
+      lane: "agent",
+      label: `${c.says} — run ${c.run}${c.closed_says ? ` · closed: ${c.closed_says}` : ""}`,
+      tone: "wait" as const,
+    })),
     ...(d.archived_at ? [{ at: d.archived_at, lane: "change", label: STATES.archived.word, tone: "none" as const }] : []),
   ]);
   const byAuthority = $derived(
@@ -123,7 +133,7 @@
     <!-- The decisions lane is empty because it was not read, not because
          nothing was decided. -->
     {#if read.failure && !(read.failure.down && read.data === null)}<Failed what="the decisions" failure={read.failure} at={read.at} stale={read.data !== null} />{/if}
-    <Timeline {marks} lanes={["change", "gates", "decisions"]} />
+    <Timeline {marks} lanes={(d.claim_history ?? []).length ? ["change", "agent", "gates", "decisions"] : ["change", "gates", "decisions"]} />
   </section>
 
 </div>

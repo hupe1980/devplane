@@ -9,8 +9,8 @@
   import Inline from "../../lib/ui/Inline.svelte";
   import { safeHref } from "../../lib/href";
   import { spell } from "../../lib/keys";
-  import { copyText } from "../../lib/resource.svelte";
   import { answerItemKeys } from "./keys";
+  import { copyCommand, untilActivity } from "./actions";
   import type { ReadyFacts } from "../../wire/ReadyFacts";
 
   /// How much of a detail the row shows; the rest is in the `title`.
@@ -81,6 +81,7 @@
     answer,
     act,
     snooze,
+    snoozeHour = snooze,
     copyRule,
     say,
     keys = "",
@@ -91,6 +92,8 @@
     answer: (item: Item, what: Answer) => Promise<void>;
     act: (item: Item, action: string) => Promise<void>;
     snooze: (item: Item) => Promise<void>;
+    /// The keyless snooze beside `s`: for an hour.
+    snoozeHour?: (item: Item) => Promise<void>;
     copyRule: (rule: string) => Promise<void>;
     /// Reports a refusal this row makes on its own, such as an empty reply.
     say: (sentence: string) => void;
@@ -158,15 +161,14 @@
     return n <= 9 ? String(n) : null;
   };
   const answerable = $derived((item.options ?? []).filter((o) => o.id).length);
+  /// An option's number among the ones that can be chosen — its row action.
+  const optionNumber = (index: number) => (item.options ?? []).slice(0, index + 1).filter((o) => o.id).length;
 
   /// `w`: the vendor's documented link where there is one, else the resume
   /// command copied — and the control says which.
   const sessionLink = $derived(safeHref(item.session_link));
-  async function copyResume() {
-    const cmd = item.resume_command;
-    if (!cmd) return;
-    say((await copyText(cmd)) ? `copied: ${cmd} — run it in a terminal to answer there` : `nothing was copied: this page has no clipboard — run ${cmd}`);
-  }
+  const copyAttach = async () => say(await copyCommand(`devplane run attach ${item.run_id}`, ""));
+  const copyResume = async () => item.resume_command && say(await copyCommand(item.resume_command, " — run it in a terminal to answer there"));
 
   // The item keys press the control they are printed on, so a key and its
   // button can never do two different things; a control that is not here
@@ -233,6 +235,7 @@
                   class:picked={picked[q.field]?.option === o.value}
                   title={o.detail ?? undefined}
                   data-key={k}
+                  data-action="option:{q.field}:{oi}"
                   onclick={() => pick(q.field, { option: o.value })}>{o.label}</button
                 >{#if k}<kbd>{k}</kbd>{/if}</span
               >
@@ -246,6 +249,7 @@
                 placeholder="your answer"
                 aria-label="your answer to: {q.title}"
                 data-key={q.field === keyedField ? "t" : null}
+                data-action="reply:{q.field}"
               />
               <button data-send onclick={() => reply(q.field)}>reply</button><kbd title="sends from inside the field">{spell("Mod+Enter")}</kbd>
               {#if q.field === keyedField}<kbd title="puts you in this field">t</kbd>{/if}
@@ -255,7 +259,7 @@
       {/each}
       {#if form.length > 1}
         <div class="reply">
-          <button onclick={send} disabled={outstanding > 0}>
+          <button data-action="send_form" onclick={send} disabled={outstanding > 0}>
             {outstanding > 0 ? `${outstanding} still to answer` : `send ${form.length} answers`}
           </button>
         </div>
@@ -267,7 +271,7 @@
             {#if o.id}
               {@const k = optionKey(oi)}
               <span class="keyed"
-                ><button class="choice" data-key={k} onclick={() => answer(item, { option: o.id! })}>{o.label}</button
+                ><button class="choice" data-key={k} data-action="option:{optionNumber(oi)}" onclick={() => answer(item, { option: o.id! })}>{o.label}</button
                 >{#if k}<kbd>{k}</kbd>{/if}</span
               >
             {:else}
@@ -290,6 +294,7 @@
             placeholder="your answer"
             aria-label="your answer to: {item.title}"
             data-key="t"
+            data-action="reply"
           />
           <button data-send onclick={() => reply()}>reply</button><kbd title="sends from inside the field">{spell("Mod+Enter")}</kbd>
           <kbd title="puts you in this field">t</kbd>
@@ -302,7 +307,7 @@
       <p class="offer">
         <span class="dim">To stop being asked, paste this rule:</span>
         <code>{item.offer.rule}</code>
-        <button onclick={() => copyRule(item.offer!.rule)}>copy</button>
+        <button data-action="copy_rule" onclick={() => copyRule(item.offer!.rule)}>copy</button>
         <span class="dim"
           >paste into {item.offer.file} {item.offer.section} · covers {item.offer.covers}{item.offer.more
             ? "+"
@@ -321,9 +326,9 @@
     {#if item.answer_in && (sessionLink || item.resume_command)}
       <p class="session">
         {#if sessionLink}
-          <span class="keyed"><a class="act primary" data-key="w" href={sessionLink}>open the session in VS Code</a><kbd>w</kbd></span>
+          <span class="keyed"><a class="act primary" data-key="w" data-action="session" href={sessionLink}>open the session in VS Code</a><kbd>w</kbd></span>
         {:else}
-          <span class="keyed"><button class="primary" data-key="w" onclick={copyResume}>copy the resume command</button><kbd>w</kbd></span>
+          <span class="keyed"><button class="primary" data-key="w" data-action="session" onclick={copyResume}>copy the resume command</button><kbd>w</kbd></span>
           <code class="cmd">{item.resume_command}</code>
         {/if}
       </p>
@@ -331,32 +336,33 @@
 
     <div class="acts">
       {#if has("allow")}
-        <span class="keyed"><button data-key="a" onclick={() => answer(item, { decision: "allow" })}>allow</button><kbd>a</kbd></span>
+        <span class="keyed"><button data-key="a" data-action="allow" onclick={() => answer(item, { decision: "allow" })}>allow</button><kbd>a</kbd></span>
       {/if}
       {#if has("deny")}
-        <span class="keyed"><button data-key="d" onclick={() => answer(item, { decision: "deny" })}>deny</button><kbd>d</kbd></span>
+        <span class="keyed"><button data-key="d" data-action="deny" onclick={() => answer(item, { decision: "deny" })}>deny</button><kbd>d</kbd></span>
       {/if}
       {#if has("retry")}
-        <button onclick={() => act(item, "retry")}>retry</button>
+        <button data-action="retry" onclick={() => act(item, "retry")}>retry</button>
       {/if}
       {#if has("resume")}
-        <button onclick={() => act(item, "resume")}>resume</button>
+        <button data-action="resume" onclick={() => act(item, "resume")}>resume</button>
       {/if}
       {#if has("review") && item.change_id}
-        <span class="keyed"><a class="act primary" href={`#change/${encodeURIComponent(item.change_id)}/review`} data-key="r">review</a><kbd>r</kbd></span>
+        <span class="keyed"><a class="act primary" href={`#change/${encodeURIComponent(item.change_id)}/review`} data-key="r" data-action="review">review</a><kbd>r</kbd></span>
       {/if}
       <!-- A drift: tell the run which files moved, or accept it. Either is recorded. -->
       {#if has("tell_run")}
-        <button onclick={() => act(item, "tell_run")}>tell the run</button>
+        <button data-action="tell_run" onclick={() => act(item, "tell_run")}>tell the run</button>
       {/if}
       {#if has("accept_drift")}
-        <button onclick={() => act(item, "accept_drift")}>accept the drift</button>
+        <button data-action="accept_drift" onclick={() => act(item, "accept_drift")}>accept the drift</button>
       {/if}
       {#if has("open") && (item.run_id || item.change_id)}
         <span class="keyed"
           ><a
             class="act"
             data-key="o"
+            data-action="open"
             href={item.change_id
               ? `#change/${encodeURIComponent(item.change_id)}`
               : `#why/${encodeURIComponent(item.run_id ?? "")}`}>open</a
@@ -364,20 +370,23 @@
         >
       {/if}
       {#if (has("open_pr") || has("open_issue")) && url}
-        <a class="act" href={url} target="_blank" rel="noreferrer noopener">
+        <a class="act" data-action={has("open_pr") ? "open_pr" : "open_issue"} href={url} target="_blank" rel="noreferrer noopener">
           {has("open_pr") ? "open pull request" : "open issue"}
         </a>
       {/if}
       <!-- A link, never a fetch: the vendor's window opens with the prompt typed. -->
       {#if launch}
-        <a class="act" href={launch}>open an agent with this typed</a>
+        <a class="act" data-action="launch" href={launch}>open an agent with this typed</a>
       {/if}
+      <!-- Until the next activity (an hour where there is no session), or an hour. -->
       {#if has("snooze")}
-        <span class="keyed"><button data-key="s" onclick={() => snooze(item)}>snooze 1h</button><kbd>s</kbd></span>
+        <span class="keyed"><button data-key="s" data-action="snooze" onclick={() => snooze(item)}>{untilActivity(item) ? "snooze until new activity" : "snooze 1h"}</button><kbd>s</kbd></span>
+        {#if untilActivity(item)}<button data-action="snooze_hour" onclick={() => snoozeHour(item)}>for an hour</button>{/if}
       {/if}
-      <!-- A browser cannot attach, so show the command. -->
+      <!-- A browser cannot attach, so show the command, and copy it. -->
       {#if has("attach") && item.run_id}
         <code class="cmd">devplane run attach {item.run_id}</code>
+        <button data-action="attach" onclick={copyAttach}>copy</button>
       {/if}
     </div>
   </div>

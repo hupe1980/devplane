@@ -1,5 +1,5 @@
-import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, M as from_html, R as get, X as set, Y as proxy, Z as state, at as reset, i as api, k as set_text, nt as push, q as only_child, tt as pop } from "./api.js";
-import { p as copyText } from "./app.js";
+import { B as append, G as delegate, H as from_html, J as get, K as delegated, L as if_block, Q as template_effect, at as proxy, dt as pop, ft as push, ht as reset, i as api, it as sibling, ot as set, rt as only_child, st as state, tt as child, z as set_text } from "./api.js";
+import { t as copyText } from "./resource.svelte.js";
 //#region src/lib/Commands.svelte
 var root = from_html(`<span class="note svelte-1hip6z1" role="status">Copied.</span>`);
 var root_1 = from_html(`<span class="note svelte-1hip6z1" role="status">Nothing was copied — this page has no clipboard; select the text.</span>`);

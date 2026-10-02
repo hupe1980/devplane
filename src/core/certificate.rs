@@ -519,8 +519,23 @@ fn bytes_phrase(n: u64) -> String {
 }
 
 impl Certificate<'_> {
-    /// The document a reviewer reads, sized for a pull request body.
+    /// The document a reviewer reads, sized for a pull request body. It ends
+    /// with the change's `devplane://` link and the command that opens the
+    /// same change, as plain text: whether a pull request or a chat makes the
+    /// link clickable is theirs, and the command works either way.
     pub fn markdown(&self) -> String {
+        let mut o = self.body();
+        o.push_str(&self.link_lines());
+        o
+    }
+
+    /// The last two lines: the link, and the command.
+    fn link_lines(&self) -> String {
+        let id = self.change.id.as_str();
+        format!("\ndevplane://change/{id}\n\ndevplane change show {id}\n")
+    }
+
+    fn body(&self) -> String {
         let mut o = String::new();
         let w = self.change;
 
@@ -807,18 +822,22 @@ impl Certificate<'_> {
         if full.len() <= MAX_BYTES {
             return full;
         }
+        // The link and the command survive the cut: they are how a reader
+        // reaches the whole record.
+        let links = self.link_lines();
+        let full = self.body();
         let note = format!(
             "\n---\n\n**This certificate was truncated to fit its size limit.** What is above is \
              incomplete. Read the structured form for the whole record: `devplane change export {} \
              --json`.",
             self.change.id.as_str()
         );
-        let keep = MAX_BYTES.saturating_sub(note.len() + 1);
+        let keep = MAX_BYTES.saturating_sub(note.len() + links.len() + 2);
         let mut cut = keep;
         while cut > 0 && !full.is_char_boundary(cut) {
             cut -= 1;
         }
-        format!("{}\n{note}", &full[..cut])
+        format!("{}\n{note}\n{links}", &full[..cut])
     }
 }
 

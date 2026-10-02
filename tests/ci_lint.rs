@@ -143,3 +143,183 @@ fn the_published_bundle_is_accountable_to_a_commit() {
          stale silently — which is the one cost of committing it"
     );
 }
+
+/// The text of one job (a key at two spaces of indent) in a workflow, up to
+/// the next job.
+fn job<'a>(workflow: &'a str, name: &str) -> &'a str {
+    let head = format!("\n  {name}:\n");
+    let start = workflow
+        .find(&head)
+        .unwrap_or_else(|| panic!("no `{name}` job"))
+        + head.len();
+    let mut end = workflow.len();
+    let mut at = start;
+    for line in workflow[start..].split_inclusive('\n') {
+        let is_job = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line.trim_end().ends_with(':')
+            && !line.trim().contains(' ');
+        if is_job {
+            end = at;
+            break;
+        }
+        at += line.len();
+    }
+    &workflow[start..end]
+}
+
+/// Every tag builds the desktop app for each platform from the same commit,
+/// signs it only with credentials from the protected environment, and
+/// otherwise labels every file unsigned and publishes no update manifest.
+#[test]
+fn the_release_packages_the_app_signed_or_labelled_unsigned() {
+    let wf = std::fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("release.yml");
+    let packages = job(&wf, "packages");
+    assert!(
+        packages.contains("environment: release"),
+        "secrets outside the release environment"
+    );
+    assert!(
+        packages.contains("--features app"),
+        "the packages are built without the window"
+    );
+    for bundle in ["app,dmg", "nsis", "deb,appimage"] {
+        assert!(
+            packages.contains(&format!("bundles: {bundle}")),
+            "no `{bundle}` leg"
+        );
+    }
+    // The exact secret names the install page and the workflow's header name.
+    let header: String = wf
+        .lines()
+        .take_while(|l| l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let docs = std::fs::read_to_string(repo_root().join("site/content/docs/install.md"))
+        .expect("install.md");
+    for secret in [
+        "APPLE_CERTIFICATE",
+        "APPLE_CERTIFICATE_PASSWORD",
+        "APPLE_SIGNING_IDENTITY",
+        "APPLE_ID",
+        "APPLE_PASSWORD",
+        "APPLE_TEAM_ID",
+        "WINDOWS_SIGN_COMMAND",
+        "TAURI_SIGNING_PRIVATE_KEY",
+        "TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    ] {
+        assert!(
+            packages.contains(&format!("secrets.{secret} }}")),
+            "the packages job never reads `{secret}`"
+        );
+        assert!(
+            header.contains(secret),
+            "release.yml's header does not name `{secret}`"
+        );
+        assert!(docs.contains(secret), "install.md does not name `{secret}`");
+    }
+    // Unsigned is said in the file name, the summary and the marker publish reads.
+    assert!(
+        packages.contains("-unsigned."),
+        "an unsigned package is not named so"
+    );
+    assert!(
+        packages.contains("GITHUB_STEP_SUMMARY"),
+        "the missing credential is not named"
+    );
+    assert!(
+        packages.contains("unsigned-$PLATFORM"),
+        "publish cannot tell a leg was unsigned"
+    );
+    assert!(
+        packages.contains("--no-sign"),
+        "the unsigned path may still try to sign"
+    );
+    // Verified with the platform's own tools before upload.
+    for tool in [
+        "codesign --verify",
+        "spctl --assess",
+        "stapler validate",
+        "verify //pa",
+    ] {
+        assert!(packages.contains(tool), "no `{tool}` before upload");
+    }
+    // Every package has a checksum beside it.
+    assert!(
+        packages.contains(".sha256"),
+        "packages are published without checksums"
+    );
+
+    let publish = job(&wf, "publish");
+    assert!(
+        publish.contains("packages"),
+        "publish does not wait for the packages"
+    );
+    let manifest_at = publish
+        .find("> packages/latest.json")
+        .expect("no update manifest");
+    let unsigned_at = publish
+        .find("packages/unsigned-*")
+        .expect("publish never checks for unsigned legs");
+    assert!(
+        unsigned_at < manifest_at,
+        "the manifest is written before the unsigned check"
+    );
+    assert!(
+        publish.contains("These packages are unsigned"),
+        "the notes do not say what is unsigned"
+    );
+    assert!(
+        publish.contains("libwebkit2gtk-4.1-0"),
+        "the notes do not name WebKitGTK"
+    );
+    assert!(
+        publish.contains("Apple Silicon"),
+        "the notes do not say which Macs"
+    );
+    assert!(
+        publish.contains("devplane-installer.sh"),
+        "the CLI's install line is gone"
+    );
+
+    let release = job(&wf, "github-release");
+    assert!(
+        release.contains("--latest=\"$latest\""),
+        "an unsigned release is marked latest unconditionally"
+    );
+    assert!(
+        release.contains("latest.json"),
+        "an unsigned release may displace a signed one"
+    );
+
+    // The CLI's archives keep the names the composite action installs by.
+    let action = std::fs::read_to_string(repo_root().join("action.yml")).expect("action.yml");
+    assert!(
+        action.contains("devplane-${target}.tar.xz") || action.contains("devplane-$target.tar.xz"),
+        "action.yml no longer installs devplane-<target>.tar.xz"
+    );
+    assert!(
+        job(&wf, "build").contains("dist build --artifacts=local"),
+        "the CLI is no longer built by dist"
+    );
+}
+
+/// A pull request bundles every package unsigned, so a packaging break is
+/// found before a tag, and never sees a signing secret.
+#[test]
+fn every_pull_request_bundles_the_app_unsigned() {
+    let ci = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("ci.yml");
+    let bundle = job(&ci, "bundle");
+    assert!(bundle.contains("--features app") && bundle.contains("--no-sign"));
+    for b in ["app,dmg", "nsis", "deb,appimage"] {
+        assert!(
+            bundle.contains(&format!("bundles: {b}")),
+            "no `{b}` bundle in CI"
+        );
+    }
+    assert!(
+        !ci.contains("secrets."),
+        "ci.yml, which runs on pull requests, reads a secret"
+    );
+}

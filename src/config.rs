@@ -288,6 +288,148 @@ pub struct AppConfig {
     /// The port the in-process host binds: the CLI host's default unless set;
     /// `0` picks one, and then agent telemetry does not reach it.
     pub port: u16,
+    /// May the app check for updates: `"on"`, `"off"`, or absent — *not
+    /// asked*, which makes no request. Only the window's process reads it; the
+    /// command line never checks.
+    pub updates: Option<UpdatePref>,
+}
+
+/// The person's answer to *may Devplane check for updates*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePref {
+    On,
+    Off,
+}
+
+impl UpdatePref {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdatePref::On => "on",
+            UpdatePref::Off => "off",
+        }
+    }
+}
+
+/// A change to `app.toml` setting the update preference, computed and shown
+/// before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrefChange {
+    pub path: String,
+    /// `-` and `+` lines; empty when the file already says so.
+    pub diff: String,
+    /// Whether confirming writes anything.
+    pub writes: bool,
+    #[serde(skip)]
+    after: String,
+}
+
+/// `text` with `updates = "<pref>"` inside `[app]`: the line replaced where
+/// it exists, inserted under `[app]` where it does not, and `[app]` appended
+/// where the file has none. Every other byte is kept.
+pub fn with_update_pref(text: &str, pref: UpdatePref) -> String {
+    let line = format!("updates = \"{}\"", pref.as_str());
+    let lines: Vec<&str> = text.lines().collect();
+    let is_header = |l: &str| l.trim_start().starts_with('[');
+    let is_updates = |l: &str| {
+        l.trim_start()
+            .strip_prefix("updates")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    };
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 2);
+    let mut in_app = false;
+    let mut done = false;
+    let mut app_header_at = None;
+    for l in &lines {
+        if is_header(l) {
+            in_app = l.trim() == "[app]";
+            if in_app {
+                app_header_at = Some(out.len());
+            }
+        } else if in_app && !done && is_updates(l) {
+            out.push(line.clone());
+            done = true;
+            continue;
+        }
+        out.push((*l).to_string());
+    }
+    if !done {
+        match app_header_at {
+            Some(i) => out.insert(i + 1, line),
+            None => {
+                if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                    out.push(String::new());
+                }
+                out.push("[app]".into());
+                out.push(line);
+            }
+        }
+    }
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    joined
+}
+
+/// What setting the update preference would change in `path`, without
+/// writing. A file that does not parse is refused rather than edited.
+pub fn preview_update_pref(path: &std::path::Path, pref: UpdatePref) -> Result<PrefChange> {
+    let before = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    if !before.trim().is_empty() {
+        toml::from_str::<AppFile>(&before).with_context(|| {
+            format!(
+                "{} does not parse, so it is not edited; fix it first",
+                path.display()
+            )
+        })?;
+    }
+    let after = with_update_pref(&before, pref);
+    let removed: Vec<&str> = before
+        .lines()
+        .filter(|l| !after.lines().any(|a| a == *l))
+        .collect();
+    let added: Vec<&str> = after
+        .lines()
+        .filter(|l| !before.lines().any(|b| b == *l))
+        .collect();
+    let mut diff = String::new();
+    for l in &removed {
+        diff.push_str(&format!("-{l}\n"));
+    }
+    for l in &added {
+        diff.push_str(&format!("+{l}\n"));
+    }
+    Ok(PrefChange {
+        path: path.display().to_string(),
+        writes: before != after,
+        diff,
+        after,
+    })
+}
+
+/// Writes the change [`preview_update_pref`] showed, if the file still reads
+/// as it did then; otherwise nothing is written and the caller shows it again.
+pub fn write_update_pref(
+    path: &std::path::Path,
+    pref: UpdatePref,
+    shown: &PrefChange,
+) -> Result<bool> {
+    let now = preview_update_pref(path, pref)?;
+    if now != *shown {
+        return Ok(false);
+    }
+    if now.writes {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let tmp = path.with_extension(format!("toml.devplane-{}.tmp", std::process::id()));
+        std::fs::write(&tmp, &now.after).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(true)
 }
 
 impl Default for AppConfig {
@@ -298,6 +440,7 @@ impl Default for AppConfig {
             // so an agent's telemetry reaches the window's host too. `0`
             // (pick one) left every exporter pointing at nothing.
             port: DEFAULT_PORT,
+            updates: None,
         }
     }
 }
@@ -636,6 +779,85 @@ mod tests {
             1,
             "an unknown key is a problem: {problems:?}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The update preference reads as on, off, or not asked, and setting it
+    /// changes that one line and no other byte of the person's file.
+    #[test]
+    fn the_update_preference_is_one_line_and_nothing_else_moves() {
+        let dir = std::env::temp_dir().join(format!(
+            "dp-app-upd-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.toml");
+
+        assert_eq!(
+            app_config_from(&path).0.updates,
+            None,
+            "absent is not asked"
+        );
+        std::fs::write(&path, "[app]\nupdates = \"on\"\n").unwrap();
+        assert_eq!(app_config_from(&path).0.updates, Some(UpdatePref::On));
+        std::fs::write(&path, "[app]\nupdates = \"off\"\n").unwrap();
+        assert_eq!(app_config_from(&path).0.updates, Some(UpdatePref::Off));
+        std::fs::write(&path, "[app]\nupdates = \"sometimes\"\n").unwrap();
+        assert_eq!(
+            app_config_from(&path).1.len(),
+            1,
+            "an unknown value is a problem"
+        );
+
+        // Inserted under [app]; comments, other keys and [github] untouched.
+        let before = "# mine\n[app]\nshortcut = \"Alt+Space\" # my key\nport = 47000\n\n[github]\nhost = \"ghe.corp\"\n";
+        std::fs::write(&path, before).unwrap();
+        let shown = preview_update_pref(&path, UpdatePref::On).unwrap();
+        assert_eq!(shown.diff, "+updates = \"on\"\n");
+        assert!(shown.writes);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a preview writes nothing"
+        );
+        assert!(write_update_pref(&path, UpdatePref::On, &shown).unwrap());
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            "# mine\n[app]\nupdates = \"on\"\nshortcut = \"Alt+Space\" # my key\nport = 47000\n\n[github]\nhost = \"ghe.corp\"\n"
+        );
+        let (cfg, problems) = app_config_from(&path);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!((cfg.updates, cfg.port), (Some(UpdatePref::On), 47000));
+
+        // Replaced in place.
+        let shown = preview_update_pref(&path, UpdatePref::Off).unwrap();
+        assert_eq!(shown.diff, "-updates = \"on\"\n+updates = \"off\"\n");
+        assert!(write_update_pref(&path, UpdatePref::Off, &shown).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            after.replace("updates = \"on\"", "updates = \"off\"")
+        );
+
+        // A file changed since the preview is not written over.
+        let shown = preview_update_pref(&path, UpdatePref::On).unwrap();
+        std::fs::write(&path, "[app]\nport = 1\n").unwrap();
+        assert!(!write_update_pref(&path, UpdatePref::On, &shown).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[app]\nport = 1\n");
+
+        // No file, or no [app]: the section is added.
+        assert_eq!(
+            with_update_pref("", UpdatePref::On),
+            "[app]\nupdates = \"on\"\n"
+        );
+        assert_eq!(
+            with_update_pref("[github]\nhost = \"x\"\n", UpdatePref::Off),
+            "[github]\nhost = \"x\"\n\n[app]\nupdates = \"off\"\n"
+        );
+        // A file that does not parse is not edited.
+        std::fs::write(&path, "[app\n").unwrap();
+        assert!(preview_update_pref(&path, UpdatePref::On).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

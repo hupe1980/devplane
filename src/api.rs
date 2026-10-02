@@ -37,6 +37,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/runs/{id}/messages", get(run_messages))
         .route("/api/runs/{id}/snooze", post(snooze))
         .route("/api/runs/{id}/prompt", post(prompt_run))
+        // The stop tool's one write: an agent says its spec and tests conflict.
+        .route("/api/runs/{id}/claim", post(claim_run))
         // One answer route addressed by the ask, not the run: the row knows its
         // kind, the caller says what the person chose.
         .route("/api/asks", get(asks_index))
@@ -68,6 +70,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/changes/{id}/certificate", get(change_certificate))
         .route("/api/changes/{id}/open", post(open_change))
         .route("/api/changes/{id}/resume", post(resume_change))
+        .route("/api/changes/{id}/claim/read", post(read_claim))
         .route("/api/changes/adopt", post(adopt_change))
         .route("/api/changes/{id}/archive", post(archive_change))
         .route("/api/changes/{id}/offer", post(offer_change))
@@ -91,6 +94,11 @@ pub fn router(state: Shared) -> Router {
         .route("/api/modes", get(modes))
         .route("/api/quitting", get(quitting))
         .route("/api/quit", post(quit))
+        // Update checks: the window's, off until the person says (`crate::update`).
+        .route("/api/app/update", get(crate::update::state))
+        .route("/api/app/updates", post(crate::update::preference))
+        .route("/api/app/update/install", post(crate::update::install))
+        .route("/api/app/update/dismiss", post(crate::update::dismiss))
         .route("/api/stream", get(stream))
         // The first run from the window: the checklist, declaring a check,
         // scanning before trust, connecting an agent (`crate::firstrun`).
@@ -487,8 +495,16 @@ async fn inbox(
 ) -> impl IntoResponse {
     guard!(state, headers);
     let snap = state.snapshot().await;
-    let mut view = crate::view::inbox(&snap, &state.store, &state.policy, &q).await;
-    view.hold(state.hold.held(), state.hold.landed());
+    let held = state.hold.held();
+    let mut view = crate::view::inbox(
+        &snap,
+        &state.store,
+        &state.policy,
+        &q,
+        held.as_ref().map(|h| h.ask.as_str()),
+    )
+    .await;
+    view.hold(held, state.hold.landed());
     Json(view).into_response()
 }
 
@@ -766,7 +782,16 @@ async fn snooze_project(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = snooze_until(q.minutes);
+    let how = match q.how() {
+        // A forge item has no session to report activity: only minutes.
+        Ok(crate::core::attention::SnoozeFor::Activity) => {
+            return bad_snooze(
+                "a pull request or an issue has no session; snooze it for minutes".into(),
+            );
+        }
+        Ok(h) => h,
+        Err(why) => return bad_snooze(why),
+    };
     let project = crate::core::ProjectId::new(id);
     let dismissed: Vec<crate::core::AttentionKind> = {
         let mut f = state.forge.lock().await;
@@ -789,11 +814,16 @@ async fn snooze_project(
         .map(|i| i.kind)
         .collect();
         let entry = f.snoozed.entry(project.clone()).or_default();
-        match until {
-            Some(t) => entry.hide(kinds.clone(), t),
-            None => entry.clear(),
+        match crate::core::attention::snooze(
+            entry,
+            kinds,
+            q.kind.as_deref(),
+            how.clone(),
+            Default::default(),
+        ) {
+            Ok(kinds) => kinds,
+            Err(refused) => return never_snoozed(refused),
         }
-        kinds
     };
     for kind in &dismissed {
         let id = format!("gh:{}:{}", project.as_str(), kind.as_str());
@@ -805,7 +835,8 @@ async fn snooze_project(
             .ok();
     }
     state.notify_changed();
-    Json(json!({"snoozed_until": until.map(|t| t.to_string()), "kinds": dismissed})).into_response()
+    Json(json!({"snoozed_until": SnoozeQuery::says_until(&how), "kinds": dismissed}))
+        .into_response()
 }
 
 async fn run_detail(
@@ -960,6 +991,117 @@ async fn prompt_run(
     }
 }
 
+/// What the stop tool sends: the agent's reason and paths, plus what the host
+/// gave its server — the change it was started for and the session's key.
+/// There is no origin field: the run is the path, and the host resolves the
+/// rest from the run it drives.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimBody {
+    reason: String,
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    change: Option<String>,
+    #[serde(default)]
+    key: String,
+}
+
+/// Records a stop claim, then stops the run once the answer is on its way.
+/// Every refusal is a sentence, and nothing is written for any of them.
+async fn claim_run(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ClaimBody>,
+) -> impl IntoResponse {
+    use crate::core::claim::ClaimRefusal as R;
+    guard!(state, headers);
+    // Never a prefix: a claim names its own run exactly.
+    let run = RunId::new(id);
+    let draft = crate::core::claim::ClaimDraft {
+        reason: body.reason,
+        paths: body.paths,
+    };
+    match crate::change::record_claim(&state, &run, draft, body.change, &body.key).await {
+        Ok(claim) => {
+            let stopper = state.clone();
+            let stopped = run.clone();
+            tokio::spawn(async move {
+                // After the answer has reached the agent, so it reads that it
+                // was recorded before its turn is cancelled.
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                crate::driven::stop_claimed(&stopper, &stopped).await;
+            });
+            Json(json!({
+                "recorded": true,
+                "claim": claim.id,
+                "change": claim.origin.change(),
+                "run": run,
+                "says": format!(
+                    "Recorded: {} — change {}, run {run}. Your person reads this before deciding \
+                     anything about the change; it is your claim, not a failure, and it does not \
+                     change whether the checks pass. Devplane is stopping this run now; do nothing \
+                     further. Your person answers by resuming it.",
+                    crate::core::claim::SAYS,
+                    claim.origin.change(),
+                ),
+            }))
+            .into_response()
+        }
+        Err(refusal) => {
+            let status = match &refusal {
+                R::NotDriven(_) => StatusCode::NOT_FOUND,
+                R::BadKey => StatusCode::FORBIDDEN,
+                R::EmptyReason | R::TooLarge { .. } | R::PathEscapes(_) | R::UnknownArgument(_) => {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                }
+                R::NoRun
+                | R::NoHost
+                | R::NoChange
+                | R::WrongChange(_)
+                | R::Stopping
+                | R::AlreadyOpen { .. } => StatusCode::CONFLICT,
+            };
+            (
+                status,
+                Json(json!({"recorded": false, "refused": refusal.name(), "says": refusal.says()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// A person marks a change's open stop claim read: it leaves what asks for
+/// attention and stays on the change. No decision row.
+async fn read_claim(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    let open = state.changes.lock().await.get(&id).and_then(|c| {
+        c.open_claim()
+            .map(|o| (o.id.clone(), o.origin.run().clone()))
+    });
+    match open {
+        Some((claim, run)) => {
+            crate::change::close_claims(&state, &id, crate::core::claim::ClosedBy::Read).await;
+            Json(json!({
+                "closed": claim,
+                "says": format!("marked read — it stays on the change under run {run}"),
+            }))
+            .into_response()
+        }
+        None => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "this change has no open claim", "says": "this change has no open claim"})),
+        )
+            .into_response(),
+    }
+}
+
 /// What a person chose, for either kind of ask. The route validates it
 /// against the row. Unknown fields are refused, so a body in which nobody
 /// said anything is a 422 rather than a decision.
@@ -1059,6 +1201,8 @@ async fn answer_ask(
                 .into_response();
         }
         let (held, committed) = crate::hold::hold(&state, &ask, answer, from).await;
+        // The held item leaves the count: the tray reads it again.
+        state.notify_changed();
         return (
             StatusCode::ACCEPTED,
             Json(json!({"held": held, "committed": committed})),
@@ -1091,11 +1235,15 @@ async fn undo_answer(
     guard!(state, headers);
     let window = path_of(&state, &headers, &id) == "window";
     match state.hold.withdraw(&id, window) {
-        Ok(()) => Json(json!({
+        Ok(()) => {
+            // The item is back in the list and the count.
+            state.notify_changed();
+            Json(json!({
             "withdrawn": id,
             "says": "taken back — nothing reached the agent, and the question is waiting again",
-        }))
-        .into_response(),
+            }))
+            .into_response()
+        }
         Err(refused) => (
             StatusCode::CONFLICT,
             Json(json!({"error": refused.says(), "says": refused.says()})),
@@ -1866,20 +2014,32 @@ async fn snooze_change(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = snooze_until(q.minutes);
+    let how = match q.how() {
+        Ok(h) => h,
+        Err(why) => return bad_snooze(why),
+    };
     let id = change_id!(state, id);
     // A drift is derived from the runs, so it is asked before the row is held.
     let drifting = crate::change::has_drift(&state, &id).await;
+    // The change's activity is its runs' too, so they are read first.
+    let last_events: std::collections::BTreeMap<crate::core::RunId, jiff::Timestamp> = {
+        let w = state.world.lock().await;
+        w.runs().map(|r| (r.id.clone(), r.last_event_at)).collect()
+    };
 
     let saved = {
         let mut changes = state.changes.lock().await;
         match changes.get_mut(&id) {
             Some(w) => {
+                let mark = crate::core::attention::ActivityMark::of_change(w, |r| {
+                    last_events.get(r).copied()
+                });
                 // The kinds on screen now, never what turns up later.
                 let mut kinds: Vec<_> = crate::core::attention::items_for_change(
                     w,
                     false,
                     false,
+                    &mark,
                     jiff::Timestamp::now(),
                 )
                 .into_iter()
@@ -1888,11 +2048,16 @@ async fn snooze_change(
                 if drifting {
                     kinds.push(crate::core::AttentionKind::SpecDrifted);
                 }
-                match until {
-                    Some(t) => w.snoozed.hide(kinds.clone(), t),
-                    None => w.snoozed.clear(),
+                match crate::core::attention::snooze(
+                    &mut w.snoozed,
+                    kinds,
+                    q.kind.as_deref(),
+                    how.clone(),
+                    mark,
+                ) {
+                    Ok(kinds) => Some((w.clone(), kinds)),
+                    Err(refused) => return never_snoozed(refused),
                 }
-                Some((w.clone(), kinds))
             }
             None => None,
         }
@@ -1917,7 +2082,8 @@ async fn snooze_change(
         tracing::warn!(error = %e, "could not persist a change snooze");
     }
     state.notify_changed();
-    Json(json!({"ok": true, "until": until.map(|t| t.to_string())})).into_response()
+    Json(json!({"ok": true, "until": SnoozeQuery::says_until(&how), "kinds": dismissed}))
+        .into_response()
 }
 
 /// Finishes a change: a person accepts it, and the basis is recorded. Nothing
@@ -2304,6 +2470,58 @@ struct SnoozeQuery {
     /// Minutes to stay quiet. Zero un-snoozes, which is the only way back.
     #[serde(default = "default_snooze")]
     minutes: i64,
+    /// `activity`: stay quiet until the subject next does something, rather
+    /// than for `minutes`.
+    #[serde(default)]
+    until: Option<String>,
+    /// One kind on the subject rather than every kind on screen.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+impl SnoozeQuery {
+    /// What the request asks for, or why it cannot be read.
+    fn how(&self) -> Result<crate::core::attention::SnoozeFor, String> {
+        use crate::core::attention::SnoozeFor;
+        match self.until.as_deref() {
+            Some("activity") => Ok(SnoozeFor::Activity),
+            Some(other) => Err(format!("`until` takes `activity`, not `{other}`")),
+            None => Ok(match snooze_until(self.minutes) {
+                Some(t) => SnoozeFor::At(t),
+                None => SnoozeFor::Back,
+            }),
+        }
+    }
+
+    /// The `until` a response names: a moment, `activity`, or nothing.
+    fn says_until(how: &crate::core::attention::SnoozeFor) -> Option<String> {
+        use crate::core::attention::SnoozeFor;
+        match how {
+            SnoozeFor::At(t) => Some(t.to_string()),
+            SnoozeFor::Activity => Some("activity".to_string()),
+            SnoozeFor::Back => None,
+        }
+    }
+}
+
+/// A snooze request that cannot be read.
+fn bad_snooze(why: String) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": why, "says": why})),
+    )
+        .into_response()
+}
+
+/// A snooze refused because a question or a permission is among the kinds:
+/// those wait for an answer, and nothing was hidden.
+fn never_snoozed(n: crate::core::attention::NeverSnoozed) -> axum::response::Response {
+    let kinds: Vec<&str> = n.0.iter().map(|k| k.as_str()).collect();
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"error": n.says(), "says": n.says(), "kinds": kinds})),
+    )
+        .into_response()
 }
 fn default_snooze() -> i64 {
     60
@@ -2319,13 +2537,13 @@ async fn snooze(
     Query(q): Query<SnoozeQuery>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let until = snooze_until(q.minutes);
+    let how = match q.how() {
+        Ok(h) => h,
+        Err(why) => return bad_snooze(why),
+    };
 
     let run_id = run_id!(state, id);
     let now = jiff::Timestamp::now();
-    // Named before the snooze hides them: a dismissal is the clearest signal
-    // that a kind is too loud.
-    let mut dismissed: Vec<crate::core::AttentionKind> = Vec::new();
     let saved = {
         let mut w = state.world.lock().await;
         // The run's own project threshold, the one its inbox row was
@@ -2334,22 +2552,17 @@ async fn snooze(
             .run(&run_id)
             .and_then(|r| state.policy.stall_seconds(r.working_dir()))
             .unwrap_or(w.attention.stall_seconds);
-        if until.is_some()
-            && let Some(r) = w.run(&run_id)
-        {
-            let cfg = w.attention;
-            dismissed = crate::core::attention::run_items_at(r, &cfg, stall, now)
-                .items
-                .into_iter()
-                .map(|i| i.kind)
-                .collect();
-        }
-        if !w.snooze(&run_id, until, now, stall) {
-            None
-        } else {
-            w.run(&run_id).cloned()
+        match w.snooze(&run_id, q.kind.as_deref(), how.clone(), now, stall) {
+            None => None,
+            Some(Err(refused)) => return never_snoozed(refused),
+            Some(Ok(dismissed)) => w.run(&run_id).cloned().map(|r| (r, dismissed)),
         }
     };
+    let Some((run, dismissed)) = saved else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
+    };
+    // Named once hidden: a dismissal is the clearest signal that a kind is
+    // too loud.
     acted_on(
         &state,
         run_id.as_str(),
@@ -2357,16 +2570,13 @@ async fn snooze(
         crate::core::attention::Resolution::Dismissed,
     )
     .await;
-
-    let Some(run) = saved else {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": "no such run"}))).into_response();
-    };
     // Persisted, so a snooze survives a restart.
     if let Err(e) = state.store.save_run(&run).await {
         tracing::warn!(error = %e, "could not persist snooze");
     }
     state.notify_changed();
-    Json(json!({"snoozed_until": until.map(|t| t.to_string())})).into_response()
+    Json(json!({"snoozed_until": SnoozeQuery::says_until(&how), "kinds": dismissed}))
+        .into_response()
 }
 
 #[derive(Deserialize)]

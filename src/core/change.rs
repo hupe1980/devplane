@@ -1011,6 +1011,12 @@ pub struct Change {
         skip_serializing_if = "Option::is_none"
     )]
     pub base_checks: Option<crate::core::base_checks::BaseChecks>,
+    /// What the change's agents said about it through the stop tool, in order
+    /// of arrival. The agents' claims, beside the gates and never among them:
+    /// nothing that derives the state or the verdict reads it. A claim is
+    /// never removed, only closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_claims: Vec<crate::core::claim::StopClaim>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -1052,6 +1058,7 @@ impl Change {
             pull_request: None,
             snoozed: Default::default(),
             base_checks: None,
+            stop_claims: Vec::new(),
             created_at: now,
             updated_at: now,
         }
@@ -1198,6 +1205,44 @@ impl Change {
     pub fn in_place_says(&self) -> Option<&'static str> {
         self.in_place()
             .then_some("in place — no parallel safety, and the diff is against the working tree")
+    }
+
+    /// The newest open stop claim, if any of this change's agents has one.
+    pub fn open_claim(&self) -> Option<&crate::core::claim::StopClaim> {
+        self.stop_claims.iter().rev().find(|c| c.is_open())
+    }
+
+    /// The open stop claim `run` made, if it has one.
+    pub fn open_claim_for(&self, run: &RunId) -> Option<&crate::core::claim::StopClaim> {
+        self.stop_claims
+            .iter()
+            .rev()
+            .find(|c| c.is_open() && c.origin.run() == run)
+    }
+
+    /// Records a claim; refused while the same run already has one open, so
+    /// at most one is open per run whatever order calls arrive in.
+    pub fn push_claim(
+        &mut self,
+        claim: crate::core::claim::StopClaim,
+    ) -> Result<(), crate::core::claim::ClaimRefusal> {
+        if let Some(open) = self.open_claim_for(claim.origin.run()) {
+            return Err(crate::core::claim::ClaimRefusal::AlreadyOpen {
+                at: open.origin.at(),
+            });
+        }
+        self.stop_claims.push(claim);
+        Ok(())
+    }
+
+    /// Closes every open claim; returns whether any was open. Writes no
+    /// decision: closing a claim decides nothing.
+    pub fn close_claims(&mut self, by: crate::core::claim::ClosedBy, at: Timestamp) -> bool {
+        let mut any = false;
+        for c in &mut self.stop_claims {
+            any |= c.close(by, at);
+        }
+        any
     }
 
     pub fn current_run(&self) -> Option<&RunId> {
@@ -1655,6 +1700,122 @@ mod tests {
                 serde_json::to_string(&state).unwrap(),
                 format!("\"{}\"", state.as_str())
             );
+        }
+    }
+
+    fn claim_by(run: &str, at: &str) -> crate::core::claim::StopClaim {
+        use crate::core::claim::*;
+        StopClaim::new(
+            ClaimId::new(format!("sc-{run}-{at}")),
+            ClaimDraft {
+                reason: "the spec says 30 days; the test asserts 7".into(),
+                paths: vec!["tests/session_test.rs".into()],
+            },
+            ClaimOrigin::of_run(
+                crate::core::ids::ProjectId::new("/p"),
+                "p",
+                crate::core::ids::ChangeId::new("c-1"),
+                RunId::new(run),
+                "echo",
+                at.parse().unwrap(),
+            ),
+            |_| Ok(()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn at_most_one_claim_is_open_per_run_whatever_arrives() {
+        use crate::core::claim::ClosedBy;
+        let mut w = Change::new(
+            crate::core::ids::ProjectId::from_path(std::path::Path::new("/tmp/x")),
+            "t".into(),
+            "p".into(),
+        );
+        let at = "2026-09-27T10:00:00Z";
+        assert!(w.push_claim(claim_by("r1", at)).is_ok());
+        assert_eq!(
+            w.push_claim(claim_by("r1", "2026-09-27T10:00:01Z"))
+                .unwrap_err()
+                .name(),
+            "already_open"
+        );
+        // Another run of the same change may say so too.
+        assert!(w.push_claim(claim_by("r2", at)).is_ok());
+        for run in ["r1", "r2"] {
+            let open = w
+                .stop_claims
+                .iter()
+                .filter(|c| c.origin.run().as_str() == run && c.is_open())
+                .count();
+            assert_eq!(open, 1);
+        }
+        assert_eq!(w.open_claim().unwrap().origin.run().as_str(), "r2");
+        // Closed, and kept: a run that is answered may say so again.
+        assert!(w.close_claims(ClosedBy::Read, at.parse().unwrap()));
+        assert!(w.open_claim().is_none());
+        assert!(!w.close_claims(ClosedBy::Read, at.parse().unwrap()));
+        assert!(w.push_claim(claim_by("r1", "2026-09-27T11:00:00Z")).is_ok());
+        assert_eq!(w.stop_claims.len(), 3, "a claim is never removed");
+        assert!(w.open_claim_for(&RunId::new("r1")).is_some());
+        assert!(w.open_claim_for(&RunId::new("r2")).is_none());
+    }
+
+    /// The claim is the agent's; the verdict is the gate's. Whether the
+    /// gate passed or failed, a change reads the same with and without one.
+    #[test]
+    fn a_claim_leaves_the_verdict_and_the_state_exactly_as_the_gate_left_them() {
+        let stamp = CommitStamp {
+            commit: Some("abc".into()),
+            tree: Some("t1".into()),
+            tree_unknown: None,
+            branch: Some("main".into()),
+            clean: true,
+            changed_files: 0,
+            reach: Reach::NoRemote,
+            remote: None,
+        };
+        let checks = vec!["cargo test".to_string()];
+        for code in [0, 101] {
+            let mut w = Change::new(
+                crate::core::ids::ProjectId::from_path(std::path::Path::new("/tmp/x")),
+                "t".into(),
+                "p".into(),
+            );
+            w.gates.push(GateReport {
+                junit: Vec::new(),
+                base_commit: None,
+                gate: "check".into(),
+                at: "2026-09-27T10:00:00Z".parse().unwrap(),
+                duration_ms: 1,
+                attempt: 1,
+                spec: None,
+                commit: Some(stamp.clone()),
+                commands: vec![CommandResult {
+                    duration_ms: 1,
+                    ..CommandResult::exited("cargo test", code)
+                }],
+            });
+            w.tree_now = Some(stamp.clone());
+            w.waiting = Some(Waiting::Person);
+            let declared = || Declared::of(Some(&checks));
+            let without = (
+                w.state(declared(), w.tree_now.as_ref()),
+                w.verdict(declared(), w.tree_now.as_ref()),
+            );
+            let mut with = w.clone();
+            with.push_claim(claim_by("r1", "2026-09-27T10:01:00Z"))
+                .unwrap();
+            assert_eq!(
+                (
+                    with.state(declared(), with.tree_now.as_ref()),
+                    with.verdict(declared(), with.tree_now.as_ref()),
+                ),
+                without,
+                "a claim moved the verdict when check exited {code}"
+            );
+            assert!(with.stopped.is_none(), "a claim is not a failure");
+            assert_eq!(code == 0, without.0 == ChangeState::Verified);
         }
     }
 }

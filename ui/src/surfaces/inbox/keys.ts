@@ -16,7 +16,7 @@ export const ITEM_KEYS: ReadonlyArray<{ combo: string; action: string; label: st
   { combo: "a", action: "item-allow", label: "allow the permission, once" },
   { combo: "d", action: "item-deny", label: "deny the permission" },
   { combo: "w", action: "item-session", label: "reach the session the vendor owns: open its link, or copy its resume command" },
-  { combo: "s", action: "item-snooze", label: "snooze the item for an hour" },
+  { combo: "s", action: "item-snooze", label: "snooze the item until there is new activity (an hour for a pull request or an issue)" },
   { combo: "o", action: "item-open", label: "open the change or session the item is about" },
   { combo: "r", action: "item-review", label: "open the change's review" },
   { combo: "z", action: "item-undo", label: "undo: take back the answer before it is sent, or put a snoozed item back" },

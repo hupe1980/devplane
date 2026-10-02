@@ -59,6 +59,7 @@ app = [
   "dep:tauri-plugin-deep-link",
   "dep:tauri-plugin-single-instance",
   "dep:tauri-plugin-opener",
+  "dep:tauri-plugin-updater",
 ]
 
 [dependencies]
@@ -71,6 +72,9 @@ tauri-plugin-deep-link = { version = "2", optional = true }
 # `deep-link` so a second launch hands its URL to the app already running.
 tauri-plugin-single-instance = { version = "2", optional = true, features = ["deep-link"] }
 tauri-plugin-opener = { version = "2", optional = true }
+# The update check: off until the person switches it on in `app.toml`, run
+# only by the window's process, never by the CLI.
+tauri-plugin-updater = { version = "2", optional = true }
 agent-client-protocol = "2.2"
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
@@ -108,7 +112,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
 # Used by `build.rs` only under the `app` feature.
 [build-dependencies]
-tauri-build = { version = "2", optional = true }
+tauri-build = { version = "2", optional = true , features = [] }
 
 [profile.release]
 lto = "thin"

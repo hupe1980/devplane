@@ -4,6 +4,21 @@ import { bind, bindList, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
 import { address } from "./place.svelte";
 import { bindItemKeys } from "./keys";
+import type { Feed } from "../../lib/surfaces";
+
+/// The inbox's one number: what the activity bar's badge, the status bar and
+/// the tray all show, under the words `COUNT_WORD`. The host composes it
+/// (`count` on `/api/inbox`: the whole inbox's listed rows, without the item
+/// a held answer belongs to) and the tray reads the same composition; a
+/// recording older than that field is the list it was read with.
+export function inboxCount(feed: Feed): number | null {
+  const i = feed.inbox as { items?: unknown[]; count?: number } | null;
+  if (!i?.items) return null;
+  return typeof i.count === "number" ? i.count : i.items.length;
+}
+/// What the number counts, said the same way in the badge's label, the
+/// status bar and the tray's tooltip.
+export const COUNT_WORD = "need you";
 
 // The list keys (answered by `Inbox.svelte` through `lib/cursor`), and the
 // way here from anywhere.
@@ -27,28 +42,20 @@ register({
   order: 0,
   // Opening this is a look; opening anything else is not.
   marksLook: true,
-  // What needs you, right of the status bar: the inbox rows a person can
-  // answer from here — the rule the answer window's list uses (the host's
-  // `needs_you` narrowing), so the two never disagree. Asks that outlived
-  // their sessions are the host's own number, absent when there are none.
+  // What needs you, right of the status bar: the inbox's one number, the
+  // badge's. Asks that outlived their sessions are the host's own number
+  // under their own noun, absent when there are none.
   status: (feed) => {
-    const i = feed.inbox as { items?: Array<{ ask?: string | null; options?: unknown[]; actions?: string[] }> } | null;
-    if (!i?.items) return [];
+    const n = inboxCount(feed);
+    if (n === null) return [];
     const s = (feed.board as { summary?: { asks_waiting?: number } } | null)?.summary;
-    const answerable = i.items.filter(
-      (x) => !!x.ask || (x.options ?? []).length > 0 || (x.actions ?? []).some((a) => a !== "open" && a !== "snooze"),
-    ).length;
     return [
-      { n: answerable, word: "need you", icon: "inbox", tone: "wait" as const, end: true },
-      ...(s?.asks_waiting ? [{ n: s.asks_waiting, word: "asked, session gone", icon: "question", tone: "wait" as const, end: true }] : []),
+      { n, word: COUNT_WORD, icon: "inbox", tone: "wait" as const, end: true },
+      ...(s?.asks_waiting ? [{ n: s.asks_waiting, word: "asks that outlived their sessions", icon: "question", tone: "wait" as const, end: true }] : []),
     ];
   },
-  // The badge is everything in the inbox — failed gates too —
-  // and is labelled as such beside the icon.
-  count: (feed) => {
-    const i = feed.inbox as { items?: unknown[] } | null;
-    return i?.items?.length ?? null;
-  },
+  count: inboxCount,
+  countWord: COUNT_WORD,
   // A link naming an ask — `devplane://ask/<id>` — lands here on that row.
   link: "ask",
   linkFocus: (id) => `ask=${id}`,
@@ -61,6 +68,8 @@ register({
           close?: unknown;
           held?: unknown;
           landed?: unknown;
+          snoozed?: number;
+          snoozed_rows?: unknown[];
         }
       | null;
     const items = b?.items ?? [];
@@ -76,6 +85,8 @@ register({
       close: b?.close ?? null,
       held: b?.held ?? null,
       landed: b?.landed ?? null,
+      snoozed: b?.snoozed ?? 0,
+      snoozed_rows: b?.snoozed_rows ?? [],
       project,
       item,
       wanted,

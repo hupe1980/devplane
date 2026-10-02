@@ -158,8 +158,8 @@ pub fn items_for_forge(
     now: Timestamp,
 ) -> crate::core::attention::Derived {
     let mut out = Vec::new();
-    // Hidden is counted, never dropped.
-    let hidden = std::cell::Cell::new(0usize);
+    // Hidden is listed and counted, never dropped.
+    let hidden = std::cell::RefCell::new(Vec::new());
     let launch = |prompt: String| -> Option<String> {
         crate::core::deeplink::open_repo(forge.repo.as_deref()?, &prompt)
     };
@@ -171,8 +171,25 @@ pub fn items_for_forge(
               since_at: Timestamp,
               actions: Vec<Action>,
               launch: Option<String>| {
-        if snoozed.hides(&kind, now) {
-            hidden.set(hidden.get() + 1);
+        // A forge item has no session, so only a timed snooze applies.
+        let none = crate::core::attention::ActivityMark::default();
+        if snoozed.hides(&kind, now, &none)
+            && let Some(until) = snoozed.until(&kind)
+        {
+            hidden
+                .borrow_mut()
+                .push(crate::core::attention::SnoozedRow::new(
+                    format!(
+                        "gh:{}:{}:{number}",
+                        forge.project_id.as_str(),
+                        kind.as_str()
+                    ),
+                    &kind,
+                    title,
+                    until,
+                    &format!("/api/projects/{}", forge.project_id.as_str()),
+                    false,
+                ));
             return None;
         }
         Some(AttentionItem {
@@ -274,7 +291,7 @@ pub fn items_for_forge(
     }
     crate::core::attention::Derived {
         items: out,
-        snoozed: hidden.get(),
+        snoozed: hidden.into_inner(),
     }
 }
 
@@ -397,10 +414,12 @@ mod tests {
         let mut s = Snoozed::default();
         s.hide(
             [AttentionKind::ReviewRequested],
-            Timestamp::now() + jiff::SignedDuration::from_hours(1),
+            crate::core::attention::Until::At(
+                Timestamp::now() + jiff::SignedDuration::from_hours(1),
+            ),
         );
         let derived = items_for_forge(&forge(), &s, &BTreeSet::new(), Timestamp::now());
-        assert_eq!(derived.snoozed, 1, "hidden is counted, not dropped");
+        assert_eq!(derived.snoozed.len(), 1, "hidden is counted, not dropped");
         let items = derived.items;
         assert!(
             items

@@ -1,5 +1,6 @@
-import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, P as text, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, f as bind_value, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, ot as noop, p as remove_input_defaults, q as only_child, st as to_array, tt as pop, w as each, y as set_class } from "./api.js";
-import { O as go, R as surfaces, a as Inline, h as resource, i as Skeleton, n as Icon, t as Pill } from "./app.js";
+import { $ as user_effect, B as append, C as remove_input_defaults, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, S as bind_value, V as comment, W as text, _t as to_array, at as proxy, ct as user_derived, dt as pop, ft as push, g as prop, gt as noop, ht as reset, it as sibling, k as set_class, mt as next, nt as first_child, ot as set, rt as only_child, st as state, tt as child, w as set_attribute, z as set_text } from "./api.js";
+import { r as resource } from "./resource.svelte.js";
+import { O as surfaces, a as Inline, i as Skeleton, n as Icon, t as Pill, w as go } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as Failed } from "./Failed.js";
 import { t as Grid } from "./Grid.js";

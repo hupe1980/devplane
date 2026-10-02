@@ -24,6 +24,8 @@
     updated_at?: string;
     counts_says?: string | null;
     qualifier?: Q | null;
+    /// The agent's open stop claim: its label, read after the state.
+    stop_claim?: { says: string } | null;
   };
 
   let {
@@ -141,6 +143,8 @@
                 {#if r.waiting_says}<span class="wait">{r.waiting_says}</span>{/if}
                 {#if r.in_place}<span class="dim">in place</span>{/if}
               </span>
+              <!-- After the state and its weakened checks, never before them. -->
+              {#if r.stop_claim}<span class="claimed">{r.stop_claim.says}</span>{/if}
               {#if r.branch}<span class="branch"><Icon name="change" size={11} /> {r.branch}</span>{/if}
             </div>
           {/each}
@@ -286,6 +290,13 @@
   }
   .wait {
     color: var(--wait);
+  }
+  .claimed {
+    color: var(--wait);
+    font-size: var(--t-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .dim {
     color: var(--faint);

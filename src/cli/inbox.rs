@@ -22,6 +22,7 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         inhibited,
         narrowed,
         snoozed,
+        snoozed_rows,
         close,
         held,
         ..
@@ -61,6 +62,9 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
                 )
             )
         );
+        for row in &snoozed_rows {
+            println!("{}", paint(DIM, &format!("  {} — {}", row.title, row.says)));
+        }
     }
 
     let left_out = narrowed.as_ref().map_or(0, |n| n.count);
@@ -408,26 +412,39 @@ pub(super) fn print_attention(v: &serde_json::Value) {
     }
 }
 
-pub async fn cmd_snooze(id: &str, minutes: i64, json: bool) -> Result<()> {
+/// The query a snooze sends: until the subject's next activity, or for
+/// `minutes` (`0` brings everything back).
+pub fn snooze_query(minutes: i64, until_activity: bool) -> String {
+    match until_activity {
+        true => "until=activity".to_string(),
+        false => format!("minutes={minutes}"),
+    }
+}
+
+pub async fn cmd_snooze(id: &str, minutes: i64, until_activity: bool, json: bool) -> Result<()> {
     let c = client::Client::connect_running().await?;
     let reader = crate::local::Reader::Host(c.clone());
     // A change id (`c-…`) snoozes the change; anything else is a run.
-    let (what, id) = match super::ids::change_or_run(&reader, id).await? {
-        super::ids::Subject::Change(id) => ("changes", id),
-        super::ids::Subject::Run(id) => ("runs", id),
+    let (what, id, subject) = match super::ids::change_or_run(&reader, id).await? {
+        super::ids::Subject::Change(id) => ("changes", id, "the change"),
+        super::ids::Subject::Run(id) => ("runs", id, "the session"),
     };
     let v: serde_json::Value = c
-        .post(&format!("/api/{what}/{id}/snooze?minutes={minutes}"))
+        .post(&format!(
+            "/api/{what}/{id}/snooze?{}",
+            snooze_query(minutes, until_activity)
+        ))
         .await?;
     if json {
         return crate::cli::print_json(&v);
     }
-    match minutes {
-        0 => println!(
+    match (until_activity, minutes) {
+        (true, _) => println!("Snoozed until {subject} next reports activity."),
+        (false, 0) => println!(
             "{} — its items are back in the inbox.",
             paint(BOLD, "Un-snoozed")
         ),
-        _ => println!("Quiet for {minutes} minutes."),
+        (false, _) => println!("Quiet for {minutes} minutes."),
     }
     Ok(())
 }
@@ -861,6 +878,37 @@ mod tests {
             label: label.to_string(),
             kind: None,
         }
+    }
+
+    /// `--until-activity` asks the host for the subject's next activity,
+    /// and is refused beside `--minutes`.
+    #[test]
+    fn a_snooze_until_activity_sends_no_minutes_and_refuses_them() {
+        assert_eq!(snooze_query(60, true), "until=activity");
+        assert_eq!(snooze_query(15, false), "minutes=15");
+        assert_eq!(snooze_query(0, false), "minutes=0");
+        use clap::Parser;
+        let ok = crate::cli::Cli::try_parse_from([
+            "devplane",
+            "inbox",
+            "snooze",
+            "s1",
+            "--until-activity",
+        ]);
+        assert!(ok.is_ok(), "{:?}", ok.err());
+        let both = crate::cli::Cli::try_parse_from([
+            "devplane",
+            "inbox",
+            "snooze",
+            "s1",
+            "--until-activity",
+            "--minutes",
+            "5",
+        ]);
+        assert!(
+            both.is_err(),
+            "minutes and activity are two different snoozes"
+        );
     }
 
     /// The option's id, never its label: they differ for real agents.

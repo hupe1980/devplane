@@ -507,6 +507,16 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "is_zero")]
         omitted_bytes: u64,
     },
+    /// The agent said, through Devplane's stop tool, that the specification
+    /// and the tests of its change conflict. The agent's claim, kept on the
+    /// change; on the run's timeline it changes no state — the stop that
+    /// follows does.
+    StopClaimed {
+        claim: String,
+        reason: String,
+        #[serde(default)]
+        paths: Vec<String>,
+    },
     /// Something changed that no observation describes (a change phase, a gate
     /// verdict, a snooze). Tells subscribers to ask again; applied to no run.
     Refresh,
@@ -553,6 +563,7 @@ impl Event {
             | Event::TasksSent { .. }
             | Event::SpecObserved { .. }
             | Event::EditReported { .. }
+            | Event::StopClaimed { .. }
             | Event::Refresh => Source::Host,
             _ => Source::Hook,
         }
@@ -599,6 +610,7 @@ impl Event {
             Event::TasksSent { .. } => "tasks_sent",
             Event::SpecObserved { .. } => "spec_observed",
             Event::EditReported { .. } => "edit_reported",
+            Event::StopClaimed { .. } => "stop_claimed",
             Event::Refresh => "refresh",
         }
     }

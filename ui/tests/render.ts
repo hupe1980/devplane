@@ -5,6 +5,7 @@ import "./render/registry";
 import "./render/board";
 import "./render/inbox";
 import "./render/inbox_keys";
+import "./render/one_count";
 import "./render/change";
 import "./render/review";
 import "./render/honest";

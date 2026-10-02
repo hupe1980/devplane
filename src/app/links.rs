@@ -95,10 +95,38 @@ pub fn install(app: &AppHandle) {
     });
     // A dev build on Linux or Windows can register itself; macOS registers a
     // scheme only for an installed bundle, and says nothing here.
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(windows)]
     if let Err(e) = app.deep_link().register_all() {
         tracing::warn!(error = %e, "could not register the devplane:// scheme");
     }
+    // On Linux the plugin writes a desktop file naming `$APPIMAGE` (never the
+    // mount it runs from) or this binary. An AppImage has no installer, so
+    // the first run is where links start to open it, and it says so once:
+    // when the file did not exist before. Nothing is remembered.
+    #[cfg(target_os = "linux")]
+    {
+        let desktop = handler_file(app);
+        let existed = desktop.as_ref().is_some_and(|d| d.exists());
+        match app.deep_link().register_all() {
+            Err(e) => tracing::warn!(error = %e, "could not register the devplane:// scheme"),
+            Ok(()) if !existed && std::env::var_os("APPIMAGE").is_some() => crate::notify::send(
+                "Devplane",
+                "devplane:// links now open this AppImage. Move or rename it and they stop \
+                 until it runs again.",
+            ),
+            Ok(()) => {}
+        }
+    }
+}
+
+/// The desktop file the deep-link plugin writes on Linux: named after this
+/// executable, in the user's applications folder.
+#[cfg(target_os = "linux")]
+fn handler_file(app: &AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    let bin = tauri::utils::platform::current_exe().ok()?;
+    let name = format!("{}-handler.desktop", bin.file_name()?.to_string_lossy());
+    Some(app.path().data_dir().ok()?.join("applications").join(name))
 }
 
 /// The second launch's arguments, handed over by the single-instance plugin:

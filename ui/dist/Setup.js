@@ -1,5 +1,6 @@
-import { A as append, B as untrack, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, L as event, M as from_html, P as text, Q as user_derived, R as get, T as index, U as user_effect, X as set, Y as proxy, Z as state, _ as set_selected, at as reset, d as bind_checked, et as remove_textarea_child, f as bind_value, g as init_select, h as bind_select_value, i as api, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, ot as noop, p as remove_input_defaults, q as only_child, st as to_array, t as Refused, tt as pop, w as each, y as set_class } from "./api.js";
-import { N as run, O as go, _ as TITLES, a as Inline, b as skippedSteps, h as resource, i as Skeleton, n as Icon, p as copyText, s as ago, t as Pill, v as incomplete, y as keepSkipped } from "./app.js";
+import { $ as user_effect, B as append, C as remove_input_defaults, D as set_selected, E as init_select, F as index, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, S as bind_value, T as bind_select_value, V as comment, W as text, X as untrack, _t as to_array, at as proxy, ct as user_derived, dt as pop, f as run, ft as push, g as prop, gt as noop, ht as reset, i as api, it as sibling, k as set_class, mt as next, nt as first_child, ot as set, q as event, rt as only_child, st as state, t as Refused, tt as child, ut as remove_textarea_child, w as set_attribute, x as bind_checked, z as set_text } from "./api.js";
+import { r as resource, t as copyText } from "./resource.svelte.js";
+import { a as Inline, g as skippedSteps, h as keepSkipped, i as Skeleton, m as incomplete, n as Icon, p as TITLES, s as ago, t as Pill, w as go } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as Failed } from "./Failed.js";
 import { t as safeHref } from "./href.js";
@@ -16,19 +17,19 @@ function hostSays(h) {
 		default: return "not signed in";
 	}
 }
-var root$5 = from_html(`<button>Sign out</button>`);
-var root_1$6 = from_html(`<button>Sign in</button>`);
-var root_2$6 = from_html(`<p class="said svelte-t93vvx"> </p>`);
-var root_3$6 = from_html(`<p class="quiet svelte-t93vvx"> <code class="svelte-t93vvx"> </code> signs in with GitHub CLI's token, or pipe a fine-grained personal access token to the same command.</p>`);
-var root_4$6 = from_html(`<div class="code svelte-t93vvx"><p class="svelte-t93vvx">Open <a target="_blank" rel="noopener noreferrer"> </a> and enter:</p> <p class="big svelte-t93vvx"> </p> <button>Copy code</button></div>`);
-var root_5$6 = from_html(`<div class="host svelte-t93vvx"><div class="line svelte-t93vvx"><b> </b> <span> </span> <!></div> <!> <!> <!></div>`);
-var root_6$6 = from_html(`<p class="quiet svelte-t93vvx"> </p>`);
-var root_7$6 = from_html(`<p class="said svelte-t93vvx"><!></p>`);
-var root_8$5 = from_html(`<section class="card wide svelte-t93vvx" id="github"><h2 class="svelte-t93vvx"><!> GitHub</h2> <!> <!> <!> <p class="quiet svelte-t93vvx">The token is kept only in this machine's credential store — never in a file, a log or this page.</p></section>`);
+var root$6 = from_html(`<button>Sign out</button>`);
+var root_1$7 = from_html(`<button>Sign in</button>`);
+var root_2$7 = from_html(`<p class="said svelte-t93vvx"> </p>`);
+var root_3$7 = from_html(`<p class="quiet svelte-t93vvx"> <code class="svelte-t93vvx"> </code> signs in with GitHub CLI's token, or pipe a fine-grained personal access token to the same command.</p>`);
+var root_4$7 = from_html(`<div class="code svelte-t93vvx"><p class="svelte-t93vvx">Open <a target="_blank" rel="noopener noreferrer"> </a> and enter:</p> <p class="big svelte-t93vvx"> </p> <button>Copy code</button></div>`);
+var root_5$7 = from_html(`<div class="host svelte-t93vvx"><div class="line svelte-t93vvx"><b> </b> <span> </span> <!></div> <!> <!> <!></div>`);
+var root_6$7 = from_html(`<p class="quiet svelte-t93vvx"> </p>`);
+var root_7$7 = from_html(`<p class="said svelte-t93vvx"><!></p>`);
+var root_8$6 = from_html(`<section class="card wide svelte-t93vvx" id="github"><h2 class="svelte-t93vvx"><!> GitHub</h2> <!> <!> <!> <p class="quiet svelte-t93vvx">The token is kept only in this machine's credential store — never in a file, a log or this page.</p></section>`);
 function GitHubPanel($$anchor, $$props) {
 	push($$props, true);
 	let hosts = prop($$props, "hosts", 19, () => []), clientId = prop($$props, "clientId", 3, true), busy = prop($$props, "busy", 3, ""), said = prop($$props, "said", 3, ""), signIn = prop($$props, "signIn", 3, () => {}), signOut = prop($$props, "signOut", 3, () => {}), copy = prop($$props, "copy", 3, () => {});
-	var section = root_8$5();
+	var section = root_8$6();
 	var h2 = child(section);
 	var node = child(h2);
 	Icon(node, {
@@ -39,7 +40,7 @@ function GitHubPanel($$anchor, $$props) {
 	reset(h2);
 	var node_1 = sibling(h2, 2);
 	each(node_1, 17, hosts, (h) => h.host, ($$anchor, h) => {
-		var div = root_5$6();
+		var div = root_5$7();
 		var div_1 = child(div);
 		var b = child(div_1);
 		var text = only_child(b, true);
@@ -48,13 +49,13 @@ function GitHubPanel($$anchor, $$props) {
 		var text_1 = only_child(span, true);
 		var node_2 = sibling(span, 2);
 		var consequent = ($$anchor) => {
-			var button = root$5();
+			var button = root$6();
 			template_effect(() => button.disabled = !!busy());
 			delegated("click", button, () => signOut()(get(h).host));
 			append($$anchor, button);
 		};
 		var consequent_1 = ($$anchor) => {
-			var button_1 = root_1$6();
+			var button_1 = root_1$7();
 			template_effect(() => button_1.disabled = !!busy() || !(get(h).device_flow ?? clientId()));
 			delegated("click", button_1, () => signIn()(get(h).host));
 			append($$anchor, button_1);
@@ -66,7 +67,7 @@ function GitHubPanel($$anchor, $$props) {
 		reset(div_1);
 		var node_3 = sibling(div_1, 2);
 		var consequent_2 = ($$anchor) => {
-			var p = root_2$6();
+			var p = root_2$7();
 			var text_2 = only_child(p, true);
 			template_effect(() => set_text(text_2, get(h).said));
 			append($$anchor, p);
@@ -76,7 +77,7 @@ function GitHubPanel($$anchor, $$props) {
 		});
 		var node_4 = sibling(node_3, 2);
 		var consequent_3 = ($$anchor) => {
-			var p_1 = root_3$6();
+			var p_1 = root_3$7();
 			var text_3 = child(p_1);
 			var code = sibling(text_3);
 			var text_4 = only_child(code);
@@ -93,7 +94,7 @@ function GitHubPanel($$anchor, $$props) {
 		});
 		var node_5 = sibling(node_4, 2);
 		var consequent_4 = ($$anchor) => {
-			var div_2 = root_4$6();
+			var div_2 = root_4$7();
 			var p_2 = child(div_2);
 			var a = sibling(child(p_2));
 			var text_5 = only_child(a, true);
@@ -130,7 +131,7 @@ function GitHubPanel($$anchor, $$props) {
 	});
 	var node_6 = sibling(node_1, 2);
 	var consequent_5 = ($$anchor) => {
-		var p_4 = root_6$6();
+		var p_4 = root_6$7();
 		var text_7 = only_child(p_4);
 		template_effect(() => set_text(text_7, `${busy() ?? ""}…`));
 		append($$anchor, p_4);
@@ -140,7 +141,7 @@ function GitHubPanel($$anchor, $$props) {
 	});
 	var node_7 = sibling(node_6, 2);
 	var consequent_6 = ($$anchor) => {
-		var p_5 = root_7$6();
+		var p_5 = root_7$7();
 		var node_8 = child(p_5);
 		Inline(node_8, { get text() {
 			return said();
@@ -159,14 +160,14 @@ function GitHubPanel($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region src/lib/PendingWrite.svelte
-var root$4 = from_html(`<span class="tag svelte-14cazgd">a new file</span>`);
-var root_1$5 = from_html(`<span class="tag svelte-14cazgd">removed</span>`);
-var root_2$5 = from_html(`<span class="tag warn svelte-14cazgd">has uncommitted changes — the diff is against the file as it is on disk</span>`);
-var root_3$5 = from_html(`<p class="quiet svelte-14cazgd">Already exactly this; nothing to write.</p>`);
-var root_4$5 = from_html(`<span> </span>`);
-var root_5$5 = from_html(`<pre class="diff svelte-14cazgd" data-quoted=""></pre>`);
-var root_6$5 = from_html(`<p class="said svelte-14cazgd" role="status"> </p>`);
-var root_7$5 = from_html(`<div class="pending svelte-14cazgd" role="group"><p class="file svelte-14cazgd"><!> <code class="svelte-14cazgd"> </code> <!> <!> <!></p> <!> <!> <div class="actions svelte-14cazgd"><button type="button" class="primary svelte-14cazgd"><!> </button> <button type="button">Cancel — write nothing</button></div></div>`);
+var root$5 = from_html(`<span class="tag svelte-14cazgd">a new file</span>`);
+var root_1$6 = from_html(`<span class="tag svelte-14cazgd">removed</span>`);
+var root_2$6 = from_html(`<span class="tag warn svelte-14cazgd">has uncommitted changes — the diff is against the file as it is on disk</span>`);
+var root_3$6 = from_html(`<p class="quiet svelte-14cazgd">Already exactly this; nothing to write.</p>`);
+var root_4$6 = from_html(`<span> </span>`);
+var root_5$6 = from_html(`<pre class="diff svelte-14cazgd" data-quoted=""></pre>`);
+var root_6$6 = from_html(`<p class="said svelte-14cazgd" role="status"> </p>`);
+var root_7$6 = from_html(`<div class="pending svelte-14cazgd" role="group"><p class="file svelte-14cazgd"><!> <code class="svelte-14cazgd"> </code> <!> <!> <!></p> <!> <!> <div class="actions svelte-14cazgd"><button type="button" class="primary svelte-14cazgd"><!> </button> <button type="button">Cancel — write nothing</button></div></div>`);
 function PendingWrite($$anchor, $$props) {
 	push($$props, true);
 	let confirmLabel = prop($$props, "confirmLabel", 3, "Confirm"), step = prop($$props, "step", 3, "");
@@ -208,7 +209,7 @@ function PendingWrite($$anchor, $$props) {
 		}
 	}
 	const lines = user_derived(() => get(p).diff.replace(/\n$/, "").split("\n"));
-	var div = root_7$5();
+	var div = root_7$6();
 	var p_1 = child(div);
 	var node = child(p_1);
 	Icon(node, {
@@ -219,7 +220,7 @@ function PendingWrite($$anchor, $$props) {
 	var text = only_child(code, true);
 	var node_1 = sibling(code, 2);
 	var consequent = ($$anchor) => {
-		var span = root$4();
+		var span = root$5();
 		append($$anchor, span);
 	};
 	if_block(node_1, ($$render) => {
@@ -227,7 +228,7 @@ function PendingWrite($$anchor, $$props) {
 	});
 	var node_2 = sibling(node_1, 2);
 	var consequent_1 = ($$anchor) => {
-		var span_1 = root_1$5();
+		var span_1 = root_1$6();
 		append($$anchor, span_1);
 	};
 	if_block(node_2, ($$render) => {
@@ -235,7 +236,7 @@ function PendingWrite($$anchor, $$props) {
 	});
 	var node_3 = sibling(node_2, 2);
 	var consequent_2 = ($$anchor) => {
-		var span_2 = root_2$5();
+		var span_2 = root_2$6();
 		append($$anchor, span_2);
 	};
 	if_block(node_3, ($$render) => {
@@ -244,13 +245,13 @@ function PendingWrite($$anchor, $$props) {
 	reset(p_1);
 	var node_4 = sibling(p_1, 2);
 	var consequent_3 = ($$anchor) => {
-		var p_2 = root_3$5();
+		var p_2 = root_3$6();
 		append($$anchor, p_2);
 	};
 	var alternate = ($$anchor) => {
-		var pre = root_5$5();
+		var pre = root_5$6();
 		each(pre, 21, () => get(lines), index, ($$anchor, l) => {
-			var span_3 = root_4$5();
+			var span_3 = root_4$6();
 			let classes;
 			var text_1 = only_child(span_3);
 			template_effect(($0, $1) => {
@@ -272,7 +273,7 @@ function PendingWrite($$anchor, $$props) {
 	});
 	var node_5 = sibling(node_4, 2);
 	var consequent_4 = ($$anchor) => {
-		var p_3 = root_6$5();
+		var p_3 = root_6$6();
 		var text_2 = only_child(p_3, true);
 		template_effect(() => set_text(text_2, get(said)));
 		append($$anchor, p_3);
@@ -308,17 +309,17 @@ function PendingWrite($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region src/surfaces/setup/Connect.svelte
-var root$3 = from_html(`<p class="quiet svelte-mew5m0"> <code class="svelte-mew5m0">npm install -g @anthropic-ai/claude-code</code> — and come back; until then Devplane watches nothing and gates nothing.</p>`);
-var root_1$4 = from_html(`<span class="off svelte-mew5m0"> </span>`);
-var root_2$4 = from_html(`<span class="on svelte-mew5m0">connected</span>`);
-var root_3$4 = from_html(`<span class="quiet svelte-mew5m0">not connected</span>`);
-var root_4$4 = from_html(`<button type="button"> </button>`);
-var root_5$4 = from_html(`<button type="button">Disconnect — show the change</button>`);
-var root_6$4 = from_html(`<div class="actions svelte-mew5m0"><!> <!></div>`);
-var root_7$4 = from_html(`<div class="agent svelte-mew5m0"><p class="who svelte-mew5m0"><!> <b> </b> <!> <code class="path svelte-mew5m0"> </code></p> <!></div>`);
-var root_8$4 = from_html(`<p class="fail svelte-mew5m0" role="alert"><!></p>`);
-var root_9$4 = from_html(`<div><button type="button">Skip — watch sessions only</button></div>`);
-var root_10$4 = from_html(`<div class="connect svelte-mew5m0"><!> <!> <!> <!></div>`);
+var root$4 = from_html(`<p class="quiet svelte-mew5m0"> <code class="svelte-mew5m0">npm install -g @anthropic-ai/claude-code</code> — and come back; until then Devplane watches nothing and gates nothing.</p>`);
+var root_1$5 = from_html(`<span class="off svelte-mew5m0"> </span>`);
+var root_2$5 = from_html(`<span class="on svelte-mew5m0">connected</span>`);
+var root_3$5 = from_html(`<span class="quiet svelte-mew5m0">not connected</span>`);
+var root_4$5 = from_html(`<button type="button"> </button>`);
+var root_5$5 = from_html(`<button type="button">Disconnect — show the change</button>`);
+var root_6$5 = from_html(`<div class="actions svelte-mew5m0"><!> <!></div>`);
+var root_7$5 = from_html(`<div class="agent svelte-mew5m0"><p class="who svelte-mew5m0"><!> <b> </b> <!> <code class="path svelte-mew5m0"> </code></p> <!></div>`);
+var root_8$5 = from_html(`<p class="fail svelte-mew5m0" role="alert"><!></p>`);
+var root_9$5 = from_html(`<div><button type="button">Skip — watch sessions only</button></div>`);
+var root_10$5 = from_html(`<div class="connect svelte-mew5m0"><!> <!> <!> <!></div>`);
 function Connect($$anchor, $$props) {
 	push($$props, true);
 	let firstRun = prop($$props, "firstRun", 3, false);
@@ -348,10 +349,10 @@ function Connect($$anchor, $$props) {
 		}
 	}
 	const shown = user_derived(() => $$props.agents.filter((a) => a.present || a.connected));
-	var div = root_10$4();
+	var div = root_10$5();
 	var node = child(div);
 	var consequent = ($$anchor) => {
-		var p = root$3();
+		var p = root$4();
 		var text = child(p);
 		next(2);
 		reset(p);
@@ -363,7 +364,7 @@ function Connect($$anchor, $$props) {
 	});
 	var node_1 = sibling(node, 2);
 	each(node_1, 17, () => get(shown), (a) => a.agent, ($$anchor, a) => {
-		var div_1 = root_7$4();
+		var div_1 = root_7$5();
 		var p_1 = child(div_1);
 		var node_2 = child(p_1);
 		Icon(node_2, {
@@ -374,17 +375,17 @@ function Connect($$anchor, $$props) {
 		var text_1 = only_child(b_1, true);
 		var node_3 = sibling(b_1, 2);
 		var consequent_1 = ($$anchor) => {
-			var span = root_1$4();
+			var span = root_1$5();
 			var text_2 = only_child(span);
 			template_effect(($0) => set_text(text_2, `gate off for ${get(a).name ?? ""} — the binary its hooks run is gone (${$0 ?? ""})`), [() => get(a).gate_off.join(", ")]);
 			append($$anchor, span);
 		};
 		var consequent_2 = ($$anchor) => {
-			var span_1 = root_2$4();
+			var span_1 = root_2$5();
 			append($$anchor, span_1);
 		};
 		var alternate = ($$anchor) => {
-			var span_2 = root_3$4();
+			var span_2 = root_3$5();
 			append($$anchor, span_2);
 		};
 		if_block(node_3, ($$render) => {
@@ -420,10 +421,10 @@ function Connect($$anchor, $$props) {
 			}
 		};
 		var alternate_1 = ($$anchor) => {
-			var div_2 = root_6$4();
+			var div_2 = root_6$5();
 			var node_5 = child(div_2);
 			var consequent_4 = ($$anchor) => {
-				var button = root_4$4();
+				var button = root_4$5();
 				var text_4 = only_child(button, true);
 				template_effect(() => {
 					button.disabled = !!get(asking);
@@ -437,7 +438,7 @@ function Connect($$anchor, $$props) {
 			});
 			var node_6 = sibling(node_5, 2);
 			var consequent_5 = ($$anchor) => {
-				var button_1 = root_5$4();
+				var button_1 = root_5$5();
 				template_effect(() => button_1.disabled = !!get(asking));
 				delegated("click", button_1, () => preview(get(a).agent, "disconnect"));
 				append($$anchor, button_1);
@@ -461,7 +462,7 @@ function Connect($$anchor, $$props) {
 	});
 	var node_7 = sibling(node_1, 2);
 	var consequent_6 = ($$anchor) => {
-		var p_2 = root_8$4();
+		var p_2 = root_8$5();
 		var node_8 = child(p_2);
 		Inline(node_8, { get text() {
 			return get(said);
@@ -474,7 +475,7 @@ function Connect($$anchor, $$props) {
 	});
 	var node_9 = sibling(node_7, 2);
 	var consequent_7 = ($$anchor) => {
-		var div_3 = root_9$4();
+		var div_3 = root_9$5();
 		var button_2 = only_child(div_3);
 		template_effect(() => set_attribute(button_2, "data-first-run-step", firstRun() ? "skip-connect" : void 0));
 		delegated("click", button_2, function(...$$args) {
@@ -492,17 +493,17 @@ function Connect($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region src/surfaces/setup/Trust.svelte
-var root_1$3 = from_html(`<div class="row svelte-1eg9zt8"><!> <b> </b> <code class="svelte-1eg9zt8"> </code> <button type="button">Read what it would allow</button></div>`);
-var root_2$3 = from_html(`<div class="found"><p class="label svelte-1eg9zt8">Found from sessions on this machine</p> <!></div>`);
-var root_3$3 = from_html(`<span class="warn svelte-1eg9zt8">not a git repository — a change here cannot be isolated</span>`);
-var root_4$3 = from_html(`<p class="quiet svelte-1eg9zt8">Already trusted.</p>`);
-var root_5$3 = from_html(`<li><code data-quoted="" class="svelte-1eg9zt8"> </code> <span class="src svelte-1eg9zt8"> </span> <span class="detail svelte-1eg9zt8"><!></span></li>`);
-var root_6$3 = from_html(`<div class="kind"><p class="label svelte-1eg9zt8"> </p> <ul class="svelte-1eg9zt8"></ul></div>`);
-var root_7$3 = from_html(`<p class="warn svelte-1eg9zt8"> </p>`);
-var root_8$3 = from_html(`<p class="quiet svelte-1eg9zt8">Trusting lets an agent Devplane starts here run this repository's own configuration without asking. <!></p> <!> <!> <div><button type="button" class="primary svelte-1eg9zt8"><!> </button></div>`, 1);
-var root_9$3 = from_html(`<div class="scan svelte-1eg9zt8"><p class="svelte-1eg9zt8"><b> </b> <code class="svelte-1eg9zt8"> </code><!></p> <!></div>`);
-var root_10$3 = from_html(`<p class="fail svelte-1eg9zt8" role="alert"><!></p>`);
-var root_11$3 = from_html(`<div class="trust svelte-1eg9zt8"><!> <form class="add"><label for="trust-path" class="label svelte-1eg9zt8">Add a repository by its path</label> <div class="line svelte-1eg9zt8"><input id="trust-path" placeholder="/path/to/your/repository" autocomplete="off" spellcheck="false" class="svelte-1eg9zt8"/> <button type="submit"> </button></div></form> <!> <!></div>`);
+var root_1$4 = from_html(`<div class="row svelte-1eg9zt8"><!> <b> </b> <code class="svelte-1eg9zt8"> </code> <button type="button">Read what it would allow</button></div>`);
+var root_2$4 = from_html(`<div class="found"><p class="label svelte-1eg9zt8">Found from sessions on this machine</p> <!></div>`);
+var root_3$4 = from_html(`<span class="warn svelte-1eg9zt8">not a git repository — a change here cannot be isolated</span>`);
+var root_4$4 = from_html(`<p class="quiet svelte-1eg9zt8">Already trusted.</p>`);
+var root_5$4 = from_html(`<li><code data-quoted="" class="svelte-1eg9zt8"> </code> <span class="src svelte-1eg9zt8"> </span> <span class="detail svelte-1eg9zt8"><!></span></li>`);
+var root_6$4 = from_html(`<div class="kind"><p class="label svelte-1eg9zt8"> </p> <ul class="svelte-1eg9zt8"></ul></div>`);
+var root_7$4 = from_html(`<p class="warn svelte-1eg9zt8"> </p>`);
+var root_8$4 = from_html(`<p class="quiet svelte-1eg9zt8">Trusting lets an agent Devplane starts here run this repository's own configuration without asking. <!></p> <!> <!> <div><button type="button" class="primary svelte-1eg9zt8"><!> </button></div>`, 1);
+var root_9$4 = from_html(`<div class="scan svelte-1eg9zt8"><p class="svelte-1eg9zt8"><b> </b> <code class="svelte-1eg9zt8"> </code><!></p> <!></div>`);
+var root_10$4 = from_html(`<p class="fail svelte-1eg9zt8" role="alert"><!></p>`);
+var root_11$4 = from_html(`<div class="trust svelte-1eg9zt8"><!> <form class="add"><label for="trust-path" class="label svelte-1eg9zt8">Add a repository by its path</label> <div class="line svelte-1eg9zt8"><input id="trust-path" placeholder="/path/to/your/repository" autocomplete="off" spellcheck="false" class="svelte-1eg9zt8"/> <button type="submit"> </button></div></form> <!> <!></div>`);
 function Trust($$anchor, $$props) {
 	push($$props, true);
 	let firstRun = prop($$props, "firstRun", 3, false);
@@ -553,13 +554,13 @@ function Trust($$anchor, $$props) {
 		["skill", "Skills that pre-approve tools"],
 		["policy", "Allow rules it brings"]
 	];
-	var div = root_11$3();
+	var div = root_11$4();
 	var node = child(div);
 	var consequent = ($$anchor) => {
-		var div_1 = root_2$3();
+		var div_1 = root_2$4();
 		var node_1 = sibling(child(div_1), 2);
 		each(node_1, 17, () => get(found), (p) => p.id, ($$anchor, p) => {
-			var div_2 = root_1$3();
+			var div_2 = root_1$4();
 			var node_2 = child(div_2);
 			Icon(node_2, {
 				name: "folder",
@@ -595,7 +596,7 @@ function Trust($$anchor, $$props) {
 	reset(form);
 	var node_3 = sibling(form, 2);
 	var consequent_6 = ($$anchor) => {
-		var div_4 = root_9$3();
+		var div_4 = root_9$4();
 		var p_1 = child(div_4);
 		var b_1 = child(p_1);
 		var text_3 = only_child(b_1, true);
@@ -603,7 +604,7 @@ function Trust($$anchor, $$props) {
 		var text_4 = only_child(code_1, true);
 		var node_4 = sibling(code_1);
 		var consequent_1 = ($$anchor) => {
-			var span = root_3$3();
+			var span = root_3$4();
 			append($$anchor, span);
 		};
 		if_block(node_4, ($$render) => {
@@ -612,11 +613,11 @@ function Trust($$anchor, $$props) {
 		reset(p_1);
 		var node_5 = sibling(p_1, 2);
 		var consequent_2 = ($$anchor) => {
-			var p_2 = root_4$3();
+			var p_2 = root_4$4();
 			append($$anchor, p_2);
 		};
 		var alternate = ($$anchor) => {
-			var fragment = root_8$3();
+			var fragment = root_8$4();
 			var p_3 = first_child(fragment);
 			var node_6 = sibling(child(p_3));
 			var consequent_3 = ($$anchor) => {
@@ -637,12 +638,12 @@ function Trust($$anchor, $$props) {
 				var fragment_2 = comment();
 				var node_8 = first_child(fragment_2);
 				var consequent_4 = ($$anchor) => {
-					var div_5 = root_6$3();
+					var div_5 = root_6$4();
 					var p_4 = child(div_5);
 					var text_6 = only_child(p_4, true);
 					var ul = sibling(p_4, 2);
 					each(ul, 21, () => get(rows), index, ($$anchor, f) => {
-						var li = root_5$3();
+						var li = root_5$4();
 						var code_2 = child(li);
 						var text_7 = only_child(code_2, true);
 						var span_1 = sibling(code_2, 2);
@@ -672,7 +673,7 @@ function Trust($$anchor, $$props) {
 			});
 			var node_10 = sibling(node_7, 2);
 			var consequent_5 = ($$anchor) => {
-				var p_5 = root_7$3();
+				var p_5 = root_7$4();
 				var text_9 = only_child(p_5);
 				template_effect(($0) => set_text(text_9, `Could not be read, so what they run is not shown here and is still run by the agent: ${$0 ?? ""}`), [() => get(scan).unreadable.join(", ")]);
 				append($$anchor, p_5);
@@ -715,7 +716,7 @@ function Trust($$anchor, $$props) {
 	});
 	var node_12 = sibling(node_3, 2);
 	var consequent_7 = ($$anchor) => {
-		var p_6 = root_10$3();
+		var p_6 = root_10$4();
 		var node_13 = child(p_6);
 		Inline(node_13, { get text() {
 			return get(said);
@@ -743,21 +744,21 @@ function Trust($$anchor, $$props) {
 delegate(["click"]);
 //#endregion
 //#region src/surfaces/setup/Declare.svelte
-var root$2 = from_html(`<p class="head svelte-be32sg"><!> </p>`);
-var root_1$2 = from_html(`<p class="head ok svelte-be32sg"> </p>`);
-var root_2$2 = from_html(`<p class="done svelte-be32sg" role="status"><!> Check declared — nothing has run yet. It runs when a change's agent finishes, or when you run the gates.</p>`);
-var root_3$2 = from_html(`<p class="fail svelte-be32sg" role="alert"><!> <code class="svelte-be32sg"> </code> </p>`);
-var root_4$2 = from_html(`<p class="quiet svelte-be32sg"> </p>`);
-var root_5$2 = from_html(`<textarea aria-label="the command" class="svelte-be32sg"></textarea>`);
-var root_6$2 = from_html(`<code data-quoted="" class="svelte-be32sg"> </code>`);
-var root_7$2 = from_html(`<li><input type="checkbox"/> <div class="cmd svelte-be32sg"><!> <span class="src svelte-be32sg"> </span></div> <div class="tools svelte-be32sg"><button type="button"> </button> <button type="button" aria-label="move up">↑</button> <button type="button" aria-label="move down">↓</button></div></li>`);
-var root_8$2 = from_html(`<ol class="rows svelte-be32sg" aria-label="commands for check, in order"></ol>`);
-var root_9$2 = from_html(`<label class="row svelte-be32sg"><input type="checkbox"/> <code data-quoted="" class="svelte-be32sg"> </code> <span class="src svelte-be32sg"> </span></label>`);
-var root_10$2 = from_html(`<div class="named svelte-be32sg"><p class="label svelte-be32sg">A named gate — evidence on the change, never part of check</p> <!></div>`);
-var root_11$2 = from_html(`<p class="fail svelte-be32sg"> </p>`);
-var root_12$2 = from_html(`<!> <form class="add svelte-be32sg"><input placeholder="Add a command — e.g. make test" aria-label="add a command to check" class="svelte-be32sg"/> <button type="submit"><!> Add</button></form> <!> <!> <div class="go svelte-be32sg"><button type="button" class="primary svelte-be32sg"> </button> <span class="quiet svelte-be32sg">Offering runs nothing. Only the commands you confirm become the gate.</span></div>`, 1);
-var root_13$2 = from_html(`<!> <!> <!>`, 1);
-var root_14$2 = from_html(`<div class="declare svelte-be32sg"><!></div>`);
+var root$3 = from_html(`<p class="head svelte-be32sg"><!> </p>`);
+var root_1$3 = from_html(`<p class="head ok svelte-be32sg"> </p>`);
+var root_2$3 = from_html(`<p class="done svelte-be32sg" role="status"><!> Check declared — nothing has run yet. It runs when a change's agent finishes, or when you run the gates.</p>`);
+var root_3$3 = from_html(`<p class="fail svelte-be32sg" role="alert"><!> <code class="svelte-be32sg"> </code> </p>`);
+var root_4$3 = from_html(`<p class="quiet svelte-be32sg"> </p>`);
+var root_5$3 = from_html(`<textarea aria-label="the command" class="svelte-be32sg"></textarea>`);
+var root_6$3 = from_html(`<code data-quoted="" class="svelte-be32sg"> </code>`);
+var root_7$3 = from_html(`<li><input type="checkbox"/> <div class="cmd svelte-be32sg"><!> <span class="src svelte-be32sg"> </span></div> <div class="tools svelte-be32sg"><button type="button"> </button> <button type="button" aria-label="move up">↑</button> <button type="button" aria-label="move down">↓</button></div></li>`);
+var root_8$3 = from_html(`<ol class="rows svelte-be32sg" aria-label="commands for check, in order"></ol>`);
+var root_9$3 = from_html(`<label class="row svelte-be32sg"><input type="checkbox"/> <code data-quoted="" class="svelte-be32sg"> </code> <span class="src svelte-be32sg"> </span></label>`);
+var root_10$3 = from_html(`<div class="named svelte-be32sg"><p class="label svelte-be32sg">A named gate — evidence on the change, never part of check</p> <!></div>`);
+var root_11$3 = from_html(`<p class="fail svelte-be32sg"> </p>`);
+var root_12$3 = from_html(`<!> <form class="add svelte-be32sg"><input placeholder="Add a command — e.g. make test" aria-label="add a command to check" class="svelte-be32sg"/> <button type="submit"><!> Add</button></form> <!> <!> <div class="go svelte-be32sg"><button type="button" class="primary svelte-be32sg"> </button> <span class="quiet svelte-be32sg">Offering runs nothing. Only the commands you confirm become the gate.</span></div>`, 1);
+var root_13$3 = from_html(`<!> <!> <!>`, 1);
+var root_14$3 = from_html(`<div class="declare svelte-be32sg"><!></div>`);
 function Declare($$anchor, $$props) {
 	push($$props, true);
 	let firstRun = prop($$props, "firstRun", 3, false), planted = prop($$props, "candidates", 3, null);
@@ -869,7 +870,7 @@ function Declare($$anchor, $$props) {
 	const where = (r) => r.source === "typed here" ? "typed here" : `found: ${r.source}${r.line ? `:${r.line}` : ""}`;
 	const mark = (s) => firstRun() ? s : void 0;
 	const firstOffered = user_derived(() => get(rows).findIndex((r) => r.source !== "devplane.toml"));
-	var div = root_14$2();
+	var div = root_14$3();
 	var node = child(div);
 	var consequent = ($$anchor) => {
 		Failed($$anchor, {
@@ -886,11 +887,11 @@ function Declare($$anchor, $$props) {
 		Skeleton($$anchor, { rows: 3 });
 	};
 	var alternate_4 = ($$anchor) => {
-		var fragment_2 = root_13$2();
+		var fragment_2 = root_13$3();
 		var node_1 = first_child(fragment_2);
 		var consequent_2 = ($$anchor) => {};
 		var consequent_3 = ($$anchor) => {
-			var p = root$2();
+			var p = root$3();
 			var node_2 = child(p);
 			Icon(node_2, {
 				name: "alert",
@@ -902,7 +903,7 @@ function Declare($$anchor, $$props) {
 			append($$anchor, p);
 		};
 		var alternate = ($$anchor) => {
-			var p_1 = root_1$2();
+			var p_1 = root_1$3();
 			var text_1 = only_child(p_1);
 			template_effect(() => set_text(text_1, `${get(data).project.name ?? ""}: check is declared. Change it below; the edit is shown as a diff before anything is written.`));
 			append($$anchor, p_1);
@@ -914,7 +915,7 @@ function Declare($$anchor, $$props) {
 		});
 		var node_3 = sibling(node_1, 2);
 		var consequent_4 = ($$anchor) => {
-			var p_2 = root_2$2();
+			var p_2 = root_2$3();
 			var node_4 = child(p_2);
 			Icon(node_4, {
 				name: "check",
@@ -929,7 +930,7 @@ function Declare($$anchor, $$props) {
 		});
 		var node_5 = sibling(node_3, 2);
 		var consequent_5 = ($$anchor) => {
-			var p_3 = root_3$2();
+			var p_3 = root_3$3();
 			var node_6 = child(p_3);
 			Icon(node_6, {
 				name: "alert",
@@ -968,32 +969,32 @@ function Declare($$anchor, $$props) {
 			}
 		};
 		var alternate_3 = ($$anchor) => {
-			var fragment_4 = root_12$2();
+			var fragment_4 = root_12$3();
 			var node_7 = first_child(fragment_4);
 			var consequent_7 = ($$anchor) => {
-				var p_4 = root_4$2();
+				var p_4 = root_4$3();
 				var text_4 = only_child(p_4);
 				template_effect(($0) => set_text(text_4, `Found nothing to offer — looked for: ${$0 ?? ""}. Type the command that says this project is done.`), [() => get(data).looked_for.join(" · ")]);
 				append($$anchor, p_4);
 			};
 			var alternate_2 = ($$anchor) => {
-				var ol = root_8$2();
+				var ol = root_8$3();
 				each(ol, 23, () => get(rows), (r) => r.key, ($$anchor, r, i) => {
-					var li = root_7$2();
+					var li = root_7$3();
 					let classes;
 					var input = child(li);
 					remove_input_defaults(input);
 					var div_1 = sibling(input, 2);
 					var node_8 = child(div_1);
 					var consequent_8 = ($$anchor) => {
-						var textarea = root_5$2();
+						var textarea = root_5$3();
 						remove_textarea_child(textarea);
 						template_effect(($0) => set_attribute(textarea, "rows", $0), [() => Math.max(1, get(r).command.split("\n").length)]);
 						bind_value(textarea, () => get(r).command, ($$value) => get(r).command = $$value);
 						append($$anchor, textarea);
 					};
 					var alternate_1 = ($$anchor) => {
-						var code_1 = root_6$2();
+						var code_1 = root_6$3();
 						var text_5 = only_child(code_1, true);
 						template_effect(() => set_text(text_5, get(r).command));
 						append($$anchor, code_1);
@@ -1048,10 +1049,10 @@ function Declare($$anchor, $$props) {
 			reset(form);
 			var node_10 = sibling(form, 2);
 			var consequent_9 = ($$anchor) => {
-				var div_3 = root_10$2();
+				var div_3 = root_10$3();
 				var node_11 = sibling(child(div_3), 2);
 				each(node_11, 17, () => get(named), (r) => r.key, ($$anchor, r, $$index_1) => {
-					var label = root_9$2();
+					var label = root_9$3();
 					var input_2 = child(label);
 					remove_input_defaults(input_2);
 					var code_2 = sibling(input_2, 2);
@@ -1074,7 +1075,7 @@ function Declare($$anchor, $$props) {
 			});
 			var node_12 = sibling(node_10, 2);
 			var consequent_10 = ($$anchor) => {
-				var p_5 = root_11$2();
+				var p_5 = root_11$3();
 				var text_10 = only_child(p_5, true);
 				template_effect(() => set_text(text_10, get(said)));
 				append($$anchor, p_5);
@@ -1111,6 +1112,358 @@ function Declare($$anchor, $$props) {
 		else $$render(alternate_4, -1);
 	});
 	reset(div);
+	append($$anchor, div);
+	pop();
+}
+delegate(["click"]);
+//#endregion
+//#region src/surfaces/setup/Updates.svelte
+var root$2 = from_html(`<p class="quiet svelte-kayi80">Reading…</p>`);
+var root_1$2 = from_html(`<p class="quiet svelte-kayi80">Update checks are in the desktop app. This page is served by <code>devplane up</code>, which never checks.</p>`);
+var root_2$2 = from_html(`<p class="svelte-kayi80">May Devplane check for a newer version when the app starts?</p> <p class="quiet svelte-kayi80">It fetches <code> </code> <b>Install and restart</b>. Until you answer, nothing is checked.</p>`, 1);
+var root_3$2 = from_html(`<p class="svelte-kayi80">Update checks off. Releases are published at <code> </code>.</p>`);
+var root_4$2 = from_html(`<p class="svelte-kayi80"> <code> </code>.</p>`);
+var root_5$2 = from_html(`<p class="quiet svelte-kayi80">Checking for a newer version…</p>`);
+var root_6$2 = from_html(`<p class="svelte-kayi80"> </p>`);
+var root_7$2 = from_html(`<p class="fail svelte-kayi80"> </p>`);
+var root_8$2 = from_html(`<pre class="notes svelte-kayi80" aria-label="release notes"> </pre>`);
+var root_9$2 = from_html(`<pre class="stops svelte-kayi80" role="alert"> </pre> <div class="actions svelte-kayi80"><button type="button" class="primary">Stop them, install and restart</button> <button type="button">Keep running</button></div>`, 1);
+var root_10$2 = from_html(`<button type="button">Not now</button>`);
+var root_11$2 = from_html(`<div class="actions svelte-kayi80"><button type="button" class="primary">Install and restart</button> <!></div>`);
+var root_12$2 = from_html(`<p class="svelte-kayi80"><b> </b> is available<!>. Installing it restarts the app.</p> <!> <!> <!>`, 1);
+var root_13$2 = from_html(`<p class="svelte-kayi80"><b> </b> <code> </code>.</p>`);
+var root_14$2 = from_html(`<button type="button"> </button>`);
+var root_15$2 = from_html(`<div class="actions svelte-kayi80"><!> <!></div>`);
+var root_16$2 = from_html(`<p class="fail svelte-kayi80" role="alert"> </p>`);
+var root_17$2 = from_html(`<!> <!> <!>`, 1);
+var root_18 = from_html(`<div class="updates svelte-kayi80"><!></div>`);
+function Updates($$anchor, $$props) {
+	push($$props, true);
+	const read = resource(() => $$props.shown ? null : "/api/app/update", { tell: () => "devplane doctor" });
+	const s = user_derived(() => $$props.shown ?? read.data);
+	let pending = state(null);
+	let stops = state("");
+	let said = state("");
+	let busy = state(false);
+	async function preview(pref) {
+		set(said, "");
+		try {
+			set(pending, {
+				pref,
+				p: await api("/api/app/updates", {
+					method: "POST",
+					body: JSON.stringify({
+						updates: pref,
+						confirm: false
+					})
+				})
+			}, true);
+		} catch (e) {
+			set(said, e instanceof Error ? e.message : String(e), true);
+		}
+	}
+	async function install(version, confirm = false) {
+		if (get(busy)) return;
+		set(busy, true);
+		set(said, "");
+		try {
+			await api("/api/app/update/install", {
+				method: "POST",
+				body: JSON.stringify({
+					version,
+					confirm
+				})
+			});
+			set(stops, "");
+		} catch (e) {
+			const b = e instanceof Refused ? e.body : null;
+			if (b?.refused === "stops" && b.says) set(stops, b.says, true);
+			else set(said, b?.why ?? (e instanceof Error ? e.message : String(e)), true);
+		} finally {
+			set(busy, false);
+			await read.reload();
+		}
+	}
+	async function dismiss(version) {
+		set(said, "");
+		try {
+			await api("/api/app/update/dismiss", {
+				method: "POST",
+				body: JSON.stringify({ version })
+			});
+		} catch (e) {
+			set(said, e instanceof Error ? e.message : String(e), true);
+		}
+		await read.reload();
+	}
+	var div = root_18();
+	var node = child(div);
+	var consequent = ($$anchor) => {
+		Failed($$anchor, {
+			what: "the update check",
+			get failure() {
+				return read.failure;
+			}
+		});
+	};
+	var consequent_1 = ($$anchor) => {
+		var p = root$2();
+		append($$anchor, p);
+	};
+	var consequent_2 = ($$anchor) => {
+		var p_1 = root_1$2();
+		append($$anchor, p_1);
+	};
+	var alternate_1 = ($$anchor) => {
+		var fragment_1 = root_17$2();
+		var node_1 = first_child(fragment_1);
+		var consequent_3 = ($$anchor) => {
+			var fragment_2 = root_2$2();
+			var p_2 = sibling(first_child(fragment_2), 2);
+			var code = sibling(child(p_2));
+			var text = only_child(code, true);
+			var text_1 = sibling(code);
+			next(2);
+			reset(p_2);
+			template_effect(() => {
+				set_text(text, get(s).fetches);
+				set_text(text_1, ` once per launch — never on a timer — and sends ${get(s).sends ?? ""}. Nothing is
+        downloaded until you choose `);
+			});
+			append($$anchor, fragment_2);
+		};
+		var consequent_4 = ($$anchor) => {
+			var p_3 = root_3$2();
+			var code_1 = sibling(child(p_3));
+			var text_2 = only_child(code_1, true);
+			next();
+			reset(p_3);
+			template_effect(() => set_text(text_2, get(s).releases));
+			append($$anchor, p_3);
+		};
+		var consequent_5 = ($$anchor) => {
+			var p_4 = root_4$2();
+			var text_3 = child(p_4);
+			var code_2 = sibling(text_3);
+			var text_4 = only_child(code_2, true);
+			next();
+			reset(p_4);
+			template_effect(() => {
+				set_text(text_3, `${get(s).why ?? ""}. Releases are published at `);
+				set_text(text_4, get(s).releases);
+			});
+			append($$anchor, p_4);
+		};
+		var consequent_6 = ($$anchor) => {
+			var p_5 = root_5$2();
+			append($$anchor, p_5);
+		};
+		var consequent_7 = ($$anchor) => {
+			var p_6 = root_6$2();
+			var text_5 = only_child(p_6);
+			template_effect(() => set_text(text_5, `Update checks on. Version ${get(s).running ?? ""} is the newest.`));
+			append($$anchor, p_6);
+		};
+		var consequent_8 = ($$anchor) => {
+			var p_7 = root_6$2();
+			var text_6 = only_child(p_7);
+			template_effect(() => set_text(text_6, `Update checks on. ${get(s).why ?? ""}; nothing was downloaded.`));
+			append($$anchor, p_7);
+		};
+		var consequent_9 = ($$anchor) => {
+			var p_8 = root_7$2();
+			var text_7 = only_child(p_8);
+			template_effect(() => set_text(text_7, `The last check found nothing it could trust: ${get(s).why ?? ""}. Nothing was downloaded.`));
+			append($$anchor, p_8);
+		};
+		var consequent_15 = ($$anchor) => {
+			var fragment_3 = root_12$2();
+			var p_9 = first_child(fragment_3);
+			var b_1 = child(p_9);
+			var text_8 = only_child(b_1);
+			var node_2 = sibling(b_1, 2);
+			var consequent_10 = ($$anchor) => {
+				var text_9 = text();
+				template_effect(() => set_text(text_9, `(you run ${get(s).running ?? ""})`));
+				append($$anchor, text_9);
+			};
+			if_block(node_2, ($$render) => {
+				if (get(s).state === "offer") $$render(consequent_10);
+			});
+			next();
+			reset(p_9);
+			var node_3 = sibling(p_9, 2);
+			var consequent_11 = ($$anchor) => {
+				var pre = root_8$2();
+				var text_10 = only_child(pre, true);
+				template_effect(() => set_text(text_10, get(s).notes));
+				append($$anchor, pre);
+			};
+			if_block(node_3, ($$render) => {
+				if (get(s).state === "offer" && get(s).notes) $$render(consequent_11);
+			});
+			var node_4 = sibling(node_3, 2);
+			var consequent_12 = ($$anchor) => {
+				var p_10 = root_7$2();
+				var text_11 = only_child(p_10, true);
+				template_effect(() => set_text(text_11, get(s).why));
+				append($$anchor, p_10);
+			};
+			if_block(node_4, ($$render) => {
+				if (get(s).state === "failed") $$render(consequent_12);
+			});
+			var node_5 = sibling(node_4, 2);
+			var consequent_13 = ($$anchor) => {
+				var fragment_5 = root_9$2();
+				var pre_1 = first_child(fragment_5);
+				var text_12 = only_child(pre_1, true);
+				var div_1 = sibling(pre_1, 2);
+				var button = child(div_1);
+				var button_1 = sibling(button, 2);
+				reset(div_1);
+				template_effect(() => {
+					set_text(text_12, get(stops));
+					button.disabled = get(busy);
+					button_1.disabled = get(busy);
+				});
+				delegated("click", button, () => install(get(s).version, true));
+				delegated("click", button_1, () => set(stops, ""));
+				append($$anchor, fragment_5);
+			};
+			var alternate = ($$anchor) => {
+				var div_2 = root_11$2();
+				var button_2 = child(div_2);
+				var node_6 = sibling(button_2, 2);
+				var consequent_14 = ($$anchor) => {
+					var button_3 = root_10$2();
+					delegated("click", button_3, () => dismiss(get(s).version));
+					append($$anchor, button_3);
+				};
+				if_block(node_6, ($$render) => {
+					if (get(s).state === "offer") $$render(consequent_14);
+				});
+				reset(div_2);
+				template_effect(() => button_2.disabled = get(busy));
+				delegated("click", button_2, () => install(get(s).version));
+				append($$anchor, div_2);
+			};
+			if_block(node_5, ($$render) => {
+				if (get(stops)) $$render(consequent_13);
+				else $$render(alternate, -1);
+			});
+			template_effect(() => set_text(text_8, `Devplane ${get(s).version ?? ""}`));
+			append($$anchor, fragment_3);
+		};
+		var consequent_16 = ($$anchor) => {
+			var p_11 = root_13$2();
+			var b_2 = child(p_11);
+			var text_13 = only_child(b_2);
+			var text_14 = sibling(b_2);
+			var code_3 = sibling(text_14);
+			var text_15 = only_child(code_3, true);
+			next();
+			reset(p_11);
+			template_effect(() => {
+				set_text(text_13, `Devplane ${get(s).version ?? ""}`);
+				set_text(text_14, ` is available, but this copy cannot replace itself: ${get(s).why ?? ""}. Get it from `);
+				set_text(text_15, get(s).where);
+			});
+			append($$anchor, p_11);
+		};
+		var consequent_17 = ($$anchor) => {
+			var p_12 = root_6$2();
+			var text_16 = only_child(p_12);
+			template_effect(() => set_text(text_16, `Downloading and verifying ${get(s).version ?? ""}. Nothing is replaced unless its signature verifies.`));
+			append($$anchor, p_12);
+		};
+		if_block(node_1, ($$render) => {
+			if (get(s).state === "not_asked") $$render(consequent_3);
+			else if (get(s).state === "off") $$render(consequent_4, 1);
+			else if (get(s).state === "unavailable") $$render(consequent_5, 2);
+			else if (get(s).state === "checking") $$render(consequent_6, 3);
+			else if (get(s).state === "current") $$render(consequent_7, 4);
+			else if (get(s).state === "check_failed") $$render(consequent_8, 5);
+			else if (get(s).state === "untrusted") $$render(consequent_9, 6);
+			else if (get(s).state === "offer" || get(s).state === "dismissed" || get(s).state === "failed") $$render(consequent_15, 7);
+			else if (get(s).state === "cannot_replace") $$render(consequent_16, 8);
+			else if (get(s).state === "installing") $$render(consequent_17, 9);
+		});
+		var node_7 = sibling(node_1, 2);
+		var consequent_18 = ($$anchor) => {
+			{
+				let $0 = user_derived(() => ({ updates: get(pending).pref }));
+				let $1 = user_derived(() => get(pending).pref === "on" ? "Turn update checks on" : "Turn update checks off");
+				PendingWrite($$anchor, {
+					get pending() {
+						return get(pending).p;
+					},
+					url: "/api/app/updates",
+					get body() {
+						return get($0);
+					},
+					get confirmLabel() {
+						return get($1);
+					},
+					oncancel: () => set(pending, null),
+					ondone: () => {
+						set(pending, null);
+						read.reload();
+						$$props.onchanged?.();
+					}
+				});
+			}
+		};
+		var consequent_21 = ($$anchor) => {
+			var div_3 = root_15$2();
+			var node_8 = child(div_3);
+			var consequent_19 = ($$anchor) => {
+				var button_4 = root_14$2();
+				var text_17 = only_child(button_4, true);
+				template_effect(() => set_text(text_17, get(s).state === "not_asked" ? "Yes, check — show the change" : "Turn checks on — show the change"));
+				delegated("click", button_4, () => preview("on"));
+				append($$anchor, button_4);
+			};
+			if_block(node_8, ($$render) => {
+				if (get(s).state === "not_asked" || get(s).state === "off") $$render(consequent_19);
+			});
+			var node_9 = sibling(node_8, 2);
+			var consequent_20 = ($$anchor) => {
+				var button_5 = root_14$2();
+				var text_18 = only_child(button_5, true);
+				template_effect(() => set_text(text_18, get(s).state === "not_asked" ? "No — show the change" : "Turn checks off — show the change"));
+				delegated("click", button_5, () => preview("off"));
+				append($$anchor, button_5);
+			};
+			if_block(node_9, ($$render) => {
+				if (get(s).state !== "off") $$render(consequent_20);
+			});
+			reset(div_3);
+			append($$anchor, div_3);
+		};
+		if_block(node_7, ($$render) => {
+			if (get(pending)) $$render(consequent_18);
+			else if (get(s).state !== "unavailable" && get(s).state !== "installing") $$render(consequent_21, 1);
+		});
+		var node_10 = sibling(node_7, 2);
+		var consequent_22 = ($$anchor) => {
+			var p_13 = root_16$2();
+			var text_19 = only_child(p_13, true);
+			template_effect(() => set_text(text_19, get(said)));
+			append($$anchor, p_13);
+		};
+		if_block(node_10, ($$render) => {
+			if (get(said)) $$render(consequent_22);
+		});
+		append($$anchor, fragment_1);
+	};
+	if_block(node, ($$render) => {
+		if (read.phase === "failed" && read.failure) $$render(consequent);
+		else if (!get(s)) $$render(consequent_1, 1);
+		else if (get(s).state === "not_this_build") $$render(consequent_2, 2);
+		else $$render(alternate_1, -1);
+	});
+	reset(div);
+	template_effect(() => set_attribute(div, "data-update-state", get(s)?.state ?? ""));
 	append($$anchor, div);
 	pop();
 }
@@ -1320,10 +1673,13 @@ function Checklist($$anchor, $$props) {
 				if (get(s).id === "updates" && get(s).state === "done") $$render(consequent_11);
 			});
 			var node_10 = sibling(node_9, 2);
-			var consequent_21 = ($$anchor) => {
+			var consequent_22 = ($$anchor) => {
 				var div_1 = root_14$1();
 				var node_11 = child(div_1);
 				var consequent_12 = ($$anchor) => {
+					Updates($$anchor, { onchanged: reload });
+				};
+				var consequent_13 = ($$anchor) => {
 					Connect($$anchor, {
 						get agents() {
 							return get(data).agents;
@@ -1333,20 +1689,20 @@ function Checklist($$anchor, $$props) {
 						onskip: () => skip("connect")
 					});
 				};
-				var consequent_13 = ($$anchor) => {
+				var consequent_14 = ($$anchor) => {
 					Trust($$anchor, {
 						firstRun: true,
 						ontrusted: reload
 					});
 				};
-				var consequent_14 = ($$anchor) => {
-					var fragment_7 = root_9$1();
-					var div_2 = sibling(first_child(fragment_7), 2);
+				var consequent_15 = ($$anchor) => {
+					var fragment_8 = root_9$1();
+					var div_2 = sibling(first_child(fragment_8), 2);
 					var button_3 = only_child(div_2);
 					delegated("click", button_3, () => $$props.ongithub?.());
-					append($$anchor, fragment_7);
+					append($$anchor, fragment_8);
 				};
-				var consequent_15 = ($$anchor) => {
+				var consequent_16 = ($$anchor) => {
 					Declare($$anchor, {
 						get project() {
 							return get(data).project;
@@ -1355,13 +1711,13 @@ function Checklist($$anchor, $$props) {
 						ondone: reload
 					});
 				};
-				var consequent_20 = ($$anchor) => {
-					var fragment_9 = root_13$1();
-					var node_12 = first_child(fragment_9);
-					var consequent_19 = ($$anchor) => {
+				var consequent_21 = ($$anchor) => {
+					var fragment_10 = root_13$1();
+					var node_12 = first_child(fragment_10);
+					var consequent_20 = ($$anchor) => {
 						var p_3 = root_12$1();
 						var node_13 = child(p_3);
-						var consequent_16 = ($$anchor) => {
+						var consequent_17 = ($$anchor) => {
 							var a = root_10$1();
 							var text_7 = only_child(a, true);
 							template_effect(($0) => {
@@ -1377,31 +1733,31 @@ function Checklist($$anchor, $$props) {
 							append($$anchor, b);
 						};
 						if_block(node_13, ($$render) => {
-							if (changeSurface()) $$render(consequent_16);
+							if (changeSurface()) $$render(consequent_17);
 							else $$render(alternate_1, -1);
 						});
 						var text_9 = sibling(node_13);
 						var node_14 = sibling(text_9);
-						var consequent_17 = ($$anchor) => {
+						var consequent_18 = ($$anchor) => {
 							var text_10 = text();
 							template_effect(() => set_text(text_10, `· not verified — ${get(data).latest.check_failed ?? ""}; the gate's output is on the change's Gates tab`));
 							append($$anchor, text_10);
 						};
-						var consequent_18 = ($$anchor) => {
+						var consequent_19 = ($$anchor) => {
 							var text_11 = text();
 							template_effect(($0) => set_text(text_11, `· started ${$0 ?? ""} ago`), [() => ago(Math.max(0, (get(now) - Date.parse(get(data).latest.created_at)) / 1e3))]);
 							append($$anchor, text_11);
 						};
 						if_block(node_14, ($$render) => {
-							if (get(data).latest.check_failed) $$render(consequent_17);
-							else if (get(data).latest.state !== "verified" && get(data).latest.created_at) $$render(consequent_18, 1);
+							if (get(data).latest.check_failed) $$render(consequent_18);
+							else if (get(data).latest.state !== "verified" && get(data).latest.created_at) $$render(consequent_19, 1);
 						});
 						reset(p_3);
 						template_effect(() => set_text(text_9, ` · ${get(data).latest.state ?? ""} `));
 						append($$anchor, p_3);
 					};
 					if_block(node_12, ($$render) => {
-						if (get(data).latest) $$render(consequent_19);
+						if (get(data).latest) $$render(consequent_20);
 					});
 					var div_3 = sibling(node_12, 2);
 					var button_4 = child(div_3);
@@ -1415,20 +1771,21 @@ function Checklist($$anchor, $$props) {
 					next(2);
 					reset(div_3);
 					delegated("click", button_4, newChange);
-					append($$anchor, fragment_9);
+					append($$anchor, fragment_10);
 				};
 				if_block(node_11, ($$render) => {
-					if (get(s).id === "connect") $$render(consequent_12);
-					else if (get(s).id === "trust") $$render(consequent_13, 1);
-					else if (get(s).id === "github") $$render(consequent_14, 2);
-					else if (get(s).id === "declare" && get(data).project) $$render(consequent_15, 3);
-					else if (get(s).id === "first_change") $$render(consequent_20, 4);
+					if (get(s).id === "updates") $$render(consequent_12);
+					else if (get(s).id === "connect") $$render(consequent_13, 1);
+					else if (get(s).id === "trust") $$render(consequent_14, 2);
+					else if (get(s).id === "github") $$render(consequent_15, 3);
+					else if (get(s).id === "declare" && get(data).project) $$render(consequent_16, 4);
+					else if (get(s).id === "first_change") $$render(consequent_21, 5);
 				});
 				reset(div_1);
 				append($$anchor, div_1);
 			};
 			if_block(node_10, ($$render) => {
-				if (get(s).id === get(open)) $$render(consequent_21);
+				if (get(s).id === get(open)) $$render(consequent_22);
 			});
 			reset(li);
 			template_effect(() => {
@@ -1471,7 +1828,7 @@ var root_12 = from_html(`<span class="fail svelte-1y95tkv">unreadable</span>`);
 var root_13 = from_html(`<span class="ok svelte-1y95tkv">check declared</span>`);
 var root_14 = from_html(`<a>Declare a check</a>`);
 var root_15 = from_html(`<div class="frame svelte-1y95tkv"><!></div> <!>`, 1);
-var root_16 = from_html(`<div class="grid svelte-1y95tkv"><section class="card svelte-1y95tkv"><h2 class="svelte-1y95tkv"><!> This machine</h2> <!></section> <section class="card svelte-1y95tkv"><h2 class="svelte-1y95tkv"><!> Your agent</h2> <!></section> <!> <section class="card wide svelte-1y95tkv"><h2 class="svelte-1y95tkv"><!> Rules for every project</h2> <!></section></div> <section class="projects svelte-1y95tkv"><h2 class="svelte-1y95tkv"><!> Projects <span class="svelte-1y95tkv"> </span></h2> <!> <!></section>`, 1);
+var root_16 = from_html(`<div class="grid svelte-1y95tkv"><section class="card svelte-1y95tkv"><h2 class="svelte-1y95tkv"><!> This machine</h2> <!></section> <section class="card svelte-1y95tkv"><h2 class="svelte-1y95tkv"><!> Your agent</h2> <!></section> <section class="card svelte-1y95tkv" aria-label="update checks"><h2 class="svelte-1y95tkv"><!> Update checks</h2> <!></section> <!> <section class="card wide svelte-1y95tkv"><h2 class="svelte-1y95tkv"><!> Rules for every project</h2> <!></section></div> <section class="projects svelte-1y95tkv"><h2 class="svelte-1y95tkv"><!> Projects <span class="svelte-1y95tkv"> </span></h2> <!> <!></section>`, 1);
 var root_17 = from_html(`<div class="page svelte-1y95tkv"><h1 class="svelte-1y95tkv">Setup</h1> <!> <!> <!></div>`);
 function Setup($$anchor, $$props) {
 	push($$props, true);
@@ -1691,7 +2048,18 @@ function Setup($$anchor, $$props) {
 			else $$render(alternate, -1);
 		});
 		reset(section_2);
-		var node_9 = sibling(section_2, 2);
+		var section_3 = sibling(section_2, 2);
+		var h2_3 = child(section_3);
+		var node_9 = child(h2_3);
+		Icon(node_9, {
+			name: "refresh",
+			size: 14
+		});
+		next();
+		reset(h2_3);
+		Updates(sibling(h2_3, 2), {});
+		reset(section_3);
+		var node_11 = sibling(section_3, 2);
 		var consequent_4 = ($$anchor) => {
 			Failed($$anchor, {
 				what: "the GitHub sign-in",
@@ -1702,11 +2070,11 @@ function Setup($$anchor, $$props) {
 		};
 		var alternate_1 = ($$anchor) => {
 			var fragment_5 = root_2();
-			var node_10 = sibling(first_child(fragment_5), 2);
+			var node_12 = sibling(first_child(fragment_5), 2);
 			{
 				let $0 = user_derived(() => github.data?.hosts ?? []);
 				let $1 = user_derived(() => github.data?.client_id ?? true);
-				GitHubPanel(node_10, {
+				GitHubPanel(node_12, {
 					get hosts() {
 						return get($0);
 					},
@@ -1726,32 +2094,32 @@ function Setup($$anchor, $$props) {
 			}
 			append($$anchor, fragment_5);
 		};
-		if_block(node_9, ($$render) => {
+		if_block(node_11, ($$render) => {
 			if (github.phase === "failed" && github.failure) $$render(consequent_4);
 			else $$render(alternate_1, -1);
 		});
-		var section_3 = sibling(node_9, 2);
-		var h2_3 = child(section_3);
-		var node_11 = child(h2_3);
-		Icon(node_11, {
+		var section_4 = sibling(node_11, 2);
+		var h2_4 = child(section_4);
+		var node_13 = child(h2_4);
+		Icon(node_13, {
 			name: "shield",
 			size: 14
 		});
 		next();
-		reset(h2_3);
-		var node_12 = sibling(h2_3, 2);
+		reset(h2_4);
+		var node_14 = sibling(h2_4, 2);
 		var consequent_5 = ($$anchor) => {
 			var p_2 = root_3();
 			append($$anchor, p_2);
 		};
 		var consequent_6 = ($$anchor) => {
 			var p_3 = root_4();
-			var node_13 = child(p_3);
-			Icon(node_13, {
+			var node_15 = child(p_3);
+			Icon(node_15, {
 				name: "alert",
 				size: 13
 			});
-			var text = sibling(node_13);
+			var text = sibling(node_15);
 			reset(p_3);
 			template_effect(() => set_text(text, ` ${get(policy).path ?? ""} will not parse — every gated call asks until it does: ${get(policy).error ?? ""}`));
 			append($$anchor, p_3);
@@ -1764,8 +2132,8 @@ function Setup($$anchor, $$props) {
 			reset(p_4);
 			var div_2 = sibling(p_4, 2);
 			var div_3 = child(div_2);
-			var node_14 = sibling(child(div_3), 2);
-			each(node_14, 16, () => get(policy).deny ?? [], (r) => r, ($$anchor, r) => {
+			var node_16 = sibling(child(div_3), 2);
+			each(node_16, 16, () => get(policy).deny ?? [], (r) => r, ($$anchor, r) => {
 				var code_2 = root_5();
 				var text_2 = only_child(code_2, true);
 				template_effect(() => set_text(text_2, r));
@@ -1776,8 +2144,8 @@ function Setup($$anchor, $$props) {
 			});
 			reset(div_3);
 			var div_4 = sibling(div_3, 2);
-			var node_15 = sibling(child(div_4), 2);
-			each(node_15, 16, () => get(policy).ask ?? [], (r) => r, ($$anchor, r) => {
+			var node_17 = sibling(child(div_4), 2);
+			each(node_17, 16, () => get(policy).ask ?? [], (r) => r, ($$anchor, r) => {
 				var code_3 = root_7();
 				var text_3 = only_child(code_3, true);
 				template_effect(() => set_text(text_3, r));
@@ -1791,32 +2159,32 @@ function Setup($$anchor, $$props) {
 			template_effect(() => set_text(text_1, get(policy).path));
 			append($$anchor, fragment_6);
 		};
-		if_block(node_12, ($$render) => {
+		if_block(node_14, ($$render) => {
 			if (!get(policy) || !get(policy).exists) $$render(consequent_5);
 			else if (get(policy).error) $$render(consequent_6, 1);
 			else $$render(alternate_2, -1);
 		});
-		reset(section_3);
+		reset(section_4);
 		reset(div_1);
-		var section_4 = sibling(div_1, 2);
-		var h2_4 = child(section_4);
-		var node_16 = child(h2_4);
-		Icon(node_16, {
+		var section_5 = sibling(div_1, 2);
+		var h2_5 = child(section_5);
+		var node_18 = child(h2_5);
+		Icon(node_18, {
 			name: "folder",
 			size: 14
 		});
-		var span_2 = sibling(node_16, 2);
+		var span_2 = sibling(node_18, 2);
 		var text_4 = only_child(span_2, true);
-		reset(h2_4);
-		var node_17 = sibling(h2_4, 2);
-		each(node_17, 17, () => (get(data).projects ?? []).filter((p) => p.trusted && !p.error && !p.declares_gates), (p) => p.id, ($$anchor, p) => {
+		reset(h2_5);
+		var node_19 = sibling(h2_5, 2);
+		each(node_19, 17, () => (get(data).projects ?? []).filter((p) => p.trusted && !p.error && !p.declares_gates), (p) => p.id, ($$anchor, p) => {
 			var p_5 = root_9();
-			var node_18 = child(p_5);
-			Icon(node_18, {
+			var node_20 = child(p_5);
+			Icon(node_20, {
 				name: "alert",
 				size: 13
 			});
-			var text_5 = sibling(node_18);
+			var text_5 = sibling(node_20);
 			var a = sibling(text_5);
 			reset(p_5);
 			template_effect(($0) => {
@@ -1825,7 +2193,7 @@ function Setup($$anchor, $$props) {
 			}, [() => declareHref(get(p))]);
 			append($$anchor, p_5);
 		});
-		var node_19 = sibling(node_17, 2);
+		var node_21 = sibling(node_19, 2);
 		var consequent_7 = ($$anchor) => {
 			var p_6 = root_10();
 			append($$anchor, p_6);
@@ -1833,11 +2201,11 @@ function Setup($$anchor, $$props) {
 		var alternate_5 = ($$anchor) => {
 			var fragment_7 = root_15();
 			var div_5 = first_child(fragment_7);
-			var node_20 = child(div_5);
+			var node_22 = child(div_5);
 			{
 				const cell = ($$anchor, r = noop, c = noop) => {
 					var fragment_8 = comment();
-					var node_21 = first_child(fragment_8);
+					var node_23 = first_child(fragment_8);
 					var consequent_8 = ($$anchor) => {
 						var b = root_11();
 						var text_6 = only_child(b, true);
@@ -1860,7 +2228,7 @@ function Setup($$anchor, $$props) {
 					};
 					var consequent_12 = ($$anchor) => {
 						var fragment_10 = comment();
-						var node_22 = first_child(fragment_10);
+						var node_24 = first_child(fragment_10);
 						var consequent_10 = ($$anchor) => {
 							var span_3 = root_12();
 							append($$anchor, span_3);
@@ -1874,7 +2242,7 @@ function Setup($$anchor, $$props) {
 							template_effect(($0) => set_attribute(a_1, "href", $0), [() => declareHref(r())]);
 							append($$anchor, a_1);
 						};
-						if_block(node_22, ($$render) => {
+						if_block(node_24, ($$render) => {
 							if (r().error) $$render(consequent_10);
 							else if (r().declares_gates) $$render(consequent_11, 1);
 							else $$render(alternate_3, -1);
@@ -1891,7 +2259,7 @@ function Setup($$anchor, $$props) {
 						template_effect(() => set_text(text_8, r().root));
 						append($$anchor, text_8);
 					};
-					if_block(node_21, ($$render) => {
+					if_block(node_23, ($$render) => {
 						if (c().key === "name") $$render(consequent_8);
 						else if (c().key === "trusted") $$render(consequent_9, 1);
 						else if (c().key === "gates") $$render(consequent_12, 2);
@@ -1901,7 +2269,7 @@ function Setup($$anchor, $$props) {
 					append($$anchor, fragment_8);
 				};
 				let $0 = user_derived(() => get(data).projects ?? []);
-				Grid(node_20, {
+				Grid(node_22, {
 					id: "setup-projects",
 					get columns() {
 						return columns;
@@ -1929,26 +2297,26 @@ function Setup($$anchor, $$props) {
 				});
 			}
 			reset(div_5);
-			var node_23 = sibling(div_5, 2);
-			each(node_23, 17, () => (get(data).projects ?? []).filter((p) => p.error), (p) => p.id, ($$anchor, p) => {
+			var node_25 = sibling(div_5, 2);
+			each(node_25, 17, () => (get(data).projects ?? []).filter((p) => p.error), (p) => p.id, ($$anchor, p) => {
 				var p_7 = root_4();
-				var node_24 = child(p_7);
-				Icon(node_24, {
+				var node_26 = child(p_7);
+				Icon(node_26, {
 					name: "alert",
 					size: 13
 				});
-				var text_9 = sibling(node_24);
+				var text_9 = sibling(node_26);
 				reset(p_7);
 				template_effect(() => set_text(text_9, ` ${get(p).name ?? ""}: ${get(p).error ?? ""}`));
 				append($$anchor, p_7);
 			});
 			append($$anchor, fragment_7);
 		};
-		if_block(node_19, ($$render) => {
+		if_block(node_21, ($$render) => {
 			if ((get(data).projects ?? []).length === 0) $$render(consequent_7);
 			else $$render(alternate_5, -1);
 		});
-		reset(section_4);
+		reset(section_5);
 		template_effect(() => set_text(text_4, get(data).projects?.length ?? 0));
 		append($$anchor, fragment_2);
 	};

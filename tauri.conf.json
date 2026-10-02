@@ -9,14 +9,51 @@
     "withGlobalTauri": false
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.png"]
+    "active": true,
+    "targets": ["app", "dmg", "nsis", "deb", "appimage"],
+    "createUpdaterArtifacts": false,
+    "publisher": "hupe1980",
+    "copyright": "Copyright (c) hupe1980. MIT OR Apache-2.0.",
+    "license": "MIT OR Apache-2.0",
+    "homepage": "https://hupe1980.github.io/devplane",
+    "category": "DeveloperTool",
+    "shortDescription": "Decide whether an agent's change is safe to merge.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "scripts/nsis-hooks.nsh"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
+        "postRemoveScript": "scripts/deb-postrm.sh"
+      }
+    }
   },
   "plugins": {
     "deep-link": {
       "desktop": {
         "schemes": ["devplane"]
       }
+    },
+    "updater": {
+      "pubkey": "",
+      "endpoints": ["https://github.com/hupe1980/devplane/releases/latest/download/latest.json"],
+      "requireSignedVersion": true
     }
   }
 }

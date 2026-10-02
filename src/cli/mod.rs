@@ -64,6 +64,31 @@ where
     }
 }
 
+/// Whether an app build should open the window rather than run the command
+/// line: started with no argument at all and no terminal on stdin, as Finder,
+/// the Start menu and a desktop launcher start it. A bare `devplane` typed in
+/// a terminal still runs `status`. (A pipe into `devplane` with no command
+/// also has no terminal; a script names its command.)
+pub fn opens_window<S: AsRef<std::ffi::OsStr>>(args: &[S], stdin_is_terminal: bool) -> bool {
+    args.len() <= 1 && !stdin_is_terminal
+}
+
+/// Starts the window, as the operating system's launch of the app does. A
+/// binary without the window never gets here: `main` asks only in an app build.
+pub async fn open_window() -> Result<()> {
+    #[cfg(feature = "app")]
+    {
+        crate::app::run(None).await
+    }
+    #[cfg(not(feature = "app"))]
+    anyhow::bail!("{NO_WINDOW}")
+}
+
+/// What a binary without the window says when asked for one.
+pub const NO_WINDOW: &str = "this binary was built without the app feature, so there is no \
+     window to open. Download the desktop app from https://github.com/hupe1980/devplane/releases, \
+     or run `devplane up` for the same page in a browser.";
+
 /// Starts the window on a link. The deep-link plugin reads the link from this
 /// process's arguments, so the window opens on it as it first shows.
 pub async fn open_link(url: &str) -> Result<()> {
@@ -75,8 +100,8 @@ pub async fn open_link(url: &str) -> Result<()> {
     #[cfg(not(feature = "app"))]
     anyhow::bail!(
         "`{url}` is a link for the Devplane window, and this binary was built without the \
-         app feature. Install one with `cargo install devplane --features app`, or run \
-         `devplane up` and open the change from the browser."
+         app feature. Download the desktop app from https://github.com/hupe1980/devplane/releases, \
+         or run `devplane up` and open the change from the browser."
     )
 }
 
@@ -525,6 +550,10 @@ pub enum InboxCmd {
         /// Minutes to stay quiet. `0` un-snoozes
         #[arg(long, default_value_t = 60)]
         minutes: i64,
+        /// Stay quiet until the run or change next reports activity, rather
+        /// than for minutes
+        #[arg(long, conflicts_with = "minutes")]
+        until_activity: bool,
     },
 }
 
@@ -867,6 +896,14 @@ pub enum ChangeCmd {
         #[arg(long, requires = "delete_branch")]
         force: bool,
     },
+    /// Mark the agent's open stop claim read
+    ///
+    /// The claim leaves what asks for attention and stays on the change under
+    /// its run. Refused inside an agent's session.
+    ClaimRead {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it
+        change: String,
+    },
     /// Print the done certificate: what was checked, against which commit,
     /// and how to check it yourself
     ///
@@ -1035,9 +1072,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             ..
         } => inbox::cmd_answer(&ask, allow, deny, option, custom, field, json).await,
         Command::Inbox {
-            what: Some(InboxCmd::Snooze { id, minutes }),
+            what:
+                Some(InboxCmd::Snooze {
+                    id,
+                    minutes,
+                    until_activity,
+                }),
             ..
-        } => inbox::cmd_snooze(&id, minutes, json).await,
+        } => inbox::cmd_snooze(&id, minutes, until_activity, json).await,
         Command::Inbox { all: true, .. } => inbox::cmd_inbox_all(json).await,
         Command::Inbox {
             project, needs_you, ..
@@ -1126,11 +1168,7 @@ async fn cmd_up(port: Option<u16>, no_browser: bool, window: bool) -> Result<()>
         #[cfg(feature = "app")]
         return crate::app::run(port).await;
         #[cfg(not(feature = "app"))]
-        anyhow::bail!(
-            "this binary was built without the app feature, so there is no window to open. \
-             Install one with `cargo install devplane --features app`, or run `devplane up` \
-             for the same page in a browser."
-        );
+        anyhow::bail!("{NO_WINDOW}");
     }
     let port = port.unwrap_or(config::DEFAULT_PORT);
     match no_browser {
@@ -1491,5 +1529,17 @@ mod launch_tests {
             Launch::Cli
         );
         assert_eq!(launch_of(Vec::<String>::new()), Launch::Cli);
+    }
+
+    /// The operating system starts the app with no argument and no terminal;
+    /// a person typing `devplane` has a terminal and gets `status`.
+    #[test]
+    fn only_a_launch_with_no_argument_and_no_terminal_opens_the_window() {
+        use super::opens_window;
+        assert!(opens_window(&["devplane"], false));
+        assert!(opens_window(&Vec::<String>::new(), false));
+        assert!(!opens_window(&["devplane"], true));
+        assert!(!opens_window(&["devplane", "status"], false));
+        assert!(!opens_window(&["devplane", "doctor", "--json"], false));
     }
 }

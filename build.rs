@@ -17,6 +17,14 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/dist");
     println!("cargo:rerun-if-changed=build.rs");
 
+    // Set by the release workflow only on a leg where every signing
+    // credential was present; `devplane doctor` says "signed build" from it.
+    // It records how this binary was built, not a check of its signature.
+    println!("cargo:rerun-if-env-changed=DEVPLANE_SIGNED");
+    if std::env::var("DEVPLANE_SIGNED").is_ok_and(|v| v == "1") {
+        println!("cargo:rustc-env=DEVPLANE_SIGNED=1");
+    }
+
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let generated = out.join("ui_bundle.rs");
 

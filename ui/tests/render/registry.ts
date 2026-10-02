@@ -80,7 +80,8 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
   for (const band of BANDS) if (!bar.includes(`role="group" aria-label="${BAND_LABELS[band]}"`)) fail(`the activity bar does not name the band ${band}`);
   for (const s of listed()) {
     const n = s.count?.(recorded) ?? null;
-    const name = n ? `${s.title}, ${n}` : s.title;
+    // The number with what it counts, where the surface names it.
+    const name = n ? `${s.title}, ${n}${s.countWord ? ` ${s.countWord}` : ""}` : s.title;
     if (!bar.includes(`aria-label="${name}"`)) fail(`the activity bar's ${s.id} button is not named "${name}"`);
   }
   if (!/aria-current="page"/.test(bar)) fail("nothing in the activity bar says which surface is showing");

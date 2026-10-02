@@ -6,8 +6,10 @@
 import Inbox from "../../src/surfaces/inbox/Inbox.svelte";
 import Answer from "../../src/surfaces/answer/Answer.svelte";
 import recorded from "../../fixtures/inbox.json";
-import { all, bind, combo, sheet } from "../../src/lib/keys";
+import { all, bind, combo, sheet, spell } from "../../src/lib/keys";
 import { ITEM_KEYS, whyNot } from "../../src/surfaces/inbox/keys";
+import { rowActions, rowCommands } from "../../src/surfaces/inbox/actions";
+import { commands, rank } from "../../src/surfaces/palette/Palette.svelte";
 import "../../src/shell/keys";
 import { fail, html, source } from "../harness";
 
@@ -147,4 +149,55 @@ type Row = Parameters<typeof whyNot>[0];
   if (!/\(\?:answer\|undo\)/.test(source("../src/lib/api.ts"))) fail("taking a held answer back does not carry the window's proof");
   const win = html(Answer, { items: [{ id: "q", kind: "question", level: "high", title: "Keep?", ask: "a", actions: ["choose"], options: [{ id: "o", label: "keep" }] }] });
   if (!/<kbd[^>]*>1<\/kbd>/.test(win)) fail("the answer window does not print the option keys");
+}
+
+// ── One set of row actions: the controls, the keys and ⌘K ───────────────
+{
+  const ids = (markup: string) => [...markup.matchAll(/data-action="([^"]+)"/g)].map((m) => m[1]);
+  const planted: Row[] = [
+    { id: "f", kind: "question", level: "high", title: "Two questions", ask: "ask-f", actions: ["choose", "reply"],
+      form: [
+        { field: "a", title: "Route?", options: [{ value: "keep", label: "keep", detail: null }, { value: "drop", label: "drop", detail: null }], custom_field: "a-other" },
+        { field: "b", title: "Tests?", options: [{ value: "yes", label: "yes", detail: null }], custom_field: null },
+      ] },
+    { id: "d", kind: "spec_drifted", level: "normal", title: "Drift", change_id: "c1", run_id: "r1", actions: ["tell_run", "accept_drift", "snooze"] },
+    { id: "g", kind: "review_requested", level: "normal", title: "Review #4", project_id: "p", url: "https://github.com/o/r/pull/4", actions: ["open_pr", "snooze"] },
+    { id: "x", kind: "gate_failed", level: "high", title: "Checks failed", change_id: "c2", launch: "claude-cli://open?q=x", actions: ["retry", "resume", "open", "snooze"] },
+  ];
+  for (const i of [...(recorded.items as Row[]), ...planted]) {
+    const shown = ids(html(Inbox, { items: [i], loaded: true }));
+    const offered = rowActions(i);
+    if (shown.join() !== offered.map((a) => a.id).join())
+      fail(`"${i.title}": its controls (${shown.join(" ")}) are not its row actions (${offered.map((a) => a.id).join(" ")})`);
+    if (offered.some((a) => /offer/i.test(a.id + a.label))) fail(`"${i.title}" offers a change from the inbox`);
+    // Each key a row action names is printed on that control.
+    const out = html(Inbox, { items: [i], loaded: true });
+    for (const a of offered)
+      if (a.key && !new RegExp(`data-key="${a.key}"[^>]*data-action="${a.id}"|data-action="${a.id}"[^>]*data-key="${a.key}"`).test(out))
+        fail(`"${i.title}": ${a.id} names the key ${a.key} and its control does not carry it`);
+  }
+  const ctx = recorded.items.find((i: Row) => i.kind === "context_high") as Row;
+  const snoozes = rowActions(ctx).filter((a) => a.id.startsWith("snooze"));
+  if (snoozes.map((a) => `${a.id}:${a.key}`).join() !== "snooze:s,snooze_hour:null") fail(`s and the keyless hour are not both offered: ${snoozes.map((a) => a.id)}`);
+  if (!/until there is new activity/.test(snoozes[0].label)) fail("s does not say it waits for new activity");
+  const forge = planted.find((i) => i.kind === "review_requested")!;
+  if (rowActions(forge).some((a) => a.id === "snooze_hour") || !/an hour/.test(rowActions(forge).find((a) => a.id === "snooze")!.label))
+    fail("a pull request, which has no session, is not snoozed for an hour");
+
+  // ⌘K over the inbox: the selected item's actions first, with their keys.
+  const question = recorded.items.find((i: Row) => i.kind === "question") as Row;
+  const here = rowCommands(question, () => {});
+  const shown = rank(commands({ here, changes: [{ id: "c", title: "A change" }], opensChange: "change", places: [], keys: [], projects: [], landing: "inbox", over: "inbox", back: () => {} }), "");
+  const first = shown.slice(0, here.length);
+  if (first.some((e) => e.kind !== "here")) fail("the palette does not list the row's actions first");
+  const want = rowActions(question).map((a) => `${a.label}|${a.key ? spell(a.key) : ""}`).join();
+  if (first.map((e) => `${e.label}|${e.hint ?? ""}`).join() !== want) fail(`the palette's row actions are not the row's: ${first.map((e) => e.label)}`);
+  const ready = recorded.items.find((i: Row) => i.kind === "ready_to_decide") as Row;
+  if (rowCommands(ready, () => {}).some((c) => /offer/i.test(c.label))) fail("⌘K on a ready row offers the change");
+  const inbox = source("../src/surfaces/inbox/Inbox.svelte");
+  if (!/offerCommands\([^)]*rowCommands|rowCommands\([\s\S]*offerCommands\(/.test(inbox)) fail("the inbox does not hand its row's actions to the palette");
+  if (!/pressAction\(/.test(inbox)) fail("a row action from the palette does not press the row's own control");
+  if (!/here\.noun/.test(source("../src/surfaces/palette/Palette.svelte"))) fail("the palette heads an inbox row's actions as a change's");
+  // The sessions list hands its selected row's actions over the same way.
+  if (!/offerCommands\([\s\S]*attach command[\s\S]*"This session"/.test(source("../src/surfaces/board/Board.svelte"))) fail("⌘K over a selected session does not list its actions");
 }
