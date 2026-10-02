@@ -1,5 +1,5 @@
-import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, et as pop, it as reset, j as from_html, k as append, m as set_attribute, o as prop, q as sibling, rt as next, tt as push, v as set_class } from "./api.js";
-import { _ as address, a as Inline, n as Icon, s as ago, v as itemFocus, y as place } from "./app.js";
+import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, q as only_child, tt as pop, w as each, y as set_class } from "./api.js";
+import { C as place, S as itemFocus, a as Inline, n as Icon, s as ago, x as address } from "./app.js";
 import { t as narrowed } from "./narrow.svelte.js";
 //#region src/surfaces/inbox/List.svelte
 var root = from_html(`<p class="since svelte-i436af"><!> </p>`);
@@ -7,14 +7,15 @@ var root_1 = from_html(`<button> </button>`);
 var root_2 = from_html(`<div class="chips svelte-i436af" role="group" aria-label="narrow to one project"><button>all</button> <!></div>`);
 var root_3 = from_html(`<p class="quiet failed svelte-i436af"> <!>.</p>`);
 var root_4 = from_html(`<p class="quiet failed svelte-i436af"> </p>`);
-var root_5 = from_html(`<div class="skel svelte-i436af" aria-busy="true"></div>`);
-var root_6 = from_html(`<p class="quiet svelte-i436af">The last read had nothing for you, and Devplane has not answered since.</p>`);
-var root_7 = from_html(`<p class="quiet svelte-i436af"> </p>`);
-var root_8 = from_html(`<span class="new svelte-i436af">new</span>`);
-var root_9 = from_html(`<span class="weak svelte-i436af"> </span>`);
-var root_10 = from_html(`<div role="option" tabindex="-1"><span class="ic svelte-i436af"><!></span> <span class="title svelte-i436af"> </span> <!> <span class="meta svelte-i436af"> <!> </span> <span class="age svelte-i436af"> </span></div>`);
-var root_11 = from_html(`<div class="folded svelte-i436af"><!> <span class="svelte-i436af"> </span></div>`);
-var root_12 = from_html(`<div class="list svelte-i436af"><header class="svelte-i436af"><span class="t svelte-i436af">What needs you</span> <span class="n svelte-i436af"> </span></header> <!> <!> <div class="rows svelte-i436af" role="listbox" aria-label="what needs you" tabindex="0"><!> <!> <!> <!></div></div>`);
+var root_5 = from_html(`<p class="quiet svelte-i436af">Not read — nothing here is current.</p>`);
+var root_6 = from_html(`<div class="skel svelte-i436af" aria-busy="true"></div>`);
+var root_7 = from_html(`<p class="quiet svelte-i436af">The last read had nothing for you, and Devplane has not answered since.</p>`);
+var root_8 = from_html(`<p class="quiet svelte-i436af"> </p>`);
+var root_9 = from_html(`<span class="new svelte-i436af">new</span>`);
+var root_10 = from_html(`<span class="weak svelte-i436af"> </span>`);
+var root_11 = from_html(`<div role="option" tabindex="-1"><span class="ic svelte-i436af"><!></span> <span class="title svelte-i436af"> </span> <!> <span class="meta svelte-i436af"> <!> </span> <span class="age svelte-i436af"> </span></div>`);
+var root_12 = from_html(`<div class="folded svelte-i436af"><!> <span class="svelte-i436af"> </span></div>`);
+var root_13 = from_html(`<div class="list svelte-i436af"><header class="svelte-i436af"><span class="t svelte-i436af">What needs you</span> <span class="n svelte-i436af"> </span></header> <!> <!> <div class="rows svelte-i436af" role="listbox" aria-label="what needs you" tabindex="0"><!> <!> <!> <!></div></div>`);
 function List($$anchor, $$props) {
 	push($$props, true);
 	let items = prop($$props, "items", 19, () => []), folded = prop($$props, "folded", 19, () => []), inhibited = prop($$props, "inhibited", 19, () => []), close = prop($$props, "close", 3, null), project = prop($$props, "project", 3, ""), focus = prop($$props, "focus", 3, ""), loaded = prop($$props, "loaded", 3, false), error = prop($$props, "error", 3, null);
@@ -41,7 +42,7 @@ function List($$anchor, $$props) {
 		return () => clearInterval(t);
 	});
 	const age = (since) => since ? ago(Math.max(0, (get(now) - Date.parse(since)) / 1e3)) : "";
-	var div = root_12();
+	var div = root_13();
 	var header = child(div);
 	var span = sibling(child(header), 2);
 	var text = only_child(span, true);
@@ -112,6 +113,10 @@ function List($$anchor, $$props) {
 		append($$anchor, p_3);
 	};
 	var consequent_4 = ($$anchor) => {
+		var p_4 = root_5();
+		append($$anchor, p_4);
+	};
+	var consequent_5 = ($$anchor) => {
 		var fragment = comment();
 		var node_6 = first_child(fragment);
 		each(node_6, 16, () => [
@@ -119,31 +124,32 @@ function List($$anchor, $$props) {
 			1,
 			2
 		], (i) => i, ($$anchor, i) => {
-			var div_3 = root_5();
+			var div_3 = root_6();
 			append($$anchor, div_3);
 		});
 		append($$anchor, fragment);
 	};
-	var consequent_5 = ($$anchor) => {
-		var p_4 = root_6();
-		append($$anchor, p_4);
-	};
 	var consequent_6 = ($$anchor) => {
 		var p_5 = root_7();
-		var text_5 = only_child(p_5, true);
-		template_effect(() => set_text(text_5, project() ? `Nothing needs you in ${project()}.` : "Nothing needs you."));
 		append($$anchor, p_5);
+	};
+	var consequent_7 = ($$anchor) => {
+		var p_6 = root_8();
+		var text_5 = only_child(p_6, true);
+		template_effect(() => set_text(text_5, project() ? `Nothing needs you in ${project()}.` : "Nothing needs you."));
+		append($$anchor, p_6);
 	};
 	if_block(node_4, ($$render) => {
 		if (narrow.on && narrow.failure && !narrow.data) $$render(consequent_2);
 		else if (get(missing)) $$render(consequent_3, 1);
-		else if (!get(ready) && get(shown).length === 0) $$render(consequent_4, 2);
-		else if (get(nothingRaised) && error()) $$render(consequent_5, 3);
-		else if (get(nothingRaised)) $$render(consequent_6, 4);
+		else if (!get(ready) && get(shown).length === 0 && error()) $$render(consequent_4, 2);
+		else if (!get(ready) && get(shown).length === 0) $$render(consequent_5, 3);
+		else if (get(nothingRaised) && error()) $$render(consequent_6, 4);
+		else if (get(nothingRaised)) $$render(consequent_7, 5);
 	});
 	var node_7 = sibling(node_4, 2);
 	each(node_7, 17, () => get(shown), (i) => i.id, ($$anchor, i) => {
-		var div_4 = root_10();
+		var div_4 = root_11();
 		let classes_2;
 		var span_1 = child(div_4);
 		var node_8 = child(span_1);
@@ -160,24 +166,24 @@ function List($$anchor, $$props) {
 		var span_2 = sibling(span_1, 2);
 		var text_6 = only_child(span_2, true);
 		var node_9 = sibling(span_2, 2);
-		var consequent_7 = ($$anchor) => {
-			var span_3 = root_8();
+		var consequent_8 = ($$anchor) => {
+			var span_3 = root_9();
 			append($$anchor, span_3);
 		};
 		if_block(node_9, ($$render) => {
-			if (get(i).new_to_you) $$render(consequent_7);
+			if (get(i).new_to_you) $$render(consequent_8);
 		});
 		var span_4 = sibling(node_9, 2);
 		var text_7 = child(span_4, true);
 		var node_10 = sibling(text_7);
-		var consequent_8 = ($$anchor) => {
-			var span_5 = root_9();
+		var consequent_9 = ($$anchor) => {
+			var span_5 = root_10();
 			var text_8 = only_child(span_5, true);
 			template_effect(() => set_text(text_8, ` · ${get(i).facts.qualifier.says}`));
 			append($$anchor, span_5);
 		};
 		if_block(node_10, ($$render) => {
-			if (get(i).facts?.qualifier?.says) $$render(consequent_8);
+			if (get(i).facts?.qualifier?.says) $$render(consequent_9);
 		});
 		var text_9 = sibling(node_10, 1, true);
 		reset(span_4);
@@ -208,7 +214,7 @@ function List($$anchor, $$props) {
 	});
 	var node_11 = sibling(node_7, 2);
 	each(node_11, 17, () => get(shownFolded), (f) => f.kind + (f.project ?? ""), ($$anchor, f) => {
-		var div_5 = root_11();
+		var div_5 = root_12();
 		var node_12 = child(div_5);
 		Icon(node_12, {
 			name: "more",
@@ -226,7 +232,7 @@ function List($$anchor, $$props) {
 	});
 	var node_13 = sibling(node_11, 2);
 	each(node_13, 17, () => get(shownInhibited), (s) => s.cause, ($$anchor, s) => {
-		var div_6 = root_11();
+		var div_6 = root_12();
 		var node_14 = child(div_6);
 		Icon(node_14, {
 			name: "more",

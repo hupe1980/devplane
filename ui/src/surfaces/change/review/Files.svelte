@@ -1,8 +1,9 @@
 <script lang="ts">
   // A change's files in reading order: by declared role, or by the run that
   // wrote them, with *not asked for* apart. Each row: how much changed, whether
-  // a declared test covers it, and how many hunks you marked (a count, never a
-  // percentage; marks stay in this browser).
+  // a declared test covers it, and how many of its hunks nobody marked seen —
+  // a count in words, never a share; *all seen* when none is left. The file
+  // whose strip is at the top of the review is the highlighted one.
   import Inline from "../../../lib/ui/Inline.svelte";
   import Icon from "../../../lib/ui/Icon.svelte";
   import type { File } from "./types";
@@ -11,12 +12,12 @@
   let {
     sections,
     selected,
-    marked,
+    unreadOf,
     pick,
   }: {
     sections: Section[];
     selected: string;
-    marked: (f: File) => number;
+    unreadOf: (f: File) => number;
     pick: (path: string) => void;
   } = $props();
 
@@ -38,14 +39,15 @@
     {#if !folded[s.says]}
       {#each s.files as f (s.says + f.path)}
         {@const [dir, base] = split(f.path)}
-        {@const done = marked(f)}
+        {@const left = unreadOf(f)}
         <button class="file" aria-current={f.path === selected ? "true" : undefined} onclick={() => pick(f.path)} title={f.path}>
           <Icon name={statusIcon(f.status_says)} size={13} />
           <span class="name"><span class="dir">{dir}</span><b>{base}</b></span>
           <span class="delta"><span class="add">+{f.added}</span> <span class="del">−{f.removed}</span></span>
           <span class="meta">
             {#if f.coverage?.coverage === "covered"}<span class="cov" title={f.coverage_says ?? ""}><Icon name="shield" size={11} /></span>{/if}
-            {#if f.hunks.length}<span class="seen" class:all={done === f.hunks.length} title="{done} of {f.hunks.length} hunks marked in this browser">{done}/{f.hunks.length}</span>{/if}
+            {#if f.hunks.length || f.unit_seen != null}<span class="seen" class:all={left === 0}>{left === 0 ? "all seen" : `${left} unread`}</span>{/if}
+            {#if f.changed_since_seen}<span class="moved">changed since seen</span>{/if}
           </span>
         </button>
       {/each}
@@ -158,5 +160,8 @@
   }
   .seen.all {
     color: var(--ink);
+  }
+  .moved {
+    color: var(--wait);
   }
 </style>

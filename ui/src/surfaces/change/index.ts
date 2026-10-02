@@ -22,18 +22,19 @@ onAction("go-changes", () => {
   return true;
 });
 
-// One key each. `s` marks a hunk in this browser, keyed by the hunk's
-// content so a rewritten hunk is unmarked again; a weakened line inside that
-// hunk is also recorded as read, durably, by the host; `request a fix` is a message
-// to the agent, not a rejection. There is no *accept* mark: one durable seen
-// record is the host's to keep, not a second verdict in the browser.
+// One key each. `s` marks the hunk under the cursor seen — kept by the host,
+// keyed by the hunk's content, so a hunk the agent rewrites is unread again;
+// a weakened row is read when its hunks are. `f` starts a comment on the
+// hunk; comments wait in one pending review, sent together as one turn.
+// There is no *accept* mark: seen is the only one, and it is the host's.
 const KEYS: Array<[string, string, string]> = [
-  ["j", "hunk-next", "next hunk"],
-  ["k", "hunk-prev", "previous hunk"],
+  ["j", "hunk-next", "next hunk, across files"],
+  ["k", "hunk-prev", "previous hunk, across files"],
   ["n", "file-next", "next file"],
   ["p", "file-prev", "previous file"],
-  ["s", "hunk-seen", "mark this hunk (in this browser, until it changes); a weakened line in it is recorded as read by the host"],
-  ["f", "hunk-fix", "request a fix: a message to the change's latest run, quoting this hunk"],
+  ["s", "hunk-seen", "mark this hunk seen — kept by Devplane until the hunk changes"],
+  ["f", "hunk-fix", "request a fix: start a comment on this hunk, for the pending review"],
+  ["Mod+Enter", "review-send", "send the pending review: every comment, as one turn to the agent"],
   ["x", "hunk-expand", "expand this file's collapsed formatter-only hunks"],
   ["v", "diff-mode", "switch between unified and side-by-side"],
   ["1", "tab-risk", "read by risk"],

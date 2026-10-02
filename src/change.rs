@@ -143,7 +143,11 @@ pub async fn preflight(
         let agent_available = crate::acp::resolve(&agent_id, &state.agents).is_some();
         // Unreadable is not clean: defaulting to clean would reassure on the
         // least known case. Tracked files only, as the worktree refuses on.
-        let dirty = match crate::git::uncommitted(&root).await {
+        // `devplane.toml` governs from the checkout (see `governing_root`), so
+        // a check declared and not yet committed does not make it dirty.
+        let dirty = match crate::git::uncommitted_except(&root, &[crate::core::config::CONFIG_FILE])
+            .await
+        {
             Ok(dirty) => dirty,
             Err(e) => Some(format!("git could not read its status: {e:#}")),
         };
@@ -210,7 +214,7 @@ pub async fn preflight(
             Some(PreflightReason::DirtyWorktree) => dirty,
             _ => None,
         };
-        let notes = match &config {
+        let mut notes = match &config {
             Some(c) => notes_for(
                 c.workspace.setup.as_deref(),
                 &lockfiles_at(&root),
@@ -219,6 +223,11 @@ pub async fn preflight(
             ),
             None => Vec::new(),
         };
+        if config.as_ref().is_some_and(|c| !c.has_gates()) {
+            notes.push(crate::core::preflight::Note::NoCheck {
+                project: name.clone(),
+            });
+        }
         out.push(Finding {
             asked: a.clone(),
             says: refusal.map(|r| refusal_line(&name, r, &shown, detail.as_deref())),
@@ -1119,6 +1128,12 @@ pub enum Offer {
         /// The commit this offer wrote, when the checked tree was not yet one.
         #[serde(skip_serializing_if = "Option::is_none")]
         committed: Option<String>,
+        /// The changed files no person marked a hunk of seen, by path.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        not_opened: Vec<String>,
+        /// *2 files not opened: a.rs, b.rs* — names, never a share.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        not_opened_says: Option<String>,
     },
     /// The push command to paste and the address that opens the pull request
     /// in a browser, because the configuration does not allow Devplane to push.
@@ -1128,6 +1143,12 @@ pub enum Offer {
         /// The commit this offer wrote, when the checked tree was not yet one.
         #[serde(skip_serializing_if = "Option::is_none")]
         committed: Option<String>,
+        /// The changed files no person marked a hunk of seen, by path.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        not_opened: Vec<String>,
+        /// *2 files not opened: a.rs, b.rs* — names, never a share.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        not_opened_says: Option<String>,
     },
 }
 
@@ -1192,6 +1213,7 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
         let changes = state.changes.lock().await;
         changes.get(id).cloned().context("no such change")?
     };
+    let mut not_opened: Vec<String> = Vec::new();
     // First, because it is the refusal a person must read: a weakened check
     // nobody marked seen. Checked where the offer happens, never where it was
     // clicked, so a second window cannot get past it.
@@ -1199,12 +1221,21 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
         let root = governing_root(state, id).await;
         // An unreadable diff or configuration refuses: it is not "nothing
         // weakened".
-        let rows = crate::view::weakened_in(root.as_deref(), dir, Some(&change)).await?;
-        let seen = state
-            .store
-            .weakened_seen(id.as_str())
-            .await
-            .unwrap_or_default();
+        let (rows, set) = crate::view::read_rows_in(root.as_deref(), dir, Some(&change)).await?;
+        let marks = state.store.seen(id.as_str()).await.unwrap_or_default();
+        let seen = crate::core::review::rows_seen(&rows, &set, &marks);
+        // Informs the offer, never refuses it: the files nobody opened.
+        let roles = root
+            .as_deref()
+            .and_then(|r| ProjectConfig::load(r).ok())
+            .and_then(|c| c.review.roles);
+        not_opened = crate::core::review::not_opened(
+            crate::core::review::reading_order(&set, roles.as_ref(), &rows)
+                .iter()
+                .map(String::as_str),
+            &set,
+            &marks,
+        );
         let unseen: Vec<crate::core::review::Weakened> = rows
             .into_iter()
             .filter(|w| !seen.contains(&(w.path.clone(), w.matched.clone())))
@@ -1254,6 +1285,8 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
             }
         };
         return Ok(Offer::Commands {
+            not_opened_says: crate::core::review::not_opened_says(&not_opened),
+            not_opened,
             committed,
             push: format!(
                 "git -C {} push --set-upstream origin {}",
@@ -1359,6 +1392,8 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
     Ok(Offer::Opened {
         pull_request,
         committed,
+        not_opened_says: crate::core::review::not_opened_says(&not_opened),
+        not_opened,
     })
 }
 
@@ -1875,6 +1910,128 @@ pub async fn resume(state: &Shared, id: &ChangeId) -> Result<()> {
         )
         .await;
     Ok(())
+}
+
+/// How a prompt sent to a change reached an agent, from the run's state when
+/// it was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivered {
+    /// The change's agent was idle and is reading it now.
+    Reading,
+    /// The change's agent is mid-turn; it reads this when the turn ends.
+    Queued,
+    /// The change's last session was resumed to read it.
+    Resumed,
+    /// No session could be resumed; a run was started on the change.
+    Started,
+}
+
+impl Delivered {
+    pub fn says(self) -> &'static str {
+        match self {
+            Delivered::Reading => "sent — the agent is reading it now",
+            Delivered::Queued => "queued — the agent reads this when its current turn ends",
+            Delivered::Resumed => "sent — resumes the session",
+            Delivered::Started => "sent — started a run",
+        }
+    }
+}
+
+/// Sends a person's prompt to a change: to its live run; else by resuming
+/// its latest session; else by starting a run on the change with its last
+/// agent. Refused, saying why, when none of these can be done — and then
+/// nothing was sent. Recorded as the person's prompt like any other.
+pub async fn deliver_prompt(
+    state: &Shared,
+    id: &ChangeId,
+    text: String,
+) -> Result<(Delivered, RunId)> {
+    let change = {
+        let changes = state.changes.lock().await;
+        changes.get(id).cloned().context("no such change")?
+    };
+    if change.archived_at.is_some() {
+        bail!("that change is archived; its worktree is gone, so no agent can read this");
+    }
+    let mut why_not_resumed = None;
+    if let Some(run) = change.current_run().cloned() {
+        if crate::driven::is_live(state, &run).await {
+            let delivery = {
+                let w = state.world.lock().await;
+                w.run(&run)
+                    .map(|r| crate::core::run::Delivery::of(&r.state))
+                    .unwrap_or(crate::core::run::Delivery::Sent)
+            };
+            crate::driven::prompt(state, &run, text).await?;
+            return Ok((
+                match delivery {
+                    crate::core::run::Delivery::Queued => Delivered::Queued,
+                    crate::core::run::Delivery::Sent => Delivered::Reading,
+                },
+                run,
+            ));
+        }
+        match crate::driven::resume(state, &run).await {
+            Ok(_) => {
+                set_waiting(state, id, None).await;
+                crate::driven::prompt(state, &run, text).await?;
+                return Ok((Delivered::Resumed, run));
+            }
+            Err(e) => why_not_resumed = Some(e),
+        }
+    }
+    let unreachable = |e: anyhow::Error| match &why_not_resumed {
+        Some(r) => anyhow::anyhow!(
+            "nothing was sent: the session could not be resumed ({r:#}), and no run could be started ({e:#})"
+        ),
+        None => anyhow::anyhow!("nothing was sent: no run could be started ({e:#})"),
+    };
+    let dir = change
+        .worktree
+        .clone()
+        .filter(|d| d.is_dir())
+        .ok_or_else(|| unreachable(anyhow::anyhow!("the change has no checkout on disk")))?;
+    let last_agent = {
+        let w = state.world.lock().await;
+        change
+            .runs
+            .iter()
+            .rev()
+            .find_map(|r| w.run(r).map(|r| r.agent.clone()))
+    };
+    let agent_id = match last_agent {
+        Some(a) => a,
+        None => governing_config(state, id)
+            .await
+            .ok()
+            .and_then(|(_, c)| c.agent.default)
+            .unwrap_or_else(|| "claude".into()),
+    };
+    let spec = crate::acp::resolve(&agent_id, &state.agents)
+        .with_context(|| format!("unknown agent `{agent_id}`"))
+        .map_err(unreachable)?;
+    let run = crate::driven::dispatch_for_change(state, &spec, dir, id, Vec::new())
+        .await
+        .map_err(unreachable)?;
+    let saved = {
+        let mut changes = state.changes.lock().await;
+        changes.get_mut(id).map(|c| {
+            c.runs.push(run.clone());
+            c.updated_at = jiff::Timestamp::now();
+            c.clone()
+        })
+    };
+    if let Some(c) = saved {
+        persist(state, &c).await;
+    }
+    state
+        .change_of_run
+        .lock()
+        .await
+        .insert(run.clone(), id.clone());
+    crate::driven::prompt(state, &run, text).await?;
+    Ok((Delivered::Started, run))
 }
 
 /// Hands the failures back to the agent once more, past the project's bound.

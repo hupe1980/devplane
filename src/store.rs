@@ -6,6 +6,7 @@
 //! which table is which. Timestamps are compared as text, so every one is
 //! written through [`ts`] at a fixed width.
 
+use crate::core::comments::ReviewComment;
 use crate::core::event::EventEnvelope;
 use crate::core::ids::{ProjectId, RunId};
 use crate::core::project::Project;
@@ -23,11 +24,11 @@ use std::str::FromStr;
 /// satisfy (a renamed or added column, a changed type, a dropped table). A file
 /// stamped with anything else is moved aside on open (`Store::retire`), not
 /// migrated.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// The statement that stamps it, written out because `PRAGMA user_version`
 /// accepts no bind parameter.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 12";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 13";
 
 /// The database and its sidecars readable by their owner alone, whoever
 /// opened them first — a hook creates the file long before any `up` would
@@ -1097,32 +1098,112 @@ impl Store {
         Ok(())
     }
 
-    /// Records that a person read one weakened-check row of a change. No time
-    /// is stored: only that it was seen, and by a person.
-    pub async fn mark_weakened_seen(&self, change: &str, path: &str, matched: &str) -> Result<()> {
+    /// Records that a person marked one unit of a change's review seen. No
+    /// time is stored: only that it was seen.
+    pub async fn mark_seen(&self, change: &str, path: &str, digest: &str) -> Result<()> {
         sqlx::query(
-            "INSERT INTO weakened_seen (change_id, path, matched, authority) \
-             VALUES (?, ?, ?, 'person') ON CONFLICT DO NOTHING",
+            "INSERT INTO seen (change_id, path, hunk_digest) VALUES (?, ?, ?) \
+             ON CONFLICT DO NOTHING",
         )
         .bind(change)
         .bind(path)
-        .bind(matched)
+        .bind(digest)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Every `(path, matched)` a person marked seen on this change.
-    pub async fn weakened_seen(
-        &self,
-        change: &str,
-    ) -> Result<std::collections::HashSet<(String, String)>> {
+    /// Every `(path, hunk_digest)` a person marked seen on this change.
+    pub async fn seen(&self, change: &str) -> Result<std::collections::HashSet<(String, String)>> {
         let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT path, matched FROM weakened_seen WHERE change_id = ?")
+            sqlx::query_as("SELECT path, hunk_digest FROM seen WHERE change_id = ?")
                 .bind(change)
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows.into_iter().collect())
+    }
+
+    /// Keeps a review comment, unsent.
+    pub async fn add_comment(&self, c: &ReviewComment) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO review_comments (id, change_id, path, line, side, hunk_header, \
+             hunk_digest, line_text, body, tree, created_at, sent_at, run_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+        )
+        .bind(&c.id)
+        .bind(&c.change_id)
+        .bind(&c.path)
+        .bind(i64::from(c.line))
+        .bind(&c.side)
+        .bind(&c.hunk_header)
+        .bind(&c.hunk_digest)
+        .bind(&c.line_text)
+        .bind(&c.body)
+        .bind(&c.tree)
+        .bind(&c.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A change's comments, oldest first, sent and unsent.
+    pub async fn comments(&self, change: &str) -> Result<Vec<ReviewComment>> {
+        let rows = sqlx::query(
+            "SELECT id, change_id, path, line, side, hunk_header, hunk_digest, line_text, body, \
+             tree, created_at, sent_at, run_id FROM review_comments WHERE change_id = ? \
+             ORDER BY created_at, rowid",
+        )
+        .bind(change)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| ReviewComment {
+                id: r.get("id"),
+                change_id: r.get("change_id"),
+                path: r.get("path"),
+                line: u32::try_from(r.get::<i64, _>("line")).unwrap_or(0),
+                side: r.get("side"),
+                hunk_header: r.get("hunk_header"),
+                hunk_digest: r.get("hunk_digest"),
+                line_text: r.get("line_text"),
+                body: r.get("body"),
+                tree: r.get("tree"),
+                created_at: r.get("created_at"),
+                sent_at: r.get("sent_at"),
+                run_id: r.get("run_id"),
+            })
+            .collect())
+    }
+
+    /// Deletes one unsent comment; `false` when there is no such unsent one.
+    pub async fn delete_unsent_comment(&self, change: &str, id: &str) -> Result<bool> {
+        let done = sqlx::query(
+            "DELETE FROM review_comments WHERE change_id = ? AND id = ? AND sent_at IS NULL",
+        )
+        .bind(change)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// Marks comments sent to `run`, once: a sent comment keeps its first send.
+    pub async fn mark_comments_sent(&self, ids: &[String], run: &str, at: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for id in ids {
+            sqlx::query(
+                "UPDATE review_comments SET sent_at = ?, run_id = ? \
+                 WHERE id = ? AND sent_at IS NULL",
+            )
+            .bind(at)
+            .bind(run)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// One day's decisions and the count of the day's questions, for the close.

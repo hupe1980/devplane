@@ -1,20 +1,21 @@
-import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, et as pop, f as bind_value, it as reset, j as from_html, k as append, m as set_attribute, o as prop, p as remove_input_defaults, q as sibling, rt as next, tt as push } from "./api.js";
+import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, f as bind_value, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, p as remove_input_defaults, q as only_child, tt as pop, w as each } from "./api.js";
 import { a as Inline, n as Icon } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as ChangeState } from "./ChangeState.js";
 import { n as specs, r as watch, t as key } from "./store.svelte.js";
 //#region src/surfaces/plan/List.svelte
-var root = from_html(`<p class="quiet fail svelte-16yypc0">The specifications could not be read: <!></p>`);
-var root_1 = from_html(`<div class="skel svelte-16yypc0"></div>`);
-var root_2 = from_html(`<span class="state svelte-16yypc0"><!></span>`);
-var root_3 = from_html(`<span class="boxes svelte-16yypc0"> </span>`);
-var root_4 = from_html(`<span class="wait svelte-16yypc0"><!> </span>`);
-var root_5 = from_html(`<span class="wait svelte-16yypc0"><!> drifted</span>`);
-var root_6 = from_html(`<button class="row svelte-16yypc0"><span class="title svelte-16yypc0"><!> </span> <!> <span class="meta svelte-16yypc0"><!> <!> <!></span></button>`);
-var root_7 = from_html(`<button class="group svelte-16yypc0"><!> <!> <span> </span> <span class="n svelte-16yypc0"> </span></button> <!>`, 1);
-var root_8 = from_html(`<details class="bare svelte-16yypc0"><summary class="svelte-16yypc0"><!> </summary> <p class="svelte-16yypc0"> </p> <p class="why svelte-16yypc0"><!></p></details>`);
-var root_9 = from_html(`<p class="none svelte-16yypc0"> </p>`);
-var root_10 = from_html(`<div class="list svelte-16yypc0"><header class="svelte-16yypc0"><span class="t svelte-16yypc0">Specifications</span><span class="n svelte-16yypc0"> </span></header> <label class="filter svelte-16yypc0"><!> <input placeholder="Filter specifications" aria-label="filter the specifications" class="svelte-16yypc0"/></label> <div class="rows svelte-16yypc0"><!> <!> <!> <!></div></div>`);
+var root = from_html(`<span class="n svelte-16yypc0"> </span>`);
+var root_1 = from_html(`<p class="quiet fail svelte-16yypc0">Could not read the specifications: <!>. Nothing here is current; <code>devplane doctor</code> tells more.</p>`);
+var root_2 = from_html(`<div class="skel svelte-16yypc0"></div>`);
+var root_3 = from_html(`<span class="state svelte-16yypc0"><!></span>`);
+var root_4 = from_html(`<span class="boxes svelte-16yypc0"> </span>`);
+var root_5 = from_html(`<span class="wait svelte-16yypc0"><!> </span>`);
+var root_6 = from_html(`<span class="wait svelte-16yypc0"><!> drifted</span>`);
+var root_7 = from_html(`<button class="row svelte-16yypc0"><span class="title svelte-16yypc0"><!> </span> <!> <span class="meta svelte-16yypc0"><!> <!> <!></span></button>`);
+var root_8 = from_html(`<button class="group svelte-16yypc0"><!> <!> <span> </span> <span class="n svelte-16yypc0"> </span></button> <!>`, 1);
+var root_9 = from_html(`<details class="bare svelte-16yypc0"><summary class="svelte-16yypc0"><!> </summary> <p class="svelte-16yypc0"> </p> <p class="why svelte-16yypc0"><!></p></details>`);
+var root_10 = from_html(`<p class="none svelte-16yypc0"> </p>`);
+var root_11 = from_html(`<div class="list svelte-16yypc0"><header class="svelte-16yypc0"><span class="t svelte-16yypc0">Specifications</span><!></header> <label class="filter svelte-16yypc0"><!> <input placeholder="Filter specifications" aria-label="filter the specifications" class="svelte-16yypc0"/></label> <div class="rows svelte-16yypc0"><!> <!> <!> <!></div></div>`);
 function List($$anchor, $$props) {
 	push($$props, true);
 	let focus = prop($$props, "focus", 3, "");
@@ -40,92 +41,101 @@ function List($$anchor, $$props) {
 		},
 		open: (i) => $$props.open(get(flat)[i], true)
 	}));
-	var div = root_10();
+	var div = root_11();
 	var header = child(div);
-	var span = sibling(child(header));
-	var text = only_child(span, true);
+	var node = sibling(child(header));
+	var consequent = ($$anchor) => {
+		var span = root();
+		var text = only_child(span, true);
+		template_effect(() => set_text(text, get(total)));
+		append($$anchor, span);
+	};
+	if_block(node, ($$render) => {
+		if (specs.projects !== null) $$render(consequent);
+	});
 	reset(header);
 	var label = sibling(header, 2);
-	var node = child(label);
-	Icon(node, {
+	var node_1 = child(label);
+	Icon(node_1, {
 		name: "filter",
 		size: 13
 	});
-	var input = sibling(node, 2);
+	var input = sibling(node_1, 2);
 	remove_input_defaults(input);
 	reset(label);
 	var div_1 = sibling(label, 2);
-	var node_1 = child(div_1);
-	var consequent = ($$anchor) => {
-		var p_1 = root();
-		var node_2 = sibling(child(p_1));
-		Inline(node_2, { get text() {
+	var node_2 = child(div_1);
+	var consequent_1 = ($$anchor) => {
+		var p_1 = root_1();
+		var node_3 = sibling(child(p_1));
+		Inline(node_3, { get text() {
 			return specs.error;
 		} });
+		next(3);
 		reset(p_1);
 		append($$anchor, p_1);
 	};
-	var consequent_1 = ($$anchor) => {
+	var consequent_2 = ($$anchor) => {
 		var fragment = comment();
-		var node_3 = first_child(fragment);
-		each(node_3, 16, () => [
+		var node_4 = first_child(fragment);
+		each(node_4, 16, () => [
 			0,
 			1,
 			2
 		], (i) => i, ($$anchor, i) => {
-			var div_2 = root_1();
+			var div_2 = root_2();
 			append($$anchor, div_2);
 		});
 		append($$anchor, fragment);
 	};
-	if_block(node_1, ($$render) => {
-		if (specs.error) $$render(consequent);
-		else if (specs.projects === null) $$render(consequent_1, 1);
+	if_block(node_2, ($$render) => {
+		if (specs.error) $$render(consequent_1);
+		else if (specs.projects === null) $$render(consequent_2, 1);
 	});
-	var node_4 = sibling(node_1, 2);
-	each(node_4, 17, () => get(projects), (p) => p.project_id, ($$anchor, p) => {
-		var fragment_1 = root_7();
+	var node_5 = sibling(node_2, 2);
+	each(node_5, 17, () => get(projects), (p) => p.project_id, ($$anchor, p) => {
+		var fragment_1 = root_8();
 		var button = first_child(fragment_1);
-		var node_5 = child(button);
+		var node_6 = child(button);
 		{
 			let $0 = user_derived(() => get(folded)[get(p).project_id] ? "right" : "down");
-			Icon(node_5, {
+			Icon(node_6, {
 				get name() {
 					return get($0);
 				},
 				size: 12
 			});
 		}
-		var node_6 = sibling(node_5, 2);
-		Icon(node_6, {
+		var node_7 = sibling(node_6, 2);
+		Icon(node_7, {
 			name: "folder",
 			size: 13
 		});
-		var span_1 = sibling(node_6, 2);
+		var span_1 = sibling(node_7, 2);
 		var text_1 = only_child(span_1, true);
 		var span_2 = sibling(span_1, 2);
 		var text_2 = only_child(span_2, true);
 		reset(button);
-		var node_7 = sibling(button, 2);
-		var consequent_6 = ($$anchor) => {
+		var node_8 = sibling(button, 2);
+		var consequent_7 = ($$anchor) => {
 			var fragment_2 = comment();
-			var node_8 = first_child(fragment_2);
-			each(node_8, 17, () => get(p).plans, (r) => r.plan.path, ($$anchor, r) => {
+			var node_9 = first_child(fragment_2);
+			each(node_9, 17, () => get(p).plans, (r) => r.plan.path, ($$anchor, r) => {
 				const k = user_derived(() => key(get(p), get(r)));
-				var button_1 = root_6();
+				var button_1 = root_7();
 				var span_3 = child(button_1);
-				var node_9 = child(span_3);
-				Icon(node_9, {
+				var node_10 = child(span_3);
+				Icon(node_10, {
 					name: "spec",
 					size: 13
 				});
-				var text_3 = sibling(node_9);
+				var text_3 = sibling(node_10);
 				reset(span_3);
-				var node_10 = sibling(span_3, 2);
-				var consequent_2 = ($$anchor) => {
-					var span_4 = root_2();
-					var node_11 = child(span_4);
-					ChangeState(node_11, {
+				var node_11 = sibling(span_3, 2);
+				var consequent_3 = ($$anchor) => {
+					var span_4 = root_3();
+					var node_12 = child(span_4);
+					ChangeState(node_12, {
 						get state() {
 							return get(r).state;
 						},
@@ -141,13 +151,13 @@ function List($$anchor, $$props) {
 					].filter(Boolean).join(" · ")]);
 					append($$anchor, span_4);
 				};
-				if_block(node_10, ($$render) => {
-					if (get(r).state) $$render(consequent_2);
+				if_block(node_11, ($$render) => {
+					if (get(r).state) $$render(consequent_3);
 				});
-				var span_5 = sibling(node_10, 2);
-				var node_12 = child(span_5);
-				var consequent_3 = ($$anchor) => {
-					var span_6 = root_3();
+				var span_5 = sibling(node_11, 2);
+				var node_13 = child(span_5);
+				var consequent_4 = ($$anchor) => {
+					var span_6 = root_4();
 					var text_4 = only_child(span_6);
 					template_effect(() => {
 						set_attribute(span_6, "title", `boxes ticked in the task file · ${get(r).plan.progress.total ?? ""} tasks`);
@@ -155,30 +165,30 @@ function List($$anchor, $$props) {
 					});
 					append($$anchor, span_6);
 				};
-				if_block(node_12, ($$render) => {
-					if (get(r).plan.progress) $$render(consequent_3);
+				if_block(node_13, ($$render) => {
+					if (get(r).plan.progress) $$render(consequent_4);
 				});
-				var node_13 = sibling(node_12, 2);
-				var consequent_4 = ($$anchor) => {
-					var span_7 = root_4();
-					var node_14 = child(span_7);
-					Icon(node_14, {
+				var node_14 = sibling(node_13, 2);
+				var consequent_5 = ($$anchor) => {
+					var span_7 = root_5();
+					var node_15 = child(span_7);
+					Icon(node_15, {
 						name: "question",
 						size: 11
 					});
-					var text_5 = sibling(node_14);
+					var text_5 = sibling(node_15);
 					reset(span_7);
 					template_effect(() => set_text(text_5, ` ${get(r).plan.open_questions ?? ""}`));
 					append($$anchor, span_7);
 				};
-				if_block(node_13, ($$render) => {
-					if (get(r).plan.open_questions > 0) $$render(consequent_4);
+				if_block(node_14, ($$render) => {
+					if (get(r).plan.open_questions > 0) $$render(consequent_5);
 				});
-				var node_15 = sibling(node_13, 2);
-				var consequent_5 = ($$anchor) => {
-					var span_8 = root_5();
-					var node_16 = child(span_8);
-					Icon(node_16, {
+				var node_16 = sibling(node_14, 2);
+				var consequent_6 = ($$anchor) => {
+					var span_8 = root_6();
+					var node_17 = child(span_8);
+					Icon(node_17, {
 						name: "alert",
 						size: 11
 					});
@@ -186,8 +196,8 @@ function List($$anchor, $$props) {
 					reset(span_8);
 					append($$anchor, span_8);
 				};
-				if_block(node_15, ($$render) => {
-					if (get(r).drifted) $$render(consequent_5);
+				if_block(node_16, ($$render) => {
+					if (get(r).drifted) $$render(consequent_6);
 				});
 				reset(span_5);
 				reset(button_1);
@@ -203,8 +213,8 @@ function List($$anchor, $$props) {
 			});
 			append($$anchor, fragment_2);
 		};
-		if_block(node_7, ($$render) => {
-			if (!get(folded)[get(p).project_id]) $$render(consequent_6);
+		if_block(node_8, ($$render) => {
+			if (!get(folded)[get(p).project_id]) $$render(consequent_7);
 		});
 		template_effect(() => {
 			set_attribute(button, "aria-expanded", !get(folded)[get(p).project_id]);
@@ -217,22 +227,22 @@ function List($$anchor, $$props) {
 		}, true));
 		append($$anchor, fragment_1);
 	});
-	var node_17 = sibling(node_4, 2);
-	var consequent_7 = ($$anchor) => {
-		var details = root_8();
+	var node_18 = sibling(node_5, 2);
+	var consequent_8 = ($$anchor) => {
+		var details = root_9();
 		var summary = child(details);
-		var node_18 = child(summary);
-		Icon(node_18, {
+		var node_19 = child(summary);
+		Icon(node_19, {
 			name: "folder",
 			size: 13
 		});
-		var text_6 = sibling(node_18);
+		var text_6 = sibling(node_19);
 		reset(summary);
 		var p_2 = sibling(summary, 2);
 		var text_7 = only_child(p_2, true);
 		var p_3 = sibling(p_2, 2);
-		var node_19 = child(p_3);
-		Inline(node_19, { get text() {
+		var node_20 = child(p_3);
+		Inline(node_20, { get text() {
 			return get(sentence);
 		} });
 		reset(p_3);
@@ -244,22 +254,21 @@ function List($$anchor, $$props) {
 		append($$anchor, details);
 	};
 	var d = user_derived(() => get(bare).length > 0 && !get(filter).trim());
-	if_block(node_17, ($$render) => {
-		if (get(d)) $$render(consequent_7);
+	if_block(node_18, ($$render) => {
+		if (get(d)) $$render(consequent_8);
 	});
-	var node_20 = sibling(node_17, 2);
-	var consequent_8 = ($$anchor) => {
-		var p_4 = root_9();
+	var node_21 = sibling(node_18, 2);
+	var consequent_9 = ($$anchor) => {
+		var p_4 = root_10();
 		var text_8 = only_child(p_4);
 		template_effect(() => set_text(text_8, `${specs.omitted ?? ""} more not shown.`));
 		append($$anchor, p_4);
 	};
-	if_block(node_20, ($$render) => {
-		if (specs.omitted > 0) $$render(consequent_8);
+	if_block(node_21, ($$render) => {
+		if (specs.omitted > 0) $$render(consequent_9);
 	});
 	reset(div_1);
 	reset(div);
-	template_effect(() => set_text(text, get(total)));
 	bind_value(input, () => get(filter), ($$value) => set(filter, $$value));
 	append($$anchor, div);
 	pop();

@@ -1,17 +1,18 @@
-import { A as comment, E as if_block, G as first_child, H as user_effect, I as event, J as proxy, K as only_child, L as get, N as text, O as set_text, V as template_effect, W as child, X as state, Y as set, Z as user_derived, at as noop, et as pop, f as bind_value, i as api, it as reset, j as from_html, k as append, m as set_attribute, o as prop, p as remove_input_defaults, q as sibling, tt as push, z as untrack } from "./api.js";
-import { a as Inline, m as failure, n as Icon, w as go } from "./app.js";
+import { A as append, B as untrack, D as if_block, G as child, H as template_effect, J as sibling, K as first_child, L as event, M as from_html, P as text, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, f as bind_value, i as api, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, ot as noop, p as remove_input_defaults, q as only_child, tt as pop } from "./api.js";
+import { O as go, a as Inline, m as failure, n as Icon } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as Grid } from "./Grid.js";
 import { t as Empty } from "./Empty.js";
 //#region src/surfaces/search/Search.svelte
 var root = from_html(`<p class="fail svelte-1acjvix"><!></p>`);
-var root_1 = from_html(`<a class="svelte-1acjvix"> </a>`);
-var root_2 = from_html(`<span class="t svelte-1acjvix"> </span>`);
-var root_3 = from_html(`<div class="frame svelte-1acjvix"><!></div>`);
-var root_4 = from_html(`<div class="page svelte-1acjvix"><h1 class="sr-only">Search every session</h1> <form class="bar svelte-1acjvix"><label class="field svelte-1acjvix"><!> <input type="search" aria-label="search every session" placeholder="A command, a question, an error" class="svelte-1acjvix"/></label> <button type="submit"> </button></form> <p class="note svelte-1acjvix">Tool calls, questions and errors from every session. Prompts and replies are never recorded, so they are never found.</p> <!> <!></div>`);
+var root_1 = from_html(`<p class="note svelte-1acjvix"><!></p>`);
+var root_2 = from_html(`<a class="svelte-1acjvix"> </a>`);
+var root_3 = from_html(`<span class="t svelte-1acjvix"> </span>`);
+var root_4 = from_html(`<div class="frame svelte-1acjvix"><!></div>`);
+var root_5 = from_html(`<div class="page svelte-1acjvix"><h1 class="sr-only">Search every session</h1> <form class="bar svelte-1acjvix"><label class="field svelte-1acjvix"><!> <input type="search" aria-label="search every session" placeholder="A command, a question, an error" class="svelte-1acjvix"/></label> <button type="submit"> </button></form> <p class="note svelte-1acjvix">Tool calls, questions and errors from every session. Prompts and replies are never recorded, so they are never found.</p> <!> <!> <!></div>`);
 function Search($$anchor, $$props) {
 	push($$props, true);
-	let q = prop($$props, "q", 3, "");
+	let q = prop($$props, "q", 3, ""), blind = prop($$props, "blind", 3, "");
 	let query = state("");
 	let hits = state(proxy([]));
 	let ran = state(false);
@@ -81,7 +82,7 @@ function Search($$anchor, $$props) {
 			label: "What matched"
 		}
 	];
-	var div = root_4();
+	var div = root_5();
 	var form = sibling(child(div), 2);
 	var label = child(form);
 	var node = child(label);
@@ -110,6 +111,19 @@ function Search($$anchor, $$props) {
 	});
 	var node_3 = sibling(node_1, 2);
 	var consequent_1 = ($$anchor) => {
+		var p_1 = root_1();
+		var node_4 = child(p_1);
+		Inline(node_4, { get text() {
+			return blind();
+		} });
+		reset(p_1);
+		append($$anchor, p_1);
+	};
+	if_block(node_3, ($$render) => {
+		if (blind()) $$render(consequent_1);
+	});
+	var node_5 = sibling(node_3, 2);
+	var consequent_2 = ($$anchor) => {
 		{
 			let $0 = user_derived(() => `Nothing any session recorded contains “${get(ranFor)}”.`);
 			Empty($$anchor, {
@@ -121,20 +135,20 @@ function Search($$anchor, $$props) {
 			});
 		}
 	};
-	var consequent_4 = ($$anchor) => {
-		var div_1 = root_3();
-		var node_4 = child(div_1);
+	var consequent_5 = ($$anchor) => {
+		var div_1 = root_4();
+		var node_6 = child(div_1);
 		{
 			const cell = ($$anchor, h = noop, c = noop) => {
 				var fragment_1 = comment();
-				var node_5 = first_child(fragment_1);
-				var consequent_2 = ($$anchor) => {
+				var node_7 = first_child(fragment_1);
+				var consequent_3 = ($$anchor) => {
 					var text_1 = text();
 					template_effect(($0) => set_text(text_1, $0), [() => new Date(h().at).toLocaleString()]);
 					append($$anchor, text_1);
 				};
-				var consequent_3 = ($$anchor) => {
-					var a = root_1();
+				var consequent_4 = ($$anchor) => {
+					var a = root_2();
 					var text_2 = only_child(a, true);
 					template_effect(($0, $1) => {
 						set_attribute(a, "href", $0);
@@ -143,19 +157,19 @@ function Search($$anchor, $$props) {
 					append($$anchor, a);
 				};
 				var alternate = ($$anchor) => {
-					var span = root_2();
+					var span = root_3();
 					var text_3 = only_child(span, true);
 					template_effect(() => set_text(text_3, h().text));
 					append($$anchor, span);
 				};
-				if_block(node_5, ($$render) => {
-					if (c().key === "at") $$render(consequent_2);
-					else if (c().key === "run") $$render(consequent_3, 1);
+				if_block(node_7, ($$render) => {
+					if (c().key === "at") $$render(consequent_3);
+					else if (c().key === "run") $$render(consequent_4, 1);
 					else $$render(alternate, -1);
 				});
 				append($$anchor, fragment_1);
 			};
-			Grid(node_4, {
+			Grid(node_6, {
 				id: "search",
 				get columns() {
 					return columns;
@@ -184,9 +198,9 @@ function Search($$anchor, $$props) {
 		reset(div_1);
 		append($$anchor, div_1);
 	};
-	if_block(node_3, ($$render) => {
-		if (get(ran) && get(hits).length === 0 && !get(busy)) $$render(consequent_1);
-		else if (get(hits).length > 0) $$render(consequent_4, 1);
+	if_block(node_5, ($$render) => {
+		if (get(ran) && get(hits).length === 0 && !get(busy)) $$render(consequent_2);
+		else if (get(hits).length > 0) $$render(consequent_5, 1);
 	});
 	reset(div);
 	template_effect(() => {

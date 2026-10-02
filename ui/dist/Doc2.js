@@ -1,5 +1,5 @@
-import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, Z as user_derived, _ as set_style, et as pop, it as reset, j as from_html, k as append, m as set_attribute, o as prop, ot as to_array, q as sibling, rt as next, tt as push, v as set_class, w as index } from "./api.js";
-import { a as Inline, i as Skeleton, k as run, n as Icon } from "./app.js";
+import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, Q as user_derived, R as get, T as index, U as user_effect, at as reset, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, q as only_child, st as to_array, tt as pop, v as set_style, w as each, y as set_class } from "./api.js";
+import { N as run, a as Inline, i as Skeleton, n as Icon } from "./app.js";
 import { t as Empty } from "./Empty.js";
 import { t as ChangeState } from "./ChangeState.js";
 import { n as specs, r as watch, t as key } from "./store.svelte.js";
@@ -41,7 +41,15 @@ function Doc($$anchor, $$props) {
 		var consequent = ($$anchor) => {
 			var div = root();
 			var node_2 = child(div);
-			Skeleton(node_2, { rows: 4 });
+			{
+				let $0 = user_derived(() => !!specs.error);
+				Skeleton(node_2, {
+					rows: 4,
+					get failed() {
+						return get($0);
+					}
+				});
+			}
 			reset(div);
 			append($$anchor, div);
 		};

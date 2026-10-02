@@ -59,8 +59,8 @@ try {
     await p.locator(".doc").waitFor();
     const offer = p.getByRole("button", { name: /Offer as pull request/ });
     check("Offer is held while a weakened row is unread", recorded.qualifier?.unseen > 0 && (await offer.isDisabled()));
-    const why = (await p.locator(".doc .toolbar").innerText()).replace(/\s+/g, " ");
-    check("…and says why beside it", why.includes(`Read ${recorded.qualifier?.unseen} weakened check`), why);
+    const why = (await p.locator(".doc [role=toolbar]").innerText()).replace(/\s+/g, " ");
+    check("…and says why beside it", /Read the weakened checks? first/.test(why), why);
     await p.getByRole("button", { name: /Run gates/ }).click();
     await sleep(800);
     let reads = 0;
@@ -214,7 +214,7 @@ try {
     check("the finished run says what it came to", /The gates failed: check failed/.test(after) && !/running/.test(after), after);
     await p.getByRole("button", { name: /Offer as pull request/ }).click();
     await sleep(500);
-    const offered = await p.locator(".head").innerText();
+    const offered = await p.locator(".doc").innerText();
     check("an offer that handed back commands shows them", offered.includes("git push -u origin change/x") && offered.includes("gh pr create"));
     check("…and does not say it was offered", !/offer made/.test(offered));
     await p.context().close();
@@ -233,15 +233,31 @@ try {
     await p.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
     await p.evaluate(() => dispatchEvent(new KeyboardEvent("keydown", { key: "£", code: "Digit3", altKey: true, bubbles: true })));
     await sleep(300);
-    check("⌥3 shows the review and the address says so", (await p.evaluate(() => location.hash)) === `#change/${CHANGE}/review`, await p.evaluate(() => location.hash));
+    check("⌥3 shows the review and the address says so", (await p.evaluate(() => location.hash)).startsWith(`#change/${CHANGE}/review`), await p.evaluate(() => location.hash));
     await p.reload();
     await p.locator(".doc").waitFor();
     check("a reload returns to the view", (await selectedTab(p)).startsWith("Review"), await selectedTab(p));
     const head = await p.locator(".doc .head").boundingBox();
     check("the change header stays under 120 px", !!head && head.height <= 120, `${head?.height}px`);
+    // Code above the fold: the first diff line starts above 300 px.
+    await p.locator(".doc .hunk table tr").first().waitFor();
+    const first = await p.locator(".doc .hunk table tr").first().boundingBox();
+    check("at 1280×800 the first diff line starts above 300 px", !!first && first.y < 300, `${first?.y}px`);
+    // Each count once: the unread hunks on the Review tab, and nowhere else.
     const texts = (await p.locator(".doc").innerText()).replace(/\s+/g, " ");
-    const words = /(\d+ hunks? unread · 1 weakened)/.exec(texts)?.[1] ?? "";
-    check("header, tab and pane say one unread", !!words && texts.split(words).length - 1 >= 3, words);
+    const words = /(\d+ hunks? unread)/.exec(texts)?.[1] ?? "";
+    check("the unread count is said once", !!words && texts.split(words).length - 1 === 1, `${words} × ${texts.split(words).length - 1}`);
+    // The hunk is in the address, and a reload returns to it.
+    await p.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+    await p.keyboard.press("j");
+    await sleep(700);
+    const at = await p.evaluate(() => location.hash);
+    check("moving to a hunk puts it in the address", /^#change\/[^/]+\/review%2F.+%40/.test(at), at);
+    const cursor = await p.locator(".doc .hunk.current").getAttribute("id");
+    await p.reload();
+    await p.locator(".doc .hunk.current").waitFor();
+    await sleep(500);
+    check("a reload returns to the same hunk", (await p.locator(".doc .hunk.current").getAttribute("id")) === cursor, `${cursor}`);
     for (const [where, rows] of [["#board", ".frame [role=row][data-key]"], ["#plan", ".side [data-spec]"], ["#why", ".frame [role=row][data-key]"]]) {
       await p.goto(`${BASE}${where}`);
       const first = p.locator(rows).first();
@@ -253,6 +269,14 @@ try {
       check(`j on a fresh ${where} moves its cursor`, moved);
     }
     await p.setViewportSize({ width: 900, height: 700 });
+    await p.goto(`${BASE}#change/${CHANGE}/review`);
+    await p.locator(".doc .hunk table tr").first().waitFor();
+    const seen = await p.locator(".doc .hunk table tr").first().boundingBox();
+    check("at 900×700 a diff line is visible", !!seen && seen.y + seen.height <= 700, `${seen?.y}px`);
+    const cut = await p.evaluate(() => [...document.querySelectorAll(".doc .head h1, .doc .head button, .doc .head summary, .doc [role=tab]")]
+      .filter((e) => e.getBoundingClientRect().width > 0 && (e.scrollWidth > e.clientWidth + 1 || e.getBoundingClientRect().right > innerWidth))
+      .map((e) => e.textContent?.trim()));
+    check("at 900 px nothing in the header is clipped", cut.length === 0, cut.join(" | "));
     await p.goto(`${BASE}#change/${CHANGE}`);
     await p.locator(".doc").waitFor();
     check("under 1100 px an open change folds the sidebar", (await p.locator(".side [role=option]").count()) === 0 || !(await p.locator(".side").isVisible()));

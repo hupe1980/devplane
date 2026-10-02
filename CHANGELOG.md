@@ -2,6 +2,51 @@
 
 Notable changes per release, in the style of [Keep a Changelog](https://keepachangelog.com/). Dates are UTC.
 
+## Unreleased
+
+### Added
+
+- A first-run checklist in Setup, opened first while a step is left: sessions already running, update
+  checks, connect an agent, trust a repository, declare a check, the spec dialect, and a first change
+  that reads *verified*. Each step is read from the machine, can be skipped and brought back, and
+  writes only a diff the person confirmed.
+- Declare a check from the window: commands the repository already has (`cargo test`, the test script
+  with its package manager, `justfile` recipes, CI steps) offered with their file and line, and
+  `openspec validate --all --strict` as a named gate, never part of `check`; the change to
+  `devplane.toml` is shown as a diff and written only on confirm.
+- Connect and disconnect an agent, and trust a repository after reading what it would allow, from the
+  window.
+- The review reads in one scroll: every hunk of every file in one column, in review order, each
+  file's facts a strip that stays in view; `j`/`k` cross files.
+- Review comments: press a line number or `f`, and the comment waits in a pending review kept by the
+  host; **Send N comments** (or `⌘Enter`) sends them all as one turn to the change's agent, each tied
+  to the tree and hunk it was written against, resuming the session or starting a run when none is
+  live. After the agent's next turn each comment says whether its hunk changed.
+- The line that weakened a check is marked in the diff's gutter with the gate that ran over it, and
+  the Gates view links back to it.
+- The offer names the files nobody opened, by path (*2 files not opened: …*), in the window and
+  `devplane change offer`; it never refuses for them.
+
+### Changed
+
+- *Seen* is kept by the host for every hunk, keyed by its content: the window, `devplane change
+  review --seen <path>`, the inbox and the offer read the same marks, and a hunk the agent rewrites is
+  unread again. A weakened row is read when its hunks are. The marks in the browser are gone.
+- A change's header is one line, with the rest under **More**; at 1280×800 the review's first diff
+  line is above 300 px. Each count is said once; the address names the hunk under the cursor.
+- The store's schema is version 13: an older store is set aside, not migrated.
+- A failed read says what it means for the page, names `devplane doctor`, offers Retry and keeps the
+  host's raw answer behind a disclosure; no loading skeleton stays beside it.
+- An empty list on a host no session has reported to says what it cannot see, so it never reads like
+  an empty one.
+- No count is shown while a list is loading (Specifications).
+- The forge offers *Sign in* when the host's error is a missing sign-in, says *not read yet* before
+  its first read, and names a project whose read failed; *No open issue* only after a read.
+- New change says, before anything is created, when the project declares no `check`.
+- A gate command that is not installed reads *`<program>` is not on PATH*, not a failing check.
+- An uncommitted `devplane.toml` no longer makes a checkout dirty for a new change: it governs from
+  the checkout.
+
 ## 0.12.0 — 2026-09-27
 
 The verdict runs the base's tests against the change and runs in CI; the command line is a set of nouns; offering

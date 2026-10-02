@@ -1,4 +1,5 @@
 import { register } from "../../lib/surfaces";
+import { unseen } from "../../lib/sight";
 import { bindList } from "../../lib/keys";
 import { bindItemKeys } from "../inbox/keys";
 
@@ -18,6 +19,6 @@ register({
   nav: false,
   bare: true,
   reads: ["/api/inbox"],
-  select: () => ({}),
+  select: (feed) => ({ blind: unseen(feed.board) }),
   page: () => import("./Answer.svelte"),
 });

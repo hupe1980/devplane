@@ -421,6 +421,32 @@ fn a_project_with_no_gates_does_not_report_that_gates_passed() {
     );
 }
 
+/// A `devplane.toml` the window wrote — the person's confirmed commands under
+/// an origin comment — is as inert as one written by hand: with the home gone,
+/// its gates run from a plain shell.
+#[test]
+fn a_check_declared_from_the_window_runs_with_devplane_removed() {
+    let s = Sandbox::new(Shape::NoGates);
+    let existing = std::fs::read_to_string(s.repo.join("devplane.toml")).ok();
+    let declared = devplane::core::declare::Declared {
+        check: vec!["true".into(), "sh -c 'exit 0'".into()],
+        named: Default::default(),
+    };
+    let text = devplane::core::declare::splice(existing.as_deref(), &declared).unwrap();
+    std::fs::write(s.repo.join("devplane.toml"), &text).unwrap();
+    s.remove_devplane();
+    let checks = run_all(&s);
+    let gates = checks
+        .iter()
+        .find(|c| c.name == "gates run from a plain shell")
+        .unwrap();
+    assert_eq!(gates.outcome, Outcome::Passed, "{text}");
+    assert!(
+        !text.contains(".devplane"),
+        "no repository file points at the home: {text}"
+    );
+}
+
 /// A repository with no commits yields no findings.
 #[test]
 fn a_repository_with_no_commits_is_a_supported_state() {

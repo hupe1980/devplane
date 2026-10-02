@@ -106,7 +106,7 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
 // ── Every surface gets its data from somewhere real ──────────────────────
 {
   const api = source("../../src/api.rs");
-  const served = new Set([...api.matchAll(/\.route\("([^"]+)"/g)].map((m) => m[1]));
+  const served = new Set([...api.matchAll(/\.route\(\s*"([^"]+)"/g)].map((m) => m[1]));
   if (served.size < 20) fail(`only ${served.size} routes were read from src/api.rs — this check is inert`);
   for (const s of surfaces()) {
     const takesProps = Object.keys(s.select(recorded, "focus")).length > 0;
@@ -166,6 +166,9 @@ const find = (id: string) => surfaces().find((s) => s.id === id);
   for (const want of [`${sum.working} working`, `${answerable} need you`, `${sum.projects} projects`])
     if (!bar.includes(want)) fail(`the status bar does not say "${want}"`);
   if (/0 failed|0 asked/.test(bar)) fail("an empty bucket is a zero in the status bar rather than absent");
+  const one = html(StatusBar, { items: [], projects: 1, pulse: "live", bad: false, theme: "auto",
+    cycleTheme: () => {}, help: () => {}, go: () => {} });
+  if (!one.includes("1 project<") || one.includes("1 projects")) fail('one project is said as "1 projects"');
   if (surfaces().some((s) => (s.status?.(empty) ?? []).length > 0)) fail("the status bar counts before the feed arrived");
   const panel = html(Panel, { board, open: null });
   if (!/<button[^>]*disabled/.test(panel)) fail("the activity panel offers rows that open nothing");

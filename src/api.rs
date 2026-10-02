@@ -5,6 +5,7 @@
 use crate::core::event::Source;
 use crate::core::ids::RunId;
 use crate::core::run::RunMode;
+use crate::firstrun as first;
 use crate::host::Shared;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -55,6 +56,15 @@ pub fn router(state: Shared) -> Router {
         .route("/api/changes/{id}/snooze", post(snooze_change))
         .route("/api/changes/{id}/review", get(change_review))
         .route("/api/changes/{id}/review/seen", post(mark_review_seen))
+        .route(
+            "/api/changes/{id}/comments",
+            get(list_comments).post(create_comment),
+        )
+        .route("/api/changes/{id}/comments/send", post(send_comments))
+        .route(
+            "/api/changes/{id}/comments/{cid}",
+            axum::routing::delete(delete_comment),
+        )
         .route("/api/changes/{id}/certificate", get(change_certificate))
         .route("/api/changes/{id}/open", post(open_change))
         .route("/api/changes/{id}/resume", post(resume_change))
@@ -82,6 +92,17 @@ pub fn router(state: Shared) -> Router {
         .route("/api/quitting", get(quitting))
         .route("/api/quit", post(quit))
         .route("/api/stream", get(stream))
+        // The first run from the window: the checklist, declaring a check,
+        // scanning before trust, connecting an agent (`crate::firstrun`).
+        .route("/api/first-run", get(first::first_run))
+        .route("/api/projects/scan", get(first::scan))
+        .route(
+            "/api/projects/{id}/gates/candidates",
+            get(first::gate_candidates),
+        )
+        .route("/api/projects/{id}/gates", post(first::declare_gates))
+        .route("/api/connect/{agent}", post(first::connect_agent))
+        .route("/api/disconnect/{agent}", post(first::disconnect_agent))
         // Open, and names the version: a client refuses a host of another
         // version, since a stale host 404s routes the client expects.
         .route("/healthz", get(healthz))
@@ -178,7 +199,7 @@ macro_rules! run_id {
 /// Checks the bearer token. Loopback is not access control; the token, in a
 /// user-only file, is. Only ever from the header: a token in a URL ends up in
 /// logs and process lists.
-fn authorised(state: &Shared, headers: &HeaderMap) -> bool {
+pub(crate) fn authorised(state: &Shared, headers: &HeaderMap) -> bool {
     let from_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1243,7 +1264,15 @@ fn preflight_json(findings: &[crate::core::preflight::Finding]) -> serde_json::V
             "refusal": f.refusal.map(|r| r.as_str()),
             "says": f.says,
             // What the first run in a fresh tree costs, as sentences.
-            "notes": f.notes.iter().map(crate::core::preflight::Note::says).collect::<Vec<_>>(),
+            "notes": f.notes.iter()
+                .filter(|n| !matches!(n, crate::core::preflight::Note::NoCheck { .. }))
+                .map(crate::core::preflight::Note::says)
+                .collect::<Vec<_>>(),
+            // No `check`, said apart from the costs: the window offers
+            // *Declare a check* beside it.
+            "no_check": f.notes.iter()
+                .find(|n| matches!(n, crate::core::preflight::Note::NoCheck { .. }))
+                .map(crate::core::preflight::Note::says),
         })).collect::<Vec<_>>(),
         "refused": findings.iter().filter(|f| !f.accepted()).count(),
     })
@@ -1698,13 +1727,13 @@ async fn change_review(
     }
 }
 
-/// Marks a weakened row seen: a person read it. `matched` narrows the mark to
-/// one row; without it every current row at `path` is marked.
+/// Marks a unit of a change's review seen: a person read it. `digest` names
+/// the hunk; without it every current unit at `path` is marked.
 #[derive(Deserialize)]
 struct SeenBody {
     path: String,
     #[serde(default)]
-    matched: Option<String>,
+    digest: Option<String>,
 }
 
 async fn mark_review_seen(
@@ -1716,29 +1745,117 @@ async fn mark_review_seen(
     guard!(state, headers);
     let id = change_id!(state, id);
     let snap = state.snapshot().await;
-    match crate::view::mark_seen(
-        &snap,
-        &state.store,
-        &id,
-        &body.path,
-        body.matched.as_deref(),
-    )
-    .await
+    match crate::view::mark_seen(&snap, &state.store, &id, &body.path, body.digest.as_deref())
+        .await
     {
-        Ok(seen) => Json(json!({ "seen": seen })).into_response(),
+        Ok(marked) => {
+            state.notify_changed();
+            Json(marked).into_response()
+        }
         Err(crate::view::SeenRefusal::NoSuchChange) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": format!("no change `{id}`")})),
         )
             .into_response(),
-        Err(crate::view::SeenRefusal::NoSuchRow(rows)) => (
+        Err(crate::view::SeenRefusal::NoSuchUnit(digests)) => (
             StatusCode::CONFLICT,
             Json(json!({
-                "error": format!("`{}` has no weakened row to mark seen", body.path),
-                "rows": rows,
+                "error": match &body.digest {
+                    Some(_) => format!("`{}` has no hunk with that content now — it changed", body.path),
+                    None => format!("`{}` has nothing in this change to mark seen", body.path),
+                },
+                "digests": digests,
             })),
         )
             .into_response(),
+    }
+}
+
+/// A change's review comments, oldest first, with how many are unsent.
+async fn list_comments(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match state.store.comments(id.as_str()).await {
+        Ok(all) => {
+            let unsent = all.iter().filter(|c| c.sent_at.is_none()).count();
+            Json(json!({ "comments": all, "unsent": unsent })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Keeps a comment on a line the diff shows; sends nothing.
+async fn create_comment(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::comments::NewComment>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::comments::create(&state, &id, body).await {
+        Ok(c) => (StatusCode::CREATED, Json(json!({ "comment": c }))).into_response(),
+        Err(crate::comments::Refused::NoSuchChange) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("no change `{id}`")})),
+        )
+            .into_response(),
+        Err(crate::comments::Refused::NotThere(why)) => {
+            (StatusCode::CONFLICT, Json(json!({ "error": why }))).into_response()
+        }
+    }
+}
+
+/// Deletes an unsent comment; a sent one stays.
+async fn delete_comment(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path((id, cid)): Path<(String, String)>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::comments::delete(&state, &id, &cid).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Sends every unsent comment as one prompt, to the change's live run, a
+/// resumed session or a run started on it — or says why nothing was sent.
+async fn send_comments(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::comments::send(&state, &id).await {
+        Ok(Some(sent)) => Json(sent).into_response(),
+        Ok(None) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "nothing to send", "says": "nothing to send"})),
+        )
+            .into_response(),
+        Err(e) => {
+            let says = format!("{e:#}");
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error": says, "says": says})),
+            )
+                .into_response()
+        }
     }
 }
 

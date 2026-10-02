@@ -4,7 +4,7 @@
   // The address is the source of truth: `#<surface>` or `#<surface>/<focus>`.
   // Tabs are a memory laid over it. Deep links arrive as a query (`?surface=`,
   // `?change=`, `?ask=`, `?run=`), read once and folded into the hash.
-  import { surfaces, listed, landing, type Feed } from "./lib/surfaces";
+  import { surfaces, listed, landing, opening, type Feed } from "./lib/surfaces";
   import { loadSurfaces } from "./lib/load";
   import { live } from "./lib/live.svelte";
   import { theme } from "./lib/theme.svelte";
@@ -107,8 +107,12 @@
     const id = cut === -1 ? raw : raw.slice(0, cut);
     if (!surfaces().some((s) => s.id === id)) {
       if (!raw) {
-        const home = landing()?.id;
-        if (home) go(`#${home}`);
+        // An empty address: the landing surface, unless one asks to open
+        // first (the first-run checklist). An address set meanwhile wins.
+        void opening().then((s) => {
+          const home = s?.id ?? landing()?.id;
+          if (home && !location.hash.slice(1)) go(`#${home}`);
+        });
       }
       return;
     }

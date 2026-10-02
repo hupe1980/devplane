@@ -44,14 +44,15 @@
 </script>
 
 <div class="list">
-  <header><span class="t">Specifications</span><span class="n">{total}</span></header>
+  <!-- No number until the specifications have been read: absence is not zero. -->
+  <header><span class="t">Specifications</span>{#if specs.projects !== null}<span class="n">{total}</span>{/if}</header>
   <label class="filter">
     <Icon name="filter" size={13} />
     <input bind:value={filter} placeholder="Filter specifications" aria-label="filter the specifications" />
   </label>
   <div class="rows">
     {#if specs.error}
-      <p class="quiet fail">The specifications could not be read: <Inline text={specs.error} /></p>
+      <p class="quiet fail">Could not read the specifications: <Inline text={specs.error} />. Nothing here is current; <code>devplane doctor</code> tells more.</p>
     {:else if specs.projects === null}
       {#each [0, 1, 2] as i (i)}<div class="skel"></div>{/each}
     {/if}

@@ -64,7 +64,7 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   const held = doc(rate);
   if (!offer(held)) fail("a verified change with an unread weakened row has no Offer at all");
   if (!/\bdisabled\b/.test(offer(held).split(">")[0])) fail("Offer is live while a weakened row is unread");
-  if (!visible(held).includes("Read 1 weakened check first")) fail("a held Offer does not say why beside it");
+  if (!visible(held).includes("Read the weakened check first")) fail("a held Offer does not say why beside it");
   if (!/aria-describedby="offer-held"/.test(offer(held))) fail("a held Offer's reason is not tied to the button");
   if (!offer(verified) || /\bdisabled\b/.test(offer(verified).split(">")[0])) fail("Offer is held with every weakened row read");
   if (visible(verified).includes("weakened check first")) fail("Offer gives a reason to wait with nothing unread");
@@ -172,10 +172,12 @@ const doc = (d: Record<string, unknown>) => html(Doc, { id: d.id, detail: d, loa
   if (!/waiting on you — question/.test(agent) || !/"waiting" in s/.test(agent))
     fail("a waiting run's state object is not mapped to words, so it prints as [object Object]");
   if (/Commands run/.test(agent)) fail("the agent tab claims a list of finished commands it cannot see");
-  // The review: marking a hunk reads only the weakened rows inside it.
+  // The review: `s` marks the one hunk under the cursor, by its digest, in
+  // the host; a weakened row is read when its hunks are, never by a mark of
+  // its own.
   const pane = source("../src/surfaces/change/review/Pane.svelte");
-  if (!/markRead\(\(weakRows\.get\(file\.path\) \?\? \[\]\)\.filter\(\(w\) => inHunk\(h, w\)\)\)/.test(pane))
-    fail("marking one hunk records every weakened row in its file as read");
+  if (!/markSeen\(change, x\.file\.path, x\.h\.digest\)/.test(pane)) fail("marking a hunk does not send that hunk's digest to the host");
+  if (/matched:/.test(pane)) fail("the review still marks a weakened row by its matched text");
   // No count before the list is read.
   const unread = html(ChangeList, { open: () => {} });
   if (/class="n[^"]*">0</.test(unread)) fail("the changes sidebar prints 0 before it has read anything");

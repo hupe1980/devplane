@@ -5466,10 +5466,12 @@ var Unreachable = class extends Error {
 var Refused = class extends Error {
 	status;
 	body;
-	constructor(said, status, body) {
+	path;
+	constructor(said, status, body, path = "") {
 		super(said);
 		this.status = status;
 		this.body = body;
+		this.path = path;
 	}
 };
 var writes = (opts) => !!opts.method && !/^(GET|HEAD)$/i.test(opts.method);
@@ -5526,11 +5528,11 @@ async function api(path, opts = {}) {
 			body = null;
 		}
 		const error = body?.error;
-		throw new Refused((typeof error === "string" ? error : body === null ? text.trim().slice(0, 300) : "") || `${path} → ${res.status}`, res.status, body);
+		throw new Refused((typeof error === "string" ? error : body === null ? text.trim().slice(0, 300) : "") || `${path} → ${res.status}`, res.status, body ?? (text.trim().slice(0, 2e3) || null), path);
 	}
 	return await res.json();
 }
 //#endregion
-export { remove_textarea_child as $, comment as A, effect as B, each as C, mount as D, if_block as E, delegated as F, first_child as G, user_effect as H, event as I, proxy as J, only_child as K, get as L, from_svg as M, text as N, set_text as O, delegate as P, autofocus as Q, tick as R, snippet as S, key as T, user_pre_effect as U, template_effect as V, child as W, state as X, set as Y, user_derived as Z, set_style as _, claimToken as a, noop as at, action as b, spread_props as c, bind_checked as d, pop as et, bind_value as f, init_select as g, bind_select_value as h, api as i, reset as it, from_html as j, append as k, bind_this as l, set_attribute as m, Unauthorised as n, snapshot as nt, prop as o, to_array as ot, remove_input_defaults as p, sibling as q, Unreachable as r, next as rt, rest_props as s, Refused as t, push as tt, bind_element_size as u, set_class as v, index as w, component as x, clsx as y, untrack as z };
+export { autofocus as $, append as A, untrack as B, snippet as C, if_block as D, key as E, delegate as F, child as G, template_effect as H, delegated as I, sibling as J, first_child as K, event as L, from_html as M, from_svg as N, mount as O, text as P, user_derived as Q, get as R, component as S, index as T, user_effect as U, effect as V, user_pre_effect as W, set as X, proxy as Y, state as Z, set_selected as _, claimToken as a, reset as at, clsx as b, spread_props as c, bind_checked as d, remove_textarea_child as et, bind_value as f, init_select as g, bind_select_value as h, api as i, next as it, comment as j, set_text as k, bind_this as l, set_attribute as m, Unauthorised as n, push as nt, prop as o, noop as ot, remove_input_defaults as p, only_child as q, Unreachable as r, snapshot as rt, rest_props as s, to_array as st, Refused as t, pop as tt, bind_element_size as u, set_style as v, each as w, action as x, set_class as y, tick as z };
 
 //# sourceMappingURL=api.js.map

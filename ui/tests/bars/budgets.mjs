@@ -42,10 +42,10 @@ export const BUDGETS = {
 /// change in which it first passes, and only then; 3 never joins (the runner
 /// refuses it). A bar not listed is reported in full and marked *not blocking*.
 ///
-/// 2 passes. 4 joins when no surface counts while loading, leaves a skeleton
-/// beside an error, or renders absence as zero; 1 joins when the window has a
-/// path for every first-run step.
-export const BLOCKING = /** @type {number[]} */ ([2]);
+/// 2 passes. 1 passes: the window has a path for every first-run step. 4
+/// joins when no surface counts while loading, leaves a skeleton beside an
+/// error, renders absence as zero, or shows *verified* without its qualifier.
+export const BLOCKING = /** @type {number[]} */ ([2, 1, 4]);
 
 /// Surface × phase pairs a bar 4 rule does not apply to, each with its reason,
 /// printed every run. The surface is a registered id; `rule` is one finding

@@ -56,10 +56,13 @@ export class Unreachable extends Error {
 export class Refused extends Error {
   readonly status: number;
   readonly body: unknown;
-  constructor(said: string, status: number, body: unknown) {
+  /// The route that refused, for the raw error behind a disclosure.
+  readonly path: string;
+  constructor(said: string, status: number, body: unknown, path = "") {
     super(said);
     this.status = status;
     this.body = body;
+    this.path = path;
   }
 }
 
@@ -147,7 +150,7 @@ export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
     }
     const error = (body as { error?: unknown } | null)?.error;
     const said = typeof error === "string" ? error : body === null ? text.trim().slice(0, 300) : "";
-    throw new Refused(said || `${path} → ${res.status}`, res.status, body);
+    throw new Refused(said || `${path} → ${res.status}`, res.status, body ?? (text.trim().slice(0, 2000) || null), path);
   }
   return (await res.json()) as T;
 }

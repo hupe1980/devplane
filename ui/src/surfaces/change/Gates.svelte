@@ -1,4 +1,5 @@
 <script lang="ts">
+  import NoCheck, { declaresNoCheck } from "../../lib/NoCheck.svelte";
   // Every gate run against this change: each command, exit code, duration and
   // output (its own bytes), and the certificate a reviewer can re-run. The
   // newest attempt is open; older ones fold with their verdict showing.
@@ -20,7 +21,18 @@
     reload = () => {},
     /// A certificate already read (the render harness); the host's read replaces it.
     certificate = null,
-  }: { d: Detail; id: string; reload?: () => void | Promise<void>; certificate?: { finished: boolean; markdown?: string } | null } = $props();
+    /// The weakened rows the review found, each joined back to its line.
+    weakened = [],
+    /// Opens the review on a weakened row's file.
+    toLine = null,
+  }: {
+    d: Detail;
+    id: string;
+    reload?: () => void | Promise<void>;
+    certificate?: { finished: boolean; markdown?: string } | null;
+    weakened?: Array<{ path: string; why: string; matched: string; seen: boolean; gate_says?: string | null }>;
+    toLine?: ((path: string) => void) | null;
+  } = $props();
 
   const bc = $derived(d.base_checks ?? null);
   let asked = $state("");
@@ -71,7 +83,18 @@
 </script>
 
 <div class="gates">
-  {#if attempts.length === 0}
+  {#if weakened.length}
+    <!-- What the gates ran over includes a check this change weakened: each
+         row goes back to its line in the review. -->
+    <section class="weakened" aria-label="checks this change weakened">
+      {#each weakened as w (w.path + w.matched)}
+        <p><Icon name="alert" size={13} /> <b>check weakened</b> in <button class="line" onclick={() => toLine?.(w.path)}><code>{w.path}</code></button> — <Inline text={w.why} />{#if w.gate_says}; <Inline text={w.gate_says} />{/if} · {w.seen ? "read" : "not yet read"}</p>
+      {/each}
+    </section>
+  {/if}
+  {#if declaresNoCheck(d)}
+    <NoCheck project={d.project_id} />
+  {:else if attempts.length === 0}
     <p class="quiet">No gate has run against this change yet. The gates run when the agent says it has finished, or when you press <b>Run gates</b>.</p>
   {:else}
     {#each attempts as g, i (g.at)}
@@ -179,6 +202,26 @@
 </div>
 
 <style>
+  .weakened {
+    margin-bottom: var(--s-3);
+    padding: var(--s-2) var(--s-3);
+    border-left: 3px solid var(--fail);
+    background: var(--panel);
+    font-size: var(--t-sm);
+  }
+  .weakened p {
+    margin: 0;
+    color: var(--fail);
+  }
+  .weakened .line {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+  }
   .gates {
     display: grid;
     gap: var(--s-3);

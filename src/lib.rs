@@ -21,12 +21,16 @@ pub(crate) mod change;
 pub mod cli;
 /// The CLI's view of the host.
 pub(crate) mod client;
+/// A person's review comments, kept until sent as one prompt.
+pub(crate) mod comments;
 /// Where Devplane keeps its own state, and how a client finds the host.
 pub mod config;
 /// Types and the pure logic over them. Reaches nothing outside the process.
 pub mod core;
 /// Runs Devplane owns, over the Agent Client Protocol.
 pub mod driven;
+/// The first run from the window: its checklist and the writes it confirms.
+pub mod firstrun;
 /// Verification gates: the project's own definition of done, run and parsed.
 pub mod gates;
 /// Git: worktrees per unit of work, and the status the board shows.

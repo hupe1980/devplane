@@ -6,6 +6,11 @@
     border-radius: var(--radius);
     color: var(--fail);
     font-size: var(--t-sm);
+    display: grid;
+    gap: var(--s-2);
+  }
+  .failed.svelte-fezoay p:where(.svelte-fezoay) {
+    margin: 0;
   }
   .failed.stale.svelte-fezoay {
     border-style: dashed;
@@ -17,6 +22,26 @@
   }
   .tell.svelte-fezoay {
     color: var(--dim);
+  }
+  .more.svelte-fezoay {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: start;
+    gap: var(--s-3);
+    color: var(--dim);
+  }
+  summary.svelte-fezoay {
+    cursor: pointer;
+    font-size: var(--t-xs);
+  }
+  pre.svelte-fezoay {
+    margin: var(--s-1) 0 0;
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 12rem;
+    overflow: auto;
   }
   code.svelte-fezoay,
   .failed.svelte-fezoay code {

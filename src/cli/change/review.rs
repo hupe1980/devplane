@@ -1,5 +1,5 @@
-//! `devplane change review`: a change in review order, and marking a
-//! weakened check read.
+//! `devplane change review`: a change in review order, and marking a path's
+//! hunks seen.
 
 use crate::render::{BOLD, DIM, YELLOW, clip, paint};
 use anyhow::{Context, Result};
@@ -14,6 +14,10 @@ fn print_review(r: &crate::view::ReviewView, by_intent: bool) {
     );
     println!("  {}", r.shape_says);
     println!("  {}", r.standing_says);
+    println!("  {}", unread_says(r));
+    if let Some(s) = &r.not_opened_says {
+        println!("  {}", paint(YELLOW, s));
+    }
     for s in [
         &r.unordered,
         &r.coverage_absent,
@@ -106,8 +110,21 @@ pub(super) async fn cmd_review(change: &str, by: &str, json: bool) -> Result<()>
     Ok(())
 }
 
-/// Marks every current weakened row at each path seen, as the person running
-/// this.
+/// *3 hunks unread*, from the host's marks: a count, never a share.
+pub(crate) fn unread_says(r: &crate::view::ReviewView) -> String {
+    let files = r.groups.iter().flat_map(|g| g.files.iter());
+    let n: usize = files
+        .map(|f| {
+            f.hunks.iter().filter(|h| !h.seen).count() + usize::from(f.unit_seen == Some(false))
+        })
+        .sum();
+    match n {
+        1 => "1 hunk unread".to_string(),
+        n => format!("{n} hunks unread"),
+    }
+}
+
+/// Marks every current hunk at each path seen, as the person running this.
 pub(super) async fn cmd_mark_seen(change: &str, seen: &[String], json: bool) -> Result<()> {
     let reader = crate::local::Reader::open().await?;
     let id = super::ids::change(&reader, change).await?;
@@ -115,32 +132,26 @@ pub(super) async fn cmd_mark_seen(change: &str, seen: &[String], json: bool) -> 
     for path in seen {
         let v = reader.mark_seen(&id, path).await?;
         if let Some(e) = super::said_error(&v) {
-            let rows: Vec<String> = v["rows"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|r| r["path"].as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            anyhow::bail!(
-                "{e}{}",
-                match rows.is_empty() {
-                    true => String::new(),
-                    false => format!("; the weakened rows are at: {}", rows.join(", ")),
+            anyhow::bail!("{e}");
+        }
+        let n = v["seen"].as_array().map_or(0, Vec::len);
+        if !json {
+            println!(
+                "seen: {path} — {}",
+                match n {
+                    1 => "1 hunk".to_string(),
+                    n => format!("{n} hunks"),
                 }
             );
-        }
-        for r in v["seen"].as_array().cloned().unwrap_or_default() {
-            if !json {
+            for r in v["weakened_seen"].as_array().cloned().unwrap_or_default() {
                 println!(
-                    "seen: {} — {}",
+                    "  read: {} — {}",
                     r["path"].as_str().unwrap_or(""),
                     r["why"].as_str().unwrap_or("")
                 );
             }
-            all.push(r);
         }
+        all.push(v);
     }
     if json {
         println!(

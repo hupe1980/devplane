@@ -2,6 +2,7 @@
 //! its hooks in a vendor's own settings.
 
 use super::Vendor;
+use crate::observe::connect::{read_existing, write_whole};
 use crate::render::{BOLD, DIM, clip, paint};
 use crate::{config, render};
 use anyhow::{Context, Result};
@@ -95,7 +96,7 @@ pub async fn cmd_connect(
     bin: Option<std::path::PathBuf>,
 ) -> Result<()> {
     // Every hook runs this path; one that vanishes turns the gate off.
-    let exe = stable_binary(bin)?;
+    let exe = crate::observe::connect::stable_binary(bin)?;
     if what == Vendor::Copilot {
         return connect_copilot(yes, json, &exe).await;
     }
@@ -207,65 +208,6 @@ fn require_yes(yes: bool, would_write: bool, path: &std::path::Path) -> Result<(
     Ok(())
 }
 
-/// Why a binary path would not outlive the hooks that name it, if it would
-/// not: a package runner's cache, a macOS App Translocation mount, a mounted
-/// disk image, or an AppImage's mount.
-#[must_use]
-pub fn transient_binary(path: &std::path::Path) -> Option<&'static str> {
-    let p = path.to_string_lossy().replace('\\', "/");
-    if p.contains("/_npx/") || p.contains("/.npm/_npx/") || p.contains("/npm-cache/_npx/") {
-        return Some("inside npx's package cache, which npm clears and replaces");
-    }
-    if p.contains("/AppTranslocation/") {
-        return Some("a macOS App Translocation path, a read-only copy that moves on every launch");
-    }
-    if p.starts_with("/Volumes/") {
-        return Some("on a mounted volume (a .dmg, say), which is gone once it is ejected");
-    }
-    if p.contains("/.mount_") {
-        return Some("inside an AppImage's mount, which exists only while it runs");
-    }
-    None
-}
-
-/// The binary every hook will run: `--bin` when given, else this one — unless
-/// this one lives somewhere that will disappear, which is refused with the
-/// reason and the fix. An AppImage names itself through `$APPIMAGE`.
-fn stable_binary(bin: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
-    if let Some(bin) = bin {
-        let bin = std::fs::canonicalize(&bin)
-            .with_context(|| format!("--bin {}: no such file", bin.display()))?;
-        if !bin.is_file() {
-            anyhow::bail!("--bin {}: not a file", bin.display());
-        }
-        return Ok(bin);
-    }
-    // `$APPIMAGE` is set by the AppImage runtime; trusted only when it names
-    // the file, since any process can set a variable.
-    if let Some(image) = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty()) {
-        let image = std::path::PathBuf::from(image);
-        if image.is_file() {
-            return Ok(image);
-        }
-        anyhow::bail!(
-            "not connecting: $APPIMAGE names {}, which is not a file; pass --bin <path>",
-            image.display()
-        );
-    }
-    let exe = std::env::current_exe().context("finding the devplane binary")?;
-    match transient_binary(&exe) {
-        None => Ok(exe),
-        Some(why) => anyhow::bail!(
-            "not connecting: every hook runs the binary's path, and {} is {why}, so the hooks \
-             — and the gate — would stop working without a word when it goes. Install \
-             devplane (`npm install -g devplane`, `cargo install devplane`, or copy the \
-             binary somewhere permanent) and run `agent connect` from there, or pass \
-             `--bin <path>` naming a devplane binary that stays put.",
-            exe.display()
-        ),
-    }
-}
-
 /// `devplane agent connect copilot`.
 ///
 /// Copilot loads every `*.json` in `~/.copilot/hooks/`, so the installation is
@@ -275,14 +217,19 @@ fn stable_binary(bin: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> 
 async fn connect_copilot(yes: bool, json: bool, exe: &std::path::Path) -> Result<()> {
     let base_url = host_base_url();
     let token = config::ingest_token(&config::load_or_create_token()?);
-    let dir = crate::observe::copilot::hooks_dir()
-        .context("no home directory, so no ~/.copilot to write to")?;
-    let file = dir.join(crate::observe::copilot::HOOKS_FILE);
-    let contents = crate::observe::copilot::hooks_file(exe);
-    let after = serde_json::to_string_pretty(&contents)? + "\n";
-    // The file is entirely ours: diff against what we wrote last time, if any.
-    let before = read_existing(&file)?;
-    let diff = crate::observe::connect::diff(&before, &after);
+    // The file is entirely ours: diffed against what was written last time,
+    // the same plan the window shows.
+    let planned = crate::observe::connect::plan_connect(
+        crate::observe::connect::Agent::Copilot,
+        exe,
+        &base_url,
+        &token,
+    )?;
+    let (file, after, diff) = (
+        planned.path,
+        planned.after.unwrap_or_default(),
+        planned.diff,
+    );
 
     // Three lines, not two: the telemetry routes need a bearer token — the
     // telemetry-only one, since an agent can read its own environment.
@@ -299,7 +246,6 @@ async fn connect_copilot(yes: bool, json: bool, exe: &std::path::Path) -> Result
     ];
     if json {
         if !diff.is_empty() {
-            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             write_whole(&file, &after)?;
         }
         println!(
@@ -326,7 +272,6 @@ async fn connect_copilot(yes: bool, json: bool, exe: &std::path::Path) -> Result
             println!("{}", paint(DIM, "left as it was"));
             return Ok(());
         }
-        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         write_whole(&file, &after)?;
         println!("{} {}", paint(render::GREEN, "wrote"), file.display());
     }
@@ -459,17 +404,21 @@ pub async fn cmd_disconnect(what: Vendor, yes: bool, json: bool) -> Result<()> {
 /// disconnect. No telemetry (none is documented). Codex silently skips any
 /// hook the person has not approved in its own dialog, so that is said last.
 async fn connect_codex(yes: bool, json: bool, exe: &std::path::Path) -> Result<()> {
-    let file = crate::observe::codex::hooks_path()
-        .context("no home directory, so no ~/.codex to write to")?;
-    let before = read_existing(&file)?;
-    let mut doc: serde_json::Map<String, serde_json::Value> = if before.trim().is_empty() {
-        Default::default()
-    } else {
-        serde_json::from_str(&before).with_context(|| format!("{} is not JSON", file.display()))?
+    // The same plan the window shows: Devplane's entries merged in.
+    let planned =
+        crate::observe::connect::plan_connect(crate::observe::connect::Agent::Codex, exe, "", "")?;
+    let (file, after, diff) = (
+        planned.path,
+        planned.after.unwrap_or_default(),
+        planned.diff,
+    );
+    let installed = |text: &str| {
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text)
+            .map(|d| crate::observe::codex::installed(&d).len())
+            .unwrap_or(0)
     };
-    let added = crate::observe::codex::install(&mut doc, exe);
-    let after = serde_json::to_string_pretty(&doc)? + "\n";
-    let diff = crate::observe::connect::diff(&before, &after);
+    // How many hook events are registered, as `install` counts them.
+    let added = installed(&after);
     let trust = "Codex runs a hook only after you approve it in its own dialog, and skips one \
                  you have not without a word — until then nothing here is watched or gated";
     if json {
@@ -516,32 +465,6 @@ async fn connect_codex(yes: bool, json: bool, exe: &std::path::Path) -> Result<(
         )
     );
     Ok(())
-}
-
-/// A file of the person's, or empty when there is none. Any other failure —
-/// unreadable, not UTF-8 — is an error: read as empty, the file would be
-/// overwritten with only Devplane's entries in it.
-fn read_existing(file: &std::path::Path) -> Result<String> {
-    match std::fs::read_to_string(file) {
-        Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e).with_context(|| format!("reading {}; left as it was", file.display())),
-    }
-}
-
-/// Written beside and renamed over, so an interrupted write leaves the
-/// person's file whole.
-fn write_whole(file: &std::path::Path, contents: &str) -> Result<()> {
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let tmp = file.with_extension(format!("devplane-{}.tmp", std::process::id()));
-    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, file)
-        .inspect_err(|_| {
-            std::fs::remove_file(&tmp).ok();
-        })
-        .with_context(|| format!("writing {}", file.display()))
 }
 
 async fn disconnect_codex(yes: bool, json: bool) -> Result<()> {
@@ -605,39 +528,4 @@ fn host_base_url() -> String {
         .flatten()
         .map(|i| i.base_url())
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", config::DEFAULT_PORT))
-}
-
-#[cfg(test)]
-mod tests {
-    /// `connect` writes the binary's path into every hook, so a path that
-    /// will vanish is refused with the reason, and a stable one is not.
-    #[test]
-    fn a_binary_that_will_disappear_is_named_as_such() {
-        use std::path::Path;
-        for (p, word) in [
-            (
-                "/Users/me/.npm/_npx/1a2b/node_modules/devplane/bin/devplane",
-                "npx",
-            ),
-            (
-                "/private/var/folders/x/T/AppTranslocation/ABC/d/Devplane.app/Contents/MacOS/devplane",
-                "Translocation",
-            ),
-            (
-                "/Volumes/Devplane/Devplane.app/Contents/MacOS/devplane",
-                "mounted",
-            ),
-            ("/tmp/.mount_DevplaXYZ/usr/bin/devplane", "AppImage"),
-        ] {
-            let why = super::transient_binary(Path::new(p)).unwrap_or_else(|| panic!("{p}"));
-            assert!(why.contains(word), "{p}: {why}");
-        }
-        for p in [
-            "/usr/local/bin/devplane",
-            "/opt/homebrew/bin/devplane",
-            "/Users/me/.cargo/bin/devplane",
-        ] {
-            assert_eq!(super::transient_binary(Path::new(p)), None, "{p}");
-        }
-    }
 }

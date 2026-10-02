@@ -1,9 +1,9 @@
-import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, O as set_text, P as delegate, T as key, V as template_effect, W as child, X as state, Y as set, Z as user_derived, et as pop, it as reset, j as from_html, k as append, m as set_attribute, o as prop, ot as to_array, q as sibling, rt as next, tt as push, v as set_class, w as index } from "./api.js";
-import { O as onAction, a as Inline, b as remember, f as reread, i as Skeleton, j as spell, n as Icon, s as ago, v as itemFocus, y as place } from "./app.js";
+import { A as append, D as if_block, E as key, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, Q as user_derived, R as get, T as index, U as user_effect, X as set, Y as proxy, Z as state, at as reset, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, q as only_child, st as to_array, tt as pop, w as each, y as set_class } from "./api.js";
+import { C as place, F as spell, M as onAction, S as itemFocus, a as Inline, f as reread, i as Skeleton, n as Icon, s as ago, w as remember } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as writer } from "./write.svelte.js";
 import { t as Failed } from "./Failed.js";
-import { c as Commands } from "./unread.svelte.js";
+import { s as Commands } from "./unread.svelte.js";
 import { a as takeBack, i as snooze, n as answer, o as Item, r as copyRule, t as act } from "./actions.js";
 import { t as narrowed } from "./narrow.svelte.js";
 //#region src/surfaces/inbox/Inbox.svelte
@@ -15,19 +15,20 @@ var root_4 = from_html(`<p class="dim stale svelte-ytvk4v">The last read had not
 var root_5 = from_html(`<p class="svelte-ytvk4v">Nothing needed you, and nothing was decided for you.</p>`);
 var root_6 = from_html(`<p class="svelte-ytvk4v"><!></p>`);
 var root_7 = from_html(`<p class="dim svelte-ytvk4v"> </p>`);
-var root_8 = from_html(`<div class="close svelte-ytvk4v"><span class="ok svelte-ytvk4v"><!></span> <h1 class="svelte-ytvk4v">Clear.</h1> <!> <!> <!> <!></div>`);
-var root_9 = from_html(`<p class="hairline stale svelte-ytvk4v"> </p>`);
-var root_10 = from_html(`<p class="gone svelte-ytvk4v" role="status"> </p>`);
-var root_11 = from_html(`<span class="proj svelte-ytvk4v"><!> </span>`);
-var root_12 = from_html(`<span class="age"> </span>`);
-var root_13 = from_html(`<a class="svelte-ytvk4v"><!> Open the change</a>`);
-var root_14 = from_html(`· <kbd class="svelte-ytvk4v"> </kbd> `, 1);
-var root_15 = from_html(`· <kbd class="svelte-ytvk4v">z</kbd> undo`, 1);
-var root_16 = from_html(`<!> <!> <header class="top svelte-ytvk4v"><span> </span> <span class="kind svelte-ytvk4v"> </span> <!> <!> <span class="pos svelte-ytvk4v"> </span></header> <fieldset class="bare svelte-ytvk4v"><ul role="list" tabindex="-1"><!></ul></fieldset> <footer class="nav svelte-ytvk4v"><!> <span class="keys svelte-ytvk4v"><kbd class="svelte-ytvk4v">j</kbd> <kbd class="svelte-ytvk4v">k</kbd> move between items · <kbd class="svelte-ytvk4v">Enter</kbd> moves into this one, <kbd class="svelte-ytvk4v">Tab</kbd> to its controls<!><!> · <kbd class="svelte-ytvk4v"> </kbd> every key</span></footer>`, 1);
-var root_17 = from_html(`<section class="detail svelte-ytvk4v" aria-label="the item"><p role="status" aria-live="polite"><!> <!></p> <!> <!> <!></section>`);
+var root_8 = from_html(`<p class="dim blind svelte-ytvk4v"><!></p>`);
+var root_9 = from_html(`<div class="close svelte-ytvk4v"><span class="ok svelte-ytvk4v"><!></span> <h1 class="svelte-ytvk4v">Clear.</h1> <!> <!> <!> <!></div>`);
+var root_10 = from_html(`<p class="hairline stale svelte-ytvk4v"> </p>`);
+var root_11 = from_html(`<p class="gone svelte-ytvk4v" role="status"> </p>`);
+var root_12 = from_html(`<span class="proj svelte-ytvk4v"><!> </span>`);
+var root_13 = from_html(`<span class="age"> </span>`);
+var root_14 = from_html(`<a class="svelte-ytvk4v"><!> Open the change</a>`);
+var root_15 = from_html(`· <kbd class="svelte-ytvk4v"> </kbd> `, 1);
+var root_16 = from_html(`· <kbd class="svelte-ytvk4v">z</kbd> undo`, 1);
+var root_17 = from_html(`<!> <!> <header class="top svelte-ytvk4v"><span> </span> <span class="kind svelte-ytvk4v"> </span> <!> <!> <span class="pos svelte-ytvk4v"> </span></header> <fieldset class="bare svelte-ytvk4v"><ul role="list" tabindex="-1"><!></ul></fieldset> <footer class="nav svelte-ytvk4v"><!> <span class="keys svelte-ytvk4v"><kbd class="svelte-ytvk4v">j</kbd> <kbd class="svelte-ytvk4v">k</kbd> move between items · <kbd class="svelte-ytvk4v">Enter</kbd> moves into this one, <kbd class="svelte-ytvk4v">Tab</kbd> to its controls<!><!> · <kbd class="svelte-ytvk4v"> </kbd> every key</span></footer>`, 1);
+var root_18 = from_html(`<section class="detail svelte-ytvk4v" aria-label="the item"><p role="status" aria-live="polite"><!> <!></p> <!> <!> <!></section>`);
 function Inbox($$anchor, $$props) {
 	push($$props, true);
-	let items = prop($$props, "items", 19, () => []), folded = prop($$props, "folded", 19, () => []), inhibited = prop($$props, "inhibited", 19, () => []), close = prop($$props, "close", 3, null), project = prop($$props, "project", 3, ""), item = prop($$props, "item", 3, ""), wanted = prop($$props, "wanted", 3, ""), loaded = prop($$props, "loaded", 3, false), stale_since = prop($$props, "stale_since", 3, null), error = prop($$props, "error", 3, null), watching = prop($$props, "watching", 3, null), held = prop($$props, "held", 3, null), landed = prop($$props, "landed", 3, null), open = prop($$props, "open", 3, () => {});
+	let items = prop($$props, "items", 19, () => []), folded = prop($$props, "folded", 19, () => []), inhibited = prop($$props, "inhibited", 19, () => []), close = prop($$props, "close", 3, null), project = prop($$props, "project", 3, ""), item = prop($$props, "item", 3, ""), wanted = prop($$props, "wanted", 3, ""), loaded = prop($$props, "loaded", 3, false), stale_since = prop($$props, "stale_since", 3, null), error = prop($$props, "error", 3, null), watching = prop($$props, "watching", 3, null), blind = prop($$props, "blind", 3, ""), held = prop($$props, "held", 3, null), landed = prop($$props, "landed", 3, null), open = prop($$props, "open", 3, () => {});
 	const unseen = user_derived(() => {
 		const v = [...watching()?.driven_only ?? [], ...watching()?.unproved ?? []];
 		return v.length <= 1 ? v.join("") : `${v.slice(0, -1).join(", ")} and ${v[v.length - 1]}`;
@@ -177,7 +178,7 @@ function Inbox($$anchor, $$props) {
 		const id = setInterval(() => set(now, Date.now(), true), 3e4);
 		return () => clearInterval(id);
 	});
-	var section = root_17();
+	var section = root_18();
 	var p = child(section);
 	let classes;
 	var node = child(p);
@@ -283,8 +284,8 @@ function Inbox($$anchor, $$props) {
 		var p_4 = root_4();
 		append($$anchor, p_4);
 	};
-	var consequent_12 = ($$anchor) => {
-		var div_1 = root_8();
+	var consequent_13 = ($$anchor) => {
+		var div_1 = root_9();
 		var span_2 = child(div_1);
 		var node_5 = child(span_2);
 		Icon(node_5, {
@@ -337,21 +338,31 @@ function Inbox($$anchor, $$props) {
 		});
 		var node_11 = sibling(node_10, 2);
 		var consequent_11 = ($$anchor) => {
-			var p_9 = root_7();
-			var text_9 = only_child(p_9);
-			template_effect(() => set_text(text_9, `Sessions in ${get(unseen) ?? ""} are not on this board unless Devplane started them.`));
+			var p_9 = root_8();
+			var node_12 = child(p_9);
+			Inline(node_12, { get text() {
+				return blind();
+			} });
+			reset(p_9);
 			append($$anchor, p_9);
 		};
+		var consequent_12 = ($$anchor) => {
+			var p_10 = root_7();
+			var text_9 = only_child(p_10);
+			template_effect(() => set_text(text_9, `Sessions in ${get(unseen) ?? ""} are not on this board unless Devplane started them.`));
+			append($$anchor, p_10);
+		};
 		if_block(node_11, ($$render) => {
-			if (get(unseen)) $$render(consequent_11);
+			if (blind()) $$render(consequent_11);
+			else if (get(unseen)) $$render(consequent_12, 1);
 		});
 		reset(div_1);
 		append($$anchor, div_1);
 	};
-	var consequent_20 = ($$anchor) => {
-		var fragment_4 = root_16();
-		var node_12 = first_child(fragment_4);
-		var consequent_13 = ($$anchor) => {
+	var consequent_21 = ($$anchor) => {
+		var fragment_4 = root_17();
+		var node_13 = first_child(fragment_4);
+		var consequent_14 = ($$anchor) => {
 			{
 				let $0 = user_derived(() => `the inbox narrowed to ${project()}`);
 				Failed($$anchor, {
@@ -368,50 +379,50 @@ function Inbox($$anchor, $$props) {
 				});
 			}
 		};
-		var consequent_14 = ($$anchor) => {
-			var p_10 = root_9();
-			var text_10 = only_child(p_10);
-			template_effect(($0) => set_text(text_10, `stale · as read ${$0 ?? ""}`), [() => stale_since() ? ago(Math.max(0, (Date.now() - Date.parse(stale_since())) / 1e3)) + " ago" : "before Devplane stopped answering"]);
-			append($$anchor, p_10);
-		};
-		if_block(node_12, ($$render) => {
-			if (narrow.on && narrow.failure) $$render(consequent_13);
-			else if (error()) $$render(consequent_14, 1);
-		});
-		var node_13 = sibling(node_12, 2);
 		var consequent_15 = ($$anchor) => {
 			var p_11 = root_10();
-			var text_11 = only_child(p_11, true);
-			template_effect(() => set_text(text_11, get(goneSays)));
+			var text_10 = only_child(p_11);
+			template_effect(($0) => set_text(text_10, `stale · as read ${$0 ?? ""}`), [() => stale_since() ? ago(Math.max(0, (Date.now() - Date.parse(stale_since())) / 1e3)) + " ago" : "before Devplane stopped answering"]);
 			append($$anchor, p_11);
 		};
 		if_block(node_13, ($$render) => {
-			if (get(goneSays)) $$render(consequent_15);
+			if (narrow.on && narrow.failure) $$render(consequent_14);
+			else if (error()) $$render(consequent_15, 1);
 		});
-		var header = sibling(node_13, 2);
+		var node_14 = sibling(node_13, 2);
+		var consequent_16 = ($$anchor) => {
+			var p_12 = root_11();
+			var text_11 = only_child(p_12, true);
+			template_effect(() => set_text(text_11, get(goneSays)));
+			append($$anchor, p_12);
+		};
+		if_block(node_14, ($$render) => {
+			if (get(goneSays)) $$render(consequent_16);
+		});
+		var header = sibling(node_14, 2);
 		var span_3 = child(header);
 		var text_12 = only_child(span_3, true);
 		var span_4 = sibling(span_3, 2);
 		var text_13 = only_child(span_4, true);
-		var node_14 = sibling(span_4, 2);
-		var consequent_16 = ($$anchor) => {
-			var span_5 = root_11();
-			var node_15 = child(span_5);
-			Icon(node_15, {
+		var node_15 = sibling(span_4, 2);
+		var consequent_17 = ($$anchor) => {
+			var span_5 = root_12();
+			var node_16 = child(span_5);
+			Icon(node_16, {
 				name: "folder",
 				size: 12
 			});
-			var text_14 = sibling(node_15);
+			var text_14 = sibling(node_16);
 			reset(span_5);
 			template_effect(() => set_text(text_14, ` ${get(current).project_name ?? ""}`));
 			append($$anchor, span_5);
 		};
-		if_block(node_14, ($$render) => {
-			if (get(current).project_name) $$render(consequent_16);
+		if_block(node_15, ($$render) => {
+			if (get(current).project_name) $$render(consequent_17);
 		});
-		var node_16 = sibling(node_14, 2);
-		var consequent_17 = ($$anchor) => {
-			var span_6 = root_12();
+		var node_17 = sibling(node_15, 2);
+		var consequent_18 = ($$anchor) => {
+			var span_6 = root_13();
 			var text_15 = only_child(span_6);
 			template_effect(($0) => {
 				set_attribute(span_6, "title", get(current).since);
@@ -419,17 +430,17 @@ function Inbox($$anchor, $$props) {
 			}, [() => ago(Math.max(0, (get(now) - Date.parse(get(current).since)) / 1e3))]);
 			append($$anchor, span_6);
 		};
-		if_block(node_16, ($$render) => {
-			if (get(current).since) $$render(consequent_17);
+		if_block(node_17, ($$render) => {
+			if (get(current).since) $$render(consequent_18);
 		});
-		var span_7 = sibling(node_16, 2);
+		var span_7 = sibling(node_17, 2);
 		var text_16 = only_child(span_7);
 		reset(header);
 		var fieldset = sibling(header, 2);
 		var ul = child(fieldset);
 		let classes_2;
-		var node_17 = child(ul);
-		key(node_17, () => get(current).id, ($$anchor) => {
+		var node_18 = child(ul);
+		key(node_18, () => get(current).id, ($$anchor) => {
 			Item($$anchor, {
 				get item() {
 					return get(current);
@@ -447,11 +458,11 @@ function Inbox($$anchor, $$props) {
 		reset(ul);
 		reset(fieldset);
 		var footer = sibling(fieldset, 2);
-		var node_18 = child(footer);
-		var consequent_18 = ($$anchor) => {
-			var a_1 = root_13();
-			var node_19 = child(a_1);
-			Icon(node_19, {
+		var node_19 = child(footer);
+		var consequent_19 = ($$anchor) => {
+			var a_1 = root_14();
+			var node_20 = child(a_1);
+			Icon(node_20, {
 				name: "change",
 				size: 13
 			});
@@ -460,17 +471,17 @@ function Inbox($$anchor, $$props) {
 			template_effect(($0) => set_attribute(a_1, "href", $0), [() => `#change/${encodeURIComponent(get(current).change_id)}`]);
 			append($$anchor, a_1);
 		};
-		if_block(node_18, ($$render) => {
-			if (get(current).change_id) $$render(consequent_18);
+		if_block(node_19, ($$render) => {
+			if (get(current).change_id) $$render(consequent_19);
 		});
-		var span_8 = sibling(node_18, 2);
-		var node_20 = sibling(child(span_8), 8);
-		each(node_20, 17, () => get(keysHere), ([k, what]) => k, ($$anchor, $$item) => {
+		var span_8 = sibling(node_19, 2);
+		var node_21 = sibling(child(span_8), 8);
+		each(node_21, 17, () => get(keysHere), ([k, what]) => k, ($$anchor, $$item) => {
 			var $$array = user_derived(() => to_array(get($$item), 2));
 			let k = () => get($$array)[0];
 			let what = () => get($$array)[1];
 			next();
-			var fragment_7 = root_14();
+			var fragment_7 = root_15();
 			var kbd = sibling(first_child(fragment_7));
 			var text_17 = only_child(kbd, true);
 			var text_18 = sibling(kbd);
@@ -480,16 +491,16 @@ function Inbox($$anchor, $$props) {
 			});
 			append($$anchor, fragment_7);
 		});
-		var node_21 = sibling(node_20);
-		var consequent_19 = ($$anchor) => {
-			var fragment_8 = root_15();
+		var node_22 = sibling(node_21);
+		var consequent_20 = ($$anchor) => {
+			var fragment_8 = root_16();
 			next(2);
 			append($$anchor, fragment_8);
 		};
-		if_block(node_21, ($$render) => {
-			if (get(heldHere) || get(undoHere)) $$render(consequent_19);
+		if_block(node_22, ($$render) => {
+			if (get(heldHere) || get(undoHere)) $$render(consequent_20);
 		});
-		var kbd_1 = sibling(node_21, 2);
+		var kbd_1 = sibling(node_22, 2);
 		var text_19 = only_child(kbd_1, true);
 		next();
 		reset(span_8);
@@ -511,8 +522,8 @@ function Inbox($$anchor, $$props) {
 		else if (get(missing)) $$render(consequent_5, 1);
 		else if (!get(ready) && get(nothingRaised)) $$render(consequent_6, 2);
 		else if (get(nothingRaised) && error()) $$render(consequent_7, 3);
-		else if (get(nothingRaised)) $$render(consequent_12, 4);
-		else if (get(current)) $$render(consequent_20, 5);
+		else if (get(nothingRaised)) $$render(consequent_13, 4);
+		else if (get(current)) $$render(consequent_21, 5);
 	});
 	reset(section);
 	template_effect(() => classes = set_class(p, 1, "said svelte-ytvk4v", null, classes, { empty: !get(sentence) && !get(undoHere) }));

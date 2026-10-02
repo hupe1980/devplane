@@ -1,5 +1,5 @@
-import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, N as text, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, at as noop, et as pop, f as bind_value, it as reset, j as from_html, k as append, m as set_attribute, o as prop, ot as to_array, p as remove_input_defaults, q as sibling, rt as next, tt as push, v as set_class } from "./api.js";
-import { P as surfaces, a as Inline, h as resource, i as Skeleton, n as Icon, t as Pill, w as go } from "./app.js";
+import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, P as text, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, f as bind_value, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, ot as noop, p as remove_input_defaults, q as only_child, st as to_array, tt as pop, w as each, y as set_class } from "./api.js";
+import { O as go, R as surfaces, a as Inline, h as resource, i as Skeleton, n as Icon, t as Pill } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as Failed } from "./Failed.js";
 import { t as Grid } from "./Grid.js";
@@ -20,7 +20,7 @@ var root_11 = from_html(`<div class="frame svelte-1r7h8sn"><!> <!></div>`);
 var root_12 = from_html(`<div class="ledger svelte-1r7h8sn"><header class="head svelte-1r7h8sn"><h1 class="svelte-1r7h8sn">Ledger</h1> <button title="rule, timer and nobody — what was decided instead of you"><!> Decided for you <span class="svelte-1r7h8sn"> </span></button> <div class="chips svelte-1r7h8sn" role="group" aria-label="by authority"><!> <!></div> <span class="gap svelte-1r7h8sn"></span> <label class="find svelte-1r7h8sn"><!><input placeholder="Filter" aria-label="filter the ledger" class="svelte-1r7h8sn"/></label></header> <!> <!> <!> <!></div>`);
 function Why($$anchor, $$props) {
 	push($$props, true);
-	let about = prop($$props, "about", 3, "");
+	let about = prop($$props, "about", 3, ""), blind = prop($$props, "blind", 3, "");
 	const LIMIT = 1e3;
 	const want = user_derived(about);
 	const read = resource(() => get(want) ? `/api/decisions?about=${encodeURIComponent(get(want))}&limit=${LIMIT}` : `/api/decisions?limit=${LIMIT}`, { tell: () => get(want) ? `devplane audit ${get(want)}` : "devplane audit" });
@@ -226,7 +226,10 @@ function Why($$anchor, $$props) {
 		Empty($$anchor, {
 			icon: "ledger",
 			title: "Nothing has been decided yet",
-			body: "Every refusal a rule made, every question a person answered, every gate Devplane ran — each lands here with the authority that decided it."
+			body: "Every refusal a rule made, every question a person answered, every gate Devplane ran — each lands here with the authority that decided it.",
+			get limit() {
+				return blind();
+			}
 		});
 	};
 	var alternate_2 = ($$anchor) => {

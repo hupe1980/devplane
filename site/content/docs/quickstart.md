@@ -64,7 +64,14 @@ EOF
 check = ["sh test.sh"]
 ```
 
-Commit everything: a change needs a clean checkout, and the gate is read from your commit.
+Commit everything: a change needs a clean checkout. `devplane.toml` is the one exception — gates are
+read from your checkout, never from the agent's branch, so a `check` you have not committed yet still
+governs the next change.
+
+In the window, Setup's **Declare a check** does this step for you: it offers the commands the
+repository already has (`cargo test`, the `package.json` test script with your package manager, a
+`justfile` recipe, a CI step), each with the file and line it came from, shows the exact change to
+`devplane.toml` as a diff, and writes nothing until you confirm. Offering a command never runs it.
 
 ```sh
 git add -A && git commit -m "a greeting and its test"
@@ -87,7 +94,9 @@ Red: that is the work.
 devplane project trust .
 ```
 
-It lists the repository's hooks and MCP servers (here none), then asks.
+It lists the repository's hooks and MCP servers (here none), then asks. In the window, the first-run
+checklist's **Trust a repository** takes the path, shows the same list as quoted text, and trusts on
+**Trust**.
 
 ## 6. Start a change
 

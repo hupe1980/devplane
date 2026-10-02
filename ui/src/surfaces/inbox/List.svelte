@@ -94,6 +94,9 @@
       <p class="quiet failed">Could not read the inbox narrowed to {project}: <Inline text={narrow.failure.says} />.</p>
     {:else if missing}
       <p class="quiet failed">No project is named “{project}”.</p>
+    {:else if !ready && shown.length === 0 && error}
+      <!-- Nothing was ever read: rows would promise data that is not coming. -->
+      <p class="quiet">Not read — nothing here is current.</p>
     {:else if !ready && shown.length === 0}
       {#each [0, 1, 2] as i (i)}<div class="skel" aria-busy="true"></div>{/each}
     {:else if nothingRaised && error}

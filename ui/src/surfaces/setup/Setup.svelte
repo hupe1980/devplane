@@ -1,7 +1,8 @@
 <script lang="ts">
   // What is configured on this machine: Devplane, its agent, the GitHub
-  // sign-in, your rules, and each project. Read-only but for the sign-in:
-  // each section names the file it read and the command that changes it.
+  // sign-in, your rules, and each project — with the first-run checklist on
+  // top while it has a step left, and *Declare a check* for a project with no
+  // gates. Every write here is a diff the person confirms.
   import { resource } from "../../lib/resource.svelte";
   import Failed from "../../lib/Failed.svelte";
   import Props from "../../lib/ui/Props.svelte";
@@ -14,6 +15,23 @@
   import { copyText } from "../../lib/resource.svelte";
   import { cursor } from "../../lib/cursor";
   import { go } from "../../lib/route";
+  import Checklist from "./Checklist.svelte";
+  import Declare from "./Declare.svelte";
+
+  let {
+    focus = "",
+    view = "",
+    changeSurface = "",
+  }: {
+    /// `declare` opens Declare a check for the project named in `view`.
+    focus?: string;
+    view?: string;
+    changeSurface?: string;
+  } = $props();
+  const declaring = $derived(focus === "declare" && view ? view : "");
+  function toGitHub() {
+    document.getElementById("setup-github")?.scrollIntoView({ block: "center" });
+  }
 
   type ProjectRow = {
     id: string;
@@ -24,6 +42,7 @@
     declares_gates?: boolean;
     error?: string;
   };
+  const declareHref = (p: ProjectRow) => `#setup/declare/${encodeURIComponent(p.id)}`;
   type Setup = {
     machine?: { version?: string; home?: string; database?: string };
     connect?: {
@@ -105,6 +124,14 @@
 
 <div class="page">
   <h1>Setup</h1>
+  {#if declaring}
+    <section class="card wide declare-at" aria-label="declare a check">
+      <h2><Icon name="gate" size={14} /> Declare a check</h2>
+      <Declare project={declaring} ondone={() => void read.reload()} />
+      <p><a href="#setup">Back to Setup</a></p>
+    </section>
+  {/if}
+  <Checklist {changeSurface} ongithub={toGitHub} />
   {#if read.phase === "failed" && read.failure}
     <Failed what="what is configured" failure={read.failure} />
   {:else if !data}
@@ -143,6 +170,7 @@
       {#if github.phase === "failed" && github.failure}
         <Failed what="the GitHub sign-in" failure={github.failure} />
       {:else}
+        <span id="setup-github" class="anchor"></span>
         <GitHubPanel hosts={github.data?.hosts ?? []} clientId={github.data?.client_id ?? true} {busy} {said} {signIn} {signOut} {copy} />
       {/if}
 
@@ -170,6 +198,9 @@
 
     <section class="projects">
       <h2><Icon name="folder" size={14} /> Projects <span>{data.projects?.length ?? 0}</span></h2>
+      {#each (data.projects ?? []).filter((p) => p.trusted && !p.error && !p.declares_gates) as p (p.id)}
+        <p class="nogates"><Icon name="alert" size={13} /> {p.name}: no gates declared — changes here cannot become verified. <a href={declareHref(p)}>Declare a check</a></p>
+      {/each}
       {#if (data.projects ?? []).length === 0}
         <p class="quiet">None registered. A project is registered the first time an agent works in it, or with <code>devplane project trust &lt;path&gt;</code>.</p>
       {:else}
@@ -178,7 +209,7 @@
             {#snippet cell(r, c)}
               {#if c.key === "name"}<b>{r.name}</b>
               {:else if c.key === "trusted"}<Pill word={r.trusted ? "trusted" : "not trusted"} as={r.trusted ? "none" : "wait"} />
-              {:else if c.key === "gates"}{#if r.error}<span class="fail">unreadable</span>{:else if r.declares_gates}<span class="ok">declared</span>{:else}<span class="quiet">none declared</span>{/if}
+              {:else if c.key === "gates"}{#if r.error}<span class="fail">unreadable</span>{:else if r.declares_gates}<span class="ok">check declared</span>{:else}<a href={declareHref(r)}>Declare a check</a>{/if}
               {:else if c.key === "config"}{r.config?.exists ? "present" : "absent"}
               {:else}{r.root}{/if}
             {/snippet}
@@ -205,7 +236,7 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(24rem, 100%), 1fr));
     gap: var(--s-3);
   }
   .card {
@@ -267,6 +298,22 @@
   }
   .rule.ask {
     color: var(--wait);
+  }
+  .nogates {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    color: var(--wait);
+    font-size: var(--t-sm);
+  }
+  .anchor {
+    display: none;
+  }
+  .declare-at p {
+    margin: 0;
+    font-size: var(--t-sm);
   }
   .projects {
     display: grid;

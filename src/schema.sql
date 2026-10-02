@@ -211,14 +211,36 @@ CREATE TABLE IF NOT EXISTS projection (
     through   INTEGER NOT NULL
 );
 
--- A person read a weakened-check row of a change's review: that the row was
--- seen, and by whom, never when — a time beside the change's ready time would
--- record how long somebody spent reviewing. Keyed by the row's matched text,
--- so a different skip marker is a different, unseen row. Guards the offer.
-CREATE TABLE IF NOT EXISTS weakened_seen (
-    change_id  TEXT NOT NULL,
-    path       TEXT NOT NULL,
-    matched    TEXT NOT NULL,
-    authority  TEXT NOT NULL CHECK (authority = 'person'),
-    PRIMARY KEY (change_id, path, matched)
+-- A person marked one unit of a change's review seen: a hunk, keyed by its
+-- content, so a hunk the agent rewrites is a new, unseen unit; or a file with
+-- no hunks. That it was seen, never when or by whom — a time beside the
+-- change's ready time would record how long somebody spent reviewing. A
+-- weakened-check row is seen when its hunks are. Guards the offer.
+CREATE TABLE IF NOT EXISTS seen (
+    change_id    TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    hunk_digest  TEXT NOT NULL,
+    PRIMARY KEY (change_id, path, hunk_digest)
 );
+
+-- A person's comment on one line of a change's review, kept until sent and
+-- after: sent as one prompt with every other unsent comment. Carries what the
+-- line and its hunk were when written, and the tree, so the agent and the
+-- review can tell a comment the code has since moved past. The times are
+-- facts about the comment; nothing derives a duration from them.
+CREATE TABLE IF NOT EXISTS review_comments (
+    id           TEXT PRIMARY KEY,
+    change_id    TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    line         INTEGER NOT NULL,
+    side         TEXT NOT NULL CHECK (side IN ('new', 'old')),
+    hunk_header  TEXT NOT NULL,
+    hunk_digest  TEXT NOT NULL,
+    line_text    TEXT NOT NULL,
+    body         TEXT NOT NULL,
+    tree         TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    sent_at      TEXT,
+    run_id       TEXT
+);
+CREATE INDEX IF NOT EXISTS review_comments_change ON review_comments (change_id, created_at);

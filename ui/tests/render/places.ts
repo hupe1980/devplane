@@ -16,7 +16,8 @@ import { fail, html, source, walk } from "../harness";
   if (!/Needs you[\s\S]*?class="n[^"]*">1</.test(out)) fail("what needs you is not grouped with its count");
   const hostile = html(GithubList, { issues: [row("<script>x</script>", false)], loaded: true });
   if (hostile.includes("<script>x</script>")) fail("an issue title reached the document as markup");
-  const none = html(GithubList, { issues: [], pulls: [], loaded: true, coverage: { projects: 6, configured: 4 } });
+  // *No open issue* is an answer only once GitHub has been read.
+  const none = html(GithubList, { issues: [], pulls: [], loaded: true, readAt: "2026-10-02T08:06:37Z", coverage: { projects: 6, configured: 4 } });
   if (!/No open issue/.test(none)) fail("an empty forge list is a blank rather than an answer");
   if (!/2 projects have no GitHub remote and are not counted/.test(none)) fail("projects the forge cannot see are not counted");
   if (/No open issue/.test(html(GithubList, {}))) fail("the forge list says nothing is open before it has asked");

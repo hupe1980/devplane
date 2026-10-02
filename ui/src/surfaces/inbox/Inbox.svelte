@@ -40,10 +40,13 @@
     stale_since = null,
     error = null,
     watching = null,
+    blind = "",
     held = null,
     landed = null,
     open = () => {},
   }: {
+    /// What this host cannot see, when no session has reported to it.
+    blind?: string;
     items?: Item[];
     folded?: Summary[];
     inhibited?: Inhibited[];
@@ -315,7 +318,8 @@
       {/if}
       {#if shownClose?.next}<p class="dim">Next · {shownClose.next}</p>{/if}
       {#if shownClose?.keeps_running}<p class="dim">{shownClose.keeps_running}</p>{/if}
-      {#if unseen}<p class="dim">Sessions in {unseen} are not on this board unless Devplane started them.</p>{/if}
+      {#if blind}<p class="dim blind"><Inline text={blind} /></p>
+      {:else if unseen}<p class="dim">Sessions in {unseen} are not on this board unless Devplane started them.</p>{/if}
     </div>
   {:else if current}
     {#if narrow.on && narrow.failure}

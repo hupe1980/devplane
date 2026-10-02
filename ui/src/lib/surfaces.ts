@@ -83,6 +83,12 @@ export type Surface = {
   /// opaque string the shell reads from `#<surface>/<focus>` and hands over.
   select: (feed: Feed, focus: string) => Record<string, unknown>;
 
+  /// Whether the shell should open on this surface rather than the landing
+  /// one, asked once at start and only when the address names no surface.
+  /// The first in registry order to resolve `true` wins; a deep link is never
+  /// diverted, and a surface that cannot tell resolves `false`.
+  opensFirst?: () => Promise<boolean>;
+
   /// The routes this surface fetches for itself. A surface gets data from the
   /// feed (`select`) or from here; a guard fails one that does neither, and
   /// checks every route is one the host serves.
@@ -183,6 +189,20 @@ export function surfaces(): Surface[] {
 /// The surface the shell opens on: the first in navigation order, not a flag.
 export function landing(): Surface | undefined {
   return surfaces()[0];
+}
+
+/// The surface a window with no address opens on: the first whose
+/// `opensFirst` resolves `true` within `ms`, else [`landing`].
+export async function opening(ms = 1500): Promise<Surface | undefined> {
+  for (const s of surfaces()) {
+    if (!s.opensFirst) continue;
+    const yes = await Promise.race([
+      s.opensFirst().catch(() => false),
+      new Promise<boolean>((r) => setTimeout(() => r(false), ms)),
+    ]);
+    if (yes) return s;
+  }
+  return landing();
 }
 
 export function surface(id: string): Surface | undefined {

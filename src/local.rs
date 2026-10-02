@@ -231,7 +231,7 @@ impl Reader {
         serde_json::from_value(v).with_context(|| format!("reading {path}"))
     }
 
-    /// Marks every current weakened row at `path` seen, as the person running
+    /// Marks every current hunk at `path` seen, as the person running
     /// this: through the host where one runs, otherwise straight into the store.
     pub async fn mark_seen(&self, change: &str, path: &str) -> Result<Value> {
         match self {
@@ -249,13 +249,13 @@ impl Reader {
                     .map_err(|e| anyhow::anyhow!(e))?;
                 Ok(
                     match view::mark_seen(&snap, &l.store, &id, path, None).await {
-                        Ok(seen) => json!({ "seen": seen }),
+                        Ok(marked) => serde_json::to_value(marked)?,
                         Err(view::SeenRefusal::NoSuchChange) => {
                             json!({ "error": format!("no change `{change}`") })
                         }
-                        Err(view::SeenRefusal::NoSuchRow(rows)) => json!({
-                            "error": format!("`{path}` has no weakened row to mark seen"),
-                            "rows": rows,
+                        Err(view::SeenRefusal::NoSuchUnit(digests)) => json!({
+                            "error": format!("`{path}` has nothing in this change to mark seen"),
+                            "digests": digests,
                         }),
                     },
                 )

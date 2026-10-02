@@ -12,7 +12,7 @@
   import { go } from "../../lib/route";
 
   type Hit = { run_id: string; at: string; text: string };
-  let { q = "" }: { q?: string } = $props();
+  let { q = "", blind = "" }: { q?: string; blind?: string } = $props();
 
   let query = $state("");
   let hits = $state<Hit[]>([]);
@@ -91,6 +91,7 @@
   </form>
   <p class="note">Tool calls, questions and errors from every session. Prompts and replies are never recorded, so they are never found.</p>
   {#if said}<p class="fail"><Inline text={said} /></p>{/if}
+  {#if blind}<p class="note"><Inline text={blind} /></p>{/if}
 
   {#if ran && hits.length === 0 && !busy}
     <Empty icon="search" title="Nothing matched" body={`Nothing any session recorded contains “${ranFor}”.`} />

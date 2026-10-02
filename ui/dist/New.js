@@ -1,5 +1,5 @@
-import { $ as remove_textarea_child, A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, I as event, J as proxy, K as only_child, L as get, O as set_text, P as delegate, Q as autofocus, V as template_effect, W as child, X as state, Y as set, Z as user_derived, d as bind_checked, et as pop, f as bind_value, g as init_select, h as bind_select_value, i as api, it as reset, j as from_html, k as append, m as set_attribute, o as prop, p as remove_input_defaults, q as sibling, tt as push, v as set_class, w as index } from "./api.js";
-import { h as resource, i as Skeleton, k as run, m as failure, n as Icon, w as go } from "./app.js";
+import { $ as autofocus, A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, L as event, M as from_html, Q as user_derived, R as get, T as index, U as user_effect, X as set, Y as proxy, Z as state, at as reset, d as bind_checked, et as remove_textarea_child, f as bind_value, g as init_select, h as bind_select_value, i as api, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, p as remove_input_defaults, q as only_child, tt as pop, w as each, y as set_class } from "./api.js";
+import { N as run, O as go, R as surfaces, h as resource, i as Skeleton, m as failure, n as Icon } from "./app.js";
 import { t as writer } from "./write.svelte.js";
 import { t as Failed } from "./Failed.js";
 //#region src/surfaces/new/New.svelte
@@ -16,10 +16,12 @@ var root_6 = from_html(`<p class="quiet svelte-wpxmn">Pick where and give it a t
 var root_7 = from_html(`<p class="fail svelte-wpxmn"><!> </p>`);
 var root_8 = from_html(`<p class="quiet svelte-wpxmn">Checking…</p>`);
 var root_9 = from_html(`<span class="note svelte-wpxmn"> </span>`);
-var root_10 = from_html(`<li><!> <b class="svelte-wpxmn"> </b> <span class="svelte-wpxmn"> </span> <!></li>`);
-var root_11 = from_html(`<ul class="svelte-wpxmn"></ul>`);
-var root_12 = from_html(`<p class="fail svelte-wpxmn"> </p>`);
-var root_13 = from_html(`<form class="new svelte-wpxmn" aria-label="start a new change"><header class="svelte-wpxmn"><!> <h1 class="svelte-wpxmn">New change</h1> <button type="button" class="x svelte-wpxmn" aria-label="close"><!></button></header> <div class="body svelte-wpxmn"><section class="svelte-wpxmn"><span class="label svelte-wpxmn">Where <span class="hint svelte-wpxmn">one project, or the same change in several</span></span> <!> <div class="projects svelte-wpxmn" role="group" aria-label="projects"></div></section> <!> <!> <section class="svelte-wpxmn"><label class="label svelte-wpxmn" for="title">Title <span class="hint svelte-wpxmn">also the branch name</span></label> <input id="title" placeholder="Rate-limit the login route" class="svelte-wpxmn"/></section> <section class="svelte-wpxmn"><label class="label svelte-wpxmn" for="prompt">What to do <span class="hint svelte-wpxmn">the agent's first prompt; the title is used when empty</span></label> <textarea id="prompt" rows="5" placeholder="Five failed logins a minute per account; the sixth is rejected with Retry-After." class="svelte-wpxmn"></textarea></section> <div class="row svelte-wpxmn"><section class="svelte-wpxmn"><label class="label svelte-wpxmn" for="agent">Agent</label> <select id="agent" class="svelte-wpxmn"><option> </option><!></select></section> <section class="svelte-wpxmn"><span class="label svelte-wpxmn">Isolation</span> <label class="check svelte-wpxmn"><input type="checkbox" class="svelte-wpxmn"/> Its own worktree <span class="hint svelte-wpxmn"> </span></label></section></div> <section class="preflight svelte-wpxmn" aria-live="polite"><span class="label svelte-wpxmn">Before anything is created</span> <!></section> <!></div> <footer class="svelte-wpxmn"><span class="quiet svelte-wpxmn"> </span> <button type="button" class="svelte-wpxmn">Cancel</button> <button type="submit" class="primary svelte-wpxmn"><!> </button></footer></form>`);
+var root_10 = from_html(`· <a>Declare a check</a>`, 1);
+var root_11 = from_html(`<span class="note svelte-wpxmn"> <!></span>`);
+var root_12 = from_html(`<li><!> <b class="svelte-wpxmn"> </b> <span class="svelte-wpxmn"> </span> <!> <!></li>`);
+var root_13 = from_html(`<ul class="svelte-wpxmn"></ul>`);
+var root_14 = from_html(`<p class="fail svelte-wpxmn"> </p>`);
+var root_15 = from_html(`<form class="new svelte-wpxmn" aria-label="start a new change"><header class="svelte-wpxmn"><!> <h1 class="svelte-wpxmn">New change</h1> <button type="button" class="x svelte-wpxmn" aria-label="close"><!></button></header> <div class="body svelte-wpxmn"><section class="svelte-wpxmn"><span class="label svelte-wpxmn">Where <span class="hint svelte-wpxmn">one project, or the same change in several</span></span> <!> <div class="projects svelte-wpxmn" role="group" aria-label="projects"></div></section> <!> <!> <section class="svelte-wpxmn"><label class="label svelte-wpxmn" for="title">Title <span class="hint svelte-wpxmn">also the branch name</span></label> <input id="title" placeholder="Rate-limit the login route" class="svelte-wpxmn"/></section> <section class="svelte-wpxmn"><label class="label svelte-wpxmn" for="prompt">What to do <span class="hint svelte-wpxmn">the agent's first prompt; the title is used when empty</span></label> <textarea id="prompt" rows="5" placeholder="Five failed logins a minute per account; the sixth is rejected with Retry-After." class="svelte-wpxmn"></textarea></section> <div class="row svelte-wpxmn"><section class="svelte-wpxmn"><label class="label svelte-wpxmn" for="agent">Agent</label> <select id="agent" class="svelte-wpxmn"><option> </option><!></select></section> <section class="svelte-wpxmn"><span class="label svelte-wpxmn">Isolation</span> <label class="check svelte-wpxmn"><input type="checkbox" class="svelte-wpxmn"/> Its own worktree <span class="hint svelte-wpxmn"> </span></label></section></div> <section class="preflight svelte-wpxmn" aria-live="polite"><span class="label svelte-wpxmn">Before anything is created</span> <!></section> <!></div> <footer class="svelte-wpxmn"><span class="quiet svelte-wpxmn"> </span> <button type="button" class="svelte-wpxmn">Cancel</button> <button type="submit" class="primary svelte-wpxmn"><!> </button></footer></form>`);
 function New($$anchor, $$props) {
 	push($$props, true);
 	let changeSurface = prop($$props, "changeSurface", 3, "change"), planted = prop($$props, "targets", 3, null);
@@ -30,6 +32,19 @@ function New($$anchor, $$props) {
 	const agents = user_derived(() => Array.isArray(agentsRead.data) ? agentsRead.data : []);
 	const specs = user_derived(() => specsRead.data?.projects ?? []);
 	let chosen = state(proxy([]));
+	let prechosen = false;
+	user_effect(() => {
+		if (prechosen || get(projects).length === 0) return;
+		prechosen = true;
+		let hint = "";
+		try {
+			hint = sessionStorage.getItem("vp-new-project") ?? "";
+			sessionStorage.removeItem("vp-new-project");
+		} catch {}
+		const trusted = get(projects).filter((p) => p.trusted);
+		const pick = get(projects).find((p) => p.id === hint) ?? (trusted.length === 1 && get(projects).length === 1 ? trusted[0] : null);
+		if (pick && get(chosen).length === 0) set(chosen, [pick.id], true);
+	});
 	let title = state("");
 	let prompt = state("");
 	let agent = state("");
@@ -107,7 +122,8 @@ function New($$anchor, $$props) {
 		});
 	}
 	const close = () => run("leave", "new");
-	var form = root_13();
+	const gatesAt = surfaces().find((s) => s.holds === "gates")?.id ?? "";
+	var form = root_15();
 	var header = child(form);
 	var node = child(header);
 	Icon(node, {
@@ -293,9 +309,9 @@ function New($$anchor, $$props) {
 		append($$anchor, p_4);
 	};
 	var alternate_1 = ($$anchor) => {
-		var ul = root_11();
+		var ul = root_13();
 		each(ul, 21, () => get(targets), (t) => t.asked, ($$anchor, t) => {
-			var li = root_10();
+			var li = root_12();
 			let classes_1;
 			var node_12 = child(li);
 			{
@@ -318,6 +334,27 @@ function New($$anchor, $$props) {
 				template_effect(() => set_text(text_8, get(n)));
 				append($$anchor, span_3);
 			});
+			var node_14 = sibling(node_13, 2);
+			var consequent_10 = ($$anchor) => {
+				var span_4 = root_11();
+				var text_9 = child(span_4, true);
+				var node_15 = sibling(text_9);
+				var consequent_9 = ($$anchor) => {
+					var fragment_4 = root_10();
+					var a_1 = sibling(first_child(fragment_4));
+					template_effect(($0) => set_attribute(a_1, "href", $0), [() => `#${gatesAt}/declare/${encodeURIComponent(get(projects).find((p) => p.root === get(t).root)?.id ?? get(t).root)}`]);
+					append($$anchor, fragment_4);
+				};
+				if_block(node_15, ($$render) => {
+					if (get(t).root && gatesAt) $$render(consequent_9);
+				});
+				reset(span_4);
+				template_effect(() => set_text(text_9, get(t).no_check));
+				append($$anchor, span_4);
+			};
+			if_block(node_14, ($$render) => {
+				if (get(t).no_check) $$render(consequent_10);
+			});
 			reset(li);
 			template_effect(() => {
 				classes_1 = set_class(li, 1, "svelte-wpxmn", null, classes_1, { bad: !!get(t).refusal });
@@ -336,37 +373,37 @@ function New($$anchor, $$props) {
 		else $$render(alternate_1, -1);
 	});
 	reset(section_6);
-	var node_14 = sibling(section_6, 2);
-	var consequent_9 = ($$anchor) => {
-		var p_5 = root_12();
-		var text_9 = only_child(p_5, true);
-		template_effect(() => set_text(text_9, get(said)));
+	var node_16 = sibling(section_6, 2);
+	var consequent_11 = ($$anchor) => {
+		var p_5 = root_14();
+		var text_10 = only_child(p_5, true);
+		template_effect(() => set_text(text_10, get(said)));
 		append($$anchor, p_5);
 	};
-	if_block(node_14, ($$render) => {
-		if (get(said)) $$render(consequent_9);
+	if_block(node_16, ($$render) => {
+		if (get(said)) $$render(consequent_11);
 	});
 	reset(div);
 	var footer = sibling(div, 2);
-	var span_4 = child(footer);
-	var text_10 = only_child(span_4, true);
-	var button_2 = sibling(span_4, 2);
+	var span_5 = child(footer);
+	var text_11 = only_child(span_5, true);
+	var button_2 = sibling(span_5, 2);
 	var button_3 = sibling(button_2, 2);
-	var node_15 = child(button_3);
-	Icon(node_15, {
+	var node_17 = child(button_3);
+	Icon(node_17, {
 		name: "play",
 		size: 13
 	});
-	var text_11 = sibling(node_15);
+	var text_12 = sibling(node_17);
 	reset(button_3);
 	reset(footer);
 	reset(form);
 	template_effect(() => {
 		set_text(text_2, agentsRead.failure ? "the project's default (the agents could not be read)" : "the project's default");
 		set_text(text_4, get(worktree) ? "your checkout is never touched" : "in place — no parallel safety, and the diff is against your working tree");
-		set_text(text_10, get(refused).length ? `${get(refused).length} refused — nothing will be created until every project can start` : get(chosen).length > 1 ? `${get(chosen).length} changes, one per project` : "");
+		set_text(text_11, get(refused).length ? `${get(refused).length} refused — nothing will be created until every project can start` : get(chosen).length > 1 ? `${get(chosen).length} changes, one per project` : "");
 		button_3.disabled = !get(ready) || !!starting.busy;
-		set_text(text_11, ` ${starting.busy ? `Starting · ${starting.elapsed}` : get(chosen).length > 1 ? `Start ${get(chosen).length} changes` : "Start the change"}`);
+		set_text(text_12, ` ${starting.busy ? `Starting · ${starting.elapsed}` : get(chosen).length > 1 ? `Start ${get(chosen).length} changes` : "Start the change"}`);
 	});
 	event("submit", form, start);
 	delegated("click", button, close);

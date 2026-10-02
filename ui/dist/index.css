@@ -277,6 +277,11 @@ ul, ol { margin: 0; padding: 0; }
     border-radius: 2px;
     background: var(--line);
   }
+  .unread.svelte-1xuy3ds {
+    margin: var(--s-4) 0 0;
+    color: var(--dim);
+    font-size: var(--t-sm);
+  }
 
   .wait.svelte-1gb5hex {
     padding: 0 var(--s-5);

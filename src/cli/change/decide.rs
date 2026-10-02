@@ -58,6 +58,10 @@ pub(super) async fn cmd_offer(change: &str, json: bool) -> Result<()> {
             )
         );
     }
+    // The files nobody opened, by name: said, never a reason to refuse.
+    if let Some(says) = v["not_opened_says"].as_str() {
+        println!("{}", paint(render::YELLOW, says));
+    }
     match v["offer"].as_str() {
         Some("opened") => println!(
             "{} #{} {}",

@@ -15,7 +15,7 @@
   import { surfaces } from "../../lib/surfaces";
 
   import type { Decision } from "../../wire/Decision";
-  let { about = "" }: { about?: string } = $props();
+  let { about = "", blind = "" }: { about?: string; blind?: string } = $props();
 
   /// How many rows one read asks for; a full read says there are more.
   const LIMIT = 1000;
@@ -107,7 +107,7 @@
   {#if read.phase === "failed" && read.failure}
     <Failed what="the ledger" failure={read.failure} />
   {:else if rows && rows.length === 0}
-    <Empty icon="ledger" title="Nothing has been decided yet" body="Every refusal a rule made, every question a person answered, every gate Devplane ran — each lands here with the authority that decided it." />
+    <Empty icon="ledger" title="Nothing has been decided yet" body="Every refusal a rule made, every question a person answered, every gate Devplane ran — each lands here with the authority that decided it." limit={blind} />
   {:else}
     <div class="frame">
       <Grid id="ledger" {columns} rows={shown} key={(r) => r.id} group={day} bind:selected bind:order label="decisions">

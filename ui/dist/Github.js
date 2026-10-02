@@ -1,4 +1,4 @@
-import { A as comment, E as if_block, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, O as set_text, V as template_effect, W as child, X as state, Y as set, Z as user_derived, at as noop, et as pop, it as reset, j as from_html, k as append, m as set_attribute, o as prop, q as sibling, rt as next, tt as push } from "./api.js";
+import { A as append, D as if_block, G as child, H as template_effect, J as sibling, K as first_child, M as from_html, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, ot as noop, q as only_child, tt as pop, w as each } from "./api.js";
 import { h as resource, i as Skeleton, l as listed, n as Icon, s as ago, u as plural } from "./app.js";
 import { t as cursor } from "./cursor.js";
 import { t as Failed } from "./Failed.js";
@@ -99,15 +99,17 @@ var root_6 = from_html(`<div class="state" data-state="not_github"><!></div>`);
 var root_7 = from_html(`<span class="stale svelte-sff017"> </span>`);
 var root_8 = from_html(`<p class="banner svelte-sff017"><!> <b> </b> <!> <!></p>`);
 var root_9 = from_html(`<p class="quiet svelte-sff017"> </p>`);
-var root_10 = from_html(`<p class="quiet svelte-sff017">Nothing was read before GitHub stopped answering, so there is no list to show.</p>`);
-var root_11 = from_html(`<span class="you svelte-sff017" title="needs you"><!></span>`);
-var root_12 = from_html(`<span class="t svelte-sff017"> </span>`);
-var root_13 = from_html(`<span class="dim svelte-sff017"> </span>`);
-var root_14 = from_html(`<a target="_blank" rel="noopener noreferrer" class="open svelte-sff017"><!> open</a>`);
-var root_15 = from_html(`<p class="quiet more svelte-sff017"> </p>`);
-var root_16 = from_html(`<div class="frame svelte-sff017"><!></div> <!>`, 1);
-var root_17 = from_html(`<!> <!> <!>`, 1);
-var root_18 = from_html(`<div class="page svelte-sff017"><header class="head svelte-sff017"><h1 class="svelte-sff017">Issues and pull requests</h1> <!></header> <!> <!></div>`);
+var root_10 = from_html(`<p class="banner svelte-sff017" data-state="project-failed"><!> <b> </b> </p>`);
+var root_11 = from_html(`<p class="quiet svelte-sff017">Nothing was read before GitHub stopped answering, so there is no list to show.</p>`);
+var root_12 = from_html(`<p class="quiet svelte-sff017">Not read yet: Devplane has not asked GitHub since it started. The list appears once it has.</p>`);
+var root_13 = from_html(`<span class="you svelte-sff017" title="needs you"><!></span>`);
+var root_14 = from_html(`<span class="t svelte-sff017"> </span>`);
+var root_15 = from_html(`<span class="dim svelte-sff017"> </span>`);
+var root_16 = from_html(`<a target="_blank" rel="noopener noreferrer" class="open svelte-sff017"><!> open</a>`);
+var root_17 = from_html(`<p class="quiet more svelte-sff017"> </p>`);
+var root_18 = from_html(`<div class="frame svelte-sff017"><!></div> <!>`, 1);
+var root_19 = from_html(`<!> <!> <!> <!>`, 1);
+var root_20 = from_html(`<div class="page svelte-sff017"><header class="head svelte-sff017"><h1 class="svelte-sff017">Issues and pull requests</h1> <!></header> <!> <!></div>`);
 function GithubList($$anchor, $$props) {
 	push($$props, true);
 	let issues = prop($$props, "issues", 19, () => []), pulls = prop($$props, "pulls", 19, () => []), loaded = prop($$props, "loaded", 3, false), failed = prop($$props, "failed", 3, ""), tab = prop($$props, "tab", 3, "issues"), coverage = prop($$props, "coverage", 3, null), github = prop($$props, "github", 3, null), projects = prop($$props, "projects", 19, () => []), readAt = prop($$props, "readAt", 3, null);
@@ -125,6 +127,8 @@ function GithubList($$anchor, $$props) {
 	const stale = user_derived(() => !!get(says) && !get(says).blocks);
 	const more = user_derived(() => projects().reduce((n, p) => n + ((get(showing) === "issues" ? p.issues_more : p.pull_requests_more) ?? 0), 0));
 	const age = user_derived(() => readAt() ? ago((Date.now() - new Date(readAt()).getTime()) / 1e3) : "");
+	const unread = user_derived(() => projects().filter((p) => p.stale && p.github?.state !== "not_github"));
+	const signIn = user_derived(() => /sign(ed)? ?in|auth login|not signed/i.test(failed()));
 	const counted = user_derived(() => loaded() && !failed() && !get(blocking) && !get(allElsewhere) && !get(stale));
 	let selected = state(null);
 	let order = state(proxy([]));
@@ -163,7 +167,7 @@ function GithubList($$anchor, $$props) {
 			align: "end"
 		}
 	];
-	var div = root_18();
+	var div = root_20();
 	var header = child(div);
 	var node_2 = sibling(child(header), 2);
 	var consequent_3 = ($$anchor) => {
@@ -206,23 +210,45 @@ function GithubList($$anchor, $$props) {
 	var consequent_4 = ($$anchor) => {
 		Skeleton($$anchor, {});
 	};
-	var consequent_5 = ($$anchor) => {
-		Empty($$anchor, {
-			icon: "alert",
-			title: "The forge could not be read",
-			get body() {
-				return failed();
-			}
-		});
-	};
 	var consequent_6 = ($$anchor) => {
+		{
+			const action = ($$anchor) => {
+				var fragment_3 = comment();
+				var node_5 = first_child(fragment_3);
+				var consequent_5 = ($$anchor) => {
+					act($$anchor, () => "sign_in");
+				};
+				var alternate_1 = ($$anchor) => {
+					act($$anchor, () => "doctor");
+				};
+				if_block(node_5, ($$render) => {
+					if (get(signIn)) $$render(consequent_5);
+					else $$render(alternate_1, -1);
+				});
+				append($$anchor, fragment_3);
+			};
+			let $0 = user_derived(() => get(signIn) ? "Not signed in to GitHub" : "The forge could not be read");
+			Empty($$anchor, {
+				icon: "alert",
+				get title() {
+					return get($0);
+				},
+				get body() {
+					return failed();
+				},
+				action,
+				$$slots: { action: true }
+			});
+		}
+	};
+	var consequent_7 = ($$anchor) => {
 		var div_1 = root_5();
-		var node_5 = child(div_1);
+		var node_6 = child(div_1);
 		{
 			const action = ($$anchor) => {
 				act($$anchor, () => get(says).action);
 			};
-			Empty(node_5, {
+			Empty(node_6, {
 				icon: "alert",
 				get title() {
 					return get(says).title;
@@ -238,15 +264,15 @@ function GithubList($$anchor, $$props) {
 		template_effect(() => set_attribute(div_1, "data-state", github()?.state));
 		append($$anchor, div_1);
 	};
-	var consequent_7 = ($$anchor) => {
+	var consequent_8 = ($$anchor) => {
 		var div_2 = root_6();
-		var node_6 = child(div_2);
+		var node_7 = child(div_2);
 		{
 			const action = ($$anchor) => {
 				act($$anchor, () => "remote");
 			};
 			let $0 = user_derived(() => `${listed(get(elsewhere).map((p) => p.project_name))} ${plural(get(elsewhere).length, "has", "have")} no remote on a GitHub host this machine signs in to.`);
-			Empty(node_6, {
+			Empty(node_7, {
 				icon: "forge",
 				title: "Not a GitHub repository",
 				get body() {
@@ -259,30 +285,30 @@ function GithubList($$anchor, $$props) {
 		reset(div_2);
 		append($$anchor, div_2);
 	};
-	var alternate_2 = ($$anchor) => {
-		var fragment_5 = root_17();
-		var node_7 = first_child(fragment_5);
-		var consequent_9 = ($$anchor) => {
+	var alternate_3 = ($$anchor) => {
+		var fragment_8 = root_19();
+		var node_8 = first_child(fragment_8);
+		var consequent_10 = ($$anchor) => {
 			var p_1 = root_8();
-			var node_8 = child(p_1);
-			Icon(node_8, {
+			var node_9 = child(p_1);
+			Icon(node_9, {
 				name: "alert",
 				size: 13
 			});
-			var b = sibling(node_8, 2);
+			var b = sibling(node_9, 2);
 			var text_1 = only_child(b, true);
 			var text_2 = sibling(b);
-			var node_9 = sibling(text_2);
-			var consequent_8 = ($$anchor) => {
+			var node_10 = sibling(text_2);
+			var consequent_9 = ($$anchor) => {
 				var span_4 = root_7();
 				var text_3 = only_child(span_4);
 				template_effect(() => set_text(text_3, `stale, read ${get(age) ?? ""} ago`));
 				append($$anchor, span_4);
 			};
-			if_block(node_9, ($$render) => {
-				if (get(age)) $$render(consequent_8);
+			if_block(node_10, ($$render) => {
+				if (get(age)) $$render(consequent_9);
 			});
-			act(sibling(node_9, 2), () => get(says).action);
+			act(sibling(node_10, 2), () => get(says).action);
 			reset(p_1);
 			template_effect(() => {
 				set_attribute(p_1, "data-state", github()?.state);
@@ -291,25 +317,53 @@ function GithubList($$anchor, $$props) {
 			});
 			append($$anchor, p_1);
 		};
-		if_block(node_7, ($$render) => {
-			if (get(says) && get(stale)) $$render(consequent_9);
+		if_block(node_8, ($$render) => {
+			if (get(says) && get(stale)) $$render(consequent_10);
 		});
-		var node_11 = sibling(node_7, 2);
-		var consequent_10 = ($$anchor) => {
+		var node_12 = sibling(node_8, 2);
+		var consequent_11 = ($$anchor) => {
 			var p_2 = root_9();
 			var text_4 = only_child(p_2);
 			template_effect(($0) => set_text(text_4, `${$0 ?? ""}: not a GitHub repository.`), [() => listed(get(elsewhere).map((p) => p.project_name))]);
 			append($$anchor, p_2);
 		};
-		if_block(node_11, ($$render) => {
-			if (get(elsewhere).length) $$render(consequent_10);
+		if_block(node_12, ($$render) => {
+			if (get(elsewhere).length) $$render(consequent_11);
 		});
-		var node_12 = sibling(node_11, 2);
-		var consequent_11 = ($$anchor) => {
+		var node_13 = sibling(node_12, 2);
+		each(node_13, 17, () => get(unread), (p) => p.project, ($$anchor, p) => {
 			var p_3 = root_10();
+			var node_14 = child(p_3);
+			Icon(node_14, {
+				name: "alert",
+				size: 13
+			});
+			var b_1 = sibling(node_14, 2);
+			var text_5 = only_child(b_1, true);
+			var text_6 = sibling(b_1);
+			reset(p_3);
+			template_effect(() => {
+				set_text(text_5, get(p).project_name);
+				set_text(text_6, ` could not be read — ${get(p).stale ?? ""}`);
+			});
 			append($$anchor, p_3);
-		};
+		});
+		var node_15 = sibling(node_13, 2);
 		var consequent_12 = ($$anchor) => {
+			var p_4 = root_11();
+			append($$anchor, p_4);
+		};
+		var consequent_13 = ($$anchor) => {
+			var p_5 = root_12();
+			append($$anchor, p_5);
+		};
+		var consequent_14 = ($$anchor) => {
+			var p_6 = root_9();
+			var text_7 = only_child(p_6);
+			template_effect(($0) => set_text(text_7, `Nothing open was read, and ${$0 ?? ""} could not be read at all, so this is not every project.`), [() => listed(get(unread).map((p) => p.project_name))]);
+			append($$anchor, p_6);
+		};
+		var consequent_15 = ($$anchor) => {
 			{
 				let $0 = user_derived(() => get(showing) === "issues" ? "No open issue" : "No open pull request");
 				let $1 = user_derived(() => get(absent) ? `${get(absent)} projects have no GitHub remote and are not counted.` : "");
@@ -325,48 +379,48 @@ function GithubList($$anchor, $$props) {
 				});
 			}
 		};
-		var alternate_1 = ($$anchor) => {
-			var fragment_7 = root_16();
-			var div_3 = first_child(fragment_7);
-			var node_13 = child(div_3);
+		var alternate_2 = ($$anchor) => {
+			var fragment_10 = root_18();
+			var div_3 = first_child(fragment_10);
+			var node_16 = child(div_3);
 			{
 				const cell = ($$anchor, r = noop, c = noop) => {
-					var fragment_8 = comment();
-					var node_14 = first_child(fragment_8);
-					var consequent_14 = ($$anchor) => {
-						var fragment_9 = comment();
-						var node_15 = first_child(fragment_9);
-						var consequent_13 = ($$anchor) => {
-							var span_5 = root_11();
-							var node_16 = child(span_5);
-							Icon(node_16, {
+					var fragment_11 = comment();
+					var node_17 = first_child(fragment_11);
+					var consequent_17 = ($$anchor) => {
+						var fragment_12 = comment();
+						var node_18 = first_child(fragment_12);
+						var consequent_16 = ($$anchor) => {
+							var span_5 = root_13();
+							var node_19 = child(span_5);
+							Icon(node_19, {
 								name: "person",
 								size: 13
 							});
 							reset(span_5);
 							append($$anchor, span_5);
 						};
-						if_block(node_15, ($$render) => {
-							if (r().needs_you) $$render(consequent_13);
+						if_block(node_18, ($$render) => {
+							if (r().needs_you) $$render(consequent_16);
 						});
-						append($$anchor, fragment_9);
+						append($$anchor, fragment_12);
 					};
-					var consequent_15 = ($$anchor) => {
-						var span_6 = root_12();
-						var text_5 = only_child(span_6, true);
-						template_effect(() => set_text(text_5, r().title));
+					var consequent_18 = ($$anchor) => {
+						var span_6 = root_14();
+						var text_8 = only_child(span_6, true);
+						template_effect(() => set_text(text_8, r().title));
 						append($$anchor, span_6);
 					};
-					var consequent_16 = ($$anchor) => {
-						var span_7 = root_13();
-						var text_6 = only_child(span_7, true);
-						template_effect(() => set_text(text_6, r().project_name));
+					var consequent_19 = ($$anchor) => {
+						var span_7 = root_15();
+						var text_9 = only_child(span_7, true);
+						template_effect(() => set_text(text_9, r().project_name));
 						append($$anchor, span_7);
 					};
-					var consequent_17 = ($$anchor) => {
-						var a_1 = root_14();
-						var node_17 = child(a_1);
-						Icon(node_17, {
+					var consequent_20 = ($$anchor) => {
+						var a_1 = root_16();
+						var node_20 = child(a_1);
+						Icon(node_20, {
 							name: "external",
 							size: 13
 						});
@@ -376,15 +430,15 @@ function GithubList($$anchor, $$props) {
 						append($$anchor, a_1);
 					};
 					var d_1 = user_derived(() => safeHref(r().url));
-					if_block(node_14, ($$render) => {
-						if (c().key === "you") $$render(consequent_14);
-						else if (c().key === "title") $$render(consequent_15, 1);
-						else if (c().key === "project") $$render(consequent_16, 2);
-						else if (get(d_1)) $$render(consequent_17, 3);
+					if_block(node_17, ($$render) => {
+						if (c().key === "you") $$render(consequent_17);
+						else if (c().key === "title") $$render(consequent_18, 1);
+						else if (c().key === "project") $$render(consequent_19, 2);
+						else if (get(d_1)) $$render(consequent_20, 3);
 					});
-					append($$anchor, fragment_8);
+					append($$anchor, fragment_11);
 				};
-				Grid(node_13, {
+				Grid(node_16, {
 					id: "forge",
 					get columns() {
 						return columns;
@@ -415,31 +469,33 @@ function GithubList($$anchor, $$props) {
 				});
 			}
 			reset(div_3);
-			var node_18 = sibling(div_3, 2);
-			var consequent_18 = ($$anchor) => {
-				var p_4 = root_15();
-				var text_7 = only_child(p_4);
-				template_effect(($0) => set_text(text_7, `${get(more) ?? ""} more open ${$0 ?? ""} on GitHub — only the newest are read each time.`), [() => get(showing) === "issues" ? plural(get(more), "issue", "issues") : plural(get(more), "pull request", "pull requests")]);
-				append($$anchor, p_4);
+			var node_21 = sibling(div_3, 2);
+			var consequent_21 = ($$anchor) => {
+				var p_7 = root_17();
+				var text_10 = only_child(p_7);
+				template_effect(($0) => set_text(text_10, `${get(more) ?? ""} more open ${$0 ?? ""} on GitHub — only the newest are read each time.`), [() => get(showing) === "issues" ? plural(get(more), "issue", "issues") : plural(get(more), "pull request", "pull requests")]);
+				append($$anchor, p_7);
 			};
-			if_block(node_18, ($$render) => {
-				if (get(more) > 0) $$render(consequent_18);
+			if_block(node_21, ($$render) => {
+				if (get(more) > 0) $$render(consequent_21);
 			});
-			append($$anchor, fragment_7);
+			append($$anchor, fragment_10);
 		};
-		if_block(node_12, ($$render) => {
-			if (get(shown).length === 0 && get(stale)) $$render(consequent_11);
-			else if (get(shown).length === 0) $$render(consequent_12, 1);
-			else $$render(alternate_1, -1);
+		if_block(node_15, ($$render) => {
+			if (get(shown).length === 0 && get(stale)) $$render(consequent_12);
+			else if (get(shown).length === 0 && !readAt()) $$render(consequent_13, 1);
+			else if (get(shown).length === 0 && get(unread).length) $$render(consequent_14, 2);
+			else if (get(shown).length === 0) $$render(consequent_15, 3);
+			else $$render(alternate_2, -1);
 		});
-		append($$anchor, fragment_5);
+		append($$anchor, fragment_8);
 	};
 	if_block(node_4, ($$render) => {
 		if (!loaded()) $$render(consequent_4);
-		else if (failed()) $$render(consequent_5, 1);
-		else if (get(says) && get(blocking)) $$render(consequent_6, 2);
-		else if (get(allElsewhere)) $$render(consequent_7, 3);
-		else $$render(alternate_2, -1);
+		else if (failed()) $$render(consequent_6, 1);
+		else if (get(says) && get(blocking)) $$render(consequent_7, 2);
+		else if (get(allElsewhere)) $$render(consequent_8, 3);
+		else $$render(alternate_3, -1);
 	});
 	reset(div);
 	append($$anchor, div);

@@ -1,3 +1,4 @@
+import { unseen } from "../../lib/sight";
 import { register } from "../../lib/surfaces";
 import { bindList } from "../../lib/keys";
 
@@ -16,6 +17,6 @@ register({
   nav: false,
   takesQuery: true,
   reads: ["/api/search"],
-  select: (_feed, focus) => ({ q: focus }),
+  select: (feed, focus) => ({ q: focus, blind: unseen(feed.board) }),
   page: () => import("./Search.svelte"),
 });

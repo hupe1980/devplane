@@ -149,6 +149,25 @@ pub async fn uncommitted(dir: &Path) -> Result<Option<String>> {
     }))
 }
 
+/// [`uncommitted`], not counting the files in `except`: a change governed by
+/// the checkout's own `devplane.toml` does not need that file committed, since
+/// gates are read from the checkout and never from the worktree.
+pub async fn uncommitted_except(dir: &Path, except: &[&str]) -> Result<Option<String>> {
+    let p = porcelain(dir).await?;
+    let tracked: Vec<String> = p
+        .tracked
+        .into_iter()
+        .filter(|f| !except.contains(&f.as_str()))
+        .collect();
+    Ok((!tracked.is_empty()).then(|| {
+        format!(
+            "uncommitted changes to {} tracked file(s): {}",
+            tracked.len(),
+            named(&tracked)
+        )
+    }))
+}
+
 /// `-z`, so a path is bytes up to a NUL rather than a C-quoted string; a
 /// rename's original name follows as its own record.
 async fn porcelain(dir: &Path) -> Result<Porcelain> {
@@ -987,19 +1006,27 @@ pub fn worktree_present(dir: &Path) -> bool {
 ///
 /// Refuses, before writing anything and naming the cause: an existing target,
 /// uncommitted changes to tracked files, or a base that does not resolve.
-/// Untracked files do not count.
+/// Untracked files do not count, nor does `devplane.toml`, which governs from
+/// the checkout.
 pub async fn create_worktree(root: &Path, name: &str, branch: &str, base: &str) -> Result<PathBuf> {
     let dir = root.join(WORKTREE_DIR).join(name);
     refuse_occupied(&dir)?;
 
-    let checkout = porcelain(root).await?;
-    if !checkout.tracked.is_empty() {
+    // `devplane.toml` is read from the checkout, never from the worktree, so
+    // a check declared and not yet committed still governs: it is not dirt.
+    let dirty: Vec<String> = porcelain(root)
+        .await?
+        .tracked
+        .into_iter()
+        .filter(|f| f != crate::core::config::CONFIG_FILE)
+        .collect();
+    if !dirty.is_empty() {
         bail!(
             "{} has uncommitted changes to {} tracked file(s): {}. Commit or stash them before \
              isolating work",
             root.display(),
-            checkout.tracked.len(),
-            named(&checkout.tracked)
+            dirty.len(),
+            named(&dirty)
         );
     }
 

@@ -5,7 +5,9 @@ import type { SentTask } from "../../../wire/SentTask";
 import type { Weakened } from "../../../wire/Weakened";
 
 export type Kind = "context" | "added" | "removed";
-export type Hunk = { header: string; lines: [Kind, string][]; formatter_only: boolean };
+/// `digest` is the hunk's content (a seen mark and a comment are keyed by it);
+/// `seen` is the host's mark. Both are absent in recordings made before them.
+export type Hunk = { header: string; lines: [Kind, string][]; formatter_only: boolean; digest?: string; seen?: boolean };
 export type Decision = { authority: string; action: string; outcome: string; at: string; subject: string; says: string };
 export type File = {
   path: string;
@@ -22,12 +24,22 @@ export type File = {
   body_says: string | null;
   hunks: Hunk[];
   marker_commands: string[];
+  /// A file with no hunks is one unit to mark: whether it is marked.
+  unit_seen?: boolean | null;
+  /// A hunk here was marked seen and has since been rewritten.
+  changed_since_seen?: boolean;
 };
 /// A group of files. The first is *checks weakened or changed* when the change
 /// skipped, deleted or redefined a check; `weakened` says what matched per file.
 /// Each weakened row names what it matched, and whether a person marked it
 /// seen (durable, in the host: an offer waits for every one).
-export type WeakRow = Weakened & { seen: boolean };
+export type WeakRow = Weakened & { seen: boolean; gate_says?: string | null };
+/// A comment as the host keeps it, with where its line is now and, once its
+/// run has finished a turn since it was sent, whether its hunk changed.
+export type Comment = import("../../../wire/ReviewComment").ReviewComment & {
+  anchor: import("../../../wire/Anchor").Anchor;
+  hunk_changed: boolean | null;
+};
 export type Group = { role: ReviewRole | null; says: string; files: File[]; weakened?: WeakRow[] };
 export type IntentGroup = { run: string; tasks: SentTask[]; title: string; says: string; files: string[] };
 export type Intent = {
@@ -53,7 +65,15 @@ export type ReviewBody = {
   empty_says: string | null;
   latest_run: string | null;
   qualifier?: import("../../../wire/Qualifier").Qualifier | null;
+  comments?: Comment[];
+  /// Files none of whose hunks is marked seen, by path; never a share.
+  not_opened?: string[];
+  not_opened_says?: string | null;
 };
+
+/// A hunk's key for marks and the cursor: its content digest from the host,
+/// or — in a recording made before digests — its place in the file.
+export const hunkKey = (h: Hunk, i: number): string => h.digest ?? `${i}:${h.header}`;
 
 /// One row of the risk tab: a role's heading, a file, or one of its hunks.
 /// `n` numbers the hunks across the change, which is what `j`/`k` move by.

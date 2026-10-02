@@ -747,9 +747,12 @@ fn every_route_a_surface_calls_is_one_the_host_serves() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let api = std::fs::read_to_string(root.join("src/api.rs")).expect("the api");
 
+    // `.route("…"` — on one line, or with the path on the next as rustfmt
+    // breaks a long one.
     let served: Vec<String> = api
-        .match_indices(".route(\"")
-        .filter_map(|(at, _)| api[at + 8..].split('"').next())
+        .match_indices(".route(")
+        .filter_map(|(at, _)| api[at + 7..].trim_start().strip_prefix('"'))
+        .filter_map(|rest| rest.split('"').next())
         .map(str::to_string)
         .collect();
     assert!(

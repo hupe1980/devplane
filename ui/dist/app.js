@@ -1,5 +1,5 @@
 const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["Answer.js","api.js","frame.js","cursor.js","write.svelte.js","Failed.js","Failed.css","unread.svelte.js","unread.css","actions.js","Qualifier.js","Qualifier.css","href.js","actions.css","Answer.css","Board.js","Grid.js","Grid.css","Empty.js","Empty.css","Props.js","Props.css","Board.css","List.js","ChangeState.js","ChangeState.css","List.css","Doc.js","offered.svelte.js","Tabs.js","Tabs.css","Doc.css","Github.js","Github.css","List2.js","narrow.svelte.js","List2.css","Inbox.js","Inbox.css","New.js","New.css","Palette.js","Palette.css","List3.js","store.svelte.js","List3.css","Doc2.js","Doc2.css","Quit.js","Quit.css","Search.js","Search.css","Setup.js","Setup.css","Why.js","Why.css"])))=>i.map(i=>d[i]);
-import { A as comment, C as each, D as mount, E as if_block, F as delegated, G as first_child, H as user_effect, I as event, J as proxy, K as only_child, L as get, M as from_svg, N as text, O as set_text, P as delegate, S as snippet, V as template_effect, W as child, X as state, Y as set, Z as user_derived, _ as set_style, a as claimToken, at as noop, b as action, c as spread_props, et as pop, i as api, it as reset, j as from_html, k as append, m as set_attribute, n as Unauthorised, nt as snapshot, o as prop, q as sibling, r as Unreachable, rt as next, s as rest_props, tt as push, v as set_class, w as index, x as component, z as untrack } from "./api.js";
+import { A as append, B as untrack, C as snippet, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, L as event, M as from_html, N as from_svg, O as mount, P as text, Q as user_derived, R as get, S as component, T as index, U as user_effect, X as set, Y as proxy, Z as state, a as claimToken, at as reset, c as spread_props, i as api, it as next, j as comment, k as set_text, m as set_attribute, n as Unauthorised, nt as push, o as prop, ot as noop, q as only_child, r as Unreachable, rt as snapshot, s as rest_props, t as Refused, tt as pop, v as set_style, w as each, x as action, y as set_class } from "./api.js";
 //#region \0vite/modulepreload-polyfill.js
 (function polyfill() {
 	const relList = document.createElement("link").relList;
@@ -65,6 +65,28 @@ function surfaces() {
 function landing() {
 	return surfaces()[0];
 }
+async function opening(ms = 1500) {
+	for (const s of surfaces()) {
+		if (!s.opensFirst) continue;
+		if (await Promise.race([s.opensFirst().catch(() => false), new Promise((r) => setTimeout(() => r(false), ms))])) return s;
+	}
+	return landing();
+}
+//#endregion
+//#region src/lib/sight.ts
+function unseen(board) {
+	const b = board;
+	if (!b || typeof b !== "object") return "";
+	if ((b.runs?.length ?? 0) > 0 || (b.summary?.runs ?? 0) > 0) return "";
+	const only = b.watching?.driven_only ?? [];
+	const unproved = b.watching?.unproved ?? [];
+	return [
+		"No session has reported to Devplane on this machine yet, so this cannot say what your agents are doing.",
+		only.length ? `${only.join(", ")} ${only.length === 1 ? "appears" : "appear"} only when Devplane starts ${only.length === 1 ? "it" : "them"};` : "",
+		unproved.length ? `${unproved.join(", ")} ${unproved.length === 1 ? "is" : "are"} read once connected.` : "",
+		"`devplane doctor` says what is watched here."
+	].filter(Boolean).join(" ");
+}
 //#endregion
 //#region src/lib/keys.ts
 var RESERVED = [
@@ -87,6 +109,9 @@ function bind(b) {
 	if (same) throw new Error(`${b.combo} is bound twice in ${b.surface}: "${same.label}" (${same.action}) and "${b.label}" (${b.action})`);
 	const global = bindings.find((x) => x.combo === combo && x.surface === "global");
 	if (global && b.surface !== "global") throw new Error(`${b.surface} rebinds ${b.combo}, which is global: "${global.label}" (${global.action}) against "${b.label}" (${b.action})`);
+	const [parent, mode] = b.surface.split(":");
+	const over = mode ? bindings.find((x) => x.surface === parent && x.combo === combo) : bindings.find((x) => x.surface.startsWith(`${b.surface}:`) && x.combo === combo);
+	if (over && !LIST_COMBOS.includes(combo)) throw new Error(`${b.combo} is bound in ${b.surface} ("${b.label}", ${b.action}) and in ${over.surface} ("${over.label}", ${over.action}); a mode may rebind only its surface's list keys`);
 	const shadowed = b.surface === "global" ? bindings.find((x) => x.combo === combo) : void 0;
 	if (shadowed) throw new Error(`global ${b.combo} ("${b.label}", ${b.action}) is already bound in ${shadowed.surface}: "${shadowed.label}" (${shadowed.action})`);
 	bindings.push({
@@ -305,6 +330,15 @@ bind({
 	action: "leave",
 	label: "leave: close the help, the palette or the new-change form"
 });
+var LIST_COMBOS = [
+	"Down",
+	"j",
+	"Up",
+	"k",
+	"Enter",
+	"g g",
+	"G"
+];
 function bindList(surface, open) {
 	bind({
 		surface,
@@ -576,7 +610,7 @@ register({
 	nav: false,
 	bare: true,
 	reads: ["/api/inbox"],
-	select: () => ({}),
+	select: (feed) => ({ blind: unseen(feed.board) }),
 	page: () => __vitePreload(() => import("./Answer.js"), __vite__mapDeps([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]))
 });
 //#endregion
@@ -780,12 +814,12 @@ for (const [combo, action, label] of [
 	[
 		"j",
 		"hunk-next",
-		"next hunk"
+		"next hunk, across files"
 	],
 	[
 		"k",
 		"hunk-prev",
-		"previous hunk"
+		"previous hunk, across files"
 	],
 	[
 		"n",
@@ -800,12 +834,17 @@ for (const [combo, action, label] of [
 	[
 		"s",
 		"hunk-seen",
-		"mark this hunk (in this browser, until it changes); a weakened line in it is recorded as read by the host"
+		"mark this hunk seen — kept by Devplane until the hunk changes"
 	],
 	[
 		"f",
 		"hunk-fix",
-		"request a fix: a message to the change's latest run, quoting this hunk"
+		"request a fix: start a comment on this hunk, for the pending review"
+	],
+	[
+		"Mod+Enter",
+		"review-send",
+		"send the pending review: every comment, as one turn to the agent"
 	],
 	[
 		"x",
@@ -1020,6 +1059,7 @@ register({
 			item,
 			wanted,
 			watching,
+			blind: unseen(feed.board),
 			...phase(feed)
 		};
 	},
@@ -1148,9 +1188,41 @@ register({
 	nav: false,
 	takesQuery: true,
 	reads: ["/api/search"],
-	select: (_feed, focus) => ({ q: focus }),
+	select: (feed, focus) => ({
+		q: focus,
+		blind: unseen(feed.board)
+	}),
 	page: () => __vitePreload(() => import("./Search.js"), __vite__mapDeps([50,1,3,16,17,18,19,51]))
 });
+//#endregion
+//#region src/surfaces/setup/checklist.ts
+var KEY$2 = "first-run:skipped";
+function skippedSteps() {
+	try {
+		const v = JSON.parse(localStorage.getItem(KEY$2) ?? "[]");
+		return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+	} catch {
+		return [];
+	}
+}
+function keepSkipped(ids) {
+	try {
+		localStorage.setItem(KEY$2, JSON.stringify(ids));
+	} catch {}
+}
+function incomplete(steps, skipped) {
+	return steps.some((s) => s.state !== "done" && !skipped.includes(s.id));
+}
+var TITLES = {
+	sessions: "Sessions already running",
+	updates: "Update checks",
+	connect: "Connect an agent",
+	trust: "Trust a repository",
+	github: "Sign in to GitHub",
+	declare: "Declare a check",
+	dialect: "Spec dialect",
+	first_change: "A first verified change"
+};
 //#endregion
 //#region src/surfaces/setup/index.ts
 bindList("setup", "open the inbox narrowed to the project");
@@ -1171,8 +1243,24 @@ register({
 	heading: "Setup",
 	band: "project",
 	order: 0,
-	reads: ["/api/setup", "/api/github"],
-	select: () => ({}),
+	holds: "gates",
+	reads: [
+		"/api/setup",
+		"/api/github",
+		"/api/first-run",
+		"/api/projects",
+		"/api/projects/scan",
+		"/api/projects/trust"
+	],
+	opensFirst: async () => {
+		try {
+			const r = await api("/api/first-run");
+			return Array.isArray(r?.steps) && incomplete(r.steps, skippedSteps());
+		} catch {
+			return false;
+		}
+	},
+	select: () => ({ changeSurface: surfaces().find((s) => s.link === "change")?.id ?? "" }),
 	page: () => __vitePreload(() => import("./Setup.js"), __vite__mapDeps([52,1,3,5,6,12,16,17,20,21,53]))
 });
 //#endregion
@@ -1196,7 +1284,10 @@ register({
 	band: "happening",
 	order: 4,
 	link: "run",
-	select: (_feed, focus) => ({ about: focus }),
+	select: (feed, focus) => ({
+		about: focus,
+		blind: unseen(feed.board)
+	}),
 	page: () => __vitePreload(() => import("./Why.js"), __vite__mapDeps([54,1,3,5,6,16,17,18,19,55]))
 });
 //#endregion
@@ -1212,6 +1303,14 @@ function failure(e, tell = "devplane doctor") {
 		tell: e.kind === "refused" ? "devplane up --no-browser" : "devplane doctor",
 		down: true
 	};
+	if (e instanceof Refused) {
+		const body = typeof e.body === "string" ? e.body : e.body === null ? "" : JSON.stringify(e.body);
+		return {
+			says: e.message,
+			tell,
+			raw: `${e.path ? `${e.path} → ` : ""}${e.status}${body ? ` ${body}` : ""}`
+		};
+	}
 	return {
 		says: e instanceof Error ? e.message : String(e),
 		tell
@@ -1247,7 +1346,10 @@ function resource(url, opts = {}) {
 		} catch (e) {
 			if (mine !== gen || n < landed) return;
 			landed = n;
-			set(fail, failure(e, opts.tell?.()));
+			set(fail, {
+				...failure(e, opts.tell?.()),
+				retry: reload
+			});
 		} finally {
 			if (mine === gen) pending = Math.max(0, pending - 1);
 		}
@@ -1271,6 +1373,10 @@ function resource(url, opts = {}) {
 		}, opts.every);
 		return () => clearInterval(t);
 	});
+	async function reload() {
+		const want = untrack(() => get(key));
+		if (want) await read(want, gen);
+	}
 	return {
 		get phase() {
 			return get(data) !== null ? get(fail) ? "stale" : "ok" : get(fail) ? "failed" : "loading";
@@ -1284,10 +1390,7 @@ function resource(url, opts = {}) {
 		get at() {
 			return get(at);
 		},
-		async reload() {
-			const want = untrack(() => get(key));
-			if (want) await read(want, gen);
-		}
+		reload
 	};
 }
 async function copyText(text) {
@@ -1302,6 +1405,7 @@ async function copyText(text) {
 //#endregion
 //#region src/lib/live.svelte.ts
 var EVERY_MS = 2e3;
+var unread = proxy({ failed: false });
 var poke = null;
 function reread() {
 	poke?.();
@@ -1331,6 +1435,7 @@ function live(looking) {
 			if (!same$1(snapshot(state.board), board)) state.board = board;
 			if (!same$1(snapshot(state.inbox), inbox)) state.inbox = inbox;
 			state.loaded = true;
+			unread.failed = false;
 			state.error = null;
 			state.stale_since = null;
 			lastGood = (/* @__PURE__ */ new Date()).toISOString();
@@ -1338,12 +1443,14 @@ function live(looking) {
 			if (e instanceof Unauthorised) {
 				state.unauthorised = true;
 				state.error = "This tab has no token. Run `devplane up` again for a fresh link.";
+				unread.failed = !state.loaded;
 				if (timer !== null) clearInterval(timer);
 				timer = null;
 				return;
 			}
 			state.error = e instanceof Error ? e.message : String(e);
 			state.stale_since = lastGood;
+			if (!state.loaded) unread.failed = true;
 		} finally {
 			inflight = false;
 			if (queued !== null && !state.unauthorised) {
@@ -1570,7 +1677,7 @@ function Inline($$anchor, $$props) {
 //#region src/lib/Stale.svelte
 var root$11 = from_html(`<span class="age svelte-uf40wk"> </span>`);
 var root_1$10 = from_html(`<span class="age svelte-uf40wk">· nothing has been read yet</span>`);
-var root_2$4 = from_html(`<p class="stale svelte-uf40wk"><span role="status"><!></span> <!></p>`);
+var root_2$5 = from_html(`<p class="stale svelte-uf40wk"><span role="status"><!></span> <!></p>`);
 function Stale($$anchor, $$props) {
 	push($$props, true);
 	let stale_since = prop($$props, "stale_since", 3, null);
@@ -1580,7 +1687,7 @@ function Stale($$anchor, $$props) {
 		return () => clearInterval(id);
 	});
 	const age = user_derived(() => stale_since() ? ago(Math.max(0, (get(now) - Date.parse(stale_since())) / 1e3)) : "");
-	var p = root_2$4();
+	var p = root_2$5();
 	var span = child(p);
 	Inline(child(span), { get text() {
 		return $$props.error;
@@ -1607,20 +1714,36 @@ function Stale($$anchor, $$props) {
 }
 //#endregion
 //#region src/lib/Skeleton.svelte
-var root$10 = from_html(`<div class="row svelte-1xuy3ds"><span class="bar svelte-1xuy3ds"></span></div>`);
-var root_1$9 = from_html(`<div class="skeleton svelte-1xuy3ds" aria-busy="true" aria-label="reading"></div>`);
+var root$10 = from_html(`<p class="unread svelte-1xuy3ds" role="status">Not read — nothing here is current.</p>`);
+var root_1$9 = from_html(`<div class="row svelte-1xuy3ds"><span class="bar svelte-1xuy3ds"></span></div>`);
+var root_2$4 = from_html(`<div class="skeleton svelte-1xuy3ds" aria-busy="true" aria-label="reading"></div>`);
 function Skeleton($$anchor, $$props) {
-	let rows = prop($$props, "rows", 3, 3);
-	var div = root_1$9();
-	each(div, 21, () => ({ length: rows() }), index, ($$anchor, _, i) => {
-		var div_1 = root$10();
-		var span = child(div_1);
-		set_style(span, "", {}, { width: `${40 + i * 23 % 40}%` });
-		reset(div_1);
-		append($$anchor, div_1);
+	push($$props, true);
+	let rows = prop($$props, "rows", 3, 3), failed = prop($$props, "failed", 3, false);
+	var fragment = comment();
+	var node = first_child(fragment);
+	var consequent = ($$anchor) => {
+		var p = root$10();
+		append($$anchor, p);
+	};
+	var alternate = ($$anchor) => {
+		var div = root_2$4();
+		each(div, 21, () => ({ length: rows() }), index, ($$anchor, _, i) => {
+			var div_1 = root_1$9();
+			var span = child(div_1);
+			set_style(span, "", {}, { width: `${40 + i * 23 % 40}%` });
+			reset(div_1);
+			append($$anchor, div_1);
+		});
+		reset(div);
+		append($$anchor, div);
+	};
+	if_block(node, ($$render) => {
+		if (failed() || unread.failed) $$render(consequent);
+		else $$render(alternate, -1);
 	});
-	reset(div);
-	append($$anchor, div);
+	append($$anchor, fragment);
+	pop();
 }
 //#endregion
 //#region src/lib/Lazy.svelte
@@ -2181,7 +2304,7 @@ function StatusBar($$anchor, $$props) {
 	var consequent_1 = ($$anchor) => {
 		var span_1 = root_1$3();
 		var text_2 = only_child(span_1);
-		template_effect(() => set_text(text_2, `${projects() ?? ""} projects`));
+		template_effect(() => set_text(text_2, `${projects() ?? ""} ${projects() === 1 ? "project" : "projects"}`));
 		append($$anchor, span_1);
 	};
 	if_block(node_2, ($$render) => {
@@ -2625,10 +2748,10 @@ function App($$anchor, $$props) {
 		const cut = raw.indexOf("/");
 		const id = cut === -1 ? raw : raw.slice(0, cut);
 		if (!surfaces().some((s) => s.id === id)) {
-			if (!raw) {
-				const home = landing()?.id;
-				if (home) go(`#${home}`);
-			}
+			if (!raw) opening().then((s) => {
+				const home = s?.id ?? landing()?.id;
+				if (home && !location.hash.slice(1)) go(`#${home}`);
+			});
 			return;
 		}
 		set(current, id, true);
@@ -3147,6 +3270,6 @@ var target = document.getElementById("app");
 if (!target) throw new Error("no #app to mount into");
 mount(App, { target });
 //#endregion
-export { setMode as A, State as C, help as D, all as E, landing as M, listed$1 as N, onAction as O, surfaces as P, STATES as S, answerItemKeys as T, address as _, Inline as a, remember as b, clip as c, shape as d, reread as f, same$1 as g, resource as h, Skeleton as i, spell as j, run as k, listed as l, failure as m, Icon as n, blocks as o, copyText as p, Split as r, ago as s, Pill as t, plural as u, itemFocus as v, go as w, LIFE as x, place as y };
+export { all as A, place as C, State as D, STATES as E, spell as F, landing as I, listed$1 as L, onAction as M, run as N, go as O, setMode as P, surfaces as R, itemFocus as S, LIFE as T, TITLES as _, Inline as a, skippedSteps as b, clip as c, shape as d, reread as f, same$1 as g, resource as h, Skeleton as i, help as j, answerItemKeys as k, listed as l, failure as m, Icon as n, blocks as o, copyText as p, Split as r, ago as s, Pill as t, plural as u, incomplete as v, remember as w, address as x, keepSkipped as y };
 
 //# sourceMappingURL=app.js.map

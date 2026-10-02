@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  export type Target = { asked: string; name: string; root: string | null; refusal: string | null; says: string; notes: string[] };
+  export type Target = { asked: string; name: string; root: string | null; refusal: string | null; says: string; notes: string[]; no_check?: string | null };
 
   /// Whether Start can do what it says: the host answered for every project
   /// and refused none.
@@ -21,6 +21,7 @@
   import { go } from "../../lib/route";
   import { run } from "../../lib/keys";
   import Icon from "../../lib/ui/Icon.svelte";
+  import { surfaces } from "../../lib/surfaces";
 
   type Project = { id: string; name: string; root: string; trusted: boolean; default_agent?: string | null };
   type Agent = { id: string; name?: string; command?: string };
@@ -46,6 +47,23 @@
   const specs = $derived(specsRead.data?.projects ?? []);
 
   let chosen = $state<string[]>([]);
+  // Opened from the first-run checklist for one project, or with only one
+  // trusted project to choose: it is chosen, and shown chosen.
+  let prechosen = false;
+  $effect(() => {
+    if (prechosen || projects.length === 0) return;
+    prechosen = true;
+    let hint = "";
+    try {
+      hint = sessionStorage.getItem("vp-new-project") ?? "";
+      sessionStorage.removeItem("vp-new-project");
+    } catch {
+      /* no hint */
+    }
+    const trusted = projects.filter((p) => p.trusted);
+    const pick = projects.find((p) => p.id === hint) ?? (trusted.length === 1 && projects.length === 1 ? trusted[0] : null);
+    if (pick && chosen.length === 0) chosen = [pick.id];
+  });
   let title = $state("");
   let prompt = $state("");
   let agent = $state("");
@@ -132,6 +150,8 @@
     });
   }
   const close = () => run("leave", "new");
+  /// Whichever surface holds a project's gates, by the registry, not by name.
+  const gatesAt = surfaces().find((s) => s.holds === "gates")?.id ?? "";
 </script>
 
 <form class="new" onsubmit={start} aria-label="start a new change">
@@ -225,6 +245,9 @@
               <b>{t.name}</b>
               <span>{t.says}</span>
               {#each t.notes as n, i (i)}<span class="note">{n}</span>{/each}
+              {#if t.no_check}
+                <span class="note">{t.no_check}{#if t.root && gatesAt} · <a href={`#${gatesAt}/declare/${encodeURIComponent(projects.find((p) => p.root === t.root)?.id ?? t.root)}`}>Declare a check</a>{/if}</span>
+              {/if}
             </li>
           {/each}
         </ul>

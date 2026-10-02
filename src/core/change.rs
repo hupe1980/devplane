@@ -509,6 +509,26 @@ impl CommandResult {
         matches!(self.outcome, Outcome::Exited { code: 0 })
     }
 
+    /// `` `<program>` is not on PATH `` when the shell said it could not find
+    /// the program (exit 127 and its *not found*): a gate that cannot run here,
+    /// which is not a failing check. The exit and output stay as evidence.
+    pub fn not_on_path(&self) -> Option<String> {
+        if self.outcome != (Outcome::Exited { code: 127 }) {
+            return None;
+        }
+        let out = self.output_tail.to_ascii_lowercase();
+        if !(out.contains("not found") || out.contains("no such file or directory")) {
+            return None;
+        }
+        // The program: the first word that is not a `NAME=value` assignment.
+        let program = self
+            .command
+            .split_whitespace()
+            .find(|w| !(w.contains('=') && !w.starts_with('=')))?;
+        out.contains(&program.to_ascii_lowercase())
+            .then(|| format!("`{program}` is not on PATH"))
+    }
+
     /// Whether this command produced a verdict at all.
     pub fn answered(&self) -> bool {
         matches!(self.outcome, Outcome::Exited { .. })
@@ -857,6 +877,11 @@ impl GateReport {
                     c.outcome.headline()
                 )
             }
+            Some(c) if c.not_on_path().is_some() => format!(
+                "{} could not run: {}",
+                self.gate,
+                c.not_on_path().unwrap_or_default()
+            ),
             Some(c) if !c.failures.is_empty() => format!(
                 "{} failed: {} ({} failing)",
                 self.gate,

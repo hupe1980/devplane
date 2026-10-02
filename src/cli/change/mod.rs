@@ -13,16 +13,16 @@ use anyhow::Result;
 
 /// Refuses a decision about a change from inside an agent's session: an agent
 /// may not offer, finish, archive or mark read its own work. The same check
-/// `inbox answer` makes, with the same limit: it narrows the hole and does
-/// not close it — an agent that unsets the variable, or calls the host with
-/// the token in `~/.devplane/token`, is not stopped by it.
+/// `inbox answer` makes, with the same limit: it is advisory — an agent that
+/// unsets the variable, or calls the host with the token in
+/// `~/.devplane/token`, is not stopped by it.
 fn refuse_from_agent(what: &str) -> Result<()> {
     if let Some(var) = crate::hook::agent_session() {
         anyhow::bail!(
             "refused: `{var}` is set, so this is running inside an agent's session, and an \
              agent may not {what} its own change. Do it from the Devplane window or a terminal \
-             of your own. This check narrows the hole and does not close it: an agent that \
-             unsets the variable, or calls the host with its token, is not stopped by it."
+             of your own. This check is advisory: an agent that unsets the variable, or calls \
+             the host with its token, is not stopped by it."
         );
     }
     Ok(())
@@ -44,7 +44,7 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
         ChangeCmd::Finish { .. } => refuse_from_agent("finish")?,
         ChangeCmd::Archive { .. } => refuse_from_agent("archive")?,
         ChangeCmd::Review { seen, .. } if !seen.is_empty() => {
-            refuse_from_agent("mark read a weakened check of")?
+            refuse_from_agent("mark hunks seen in")?
         }
         _ => {}
     }

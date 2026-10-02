@@ -70,7 +70,7 @@ passes them in. `tests/purity.rs` fails the build on a violation.
 
 ## The store
 
-SQLite with WAL and FTS5, one file (schema version 12), readable with `sqlite3 ~/.devplane/devplane.db`.
+SQLite with WAL and FTS5, one file (schema version 13), readable with `sqlite3 ~/.devplane/devplane.db`.
 A schema change starts a new store
 ([after an upgrade](@/docs/troubleshooting.md#the-ledger-is-empty-after-an-upgrade)).
 
@@ -81,7 +81,8 @@ A schema change starts a new store
 | `messages` | what driven agents said | no; pruned with the events |
 | `decisions` | the decision log. Appended, never updated, never pruned | no |
 | `asks` | what an agent put to a person, and what became of it | no |
-| `weakened_seen` | which weakened-check rows a person marked read | no |
+| `seen` | which hunks a person marked seen, by content; no time | no |
+| `review_comments` | a person's comments on a change's lines, until and after they are sent | no |
 | `projection`, `channel_health`, `attention_log`, `agent_capabilities`, `looks` | the tail's mark, channel latency, inbox outcomes, what each agent advertised, when you last looked | bookkeeping |
 
 On host start, events (telemetry included), messages and their search index older than 30 days, and
@@ -119,7 +120,10 @@ HTTP + JSON on `127.0.0.1`, with Server-Sent Events. Tokens: [Security](@/docs/s
 | `/api/changes/{id}/retry` | POST | one more feedback round |
 | `/api/changes/{id}/snooze` | POST | quieten its inbox items |
 | `/api/changes/{id}/review` | GET | the review |
-| `/api/changes/{id}/review/seen` | POST | mark weakened rows read |
+| `/api/changes/{id}/review/seen` | POST | mark a hunk (or every hunk at a path) seen |
+| `/api/changes/{id}/comments` | GET, POST | a change's review comments; keep one on a line the diff shows |
+| `/api/changes/{id}/comments/{cid}` | DELETE | delete an unsent comment |
+| `/api/changes/{id}/comments/send` | POST | send every unsent comment as one prompt |
 | `/api/changes/{id}/certificate` | GET | the done certificate |
 | `/api/changes/{id}/open` | POST | open the worktree (window), else its path |
 | `/api/changes/{id}/resume` | POST | reconnect to the agent's session |

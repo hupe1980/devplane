@@ -38,7 +38,7 @@
 <footer class="status" aria-label="status">
   <span class="item pulse" class:bad role="status"><span class="dot"></span>{pulse}</span>
   {#each items.filter((i) => !i.end) as i (i.surface + i.word)}{@render fact(i)}{/each}
-  {#if projects != null}<span class="item">{projects} projects</span>{/if}
+  {#if projects != null}<span class="item">{projects} {projects === 1 ? "project" : "projects"}</span>{/if}
   <span class="gap"></span>
   {#each items.filter((i) => i.end) as i (i.surface + i.word)}{@render fact(i)}{/each}
   <button class="item" onclick={cycleTheme} title="theme"><Icon name={theme === "light" ? "sun" : "moon"} size={13} />{theme}</button>

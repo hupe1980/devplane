@@ -1146,6 +1146,16 @@ pub(crate) async fn cmd_serve(port: u16) -> Result<()> {
     // Held until this function returns — the host's whole life.
     let _lock = refuse_if_hosting().await?;
     let state = boot_state().await?;
+    // A debug build can be handed the window's key, so the UX bars can drive
+    // the window's page in a browser and trust from it as the app's webview
+    // does. A release build never reads it: there, only the app holds a key.
+    #[cfg(debug_assertions)]
+    if let Some(key) = std::env::var("DEVPLANE_WINDOW_KEY")
+        .ok()
+        .filter(|k| k.len() >= 32)
+    {
+        let _ = state.window_key.set(key);
+    }
     drain_decision_spool(&state).await;
     poller::reconcile_at_startup(&state).await;
     // Fill the board before anyone can ask for it.

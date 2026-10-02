@@ -1,3 +1,4 @@
+import { unseen } from "../../lib/sight";
 import { register, phase } from "../../lib/surfaces";
 import { bind, bindList, onAction } from "../../lib/keys";
 import { go } from "../../lib/route";
@@ -79,6 +80,7 @@ register({
       item,
       wanted,
       watching,
+      blind: unseen(feed.board),
       ...phase(feed),
     };
   },

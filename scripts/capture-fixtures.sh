@@ -43,7 +43,7 @@ bindir=$(dirname "$BIN")
 save() { # route file
   api GET "$1" | sed -e "s#$bindir#/opt/devplane/target/debug#g" -e "s#$real#/home/you/code#g" -e "s#$tmp#/home/you/code#g" -e "s#$PWD#/opt/devplane#g" | clip > "$out/$2.json"
 }
-for r in board inbox changes decisions projects specs setup forge agents quitting; do
+for r in board inbox changes decisions projects specs setup forge agents quitting first-run; do
   save "api/$r" "$r" || echo "capture-fixtures: /api/$r did not answer" >&2
 done
 save "api/search?q=Read" search || true

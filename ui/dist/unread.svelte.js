@@ -1,4 +1,4 @@
-import { E as if_block, F as delegated, J as proxy, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, et as pop, it as reset, j as from_html, k as append, q as sibling, tt as push } from "./api.js";
+import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, M as from_html, R as get, X as set, Y as proxy, Z as state, at as reset, i as api, k as set_text, nt as push, q as only_child, tt as pop } from "./api.js";
 import { p as copyText } from "./app.js";
 //#region src/lib/Commands.svelte
 var root = from_html(`<span class="note svelte-1hip6z1" role="status">Copied.</span>`);
@@ -38,69 +38,47 @@ function Commands($$anchor, $$props) {
 }
 delegate(["click"]);
 //#endregion
-//#region src/surfaces/change/review/marks.ts
-function digest(text) {
-	let h = 2166136261;
-	for (let i = 0; i < text.length; i++) {
-		h ^= text.charCodeAt(i);
-		h = Math.imul(h, 16777619);
-	}
-	return (h >>> 0).toString(16).padStart(8, "0");
-}
-var prefix = (change) => `review:${change}:`;
-function markKey(change, path, header, lines) {
-	const body = lines.map(([kind, text]) => `${kind}${text}`).join("\n");
-	return `${prefix(change)}${path}:${digest(`${header}\n${body}`)}`;
-}
-function readMark(key) {
-	try {
-		return localStorage.getItem(key) === "seen" ? "seen" : null;
-	} catch {
-		return null;
-	}
-}
-function writeMark$1(key, mark) {
-	try {
-		localStorage.setItem(key, mark);
-	} catch {}
-}
-function prune(change, live) {
-	try {
-		const gone = [];
-		for (let i = 0; i < localStorage.length; i++) {
-			const k = localStorage.key(i);
-			if (k?.startsWith(prefix(change)) && !live.has(k)) gone.push(k);
-		}
-		gone.forEach((k) => localStorage.removeItem(k));
-	} catch {}
-}
-function markedFor(change) {
-	try {
-		let n = 0;
-		for (let i = 0; i < localStorage.length; i++) {
-			const k = localStorage.key(i);
-			if (k?.startsWith(prefix(change)) && readMark(k)) n++;
-		}
-		return n;
-	} catch {
-		return 0;
-	}
-}
-//#endregion
 //#region src/surfaces/change/review/unread.svelte.ts
-var marks = proxy({ n: 0 });
-function writeMark(key, mark) {
-	writeMark$1(key, mark);
-	marks.n += 1;
+var posted = proxy({ keys: /* @__PURE__ */ new Set() });
+var keyOf = (change, path, digest) => `${change}\u0000${path}\u0000${digest}`;
+function isSeen(change, path, h) {
+	return !!h.seen || !!h.digest && posted.keys.has(keyOf(change, path, h.digest));
+}
+function unitSeen(change, f) {
+	return !!f.unit_seen || posted.keys.has(keyOf(change, f.path, "*"));
+}
+function unreadIn(change, f) {
+	if (!f.hunks.length) return f.unit_seen === false && !unitSeen(change, f) ? 1 : 0;
+	let n = 0;
+	for (const h of f.hunks) if (!isSeen(change, f.path, h)) n += 1;
+	return n;
+}
+async function markSeen(change, path, digest) {
+	const k = keyOf(change, path, digest ?? "*");
+	posted.keys = /* @__PURE__ */ new Set([...posted.keys, k]);
+	try {
+		await api(`/api/changes/${encodeURIComponent(change)}/review/seen`, {
+			method: "POST",
+			body: JSON.stringify(digest ? {
+				path,
+				digest
+			} : { path })
+		});
+	} catch (e) {
+		const next = new Set(posted.keys);
+		next.delete(k);
+		posted.keys = next;
+		throw e;
+	}
 }
 function unread(r, fallback = 0) {
-	marks.n;
+	posted.keys;
 	if (!r) return {
 		hunks: null,
 		weakened: fallback
 	};
 	let hunks = 0;
-	for (const g of r.groups) for (const f of g.files) for (const h of f.hunks) if (!readMark(markKey(r.change, f.path, h.header, h.lines))) hunks += 1;
+	for (const g of r.groups) for (const f of g.files) hunks += unreadIn(r.change, f);
 	const weakened = r.groups.flatMap((g) => g.weakened ?? []).filter((w) => !w.seen).length;
 	return {
 		hunks,
@@ -112,6 +90,6 @@ function unreadSays(u) {
 	return parts.length ? parts.join(" · ") : u.hunks === null ? "" : "0 unread";
 }
 //#endregion
-export { markedFor as a, Commands as c, markKey as i, unreadSays as n, prune as o, writeMark as r, readMark as s, unread as t };
+export { unreadIn as a, unread as i, markSeen as n, unreadSays as o, unitSeen as r, Commands as s, isSeen as t };
 
 //# sourceMappingURL=unread.svelte.js.map

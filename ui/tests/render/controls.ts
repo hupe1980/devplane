@@ -73,7 +73,7 @@ import { fail, html, source, visible, walk } from "../harness";
   if (!out.includes("completed") || /class="pill done/.test(out)) fail("a pill for an agent's own word is green or wordless");
   // Green is spent only in the files that draw a verified or passed fact.
   const allowed = new Set(["lib/State.svelte", "lib/ui/Pill.svelte", "lib/ui/Props.svelte", "lib/ui/Tabs.svelte",
-    "lib/ui/Timeline.svelte", "surfaces/change/Stepper.svelte", "surfaces/change/Doc.svelte", "surfaces/change/Overview.svelte",
+    "lib/ui/Timeline.svelte", "surfaces/change/Stepper.svelte", "surfaces/change/Doc.svelte", "surfaces/change/Head.svelte", "surfaces/change/Overview.svelte",
     "surfaces/change/Tasks.svelte", "surfaces/change/Gates.svelte", "surfaces/why/Why.svelte"]);
   for (const f of walk("../src/").filter((x) => /\.(svelte|ts|css)$/.test(x) && !x.includes("/wire/"))) {
     const rel = f.replace("../src/", "");

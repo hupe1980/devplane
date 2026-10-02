@@ -1,8 +1,8 @@
 // Plain words, no riddles, no markup: every surface, rendered over the host's
 // recorded responses, says nothing in this corpus's own register (*alone*,
 // *paired*) and shows no literal backtick or `**` — host text goes through the
-// one markdown renderer. And one *unread*: the change's header, its Review tab
-// and the review pane say the same number in the same words.
+// one markdown renderer. And one *unread*, said once on a change: on its
+// Review tab, in the words a review pane on its own uses.
 import Doc from "../../src/surfaces/change/Doc.svelte";
 import Overview from "../../src/surfaces/change/Overview.svelte";
 import Tasks from "../../src/surfaces/change/Tasks.svelte";
@@ -98,19 +98,24 @@ function plain(markup: string, where: string) {
   if (!RIDDLES.test("3 tasks alone") || !/`/.test(read("<p>`x`</p>"))) fail("the plain-words check finds nothing it should");
 }
 
-// ── One unread: header, Review tab and pane say the same words ────────────
+// ── One unread, said once: on the Review tab ─────────────────────────────
 {
   const rate: Json = recorded("change", "Rate-limit the login route");
   const review: Json = recorded("review", "Rate-limit the login route");
-  const says = unreadSays(unread(review, rate.qualifier?.unseen ?? 0));
-  if (!/\d+ hunks? unread · 1 weakened/.test(says)) fail(`the unread words are not "n hunks unread · 1 weakened": ${says}`);
+  const all = unreadSays(unread(review, rate.qualifier?.unseen ?? 0));
+  if (!/\d+ hunks? unread · 1 weakened/.test(all)) fail(`the unread words are not "n hunks unread · 1 weakened": ${all}`);
+  // On the change, the weakened count is the state's (*1 check weakened*);
+  // the Review tab says the hunks.
+  const says = unreadSays({ hunks: unread(review).hunks, weakened: 0 });
   const doc = read(html(Doc, { id: rate.id, detail: rate, review, loaded: true }));
   const tab = read(html(Doc, { id: rate.id, detail: rate, review, loaded: true, view: "review" }));
   const pane = read(html(Pane, { id: "", review }));
-  // The Review button, the Review tab's count and the pane's line.
-  if ((doc.split(says).length - 1) < 2) fail(`the header and the Review tab do not both say "${says}"`);
-  if (!pane.includes(says)) fail(`the review pane does not say "${says}"`);
-  if (!tab.includes(says)) fail(`the Review tab does not say "${says}"`);
+  // Said once on the screen — on the Review tab — and not again by the
+  // header's button or the pane inside the change. A pane on its own says it.
+  if ((doc.split(says).length - 1) !== 1) fail(`the change does not say "${says}" exactly once: ${doc.split(says).length - 1}`);
+  if ((tab.split(says).length - 1) !== 1) fail(`the Review view does not say "${says}" exactly once: ${tab.split(says).length - 1}`);
+  if (!pane.includes(all)) fail(`the review pane on its own does not say "${all}"`);
+  if (/\d+ weakened(?! checks?\b)/.test(doc.replace(/\d+ checks? weakened/g, ""))) fail("the change says its weakened count a second time");
   // Evidence first: with a weakened row unread, no green sentence about the check.
   if (/exited zero against the working tree as it stands/.test(doc)) fail("the green check sentence is shown over an unread weakened check");
   const seen = { ...rate, qualifier: { ...rate.qualifier, unseen: 0 } };

@@ -4851,14 +4851,17 @@ async fn an_offer_waits_for_every_weakened_row_to_be_seen() {
         &c,
         &addr,
         &format!("/api/changes/{id}/review/seen"),
-        serde_json::json!({ "path": "fixed.txt" }),
+        serde_json::json!({ "path": "not-in-this-change.txt" }),
     )
     .await;
     assert!(
-        none["error"].as_str().unwrap().contains("no weakened row"),
+        none["error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing in this change to mark seen"),
         "{none}"
     );
-    assert_eq!(none["rows"][0]["path"], "tests/login.test.ts", "{none}");
+    assert_eq!(none["digests"], serde_json::json!([]), "{none}");
 
     // Seen by a person: the review says so, and the offer proceeds as before.
     let seen = post(
@@ -4886,6 +4889,7 @@ async fn an_offer_waits_for_every_weakened_row_to_be_seen() {
         "test(\"login\", () => {});\nit.skip(\"rejects a burst\", () => {});\n",
     )
     .unwrap();
+    std::fs::write(wt.join("extra.txt"), "nobody opened this\n").unwrap();
     commit_in(&wt, "reword the skipped test");
     let again = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
     assert_eq!(again["refused"], "weakened_unseen", "{again}");
@@ -4911,6 +4915,24 @@ async fn an_offer_waits_for_every_weakened_row_to_be_seen() {
         offer["committed"].is_null(),
         "the checked tree was already committed: {offer}"
     );
+    // The file nobody opened is named — it informs the offer, never refuses
+    // it — and never as a share of the change's files.
+    let not: Vec<&str> = offer["not_opened"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(not.contains(&"extra.txt"), "{offer}");
+    assert!(!not.contains(&"tests/login.test.ts"), "{offer}");
+    let says = offer["not_opened_says"].as_str().unwrap();
+    assert_eq!(
+        says,
+        format!("{} files not opened: {}", not.len(), not.join(", ")),
+        "{offer}"
+    );
+    let text = offer.to_string();
+    assert!(!text.contains(" of ") && !text.contains('%'), "{offer}");
     std::fs::remove_dir_all(&repo).ok();
 }
 
@@ -5073,7 +5095,7 @@ fn a_decision_about_a_change_is_refused_from_an_agent_session() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{args:?} ran from an agent session");
         assert!(
-            err.contains("`CLAUDECODE` is set") && err.contains("does not close it"),
+            err.contains("`CLAUDECODE` is set") && err.contains("advisory"),
             "{args:?}: {err}"
         );
     }

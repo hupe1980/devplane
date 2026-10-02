@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { declaresNoCheck } from "../../lib/NoCheck.svelte";
   // One change, as a document: what it is, where it stands, what you can do
   // to it, and six views over it. The state decides the toolbar: only actions
   // that can do something are offered. Every sentence is the host's.
@@ -6,7 +7,8 @@
   // Evidence first: while a weakened check is unread the header leads with
   // it, *verified* follows as a plain word, and the green sentence about the
   // check is not shown — it would be the first reassurance on the page. The
-  // header stays under ~120 px; the view tabs stick under it.
+  // header is one line (`Head`); the view tabs stick under it. The address
+  // names the view and, in the review, the hunk under the cursor.
   import { untrack } from "svelte";
   import { api, Refused } from "../../lib/api";
   import { resource, copyText, failure } from "../../lib/resource.svelte";
@@ -15,15 +17,12 @@
   import Commands from "../../lib/Commands.svelte";
   import Skeleton from "../../lib/Skeleton.svelte";
   import Inline from "../../lib/ui/Inline.svelte";
-  import ChangeState, { weakLeads } from "../../lib/ChangeState.svelte";
+  import { weakLeads } from "../../lib/ChangeState.svelte";
   import { onAction, setMode } from "../../lib/keys";
   import { offerCommands } from "../../lib/offered.svelte";
-  import { shape } from "../../lib/text";
-  import Icon from "../../lib/ui/Icon.svelte";
-  import Pill from "../../lib/ui/Pill.svelte";
   import Tabs from "../../lib/ui/Tabs.svelte";
   import Empty from "../../lib/ui/Empty.svelte";
-  import Stepper from "./Stepper.svelte";
+  import Head from "./Head.svelte";
   import { STATES } from "../../lib/State.svelte";
   import Overview from "./Overview.svelte";
   import Gates from "./Gates.svelte";
@@ -42,7 +41,8 @@
     loaded = false,
     detail: planted = null,
     review: plantedReview = null,
-    /// The view the address names (`#change/<id>/<view>`).
+    /// The view the address names: `#change/<id>/<view>`, and in the review
+    /// `#change/<id>/review/<path>@<digest>`.
     view: asked = "",
     /// Moves the address to another view; absent in the render harness.
     showView = null,
@@ -81,7 +81,12 @@
   const VIEWS = ["overview", "tasks", "review", "gates", "ledger", "agent"] as const;
   /// The view picked here when there is no address to hold it (the harness).
   let local = $state("overview");
-  const view = $derived((VIEWS as readonly string[]).includes(asked) ? asked : local);
+  const askedView = $derived(asked.split("/")[0]);
+  /// The hunk the address names, in the review: `<path>@<digest>`.
+  const askedHunk = $derived(askedView === "review" ? asked.slice("review/".length) : "");
+  const view = $derived((VIEWS as readonly string[]).includes(askedView) ? askedView : local);
+  /// An address naming a view this change does not have says so.
+  const lost = $derived(askedView && !(VIEWS as readonly string[]).includes(askedView) ? `There is no view called "${askedView}"; this is the overview.` : "");
   function setView(v: string) {
     local = v;
     showView?.(v === "overview" ? "" : v);
@@ -124,8 +129,9 @@
   /// primary action and an offer is refused by the host.
   const unseen = $derived(d?.qualifier?.unseen ?? 0);
   const leads = $derived(weakLeads(d?.qualifier));
-  /// One *unread*, for the Review button, the Review tab and the pane.
-  const unreadNow = $derived(unreadSays(unread(review, unseen)));
+  /// One *unread*, said once: on the Review tab. Hunks only — the weakened
+  /// rows are counted by the state beside the title.
+  const unreadNow = $derived(unreadSays({ hunks: unread(review, unseen).hunks, weakened: 0 }));
   /// The tree has uncommitted work the last check did not run over.
   const uncovered = $derived(
     !!d?.tree_now && d.tree_now.clean === false && !!d.gate?.ran_at?.tree && d.gate.ran_at.tree !== d.tree_now.tree,
@@ -138,7 +144,6 @@
     setView("review");
   }
   const lastRun = $derived(d?.runs?.[d.runs.length - 1] ?? "");
-  const project = $derived((d?.project_id ?? "").split("/").filter(Boolean).pop() ?? "");
 
   type Verb = "verify" | "finish" | "offer" | "resume" | "retry" | "archive";
   /// Each verb's route, spelled whole so a guard can hold every one to a
@@ -172,6 +177,7 @@
   };
   type Answered = {
     offer?: string;
+    not_opened_says?: string;
     push?: string;
     create?: string;
     pull_request?: { url: string };
@@ -182,12 +188,12 @@
   /// The sentence a write came to, from what the host answered.
   function outcome(verb: Verb, r: Answered): string {
     if (verb === "offer" && r?.offer !== "opened") {
-      return "Nothing was pushed — [github] pull_request is not set, so the pull request is yours to open. Run:";
+      return `${r?.not_opened_says ? `${r.not_opened_says}. ` : ""}Nothing was pushed — [github] pull_request is not set, so the pull request is yours to open. Run:`;
     }
     if (verb === "verify" && typeof r?.passed === "boolean") {
       return `${r.passed ? "The gates exited zero" : "The gates failed"}${r.summary ? `: ${r.summary}` : "."}`;
     }
-    return (r?.says ?? PAST[verb]) + (r?.pull_request?.url ? ` — ${r.pull_request.url}` : "");
+    return (r?.says ?? PAST[verb]) + (r?.pull_request?.url ? ` — ${r.pull_request.url}` : "") + (r?.not_opened_says ? `. ${r.not_opened_says}` : "");
   }
   async function act(verb: Verb) {
     const at = key;
@@ -260,13 +266,15 @@
   /// toolbar uses. The host still refuses an offer over an unread row.
   const canOffer = $derived(verified && unseen === 0);
   /// Why Offer is held, said beside it; empty when it is not.
-  const offerHeld = $derived(verified && unseen > 0 ? `Read ${unseen} weakened ${unseen === 1 ? "check" : "checks"} first` : "");
+  /// The count is the state's own (*1 check weakened*), said once; this says
+  /// what to do about it.
+  const offerHeld = $derived(verified && unseen > 0 ? `Read the weakened ${unseen === 1 ? "check" : "checks"} first` : "");
   // The palette's *this change* commands, each through this document's code.
   $effect(() => {
     if (!d) return;
     return offerCommands(d.title || d.id, [
       { label: `Review${unreadNow ? ` — ${unreadNow}` : ""}`, icon: "split", run: () => setView("review") },
-      ...(d.worktree ? [{ label: "Run gates", icon: "gate", run: () => void act("verify") }] : []),
+      ...(d.worktree && !declaresNoCheck(d) ? [{ label: "Run gates", icon: "gate", run: () => void act("verify") }] : []),
       ...(canOffer ? [{ label: "Offer as pull request", icon: "forge", run: () => void act("offer") }] : []),
     ]);
   });
@@ -283,81 +291,41 @@
 {:else if !d}
   <div class="loading"><Skeleton rows={4} /></div>
 {:else}
-  <article class="doc">
-    <header class="head">
-      <div class="line1">
-        <h1 title={d.title || d.id}>{d.title || d.id}</h1>
-        <ChangeState state={d.state} q={d.qualifier} />
-        {#if d.waiting_says}<Pill word={d.waiting_says} as="wait" />{/if}
-        <span class="gap"></span>
-        <Stepper state={d.state} archived={!!d.archived_at} offered={!!d.pull_request} weakUnread={unseen} />
-      </div>
-      <div class="chips">
-        <span class="chip"><Icon name="folder" size={12} /> {project}</span>
-        {#if d.branch}
-          <button class="chip mono" title="copy the branch name" onclick={() => copy(d!.branch!, "the branch name")}><Icon name="change" size={12} /> {d.branch}</button>
-        {/if}
-        {#if d.spec}<span class="chip mono" title={d.spec}><Icon name="spec" size={12} /> {d.spec}</span>{/if}
-        {#if d.in_place}<span class="chip warn"><Icon name="alert" size={12} /> in place — no parallel safety</span>{/if}
-        {#if d.shape_says}<span class="chip">{shape(d.shape_says)}</span>{/if}
-        {#if standing}<span class="standing {verified && !leads ? 'done' : ''}"><Inline text={standing} /></span>{/if}
-      </div>
-      {#if d.base_checks}
-        <!-- Beside the standing, never in it: counts carry no status colour. -->
-        <p class="counts">{d.base_checks.counts_says}{#if d.base_checks.on_base && !d.base_checks.stale}<span class="w-{d.base_checks.on_base.weight}"> · {d.base_checks.on_base.says}</span>{/if}</p>
-      {/if}
-
-      <div class="toolbar" class:held-offer={!!offerHeld} role="toolbar" aria-label="what you can do to this change">
-        <button class:primary={unseen > 0 || !verified} onclick={() => setView("review")}><Icon name="split" size={14} /> Review{#if unreadNow}<span class="count">{unreadNow}</span>{/if}</button>
-        {#if d.worktree}
-          <button onclick={() => act("verify")} disabled={!!pending.busy}><Icon name="gate" size={14} /> Run gates</button>
-        {/if}
-        {#if verified}
-          <!-- Held while a weakened row is unread, with why beside it: the host
-               refuses that offer, so the button does not pretend otherwise. -->
-          {#if offerHeld}
-            <button disabled aria-label="Offer as pull request" aria-describedby="offer-held"><Icon name="forge" size={14} /> Offer</button>
-            <span class="held" id="offer-held">{offerHeld}</span>
-          {:else}
-            <button class:primary={unseen === 0} onclick={() => act("offer")} disabled={!!pending.busy}><Icon name="forge" size={14} /> Offer as pull request</button>
-          {/if}
-        {/if}
-        {#if d.stopped}
-          <button onclick={() => act("resume")} disabled={!!pending.busy}><Icon name="play" size={14} /> Pick it back up</button>
-          {#if d.can_retry}<button onclick={() => act("retry")} disabled={!!pending.busy}><Icon name="refresh" size={14} /> Try again</button>{/if}
-        {/if}
-        {#if !d.completion && !d.archived_at && d.runs?.length}
-          <button onclick={() => act("finish")} disabled={!!pending.busy}><Icon name="check" size={14} /> Finish</button>
-        {/if}
-        <span class="gap"></span>
-        {#if d.worktree}
-          <button class="quiet" onclick={() => openIn("editor")} title="open the worktree in your editor" aria-label="Editor"><Icon name="external" size={14} /> <span class="label">Editor</span></button>
-          <button class="quiet" onclick={() => openIn("terminal")} title="open a terminal in the worktree" aria-label="Terminal"><Icon name="terminal" size={14} /> <span class="label">Terminal</span></button>
-        {/if}
-        {#if !d.archived_at && (d.completion || d.stopped)}
-          <button class="quiet" disabled={!!pending.busy} onclick={() => act("archive")} title="remove the worktree; the branch and the record are kept" aria-label="Archive"><Icon name="folder" size={14} /> <span class="label">Archive</span></button>
-        {/if}
-      </div>
-      <!-- Mounted always, so the first sentence is announced too. -->
-      <p class="said" class:empty={!said && !pending.busy} role="status" aria-live="polite">
-        {#if pending.busy}{DOING[pending.busy as Verb]} · {pending.elapsed} — nothing else can be started on this change until it is back.{:else}<Inline text={said} />{/if}
-      </p>
-      {#if commands.length && !pending.busy}<Commands {commands} />{/if}
-      {#if read.phase === "stale" && read.failure}<Failed what="this change" failure={read.failure} at={read.at} stale />{/if}
-      {#if refusal}<Refusal {refusal} read={readRow} />{/if}
-    </header>
+  <article class="doc" class:reviewing={view === "review"}>
+    <Head
+      {d}
+      {view}
+      {unseen}
+      {verified}
+      {leads}
+      {standing}
+      {offerHeld}
+      busy={pending.busy ?? ""}
+      notOpened={review?.not_opened ?? []}
+      {act}
+      {openIn}
+      {copy}
+      review={() => setView("review")}
+    />
+    <!-- Mounted always, so the first sentence is announced too. -->
+    <p class="said" class:empty={!said && !pending.busy && !lost} role="status" aria-live="polite">
+      {#if pending.busy}{DOING[pending.busy as Verb]} · {pending.elapsed} — nothing else can be started on this change until it is back.{:else}<Inline text={said || lost} />{/if}
+    </p>
+    {#if commands.length && !pending.busy}<div class="under"><Commands {commands} /></div>{/if}
+    {#if read.phase === "stale" && read.failure}<div class="under"><Failed what="this change" failure={read.failure} at={read.at} stale /></div>{/if}
+    {#if refusal}<div class="under"><Refusal {refusal} read={readRow} /></div>{/if}
 
     <div class="tabbar"><Tabs {tabs} bind:active={() => view, setView} label="views of this change" /></div>
 
-    <div class="view" role="tabpanel" aria-label={tabs.find((t) => t.id === view)?.label}>
+    <div class="view" class:review={view === "review"} role="tabpanel" aria-label={tabs.find((t) => t.id === view)?.label}>
       {#if view === "overview"}
         <Overview {d} go={setView} />
       {:else if view === "tasks"}
         <Tasks {d} {lastRun} reload={read.reload} />
       {:else if view === "review"}
-        <Pane id={key} focus={reviewAt} source={reviewRead} review={plantedReview} />
+        <Pane id={key} focus={reviewAt || askedHunk} source={reviewRead} review={plantedReview} counted onaddress={(at) => showView?.(`review/${at}`)} />
       {:else if view === "gates"}
-        <Gates {d} id={key} reload={() => read.reload()} />
+        <Gates {d} id={key} reload={() => read.reload()} weakened={(review?.groups ?? []).flatMap((g) => g.weakened ?? [])} toLine={readRow} />
       {:else if view === "ledger"}
         <Ledger id={key} />
       {:else if view === "agent"}
@@ -374,165 +342,11 @@
     flex-direction: column;
     min-height: 100%;
   }
-  .head {
-    padding: var(--s-3) var(--s-6) var(--s-2);
-    display: grid;
-    gap: var(--s-2);
-    background: var(--bg);
-    min-width: 0;
-  }
-  .line1,
-  .chips,
-  .toolbar {
-    display: flex;
-    align-items: center;
-    gap: var(--s-2);
-    min-width: 0;
-  }
-  /* Narrow, the header wraps; nothing in it is cut at the right edge. */
-  .line1,
-  .chips,
-  .toolbar {
-    flex-wrap: wrap;
-    row-gap: var(--s-1);
-  }
-  .line1 {
-    gap: var(--s-3);
-  }
-  h1 {
-    margin: 0;
-    font-size: 1.2rem;
-    font-weight: 650;
-    letter-spacing: -0.015em;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .gap {
-    flex: 1;
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    height: 1.4rem;
-    padding: 0 0.5rem;
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    background: var(--panel);
-    color: var(--dim);
-    font: inherit;
-    font-size: var(--t-xs);
-    white-space: nowrap;
-    flex: none;
-    max-width: 22rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  button.chip {
-    cursor: pointer;
-  }
-  button.chip:hover {
-    color: var(--ink);
-    border-color: var(--edge);
-  }
-  .chip.mono {
-    font-family: var(--mono);
-  }
-  .chip.warn {
-    color: var(--wait);
-  }
-  .standing {
-    min-width: 0;
-    color: var(--dim);
-    font-size: var(--t-xs);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .standing.done {
-    color: var(--done);
-  }
-  .counts {
-    margin: 0;
-    color: var(--dim);
-    font-size: var(--t-xs);
-    font-variant-numeric: tabular-nums;
-  }
-  .counts .w-warn {
-    color: var(--wait);
-    font-weight: 600;
-  }
-  .counts .w-absent {
-    color: var(--faint);
-  }
-  /* Narrower still, or with a held Offer's reason to make room for, the
-     quiet actions keep their icon and lose their word. */
-  .toolbar.held-offer .quiet {
-    padding: 0 0.45rem;
-  }
-  .toolbar.held-offer .quiet .label {
-    display: none;
-  }
-  @container doc (max-width: 900px) {
-    .toolbar .quiet {
-      padding: 0 0.45rem;
-    }
-    .toolbar .quiet .label {
-      display: none;
-    }
-  }
-  .toolbar button {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    height: 1.8rem;
-    padding: 0 0.7rem;
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    background: var(--panel);
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--t-sm);
-    cursor: pointer;
-    white-space: nowrap;
-    flex: none;
-  }
-  .toolbar button:hover:not(:disabled) {
-    border-color: var(--edge);
-    background: var(--raise);
-  }
-  .toolbar button:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-  .toolbar .primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--chrome);
-    font-weight: 600;
-  }
-  .toolbar .quiet {
-    background: none;
-    border-color: transparent;
-    color: var(--dim);
-  }
-  .held {
-    font-size: var(--t-xs);
-    color: var(--wait);
-    white-space: nowrap;
-  }
-  .count {
-    margin-left: 0.3rem;
-    font-size: var(--t-xs);
-    font-weight: 600;
-  }
   .said {
-    margin: 0;
+    margin: 0 var(--s-6) var(--s-1);
     font-size: var(--t-sm);
     color: var(--dim);
-    padding: var(--s-2) var(--s-3);
+    padding: var(--s-1) var(--s-3);
     border-left: 2px solid var(--accent);
     background: var(--panel);
   }
@@ -542,9 +356,13 @@
     width: 1px;
     height: 1px;
     padding: 0;
+    margin: 0;
     border: 0;
     overflow: hidden;
     clip-path: inset(50%);
+  }
+  .under {
+    padding: 0 var(--s-6) var(--s-1);
   }
   .tabbar {
     position: sticky;
@@ -557,6 +375,18 @@
     flex: 1;
     padding: var(--s-4) var(--s-6) var(--s-6);
     min-width: 0;
+  }
+  /* The review fills the editor and scrolls inside its column, so moving
+     hunk to hunk never scrolls the header away. */
+  .doc.reviewing {
+    height: 100%;
+    min-height: 0;
+  }
+  .view.review {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: var(--s-2) var(--s-4) var(--s-2);
   }
   .failed,
   .loading {

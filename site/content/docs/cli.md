@@ -261,7 +261,7 @@ roles` order with its role, covering test, decisions and task. No score.
 |---|---|
 | `--by risk` | declared role order (default) |
 | `--by intent` | grouped by the run that wrote each file and its tasks; unrequested files last |
-| `--seen <path>` | mark every weakened row at that path read, as yours (repeatable); refused for a path with none, and inside an agent session |
+| `--seen <path>` | mark every hunk at that path seen, as yours (repeatable); a weakened row is read when its hunks are. Refused for a path with nothing in the change, and inside an agent session (an advisory check) |
 
 #### `devplane change verify <change>`
 

@@ -5,7 +5,6 @@
   import State from "../../lib/State.svelte";
   import { clip } from "../../lib/text";
   import Qualifier from "../../lib/Qualifier.svelte";
-  import { markedFor } from "../change/review/marks";
   import { unreadSays } from "../change/review/unread.svelte";
   import Inline from "../../lib/ui/Inline.svelte";
   import { safeHref } from "../../lib/href";
@@ -102,9 +101,9 @@
   } = $props();
 
   const acts = $derived(item.actions ?? []);
-  /// Hunks this browser marked, never more than the change has: the host
-  /// cannot see these marks, so the window adds them.
-  const markedHunks = $derived(item.facts && item.change_id ? Math.min(markedFor(item.change_id), item.facts.hunks) : 0);
+  /// Hunks a person marked seen, from the host's marks — the count the
+  /// review, the CLI and the offer read. Absent in an older recording.
+  const markedHunks = $derived(item.facts ? Math.min(item.facts.hunks_seen ?? 0, item.facts.hunks) : 0);
   const has = (a: string) => acts.includes(a);
   /// The host's links, only with a scheme `lib/href` allows.
   const url = $derived(safeHref(item.url));
@@ -213,7 +212,7 @@
     {#if item.facts}
       <p class="facts">
         <Qualifier q={item.facts.qualifier} />
-        <span class="unread" title="hunks not marked in this browser's review, and weakened rows not recorded as read">· {unreadSays({ hunks: item.facts.hunks - markedHunks, weakened: item.facts.qualifier.unseen })}</span>
+        <span class="unread" title="hunks nobody marked seen, and weakened rows nobody has read">· {unreadSays({ hunks: item.facts.hunks - markedHunks, weakened: item.facts.qualifier.unseen })}</span>
         {#each item.facts.says as s (s)}<span>· <Inline text={s} /></span>{/each}
       </p>
     {/if}

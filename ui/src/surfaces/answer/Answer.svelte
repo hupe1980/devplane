@@ -19,7 +19,8 @@
   let {
     /// A planted list, for a harness; otherwise read from the host.
     items = null,
-  }: { items?: Item[] | null } = $props();
+    blind = "",
+  }: { items?: Item[] | null; blind?: string } = $props();
 
   /// The host's needs-you list (as `devplane inbox --needs-you`), so this
   /// window agrees with the tray's number.
@@ -161,6 +162,7 @@
       <Failed what="what needs you" failure={read.failure} at={read.at} stale />
     {:else}
       <p class="dim">Nothing needs you.</p>
+      {#if blind}<p class="dim"><Inline text={blind} /></p>{/if}
     {/if}
   {/if}
   <p class="hint dim">Esc hides this · ? lists every key</p>

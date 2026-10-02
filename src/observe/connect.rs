@@ -923,6 +923,321 @@ pub fn inspect(settings: &Map<String, Value>, path: &Path) -> ConnectState {
     }
 }
 
+/// The vendors whose settings `connect` writes, as the window names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Agent {
+    Claude,
+    Codex,
+    Copilot,
+}
+
+impl Agent {
+    pub const ALL: [Agent; 3] = [Agent::Claude, Agent::Codex, Agent::Copilot];
+
+    pub fn parse(s: &str) -> Option<Agent> {
+        match s {
+            "claude" => Some(Agent::Claude),
+            "codex" => Some(Agent::Codex),
+            "copilot" => Some(Agent::Copilot),
+            _ => None,
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::Codex => "codex",
+            Agent::Copilot => "copilot",
+        }
+    }
+
+    /// The vendor's own product name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude Code",
+            Agent::Codex => "Codex",
+            Agent::Copilot => "GitHub Copilot CLI",
+        }
+    }
+
+    /// The settings file connect writes for this vendor.
+    pub fn settings_file(self) -> Result<PathBuf> {
+        match self {
+            Agent::Claude => settings_path(),
+            Agent::Codex => crate::observe::codex::hooks_path()
+                .context("no home directory, so no ~/.codex to write to"),
+            Agent::Copilot => crate::observe::copilot::hooks_dir()
+                .map(|d| d.join(crate::observe::copilot::HOOKS_FILE))
+                .context("no home directory, so no ~/.copilot to write to"),
+        }
+    }
+}
+
+/// A change to one vendor settings file, computed and not yet written: the
+/// window shows `diff` and writes `after` only on the person's confirm.
+/// `after: None` removes the file (Copilot's, which is wholly Devplane's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Planned {
+    pub path: PathBuf,
+    pub before: String,
+    pub after: Option<String>,
+    pub diff: String,
+}
+
+impl Planned {
+    fn of(path: PathBuf, before: String, after: Option<String>) -> Planned {
+        let diff = diff(&before, after.as_deref().unwrap_or(""));
+        Planned {
+            path,
+            before,
+            after,
+            diff,
+        }
+    }
+}
+
+/// A file of the person's, or empty when there is none. Any other failure is
+/// an error: read as empty, the file would be overwritten.
+pub fn read_existing(file: &Path) -> Result<String> {
+    match std::fs::read_to_string(file) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {}; left as it was", file.display())),
+    }
+}
+
+fn json_doc(text: &str, file: &Path) -> Result<Map<String, Value>> {
+    if text.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    serde_json::from_str(text)
+        .with_context(|| format!("{} is not JSON; not touching it", file.display()))
+}
+
+/// What `agent connect <agent>` would write, with every hook running `exe`.
+pub fn plan_connect(
+    agent: Agent,
+    exe: &Path,
+    base_url: &str,
+    ingest_token: &str,
+) -> Result<Planned> {
+    let path = agent.settings_file()?;
+    let before = read_existing(&path)?;
+    let after = match agent {
+        Agent::Claude => {
+            let mut settings = json_doc(&before, &path)?;
+            let _ = connect(&mut settings, base_url, ingest_token, exe);
+            render_settings(&settings)
+        }
+        Agent::Codex => {
+            let mut doc = json_doc(&before, &path)?;
+            crate::observe::codex::install(&mut doc, exe);
+            serde_json::to_string_pretty(&doc)? + "\n"
+        }
+        Agent::Copilot => {
+            serde_json::to_string_pretty(&crate::observe::copilot::hooks_file(exe))? + "\n"
+        }
+    };
+    // Claude's settings are diffed as rendered, so formatting alone is not a change.
+    let before_shown = match agent {
+        Agent::Claude if !before.trim().is_empty() => render_settings(&json_doc(&before, &path)?),
+        _ => before,
+    };
+    Ok(Planned::of(path, before_shown, Some(after)))
+}
+
+/// What `agent disconnect <agent>` would write: exactly Devplane's entries out.
+pub fn plan_disconnect(agent: Agent) -> Result<Planned> {
+    let path = agent.settings_file()?;
+    let before = read_existing(&path)?;
+    let after = match agent {
+        Agent::Claude if before.trim().is_empty() => Some(before.clone()),
+        Agent::Claude => {
+            let mut settings = json_doc(&before, &path)?;
+            let shown = render_settings(&settings);
+            disconnect(&mut settings);
+            return Ok(Planned::of(path, shown, Some(render_settings(&settings))));
+        }
+        Agent::Codex => {
+            let mut doc = json_doc(&before, &path)?;
+            match crate::observe::codex::uninstall(&mut doc) {
+                0 => Some(before.clone()),
+                _ => Some(serde_json::to_string_pretty(&doc)? + "\n"),
+            }
+        }
+        Agent::Copilot if before.is_empty() => Some(String::new()),
+        Agent::Copilot => None,
+    };
+    Ok(Planned::of(path, before, after))
+}
+
+/// Writes a planned change, but only if the file still reads as it did when
+/// the diff was shown; otherwise the plan is stale and nothing is written.
+pub fn apply(planned: &Planned) -> Result<bool> {
+    let now = read_existing(&planned.path)?;
+    let same = match planned.path.extension().and_then(|e| e.to_str()) {
+        // Claude's diff was taken over the rendered form.
+        _ if now == planned.before => true,
+        Some("json") => serde_json::from_str::<Map<String, Value>>(&now)
+            .ok()
+            .is_some_and(|m| render_settings(&m) == planned.before),
+        _ => false,
+    };
+    if !same {
+        return Ok(false);
+    }
+    if planned.diff.is_empty() {
+        return Ok(true);
+    }
+    match &planned.after {
+        None => std::fs::remove_file(&planned.path)
+            .with_context(|| format!("removing {}", planned.path.display()))?,
+        Some(after) if planned.path == settings_path().unwrap_or_default() => {
+            write_settings(&planned.path, &json_doc(after, &planned.path)?)?
+        }
+        Some(after) => write_whole(&planned.path, after)?,
+    }
+    Ok(true)
+}
+
+/// Writes a whole file through a temporary one, so an interrupted write never
+/// leaves half of it.
+pub fn write_whole(file: &Path, contents: &str) -> Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let tmp = file.with_extension(format!("devplane-{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, file)
+        .inspect_err(|_| {
+            std::fs::remove_file(&tmp).ok();
+        })
+        .with_context(|| format!("writing {}", file.display()))
+}
+
+/// Whether each vendor is connected, and whether its gate is off because the
+/// binary its hooks name is gone: what the first-run checklist and Setup read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AgentConnection {
+    pub agent: Agent,
+    pub name: &'static str,
+    pub settings_path: String,
+    /// Some hook of ours is present.
+    pub connected: bool,
+    /// Hooks of ours whose binary no longer exists, by event.
+    pub gate_off: Vec<String>,
+    /// The vendor's own directory exists: it is installed here, or was.
+    pub present: bool,
+}
+
+/// Reads each vendor's settings as `doctor` does. Unreadable reads as not connected.
+pub fn connections() -> Vec<AgentConnection> {
+    Agent::ALL
+        .iter()
+        .filter_map(|&agent| {
+            let path = agent.settings_file().ok()?;
+            let text = read_existing(&path).unwrap_or_default();
+            let present = path.parent().is_some_and(|d| d.exists());
+            let (connected, gate_off) = match agent {
+                Agent::Claude => {
+                    let s = json_doc(&text, &path).unwrap_or_default();
+                    let st = inspect(&s, &path);
+                    (
+                        !st.hooks_installed.is_empty(),
+                        st.gate_off.into_iter().map(|(e, _)| e).collect(),
+                    )
+                }
+                Agent::Codex => {
+                    let d = json_doc(&text, &path).unwrap_or_default();
+                    (!crate::observe::codex::installed(&d).is_empty(), Vec::new())
+                }
+                Agent::Copilot => (!text.trim().is_empty(), Vec::new()),
+            };
+            Some(AgentConnection {
+                agent,
+                name: agent.name(),
+                settings_path: path.display().to_string(),
+                connected,
+                gate_off,
+                present,
+            })
+        })
+        .collect()
+}
+
+/// Why a binary path would not outlive the hooks that name it, if it would
+/// not: a package runner's cache, a macOS App Translocation mount, a mounted
+/// disk image, or an AppImage's mount.
+#[must_use]
+pub fn transient_binary(path: &std::path::Path) -> Option<&'static str> {
+    let p = path.to_string_lossy().replace('\\', "/");
+    if p.contains("/_npx/") || p.contains("/.npm/_npx/") || p.contains("/npm-cache/_npx/") {
+        return Some("inside npx's package cache, which npm clears and replaces");
+    }
+    if p.contains("/AppTranslocation/") {
+        return Some("a macOS App Translocation path, a read-only copy that moves on every launch");
+    }
+    if p.starts_with("/Volumes/") {
+        return Some("on a mounted volume (a .dmg, say), which is gone once it is ejected");
+    }
+    if p.contains("/.mount_") {
+        return Some("inside an AppImage's mount, which exists only while it runs");
+    }
+    None
+}
+
+/// The binary every hook will run: `--bin` when given, else this one — unless
+/// this one lives somewhere that will disappear, which is refused with the
+/// reason and the fix. An AppImage names itself through `$APPIMAGE`.
+pub fn stable_binary(bin: Option<std::path::PathBuf>) -> anyhow::Result<std::path::PathBuf> {
+    if let Some(bin) = bin {
+        let bin = std::fs::canonicalize(&bin)
+            .with_context(|| format!("--bin {}: no such file", bin.display()))?;
+        if !bin.is_file() {
+            anyhow::bail!("--bin {}: not a file", bin.display());
+        }
+        return Ok(bin);
+    }
+    // `$APPIMAGE` is set by the AppImage runtime; trusted only when it names
+    // the file, since any process can set a variable.
+    if let Some(image) = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty()) {
+        let image = std::path::PathBuf::from(image);
+        if image.is_file() {
+            return Ok(image);
+        }
+        anyhow::bail!(
+            "not connecting: $APPIMAGE names {}, which is not a file; pass --bin <path>",
+            image.display()
+        );
+    }
+    let exe = std::env::current_exe().context("finding the devplane binary")?;
+    match transient_binary(&exe) {
+        None => Ok(exe),
+        Some(why) if is_app_mount(&exe) => anyhow::bail!(
+            "not connecting: every hook runs the binary's path, and {} is {why}, so the hooks \
+             — and the gate — would stop working without a word when it goes. Move Devplane \
+             to Applications, open it from there, and connect again.",
+            exe.display()
+        ),
+        Some(why) => anyhow::bail!(
+            "not connecting: every hook runs the binary's path, and {} is {why}, so the hooks \
+             — and the gate — would stop working without a word when it goes. Install \
+             devplane (`npm install -g devplane`, `cargo install devplane`, or copy the \
+             binary somewhere permanent) and run `agent connect` from there, or pass \
+             `--bin <path>` naming a devplane binary that stays put.",
+            exe.display()
+        ),
+    }
+}
+
+/// Whether a transient path is the macOS app run from where it cannot stay: a
+/// translocated copy, or a mounted disk image. The fix there is moving the app.
+fn is_app_mount(path: &std::path::Path) -> bool {
+    let p = path.to_string_lossy();
+    p.contains("/AppTranslocation/") || p.starts_with("/Volumes/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1424,5 +1739,37 @@ mod tests {
         assert!(p.with_extension("json.devplane-backup").exists());
         assert!(!p.with_extension("json.devplane-tmp").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `connect` writes the binary's path into every hook, so a path that
+    /// will vanish is refused with the reason, and a stable one is not.
+    #[test]
+    fn a_binary_that_will_disappear_is_named_as_such() {
+        use std::path::Path;
+        for (p, word) in [
+            (
+                "/Users/me/.npm/_npx/1a2b/node_modules/devplane/bin/devplane",
+                "npx",
+            ),
+            (
+                "/private/var/folders/x/T/AppTranslocation/ABC/d/Devplane.app/Contents/MacOS/devplane",
+                "Translocation",
+            ),
+            (
+                "/Volumes/Devplane/Devplane.app/Contents/MacOS/devplane",
+                "mounted",
+            ),
+            ("/tmp/.mount_DevplaXYZ/usr/bin/devplane", "AppImage"),
+        ] {
+            let why = super::transient_binary(Path::new(p)).unwrap_or_else(|| panic!("{p}"));
+            assert!(why.contains(word), "{p}: {why}");
+        }
+        for p in [
+            "/usr/local/bin/devplane",
+            "/opt/homebrew/bin/devplane",
+            "/Users/me/.cargo/bin/devplane",
+        ] {
+            assert_eq!(super::transient_binary(Path::new(p)), None, "{p}");
+        }
     }
 }

@@ -10,6 +10,7 @@ import "./render/review";
 import "./render/honest";
 import "./render/controls";
 import "./render/places";
+import "./render/first_run";
 import "./render/behaviour";
 import "./render/words";
 import { finish } from "./harness";

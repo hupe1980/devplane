@@ -113,6 +113,11 @@
   const stale = $derived(!!says && !says.blocks);
   const more = $derived(projects.reduce((n, p) => n + ((showing === "issues" ? p.issues_more : p.pull_requests_more) ?? 0), 0));
   const age = $derived(readAt ? ago((Date.now() - new Date(readAt).getTime()) / 1000) : "");
+  /// Projects whose own read failed: named, with the host's words, so an
+  /// empty list beside them is never read as *nothing open*.
+  const unread = $derived(projects.filter((p) => p.stale && p.github?.state !== "not_github"));
+  /// A failure that a sign-in fixes, in the host's words.
+  const signIn = $derived(/sign(ed)? ?in|auth login|not signed/i.test(failed));
   /// Counts only for data: a failure state has none.
   const counted = $derived(loaded && !failed && !blocking && !allElsewhere && !stale);
   let selected = $state<string | null>(null);
@@ -162,7 +167,9 @@
   {#if !loaded}
     <Skeleton />
   {:else if failed}
-    <Empty icon="alert" title="The forge could not be read" body={failed} />
+    <Empty icon="alert" title={signIn ? "Not signed in to GitHub" : "The forge could not be read"} body={failed}>
+      {#snippet action()}{#if signIn}{@render act("sign_in")}{:else}{@render act("doctor")}{/if}{/snippet}
+    </Empty>
   {:else if says && blocking}
     <div class="state" data-state={github?.state}>
       <Empty icon="alert" title={says.title} body={says.body}>
@@ -186,8 +193,15 @@
     {#if elsewhere.length}
       <p class="quiet">{listed(elsewhere.map((p) => p.project_name))}: not a GitHub repository.</p>
     {/if}
+    {#each unread as p (p.project)}
+      <p class="banner" data-state="project-failed"><Icon name="alert" size={13} /> <b>{p.project_name}</b> could not be read — {p.stale}</p>
+    {/each}
     {#if shown.length === 0 && stale}
       <p class="quiet">Nothing was read before GitHub stopped answering, so there is no list to show.</p>
+    {:else if shown.length === 0 && !readAt}
+      <p class="quiet">Not read yet: Devplane has not asked GitHub since it started. The list appears once it has.</p>
+    {:else if shown.length === 0 && unread.length}
+      <p class="quiet">Nothing open was read, and {listed(unread.map((p) => p.project_name))} could not be read at all, so this is not every project.</p>
     {:else if shown.length === 0}
       <Empty icon="forge" title={showing === "issues" ? "No open issue" : "No open pull request"} body="Across every registered project that has a GitHub remote." limit={absent ? `${absent} projects have no GitHub remote and are not counted.` : ""} />
     {:else}

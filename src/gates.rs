@@ -507,6 +507,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_program_that_is_not_installed_reads_as_not_on_path() {
+        let report = run(
+            "check",
+            &["nonexistent-tool-devplane --x".into()],
+            &dir(),
+            Duration::from_secs(10),
+            1,
+            &GateInput::default(),
+        )
+        .await;
+        assert!(!report.passed());
+        let c = &report.commands[0];
+        assert_eq!(
+            c.outcome,
+            crate::core::change::Outcome::Exited { code: 127 }
+        );
+        assert_eq!(
+            c.not_on_path().as_deref(),
+            Some("`nonexistent-tool-devplane` is not on PATH")
+        );
+        assert_eq!(
+            report.summary(),
+            "check could not run: `nonexistent-tool-devplane` is not on PATH"
+        );
+    }
+
+    #[tokio::test]
     async fn an_empty_gate_is_not_a_pass() {
         // An empty Definition of Done proves nothing.
         let report = run(

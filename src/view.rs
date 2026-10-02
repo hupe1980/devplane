@@ -819,6 +819,11 @@ async fn ready_facts(
     let r = review_read(snap, store, id, true).await.ok()?;
     let files: Vec<&ReviewFile> = r.groups.iter().flat_map(|g| g.files.iter()).collect();
     let hunks = files.iter().map(|f| f.hunks.len() as u32).sum();
+    let hunks_seen = files
+        .iter()
+        .flat_map(|f| f.hunks.iter())
+        .filter(|h| h.seen)
+        .count() as u32;
     let not_covered = r.coverage_absent.is_none().then(|| {
         files
             .iter()
@@ -833,12 +838,10 @@ async fn ready_facts(
             .map(|f| f.hunks.len() as u32)
             .sum()
     });
-    Some(crate::core::review::ReadyFacts::of(
-        r.qualifier,
-        hunks,
-        not_covered,
-        not_asked_for,
-    ))
+    Some(crate::core::review::ReadyFacts {
+        hunks_seen: Some(hunks_seen),
+        ..crate::core::review::ReadyFacts::of(r.qualifier, hunks, not_covered, not_asked_for)
+    })
 }
 
 /// The boundary, and — for an empty inbox — what the day came to.
@@ -1436,10 +1439,7 @@ async fn read_diff_facts(
         v.shape_says = crate::core::review::shape(&set, &ordered).says();
     }
     let rows = weakened_for(&set, &config, &v.change);
-    let seen = store
-        .weakened_seen(v.change.id.as_str())
-        .await
-        .unwrap_or_default();
+    let seen = rows_read(store, v.change.id.as_str(), &rows, &set).await;
     v.qualifier = crate::core::review::Qualifier::of(&rows, &seen);
 }
 
@@ -1575,17 +1575,16 @@ pub async fn change_certificate(
     };
     // What the change did to its own checks, from its diff; `None` without a
     // worktree or with an unreadable diff, which the certificate states.
-    let (weakened, unreadable) = match weakened_of(snap, change).await {
-        None => (None, None),
-        Some(Ok(rows)) => (Some(rows), None),
-        Some(Err(e)) => (None, Some(format!("{e:#}"))),
+    let (weakened, unreadable, seen) = match read_rows_of(snap, change).await {
+        None => (None, None, Default::default()),
+        Some(Ok((rows, set))) => {
+            // Every row read by a person before the offer, said as such; the
+            // rows themselves are stated either way.
+            let seen = rows_read(store, change.id.as_str(), &rows, &set).await;
+            (Some(rows), None, seen)
+        }
+        Some(Err(e)) => (None, Some(format!("{e:#}")), Default::default()),
     };
-    // Every row read by a person before the offer, said as such; the rows
-    // themselves are stated either way.
-    let seen = store
-        .weakened_seen(change.id.as_str())
-        .await
-        .unwrap_or_default();
     let all_seen = weakened.as_ref().is_some_and(|w| {
         !w.is_empty()
             && w.iter()
@@ -1660,14 +1659,18 @@ pub fn weakened_for(
     rows
 }
 
-/// The same, read from a checkout now against its base.
+/// The same, read from a checkout now against its base, with the change set
+/// the rows were read from, for what reads the host's seen marks against it.
 /// An unreadable diff is an error, never "nothing weakened"; so is an
 /// unreadable `devplane.toml`, whose gates name files the defaults do not.
-pub async fn weakened_in(
+pub async fn read_rows_in(
     root: Option<&std::path::Path>,
     dir: &std::path::Path,
     change: Option<&Change>,
-) -> anyhow::Result<Vec<crate::core::review::Weakened>> {
+) -> anyhow::Result<(
+    Vec<crate::core::review::Weakened>,
+    crate::core::diff::ChangeSet,
+)> {
     let config = match root {
         Some(r) => crate::core::ProjectConfig::load(r).map_err(|e| {
             anyhow::anyhow!("configuration unreadable, so what the gates run is unknown: {e}")
@@ -1678,23 +1681,42 @@ pub async fn weakened_in(
     let set = crate::git::change_set(dir, &base)
         .await
         .map_err(|e| anyhow::anyhow!("the change's diff could not be read: {e:#}"))?;
-    Ok(match change {
+    let rows = match change {
         Some(c) => weakened_for(&set, &config, c),
         None => weakened_by(&set, &config),
-    })
+    };
+    Ok((rows, set))
 }
 
-/// A change's weakened rows, or `None` without a checkout on disk.
-pub async fn weakened_of(
+/// A change's weakened rows with the change set they were read from, or
+/// `None` without a checkout on disk.
+pub async fn read_rows_of(
     snap: &Snapshot,
     change: &Change,
-) -> Option<anyhow::Result<Vec<crate::core::review::Weakened>>> {
+) -> Option<
+    anyhow::Result<(
+        Vec<crate::core::review::Weakened>,
+        crate::core::diff::ChangeSet,
+    )>,
+> {
     let dir = change.worktree.as_deref().filter(|d| d.is_dir())?;
     let root = snap
         .world
         .project(&change.project_id)
         .map(|p| p.root.clone());
-    Some(weakened_in(root.as_deref(), dir, Some(change)).await)
+    Some(read_rows_in(root.as_deref(), dir, Some(change)).await)
+}
+
+/// The weakened rows a person has read, from the host's seen marks: a row is
+/// read when every hunk it was found in is marked seen.
+pub async fn rows_read(
+    store: &crate::store::Store,
+    change: &str,
+    rows: &[crate::core::review::Weakened],
+    set: &crate::core::diff::ChangeSet,
+) -> std::collections::HashSet<(String, String)> {
+    let seen = store.seen(change).await.unwrap_or_default();
+    crate::core::review::rows_seen(rows, set, &seen)
 }
 
 /// A change's qualifier: its weakened rows by kind, and how many are unseen.
@@ -1711,53 +1733,79 @@ pub async fn qualifier_of(
         return crate::core::review::Qualifier::unreadable();
     };
     let rows = weakened_for(&set, &config, change);
-    let seen = store
-        .weakened_seen(change.id.as_str())
-        .await
-        .unwrap_or_default();
+    let seen = rows_read(store, change.id.as_str(), &rows, &set).await;
     crate::core::review::Qualifier::of(&rows, &seen)
 }
 
-/// Why marking a weakened row seen was refused.
+/// Why marking a unit seen was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeenRefusal {
     NoSuchChange,
-    /// No current row matches; carries the rows that do exist.
-    NoSuchRow(Vec<crate::core::review::Weakened>),
+    /// Nothing at that path has that digest (or the path has nothing); carries
+    /// the digests that are there.
+    NoSuchUnit(Vec<String>),
 }
 
-/// Marks every current weakened row at `path` seen as the person's, or only
-/// the one whose matched text is `matched`. Never marks a row that is not
-/// there.
+/// What one mark covered: the units marked, and the weakened rows it
+/// completed.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Marked {
+    pub seen: Vec<SeenUnit>,
+    pub weakened_seen: Vec<crate::core::review::Weakened>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SeenUnit {
+    pub path: String,
+    pub digest: String,
+}
+
+/// Marks one unit at `path` seen as the person's — the hunk whose digest is
+/// `digest` — or, without one, every unit at `path` (its hunks, and the rows
+/// read there). Never marks a unit that is not in the change now.
 pub async fn mark_seen(
     snap: &Snapshot,
     store: &crate::store::Store,
     id: &crate::core::ChangeId,
     path: &str,
-    matched: Option<&str>,
-) -> Result<Vec<crate::core::review::Weakened>, SeenRefusal> {
+    digest: Option<&str>,
+) -> Result<Marked, SeenRefusal> {
     let change = snap.change(id).ok_or(SeenRefusal::NoSuchChange)?;
-    let rows = weakened_of(snap, change)
-        .await
-        .and_then(Result::ok)
-        .unwrap_or_default();
-    let hit: Vec<crate::core::review::Weakened> = rows
-        .iter()
-        .filter(|w| w.path == path && matched.is_none_or(|m| m == w.matched))
-        .cloned()
-        .collect();
+    let (rows, set) = match read_rows_of(snap, change).await {
+        Some(Ok(x)) => x,
+        _ => return Err(SeenRefusal::NoSuchUnit(Vec::new())),
+    };
+    let there = crate::core::review::units_at(path, &set, &rows);
+    let hit: Vec<String> = match digest {
+        Some(d) => there.iter().filter(|x| *x == d).cloned().collect(),
+        None => there.clone(),
+    };
     if hit.is_empty() {
-        return Err(SeenRefusal::NoSuchRow(rows));
+        return Err(SeenRefusal::NoSuchUnit(there));
     }
-    for w in &hit {
-        if let Err(e) = store
-            .mark_weakened_seen(id.as_str(), &w.path, &w.matched)
-            .await
-        {
+    let before = rows_read(store, id.as_str(), &rows, &set).await;
+    for d in &hit {
+        if let Err(e) = store.mark_seen(id.as_str(), path, d).await {
             tracing::warn!(error = %e, "a seen mark was not written");
         }
     }
-    Ok(hit)
+    let after = rows_read(store, id.as_str(), &rows, &set).await;
+    Ok(Marked {
+        seen: hit
+            .into_iter()
+            .map(|digest| SeenUnit {
+                path: path.to_string(),
+                digest,
+            })
+            .collect(),
+        weakened_seen: rows
+            .into_iter()
+            .filter(|w| {
+                let k = (w.path.clone(), w.matched.clone());
+                after.contains(&k) && !before.contains(&k)
+            })
+            .collect(),
+    })
 }
 
 /// The base a change is read against: declared, else discovered, never
@@ -1827,6 +1875,26 @@ pub struct ReviewView {
     pub latest_run: Option<String>,
     /// The first group's rows, counted by kind, with how many are unseen.
     pub qualifier: crate::core::review::Qualifier,
+    /// Every comment on the change, oldest first, with where its line is now.
+    #[serde(default)]
+    pub comments: Vec<CommentView>,
+    /// The files none of whose hunks a person marked seen, by path, in
+    /// reading order — never a share of the change.
+    #[serde(default)]
+    pub not_opened: Vec<String>,
+    #[serde(default)]
+    pub not_opened_says: Option<String>,
+}
+
+/// A comment as the review shows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommentView {
+    #[serde(flatten)]
+    pub comment: crate::core::comments::ReviewComment,
+    pub anchor: crate::core::comments::Anchor,
+    /// For a sent comment once its run has finished a turn since: whether
+    /// the hunk it was written against changed. `None` until then.
+    pub hunk_changed: Option<bool>,
 }
 
 /// A weakened row as the review shows it: with whether a person marked it seen.
@@ -1835,6 +1903,11 @@ pub struct WeakenedRow {
     #[serde(flatten)]
     pub row: crate::core::review::Weakened,
     pub seen: bool,
+    /// The gate that runs what this row weakened: the one whose command
+    /// names its path, else the declared `check`. `None` when no gate is
+    /// declared.
+    #[serde(default)]
+    pub gate_says: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1870,6 +1943,10 @@ pub struct ReviewFile {
     /// Why there are no hunks, when there are none: binary, or not shown.
     pub body_says: Option<String>,
     pub hunks: Vec<ReviewHunk>,
+    /// A file with no hunks is one unit to mark: whether it is marked.
+    pub unit_seen: Option<bool>,
+    /// A hunk here was marked seen, and the agent has since rewritten it.
+    pub changed_since_seen: bool,
     /// What to run to see each fact on this row for yourself.
     pub marker_commands: Vec<String>,
 }
@@ -1880,6 +1957,10 @@ pub struct ReviewHunk {
     pub lines: Vec<(crate::core::diff::Kind, String)>,
     /// Whitespace only: collapsed by default, counted, expandable.
     pub formatter_only: bool,
+    /// The hunk's content digest: what a seen mark and a comment are keyed by.
+    pub digest: String,
+    /// A person marked this hunk seen (in the host, for every surface).
+    pub seen: bool,
 }
 
 /// A decision, briefly: who decided, what, when, about what.
@@ -1937,6 +2018,39 @@ fn relative_to(run: &Run, raw: &str) -> String {
         }
     }
     raw.trim_start_matches("./").to_string()
+}
+
+/// A change's comments, each with where its line is now and — once the run
+/// it was sent to has finished a turn since — whether its hunk changed.
+async fn comment_views(
+    snap: &Snapshot,
+    store: &crate::store::Store,
+    change: &Change,
+    set: &crate::core::diff::ChangeSet,
+) -> Vec<CommentView> {
+    use crate::core::comments;
+    use crate::core::run::RunState;
+    let rows = store.comments(change.id.as_str()).await.unwrap_or_default();
+    rows.into_iter()
+        .map(|c| {
+            let turned = match (&c.sent_at, &c.run_id) {
+                (Some(at), Some(run)) => at.parse::<jiff::Timestamp>().ok().is_some_and(|at| {
+                    snap.world
+                        .run(&crate::core::RunId::new(run.clone()))
+                        .is_some_and(|r| {
+                            !matches!(r.state, RunState::Starting | RunState::Working)
+                                && r.last_activity_at > at
+                        })
+                }),
+                _ => false,
+            };
+            CommentView {
+                anchor: comments::anchor(&c, set),
+                hunk_changed: turned.then(|| !comments::hunk_still_there(&c, set)),
+                comment: c,
+            }
+        })
+        .collect()
 }
 
 /// The review of one change: one `git diff`, one standing read, then a fold
@@ -2031,6 +2145,7 @@ async fn review_read(
 
     let roles = config.review.roles.as_ref();
     let covers = config.review.covers.as_deref();
+    let marks = store.seen(change.id.as_str()).await.unwrap_or_default();
     let ordered = review::order(&set, roles);
     let shape = review::shape(&set, &ordered);
     let intent = review::by_intent(&set, &wrote);
@@ -2047,6 +2162,32 @@ async fn review_read(
         .iter()
         .chain(config.gates.named.values().flat_map(|g| g.run.iter()))
         .collect();
+    // The gate that runs a weakened file: named where a command names it,
+    // else the `check` gate, which runs the project's tests.
+    let ran_by = |path: &str| -> Option<String> {
+        let named = config
+            .gates
+            .check
+            .iter()
+            .map(|c| ("check", c))
+            .chain(
+                config
+                    .gates
+                    .named
+                    .iter()
+                    .flat_map(|(n, g)| g.run.iter().map(move |c| (n.as_str(), c))),
+            )
+            .find(|(_, c)| c.contains(path));
+        match named {
+            Some((gate, cmd)) => Some(format!("the `{gate}` gate runs it: `{cmd}`")),
+            None => (!config.gates.check.is_empty()).then(|| {
+                format!(
+                    "the `check` gate ran over it: `{}`",
+                    config.gates.check.join("` · `")
+                )
+            }),
+        }
+    };
     let runs_test = |test: &str| -> String {
         gate_commands
             .iter()
@@ -2100,10 +2241,15 @@ async fn review_read(
             crate::core::diff::Body::Hunks(h) => (
                 None,
                 h.iter()
-                    .map(|h| ReviewHunk {
-                        header: h.header.clone(),
-                        lines: h.lines.clone(),
-                        formatter_only: review::formatter_only(&f.path, h),
+                    .map(|h| {
+                        let digest = review::hunk_digest(h);
+                        ReviewHunk {
+                            header: h.header.clone(),
+                            lines: h.lines.clone(),
+                            formatter_only: review::formatter_only(&f.path, h),
+                            seen: marks.contains(&(f.path.clone(), digest.clone())),
+                            digest,
+                        }
                     })
                     .collect(),
             ),
@@ -2118,7 +2264,24 @@ async fn review_read(
                 (Some(format!("not shown — {why}")), Vec::new())
             }
         };
+        let units: Vec<String> = set
+            .uncut()
+            .files
+            .iter()
+            .filter(|u| u.path == f.path)
+            .flat_map(review::file_units)
+            .collect();
+        let unit_seen = hunks.is_empty().then(|| {
+            units
+                .iter()
+                .all(|d| marks.contains(&(f.path.clone(), d.clone())))
+        });
+        let changed_since_seen = marks
+            .iter()
+            .any(|(p, d)| *p == f.path && !units.contains(d));
         ReviewFile {
+            unit_seen,
+            changed_since_seen,
             path: f.path.clone(),
             status_says: match &f.status {
                 crate::core::diff::Status::Added => "added".into(),
@@ -2145,10 +2308,7 @@ async fn review_read(
     // Checks weakened or changed come first, before the rest is read as
     // though they meant what they did. Absent, not empty, when none.
     let weak = weakened_for(&set, &config, change);
-    let seen = store
-        .weakened_seen(change.id.as_str())
-        .await
-        .unwrap_or_default();
+    let seen = review::rows_seen(&weak, &set, &marks);
     let qualifier = review::Qualifier::of(&weak, &seen);
     let mut first: Vec<usize> = Vec::new();
     for w in &weak {
@@ -2168,6 +2328,7 @@ async fn review_read(
                 .into_iter()
                 .map(|row| WeakenedRow {
                     seen: seen.contains(&(row.path.clone(), row.matched.clone())),
+                    gate_says: ran_by(&row.path),
                     row,
                 })
                 .collect(),
@@ -2230,8 +2391,20 @@ async fn review_read(
         unavailable: intent.unavailable.clone(),
     };
 
+    let reading: Vec<&str> = groups
+        .iter()
+        .flat_map(|g| g.files.iter().map(|f| f.path.as_str()))
+        .collect();
+    let not_opened = review::not_opened(reading.iter().copied(), &set, &marks);
+    let comments = match for_list {
+        true => Vec::new(),
+        false => comment_views(snap, store, change, &set).await,
+    };
     let collapsed = shape.formatter_only;
     Ok(ReviewView {
+        not_opened_says: review::not_opened_says(&not_opened),
+        not_opened,
+        comments,
         change: change.id.to_string(),
         title: change.title.clone(),
         standing_says: standing.says(),
@@ -2459,6 +2632,8 @@ pub fn projects(snap: &Snapshot) -> Vec<Value> {
                 "sessions": live.get(&p.id).copied().unwrap_or(0),
                 "repo": p.repo_slug(),
                 "default_agent": cfg.as_ref().and_then(|c| c.agent.default.clone()),
+                // Whether a change here can become verified at all.
+                "declares_check": cfg.as_ref().is_some_and(|c| c.has_gates()),
             })
         })
         .collect()

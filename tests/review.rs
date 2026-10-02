@@ -9,7 +9,7 @@ mod sandbox;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-use common::{boot, echo_agent, get, post, trust};
+use common::{boot, echo_agent, get, post, trust, until};
 
 /// The fixture's branch, adopted as a change.
 async fn adopted(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) -> String {
@@ -1197,4 +1197,319 @@ mod weakening {
             "{r:?}"
         );
     }
+}
+
+/// Every hunk of a review in one list, with its file.
+fn hunks(review: &Value) -> Vec<(String, Value)> {
+    review["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|g| g["files"].as_array().unwrap().iter())
+        .flat_map(|f| {
+            f["hunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| (f["path"].as_str().unwrap().to_string(), h.clone()))
+        })
+        .collect()
+}
+
+/// One *seen*, in the host: a hunk marked with `s` is seen on every read of
+/// the review (the window's, the CLI's, the inbox row's count), and a hunk
+/// the agent rewrites is unread again — its mark was on its content.
+#[tokio::test]
+async fn a_hunk_marked_seen_is_seen_everywhere_until_it_is_rewritten() {
+    let repo = sandbox::review_repo("seen");
+    let (addr, c, _host) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/review", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(adopted["change"]["worktree"].as_str().unwrap());
+
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let all = hunks(&r);
+    assert!(all.iter().all(|(_, h)| h["seen"] == false), "{r}");
+    assert!(
+        all.iter()
+            .all(|(_, h)| h["digest"].as_str().is_some_and(|d| d.len() == 16)),
+        "every hunk carries its content digest: {r}"
+    );
+    let (_, rules) = all
+        .iter()
+        .find(|(p, _)| p == "src/core/rules.rs")
+        .cloned()
+        .unwrap();
+    let digest = rules["digest"].as_str().unwrap().to_string();
+
+    // A digest that is not there is refused, and marks nothing.
+    let stale = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "src/core/rules.rs", "digest": "0000000000000000" }),
+    )
+    .await;
+    assert!(
+        stale["error"].as_str().unwrap().contains("changed"),
+        "{stale}"
+    );
+    assert_eq!(stale["digests"], serde_json::json!([digest]), "{stale}");
+
+    let marked = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "src/core/rules.rs", "digest": digest }),
+    )
+    .await;
+    assert_eq!(marked["seen"][0]["digest"], digest.as_str(), "{marked}");
+    let unread = |r: &Value| hunks(r).iter().filter(|(_, h)| h["seen"] == false).count();
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let before = unread(&r);
+    assert_eq!(before, all.len() - 1, "{r}");
+    assert_eq!(file(&r, "src/core/rules.rs")["hunks"][0]["seen"], true);
+    // A second read — another window, the CLI — reads the same marks.
+    let again = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    assert_eq!(unread(&again), before);
+
+    // The agent rewrites the hunk: a new digest, unread, and the file says
+    // it changed since it was seen.
+    std::fs::write(
+        wt.join("src/core/rules.rs"),
+        "pub fn allowed(n: u32) -> bool {\n    n < 7\n}\n",
+    )
+    .unwrap();
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let rules = file(&r, "src/core/rules.rs");
+    assert_ne!(rules["hunks"][0]["digest"], digest.as_str(), "{rules}");
+    assert_eq!(rules["hunks"][0]["seen"], false, "{rules}");
+    assert_eq!(rules["changed_since_seen"], true, "{rules}");
+    assert_eq!(unread(&r), all.len(), "{r}");
+
+    // Marking a path marks every hunk there, as `--seen <path>` does.
+    let path = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/review/seen"),
+        serde_json::json!({ "path": "src/core/rules.rs" }),
+    )
+    .await;
+    assert_eq!(path["seen"].as_array().unwrap().len(), 1, "{path}");
+    // The offer's list of files nobody opened now leaves it out, by name.
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let not: Vec<&str> = r["not_opened"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(!not.contains(&"src/core/rules.rs"), "{not:?}");
+    assert_eq!(not.len(), reading_order(&r).len() - 1, "{not:?}");
+    let says = r["not_opened_says"].as_str().unwrap();
+    assert!(
+        says.starts_with(&format!("{} files not opened: ", not.len())),
+        "{says}"
+    );
+    let fraction = says
+        .as_bytes()
+        .windows(3)
+        .any(|w| w[0].is_ascii_digit() && w[1] == b'/' && w[2].is_ascii_digit());
+    assert!(
+        !says.contains(" of ") && !fraction && !says.contains('%'),
+        "never a share of the change: {says}"
+    );
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// Comments are kept by the host on the line they were written on, survive
+/// a reload, say when their line changed, and go to the agent together as
+/// one prompt of structured blocks; after the agent's next turn each sent
+/// comment says whether its hunk changed.
+#[tokio::test]
+async fn comments_are_kept_and_sent_as_one_turn() {
+    let Some(agent) = echo_agent() else { return };
+    let repo = sandbox::review_repo("comments");
+    let (addr, c, _host) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let v = post(
+        &c,
+        &addr,
+        "/api/changes",
+        serde_json::json!({
+            "cwd": repo.to_string_lossy(),
+            "title": "open sessions",
+            "prompt": "write-file src/session_open.rs",
+            "agent": agent,
+        }),
+    )
+    .await;
+    assert!(v.get("error").is_none(), "{v}");
+    let id = v["change_id"].as_str().unwrap().to_string();
+    let w = settled(&c, &addr, &id).await;
+    let worktree = PathBuf::from(w["worktree"].as_str().unwrap());
+    std::fs::write(
+        worktree.join("src/by_hand.rs"),
+        "pub fn one() {}\npub fn two() {}\n",
+    )
+    .unwrap();
+
+    // A line the diff does not show is refused; nothing is kept.
+    let off = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/comments"),
+        serde_json::json!({ "path": "src/by_hand.rs", "line": 40, "body": "?" }),
+    )
+    .await;
+    assert!(
+        off["error"].as_str().unwrap().contains("does not show"),
+        "{off}"
+    );
+
+    let mut ids = Vec::new();
+    for (path, line, body) in [
+        ("src/by_hand.rs", 2, "why two?"),
+        ("src/by_hand.rs", 1, "name this"),
+        ("src/session_open.rs", 1, "and this"),
+    ] {
+        let made = post(
+            &c,
+            &addr,
+            &format!("/api/changes/{id}/comments"),
+            serde_json::json!({ "path": path, "line": line, "body": body }),
+        )
+        .await;
+        let row = &made["comment"];
+        assert!(row["sent_at"].is_null(), "{made}");
+        assert_eq!(row["hunk_digest"].as_str().unwrap().len(), 16, "{made}");
+        ids.push(row["id"].as_str().unwrap().to_string());
+    }
+    // Kept by the host: a reload (a fresh read) has every one, unsent.
+    let listed = get(&c, &addr, &format!("/api/changes/{id}/comments")).await;
+    assert_eq!(listed["unsent"], 3, "{listed}");
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    assert_eq!(r["comments"].as_array().unwrap().len(), 3, "{r}");
+    assert!(
+        r["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["anchor"]["is"] == "same"),
+        "{r}"
+    );
+
+    let sent = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/comments/send"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(sent["sent"], 3, "{sent}");
+    assert!(
+        ["reading", "queued", "resumed"].contains(&sent["delivered"].as_str().unwrap()),
+        "{sent}"
+    );
+    let run = sent["run"].as_str().unwrap().to_string();
+
+    // One prompt, in the review's order, each comment a block tied to what
+    // it was written against.
+    let heard = until(
+        "the agent hears the comments",
+        std::time::Duration::from_secs(30),
+        || {
+            let p = worktree.join(".devplane/heard.log");
+            async move {
+                std::fs::read_to_string(&p)
+                    .ok()
+                    .filter(|t| t.contains("## Review comments"))
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        heard.matches("## Review comments (3)").count(),
+        1,
+        "{heard}"
+    );
+    let one = heard.find("**src/by_hand.rs** (line 1)").unwrap();
+    let two = heard.find("**src/by_hand.rs** (line 2)").unwrap();
+    assert!(one < two, "{heard}");
+    assert!(heard.contains("written against tree `"), "{heard}");
+    assert!(heard.contains("> why two?"), "{heard}");
+
+    // Sent: each comment carries the run, and a second send has nothing.
+    let listed = get(&c, &addr, &format!("/api/changes/{id}/comments")).await;
+    assert_eq!(listed["unsent"], 0, "{listed}");
+    assert!(
+        listed["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["run_id"] == run.as_str() && c["sent_at"].is_string()),
+        "{listed}"
+    );
+    let none = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/comments/send"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(none["says"], "nothing to send", "{none}");
+    let gone = c
+        .delete(format!(
+            "http://{addr}/api/changes/{id}/comments/{}",
+            ids[0]
+        ))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), 409, "a sent comment stays");
+
+    // The person edits a commented line: the comment says so, and once the
+    // agent's turn has ended, which commented hunks changed.
+    std::fs::write(
+        worktree.join("src/by_hand.rs"),
+        "pub fn one() {}\npub fn three() {}\n",
+    )
+    .unwrap();
+    let r = until(
+        "the agent's turn ends",
+        std::time::Duration::from_secs(30),
+        || {
+            let (c, addr, id) = (c.clone(), addr, id.clone());
+            async move {
+                let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+                r["comments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|c| !c["hunk_changed"].is_null())
+                    .then_some(r)
+            }
+        },
+    )
+    .await;
+    let by_line = |line: u64| {
+        r["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["path"] == "src/by_hand.rs" && c["line"] == line)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by_line(2)["anchor"]["is"], "changed", "{r}");
+    assert_eq!(by_line(2)["hunk_changed"], true, "{r}");
+    std::fs::remove_dir_all(&repo).ok();
 }

@@ -1,12 +1,13 @@
 // What a server render cannot show but a function or the source can: how a
 // key event is read (a macOS ⌥ chord included), that a focused control keeps
-// its own Enter, which links are allowed, how a review mark is keyed, and the
+// its own Enter, which links are allowed, how a review mark is counted, and the
 // source shapes that keep a page's state through a poll. The browser check
 // (`tests/browser.mjs`) drives the same bugs in a real page.
-import { all, bind, combo, dispatch, fromField, onAction, run, spell } from "../../src/lib/keys";
+import { all, bind, combo, dispatch, fromField, help, onAction, run, setMode, spell } from "../../src/lib/keys";
+import "../../src/surfaces/change/index";
 import "../../src/shell/keys";
 import { safeHref } from "../../src/lib/href";
-import { markKey } from "../../src/surfaces/change/review/marks";
+import { unread } from "../../src/surfaces/change/review/unread.svelte";
 import Failed from "../../src/lib/Failed.svelte";
 import { fail, html, source, visible, walk } from "../harness";
 
@@ -123,12 +124,18 @@ const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKe
     if (/href=\{(item\.(url|launch)|r\.url)\}|window\.open\(r\.url/.test(text)) fail(`${f} puts a host link in an href without safeHref`);
 }
 
-// ── A review mark is the hunk's content, not its header ──────────────────
+// ── A review mark is the host's, on the hunk's content ───────────────────
 {
-  const a = markKey("c-1", "src/a.ts", "@@ -1,2 +1,2 @@", [["added", "let x = 1;"]]);
-  const b = markKey("c-1", "src/a.ts", "@@ -1,2 +1,2 @@", [["added", "let x = 2;"]]);
-  if (a === b) fail("a rewritten hunk with the same header keeps its seen mark");
-  if (a !== markKey("c-1", "src/a.ts", "@@ -1,2 +1,2 @@", [["added", "let x = 1;"]])) fail("one hunk keys two ways");
+  // The host says which hunks are seen (by content digest): the window
+  // counts its words, keeps nothing of its own.
+  const file = (seen: boolean[]) => ({
+    path: "src/a.ts", status_says: "modified", added: 1, removed: 0, role: null, role_says: "", coverage: { coverage: "no_mapping" },
+    coverage_says: null, decisions: [], task_group: null, task_says: "", body_says: null, marker_commands: [],
+    hunks: seen.map((s, i) => ({ header: `@@ -${i} +${i} @@`, lines: [["added", `x${i}`]], formatter_only: false, digest: `d${i}`, seen: s })),
+  });
+  const r = (seen: boolean[]) => ({ change: "c-1", groups: [{ role: null, says: "", files: [file(seen)] }] }) as never;
+  if (unread(r([false, false])).hunks !== 2) fail("two unseen hunks are not two unread");
+  if (unread(r([true, false])).hunks !== 1) fail("a hunk the host marked seen still counts as unread");
 }
 
 // ── A failure says why and what tells more ───────────────────────────────
@@ -162,4 +169,27 @@ const key = (e: Partial<Ev>): Ev => ({ key: "", code: "", metaKey: false, ctrlKe
     if (/await navigator\.clipboard\?\.writeText/.test(text)) fail(`${f} says copied when there is no clipboard`);
     if (/signal: AbortSignal\.timeout\(TIMEOUT_MS\)/.test(text)) fail(`${f} cuts every write off at the read timeout`);
   }
+}
+
+// ── ⌥3 opens the Review; the review's keys live only in its mode ─────────
+{
+  if (combo(key({ altKey: true, key: "£", code: "Digit3" })) !== "Alt+3") fail("⌥3 as macOS sends it does not spell Alt+3");
+  const b = all().find((x) => x.surface === "change" && x.combo === "Alt+3");
+  if (b?.action !== "view-review") fail("Alt+3 does not show the change's Review");
+  // On the Overview, no review key is listed; in the Review, they are.
+  const reviewKeys = ["s", "f", "n", "p", "x", "v", "1", "2", "Mod+Enter"];
+  if (help("change").some((x) => x.surface === "change:review")) fail("the change's other views list the review's keys");
+  const clear = setMode("change", "review");
+  const inReview = help("change").map((x) => x.combo);
+  clear();
+  for (const k of reviewKeys) if (!inReview.includes(k)) fail(`the Review does not list ${k}`);
+  if (!inReview.includes("Alt+1")) fail("the Review drops the change's own keys");
+  // A mode may take its surface's list keys, and nothing else of it.
+  let threw = false;
+  try {
+    bind({ surface: "change:review", combo: "Alt+1", action: "planted", label: "a planted collision" });
+  } catch {
+    threw = true;
+  }
+  if (!threw) fail("a mode binding one of its surface's own keys is not refused");
 }

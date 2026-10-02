@@ -1,6 +1,6 @@
-import { A as comment, C as each, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, O as set_text, P as delegate, V as template_effect, W as child, X as state, Y as set, Z as user_derived, et as pop, f as bind_value, i as api, it as reset, j as from_html, k as append, l as bind_this, m as set_attribute, o as prop, p as remove_input_defaults, q as sibling, rt as next, tt as push, v as set_class, w as index } from "./api.js";
-import { C as State, T as answerItemKeys, a as Inline, c as clip, j as spell, p as copyText } from "./app.js";
-import { a as markedFor, n as unreadSays } from "./unread.svelte.js";
+import { A as append, D as if_block, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, Q as user_derived, R as get, T as index, U as user_effect, X as set, Y as proxy, Z as state, at as reset, f as bind_value, i as api, it as next, j as comment, k as set_text, l as bind_this, m as set_attribute, nt as push, o as prop, p as remove_input_defaults, q as only_child, tt as pop, w as each, y as set_class } from "./api.js";
+import { D as State, F as spell, a as Inline, c as clip, k as answerItemKeys, p as copyText } from "./app.js";
+import { o as unreadSays } from "./unread.svelte.js";
 import { t as Qualifier } from "./Qualifier.js";
 import { t as safeHref } from "./href.js";
 //#region src/surfaces/inbox/Item.svelte
@@ -8,7 +8,7 @@ var root_1 = from_html(`<span class="unseen svelte-kz8fai">new</span>`);
 var root_2 = from_html(`<span> </span>`);
 var root_3 = from_html(`<p class="d svelte-kz8fai"><!></p>`);
 var root_4 = from_html(`<span>· <!></span>`);
-var root_5 = from_html(`<p class="facts svelte-kz8fai"><!> <span class="unread" title="hunks not marked in this browser's review, and weakened rows not recorded as read"> </span> <!></p>`);
+var root_5 = from_html(`<p class="facts svelte-kz8fai"><!> <span class="unread" title="hunks nobody marked seen, and weakened rows nobody has read"> </span> <!></p>`);
 var root_6 = from_html(`<kbd class="svelte-kz8fai"> </kbd>`);
 var root_7 = from_html(`<span class="keyed svelte-kz8fai"><button> </button><!></span>`);
 var root_8 = from_html(`<kbd title="puts you in this field" class="svelte-kz8fai">t</kbd>`);
@@ -44,7 +44,7 @@ function Item($$anchor, $$props) {
 	const DETAIL_CHARS = 400;
 	let current = prop($$props, "current", 3, false), age = prop($$props, "age", 3, ""), keys = prop($$props, "keys", 3, "");
 	const acts = user_derived(() => $$props.item.actions ?? []);
-	const markedHunks = user_derived(() => $$props.item.facts && $$props.item.change_id ? Math.min(markedFor($$props.item.change_id), $$props.item.facts.hunks) : 0);
+	const markedHunks = user_derived(() => $$props.item.facts ? Math.min($$props.item.facts.hunks_seen ?? 0, $$props.item.facts.hunks) : 0);
 	const has = (a) => get(acts).includes(a);
 	const url = user_derived(() => safeHref($$props.item.url));
 	const launch = user_derived(() => safeHref($$props.item.launch));

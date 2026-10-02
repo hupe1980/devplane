@@ -22,7 +22,8 @@
 
 {#if !focus || !found}
   {#if specs.projects === null}
-    <div class="pad"><Skeleton rows={4} /></div>
+    <!-- The sidebar names the failure; the page does not promise rows. -->
+    <div class="pad"><Skeleton rows={4} failed={!!specs.error} /></div>
   {:else}
     <Empty
       icon="spec"

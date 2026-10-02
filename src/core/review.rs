@@ -222,6 +222,174 @@ pub fn hunks_of(body: &Body) -> &[Hunk] {
     }
 }
 
+// ── Seen ─────────────────────────────────────────────────────────────────────
+//
+// A person's *seen* mark is on one unit of a change: a hunk, keyed by its
+// content, so a hunk the agent rewrites is a new unit and unread again. A
+// file with no hunks (binary, not shown, a bare rename) is one unit, and so
+// is a weakened row whose file is not in the diff (a base test that fails on
+// the change). Marks carry no time.
+
+/// A hunk's identity for a seen mark: each line's kind and text, never the
+/// `@@` header, so an edit above it that only shifts its line numbers keeps
+/// it seen, and two hunks with the same text share one mark.
+pub fn hunk_digest(h: &Hunk) -> String {
+    let mut r = crate::core::hash::Rolling::new();
+    for (k, t) in &h.lines {
+        r.push_str(match k {
+            Kind::Context => " ",
+            Kind::Added => "+",
+            Kind::Removed => "-",
+        });
+        r.push_str(t);
+    }
+    r.hex()
+}
+
+/// The one unit of a file with no hunks: its path, status and body.
+pub fn file_digest(f: &crate::core::diff::FileChange) -> String {
+    let mut r = crate::core::hash::Rolling::new();
+    r.push_str("file");
+    r.push_str(&f.path);
+    r.push_str(&serde_json::to_string(&f.status).unwrap_or_default());
+    match &f.body {
+        Body::Binary { bytes } => r.push_str(&format!("binary {bytes:?}")),
+        Body::Skipped { why } => r.push_str(why),
+        Body::Hunks(h) => r.push_str(&format!("{} hunks", h.len())),
+    }
+    r.hex()
+}
+
+/// The units of one file, in diff order: its hunks' digests, or the file's
+/// one unit when it has none.
+pub fn file_units(f: &crate::core::diff::FileChange) -> Vec<String> {
+    match hunks_of(&f.body) {
+        [] => vec![file_digest(f)],
+        h => h.iter().map(hunk_digest).collect(),
+    }
+}
+
+/// The unit of a weakened row whose file is not in the diff.
+fn row_digest(w: &Weakened) -> String {
+    let mut r = crate::core::hash::Rolling::new();
+    r.push_str("row");
+    r.push_str(&format!("{:?}", w.kind));
+    r.push_str(&w.matched);
+    r.hex()
+}
+
+/// The units a weakened row is read in: the hunks at its path whose changed
+/// lines carry what it matched; every unit of the file when none does (a
+/// deleted file, an edited gate); its own unit when the file is not in the
+/// diff. Read from the whole change, never the part a view was cut to.
+pub fn row_units(w: &Weakened, set: &ChangeSet) -> Vec<(String, String)> {
+    let set = set.uncut();
+    let Some(f) = set.files.iter().find(|f| f.path == w.path) else {
+        return vec![(w.path.clone(), row_digest(w))];
+    };
+    let hit: Vec<(String, String)> = hunks_of(&f.body)
+        .iter()
+        .filter(|h| {
+            h.lines
+                .iter()
+                .any(|(k, t)| *k != Kind::Context && t.trim() == w.matched)
+        })
+        .map(|h| (f.path.clone(), hunk_digest(h)))
+        .collect();
+    match hit.is_empty() {
+        true => file_units(f)
+            .into_iter()
+            .map(|d| (f.path.clone(), d))
+            .collect(),
+        false => hit,
+    }
+}
+
+/// Every unit a mark of `path` covers: the file's units in the whole change,
+/// and the units of any weakened row at that path. Empty when nothing there.
+pub fn units_at(path: &str, set: &ChangeSet, rows: &[Weakened]) -> Vec<String> {
+    let mut out: Vec<String> = set
+        .uncut()
+        .files
+        .iter()
+        .filter(|f| f.path == path)
+        .flat_map(file_units)
+        .collect();
+    for w in rows.iter().filter(|w| w.path == path) {
+        for (_, d) in row_units(w, set) {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
+/// The rows a person has read, as `(path, matched)`: those every unit of
+/// which carries a seen mark. A weakened row is seen exactly when its hunks
+/// are; there is no mark of its own.
+pub fn rows_seen(
+    rows: &[Weakened],
+    set: &ChangeSet,
+    seen: &std::collections::HashSet<(String, String)>,
+) -> std::collections::HashSet<(String, String)> {
+    rows.iter()
+        .filter(|w| row_units(w, set).iter().all(|u| seen.contains(u)))
+        .map(|w| (w.path.clone(), w.matched.clone()))
+        .collect()
+}
+
+/// The changed files none of whose units a person marked seen, in the order
+/// given: what the offer names as *not opened*, by path, never as a share.
+pub fn not_opened<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+    set: &ChangeSet,
+    seen: &std::collections::HashSet<(String, String)>,
+) -> Vec<String> {
+    let set = set.uncut();
+    paths
+        .into_iter()
+        .filter(|p| {
+            set.files
+                .iter()
+                .filter(|f| f.path == *p)
+                .flat_map(file_units)
+                .all(|d| !seen.contains(&(p.to_string(), d)))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// The changed files' paths in the order the review reads them: the files of
+/// weakened rows first, then by declared role, then the rest.
+pub fn reading_order(set: &ChangeSet, roles: Option<&Roles>, rows: &[Weakened]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in rows {
+        if set.files.iter().any(|f| f.path == w.path) && !out.contains(&w.path) {
+            out.push(w.path.clone());
+        }
+    }
+    for (_, files) in order(set, roles).groups {
+        for i in files {
+            let p = &set.files[i].path;
+            if !out.contains(p) {
+                out.push(p.clone());
+            }
+        }
+    }
+    out
+}
+
+/// *2 files not opened: a.rs, b.rs*, or nothing when every file was. Names,
+/// never a share of the change.
+pub fn not_opened_says(files: &[String]) -> Option<String> {
+    match files.len() {
+        0 => None,
+        1 => Some(format!("1 file not opened: {}", files[0])),
+        n => Some(format!("{n} files not opened: {}", files.join(", "))),
+    }
+}
+
 /// One dispatched run's share of the change: the tasks it was sent and the
 /// changed files it wrote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -474,7 +642,7 @@ impl Qualifier {
 
 /// What the review of a change *ready to decide* would lead with, carried on
 /// its inbox row so the row never reads as calmer than the review. Hunks seen
-/// are the window's own marks, so the host sends only the total.
+/// are the host's marks, the same every surface counts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]
@@ -482,6 +650,11 @@ pub struct ReadyFacts {
     pub qualifier: Qualifier,
     /// Every hunk in the change.
     pub hunks: u32,
+    /// Hunks a person marked seen, from the host's marks. Always set by the
+    /// host; absent only in a row recorded before it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional))]
+    pub hunks_seen: Option<u32>,
     /// Files no declared test covers; `None` when no mapping is declared.
     pub not_covered: Option<u32>,
     /// Hunks in files no dispatched task asked for; `None` when grouping by
@@ -516,6 +689,7 @@ impl ReadyFacts {
         ReadyFacts {
             qualifier,
             hunks,
+            hunks_seen: None,
             not_covered,
             not_asked_for,
             says,
@@ -1362,6 +1536,108 @@ mod tests {
     use super::*;
     use crate::core::diff::{FileChange, Status};
     use crate::core::ids::SessionId;
+
+    fn h(header: &str, lines: &[(Kind, &str)]) -> Hunk {
+        Hunk {
+            header: header.into(),
+            lines: lines.iter().map(|(k, t)| (*k, t.to_string())).collect(),
+        }
+    }
+
+    #[test]
+    fn a_hunk_digest_is_its_content_not_its_place() {
+        let a = h(
+            "@@ -1,1 +1,2 @@",
+            &[(Kind::Context, "a"), (Kind::Added, "b")],
+        );
+        let shifted = h(
+            "@@ -9,1 +9,2 @@",
+            &[(Kind::Context, "a"), (Kind::Added, "b")],
+        );
+        let rewritten = h(
+            "@@ -1,1 +1,2 @@",
+            &[(Kind::Context, "a"), (Kind::Added, "c")],
+        );
+        let flipped = h(
+            "@@ -1,1 +1,2 @@",
+            &[(Kind::Context, "a"), (Kind::Removed, "b")],
+        );
+        assert_eq!(hunk_digest(&a), hunk_digest(&shifted));
+        assert_ne!(hunk_digest(&a), hunk_digest(&rewritten));
+        assert_ne!(hunk_digest(&a), hunk_digest(&flipped));
+        assert_eq!(hunk_digest(&a).len(), 16);
+    }
+
+    #[test]
+    fn a_weakened_row_is_seen_exactly_when_its_hunks_are() {
+        let skip = h(
+            "@@ -1 +1,2 @@",
+            &[(Kind::Context, "x"), (Kind::Added, "it.skip(\"a\")")],
+        );
+        let other = h("@@ -9 +9,2 @@", &[(Kind::Context, "y"), (Kind::Added, "z")]);
+        let set = ChangeSet {
+            base: "main".into(),
+            files: vec![FileChange {
+                path: "t.test.ts".into(),
+                status: Status::Modified,
+                added: 2,
+                removed: 0,
+                body: Body::Hunks(vec![skip.clone(), other.clone()]),
+            }],
+            ..ChangeSet::default()
+        };
+        let row = Weakened {
+            path: "t.test.ts".into(),
+            why: "skip".into(),
+            kind: WeakKind::Skip,
+            matched: "it.skip(\"a\")".into(),
+        };
+        let mut seen = std::collections::HashSet::new();
+        assert!(rows_seen(std::slice::from_ref(&row), &set, &seen).is_empty());
+        seen.insert(("t.test.ts".to_string(), hunk_digest(&other)));
+        assert!(rows_seen(std::slice::from_ref(&row), &set, &seen).is_empty());
+        seen.insert(("t.test.ts".to_string(), hunk_digest(&skip)));
+        assert_eq!(rows_seen(std::slice::from_ref(&row), &set, &seen).len(), 1);
+        // A row whose file is not in the diff is its own unit.
+        let base = Weakened {
+            path: "tests/old.rs".into(),
+            why: "fails".into(),
+            kind: WeakKind::BaseTests,
+            matched: "old".into(),
+        };
+        let units = row_units(&base, &set);
+        assert_eq!(units.len(), 1);
+        assert_eq!(
+            units_at("tests/old.rs", &set, &[base]),
+            vec![units[0].1.clone()]
+        );
+    }
+
+    #[test]
+    fn files_not_opened_are_named_never_a_share() {
+        let a = h("@@ -1 +1 @@", &[(Kind::Added, "a")]);
+        let b = h("@@ -1 +1 @@", &[(Kind::Added, "b")]);
+        let file = |p: &str, x: &Hunk| FileChange {
+            path: p.into(),
+            status: Status::Modified,
+            added: 1,
+            removed: 0,
+            body: Body::Hunks(vec![x.clone()]),
+        };
+        let set = ChangeSet {
+            base: "main".into(),
+            files: vec![file("a.rs", &a), file("b.rs", &b)],
+            ..ChangeSet::default()
+        };
+        let seen: std::collections::HashSet<_> = [("a.rs".to_string(), hunk_digest(&a))]
+            .into_iter()
+            .collect();
+        let not = not_opened(["a.rs", "b.rs"], &set, &seen);
+        assert_eq!(not, vec!["b.rs".to_string()]);
+        let says = not_opened_says(&not).unwrap();
+        assert_eq!(says, "1 file not opened: b.rs");
+        assert!(!says.contains(" of ") && !says.contains('/') && !says.contains('%'));
+    }
 
     /// Go's `t.Error` asserts; a field called `Error` on anything else does not.
     #[test]

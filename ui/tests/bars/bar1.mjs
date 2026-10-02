@@ -7,10 +7,19 @@
 //
 // The window's first-run steps are found by `data-first-run-step="<step>"`
 // on the control that takes the step; a step whose control is absent has no
-// path in the window. New change, its fields and Start are found as the form
-// labels them.
+// path in the window. A step the window shows as done by itself (marked
+// `data-first-run-done`) took no input. A control may appear once the previous
+// step's request has landed, so each is waited for briefly — and the wait is
+// in the measured seconds. New change, its fields and Start are found as the
+// form labels them.
 //
-// `DEVPLANE_BIN` names the host binary (default `../target/debug/devplane`),
+// The page stands in for the app's window: the host is handed a window key
+// (a debug build reads `DEVPLANE_WINDOW_KEY`) and the page the same key, as
+// the app hands its webview, so trusting from the page carries the window's
+// proof as it does in the app.
+//
+// `DEVPLANE_BIN` names the host binary (default `debug/devplane` under
+// `CARGO_TARGET_DIR`, else `../target`),
 // `ECHO_AGENT` the echo agent (default beside it under `examples/`).
 
 import { spawn, execFileSync } from "node:child_process";
@@ -31,16 +40,21 @@ const root = resolve(here, "..");
  * @typedef {{ page: any, bin: string, env: Record<string, string>, repo: string, home: string, api: (path: string, init?: any) => Promise<any> }} Ctx
  */
 
-/** A first-run control the window offers for `step`, if any. */
+/** A first-run control the window offers for `step`, if any, waited for up to 5 s. */
 async function firstRun(/** @type {any} */ page, /** @type {string} */ step) {
   const el = page.locator(`[data-first-run-step="${step}"]`).first();
-  return (await el.count()) > 0 && (await el.isVisible()) ? el : null;
+  for (let i = 0; i < 50; i++) {
+    if ((await el.count()) > 0 && (await el.isVisible())) return el;
+    await sleep(100);
+  }
+  return null;
 }
 
-/** A first-run step taken with one input on its control. */
+/** A first-run step taken with one input on its control, or none when the window shows it done by itself. */
 const oneClick = (/** @type {string} */ step) => async (/** @type {Ctx} */ c) => {
   const el = await firstRun(c.page, step);
   if (!el) return null;
+  if ((await el.getAttribute("data-first-run-done")) === "true") return 0;
   await el.click();
   await sleep(300);
   return 1;
@@ -199,7 +213,7 @@ export default async function bar1(driver, budget) {
   const findings = [];
   /** @type {string[]} */
   const measured = [];
-  const bin = process.env.DEVPLANE_BIN ?? resolve(root, "target/debug/devplane");
+  const bin = process.env.DEVPLANE_BIN ?? resolve(process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : resolve(root, "target"), "debug/devplane");
   const echo = process.env.ECHO_AGENT ?? resolve(bin, "../examples/echo_agent");
   for (const [what, p] of [["the host binary", bin], ["the echo agent", echo]]) {
     if (!existsSync(p)) {
@@ -229,7 +243,9 @@ export default async function bar1(driver, budget) {
     // An agent session's variables would make the host think it runs inside one.
     if (v !== undefined && !/^(CLAUDECODE|CLAUDE_CODE_|DEVPLANE_RUN|CODEX_|COPILOT_CLI)/.test(k)) env[k] = v;
   }
-  Object.assign(env, { DEVPLANE_HOME: home, CLAUDE_CONFIG_DIR: claude });
+  // The window's key, as the app mints one for its webview.
+  const windowKey = createHash("sha256").update(`${sb}${Date.now()}`).digest("hex");
+  Object.assign(env, { DEVPLANE_HOME: home, CLAUDE_CONFIG_DIR: claude, DEVPLANE_WINDOW_KEY: windowKey });
 
   const host = spawn(bin, ["up", "--no-browser"], { cwd: sb, env, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
@@ -267,6 +283,9 @@ export default async function bar1(driver, budget) {
     const base = vite.resolvedUrls?.local[0] ?? "";
 
     page = await driver.page();
+    await page.addInitScript((/** @type {string} */ key) => {
+      Object.defineProperty(window, "__devplane_window_key", { value: key, writable: false, configurable: false, enumerable: false });
+    }, windowKey);
     /** @type {Ctx} */
     const c = { page, bin, env, repo, home, api };
     const started = Date.now();

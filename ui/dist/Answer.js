@@ -1,21 +1,22 @@
-import { A as comment, E as if_block, F as delegated, G as first_child, H as user_effect, J as proxy, K as only_child, L as get, O as set_text, P as delegate, T as key, V as template_effect, W as child, X as state, Y as set, Z as user_derived, et as pop, it as reset, j as from_html, k as append, m as set_attribute, o as prop, q as sibling, rt as next, tt as push } from "./api.js";
-import { O as onAction, a as Inline, h as resource, i as Skeleton, s as ago } from "./app.js";
+import { A as append, D as if_block, E as key, F as delegate, G as child, H as template_effect, I as delegated, J as sibling, K as first_child, M as from_html, Q as user_derived, R as get, U as user_effect, X as set, Y as proxy, Z as state, at as reset, it as next, j as comment, k as set_text, m as set_attribute, nt as push, o as prop, q as only_child, tt as pop } from "./api.js";
+import { M as onAction, a as Inline, h as resource, i as Skeleton, s as ago } from "./app.js";
 import { t as hideWindow } from "./frame.js";
 import { t as cursor } from "./cursor.js";
 import { t as writer } from "./write.svelte.js";
 import { t as Failed } from "./Failed.js";
-import { c as Commands } from "./unread.svelte.js";
+import { s as Commands } from "./unread.svelte.js";
 import { a as takeBack, i as snooze, n as answer, o as Item, r as copyRule, t as act } from "./actions.js";
 //#region src/surfaces/answer/Answer.svelte
 var root = from_html(`<p class="held svelte-1umb941" role="status"><b> </b> <kbd class="svelte-1umb941">z</kbd> to undo <button>take it back <kbd class="svelte-1umb941">z</kbd></button></p>`);
 var root_1 = from_html(`<p class="held failed svelte-1umb941" role="status"><b> </b> </p>`);
 var root_2 = from_html(`<p class="dim more svelte-1umb941"> <kbd class="svelte-1umb941">j</kbd> <kbd class="svelte-1umb941">k</kbd> move between them</p>`);
 var root_3 = from_html(`<!> <fieldset class="bare svelte-1umb941"><ul role="list" class="one svelte-1umb941" tabindex="-1"><!></ul></fieldset> <!>`, 1);
-var root_4 = from_html(`<p class="dim svelte-1umb941">Nothing needs you.</p>`);
-var root_5 = from_html(`<section class="answer svelte-1umb941" aria-labelledby="answer-head"><h2 id="answer-head" class="svelte-1umb941">The one thing that needs you</h2> <p class="said svelte-1umb941" role="status" aria-live="polite"><!></p> <!> <!> <!> <p class="hint dim svelte-1umb941">Esc hides this · ? lists every key</p></section>`);
+var root_4 = from_html(`<p class="dim svelte-1umb941"><!></p>`);
+var root_5 = from_html(`<p class="dim svelte-1umb941">Nothing needs you.</p> <!>`, 1);
+var root_6 = from_html(`<section class="answer svelte-1umb941" aria-labelledby="answer-head"><h2 id="answer-head" class="svelte-1umb941">The one thing that needs you</h2> <p class="said svelte-1umb941" role="status" aria-live="polite"><!></p> <!> <!> <!> <p class="hint dim svelte-1umb941">Esc hides this · ? lists every key</p></section>`);
 function Answer($$anchor, $$props) {
 	push($$props, true);
-	let items = prop($$props, "items", 3, null);
+	let items = prop($$props, "items", 3, null), blind = prop($$props, "blind", 3, "");
 	const read = resource(() => "/api/inbox?needs_you=true", {
 		every: 2e3,
 		tell: () => "devplane inbox --needs-you"
@@ -90,7 +91,7 @@ function Answer($$anchor, $$props) {
 		const id = setInterval(() => set(now, Date.now(), true), 3e4);
 		return () => clearInterval(id);
 	});
-	var section = root_5();
+	var section = root_6();
 	var p = sibling(child(section), 2);
 	var node = child(p);
 	Inline(node, { get text() {
@@ -227,8 +228,21 @@ function Answer($$anchor, $$props) {
 			});
 		};
 		var alternate = ($$anchor) => {
-			var p_4 = root_4();
-			append($$anchor, p_4);
+			var fragment_8 = root_5();
+			var node_8 = sibling(first_child(fragment_8), 2);
+			var consequent_9 = ($$anchor) => {
+				var p_4 = root_4();
+				var node_9 = child(p_4);
+				Inline(node_9, { get text() {
+					return blind();
+				} });
+				reset(p_4);
+				append($$anchor, p_4);
+			};
+			if_block(node_8, ($$render) => {
+				if (blind()) $$render(consequent_9);
+			});
+			append($$anchor, fragment_8);
 		};
 		if_block(node_7, ($$render) => {
 			if (read.phase === "stale" && read.failure) $$render(consequent_8);

@@ -99,6 +99,8 @@ pub enum Note {
     FirstRunInstalls { command: String },
     /// A lockfile is present and no setup is declared: the tree starts empty.
     NoSetupDeclared { lockfiles: Vec<String> },
+    /// The project declares no `check`, so this change cannot become verified.
+    NoCheck { project: String },
 }
 
 impl Note {
@@ -106,6 +108,9 @@ impl Note {
         match self {
             Note::FirstRunInstalls { command } => {
                 format!("the first run installs dependencies: `{command}`")
+            }
+            Note::NoCheck { project } => {
+                format!("this change cannot become verified: {project} declares no check")
             }
             Note::NoSetupDeclared { lockfiles } => format!(
                 "a fresh tree will have no dependencies installed — {} {} present and \
@@ -214,6 +219,21 @@ pub fn refusal_line(name: &str, why: PreflightReason, root: &str, detail: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_with_no_check_is_told_before_anything_is_created() {
+        let n = Note::NoCheck {
+            project: "core-lib".into(),
+        };
+        assert_eq!(
+            n.says(),
+            "this change cannot become verified: core-lib declares no check"
+        );
+        assert_eq!(
+            serde_json::to_value(&n).unwrap()["note"],
+            serde_json::json!("no_check")
+        );
+    }
 
     fn facts() -> Facts {
         Facts {

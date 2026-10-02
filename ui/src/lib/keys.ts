@@ -52,6 +52,17 @@ export function bind(b: Binding): void {
       `${b.surface} rebinds ${b.combo}, which is global: "${global.label}" (${global.action}) against "${b.label}" (${b.action})`,
     );
   }
+  // A mode (`change:review`) may rebind only its surface's list keys, which
+  // it does by design; any other key of the surface it takes is a collision.
+  const [parent, mode] = b.surface.split(":");
+  const over = mode
+    ? bindings.find((x) => x.surface === parent && x.combo === combo)
+    : bindings.find((x) => x.surface.startsWith(`${b.surface}:`) && x.combo === combo);
+  if (over && !LIST_COMBOS.includes(combo)) {
+    throw new Error(
+      `${b.combo} is bound in ${b.surface} ("${b.label}", ${b.action}) and in ${over.surface} ("${over.label}", ${over.action}); a mode may rebind only its surface's list keys`,
+    );
+  }
   const shadowed = b.surface === "global" ? bindings.find((x) => x.combo === combo) : undefined;
   if (shadowed) {
     throw new Error(
@@ -332,6 +343,9 @@ export function dispatch(surface: string, e: KeyboardEvent): boolean {
 bind({ surface: "global", combo: "Mod+k", action: "open-palette", label: "command palette" });
 bind({ surface: "global", combo: "?", action: "help", label: "keys bound here" });
 bind({ surface: "global", combo: "Esc", action: "leave", label: "leave: close the help, the palette or the new-change form" });
+
+/// The keys `bindList` binds: the only ones a mode may take from its surface.
+export const LIST_COMBOS: readonly string[] = ["Down", "j", "Up", "k", "Enter", "g g", "G"];
 
 /// The list keys, for a surface that shows a list and answers them through
 /// `lib/cursor`. Bound per surface, so each is in exactly one scope and `?`
