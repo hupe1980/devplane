@@ -23,6 +23,14 @@ async fn main() {
         }
         return;
     }
+    // Linux and Windows start the binary with the link as its one argument
+    // when the app is closed; clap would refuse it as an unknown command.
+    if let devplane::cli::Launch::Link(url) = devplane::cli::launch_of(std::env::args_os()) {
+        if let Err(e) = devplane::cli::open_link(&url).await {
+            std::process::exit(devplane::cli::report_error(&e, false));
+        }
+        return;
+    }
     let cli = match devplane::cli::Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

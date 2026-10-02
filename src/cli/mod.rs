@@ -30,6 +30,56 @@ mod verify;
 /// `main` answers this before clap parses and it never appears in a script.
 pub const COMPLETE_ARG: &str = "__complete";
 
+/// What the process was started to do, read before clap parses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launch {
+    /// Opened by a `devplane://` link: Linux and Windows start the binary
+    /// with the link as its only argument when the app is not running.
+    Link(String),
+    /// Anything else is the command line.
+    Cli,
+}
+
+/// Reads the arguments (program name first) for a link launch. Only a lone
+/// argument counts, as the operating system passes it; clap would refuse it as
+/// an unknown command.
+pub fn launch_of<I, S>(args: I) -> Launch
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut args = args.into_iter().skip(1);
+    match (args.next(), args.next()) {
+        (Some(one), None) => match one.as_ref().to_str() {
+            Some(url)
+                if url
+                    .get(..11)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("devplane://")) =>
+            {
+                Launch::Link(url.to_string())
+            }
+            _ => Launch::Cli,
+        },
+        _ => Launch::Cli,
+    }
+}
+
+/// Starts the window on a link. The deep-link plugin reads the link from this
+/// process's arguments, so the window opens on it as it first shows.
+pub async fn open_link(url: &str) -> Result<()> {
+    #[cfg(feature = "app")]
+    {
+        tracing::debug!(url, "started by a link");
+        crate::app::run(None).await
+    }
+    #[cfg(not(feature = "app"))]
+    anyhow::bail!(
+        "`{url}` is a link for the Devplane window, and this binary was built without the \
+         app feature. Install one with `cargo install devplane --features app`, or run \
+         `devplane up` and open the change from the browser."
+    )
+}
+
 /// The five errands, and every non-hidden subcommand assigned to exactly one.
 ///
 /// The one place the grouping is decided; `site/content/docs/cli.md` carries a
@@ -1399,5 +1449,37 @@ mod confirm_tests {
         assert!(said.contains("Stop it? [y/N]"));
         assert!(!ask(false, true, "\n").0.unwrap());
         assert!(!ask(false, true, "").0.unwrap(), "end of input is no");
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::{Launch, launch_of};
+
+    #[test]
+    fn a_lone_devplane_link_is_a_link_launch() {
+        assert_eq!(
+            launch_of(["devplane", "devplane://change/abc"]),
+            Launch::Link("devplane://change/abc".into())
+        );
+        assert_eq!(
+            launch_of(["devplane", "DEVPLANE://inbox"]),
+            Launch::Link("DEVPLANE://inbox".into())
+        );
+    }
+
+    #[test]
+    fn everything_else_is_the_command_line() {
+        assert_eq!(launch_of(["devplane"]), Launch::Cli);
+        assert_eq!(launch_of(["devplane", "status"]), Launch::Cli);
+        assert_eq!(launch_of(["devplane", "up", "--window"]), Launch::Cli);
+        assert_eq!(launch_of(["devplane", "https://example.com"]), Launch::Cli);
+        assert_eq!(launch_of(["devplane", "devplane:"]), Launch::Cli);
+        // A link among other arguments is not how the system launches it.
+        assert_eq!(
+            launch_of(["devplane", "devplane://change/abc", "--json"]),
+            Launch::Cli
+        );
+        assert_eq!(launch_of(Vec::<String>::new()), Launch::Cli);
     }
 }
