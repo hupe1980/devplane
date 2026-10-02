@@ -973,53 +973,98 @@ pub async fn close(snap: &Snapshot, store: &crate::store::Store, empty: bool) ->
 
 // ── Asks ────────────────────────────────────────────────────────────────────
 
+/// One ask, with its outcome sentence composed in `core::ask`: what the
+/// host answers and what the CLI reads back, one type for both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AskView {
+    pub id: String,
+    pub kind: String,
+    pub run: String,
+    pub project: Option<String>,
+    pub message: String,
+    pub payload: Value,
+    pub asked_at: String,
+    pub open: bool,
+    pub outcome: String,
+    pub deadline: crate::core::ask::Deadline,
+    pub deadline_says: String,
+    pub answered_at: Option<String>,
+    pub answered_from: Option<String>,
+    pub delivery: Option<crate::core::ask::Delivery>,
+    pub delivered: Option<bool>,
+    pub ended: Option<crate::core::ask::Ended>,
+}
+
+/// A question nobody answered in a watched session: the agent asked and
+/// moved on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbandonedAsk {
+    pub run: String,
+    pub project: Option<String>,
+    pub question: String,
+    pub options: Vec<crate::core::event::Choice>,
+    pub asked_at: String,
+    pub abandoned_at: String,
+    pub moved_on_to: Option<String>,
+    pub authority: String,
+    pub outcome: String,
+}
+
+/// `/api/asks`: everything an agent has asked, and what became of each one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsksView {
+    pub open: Vec<AskView>,
+    pub settled: Vec<AskView>,
+    pub abandoned: Vec<AbandonedAsk>,
+    /// Which vendors are unseen, so an empty list never reads as none.
+    pub blind_to: Vec<String>,
+}
+
 /// One ask, with its outcome sentence composed in `core::ask`.
-pub fn render_ask(a: &Ask) -> Value {
-    json!({
-        "id": a.id.as_str(),
-        "kind": a.kind.as_str(),
-        "run": a.run.as_str(),
-        "project": a.project.as_ref().map(|p| p.as_str()),
-        "message": a.message,
-        "payload": a.payload,
-        "asked_at": a.asked_at.to_string(),
-        "open": a.is_open(),
-        "outcome": a.outcome(),
-        "deadline": a.deadline,
-        "deadline_says": a.deadline.says(),
-        "answered_at": a.answered_at.map(|t| t.to_string()),
-        "answered_from": a.answered_from,
-        "delivery": a.delivery,
-        "delivered": a.delivery.as_ref().map(|d| d.reached_the_agent()),
-        "ended": a.ended,
-    })
+pub fn render_ask(a: &Ask) -> AskView {
+    AskView {
+        id: a.id.as_str().to_string(),
+        kind: a.kind.as_str().to_string(),
+        run: a.run.as_str().to_string(),
+        project: a.project.as_ref().map(|p| p.as_str().to_string()),
+        message: a.message.clone(),
+        payload: a.payload.clone(),
+        asked_at: a.asked_at.to_string(),
+        open: a.is_open(),
+        outcome: a.outcome(),
+        deadline: a.deadline,
+        deadline_says: a.deadline.says(),
+        answered_at: a.answered_at.map(|t| t.to_string()),
+        answered_from: a.answered_from.clone(),
+        delivery: a.delivery.clone(),
+        delivered: a.delivery.as_ref().map(|d| d.reached_the_agent()),
+        ended: a.ended.clone(),
+    }
 }
 
 /// Everything an agent has asked, and what became of each one.
-pub fn asks(snap: &Snapshot, recent: &[Ask]) -> Value {
+pub fn asks(snap: &Snapshot, recent: &[Ask]) -> AsksView {
     let settled: Vec<_> = recent.iter().filter(|a| !a.is_open()).collect();
     // Questions nobody answered from watched-only sessions: not answerable
     // `asks` rows, but *the agent gave up* is one of the outcomes.
-    let mut abandoned: Vec<Value> = snap
+    let mut abandoned: Vec<AbandonedAsk> = snap
         .world
         .runs()
         .flat_map(|r| {
-            r.abandoned_questions.iter().map(move |q| {
-                json!({
-                    "run": r.id.as_str(),
-                    "project": r.project_id.as_ref().map(|p| p.as_str()),
-                    "question": q.question,
-                    "options": q.options,
-                    "asked_at": q.asked_at.to_string(),
-                    "abandoned_at": q.abandoned_at.to_string(),
-                    "moved_on_to": q.moved_on_to,
-                    "authority": "nobody",
-                    "outcome": "nobody answered: the agent asked and moved on",
-                })
+            r.abandoned_questions.iter().map(move |q| AbandonedAsk {
+                run: r.id.as_str().to_string(),
+                project: r.project_id.as_ref().map(|p| p.as_str().to_string()),
+                question: q.question.clone(),
+                options: q.options.clone(),
+                asked_at: q.asked_at.to_string(),
+                abandoned_at: q.abandoned_at.to_string(),
+                moved_on_to: q.moved_on_to.clone(),
+                authority: "nobody".to_string(),
+                outcome: "nobody answered: the agent asked and moved on".to_string(),
             })
         })
         .collect();
-    abandoned.sort_by(|a, b| b["abandoned_at"].as_str().cmp(&a["abandoned_at"].as_str()));
+    abandoned.sort_by(|a, b| b.abandoned_at.cmp(&a.abandoned_at));
     // Which vendors are unseen, so an empty list never reads as none.
     let mut blind: Vec<String> = snap
         .world
@@ -1033,12 +1078,12 @@ pub fn asks(snap: &Snapshot, recent: &[Ask]) -> Value {
         .collect();
     blind.sort();
     blind.dedup();
-    json!({
-        "open": snap.open_asks.iter().map(render_ask).collect::<Vec<_>>(),
-        "settled": settled.iter().map(|a| render_ask(a)).collect::<Vec<_>>(),
-        "abandoned": abandoned,
-        "blind_to": blind,
-    })
+    AsksView {
+        open: snap.open_asks.iter().map(render_ask).collect(),
+        settled: settled.iter().map(|a| render_ask(a)).collect(),
+        abandoned,
+        blind_to: blind,
+    }
 }
 
 // ── Modes ───────────────────────────────────────────────────────────────────
@@ -1879,13 +1924,13 @@ pub enum SeenRefusal {
 
 /// What one mark covered: the units marked, and the weakened rows it
 /// completed.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Marked {
     pub seen: Vec<SeenUnit>,
     pub weakened_seen: Vec<crate::core::review::Weakened>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeenUnit {
     pub path: String,
     pub digest: String,
@@ -2906,7 +2951,7 @@ pub struct DiagnosticsForge {
     pub error: Option<String>,
     /// Per GitHub host: signed in as whom, and when GitHub last answered.
     /// Never the token.
-    pub github: Value,
+    pub github: Vec<crate::github::HostView>,
     pub last_poll_at: Option<String>,
     pub projects: usize,
     pub skipped: usize,

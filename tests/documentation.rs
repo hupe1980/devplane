@@ -107,6 +107,27 @@ fn check(blocks: Vec<Block>) -> usize {
             continue;
         }
 
+        if b.names.contains("trusted.toml") {
+            // It must read as the person's trust file, naming a root.
+            let home = std::env::temp_dir().join(format!(
+                "vp-doc-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(devplane::trust::path(&home), &b.body).unwrap();
+            let read = devplane::trust::Trusted::read(&home);
+            assert!(
+                read.as_ref().is_ok_and(|t| t.projects().next().is_some()),
+                "{}: this `trusted.toml` example does not read as a trust file naming a root: {:?}\n{}",
+                b.source,
+                read.err(),
+                b.body
+            );
+            std::fs::remove_dir_all(&home).ok();
+            continue;
+        }
+
         if b.names.contains("agents.toml") {
             // It must add an agent, pinned.
             let home = std::env::temp_dir().join(format!(

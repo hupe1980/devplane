@@ -981,9 +981,16 @@ pub fn report_error(e: &anyhow::Error, json: bool) -> i32 {
 /// Prints a host's answer as the `--json` document. An answer that carries
 /// `error` is printed the same and fails the command: a script reading the
 /// exit status must not take a refusal for success.
-pub(crate) fn print_json(v: &serde_json::Value) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(v)?);
-    if v.get("error").is_some_and(|e| !e.is_null()) {
+pub(crate) fn print_json<T: serde::Serialize + ?Sized>(v: &T) -> Result<()> {
+    /// Whether the document carries an error; nothing else is read.
+    #[derive(serde::Deserialize)]
+    struct Failed {
+        #[serde(default)]
+        error: Option<serde::de::IgnoredAny>,
+    }
+    let v = serde_json::to_value(v)?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    if serde_json::from_value::<Failed>(v).is_ok_and(|f| f.error.is_some()) {
         return Err(Exit(1).into());
     }
     Ok(())
@@ -1343,14 +1350,24 @@ fn load_policy() -> crate::core::Policy {
     policy
 }
 
-/// One read, from wherever answers: a running host, or the store.
-async fn raw(c: &crate::local::Reader, path: &str) -> Result<serde_json::Value> {
-    c.get(path).await
+/// One read, from wherever answers — a running host, or the store — into the
+/// type the host serialises for that route.
+async fn raw_as<T: serde::de::DeserializeOwned>(c: &crate::local::Reader, path: &str) -> Result<T> {
+    c.get_as(path).await
+}
+
+/// One run as `GET /api/runs/{id}` serves it ([`crate::view::run_detail`]):
+/// the run's record, and the sentence on the tasks it was sent.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct RunDetail {
+    #[serde(flatten)]
+    pub run: crate::core::Run,
+    pub sent_says: String,
 }
 
 /// Fetches one run, or says there is no such run and how to list them.
-async fn fetch_run(c: &crate::local::Reader, run: &str) -> Result<serde_json::Value> {
-    c.get(&format!("/api/runs/{run}")).await.map_err(|_| {
+async fn fetch_run(c: &crate::local::Reader, run: &str) -> Result<RunDetail> {
+    raw_as(c, &format!("/api/runs/{run}")).await.map_err(|_| {
         anyhow::anyhow!(
             "no run `{run}` on the board.\n\n  {}",
             paint(
@@ -1561,5 +1578,61 @@ mod launch_tests {
         assert!(!opens_window(&["devplane"], true));
         assert!(!opens_window(&["devplane", "status"], false));
         assert!(!opens_window(&["devplane", "doctor", "--json"], false));
+    }
+}
+
+#[cfg(test)]
+mod run_detail_tests {
+    use crate::core::event::{Choice, WaitingFor};
+    use crate::core::run::PermissionMode;
+    use crate::core::{BlockedOn, PlanStep, RunMode, RunState, ToolCall};
+
+    /// `run show --json` re-serialises the typed detail: it must print what
+    /// the host served, byte for byte.
+    #[test]
+    fn the_detail_round_trips_to_the_bytes_the_host_served() {
+        let at: jiff::Timestamp = "2026-10-02T09:15:30.123456789Z".parse().unwrap();
+        let mut run = crate::core::Run::new_at(
+            "s-1".into(),
+            "/work/repo".into(),
+            RunMode::Driven,
+            "claude",
+            at,
+        );
+        run.state = RunState::Waiting(WaitingFor::Other("dialog open".into()));
+        run.worktree = Some("/work/repo-wt".into());
+        run.pid = Some(4242);
+        run.permission_mode = Some(PermissionMode::Unrecognised("odd".into()));
+        run.totals.cost_usd = 0.1234567;
+        run.totals.rate_limit_percent = Some(42.5);
+        run.totals.rate_limit_resets_at = Some(1_790_000_000);
+        run.blocked_on = Some(BlockedOn {
+            waiting_for: WaitingFor::Permission,
+            message: Some("Run tests?".into()),
+            request_id: None,
+            ask: None,
+            tool: Some("Bash".into()),
+            input: Some(serde_json::json!({"command": "cargo test", "n": 1.5})),
+            options: vec![Choice::label("Yes")],
+            form: None,
+            since: at,
+        });
+        run.plan = vec![PlanStep {
+            content: "write it".into(),
+            status: "in_progress".into(),
+        }];
+        run.recent_tools = vec![ToolCall {
+            tool: "Edit".into(),
+            at,
+            ok: Some(true),
+            input: None,
+            call_id: Some("t-1".into()),
+        }];
+        let served = crate::view::run_detail(&run);
+        let detail: super::RunDetail = serde_json::from_value(served.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_string_pretty(&serde_json::to_value(&detail).unwrap()).unwrap(),
+            serde_json::to_string_pretty(&served).unwrap()
+        );
     }
 }

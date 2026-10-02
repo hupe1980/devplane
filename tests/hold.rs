@@ -23,7 +23,7 @@ async fn boot(key: Option<&str>) -> (SocketAddr, reqwest::Client, Shared) {
         db.clone(),
         TOKEN.into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();

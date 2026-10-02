@@ -1,12 +1,16 @@
 -- Devplane's store: what it observed, and what it was told.
 --
 -- Rebuildable: `runs`, `events`, `events_fts`, `messages`, `channel_health`,
--- `attention_log`, and `projects` except its `trusted` flag. Each is an
--- observation or a projection of one; losing it costs history.
+-- `attention_log`, and `projects`. Each is an observation or a projection of
+-- one; losing it costs history.
 --
--- The record: `changes`, `asks`, `decisions`, `agent_capabilities`, `looks`,
--- and the `trusted` flag. Nothing can say these again, so the
--- schema is versioned and an old file is moved aside rather than dropped.
+-- The record: `changes`, `asks`, `decisions`, `agent_capabilities`, `looks`.
+-- Nothing can say these again, so the schema is versioned and an old file is
+-- moved aside rather than dropped.
+--
+-- No preference lives here: which repositories a person trusted is
+-- `trusted.toml` beside this file, and a store from before is read once for
+-- its trusted roots before it is moved aside.
 --
 -- `events` and `decisions` are append-only; tables updated in place say how.
 
@@ -15,7 +19,6 @@ CREATE TABLE IF NOT EXISTS projects (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     root         TEXT NOT NULL,
-    trusted      INTEGER NOT NULL DEFAULT 0,
     repo_url     TEXT,
     auto_discovered INTEGER NOT NULL DEFAULT 1
 );

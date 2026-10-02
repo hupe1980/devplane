@@ -457,6 +457,18 @@ say "retired anchors" "none cited as live work outside the roadmap and the log"
 
 cd "$root" || exit 1
 
+# The store's schema version the notes state must be the code's.
+cd "$root" || exit 1
+code_schema=$(grep -oE 'pub const SCHEMA_VERSION: i64 = [0-9]+' src/store.rs | grep -oE '[0-9]+$')
+expect "SCHEMA_VERSION in src/store.rs" "$code_schema" || true
+notes_schema=$(grep -oE '`SCHEMA_VERSION` [0-9]+' concepts/STATE.md | grep -oE '[0-9]+$' | sort -u)
+expect "SCHEMA_VERSION in STATE.md" "$notes_schema" || true
+if [ -n "$notes_schema" ] && [ "$notes_schema" != "$code_schema" ]; then
+  echo "STATE.md says the store schema is $notes_schema; src/store.rs says $code_schema"
+  fail=1
+fi
+say "schema" "STATE.md matches src/store.rs: $code_schema"
+
 echo
 if [ "$fail" = 0 ]; then
   echo "ok — and every guard above found something to compare"

@@ -1,56 +1,82 @@
 //! Steering a change while it is in flight: verify, retry, resume, prompt,
 //! stop, and deciding about a specification that moved.
 
-use super::{host_and_change, ids, said_error};
+use super::{Answer, Says, host_and_change, ids};
 use crate::render::{self, DIM, clip, paint};
 use anyhow::{Context, Result};
+use serde::Deserialize;
+use serde::de::IgnoredAny;
+
+/// What `verify` came to: the gates' word, and the base checks when asked.
+#[derive(Deserialize)]
+struct Verified {
+    #[serde(default)]
+    passed: bool,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    report: Option<crate::core::change::GateReport>,
+    #[serde(default)]
+    base_checks: Option<crate::core::base_checks::View>,
+    #[serde(default)]
+    base_checks_refused: Option<String>,
+}
+
+/// The specification an accepted drift now works to.
+#[derive(Deserialize)]
+struct Accepted {
+    #[serde(default)]
+    fingerprint: Option<String>,
+}
 
 pub(super) async fn cmd_verify(change: &str, base_checks: bool, json: bool) -> Result<()> {
     let (c, id) = host_and_change(change).await?;
     if !json {
         println!("{}", paint(DIM, "running the project's gates…"));
     }
-    let v: serde_json::Value = c
+    let answer: Answer<Verified> = c
         .post_json(
             &format!("/api/changes/{id}/verify"),
             &serde_json::json!({ "base_checks": base_checks }),
         )
         .await?;
     if json {
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&answer);
     }
-    if let Some(e) = said_error(&v) {
-        anyhow::bail!("{e}");
-    }
-    let passed = v["passed"].as_bool().unwrap_or(false);
+    let v = answer.read()?;
+    let passed = v.passed;
     println!(
         "{} {}",
         match passed {
             true => paint(render::GREEN, "passed"),
             false => paint(render::RED, "failed"),
         },
-        v["summary"].as_str().unwrap_or("")
+        v.summary.as_deref().unwrap_or("")
     );
     // Every sentence is the host's; a count is not a verdict, so none is coloured.
-    let b = &v["base_checks"];
-    if let Some(why) = v["base_checks_refused"].as_str() {
+    let b = v.base_checks.as_ref();
+    if let Some(why) = &v.base_checks_refused {
         println!("base checks  {why}");
     }
-    for (label, key) in [
-        ("base's tests on this change", "on_change"),
-        ("new tests on the base", "on_base"),
+    for (label, says) in [
+        (
+            "base's tests on this change",
+            b.and_then(|b| b.on_change.as_ref()).map(|o| &o.says),
+        ),
+        (
+            "new tests on the base",
+            b.and_then(|b| b.on_base.as_ref()).map(|o| &o.says),
+        ),
     ] {
-        if let Some(says) = b[key]["says"].as_str() {
+        if let Some(says) = says {
             println!("  {label}  {says}");
         }
     }
-    if let Some(says) = b["counts_says"].as_str() {
-        println!("tests      {says}");
+    if let Some(b) = b {
+        println!("tests      {}", b.counts_says);
     }
     if !passed {
-        let report: Option<crate::core::change::GateReport> =
-            serde_json::from_value(v["report"].clone()).ok();
-        for cmd in report.iter().flat_map(|r| r.commands.iter()) {
+        for cmd in v.report.iter().flat_map(|r| r.commands.iter()) {
             for f in cmd.failures.iter().take(10) {
                 println!("    {f}");
             }
@@ -61,37 +87,33 @@ pub(super) async fn cmd_verify(change: &str, base_checks: bool, json: bool) -> R
 
 pub(super) async fn cmd_retry(change: &str, json: bool) -> Result<()> {
     let (c, id) = host_and_change(change).await?;
-    let v: serde_json::Value = c
+    let answer: Answer<IgnoredAny> = c
         .post_json(&format!("/api/changes/{id}/retry"), &serde_json::json!({}))
         .await?;
     if json {
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&answer);
     }
-    match said_error(&v) {
-        Some(e) => anyhow::bail!("{e}"),
-        None => println!(
-            "{} the failures went back to the same session.",
-            paint(render::GREEN, "handed back —")
-        ),
-    }
+    answer.read()?;
+    println!(
+        "{} the failures went back to the same session.",
+        paint(render::GREEN, "handed back —")
+    );
     Ok(())
 }
 
 pub(super) async fn cmd_resume(change: &str, json: bool) -> Result<()> {
     let (c, id) = host_and_change(change).await?;
-    let v: serde_json::Value = c
+    let answer: Answer<IgnoredAny> = c
         .post_json(&format!("/api/changes/{id}/resume"), &serde_json::json!({}))
         .await?;
     if json {
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&answer);
     }
-    match said_error(&v) {
-        Some(e) => anyhow::bail!("{e}"),
-        None => println!(
-            "{} the agent is back on the same conversation.",
-            paint(render::GREEN, "resumed —")
-        ),
-    }
+    answer.read()?;
+    println!(
+        "{} the agent is back on the same conversation.",
+        paint(render::GREEN, "resumed —")
+    );
     Ok(())
 }
 
@@ -118,19 +140,16 @@ pub(super) async fn cmd_prompt(run: &str, text: Vec<String>, json: bool) -> Resu
     }
     let c = crate::client::Client::connect_running().await?;
     let run = run_of(&c, run).await?;
-    let v: serde_json::Value = c
+    let answer: Answer<Says> = c
         .post_json(
             &format!("/api/runs/{run}/prompt"),
             &serde_json::json!({ "text": text }),
         )
         .await?;
     if json {
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&answer);
     }
-    match said_error(&v) {
-        Some(e) => anyhow::bail!("{e}"),
-        None => println!("{}", v["says"].as_str().unwrap_or("sent")),
-    }
+    println!("{}", answer.read()?.says.as_deref().unwrap_or("sent"));
     Ok(())
 }
 
@@ -138,28 +157,24 @@ pub(super) async fn cmd_stop(run: &str, yes: bool, json: bool) -> Result<()> {
     let c = crate::client::Client::connect_running().await?;
     let run = run_of(&c, run).await?;
     // What survives, said before anything is stopped.
-    let before: serde_json::Value = c.get(&format!("/api/runs/{run}/stop")).await?;
-    if let Some(e) = said_error(&before) {
-        anyhow::bail!("{e}");
-    }
+    let before: Answer<Says> = c.get(&format!("/api/runs/{run}/stop")).await?;
+    let says = before.read()?.says.as_deref().unwrap_or("");
     match json {
-        true => eprintln!("{}", before["says"].as_str().unwrap_or("")),
-        false => println!("{}", before["says"].as_str().unwrap_or("")),
+        true => eprintln!("{says}"),
+        false => println!("{says}"),
     }
     if !crate::cli::confirm("Stop it?", yes)? {
         eprintln!("{}", paint(DIM, "not stopped"));
         return Ok(());
     }
-    let v: serde_json::Value = c
+    let answer: Answer<IgnoredAny> = c
         .post_json(&format!("/api/runs/{run}/stop"), &serde_json::json!({}))
         .await?;
     if json {
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&answer);
     }
-    match said_error(&v) {
-        Some(e) => anyhow::bail!("{e}"),
-        None => println!("{}", paint(render::GREEN, "stopped")),
-    }
+    answer.read()?;
+    println!("{}", paint(render::GREEN, "stopped"));
     Ok(())
 }
 
@@ -177,24 +192,22 @@ pub(super) async fn cmd_drift(
     };
     let (c, id) = host_and_change(change).await?;
     let run = ids::run(&crate::local::Reader::Host(c.clone()), run).await?;
-    let v: serde_json::Value = c
+    let answer: Answer<Accepted> = c
         .post_json(
             &format!("/api/changes/{id}/drift/{verb}"),
             &serde_json::json!({ "run": run }),
         )
         .await?;
     if json {
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&answer);
     }
-    if let Some(e) = said_error(&v) {
-        anyhow::bail!("{e}");
-    }
+    let v = answer.read()?;
     match verb {
         "accept" => println!(
             "{} the change now works to the specification run {} saw ({}); recorded as yours.",
             paint(render::GREEN, "accepted —"),
             clip(&run, 12),
-            clip(v["fingerprint"].as_str().unwrap_or(""), 12)
+            clip(v.fingerprint.as_deref().unwrap_or(""), 12)
         ),
         _ => println!(
             "{} run {} was handed the files that changed; recorded as yours.",

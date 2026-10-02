@@ -1,29 +1,31 @@
 //! What happened: search across sessions, and the audit trail of decisions.
 
-use super::{raw, urlencode};
+use super::{raw_as, urlencode};
 use crate::render;
 use crate::render::{DIM, clip, paint};
 use anyhow::Result;
 
+/// One search hit: the session it is in and the matching text, as
+/// `/api/search` answers it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SearchHit {
+    run_id: String,
+    text: String,
+}
+
 pub async fn cmd_search(query: &str, json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
-    let v = raw(&c, &format!("/api/search?q={}", urlencode(query))).await?;
+    let hits: Vec<SearchHit> = raw_as(&c, &format!("/api/search?q={}", urlencode(query))).await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        println!("{}", serde_json::to_string_pretty(&hits)?);
         return Ok(());
     }
-    let empty = vec![];
-    let hits = v.as_array().unwrap_or(&empty);
     if hits.is_empty() {
         println!("No matches for `{query}`.");
         return Ok(());
     }
-    for hit in hits {
-        println!(
-            "{}  {}",
-            paint(DIM, &clip(hit["run_id"].as_str().unwrap_or(""), 12)),
-            hit["text"].as_str().unwrap_or("")
-        );
+    for hit in &hits {
+        println!("{}  {}", paint(DIM, &clip(&hit.run_id, 12)), hit.text);
     }
     Ok(())
 }
@@ -54,12 +56,10 @@ pub async fn cmd_audit(
         ),
         None => format!("/api/decisions?limit={limit}{filter}"),
     };
-    let v = raw(&c, &path).await?;
+    let rows: Vec<crate::core::Decision> = raw_as(&c, &path).await?;
 
     // Rendered to stdout, not exported: Devplane receives OTLP and sends none.
     if otel {
-        let rows: Vec<crate::core::Decision> =
-            serde_json::from_value(v.clone()).unwrap_or_default();
         println!(
             "{}",
             serde_json::to_string_pretty(&crate::core::genai::payload(&rows))?
@@ -68,11 +68,9 @@ pub async fn cmd_audit(
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
-    let empty = vec![];
-    let rows = v.as_array().unwrap_or(&empty);
     if rows.is_empty() {
         println!(
             "{}",
@@ -87,15 +85,16 @@ pub async fn cmd_audit(
         );
         return Ok(());
     }
-    for d in rows {
-        let authority = d["authority"].as_str().unwrap_or("");
+    for d in &rows {
+        let authority = d.authority.as_str();
+        let at = d.at.to_string();
         println!(
             "{} {} {} {}",
-            paint(DIM, d["at"].as_str().unwrap_or("").get(0..19).unwrap_or("")),
+            paint(DIM, at.get(0..19).unwrap_or("")),
             // `nobody` is coloured as a refusal whatever its outcome: the
             // moment passed without a person deciding.
             render::pad(
-                &match (authority, d["outcome"].as_str().unwrap_or("")) {
+                &match (authority, d.outcome.as_str()) {
                     ("nobody", _) => paint(render::RED, authority),
                     (_, "deny") | (_, "fail") => paint(render::RED, authority),
                     ("person", _) => paint(render::BLUE, authority),
@@ -104,18 +103,18 @@ pub async fn cmd_audit(
                 },
                 7
             ),
-            render::pad(d["action"].as_str().unwrap_or(""), 16),
-            clip(d["subject"].as_str().unwrap_or(""), 48)
+            render::pad(&d.action, 16),
+            clip(&d.subject, 48)
         );
-        if let Some(r) = d["reason"].as_str() {
+        if let Some(r) = &d.reason {
             println!("{:>21}{}", "", paint(DIM, &format!("↳ {}", clip(r, 70))));
         }
         // Where an MCP tool was defined, reported and never graded. Three
         // states: a source, an MCP call whose source was not reported (said
         // explicitly), and a non-MCP call (nothing printed).
-        let tool = d["tool"].as_str().unwrap_or("");
+        let tool = d.tool.as_deref().unwrap_or("");
         match (
-            d["server_source"].as_str(),
+            d.server_source.as_deref(),
             crate::core::decision::could_carry_provenance(tool),
         ) {
             (Some(src), _) => {

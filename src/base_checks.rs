@@ -517,7 +517,8 @@ async fn run_check(root: &Path, dir: &Path, config: &ProjectConfig) -> Run {
     let env = crate::core::caches::env_for(root, &config.workspace.share);
     let mut setup = None;
     if let Some(cmd) = &config.workspace.setup {
-        let report = crate::gates::run(
+        let report = crate::gates::run_in_turn(
+            config.gates.serial,
             "setup",
             std::slice::from_ref(cmd),
             dir,
@@ -536,7 +537,8 @@ async fn run_check(root: &Path, dir: &Path, config: &ProjectConfig) -> Run {
             return run;
         }
     }
-    let report = crate::gates::run(
+    let report = crate::gates::run_in_turn(
+        config.gates.serial,
         crate::core::change::CHECK,
         &config.gates.check,
         dir,

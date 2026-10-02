@@ -2276,7 +2276,7 @@ struct TrustBody {
 /// repository's own code. So the route also wants the window's proof for this
 /// path ([`crate::config::trust_proof`]); a host with no window refuses every
 /// request, and a person trusts with `devplane project trust` in a terminal of
-/// their own, which writes the store and has the host re-read it
+/// their own, which writes `trusted.toml` and has the host re-read it
 /// ([`reload_projects`]). This narrows the hole and does not close it: an
 /// agent that can drive the desktop can press the window's button.
 async fn trust_project(
@@ -2319,8 +2319,14 @@ async fn trust_project(
     match project {
         Some(p) => {
             // Checked, and rolled back on failure, so `{"trusted": true}`
-            // stays true after a restart.
-            if let Err(e) = state.store.save_project(&p).await {
+            // stays true after a restart. The project row is history; the
+            // trust is the person's file.
+            let saved = match state.store.save_project(&p).await {
+                Ok(()) => crate::trust::add(&state.home, [p.root.clone()]).map(|_| ()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = saved {
+                let e = format!("{e:#}");
                 tracing::error!(project = %p.id.as_str(), error = %e, "could not record trust");
                 state
                     .store
@@ -2360,10 +2366,11 @@ async fn trust_project(
     }
 }
 
-/// Re-reads the projects the store records, so trust a person wrote with
-/// `devplane project trust` while this host runs takes effect at once rather
-/// than at the next start. Grants nothing the store does not already say, and
-/// takes nothing back: a project's trust only ever merges in.
+/// Re-reads the projects the store records and the repositories
+/// `trusted.toml` names, so trust a person wrote with `devplane project
+/// trust` while this host runs takes effect at once rather than at the next
+/// start. Grants nothing the file does not already say, and takes nothing
+/// back: a project's trust only ever merges in.
 async fn reload_projects(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     guard!(state, headers);
     let projects = match state.store.load_projects().await {
@@ -2376,12 +2383,22 @@ async fn reload_projects(State(state): State<Shared>, headers: HeaderMap) -> imp
                 .into_response();
         }
     };
+    let trusted = match crate::trust::Trusted::read(&state.home) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("could not read the trusted repositories: {e:#}")})),
+            )
+                .into_response();
+        }
+    };
     let mut w = state.world.lock().await;
-    let n = projects.len();
-    for p in projects {
-        w.upsert_project(p);
+    let mut ids = std::collections::BTreeSet::new();
+    for p in projects.into_iter().chain(trusted.projects()) {
+        ids.insert(w.upsert_project(p));
     }
-    Json(json!({"projects": n})).into_response()
+    Json(json!({"projects": ids.len()})).into_response()
 }
 
 /// Issues a repository is offering as work.
@@ -2725,7 +2742,7 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
         DiagnosticsForge {
             viewer: f.viewer.clone(),
             error: f.error.clone(),
-            github: serde_json::to_value(state.github.views()).unwrap_or_default(),
+            github: state.github.views(),
             last_poll_at: f.last_poll_at.map(|t| t.to_string()),
             projects: f.projects.len(),
             skipped: f.skip.len(),

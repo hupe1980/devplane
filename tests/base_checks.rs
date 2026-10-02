@@ -190,7 +190,7 @@ async fn boot() -> (std::net::SocketAddr, reqwest::Client, Host) {
         db.clone(),
         "tok".into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();

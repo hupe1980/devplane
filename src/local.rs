@@ -41,6 +41,12 @@ impl Local {
         for p in self.store.load_projects().await? {
             world.upsert_project(p);
         }
+        // Trust is the person's file; one that cannot be read trusts nothing.
+        if let Ok(t) = crate::trust::Trusted::read(&self.home) {
+            for p in t.projects() {
+                world.upsert_project(p);
+            }
+        }
         world.restore_runs(self.store.load_runs().await?);
         // Replay what hooks wrote past the host's mark, in memory only (the
         // mark is the host's to move). Paged to the end, and each event at
@@ -120,7 +126,7 @@ impl Local {
             }
             ["api", "asks"] => {
                 let recent = self.store.asks(50).await.unwrap_or_default();
-                view::asks(&snap, &recent)
+                serde_json::to_value(view::asks(&snap, &recent))?
             }
             ["api", "runs", id] => {
                 let id = snap
@@ -233,7 +239,11 @@ impl Reader {
 
     /// Marks every current hunk at `path` seen, as the person running
     /// this: through the host where one runs, otherwise straight into the store.
-    pub async fn mark_seen(&self, change: &str, path: &str) -> Result<Value> {
+    pub async fn mark_seen<T: serde::de::DeserializeOwned>(
+        &self,
+        change: &str,
+        path: &str,
+    ) -> Result<T> {
         match self {
             Reader::Host(c) => {
                 c.post_json(
@@ -247,7 +257,7 @@ impl Reader {
                 let id = snap
                     .resolve_change(change)
                     .map_err(|e| anyhow::anyhow!(e))?;
-                Ok(
+                Ok(serde_json::from_value(
                     match view::mark_seen(&snap, &l.store, &id, path, None).await {
                         Ok(marked) => serde_json::to_value(marked)?,
                         Err(view::SeenRefusal::NoSuchChange) => {
@@ -258,7 +268,7 @@ impl Reader {
                             "digests": digests,
                         }),
                     },
-                )
+                )?)
             }
         }
     }
@@ -294,7 +304,7 @@ impl Reader {
                 .map_err(|e| anyhow::anyhow!(e))?;
                 // This process is the surface; the body's own claim is not asked.
                 let done = crate::driven::answer_without_host(&l.store, ask, answer, "cli").await?;
-                Ok(view::render_ask(&done))
+                Ok(serde_json::to_value(view::render_ask(&done))?)
             }
         }
     }

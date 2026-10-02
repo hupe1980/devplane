@@ -226,6 +226,7 @@ Completing an id asks a running host or reads the store (never starting a host),
 | `policy.toml` | optional machine-wide `[policy]` rules |
 | `agents.toml` | optional extra agents; see [Driving agents](@/docs/agents.md#adding-an-agent) |
 | `app.toml` | optional settings for the window |
+| `trusted.toml` | the repositories you trusted (`devplane project trust`, or the window) |
 
 Outside it: `~/.claude/settings.json.devplane-backup` (from `agent connect claude`) and each change's
 worktree under the repository's `.claude/worktrees/`.

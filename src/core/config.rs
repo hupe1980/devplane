@@ -100,6 +100,10 @@ pub struct Gates {
     pub junit: Vec<String>,
     /// When the base's tests run on a change and its new tests on the base.
     pub base_checks: BaseChecksWhen,
+    /// Whether this repository's gates run one at a time on this machine:
+    /// for checks that share something two changes cannot both hold, such as
+    /// one test database. Off, two changes' gates run at once.
+    pub serial: bool,
 }
 
 /// When base checks run: the cost is the person's choice.
@@ -133,6 +137,7 @@ const GATES_KEYS: &[&str] = &[
     "max_feedback_rounds",
     "junit",
     "base_checks",
+    "serial",
 ];
 
 impl TryFrom<toml::Table> for Gates {
@@ -174,6 +179,9 @@ impl TryFrom<toml::Table> for Gates {
             g.base_checks = v.clone().try_into().map_err(|_| {
                 format!("`[gates] base_checks` is \"offer\", \"auto\" or \"off\", not {v}")
             })?;
+        }
+        if let Some(v) = t.remove("serial") {
+            g.serial = v.as_bool().ok_or("`[gates] serial` is true or false")?;
         }
         for (name, v) in t {
             if let Some(why) = removed_gates_key(&name) {
@@ -230,6 +238,7 @@ impl Default for Gates {
             named: BTreeMap::new(),
             junit: Vec::new(),
             base_checks: BaseChecksWhen::Offer,
+            serial: false,
         }
     }
 }
@@ -777,6 +786,7 @@ impl ProjectConfig {
                 })).collect::<Vec<_>>(),
                 "junit": self.gates.junit,
                 "base_checks": self.gates.base_checks.as_str(),
+                "serial": self.gates.serial,
             },
             "policy": {
                 "deny": rules(policy.deny_rules()),
@@ -1158,6 +1168,22 @@ timeout = "90s"
             let err = ProjectConfig::parse(text).expect_err(text);
             assert!(err.contains(says), "{text}\n produced: {err}");
         }
+    }
+
+    /// `serial` is a flag of `[gates]`, off unless written; anything but a
+    /// boolean is refused, and a misspelling names a gate table, not a pass.
+    #[test]
+    fn serial_gates_are_a_flag_and_off_by_default() {
+        assert!(!parse("[gates]\ncheck = [\"t\"]\n").gates.serial);
+        assert!(
+            parse("[gates]\ncheck = [\"t\"]\nserial = true\n")
+                .gates
+                .serial
+        );
+        let err = ProjectConfig::parse("[gates]\nserial = \"yes\"\n").unwrap_err();
+        assert!(err.contains("`[gates] serial` is true or false"), "{err}");
+        let err = ProjectConfig::parse("[gates]\nserialise = true\n").unwrap_err();
+        assert!(err.contains("serial"), "the keys are listed: {err}");
     }
 
     #[test]

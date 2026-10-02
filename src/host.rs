@@ -110,6 +110,9 @@ pub struct AppState {
     /// Agents this machine can drive: built-ins with the user's `agents.toml`
     /// layered over them. Read once at start.
     pub agents: Vec<crate::acp::AgentSpec>,
+    /// Devplane's home, where the person's own files are read from: the
+    /// trusted repositories among them ([`crate::trust`]).
+    pub home: PathBuf,
     pub token: String,
     /// Accepted on the telemetry routes only; see [`crate::config::ingest_token`].
     pub ingest_token: String,
@@ -250,6 +253,16 @@ impl AppState {
         for p in store.load_projects().await? {
             world.upsert_project(p);
         }
+        // Trust is the person's file, not the store's. A file that cannot be
+        // read trusts nothing and says so, rather than refusing to start.
+        match crate::trust::Trusted::read(&home) {
+            Ok(t) => {
+                for p in t.projects() {
+                    world.upsert_project(p);
+                }
+            }
+            Err(e) => tracing::error!(error = format!("{e:#}"), "no repository is trusted"),
+        }
         let runs = store.load_runs().await?;
         let restored = runs.len();
         world.restore_runs(runs);
@@ -287,7 +300,8 @@ impl AppState {
             leaked_agents: Mutex::new(Vec::new()),
             forge: Mutex::new(ForgeState::default()),
             github: Arc::new(crate::github::GitHub::new(&home)),
-            policy: PolicyCache::new(policy, home, dirs::home_dir()),
+            policy: PolicyCache::new(policy, home.clone(), dirs::home_dir()),
+            home,
             ingest_token: crate::config::ingest_token(&token),
             token,
             tx,
@@ -631,6 +645,7 @@ pub fn secure_home(dir: &std::path::Path) -> std::io::Result<()> {
             let secret = name == "token"
                 || name == "host.json"
                 || name == "policy.toml"
+                || name == crate::trust::FILE
                 || name.starts_with("devplane.");
             // `symlink_metadata`: a link is left alone rather than followed to
             // a file this does not own.

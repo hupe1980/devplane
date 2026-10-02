@@ -412,7 +412,13 @@ const OWN_WHY: &str = "built in: an agent may not read or change Devplane's own 
 
 /// The files under `~/.devplane` no agent may change; `devplane.db` also
 /// covers its `-wal`, `-shm` and `-journal` siblings.
-const OWN_NAMES: &[&str] = &["policy.toml", "agents.toml", "token", "host.json"];
+const OWN_NAMES: &[&str] = &[
+    "policy.toml",
+    "agents.toml",
+    crate::trust::FILE,
+    "token",
+    "host.json",
+];
 const OWN_DB: &str = "devplane.db";
 /// Past this many candidate working directories the line is not followed.
 const MOST_CWDS: usize = 16;

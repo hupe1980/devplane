@@ -213,9 +213,10 @@ try {
     const after = await p.locator(".said").first().innerText();
     check("the finished run says what it came to", /The gates failed: check failed/.test(after) && !/running/.test(after), after);
     await p.getByRole("button", { name: /Offer as pull request/ }).click();
-    await sleep(500);
+    // Wait for the answer rather than a fixed pause: a loaded machine is slower.
+    await p.getByText("git push -u origin change/x").first().waitFor({ timeout: 5000 }).catch(() => {});
     const offered = await p.locator(".doc").innerText();
-    check("an offer that handed back commands shows them", offered.includes("git push -u origin change/x") && offered.includes("gh pr create"));
+    check("an offer that handed back commands shows them", offered.includes("git push -u origin change/x") && offered.includes("gh pr create"), offered.slice(0, 400).replace(/\s+/g, " "));
     check("…and does not say it was offered", !/offer made/.test(offered));
     await p.context().close();
   }

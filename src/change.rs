@@ -443,7 +443,8 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<ChangeId> {
                 .await
                 .insert(change.id.clone(), change.clone());
             state.notify_changed();
-            let report = crate::gates::run(
+            let report = crate::gates::run_in_turn(
+                config.gates.serial,
                 "setup",
                 std::slice::from_ref(setup),
                 &dir,
@@ -700,7 +701,8 @@ pub async fn on_turn_ended(state: &Shared, run: &RunId) {
     state.notify_changed();
     // Nothing commits: the gate runs on the working tree, uncommitted work
     // included, and records that tree's digest for `verified`.
-    let mut report = crate::gates::run(
+    let mut report = crate::gates::run_in_turn(
+        config.gates.serial,
         "check",
         &config.gates.check,
         &dir,
@@ -1837,7 +1839,8 @@ pub async fn verify(state: &Shared, id: &ChangeId) -> Result<crate::core::GateRe
     let mut report = if gone {
         crate::gates::absent_worktree("check", &config.gates.check, &dir, attempt)
     } else {
-        crate::gates::run(
+        crate::gates::run_in_turn(
+            config.gates.serial,
             "check",
             &config.gates.check,
             &dir,

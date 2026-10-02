@@ -347,6 +347,7 @@ fn an_agent_may_not_change_devplanes_own_files_or_read_its_token() {
     for file in [
         format!("{h}/policy.toml"),
         format!("{h}/agents.toml"),
+        format!("{h}/trusted.toml"),
         format!("{h}/devplane.db"),
         format!("{h}/devplane.db-wal"),
         format!("{h}/token"),
@@ -371,6 +372,7 @@ fn an_agent_may_not_change_devplanes_own_files_or_read_its_token() {
         format!("cat {h}/token"),
         "echo '[policy]' > devplane.toml".to_string(),
         format!("cp /tmp/x {h}/agents.toml"),
+        format!("echo 'roots = [\"/x\"]' > {h}/trusted.toml"),
     ] {
         assert!(matches!(sh(cmd.clone()), Verdict::Deny { .. }), "{cmd}");
     }
@@ -379,7 +381,13 @@ fn an_agent_may_not_change_devplanes_own_files_or_read_its_token() {
         Verdict::Unresolved { .. }
     ));
     // Nothing under the home is read either: the store holds the answers.
-    for file in ["policy.toml", "token", "devplane.db", "spool/x.json"] {
+    for file in [
+        "policy.toml",
+        "trusted.toml",
+        "token",
+        "devplane.db",
+        "spool/x.json",
+    ] {
         match cache.restrictive(&root, "Read", &json!({"file_path": format!("{h}/{file}")})) {
             Verdict::Deny { rule } => assert!(rule.starts_with("devplane-own-files"), "{rule}"),
             v => panic!("{file}: {v:?}"),

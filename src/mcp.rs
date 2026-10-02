@@ -48,10 +48,11 @@ const QUESTIONS: &[Question] = &[
     Question {
         name: "change",
         description: "A change: its phase, the gate verdicts it has collected, the \
-                      specification it answers and what its checks said. Omit `id` for every open \
-                      change.",
+                      specification it answers and what its checks said. Omit `id` for the change \
+                      you were started for, or, when Devplane did not start you for one, every \
+                      open change.",
         schema: r#"{"type":"object","properties":{"id":{"type":"string",
-                   "description":"The change id. Omit for all open changes."}}}"#,
+                   "description":"The change id. Omit for your own change, or all open changes when you have none."}}}"#,
     },
     Question {
         name: "explain",
@@ -217,7 +218,7 @@ impl ServerHandler for Server {
             "inbox" => self.ask("/api/inbox").await,
             // Filtered here rather than behind a route of its own: one
             // endpoint with one shape cannot disagree with another.
-            "change" => match s("id") {
+            "change" => match change_asked(s("id"), own_change()) {
                 Some(id) => self.ask_filtered("/api/changes", &id).await,
                 None => self.ask("/api/changes").await,
             },
@@ -247,6 +248,22 @@ impl ServerHandler for Server {
             ))),
         }
     }
+}
+
+/// The change Devplane started this server's agent for, from what the host
+/// put in its environment ([`crate::driven::CHANGE_ENV`]); `None` for an
+/// agent Devplane did not start for a change.
+fn own_change() -> Option<String> {
+    std::env::var(crate::driven::CHANGE_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+/// Which change the `change` tool answers about: the one asked for by id,
+/// else the caller's own, else (`None`) every open change. Scoping is a
+/// default, not a wall: any change can still be asked for by id, as before.
+fn change_asked(id: Option<String>, own: Option<String>) -> Option<String> {
+    id.or(own)
 }
 
 /// The stop tool: the run, change and key come from what the host put in this
@@ -280,7 +297,7 @@ async fn claim(args: serde_json::Map<String, serde_json::Value>) -> CallToolResp
     let body = serde_json::json!({
         "reason": draft.reason,
         "paths": draft.paths,
-        "change": env(crate::driven::CHANGE_ENV),
+        "change": own_change(),
         "key": env(crate::driven::CLAIM_KEY_ENV).unwrap_or_default(),
     });
     match client
@@ -441,6 +458,35 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("is_error: Some(true)"), "{text}");
+    }
+
+    /// An agent Devplane started for a change asks about that change when
+    /// it names none; one it did not start sees every open change; an id is
+    /// always honoured.
+    #[test]
+    fn the_change_tool_defaults_to_the_callers_own_change() {
+        let own = || Some("chg-own".to_string());
+        assert_eq!(change_asked(None, own()).as_deref(), Some("chg-own"));
+        assert_eq!(change_asked(None, None), None);
+        assert_eq!(
+            change_asked(Some("chg-other".into()), own()).as_deref(),
+            Some("chg-other")
+        );
+        let q = QUESTIONS.iter().find(|q| q.name == "change").unwrap();
+        assert!(q.description.contains("the change you were started for"));
+        // The variable the host hands this server is the one it reads.
+        let code = include_str!("mcp.rs");
+        let code = &code[..code.find("#[cfg(test)]").unwrap()];
+        assert_eq!(
+            code.matches("std::env::var(crate::driven::CHANGE_ENV)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            code.matches("own_change()").count(),
+            3,
+            "defined once, and read by the tool and by the claim"
+        );
     }
 
     #[test]

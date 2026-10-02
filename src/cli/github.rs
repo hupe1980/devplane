@@ -3,10 +3,41 @@
 //! window shows the same code) and runs in this process otherwise; both store
 //! to the same credential-store entry.
 
-use crate::github::{GitHub, Secret};
+use crate::github::{GitHub, HostView, Secret, SignIn};
 use crate::render::{BOLD, DIM, paint};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+
+/// What `/api/github/login` answers: the pending code, or why not. Only the
+/// fields read here.
+#[derive(serde::Deserialize)]
+struct LoginStarted {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    verification_uri: Option<String>,
+    #[serde(default)]
+    user_code: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
+}
+
+/// What `/api/github/logout` answers: where the token was deleted from, or
+/// why it was not.
+#[derive(serde::Deserialize)]
+struct LoggedOut {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    deleted_from: Option<String>,
+}
+
+/// `/api/github`: every GitHub host's sign-in.
+#[derive(serde::Deserialize)]
+struct GitHubState {
+    #[serde(default)]
+    hosts: Vec<HostView>,
+}
 
 /// Whether `url` may be handed to the platform's opener: a web address with
 /// nothing a shell or a command line could read as more than one word.
@@ -98,7 +129,7 @@ fn token_from_stdin() -> Result<Secret> {
 /// host there is nobody to tell.
 async fn tell_the_host(host: &str) {
     if let Ok(c) = crate::client::Client::connect_running().await {
-        let _: Result<Value> = c
+        let _: Result<serde::de::IgnoredAny> = c
             .post_json("/api/github/refresh", &json!({"host": host}))
             .await;
     }
@@ -118,48 +149,37 @@ pub async fn cmd_login(host: Option<String>, with_token: bool, json: bool) -> Re
 
     // Through the host when one runs: the window shows the same code.
     if let Ok(c) = crate::client::Client::connect_running().await {
-        let started: Value = c
+        let started: LoginStarted = c
             .post_json("/api/github/login", &json!({"host": host}))
             .await?;
-        if let Some(e) = started["error"].as_str() {
+        if let Some(e) = &started.error {
             bail!("{e}");
         }
-        let uri = started["verification_uri"].as_str().unwrap_or_default();
+        let uri = started.verification_uri.as_deref().unwrap_or_default();
         print_code(
             &host,
-            started["user_code"].as_str().unwrap_or_default(),
+            started.user_code.as_deref().unwrap_or_default(),
             uri,
-            started["expires_at"].as_str().unwrap_or_default(),
+            started.expires_at.as_deref().unwrap_or_default(),
             json,
         );
         open_in_browser(uri);
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let all: Value = c.get("/api/github").await?;
-            let Some(now) = all["hosts"]
-                .as_array()
-                .and_then(|h| h.iter().find(|v| v["host"] == host.as_str()))
-            else {
+            let all = c.get::<GitHubState>("/api/github").await?;
+            let Some(now) = all.hosts.into_iter().find(|v| v.host == host) else {
                 continue;
             };
-            if now["state"] == "pending" {
+            if matches!(now.sign_in, SignIn::Pending { .. }) {
                 continue;
             }
             // Said first: a denied attempt while an older sign-in stands
             // leaves the host signed in, and is still a denial.
-            if let Some(said) = now["said"].as_str() {
+            if let Some(said) = &now.said {
                 bail!("{said}");
             }
-            if now["state"] == "signed_in" {
-                let scopes: Vec<String> =
-                    serde_json::from_value(now["scopes"].clone()).unwrap_or_default();
-                signed_in(
-                    &host,
-                    now["login"].as_str().unwrap_or_default(),
-                    &scopes,
-                    &hub.describe_store(&host),
-                    json,
-                );
+            if let SignIn::SignedIn { login, scopes } = &now.sign_in {
+                signed_in(&host, login, scopes, &hub.describe_store(&host), json);
                 return Ok(());
             }
             bail!("the sign-in ended without a token");
@@ -185,13 +205,13 @@ pub async fn cmd_logout(host: Option<String>, json: bool) -> Result<()> {
     let host = hub.host_or_default(host.as_deref());
     let from = match crate::client::Client::connect_running().await {
         Ok(c) => {
-            let v: Value = c
+            let v: LoggedOut = c
                 .post_json("/api/github/logout", &json!({"host": host}))
                 .await?;
-            if let Some(e) = v["error"].as_str() {
+            if let Some(e) = v.error {
                 bail!("{e}");
             }
-            v["deleted_from"].as_str().map(str::to_string)
+            v.deleted_from
         }
         Err(_) => hub.logout(&host).await?,
     };
@@ -222,38 +242,32 @@ pub async fn cmd_logout(host: Option<String>, json: bool) -> Result<()> {
 /// One line per GitHub host: whom it signs in as, the scopes, when GitHub
 /// last answered. From the host's diagnostics when one runs, else from this
 /// machine's sign-in record. Never the token.
-pub fn doctor_lines(hosts: &Value, default_host: &str) -> Vec<String> {
-    let empty = vec![];
-    let hosts = hosts.as_array().unwrap_or(&empty);
+pub fn doctor_lines(hosts: &[HostView], default_host: &str) -> Vec<String> {
     let width = hosts
         .iter()
-        .filter_map(|h| h["host"].as_str().map(str::len))
+        .map(|h| h.host.len())
         .max()
         .unwrap_or(10)
         .max(10);
     hosts
         .iter()
         .map(|h| {
-            let name = h["host"].as_str().unwrap_or_default();
+            let name = h.host.as_str();
             let flag = if name == default_host {
                 String::new()
             } else {
                 format!(" --host {name}")
             };
-            let says = match h["state"].as_str().unwrap_or_default() {
-                "signed_in" => {
-                    let scopes: Vec<&str> = h["scopes"]
-                        .as_array()
-                        .map(|s| s.iter().filter_map(|x| x.as_str()).collect())
-                        .unwrap_or_default();
-                    let read = h["last_read"]
-                        .as_str()
+            let says = match &h.sign_in {
+                SignIn::SignedIn { login, scopes } => {
+                    let read = h
+                        .last_read
+                        .as_deref()
                         .and_then(|t| t.parse::<jiff::Timestamp>().ok())
                         .map(|t| format!("last read {} ago", ago(t)))
                         .unwrap_or_else(|| "not read yet".into());
                     format!(
-                        "signed in as {} · {} · {read}",
-                        h["login"].as_str().unwrap_or("?"),
+                        "signed in as {login} · {} · {read}",
                         if scopes.is_empty() {
                             "scopes unknown".to_string()
                         } else {
@@ -261,21 +275,17 @@ pub fn doctor_lines(hosts: &Value, default_host: &str) -> Vec<String> {
                         }
                     )
                 }
-                "pending" => format!(
-                    "signing in — enter {} at {}",
-                    h["user_code"].as_str().unwrap_or("?"),
-                    h["verification_uri"].as_str().unwrap_or("?")
-                ),
-                "expired" => format!("sign-in expired — devplane auth login{flag}"),
-                "rate_limited" => {
-                    format!("rate limited until {}", h["until"].as_str().unwrap_or("?"))
+                SignIn::Pending {
+                    user_code,
+                    verification_uri,
+                    ..
+                } => format!("signing in — enter {user_code} at {verification_uri}"),
+                SignIn::Expired => format!("sign-in expired — devplane auth login{flag}"),
+                SignIn::RateLimited { until } => format!("rate limited until {until}"),
+                SignIn::Unreachable { why, since } => {
+                    format!("unreachable since {since} — {why}")
                 }
-                "unreachable" => format!(
-                    "unreachable since {} — {}",
-                    h["since"].as_str().unwrap_or("?"),
-                    h["why"].as_str().unwrap_or("")
-                ),
-                _ => format!("not signed in — devplane auth login{flag}"),
+                SignIn::SignedOut => format!("not signed in — devplane auth login{flag}"),
             };
             format!("  {name:<width$}   {says}")
         })
@@ -293,22 +303,20 @@ fn ago(t: jiff::Timestamp) -> String {
 
 /// Every GitHub host's sign-in and the configured host: from the running
 /// host's diagnostics when there are some, else from this machine's record.
-pub fn doctor_hosts(hosts: Option<&Value>) -> (Value, String) {
+/// `None` when neither can be read.
+pub fn doctor_hosts(hosts: Option<&[HostView]>) -> (Option<Vec<HostView>>, String) {
     match (hosts, GitHub::for_home().ok()) {
-        (Some(v), Some(hub)) if v.is_array() => (v.clone(), hub.default_host().to_string()),
-        (_, Some(hub)) => (
-            serde_json::to_value(hub.views()).unwrap_or_default(),
-            hub.default_host().to_string(),
-        ),
-        (_, None) => (Value::Null, "github.com".to_string()),
+        (Some(v), Some(hub)) => (Some(v.to_vec()), hub.default_host().to_string()),
+        (_, Some(hub)) => (Some(hub.views()), hub.default_host().to_string()),
+        (_, None) => (None, "github.com".to_string()),
     }
 }
 
 /// `doctor`'s GitHub section.
-pub fn print_doctor(hosts: Option<&Value>) {
+pub fn print_doctor(hosts: Option<&[HostView]>) {
     println!("\n{}", paint(BOLD, "github"));
     let (hosts, default_host) = doctor_hosts(hosts);
-    for line in doctor_lines(&hosts, &default_host) {
+    for line in doctor_lines(hosts.as_deref().unwrap_or_default(), &default_host) {
         println!("{line}");
     }
 }
@@ -349,11 +357,13 @@ mod tests {
 
     #[test]
     fn the_doctor_section_names_each_host_and_never_a_token() {
-        let hosts = json!([
+        let hosts: Vec<HostView> = serde_json::from_value(json!([
             {"host": "github.com", "state": "signed_in", "login": "octocat",
-             "scopes": ["repo", "read:org"], "last_read": jiff::Timestamp::now().to_string()},
-            {"host": "ghe.corp", "state": "signed_out", "last_read": null},
-        ]);
+             "scopes": ["repo", "read:org"], "last_read": jiff::Timestamp::now().to_string(),
+             "device_flow": true},
+            {"host": "ghe.corp", "state": "signed_out", "last_read": null, "device_flow": false},
+        ]))
+        .expect("the host's own shape");
         let lines = doctor_lines(&hosts, "github.com");
         assert!(lines[0].contains("signed in as octocat · repo, read:org · last read"));
         assert!(

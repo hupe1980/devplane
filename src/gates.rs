@@ -36,6 +36,74 @@ impl GateInput {
     }
 }
 
+/// Held while a gate runs in a project that declares `[gates] serial = true`:
+/// an exclusive lock on a file named for the repository, so every gate of that
+/// repository — in any worktree, and from any Devplane process on this
+/// machine — waits for the one before it. Released on drop, and by the
+/// operating system if the process dies.
+#[derive(Debug)]
+pub struct Exclusive(#[allow(dead_code)] std::fs::File);
+
+/// Waits until no other gate of `dir`'s repository runs, when `serial` says
+/// gates there share something (a database, a port) and must not overlap.
+/// `None` when they may run at once, or when no lock could be taken — which
+/// is logged, and the gate runs rather than never running.
+///
+/// The lock lives in the system's temporary directory, named for the
+/// repository's shared git directory (or `dir` itself outside one): nothing is
+/// written into the repository or into Devplane's home. Never nest two: a
+/// second lock in the same process waits on the first.
+pub async fn exclusive(dir: &Path, serial: bool) -> Option<Exclusive> {
+    if !serial {
+        return None;
+    }
+    let key = match crate::git::common_dir(dir).await {
+        Some(c) => c,
+        None => dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()),
+    };
+    let at = std::env::temp_dir().join(format!(
+        "devplane-gates-{}.lock",
+        crate::core::hash::hex(key.to_string_lossy().as_bytes())
+    ));
+    let taken = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&at)?;
+        file.lock()?;
+        Ok(file)
+    })
+    .await;
+    match taken {
+        Ok(Ok(f)) => Some(Exclusive(f)),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "could not serialise this gate; it runs anyway");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not serialise this gate; it runs anyway");
+            None
+        }
+    }
+}
+
+/// [`run`], in turn with the repository's other gates when `serial` says so
+/// ([`exclusive`]). The wait is not counted against the gate's timeout: a
+/// gate's time is the time its commands ran.
+pub async fn run_in_turn(
+    serial: bool,
+    gate: &str,
+    commands: &[String],
+    dir: &Path,
+    timeout: Duration,
+    attempt: u32,
+    input: &GateInput,
+) -> GateReport {
+    let _turn = exclusive(dir, serial).await;
+    run(gate, commands, dir, timeout, attempt, input).await
+}
+
 /// Runs a gate's commands in order, stopping at the first failure (a later
 /// command would usually fail for the same reason and bury the cause).
 pub async fn run(
@@ -488,6 +556,104 @@ mod tests {
 
     fn dir() -> std::path::PathBuf {
         std::env::temp_dir()
+    }
+
+    /// A repository and a second worktree of it, as two changes have.
+    fn two_worktrees(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base =
+            std::env::temp_dir().join(format!("dp-serial-{tag}-{}", uuid::Uuid::new_v4().simple()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        git(&repo, &["add", "f"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
+        let other = base.join("other");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "two",
+                &other.to_string_lossy(),
+            ],
+        );
+        (repo, other)
+    }
+
+    /// Two changes' gates, started together in two worktrees of one
+    /// repository, each writing `begin` then `end` to one shared log: with
+    /// `serial` the log never shows two runs open at once; without it, it
+    /// does.
+    async fn interleaved(serial: bool) -> bool {
+        let (a, b) = two_worktrees(if serial { "on" } else { "off" });
+        let log = a.parent().unwrap().join("log");
+        let command = format!(
+            "echo begin >> '{l}'; sleep 0.4; echo end >> '{l}'",
+            l = log.display()
+        );
+        let gate = |dir: std::path::PathBuf| {
+            let command = command.clone();
+            async move {
+                run_in_turn(
+                    serial,
+                    "check",
+                    &[command],
+                    &dir,
+                    Duration::from_secs(20),
+                    1,
+                    &GateInput::default(),
+                )
+                .await
+            }
+        };
+        let (one, two) = tokio::join!(gate(a.clone()), gate(b));
+        assert!(one.passed() && two.passed(), "{one:?}\n{two:?}");
+        let lines: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        std::fs::remove_dir_all(a.parent().unwrap()).ok();
+        lines != ["begin", "end", "begin", "end"]
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn serial_gates_of_one_repository_never_overlap() {
+        assert!(!interleaved(true).await, "two serial gates overlapped");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn gates_that_are_not_serial_run_at_once() {
+        assert!(interleaved(false).await, "two gates waited for each other");
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_is_not_serial_takes_no_lock() {
+        assert!(exclusive(&dir(), false).await.is_none());
+        assert!(exclusive(&dir(), true).await.is_some());
     }
 
     #[tokio::test]

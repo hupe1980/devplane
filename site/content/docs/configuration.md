@@ -39,6 +39,7 @@ timeout = "10m"             # for the whole gate
 max_feedback_rounds = 2     # then the change stops for a person
 junit       = ["reports/junit.xml"]   # JUnit files check writes; names tests
 base_checks = "offer"                 # offer | auto | off
+serial      = false                   # true: one gate at a time (a shared database)
 
 [gates.e2e]                 # run by name; never what verifies a change
 run     = ["pnpm test -- --run tests/e2e"]
@@ -121,11 +122,13 @@ carry no prose either way.
 | `max_feedback_rounds` | integer | `2` | how many times failures go back to the agent before the change stops for a person; `0` stops at once |
 | `junit` | list of paths | empty | JUnit XML files `check` writes, relative to the checkout; read only when the run wrote them, inside the checkout, up to 16 MiB, to name tests. Git should ignore them: writing a tracked path moves the tree `check` is judged on |
 | `base_checks` | `offer` · `auto` · `off` | `offer` | when [base checks](@/docs/verified-done.md#base-checks) run: when you offer or ask, also after every passing `check`, or never |
+| `serial` | bool | `false` | run this repository's gates one at a time on this machine — `setup`, `check`, named gates and base checks, from every change's worktree and from `devplane gate`. For checks that share something two runs cannot both hold, such as one test database or a fixed port. A gate waiting its turn is not timed; its `timeout` starts when its commands do. Not serialised across machines: two CI jobs are two machines |
 
 ### `[gates.<name>]`
 
-Any other table under `[gates]` is a named gate. `check`, `timeout`, `max_feedback_rounds`, `junit`
-and `base_checks` are reserved and cannot name one.
+Any other table under `[gates]` is a named gate. `check`, `timeout`, `max_feedback_rounds`, `junit`,
+`base_checks` and `serial` are reserved and cannot name one. Any other key that is not a table is
+refused.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -271,6 +274,16 @@ client_id = "Iv1.…"                  # another Enterprise server's own app
 
 **`agents.toml`**: agents added by name, beside the built-in ones. See
 [Driving agents](@/docs/agents.md).
+
+**`trusted.toml`**: the repositories you trusted, written by `devplane project trust` and by the
+window, never by hand-off from an agent. One key, `roots`, a list of absolute paths; any other key is
+refused and trusts nothing. Delete a root to take its trust back; the host reads the file when it
+starts. The store never holds trust: deleting it loses history, not this.
+
+```toml
+# ~/.devplane/trusted.toml
+roots = ["/Users/you/src/api"]
+```
 
 ## Environment
 

@@ -126,7 +126,9 @@ pub fn cmd_explain(
     json: bool,
 ) -> Result<()> {
     let dir = path.canonicalize().context("that path does not exist")?;
-    let input: serde_json::Value = match input {
+    // The tool's input as the agent would send it: arbitrary JSON, typed by
+    // the tool, so it stays a JSON value.
+    let input = match input {
         Some(raw) => serde_json::from_str(&raw).context("--input is not JSON")?,
         None => {
             let text = call.join(" ");
@@ -574,24 +576,44 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The part of Claude Code's `settings.json` read here: its allow rules.
+#[derive(serde::Deserialize)]
+struct ClaudeSettings {
+    #[serde(default)]
+    permissions: Option<ClaudePermissions>,
+}
+
+#[derive(serde::Deserialize)]
+struct ClaudePermissions {
+    #[serde(default)]
+    allow: Option<Vec<AllowRule>>,
+}
+
+/// One entry of `permissions.allow`: a rule, or something that is not one
+/// and is skipped.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum AllowRule {
+    Text(String),
+    Other(serde::de::IgnoredAny),
+}
+
 /// Allow rules from the agent's own settings: `devplane.toml` has no allow
 /// list, so these are the rules that actually grant.
 fn vendor_allow_rules(root: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
-    for rel in [".claude/settings.json", ".claude/settings.local.json"] {
+    for &rel in &[".claude/settings.json", ".claude/settings.local.json"] {
         let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
             continue;
         };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        let Ok(v) = serde_json::from_str::<ClaudeSettings>(&text) else {
             continue;
         };
-        if let Some(a) = v
-            .get("permissions")
-            .and_then(|p| p.get("allow"))
-            .and_then(|a| a.as_array())
-        {
-            out.extend(a.iter().filter_map(|r| r.as_str().map(str::to_string)));
-        }
+        let allow = v.permissions.and_then(|p| p.allow).unwrap_or_default();
+        out.extend(allow.into_iter().filter_map(|r| match r {
+            AllowRule::Text(r) => Some(r),
+            AllowRule::Other(_) => None,
+        }));
     }
     out
 }

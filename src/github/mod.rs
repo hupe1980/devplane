@@ -251,7 +251,7 @@ pub enum Error {
 }
 
 /// One host's sign-in, as every surface shows it. Never the token.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SignIn {
     SignedOut,
@@ -275,7 +275,7 @@ pub enum SignIn {
 }
 
 /// A host and its sign-in.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HostView {
     pub host: String,
     #[serde(flatten)]

@@ -102,7 +102,8 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool
     }
 
     // The person's own checkout: its caches are theirs, so nothing is redirected.
-    let report = crate::gates::run(
+    let report = crate::gates::run_in_turn(
+        config.gates.serial,
         label,
         &commands,
         &root,

@@ -31,9 +31,67 @@ fn refuse_from_agent(what: &str) -> Result<()> {
 /// The exit status of a refusal, distinct from an error's 1.
 const REFUSED: i32 = 3;
 
-/// The error a host explained in its answer, if it did.
-fn said_error(v: &serde_json::Value) -> Option<&str> {
-    v.get("error").and_then(|e| e.as_str())
+/// A host's answer to one request: what this command reads of it, as `T`,
+/// beside the document as the host wrote it, which `--json` prints unchanged.
+/// The document is carried, never looked into.
+pub(super) struct Answer<T> {
+    doc: serde_json::Value,
+    /// The refusal the host explained in words, if it did.
+    error: Option<String>,
+    /// `T`, or why the document is not one — only ever kept beside `error`.
+    read: std::result::Result<T, String>,
+}
+
+impl<T> Answer<T> {
+    /// The refusal the host explained, if it did.
+    fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// What the host answered, read whether or not it also refused.
+    fn typed(&self) -> Option<&T> {
+        self.read.as_ref().ok()
+    }
+
+    /// What the host answered, or its refusal as this command's error.
+    fn read(&self) -> Result<&T> {
+        if let Some(e) = &self.error {
+            anyhow::bail!("{e}");
+        }
+        self.read.as_ref().map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for Answer<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        /// The one field every refusal carries.
+        #[derive(serde::Deserialize)]
+        struct Said {
+            #[serde(default)]
+            error: Option<String>,
+        }
+        let doc = serde_json::Value::deserialize(d)?;
+        let error = Said::deserialize(&doc).ok().and_then(|s| s.error);
+        let read = T::deserialize(&doc).map_err(|e| e.to_string());
+        // A refusal need not be a `T`; an answer that is neither is undecodable.
+        if let (None, Err(e)) = (&error, &read) {
+            return Err(serde::de::Error::custom(e));
+        }
+        Ok(Self { doc, error, read })
+    }
+}
+
+impl<T> serde::Serialize for Answer<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        self.doc.serialize(s)
+    }
+}
+
+/// An answer whose one sentence is all a command says of it.
+#[derive(serde::Deserialize)]
+pub(super) struct Says {
+    #[serde(default)]
+    says: Option<String>,
 }
 
 pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {

@@ -35,22 +35,35 @@ fn app_line(window: bool, signed: bool, updates: &str) -> String {
 
 /// The `app` section of `doctor`: whether this binary has the window, the
 /// shortcut (validated by the plugin's own parser where built in), and the port.
-fn app_section() -> serde_json::Value {
+#[derive(serde::Serialize)]
+struct AppSection {
+    built: bool,
+    window: bool,
+    signed: bool,
+    updates: &'static str,
+    shortcut: String,
+    /// `None` where this binary has no shortcut parser to ask.
+    shortcut_valid: Option<bool>,
+    port: u16,
+    problems: Vec<crate::core::config::Problem>,
+}
+
+fn app_section() -> AppSection {
     let (cfg, problems) = config::app_config().unwrap_or_default();
     #[cfg(feature = "app")]
-    let valid = serde_json::json!(crate::app::shortcut::validate(&cfg.shortcut).is_ok());
+    let valid = Some(crate::app::shortcut::validate(&cfg.shortcut).is_ok());
     #[cfg(not(feature = "app"))]
-    let valid = serde_json::Value::Null;
-    serde_json::json!({
-        "built": cfg!(feature = "app"),
-        "window": cfg!(feature = "app"),
-        "signed": SIGNED,
-        "updates": updates_word(cfg.updates),
-        "shortcut": cfg.shortcut,
-        "shortcut_valid": valid,
-        "port": cfg.port,
-        "problems": problems,
-    })
+    let valid = None;
+    AppSection {
+        built: cfg!(feature = "app"),
+        window: cfg!(feature = "app"),
+        signed: SIGNED,
+        updates: updates_word(cfg.updates),
+        shortcut: cfg.shortcut,
+        shortcut_valid: valid,
+        port: cfg.port,
+        problems,
+    }
 }
 
 /// The `gate` section of `doctor`, printed once whether or not a host answers.
@@ -205,7 +218,7 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
                 },
                 "spooled_decisions": spooled,
                 // Whether or not a host answers: the sign-in record says it.
-                "github": super::github::doctor_hosts(diag.as_ref().map(|d| &d.forge.github)).0,
+                "github": super::github::doctor_hosts(diag.as_ref().map(|d| d.forge.github.as_slice())).0,
                 "diagnostics": diag,
                 "only_gate": provider,
                 "junit_not_ignored": junit,
@@ -238,13 +251,9 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
     println!("\n{}", paint(BOLD, "app"));
     println!(
         "  app       {}",
-        app_line(
-            app["window"] == true,
-            app["signed"] == true,
-            app["updates"].as_str().unwrap_or("not_asked")
-        )
+        app_line(app.window, app.signed, app.updates)
     );
-    if app["window"] != true {
+    if !app.window {
         println!(
             "            {}",
             paint(
@@ -253,20 +262,11 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
             )
         );
     }
-    match app["problems"].as_array() {
-        Some(ps) if !ps.is_empty() => {
-            for p in ps {
-                println!(
-                    "  config    {} {}",
-                    paint(render::RED, p["where"].as_str().unwrap_or("app.toml")),
-                    p["what"].as_str().unwrap_or("")
-                );
-            }
-        }
-        _ => {}
+    for p in &app.problems {
+        println!("  config    {} {}", paint(render::RED, &p.where_), p.what);
     }
-    let shortcut = app["shortcut"].as_str().unwrap_or("");
-    match app["shortcut_valid"].as_bool() {
+    let shortcut = app.shortcut.as_str();
+    match app.shortcut_valid {
         Some(true) => println!("  shortcut  {shortcut}"),
         Some(false) => println!(
             "  shortcut  {} {}",
@@ -283,9 +283,9 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
     }
     println!(
         "  port      {}",
-        match app["port"].as_u64() {
-            Some(0) | None => "0 — the app picks a free one".to_string(),
-            Some(p) => p.to_string(),
+        match app.port {
+            0 => "0 — the app picks a free one".to_string(),
+            p => p.to_string(),
         }
     );
 
@@ -450,7 +450,7 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
     }
 
     // GitHub: its own section, per host, whether or not a host runs.
-    super::github::print_doctor(diag.as_ref().map(|d| &d.forge.github));
+    super::github::print_doctor(diag.as_ref().map(|d| d.forge.github.as_slice()));
     if let Some(d) = diag {
         // Each ruled-out project with its reason, not just a count.
         for p in &d.forge.skipped_projects {
@@ -507,8 +507,12 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
             }
         }
 
-        if let Some(attention) = d.attention.as_ref().filter(|a| a.is_object()) {
-            super::inbox::print_attention(attention);
+        if let Some(attention) = d
+            .attention
+            .as_ref()
+            .and_then(|a| serde_json::from_value::<super::inbox::Attention>(a.clone()).ok())
+        {
+            super::inbox::print_attention(&attention);
         }
 
         // Claude Code's auto-mode classifier, shown beside Devplane's own
@@ -691,7 +695,7 @@ fn off_subscription(get: impl Fn(&str) -> Option<String>) -> Option<&'static str
     let set = |k: &str| {
         get(k).is_some_and(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
     };
-    for k in [
+    for &k in &[
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_VERTEX",
         "CLAUDE_CODE_USE_FOUNDRY",

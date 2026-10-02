@@ -1,6 +1,6 @@
 //! The queue of things being asked of a person, and answering them.
 
-use super::raw;
+use super::raw_as;
 use crate::render::{BOLD, DIM, clip, level_marker, paint};
 use crate::{client, render};
 use anyhow::Result;
@@ -317,18 +317,41 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
     Ok(())
 }
 
+/// What the inbox raised over a window and what became of it, as the host's
+/// diagnostics carry it.
+#[derive(serde::Deserialize)]
+pub(super) struct Attention {
+    #[serde(default = "a_week")]
+    days: i64,
+    #[serde(default)]
+    agents: Vec<String>,
+    #[serde(default)]
+    kinds: std::collections::BTreeMap<String, KindRow>,
+}
+
+fn a_week() -> i64 {
+    7
+}
+
+/// One kind's counts, and the share the host computed from them.
+#[derive(serde::Deserialize)]
+struct KindRow {
+    #[serde(flatten)]
+    counts: crate::core::attention::KindStats,
+    #[serde(default)]
+    acted_share: Option<f64>,
+}
+
 /// `doctor`'s inbox section: per kind, what the last week raised and what
 /// became of it — whether the inbox is worth reading at all.
-pub(super) fn print_attention(v: &serde_json::Value) {
-    let days = v["days"].as_i64().unwrap_or(7);
+pub(super) fn print_attention(v: &Attention) {
+    let days = v.days;
     println!("\n{}", paint(BOLD, &format!("inbox, last {days} days")));
-    let empty = serde_json::Map::new();
-    let kinds = v.get("kinds").and_then(|k| k.as_object()).unwrap_or(&empty);
+    let kinds = &v.kinds;
     if kinds.is_empty() {
         println!("  {}", paint(DIM, "nothing has reached the inbox"));
         return;
     }
-    let n = |o: &serde_json::Value, k: &str| o.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
     println!(
         "{}",
         paint(
@@ -347,26 +370,22 @@ pub(super) fn print_attention(v: &serde_json::Value) {
             )
         )
     );
-    let mut rows: Vec<(&String, &serde_json::Value)> = kinds.iter().collect();
-    rows.sort_by_key(|(_, v)| -n(v, "raised"));
-    for (kind, st) in rows {
-        let (raised, acted, dismissed, elsewhere, open) = (
-            n(st, "raised"),
-            n(st, "acted"),
-            n(st, "dismissed"),
-            n(st, "elsewhere"),
-            n(st, "open"),
-        );
+    let mut rows: Vec<(&String, &KindRow)> = kinds.iter().collect();
+    rows.sort_by_key(|(_, v)| -v.counts.raised);
+    for (kind, row) in rows {
+        let st = &row.counts;
+        let (raised, acted, dismissed, elsewhere, open) =
+            (st.raised, st.acted, st.dismissed, st.elsewhere, st.open);
         // "Nobody resolved it yet" and "everybody ignores it" differ; the host
         // computes `acted_share`, so the rule lives in one place.
-        let share = match st.get("acted_share").and_then(|s| s.as_f64()) {
+        let share = match row.acted_share {
             Some(f) => format!("{:.0}%", 100.0 * f),
             None => paint(DIM, "—"),
         };
         // How often this kind was folded, and how often it was then acted on:
         // the latter is a fold that stood in the way.
-        let folded = n(st, "folded");
-        let wrongly = n(st, "folded_then_acted");
+        let folded = st.folded;
+        let wrongly = st.folded_then_acted;
         let f = match folded {
             0 => paint(DIM, "—"),
             v => v.to_string(),
@@ -393,10 +412,7 @@ pub(super) fn print_attention(v: &serde_json::Value) {
     // Ask frequency is a property of the model, so a `raised` count spanning
     // vendors mixes escalation policies. Said only when more than one vendor
     // is present.
-    let agents: Vec<&str> = v["agents"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
-        .unwrap_or_default();
+    let agents = &v.agents;
     if agents.len() > 1 {
         println!(
             "{}",
@@ -429,7 +445,7 @@ pub async fn cmd_snooze(id: &str, minutes: i64, until_activity: bool, json: bool
         super::ids::Subject::Change(id) => ("changes", id, "the change"),
         super::ids::Subject::Run(id) => ("runs", id, "the session"),
     };
-    let v: serde_json::Value = c
+    let v: Snoozed = c
         .post(&format!(
             "/api/{what}/{id}/snooze?{}",
             snooze_query(minutes, until_activity)
@@ -447,6 +463,30 @@ pub async fn cmd_snooze(id: &str, minutes: i64, until_activity: bool, json: bool
         (false, _) => println!("Quiet for {minutes} minutes."),
     }
     Ok(())
+}
+
+/// What a snooze answers: a run's kinds and until when, or a change's.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum Snoozed {
+    Change {
+        ok: bool,
+        until: Option<String>,
+        kinds: Vec<String>,
+    },
+    Run {
+        snoozed_until: Option<String>,
+        kinds: Vec<String>,
+    },
+}
+
+/// What answering an ask returns: the ask as it now stands, or why the
+/// answer was refused.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum Answered {
+    Refused { error: String },
+    Ask(Box<crate::view::AskView>),
 }
 
 /// Answers something an agent asked, by the ask's own token. The host
@@ -480,8 +520,8 @@ pub async fn cmd_answer(
         (_, true) => Some("deny"),
         _ => None,
     };
-    let v = c
-        .answer(
+    let v: Answered = c
+        .answer_as(
             ask,
             &serde_json::json!({
                 "decision": decision,
@@ -494,19 +534,14 @@ pub async fn cmd_answer(
     if json {
         return crate::cli::print_json(&v);
     }
-    match v.get("error").and_then(|e| e.as_str()) {
-        Some(e) => anyhow::bail!("{e}"),
+    match v {
+        Answered::Refused { error } => anyhow::bail!("{error}"),
         // The outcome: delivered to a waiting agent, into a resumed session,
         // or recorded and undelivered.
-        None => println!(
+        Answered::Ask(a) => println!(
             "{}  {}",
             paint(render::GREEN, "answered"),
-            paint(
-                DIM,
-                v.get("outcome")
-                    .and_then(|o| o.as_str())
-                    .unwrap_or_default()
-            )
+            paint(DIM, &a.outcome)
         ),
     }
     Ok(())
@@ -515,21 +550,17 @@ pub async fn cmd_answer(
 /// Everything an agent has asked, and what became of each one.
 pub async fn cmd_inbox_all(json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
-    let v = raw(&c, "/api/asks").await?;
+    let v: crate::view::AsksView = raw_as(&c, "/api/asks").await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    let empty = vec![];
-    let open = v["open"].as_array().unwrap_or(&empty);
-    let settled = v["settled"].as_array().unwrap_or(&empty);
-    let abandoned = v["abandoned"].as_array().unwrap_or(&empty);
-    let blind: Vec<&str> = v["blind_to"]
-        .as_array()
-        .unwrap_or(&empty)
-        .iter()
-        .filter_map(|a| a.as_str())
-        .collect();
+    let crate::view::AsksView {
+        open,
+        settled,
+        abandoned,
+        blind_to: blind,
+    } = v;
 
     // "Nothing was abandoned" and "this vendor has no channel for it" are
     // different facts; `blindness` prints the second.
@@ -558,38 +589,24 @@ pub async fn cmd_inbox_all(json: bool) -> Result<()> {
     if open.is_empty() {
         println!("{}", paint(DIM, "Nothing is waiting on you."));
     }
-    for a in open {
+    for a in &open {
+        println!("{}  {}", paint(render::BOLD, &a.id), a.message);
         println!(
-            "{}  {}",
-            paint(render::BOLD, a["id"].as_str().unwrap_or("")),
-            a["message"].as_str().unwrap_or("")
+            "{:>4}{}",
+            "",
+            paint(DIM, &format!("{} · {}", a.kind, a.deadline_says))
         );
         println!(
             "{:>4}{}",
             "",
-            paint(
-                DIM,
-                &format!(
-                    "{} · {}",
-                    a["kind"].as_str().unwrap_or(""),
-                    a["deadline_says"].as_str().unwrap_or("")
-                )
-            )
-        );
-        println!(
-            "{:>4}{}",
-            "",
-            paint(
-                DIM,
-                &format!("devplane inbox answer {}", a["id"].as_str().unwrap_or(""))
-            )
+            paint(DIM, &format!("devplane inbox answer {}", a.id))
         );
     }
     for a in settled.iter().take(10) {
         println!(
             "{}  {}",
-            paint(DIM, &clip(a["message"].as_str().unwrap_or(""), 48)),
-            paint(DIM, a["outcome"].as_str().unwrap_or(""))
+            paint(DIM, &clip(&a.message, 48)),
+            paint(DIM, &a.outcome)
         );
     }
 
@@ -602,8 +619,8 @@ pub async fn cmd_inbox_all(json: bool) -> Result<()> {
             paint(render::YELLOW, "Questions the agent asked and moved past")
         );
         for a in abandoned.iter().take(10) {
-            println!("  {}", paint(BOLD, a["question"].as_str().unwrap_or("")));
-            let what = match a["moved_on_to"].as_str() {
+            println!("  {}", paint(BOLD, &a.question));
+            let what = match a.moved_on_to.as_deref() {
                 Some(next) => format!("nobody answered — it did `{next}` instead"),
                 None => "nobody answered — the session ended".to_string(),
             };
@@ -635,15 +652,12 @@ fn plural_items(n: usize) -> &'static str {
 /// Which projects are deciding without you, and what clock answers for you.
 pub async fn cmd_modes(json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
-    let v = raw(&c, "/api/modes").await?;
+    // Deserialised into the API's own type, so a missing field fails to compile.
+    let m: crate::core::world::Modes = raw_as(&c, "/api/modes").await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        println!("{}", serde_json::to_string_pretty(&m)?);
         return Ok(());
     }
-    // Deserialised into the API's own type, so a missing field fails to compile.
-    let m: crate::core::world::Modes = serde_json::from_value(v).map_err(|e| {
-        anyhow::anyhow!("the host's answer did not match what this build expects: {e}")
-    })?;
     let projects = &m.projects;
     // The machine-wide question clock first: it applies to every session, and
     // managed settings can set it where the vendor's UI hides it.

@@ -24,11 +24,11 @@ use std::str::FromStr;
 /// satisfy (a renamed or added column, a changed type, a dropped table). A file
 /// stamped with anything else is moved aside on open (`Store::retire`), not
 /// migrated.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// The statement that stamps it, written out because `PRAGMA user_version`
 /// accepts no bind parameter.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 13";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 14";
 
 /// The database and its sidecars readable by their owner alone, whoever
 /// opened them first — a hook creates the file long before any `up` would
@@ -219,7 +219,13 @@ impl Store {
                         Some(v) if v > SCHEMA_VERSION => {
                             bail!("{}", Self::skew(v).unwrap_or_default());
                         }
-                        Some(v) if v != 0 => Self::retire(path, v)?,
+                        Some(v) if v != 0 => {
+                            // Trust lived in the store before schema 14: its
+                            // roots move to the file named for it before the
+                            // store is set aside, or trust would vanish.
+                            Self::carry_trust(path).await?;
+                            Self::retire(path, v)?
+                        }
                         _ => {}
                     }
                     let pool = connect()
@@ -243,6 +249,48 @@ impl Store {
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)
+    }
+
+    /// Reads the roots a store from before schema 14 recorded as trusted and
+    /// adds them to `trusted.toml` beside it. A store with no such column
+    /// carries nothing; a trust file that cannot be written keeps the store
+    /// where it is, so the roots are never lost between the two.
+    async fn carry_trust(path: &Path) -> Result<()> {
+        let opts = SqliteConnectOptions::new().filename(path).read_only(true);
+        let Ok(pool) = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+        else {
+            return Ok(());
+        };
+        let roots = sqlx::query_as::<_, (String,)>("SELECT root FROM projects WHERE trusted != 0")
+            .fetch_all(&pool)
+            .await;
+        pool.close().await;
+        let Ok(roots) = roots else {
+            return Ok(());
+        };
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let home = path.parent().unwrap_or(Path::new("."));
+        let n = roots.len();
+        crate::trust::add(home, roots.into_iter().map(|(r,)| PathBuf::from(r))).with_context(
+            || {
+                format!(
+                    "{} recorded {n} trusted repositories and they could not be moved to {}, \
+                     so the store was not set aside",
+                    path.display(),
+                    crate::trust::path(home).display()
+                )
+            },
+        )?;
+        tracing::info!(
+            roots = n,
+            "trusted repositories moved from the store to their own file"
+        );
+        Ok(())
     }
 
     /// Takes the exclusive lock that serialises retiring, on a file next to
@@ -570,18 +618,19 @@ impl Store {
         Ok(decode_rows("run", &rows, payload))
     }
 
+    /// Records a registered project. Its `trusted` is never written: trust is
+    /// a preference, kept in `trusted.toml` ([`crate::trust`]).
     pub async fn save_project(&self, p: &Project) -> Result<()> {
         sqlx::query(
-            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered)
-             VALUES (?,?,?,?,?,?)
+            "INSERT INTO projects (id, name, root, repo_url, auto_discovered)
+             VALUES (?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
-               name=excluded.name, trusted=excluded.trusted, repo_url=excluded.repo_url,
+               name=excluded.name, repo_url=excluded.repo_url,
                auto_discovered=excluded.auto_discovered",
         )
         .bind(p.id.as_str())
         .bind(&p.name)
         .bind(p.root.to_string_lossy().to_string())
-        .bind(p.trusted as i32)
         .bind(p.repo_url.as_deref())
         .bind(p.auto_discovered as i32)
         .execute(&self.pool)
@@ -590,20 +639,19 @@ impl Store {
     }
 
     /// Records a project something saw (a hook resolving a directory, the host
-    /// learning a remote) without touching `trusted`. Inserts a new row, and on
-    /// an existing one only fills a missing remote, so a hook's stale read can
-    /// never revoke a trust granted in between.
+    /// learning a remote). Inserts a new row, and on an existing one only fills
+    /// a missing remote, so a hook's stale read never undoes a registration
+    /// made in between.
     pub async fn note_project(&self, p: &Project) -> Result<()> {
         sqlx::query(
-            "INSERT INTO projects (id, name, root, trusted, repo_url, auto_discovered)
-             VALUES (?,?,?,?,?,?)
+            "INSERT INTO projects (id, name, root, repo_url, auto_discovered)
+             VALUES (?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                repo_url = COALESCE(projects.repo_url, excluded.repo_url)",
         )
         .bind(p.id.as_str())
         .bind(&p.name)
         .bind(p.root.to_string_lossy().to_string())
-        .bind(p.trusted as i32)
         .bind(p.repo_url.as_deref())
         .bind(p.auto_discovered as i32)
         .execute(&self.pool)
@@ -612,17 +660,17 @@ impl Store {
     }
 
     pub async fn load_projects(&self) -> Result<Vec<Project>> {
-        let rows =
-            sqlx::query("SELECT id, name, root, trusted, repo_url, auto_discovered FROM projects")
-                .fetch_all(&self.pool)
-                .await?;
+        let rows = sqlx::query("SELECT id, name, root, repo_url, auto_discovered FROM projects")
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows
             .iter()
             .map(|r| Project {
                 id: ProjectId::new(r.get::<String, _>("id")),
                 name: r.get("name"),
                 root: r.get::<String, _>("root").into(),
-                trusted: r.get::<i64, _>("trusted") != 0,
+                // Never the store's to say: see `crate::trust`.
+                trusted: false,
                 repo_url: r.get("repo_url"),
                 auto_discovered: r.get::<i64, _>("auto_discovered") != 0,
             })
@@ -1911,19 +1959,73 @@ mod tests {
         assert!(rows[0].0 > through, "a sequence number was reused");
     }
 
-    /// Recording what a hook saw never revokes a trust granted in between.
+    /// The store keeps no trust: a project saved trusted reads back as not,
+    /// and a hook noting it changes nothing either way.
     #[tokio::test]
-    async fn noting_a_project_never_touches_trust() {
+    async fn the_store_never_records_trust() {
         let s = Store::open_in_memory().await.unwrap();
         let seen = Project::from_root(PathBuf::from("/repo"));
-        assert!(!seen.trusted);
         s.note_project(&seen).await.unwrap();
         let mut trusted = seen.clone();
         trusted.trusted = true;
         s.save_project(&trusted).await.unwrap();
         s.note_project(&seen).await.unwrap();
         let back = s.load_projects().await.unwrap();
-        assert!(back[0].trusted, "a hook revoked the trust");
+        assert_eq!(back.len(), 1);
+        assert!(
+            !back[0].trusted,
+            "trust is `trusted.toml`'s, not the store's"
+        );
+    }
+
+    /// A store from before schema 14 kept trust in a column; setting it
+    /// aside first moves its trusted roots to `trusted.toml`, so no trust a
+    /// person granted vanishes with the hard cut.
+    #[tokio::test]
+    async fn an_older_stores_trusted_roots_move_to_their_own_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "devplane-carry-trust-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::trust::add(&dir, [PathBuf::from("/already")]).unwrap();
+        let path = dir.join("devplane.db");
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "PRAGMA user_version = 13;
+             CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL,
+               trusted INTEGER NOT NULL DEFAULT 0, repo_url TEXT,
+               auto_discovered INTEGER NOT NULL DEFAULT 1);
+             INSERT INTO projects VALUES ('a', 'a', '/repos/a', 1, NULL, 0);
+             INSERT INTO projects VALUES ('b', 'b', '/repos/b', 0, NULL, 1);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let s = Store::open(&path).await.unwrap();
+        let t = crate::trust::Trusted::read(&dir).unwrap();
+        assert_eq!(
+            t.roots.iter().cloned().collect::<Vec<_>>(),
+            [PathBuf::from("/already"), PathBuf::from("/repos/a")],
+            "the trusted root moved, the untrusted one did not, and nothing was lost"
+        );
+        assert_eq!(backups(&dir).len(), 1, "the old store was set aside");
+        let columns: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_table_info('projects')")
+                .fetch_all(s.pool())
+                .await
+                .unwrap();
+        assert!(!columns.iter().any(|(c,)| c == "trusted"), "{columns:?}");
     }
 
     #[tokio::test]

@@ -368,67 +368,66 @@ async fn list(f: Filter, json: bool, summary: bool) -> Result<()> {
 pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
     let run = &ids::run(&c, run).await?;
-    let v = fetch_run(&c, run).await?;
+    let detail = fetch_run(&c, run).await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        // Through a `Value`, whose keys are sorted, as the host's own were.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::to_value(&detail)?)?
+        );
         return Ok(());
     }
+    let v = &detail.run;
 
-    let str_of = |k: &str| v[k].as_str().unwrap_or("-").to_string();
+    let or_dash = |s: Option<&str>| s.unwrap_or("-").to_string();
     println!(
         "{}  {}",
-        paint(BOLD, &str_of("name")),
-        paint(DIM, v["id"].as_str().unwrap_or(""))
+        paint(BOLD, &or_dash(v.name.as_deref())),
+        paint(DIM, v.id.as_str())
     );
-    println!("  state      {}", v["state"].as_str().unwrap_or("?"));
-    println!("  agent      {} ({})", str_of("agent"), str_of("mode"));
+    // A waiting run's state is an object on the wire, printed as `?`.
+    let state = match &v.state {
+        crate::core::RunState::Waiting(_) => "?",
+        s => s.as_str(),
+    };
+    println!("  state      {state}");
+    println!("  agent      {} ({})", v.agent, v.mode.as_str());
     // From the run's record, never parsed; a watched session says it carries
     // none rather than guessing from the diff.
-    println!("  tasks      {}", str_of("sent_says"));
-    for t in v["sent"].as_array().unwrap_or(&vec![]) {
-        println!(
-            "             {}",
-            paint(DIM, t["text"].as_str().unwrap_or(""))
-        );
+    println!("  tasks      {}", detail.sent_says);
+    for t in v.sent.iter().flatten() {
+        println!("             {}", paint(DIM, &t.text));
     }
-    println!("  where      {}", str_of("cwd"));
-    if let Some(w) = v["worktree"].as_str() {
-        println!("  worktree   {w}");
+    println!("  where      {}", v.cwd.display());
+    if let Some(w) = &v.worktree {
+        println!("  worktree   {}", w.display());
     }
-    println!("  model      {}", str_of("model"));
-    println!("  surface    {}", str_of("entrypoint"));
-    if let Some(pid) = v["pid"].as_u64() {
+    println!("  model      {}", or_dash(v.model.as_deref()));
+    println!("  surface    {}", or_dash(v.entrypoint.as_deref()));
+    if let Some(pid) = v.pid {
         println!("  pid        {pid}");
     }
 
-    let t = &v["totals"];
+    let t = &v.totals;
     println!(
         "  cost       ${:.4} over {} requests",
-        t["cost_usd"].as_f64().unwrap_or(0.0),
-        t["api_requests"].as_u64().unwrap_or(0)
+        t.cost_usd, t.api_requests
     );
-    println!(
-        "  tools      {} calls, {} errors",
-        t["tool_calls"].as_u64().unwrap_or(0),
-        t["errors"].as_u64().unwrap_or(0)
-    );
+    println!("  tools      {} calls, {} errors", t.tool_calls, t.errors);
     // What the session changed, as the status line reports it (or nothing).
-    let (added, removed) = (
-        t["lines_added"].as_u64().unwrap_or(0),
-        t["lines_removed"].as_u64().unwrap_or(0),
-    );
+    let (added, removed) = (t.lines_added, t.lines_removed);
     if added > 0 || removed > 0 {
         println!("  changed    +{added} −{removed} lines");
     }
     // A rate-limit percentage with no reset time is a number with no verb.
-    if let Some(pct) = t["rate_limit_percent"].as_f64() {
-        let window = match t["rate_limit_window"].as_str() {
+    if let Some(pct) = t.rate_limit_percent {
+        let window = match t.rate_limit_window.as_deref() {
             Some("five_hour") => "5-hour",
             Some("seven_day") => "7-day",
             Some("spend_limit") => "spend limit",
             other => other.unwrap_or("window"),
         };
-        let when = match t["rate_limit_resets_at"].as_i64() {
+        let when = match t.rate_limit_resets_at {
             Some(at) => match jiff::Timestamp::from_second(at) {
                 Ok(ts) => format!(", resets {}", render::until(ts)),
                 Err(_) => String::new(),
@@ -437,53 +436,44 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
         };
         println!("  limits     {window} {pct:.0}% used{when}");
     }
-    if let Some(v) = v["claude_version"].as_str() {
+    if let Some(v) = &v.claude_version {
         println!("  harness    Claude Code {v}");
     }
 
-    if let Some(b) = v["blocked_on"].as_object() {
+    if let Some(b) = &v.blocked_on {
         println!("\n{}", paint(render::YELLOW, "blocked on"));
-        if let Some(m) = b.get("message").and_then(|m| m.as_str()) {
+        if let Some(m) = &b.message {
             println!("  {m}");
         }
-        for (n, o) in b
-            .get("options")
-            .and_then(|o| o.as_array())
-            .unwrap_or(&vec![])
-            .iter()
-            .enumerate()
-        {
-            println!("  {}. {}", n + 1, o.as_str().unwrap_or(""));
+        // Each option is an object on the wire, printed as an empty label.
+        for n in 0..b.options.len() {
+            println!("  {}. ", n + 1);
         }
     }
 
-    let empty = vec![];
     // What the agent says it is going to do, where it says anything.
-    let plan = v["plan"].as_array().unwrap_or(&empty);
-    if !plan.is_empty() {
+    if !v.plan.is_empty() {
         println!("\n{}", paint(BOLD, "plan"));
-        for step in plan {
-            let status = step["status"].as_str().unwrap_or("pending");
+        for step in &v.plan {
             println!(
                 "  {} {}",
-                match status {
+                match step.status.as_str() {
                     "completed" => paint(render::GREEN, "✓"),
                     "in_progress" => paint(render::BLUE, "▸"),
                     _ => paint(DIM, "·"),
                 },
-                clip(step["content"].as_str().unwrap_or(""), 74)
+                clip(&step.content, 74)
             );
         }
     }
 
-    let tools = v["recent_tools"].as_array().unwrap_or(&empty);
-    if !tools.is_empty() {
+    if !v.recent_tools.is_empty() {
         println!("\n{}", paint(BOLD, "recent tools"));
-        for t in tools.iter().rev().take(10) {
+        for t in v.recent_tools.iter().rev().take(10) {
             println!(
                 "  {:<14} {}",
-                t["tool"].as_str().unwrap_or("?"),
-                match t["ok"].as_bool() {
+                t.tool,
+                match t.ok {
                     Some(true) => paint(render::GREEN, "ok"),
                     Some(false) => paint(render::RED, "failed"),
                     None => paint(DIM, "running"),
@@ -493,7 +483,7 @@ pub async fn cmd_show(run: &str, json: bool) -> Result<()> {
     }
 
     // The tail of the conversation; `devplane run watch <run>` is the live version.
-    if v["mode"] == "driven" {
+    if v.mode == crate::core::RunMode::Driven {
         let said: Vec<render::Message> = c
             .get_as(&format!("/api/runs/{run}/messages?limit=6"))
             .await
@@ -549,8 +539,7 @@ async fn follow_run(run: &str, thinking: bool, history: i64) -> Result<()> {
 
     // Only a driven run has a conversation to follow; say so otherwise.
     let detail = fetch_run(&crate::local::Reader::Host(c.clone()), run).await?;
-    let mode = detail["mode"].as_str().unwrap_or("observed");
-    if mode != "driven" {
+    if detail.run.mode != crate::core::RunMode::Driven {
         anyhow::bail!(
             "that is a session Devplane watches, not one it drives, and the documented \
              channels carry no transcript: hooks report lifecycle and tool inputs, and \
@@ -590,17 +579,17 @@ async fn follow_run(run: &str, thinking: bool, history: i64) -> Result<()> {
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
             };
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            let Ok(f) = serde_json::from_str::<StreamFrame>(data) else {
                 continue;
             };
-            match v["frame"].as_str() {
+            match f.frame.as_deref() {
                 Some("message") => print_message(
-                    v["role"].as_str().unwrap_or("agent"),
-                    v["text"].as_str().unwrap_or(""),
+                    f.role.as_deref().unwrap_or("agent"),
+                    f.text.as_deref().unwrap_or(""),
                     thinking,
                 ),
                 // The turn ending marks the answer complete, not paused.
-                Some("event") if v["event"]["type"] == "turn_ended" => {
+                Some("event") if f.event_type() == Some("turn_ended") => {
                     println!("{}", paint(DIM, "— turn ended —"));
                 }
                 _ => {}
@@ -616,12 +605,10 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
     let c = client::Client::connect_running().await?;
     let run = &ids::run(&crate::local::Reader::Host(c.clone()), run).await?;
     let v = fetch_run(&crate::local::Reader::Host(c.clone()), run).await?;
-    let dir = v["worktree"]
-        .as_str()
-        .or_else(|| v["cwd"].as_str())
-        .unwrap_or(".");
-    let session = v["session_id"].as_str().unwrap_or(run);
-    let mode = v["mode"].as_str().unwrap_or("observed");
+    let v = &v.run;
+    let dir = v.worktree.as_deref().unwrap_or(&v.cwd);
+    let session = v.session_id.as_str();
+    let mode = v.mode.as_str();
 
     let bin = crate::observe::locate::claude_binary()
         .context("no claude binary found; set DEVPLANE_CLAUDE_BIN")?;
@@ -638,7 +625,12 @@ pub async fn cmd_attach(run: &str) -> Result<()> {
         "{}",
         paint(
             DIM,
-            &format!("{} {} (in {dir})", bin.display(), args.join(" "))
+            &format!(
+                "{} {} (in {})",
+                bin.display(),
+                args.join(" "),
+                dir.display()
+            )
         )
     );
 
@@ -738,36 +730,61 @@ pub async fn cmd_watch(run: Option<&str>, thinking: bool, history: i64) -> Resul
             let Some(data) = line.strip_prefix("data: ") else {
                 continue;
             };
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            let Ok(f) = serde_json::from_str::<StreamFrame>(data) else {
                 continue;
             };
             // Two kinds of frame, told apart on the wire rather than guessed at.
-            let (at, what) = match v["frame"].as_str() {
-                Some("message") => (
-                    v["at"].as_str().unwrap_or(""),
-                    format!(
-                        "{:<8} {}",
-                        v["role"].as_str().unwrap_or(""),
-                        clip(v["text"].as_str().unwrap_or("").trim(), 60)
-                    ),
+            let at = f.at.as_deref().unwrap_or("");
+            let what = match f.frame.as_deref() {
+                Some("message") => format!(
+                    "{:<8} {}",
+                    f.role.as_deref().unwrap_or(""),
+                    clip(f.text.as_deref().unwrap_or("").trim(), 60)
                 ),
-                _ => (
-                    v["at"].as_str().unwrap_or(""),
-                    v["event"]["type"].as_str().unwrap_or("?").to_string(),
-                ),
+                _ => f.event_type().unwrap_or("?").to_string(),
             };
             println!(
                 "{} {} {}",
                 paint(DIM, at.get(11..19).unwrap_or("")),
-                paint(
-                    render::MAGENTA,
-                    &clip(v["run_id"].as_str().unwrap_or(""), 8)
-                ),
+                paint(render::MAGENTA, &clip(f.run_id.as_deref().unwrap_or(""), 8)),
                 what
             );
         }
     }
     Ok(())
+}
+
+/// One `data:` line of `/api/stream`: a [`crate::core::Frame`], read only as
+/// far as a terminal prints it. Every field is optional, so a line that is not
+/// a frame (a `resync`) still reads.
+#[derive(serde::Deserialize)]
+struct StreamFrame {
+    /// `message` or `event`.
+    #[serde(default)]
+    frame: Option<String>,
+    #[serde(default)]
+    at: Option<String>,
+    #[serde(default)]
+    run_id: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    event: Option<EventTag>,
+}
+
+/// An event, by its `type` alone.
+#[derive(serde::Deserialize)]
+struct EventTag {
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+}
+
+impl StreamFrame {
+    fn event_type(&self) -> Option<&str> {
+        self.event.as_ref()?.kind.as_deref()
+    }
 }
 
 /// The sentence naming the vendors this machine cannot watch, composed from

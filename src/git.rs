@@ -1336,6 +1336,18 @@ async fn resolve_base(root: &Path, base: &str) -> Option<String> {
     None
 }
 
+/// The repository every worktree of `dir` shares (`--git-common-dir`), made
+/// absolute and canonical; `None` outside a repository.
+pub async fn common_dir(dir: &Path) -> Option<PathBuf> {
+    let common = git(dir, &["rev-parse", "--git-common-dir"]).await.ok()?;
+    let common = PathBuf::from(common.trim());
+    let common = match common.is_absolute() {
+        true => common,
+        false => dir.join(common),
+    };
+    common.canonicalize().ok()
+}
+
 /// Appends `.claude/worktrees/` to `.git/info/exclude`, once.
 ///
 /// Not `.gitignore`, which is tracked and would need committing. Resolved via

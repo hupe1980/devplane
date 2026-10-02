@@ -1,107 +1,111 @@
 //! GitHub across every registered project: `devplane pr list` and
 //! `devplane issue list`, what needs you first.
 
-use super::raw;
+use super::raw_as;
+use crate::github::{HostView, SignIn};
 use crate::render::{BOLD, DIM, clip, paint};
 use crate::{client, render};
-use anyhow::{Context, Result};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
-/// What GitHub says across every project: one answer, both halves.
+/// What GitHub says across every project: one answer, both halves, as
+/// `/api/forge` serialises it.
 ///
 /// Each list has its own row type: a PR row has every field an issue row
 /// needs, so a shared type would silently read one as the other.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ForgeList {
-    #[serde(default)]
     viewer: Option<String>,
-    #[serde(default)]
     error: Option<String>,
-    #[serde(default)]
     fetched_at: Option<String>,
+    issues: Vec<ForgeRow<crate::core::ForgeIssue>>,
+    pull_requests: Vec<ForgeRow<crate::core::ForgePullRequest>>,
+    /// Projects whose last poll failed; their rows are the last good ones.
+    stale: Vec<StaleProject>,
     /// The configured GitHub host's sign-in.
-    #[serde(default)]
-    github: serde_json::Value,
+    github: HostView,
     /// Every registered project and the state its GitHub is in.
-    #[serde(default)]
     projects: Vec<ForgeProject>,
-    #[serde(default)]
-    issues: Vec<ForgeIssueRow>,
-    #[serde(default)]
-    pull_requests: Vec<ForgePrRow>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ForgeProject {
-    project_name: String,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    github: serde_json::Value,
-    /// Why the last poll failed; the rows are the last good ones.
-    #[serde(default)]
-    stale: Option<String>,
-    #[serde(default)]
     issues_more: usize,
-    #[serde(default)]
     pull_requests_more: usize,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ForgeIssueRow {
+/// One row of either list: the item, with the project it belongs to.
+#[derive(Debug, Serialize, Deserialize)]
+struct ForgeRow<T> {
+    project: String,
     project_name: String,
-    number: u64,
-    title: String,
-    url: String,
-    #[serde(default)]
-    labels: Vec<String>,
-    #[serde(default)]
-    assigned_to_me: bool,
+    needs_you: bool,
+    #[serde(flatten)]
+    item: T,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ForgePrRow {
+/// A project whose last poll failed.
+#[derive(Debug, Serialize, Deserialize)]
+struct StaleProject {
+    project: String,
     project_name: String,
-    number: u64,
-    title: String,
-    url: String,
-    status: String,
-    #[serde(default)]
-    draft: bool,
-    #[serde(default)]
-    mine: bool,
-    #[serde(default)]
-    review_requested: bool,
+    error: String,
+    last_good: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgeProject {
+    project: String,
+    project_name: String,
+    repo: Option<String>,
+    host: Option<String>,
+    github: ProjectGitHub,
+    /// Why the last poll failed; the rows are the last good ones.
+    stale: Option<String>,
+    read_at: Option<String>,
+    issues_more: usize,
+    pull_requests_more: usize,
+}
+
+/// Which state a project's GitHub is in: its host's sign-in, or why it has
+/// none.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ProjectGitHub {
+    Host(HostView),
+    Other(NoSignIn),
+}
+
+/// A project with no host to sign in to: not a GitHub repository, or not
+/// polled yet.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum NoSignIn {
+    NotGithub { why: String },
+    Unknown,
 }
 
 /// What a sign-in state says instead of a list, if anything: not signed in,
 /// expired, rate limited or unreachable are never an empty list. `flag` is
 /// the `--host` a login for this host needs.
-fn sign_in_says(github: &serde_json::Value, flag: &str) -> Option<String> {
-    match github["state"].as_str()? {
-        "signed_out" => Some(format!(
+fn sign_in_says(github: &SignIn, flag: &str) -> Option<String> {
+    match github {
+        SignIn::SignedOut => Some(format!(
             "Not signed in to GitHub — run `devplane auth login{flag}`, or sign in from Setup."
         )),
-        "pending" => Some(format!(
-            "Signing in to GitHub — enter {} at {}.",
-            github["user_code"].as_str().unwrap_or("the code"),
-            github["verification_uri"]
-                .as_str()
-                .unwrap_or("GitHub's device page")
+        SignIn::Pending {
+            user_code,
+            verification_uri,
+            ..
+        } => Some(format!(
+            "Signing in to GitHub — enter {user_code} at {verification_uri}."
         )),
-        "expired" => Some(format!(
+        SignIn::Expired => Some(format!(
             "GitHub sign-in expired: GitHub no longer accepts the token — run `devplane auth login{flag}`."
         )),
-        "rate_limited" => Some(format!(
-            "GitHub's rate limit is spent; it resets at {} and the lists below are from before.",
-            github["until"]
-                .as_str()
-                .unwrap_or("a time GitHub did not say")
+        SignIn::RateLimited { until } => Some(format!(
+            "GitHub's rate limit is spent; it resets at {until} and the lists below are from before."
         )),
-        "unreachable" => Some(format!(
-            "GitHub is unreachable ({}); the lists below are from the last read.",
-            github["why"].as_str().unwrap_or("no answer")
+        SignIn::Unreachable { why, .. } => Some(format!(
+            "GitHub is unreachable ({why}); the lists below are from the last read."
         )),
-        _ => None,
+        SignIn::SignedIn { .. } => None,
     }
 }
 
@@ -109,7 +113,7 @@ fn sign_in_says(github: &serde_json::Value, flag: &str) -> Option<String> {
 /// sign-in, a failed poll, or nothing read yet. `false` when there is nothing
 /// to list below it.
 fn forge_preamble(list: &ForgeList) -> bool {
-    if let Some(says) = sign_in_says(&list.github, "") {
+    if let Some(says) = sign_in_says(&list.github.sign_in, "") {
         println!("{}\n", paint(render::YELLOW, &says));
     }
     if let Some(e) = &list.error {
@@ -145,17 +149,18 @@ fn project_says(p: &ForgeProject, default_host: Option<&str>) -> Option<String> 
         (h, Some(d)) if h == d => String::new(),
         (h, _) => format!(" --host {h}"),
     };
-    match p.github["state"].as_str() {
-        Some("not_github") => Some(format!(
-            "not a GitHub repository — {}",
-            p.github["why"].as_str().unwrap_or("no GitHub remote")
-        )),
-        Some("unknown") => Some("not read yet".into()),
-        Some("signed_in") | None => p.stale.as_ref().map(|e| format!("stale — {e}")),
-        Some(_) => sign_in_says(&p.github, &flag).map(|s| match &p.stale {
-            Some(e) => format!("{s} ({e})"),
-            None => s,
-        }),
+    match &p.github {
+        ProjectGitHub::Other(NoSignIn::NotGithub { why }) => {
+            Some(format!("not a GitHub repository — {why}"))
+        }
+        ProjectGitHub::Other(NoSignIn::Unknown) => Some("not read yet".into()),
+        ProjectGitHub::Host(h) => match sign_in_says(&h.sign_in, &flag) {
+            None => p.stale.as_ref().map(|e| format!("stale — {e}")),
+            Some(s) => Some(match &p.stale {
+                Some(e) => format!("{s} ({e})"),
+                None => s,
+            }),
+        },
     }
 }
 
@@ -169,7 +174,7 @@ fn print_by_project<R>(
     print_row: impl Fn(&R),
     empty: &str,
 ) {
-    let default_host = list.github["host"].as_str();
+    let default_host = Some(list.github.host.as_str());
     let mut printed = false;
     let mut quiet = Vec::new();
     for p in &list.projects {
@@ -180,7 +185,7 @@ fn print_by_project<R>(
         let says = project_says(p, default_host);
         // A project with no GitHub remote is named once at the end, not given
         // a heading of its own.
-        if mine.is_empty() && p.github["state"] == "not_github" {
+        if mine.is_empty() && matches!(p.github, ProjectGitHub::Other(NoSignIn::NotGithub { .. })) {
             quiet.push(p.project_name.as_str());
             continue;
         }
@@ -225,40 +230,62 @@ fn print_by_project<R>(
 
 /// One half of `/api/forge` under `--json`: the rows asked for, with the
 /// envelope that says how current they are — never the other half.
-fn forge_half(v: &serde_json::Value, rows: &str, more: &str) -> serde_json::Value {
-    let projects: Vec<serde_json::Value> = v["projects"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "project": p["project"], "project_name": p["project_name"],
-                        "repo": p["repo"], "host": p["host"], "github": p["github"],
-                        "stale": p["stale"], "read_at": p["read_at"], more: p[more],
-                    })
-                })
-                .collect()
+fn forge_half<R: Serialize>(
+    v: &ForgeList,
+    rows_key: &str,
+    rows: &[R],
+    more_key: &str,
+    more: usize,
+    more_of: impl Fn(&ForgeProject) -> usize,
+) -> serde_json::Value {
+    let projects: Vec<_> = v
+        .projects
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "project": p.project, "project_name": p.project_name,
+                "repo": p.repo, "host": p.host, "github": p.github,
+                "stale": p.stale, "read_at": p.read_at, more_key: more_of(p),
+            })
         })
-        .unwrap_or_default();
+        .collect();
     serde_json::json!({
-        "viewer": v["viewer"],
-        "error": v["error"],
-        "fetched_at": v["fetched_at"],
-        "github": v["github"],
-        "stale": v["stale"],
+        "viewer": v.viewer,
+        "error": v.error,
+        "fetched_at": v.fetched_at,
+        "github": v.github,
+        "stale": v.stale,
         "projects": projects,
-        rows: v[rows],
-        more: v[more],
+        rows_key: rows,
+        more_key: more,
     })
+}
+
+/// The issues half under `--json`.
+fn issues_half(v: &ForgeList) -> serde_json::Value {
+    forge_half(v, "issues", &v.issues, "issues_more", v.issues_more, |p| {
+        p.issues_more
+    })
+}
+
+/// The pull-requests half under `--json`.
+fn prs_half(v: &ForgeList) -> serde_json::Value {
+    forge_half(
+        v,
+        "pull_requests",
+        &v.pull_requests,
+        "pull_requests_more",
+        v.pull_requests_more,
+        |p| p.pull_requests_more,
+    )
 }
 
 pub async fn cmd_issues(json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
-    let v = raw(&c, "/api/forge").await?;
+    let list: ForgeList = raw_as(&c, "/api/forge").await?;
     if json {
-        return super::print_json(&forge_half(&v, "issues", "issues_more"));
+        return super::print_json(&issues_half(&list));
     }
-    let list: ForgeList = serde_json::from_value(v).context("reading /api/forge")?;
     if !forge_preamble(&list) {
         return Ok(());
     }
@@ -267,7 +294,8 @@ pub async fn cmd_issues(json: bool) -> Result<()> {
         &list.issues,
         |i| &i.project_name,
         |p| p.issues_more,
-        |i| {
+        |row| {
+            let i = &row.item;
             let mark = if i.assigned_to_me {
                 paint(render::YELLOW, "◆")
             } else {
@@ -301,11 +329,10 @@ pub async fn cmd_issues(json: bool) -> Result<()> {
 
 pub async fn cmd_prs(json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
-    let v = raw(&c, "/api/forge").await?;
+    let list: ForgeList = raw_as(&c, "/api/forge").await?;
     if json {
-        return super::print_json(&forge_half(&v, "pull_requests", "pull_requests_more"));
+        return super::print_json(&prs_half(&list));
     }
-    let list: ForgeList = serde_json::from_value(v).context("reading /api/forge")?;
     if !forge_preamble(&list) {
         return Ok(());
     }
@@ -314,7 +341,8 @@ pub async fn cmd_prs(json: bool) -> Result<()> {
         &list.pull_requests,
         |p| &p.project_name,
         |p| p.pull_requests_more,
-        |p| {
+        |row| {
+            let p = &row.item;
             let needs_me = p.review_requested
                 || (p.mine
                     && matches!(
@@ -359,6 +387,15 @@ pub async fn cmd_prs(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// What `/api/issues` answers: the issues on offer, in the board's shape, or
+/// why they could not be read.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ReadyIssues {
+    Refused { error: String },
+    Issues(Vec<crate::core::ForgeIssue>),
+}
+
 /// The issues one repository offers as work: `devplane issue list --ready`.
 pub async fn cmd_ready_issues(
     cwd: Option<std::path::PathBuf>,
@@ -370,7 +407,7 @@ pub async fn cmd_ready_issues(
         Some(p) => p,
         None => std::env::current_dir()?,
     };
-    let v: serde_json::Value = c
+    let v: ReadyIssues = c
         .post_json(
             "/api/issues",
             &serde_json::json!({ "cwd": cwd.to_string_lossy(), "label": label }),
@@ -379,20 +416,19 @@ pub async fn cmd_ready_issues(
     if json {
         return crate::cli::print_json(&v);
     }
-    if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
-        anyhow::bail!("{e}");
-    }
-    let empty = vec![];
-    let issues = v.as_array().unwrap_or(&empty);
+    let issues = match v {
+        ReadyIssues::Refused { error } => anyhow::bail!("{error}"),
+        ReadyIssues::Issues(issues) => issues,
+    };
     if issues.is_empty() {
         println!("{}", paint(DIM, "no issues are on offer here"));
         return Ok(());
     }
-    for i in issues {
+    for i in &issues {
         println!(
             "{:>6}  {}",
-            paint(BOLD, &format!("#{}", i["number"].as_u64().unwrap_or(0))),
-            clip(i["title"].as_str().unwrap_or(""), 70)
+            paint(BOLD, &format!("#{}", i.number)),
+            clip(&i.title, 70)
         );
     }
     println!(
@@ -403,21 +439,33 @@ pub async fn cmd_ready_issues(
 }
 
 #[cfg(test)]
-mod forge_tests {
-    use super::forge_half;
+mod tests {
+    use super::{ForgeList, issues_half, prs_half};
     use serde_json::json;
 
     #[test]
     fn each_forge_list_prints_its_own_half() {
+        let signed_in = json!({"host": "github.com", "state": "signed_in", "login": "octocat",
+                               "scopes": [], "last_read": null, "device_flow": true});
         let v = json!({
-            "viewer": "octocat", "fetched_at": "t", "github": {"state": "signed_in"},
-            "issues": [{"number": 7}], "pull_requests": [{"number": 2}],
+            "viewer": "octocat", "error": null, "fetched_at": "t",
+            "issues": [{"project": "p-1", "project_name": "app", "needs_you": false,
+                        "number": 7, "title": "t", "url": "u", "labels": [],
+                        "assigned_to_me": false, "updated_at": null}],
+            "pull_requests": [{"project": "p-1", "project_name": "app", "needs_you": false,
+                               "number": 2, "title": "t", "url": "u", "status": "open",
+                               "draft": false, "mine": false, "review_requested": false,
+                               "head_ref": "b", "updated_at": null}],
+            "stale": [],
+            "github": signed_in,
+            "projects": [{"project": "p-1", "project_name": "app", "repo": "o/app",
+                          "host": "github.com", "github": signed_in, "stale": null,
+                          "read_at": "t", "issues_more": 3, "pull_requests_more": 23}],
             "issues_more": 3, "pull_requests_more": 23,
-            "projects": [{"project_name": "app", "github": {"state": "signed_in"},
-                          "issues_more": 3, "pull_requests_more": 23}],
         });
-        let issues = forge_half(&v, "issues", "issues_more");
-        let prs = forge_half(&v, "pull_requests", "pull_requests_more");
+        let list: ForgeList = serde_json::from_value(v).expect("the host's own shape");
+        let issues = issues_half(&list);
+        let prs = prs_half(&list);
         assert_ne!(issues, prs);
         assert_eq!(issues["issues"][0]["number"], 7);
         assert!(issues.get("pull_requests").is_none());
@@ -425,5 +473,6 @@ mod forge_tests {
         assert!(prs.get("issues").is_none());
         assert_eq!(prs["projects"][0]["pull_requests_more"], 23);
         assert!(prs["projects"][0].get("issues_more").is_none());
+        assert_eq!(prs["projects"][0]["github"]["state"], "signed_in");
     }
 }

@@ -9,46 +9,43 @@ use anyhow::{Context, Result};
 
 pub async fn cmd_agents(json: bool) -> Result<()> {
     let c = crate::local::Reader::open().await?;
-    let v: serde_json::Value = c.get("/api/agents").await?;
+    let agents: Vec<AgentRow> = super::raw_as(&c, "/api/agents").await?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::to_value(&agents)?)?
+        );
         return Ok(());
     }
-    let empty = vec![];
     let mut any_measured = false;
-    for a in v.as_array().unwrap_or(&empty) {
+    for a in &agents {
         println!(
             "{:<10} {:<14} {}",
-            paint(BOLD, a["id"].as_str().unwrap_or("")),
-            a["name"].as_str().unwrap_or(""),
-            paint(DIM, a["command"].as_str().unwrap_or(""))
+            paint(BOLD, &a.spec.id),
+            a.spec.name,
+            paint(DIM, &a.spec.command)
         );
         // Capabilities measured at `initialize`, only for agents Devplane has
         // started: "not probed" is not "not supported".
-        if let Some(m) = a.get("measured").filter(|m| !m.is_null()) {
+        if let Some(m) = &a.measured {
             any_measured = true;
-            let yes = |k: &str| m.get(k).and_then(|b| b.as_bool()).unwrap_or(false);
             let mut can: Vec<&str> = Vec::new();
-            if yes("resume") {
+            if m.resume {
                 can.push("resume");
             }
-            if yes("load_session") {
+            if m.load_session {
                 can.push("load");
             }
-            if yes("list_sessions") {
+            if m.list_sessions {
                 can.push("list");
             }
-            if yes("declares_modes") {
+            if m.declares_modes {
                 can.push("modes");
             }
-            if yes("needs_auth") {
+            if m.needs_auth {
                 can.push("needs sign-in");
             }
-            let when = m
-                .get("at")
-                .and_then(|t| t.as_str())
-                .map(|t| clip(t, 10))
-                .unwrap_or_default();
+            let when = m.at.as_deref().map(|t| clip(t, 10)).unwrap_or_default();
             println!(
                 "           {}",
                 paint(
@@ -86,6 +83,39 @@ pub async fn cmd_agents(json: bool) -> Result<()> {
         )
     );
     Ok(())
+}
+
+/// One row of `/api/agents`: how to launch the agent, and what it was
+/// measured to support where Devplane has started it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AgentRow {
+    #[serde(flatten)]
+    spec: crate::acp::AgentSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    measured: Option<Measured>,
+}
+
+/// What `initialize` showed an agent supports. Every field is the host's.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Measured {
+    agent_name: Option<String>,
+    resume: bool,
+    load_session: bool,
+    list_sessions: bool,
+    declares_modes: bool,
+    needs_auth: bool,
+    at: Option<String>,
+}
+
+/// What `agent connect` and `agent disconnect` print under `--json`: the
+/// vendor's report, and where it was written.
+#[derive(serde::Serialize)]
+struct Written<'a, R: serde::Serialize> {
+    #[serde(flatten)]
+    report: &'a R,
+    settings_path: String,
+    diff: &'a str,
+    written: bool,
 }
 
 pub async fn cmd_connect(
@@ -127,10 +157,12 @@ pub async fn cmd_connect(
         if !diff.is_empty() {
             crate::observe::connect::write_settings(&path, &settings)?;
         }
-        let mut out = serde_json::to_value(&report)?;
-        out["settings_path"] = serde_json::json!(path.display().to_string());
-        out["diff"] = serde_json::json!(diff);
-        out["written"] = serde_json::json!(!diff.is_empty());
+        let out = serde_json::to_value(Written {
+            report: &report,
+            settings_path: path.display().to_string(),
+            diff: &diff,
+            written: !diff.is_empty(),
+        })?;
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -366,10 +398,12 @@ pub async fn cmd_disconnect(what: Vendor, yes: bool, json: bool) -> Result<()> {
         if !diff.is_empty() {
             crate::observe::connect::write_settings(&path, &settings)?;
         }
-        let mut out = serde_json::to_value(&report)?;
-        out["settings_path"] = serde_json::json!(path.display().to_string());
-        out["diff"] = serde_json::json!(diff);
-        out["written"] = serde_json::json!(!diff.is_empty());
+        let out = serde_json::to_value(Written {
+            report: &report,
+            settings_path: path.display().to_string(),
+            diff: &diff,
+            written: !diff.is_empty(),
+        })?;
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -413,7 +447,7 @@ async fn connect_codex(yes: bool, json: bool, exe: &std::path::Path) -> Result<(
         planned.diff,
     );
     let installed = |text: &str| {
-        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text)
+        serde_json::from_str::<serde_json::Map<String, _>>(text)
             .map(|d| crate::observe::codex::installed(&d).len())
             .unwrap_or(0)
     };
@@ -471,7 +505,7 @@ async fn disconnect_codex(yes: bool, json: bool) -> Result<()> {
     let file =
         crate::observe::codex::hooks_path().context("no home directory, so no ~/.codex to read")?;
     let before = read_existing(&file)?;
-    let mut doc: serde_json::Map<String, serde_json::Value> = if before.trim().is_empty() {
+    let mut doc: serde_json::Map<String, _> = if before.trim().is_empty() {
         Default::default()
     } else {
         serde_json::from_str(&before).with_context(|| format!("{} is not JSON", file.display()))?

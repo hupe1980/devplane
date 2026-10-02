@@ -73,6 +73,8 @@ pub mod spec;
 pub(crate) mod stamp;
 /// The observation store: SQLite, WAL, rebuildable.
 pub mod store;
+/// Which repositories a person trusted: a file of its own, never the store.
+pub mod trust;
 /// Whether a newer version exists, as the window's update check found it.
 /// No network here: the check is the app's, and only once the person said so.
 pub mod update;

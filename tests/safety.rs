@@ -340,12 +340,10 @@ async fn the_trust_route_refuses_the_control_token_alone() {
         "the token and an Origin header"
     );
     assert!(
-        host.store
-            .load_projects()
-            .await
+        devplane::trust::Trusted::read(&host.home)
             .unwrap()
-            .iter()
-            .all(|p| !p.trusted),
+            .roots
+            .is_empty(),
         "nothing was trusted"
     );
     let proof = devplane::config::trust_proof(common::WINDOW_KEY, &path);

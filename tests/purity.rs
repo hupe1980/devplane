@@ -1420,3 +1420,88 @@ fn the_review_times_nobody() {
         }
     }
 }
+
+/// What reading the host's JSON by hand looks like in source, with `//`
+/// comment lines already removed: a string key indexing an expression, a
+/// lookup by a literal key, a walk of an untyped object or array, or a read
+/// into an untyped value. Building `--json` output with `json!` is none of
+/// these. Returns each offending line.
+fn untyped_reads(code: &str) -> Vec<String> {
+    const CALLS: &[&str] = &[
+        ".get(\"",
+        ".get_mut(\"",
+        ".as_object(",
+        ".as_array(",
+        ".pointer(",
+        "serde_json::Value>",
+        ": serde_json::Value =",
+        ": Value =",
+    ];
+    let mut out = Vec::new();
+    for line in code.lines() {
+        let indexed = line.char_indices().any(|(i, c)| {
+            c == '['
+                && line[..i]
+                    .trim_end()
+                    .chars()
+                    .last()
+                    .is_some_and(|p| p.is_alphanumeric() || matches!(p, '_' | ')' | ']'))
+                && line[i + 1..].trim_start().starts_with('"')
+        });
+        if indexed || CALLS.iter().any(|c| line.contains(c)) {
+            out.push(line.trim().to_string());
+        }
+    }
+    out
+}
+
+/// The CLI reads the host through the types the host serialises, never by
+/// string key: a field renamed on one side is a compile error, not a blank.
+/// Test modules may read JSON by hand.
+#[test]
+fn the_cli_reads_the_host_through_typed_structs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found = Vec::new();
+    let mut files = walk(&root.join("src/cli").to_string_lossy());
+    files.sort();
+    assert!(files.len() > 10, "src/cli was not read: {files:?}");
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for line in untyped_reads(&production(&text)) {
+            found.push(format!("{file}: {line}"));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "src/cli reads JSON by string key; deserialise the type the host serialises \
+         (crate::view, the wire types) or a typed struct instead:\n{}",
+        found.join("\n")
+    );
+}
+
+/// The guard above would notice each shape it forbids, and passes what is
+/// not a read.
+#[test]
+fn the_untyped_read_guard_would_notice() {
+    for read in [
+        r#"let id = v["id"].as_str();"#,
+        r#"let t = &v["totals"]["cost"];"#,
+        r#"if v.get("error").is_some() {}"#,
+        r#"for x in v.as_array().unwrap() {}"#,
+        r#"let o = v.as_object();"#,
+        r#"let v: serde_json::Value = c.get(path).await?;"#,
+        r#"let v = c.get::<serde_json::Value>(path).await?;"#,
+        r#"let f = frame(x)[ "text" ];"#,
+    ] {
+        assert_eq!(untyped_reads(read).len(), 1, "missed: {read}");
+    }
+    for fine in [
+        r#"println!("{}", serde_json::json!({"id": id, "tags": ["a", "b"]}));"#,
+        r#"let names = vec!["a", "b"];"#,
+        r#"for k in &["a", "b"] {}"#,
+        r#"let kinds = ["a", "b"];"#,
+        r#"let r: Reloaded = c.post_json(path, &serde_json::json!({})).await?;"#,
+    ] {
+        assert!(untyped_reads(fine).is_empty(), "flagged: {fine}");
+    }
+}

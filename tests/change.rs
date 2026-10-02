@@ -1492,7 +1492,7 @@ async fn a_restart_does_not_lose_the_conversation_the_change_was_having() {
             db.clone(),
             "tok".into(),
             Policy::default(),
-            db.parent().unwrap().to_path_buf(),
+            db.with_extension("home"),
         )
         .await
         .unwrap();
@@ -1553,7 +1553,7 @@ async fn a_restart_does_not_lose_the_conversation_the_change_was_having() {
         db.clone(),
         "tok".into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();
@@ -1682,7 +1682,7 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
             db.clone(),
             "tok".into(),
             Policy::default(),
-            db.parent().unwrap().to_path_buf(),
+            db.with_extension("home"),
         )
         .await
         .unwrap();
@@ -1727,7 +1727,7 @@ async fn a_restart_does_not_leave_a_run_looking_drivable() {
         db.clone(),
         "tok".into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();
@@ -2508,7 +2508,7 @@ async fn a_graceful_stop_records_interrupted_and_never_completed() {
             db.clone(),
             "tok".into(),
             Policy::default(),
-            db.parent().unwrap().to_path_buf(),
+            db.with_extension("home"),
         )
         .await
         .unwrap();
@@ -2556,7 +2556,7 @@ async fn a_graceful_stop_records_interrupted_and_never_completed() {
         db.clone(),
         "tok".into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();

@@ -19,7 +19,7 @@ async fn boot(key: Option<&str>) -> (SocketAddr, reqwest::Client, Shared) {
         db.clone(),
         TOKEN.into(),
         Policy::default(),
-        db.parent().unwrap().to_path_buf(),
+        db.with_extension("home"),
     )
     .await
     .unwrap();
@@ -196,13 +196,25 @@ async fn the_control_token_alone_cannot_trust_a_repository() {
     let (status, _) = trust(&c, &addr, &path, &[("X-Devplane-Trust-Proof", ask)]).await;
     assert_eq!(status, 403);
 
-    let untrusted = state.store.load_projects().await.unwrap();
-    assert!(untrusted.iter().all(|p| !p.trusted), "nothing was trusted");
+    assert!(
+        devplane::trust::Trusted::read(&state.home)
+            .unwrap()
+            .roots
+            .is_empty(),
+        "nothing was trusted"
+    );
 
     let proof = devplane::config::trust_proof(&key, &path);
     let (status, said) = trust(&c, &addr, &path, &[("X-Devplane-Trust-Proof", proof)]).await;
     assert_eq!(status, 200, "{said}");
     assert_eq!(said["trusted"], true);
+    // Recorded in the person's file, not the store.
+    let root = std::path::PathBuf::from(&path).canonicalize().unwrap();
+    assert!(
+        devplane::trust::Trusted::read(&state.home)
+            .unwrap()
+            .contains(&root)
+    );
 }
 
 #[tokio::test]
@@ -214,15 +226,38 @@ async fn a_host_with_no_window_refuses_every_trust_request() {
     assert_eq!(status, 403);
 }
 
-/// Trust a person wrote to the store reaches a running host when it is told
-/// to re-read, and the re-read grants nothing the store does not say.
+/// Trust a person wrote to `trusted.toml` reaches a running host when it is
+/// told to re-read, and the re-read grants nothing the file does not say: a
+/// project row marked trusted in the store grants nothing at all.
 #[tokio::test]
-async fn reloading_takes_up_trust_recorded_in_the_store() {
+async fn reloading_takes_up_trust_recorded_in_its_file() {
     let (addr, c, state) = boot(None).await;
     let root = std::path::PathBuf::from(repo()).canonicalize().unwrap();
     let mut p = devplane::core::Project::from_root(root.clone());
     p.trusted = true;
     state.store.save_project(&p).await.unwrap();
+    let reload = || async {
+        c.post(format!("http://{addr}/api/projects/reload"))
+            .bearer_auth(TOKEN)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    reload().await;
+    assert!(
+        !state
+            .world
+            .lock()
+            .await
+            .projects()
+            .any(|q| q.root == root && q.trusted),
+        "the store says nothing about trust"
+    );
+    devplane::trust::add(&state.home, [root.clone()]).unwrap();
     assert!(
         !state
             .world

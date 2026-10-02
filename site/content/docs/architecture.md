@@ -133,7 +133,7 @@ HTTP + JSON on `127.0.0.1`, with Server-Sent Events. Tokens: [Security](@/docs/s
 | `/api/projects` | GET | registered projects |
 | `/api/specs` | GET | specifications and requirement-to-task trace |
 | `/api/projects/trust` | POST | trust a repository; the window only (the token alone is refused) |
-| `/api/projects/reload` | POST | re-read trust `devplane project trust` wrote to the store |
+| `/api/projects/reload` | POST | re-read the projects, and the trust `devplane project trust` wrote to `~/.devplane/trusted.toml` |
 | `/api/projects/{id}/snooze` | POST | quieten its GitHub items |
 | `/api/issues` | POST | a repository's open issues, live |
 | `/api/github` | GET | each host's sign-in state; never the token |

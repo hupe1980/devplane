@@ -95,12 +95,23 @@ impl Subject {
 /// An open ask, by id or unique prefix. One no longer open is passed through,
 /// so the answer's refusal says what became of it.
 pub(crate) async fn ask(reader: &Reader, needle: &str) -> Result<String> {
-    let v = reader.get("/api/asks").await?;
-    let open: Vec<&str> = v["open"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|x| x["id"].as_str()).collect())
-        .unwrap_or_default();
+    let asks: Asks = super::raw_as(reader, "/api/asks").await?;
+    let open = asks.open.iter().filter_map(|a| a.id.as_deref());
     Ok(unique("ask", needle, open)?.unwrap_or_else(|| needle.to_string()))
+}
+
+/// `/api/asks`, read only as far as the open asks' ids.
+#[derive(serde::Deserialize)]
+struct Asks {
+    #[serde(default)]
+    open: Vec<AskId>,
+}
+
+/// One open ask, by its id alone.
+#[derive(serde::Deserialize)]
+struct AskId {
+    #[serde(default)]
+    id: Option<String>,
 }
 
 #[cfg(test)]

@@ -46,14 +46,9 @@ async fn boot_shared(policy: Policy, db: &Path) -> (SocketAddr, String, reqwest:
 }
 
 async fn boot_with_db(db: &Path, token: String, policy: Policy) -> Shared {
-    let state = AppState::new(
-        db.to_path_buf(),
-        token,
-        policy,
-        db.parent().unwrap().to_path_buf(),
-    )
-    .await
-    .expect("host state");
+    let state = AppState::new(db.to_path_buf(), token, policy, db.with_extension("home"))
+        .await
+        .expect("host state");
     // As the app's host: the trust route takes only the window's proof.
     state.window_key.set(common::WINDOW_KEY.into()).ok();
     state

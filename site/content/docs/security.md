@@ -91,7 +91,8 @@ settings). An answer is recorded from the `window` only when it carries the wind
 one ask; every other holder of the token is recorded `cli`, whatever its `Origin` header or body
 says. With no window — `devplane up` in a browser — every answer is recorded `cli`. Trusting a
 repository over HTTP likewise needs the window's proof for that path: the token alone is refused, and
-`devplane project trust` (refused inside an agent session) writes the trust itself.
+`devplane project trust` (refused inside an agent session) writes the trust itself, into
+`~/.devplane/trusted.toml` — a file the built-in rule keeps every agent from reading or writing.
 
 **The limit:** the token is readable by the agent's user, which is you. The built-in rule reads the
 gated command line; a script that opens the file itself, or an agent that unsets those variables or

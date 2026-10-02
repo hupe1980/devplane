@@ -1,9 +1,85 @@
 //! `devplane change start` and `devplane change adopt`: how a change begins.
 
-use super::said_error;
+use super::Answer;
 use crate::render::{self, BOLD, DIM, paint};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// What starting would do in each project: the fields this reads.
+#[derive(Deserialize)]
+struct Preflight {
+    #[serde(default)]
+    targets: Vec<Target>,
+}
+
+/// One project's preflight.
+#[derive(Deserialize)]
+struct Target {
+    #[serde(default)]
+    name: Option<String>,
+    /// Why it is refused, when it is.
+    #[serde(default)]
+    says: Option<String>,
+    /// What the first run in a fresh tree costs, as sentences.
+    #[serde(default)]
+    notes: Vec<String>,
+}
+
+/// The changes a start or an adopt made.
+#[derive(Deserialize)]
+struct Begun {
+    #[serde(default)]
+    changes: Vec<BegunOne>,
+    /// The one change, when there is exactly one.
+    #[serde(default)]
+    change_id: Option<String>,
+    #[serde(default)]
+    change: Option<crate::core::Change>,
+}
+
+/// One project's started change.
+#[derive(Deserialize)]
+struct BegunOne {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    change_id: Option<String>,
+    #[serde(default)]
+    change: Option<crate::core::Change>,
+}
+
+/// `change start --json`: the host's answer, the first run's costs, and —
+/// for one change — what its run was sent.
+#[derive(Serialize)]
+struct StartShown<'a> {
+    #[serde(flatten)]
+    answer: &'a Answer<Begun>,
+    notes: Vec<&'a String>,
+    #[serde(flatten)]
+    sent: Option<SentShown<'a>>,
+}
+
+/// What one run was sent, as its detail says it; null when unread.
+#[derive(Serialize)]
+struct SentShown<'a> {
+    sent: Option<&'a Vec<crate::spec::SentTask>>,
+    sent_says: Option<&'a str>,
+}
+
+/// A started change's lines: where it lives and how to check it.
+fn print_begun(w: Option<&crate::core::Change>) {
+    let Some(w) = w else { return };
+    if let Some(b) = &w.branch {
+        println!("  branch    {b}");
+    }
+    if let Some(d) = &w.worktree {
+        println!("  worktree  {}", d.display());
+    }
+    if let Some(sp) = &w.spec {
+        println!("  spec      {sp}");
+    }
+}
 
 /// What `change start` was asked for.
 pub(super) struct Start {
@@ -44,13 +120,9 @@ pub(super) async fn cmd_start(s: Start, json: bool) -> Result<()> {
     });
     // Every refusal, and what the first run will cost, before anything is
     // written.
-    let pre: serde_json::Value = c.post_json("/api/changes/preflight", &body).await?;
-    if let Some(e) = said_error(&pre) {
-        anyhow::bail!("{e}");
-    }
-    let empty = vec![];
-    let targets = pre["targets"].as_array().unwrap_or(&empty);
-    let refused: Vec<&str> = targets.iter().filter_map(|t| t["says"].as_str()).collect();
+    let pre: Answer<Preflight> = c.post_json("/api/changes/preflight", &body).await?;
+    let targets = &pre.read()?.targets;
+    let refused: Vec<&str> = targets.iter().filter_map(|t| t.says.as_deref()).collect();
     if !refused.is_empty() {
         if json {
             println!("{}", serde_json::to_string_pretty(&pre)?);
@@ -67,12 +139,8 @@ pub(super) async fn cmd_start(s: Start, json: bool) -> Result<()> {
     let notes: Vec<(String, String)> = targets
         .iter()
         .flat_map(|t| {
-            let name = t["name"].as_str().unwrap_or("").to_string();
-            t["notes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(move |n| n.as_str().map(|n| (name.clone(), n.to_string())))
+            let name = t.name.clone().unwrap_or_default();
+            t.notes.iter().map(move |n| (name.clone(), n.clone()))
         })
         .collect();
     if !json {
@@ -84,66 +152,53 @@ pub(super) async fn cmd_start(s: Start, json: bool) -> Result<()> {
         }
     }
 
-    let mut v: serde_json::Value = c.post_json("/api/changes", &body).await?;
+    let answer: Answer<Begun> = c.post_json("/api/changes", &body).await?;
+    let started: &[BegunOne] = answer.typed().map_or(&[], |v| &v.changes);
     // What each run was sent lives on the run: read it back.
     let mut sent_of = Vec::new();
-    for started in v["changes"].as_array().cloned().unwrap_or_default() {
-        let run_id = started["change"]["runs"]
-            .as_array()
-            .and_then(|r| r.last())
-            .and_then(|r| r.as_str())
-            .map(str::to_string);
-        let sent: serde_json::Value = match &run_id {
-            Some(r) => c
-                .get(&format!("/api/runs/{r}"))
-                .await
-                .unwrap_or(serde_json::Value::Null),
-            None => serde_json::Value::Null,
+    for one in started {
+        let run_id = one
+            .change
+            .as_ref()
+            .and_then(|w| w.runs.last())
+            .map(|r| r.as_str().to_string());
+        let sent: Option<crate::view::RunRowView> = match &run_id {
+            Some(r) => c.get(&format!("/api/runs/{r}")).await.ok(),
+            None => None,
         };
         sent_of.push(sent);
     }
     if json {
-        if let Some(o) = v.as_object_mut() {
-            o.insert(
-                "notes".into(),
-                serde_json::json!(notes.iter().map(|(_, n)| n).collect::<Vec<_>>()),
-            );
-            if let [one] = sent_of.as_slice() {
-                o.insert("sent".into(), one["sent"].clone());
-                o.insert("sent_says".into(), one["sent_says"].clone());
-            }
-        }
+        let shown = StartShown {
+            answer: &answer,
+            notes: notes.iter().map(|(_, n)| n).collect(),
+            sent: match sent_of.as_slice() {
+                [one] => Some(SentShown {
+                    sent: one.as_ref().and_then(|r| r.sent.as_ref()),
+                    sent_says: one.as_ref().map(|r| r.sent_says.as_str()),
+                }),
+                _ => None,
+            },
+        };
         // A project that changed between preflight and start fails the
         // command here too.
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&shown);
     }
-    let started = v["changes"].as_array().cloned().unwrap_or_default();
     for (one, sent) in started.iter().zip(&sent_of) {
-        let w = &one["change"];
+        let w = one.change.as_ref();
         println!(
             "{} {}",
             paint(render::GREEN, "started"),
-            paint(BOLD, w["title"].as_str().unwrap_or(&title))
+            paint(BOLD, w.map_or(title.as_str(), |w| w.title.as_str()))
         );
         if projects.len() > 1 {
-            println!("  project   {}", one["project"].as_str().unwrap_or(""));
+            println!("  project   {}", one.project.as_deref().unwrap_or(""));
         }
-        if let Some(b) = w["branch"].as_str() {
-            println!("  branch    {b}");
-        }
-        if let Some(d) = w["worktree"].as_str() {
-            println!("  worktree  {d}");
-        }
-        if let Some(sp) = w["spec"].as_str() {
-            println!("  spec      {sp}");
-        }
-        if let Some(says) = sent["sent_says"].as_str() {
-            println!("  tasks     {says}");
-            for t in sent["sent"].as_array().unwrap_or(&vec![]) {
-                println!(
-                    "            {}",
-                    paint(DIM, t["text"].as_str().unwrap_or(""))
-                );
+        print_begun(w);
+        if let Some(sent) = sent {
+            println!("  tasks     {}", sent.sent_says);
+            for t in sent.sent.iter().flatten() {
+                println!("            {}", paint(DIM, &t.text));
             }
         }
         println!(
@@ -152,13 +207,13 @@ pub(super) async fn cmd_start(s: Start, json: bool) -> Result<()> {
                 DIM,
                 &format!(
                     "devplane change verify {}",
-                    one["change_id"].as_str().unwrap_or("")
+                    one.change_id.as_deref().unwrap_or("")
                 )
             )
         );
     }
     // A project that changed between preflight and start is named last.
-    if let Some(e) = said_error(&v) {
+    if let Some(e) = answer.error() {
         anyhow::bail!("{e}");
     }
     Ok(())
@@ -179,7 +234,7 @@ pub(super) async fn cmd_adopt(
             crate::repo::find_repo_root(&here).unwrap_or(here)
         }
     };
-    let v: serde_json::Value = c
+    let answer: Answer<Begun> = c
         .post_json(
             "/api/changes/adopt",
             &serde_json::json!({
@@ -191,33 +246,23 @@ pub(super) async fn cmd_adopt(
         )
         .await?;
     if json {
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&answer);
     }
-    if let Some(e) = said_error(&v) {
-        anyhow::bail!("{e}");
-    }
-    let w = &v["change"];
+    let v = answer.read()?;
+    let w = v.change.as_ref();
     println!(
         "{} {}",
         paint(render::GREEN, "adopted"),
-        paint(BOLD, w["title"].as_str().unwrap_or(&branch))
+        paint(BOLD, w.map_or(branch.as_str(), |w| w.title.as_str()))
     );
-    if let Some(b) = w["branch"].as_str() {
-        println!("  branch    {b}");
-    }
-    if let Some(d) = w["worktree"].as_str() {
-        println!("  worktree  {d}");
-    }
-    if let Some(sp) = w["spec"].as_str() {
-        println!("  spec      {sp}");
-    }
+    print_begun(w);
     println!(
         "  {}",
         paint(
             DIM,
             &format!(
                 "devplane change verify {}",
-                v["change_id"].as_str().unwrap_or("")
+                v.change_id.as_deref().unwrap_or("")
             )
         )
     );

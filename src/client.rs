@@ -269,6 +269,17 @@ impl crate::local::Reader {
     pub async fn change(&self, id: &str) -> Result<crate::view::ChangeView<'static>> {
         self.get_as(&format!("/api/changes/{id}")).await
     }
+
+    /// Answers an ask and reads the reply as `T`: the ask as it now stands,
+    /// or the reason it was refused.
+    pub async fn answer_as<T: DeserializeOwned>(
+        &self,
+        ask: &str,
+        body: &serde_json::Value,
+    ) -> Result<T> {
+        let v = self.answer(ask, body).await?;
+        serde_json::from_value(v).with_context(|| format!("reading the answer to ask `{ask}`"))
+    }
 }
 
 #[cfg(test)]

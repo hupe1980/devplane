@@ -7,6 +7,7 @@ use crate::core::change::{ChangeState, Outcome, Standing, Stopped};
 use crate::render::{self, BOLD, DIM, clip, paint};
 use crate::view::ChangeView;
 use anyhow::{Context, Result};
+use serde::Deserialize;
 
 /// The colour a standing is painted in, one rule for the list and the detail.
 fn standing_colour(standing: &Standing) -> &'static str {
@@ -135,6 +136,35 @@ pub(super) async fn cmd_show(change: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// A change's certificate as the host serves it: the fields export reads.
+#[derive(Deserialize)]
+struct Certified {
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    markdown: Option<String>,
+    #[serde(default)]
+    statement: Option<Stated>,
+}
+
+/// The certificate's statement, or the sentence saying why there is none.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Stated {
+    /// `{"no_statement": why}` — [`crate::core::certificate::NO_STATEMENT`].
+    Refused { no_statement: String },
+    /// The in-toto statement: a document carried and signed byte for byte,
+    /// never looked into here.
+    Statement(serde_json::Value),
+}
+
+/// What makes a document a statement: it names its `_type`.
+#[derive(Deserialize)]
+struct Typed {
+    #[serde(rename = "_type")]
+    _kind: serde::de::IgnoredAny,
+}
+
 pub(super) async fn cmd_export(
     change: &str,
     json: bool,
@@ -148,16 +178,15 @@ pub(super) async fn cmd_export(
     }
     let reader = crate::local::Reader::open().await?;
     let id = ids::change(&reader, change).await?;
-    let v: serde_json::Value = reader
-        .get(&format!("/api/changes/{id}/certificate"))
+    let v: Certified = crate::cli::raw_as(&reader, &format!("/api/changes/{id}/certificate"))
         .await
         .with_context(|| format!("no certificate for `{id}`"))?;
-    if let Some(e) = super::said_error(&v) {
+    if let Some(e) = &v.error {
         anyhow::bail!("{e}");
     }
     // Unfinished work is not an error for the Markdown: it says where it is.
     if !json && !sign {
-        let md = v["markdown"].as_str().unwrap_or("");
+        let md = v.markdown.as_deref().unwrap_or("");
         match out {
             None => println!("{md}"),
             Some(out) => {
@@ -170,14 +199,12 @@ pub(super) async fn cmd_export(
     }
     // The statement, or the sentence saying why there is none — an exit,
     // never an object that is not a statement.
-    let st = &v["statement"];
-    if let Some(why) = st[crate::core::certificate::NO_STATEMENT].as_str() {
-        anyhow::bail!("{why}");
-    }
-    if st.get("_type").is_none() {
-        anyhow::bail!("the host gave no statement for `{id}`");
-    }
-    let bytes = crate::core::attest::serialize(st);
+    let st = match v.statement {
+        Some(Stated::Refused { no_statement }) => anyhow::bail!("{no_statement}"),
+        Some(Stated::Statement(st)) if Typed::deserialize(&st).is_ok() => st,
+        _ => anyhow::bail!("the host gave no statement for `{id}`"),
+    };
+    let bytes = crate::core::attest::serialize(&st);
     let Some(out) = out else {
         print!("{}", String::from_utf8_lossy(&bytes));
         return Ok(());

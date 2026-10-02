@@ -1,8 +1,9 @@
 //! `devplane change review`: a change in review order, and marking a path's
 //! hunks seen.
 
+use super::Answer;
 use crate::render::{BOLD, DIM, YELLOW, clip, paint};
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// The review, worded exactly as the surface words it: every sentence is the
 /// host's, and this only lays them out.
@@ -98,15 +99,12 @@ fn print_review(r: &crate::view::ReviewView, by_intent: bool) {
 pub(super) async fn cmd_review(change: &str, by: &str, json: bool) -> Result<()> {
     let reader = crate::local::Reader::open().await?;
     let id = super::ids::change(&reader, change).await?;
-    let v = reader.get(&format!("/api/changes/{id}/review")).await?;
+    let answer: Answer<crate::view::ReviewView> =
+        crate::cli::raw_as(&reader, &format!("/api/changes/{id}/review")).await?;
     if json {
-        return crate::cli::print_json(&v);
+        return crate::cli::print_json(&answer);
     }
-    if let Some(e) = super::said_error(&v) {
-        anyhow::bail!("{e}");
-    }
-    let r: crate::view::ReviewView = serde_json::from_value(v).context("reading the review")?;
-    print_review(&r, by == "intent");
+    print_review(answer.read()?, by == "intent");
     Ok(())
 }
 
@@ -130,11 +128,9 @@ pub(super) async fn cmd_mark_seen(change: &str, seen: &[String], json: bool) -> 
     let id = super::ids::change(&reader, change).await?;
     let mut all = Vec::new();
     for path in seen {
-        let v = reader.mark_seen(&id, path).await?;
-        if let Some(e) = super::said_error(&v) {
-            anyhow::bail!("{e}");
-        }
-        let n = v["seen"].as_array().map_or(0, Vec::len);
+        let answer: Answer<crate::view::Marked> = reader.mark_seen(&id, path).await?;
+        let v = answer.read()?;
+        let n = v.seen.len();
         if !json {
             println!(
                 "seen: {path} — {}",
@@ -143,15 +139,11 @@ pub(super) async fn cmd_mark_seen(change: &str, seen: &[String], json: bool) -> 
                     n => format!("{n} hunks"),
                 }
             );
-            for r in v["weakened_seen"].as_array().cloned().unwrap_or_default() {
-                println!(
-                    "  read: {} — {}",
-                    r["path"].as_str().unwrap_or(""),
-                    r["why"].as_str().unwrap_or("")
-                );
+            for r in &v.weakened_seen {
+                println!("  read: {} — {}", r.path, r.why);
             }
         }
-        all.push(v);
+        all.push(answer);
     }
     if json {
         println!(
