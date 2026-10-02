@@ -18,6 +18,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The `rust-version` in Cargo.toml, checked rather than claimed.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the minimum Rust
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --lib --bins
+
   test:
     strategy:
       fail-fast: false
@@ -79,10 +92,9 @@ jobs:
 
   # `devplane verify` on this repository's own pull requests: the base's
   # `check` from devplane.toml, the weakened checks first in the job summary.
-  # Until a release carries `verify`, the binary is built from the merge base —
+  # The binary and the action that runs it both come from the merge base —
   # never from the pull request's own code, which would let it change the
   # verifier that judges it — and the action runs with `install: "false"`.
-  # Once a release carries it, the build steps go and `version:` pins it.
   verify:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -125,18 +137,28 @@ jobs:
           cargo build --release --locked --bin devplane
           echo "$RUNNER_TEMP/devplane-base/target/release" >> "$GITHUB_PATH"
 
-      # The pull request that adds `verify` is judged by a base that has none.
+      # A base built before `verify` existed has nothing to run.
       - name: Does the base's build carry verify
         id: carries
         run: |
-          if devplane verify --help > /dev/null 2>&1; then
+          if devplane verify --help > /dev/null 2>&1 && [ -f "$RUNNER_TEMP/devplane-base/action.yml" ]; then
             echo "verify=true" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::The base's build has no \`devplane verify\` yet; it runs from the next pull request."
             echo "verify=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: ./
+      # The merge base's action.yml, where `uses:` can reach it: inside the
+      # workspace, ignored by git so the checked tree stays the pull request's.
+      # `uses: ./` would run the pull request's own action.yml.
+      - name: The base's action
+        if: steps.carries.outputs.verify == 'true'
+        run: |
+          mkdir -p .devplane-base-action
+          cp "$RUNNER_TEMP/devplane-base/action.yml" .devplane-base-action/action.yml
+          echo "/.devplane-base-action/" >> .git/info/exclude
+
+      - uses: ./.devplane-base-action
         if: steps.carries.outputs.verify == 'true'
         with:
           install: "false"
@@ -164,7 +186,7 @@ jobs:
   # Every target the release ships, built the way the release builds it, so a
   # tag is never the first build of anything. A test holds this matrix equal to
   # `[workspace.metadata.dist] targets`. Windows also runs clippy, which `test`
-  # does not cover there yet.
+  # does not cover there.
   build:
     # The vendored libdbus (the Linux credential store) is C. GCC on aarch64
     # calls atomics out of line in libgcc, which a static musl link lacks

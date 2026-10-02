@@ -201,7 +201,7 @@ fn section<'a>(md: &'a str, name: &str) -> &'a str {
 const SKIPPED: &str = "it.skip(\"rejects an expired token\", async () => {\n  expect(check(\"expired\")).toBe(false);\n});\n";
 const FAILING: &str = "it(\"rejects an expired token\", async () => {\nFAIL\n});\n";
 
-// ── User Story 1 ────────────────────────────────────────────────────────────
+// ── A weakened check leads the summary ──────────────────────────────────────
 
 #[test]
 fn a_skipped_test_passes_check_and_leads_the_summary() {
@@ -279,7 +279,7 @@ fn summary_goes_to_github_step_summary_by_append() {
     assert!(m.starts_with("## Devplane verify"), "{m}");
 }
 
-// ── User Story 2 ────────────────────────────────────────────────────────────
+// ── The base's config governs, whatever the change did to it ────────────────
 
 #[test]
 fn an_edited_check_runs_the_bases_and_names_the_edit() {
@@ -382,7 +382,7 @@ fn a_deleted_config_still_runs_the_bases_check() {
     );
 }
 
-// ── User Story 4 ────────────────────────────────────────────────────────────
+// ── Exit codes ──────────────────────────────────────────────────────────────
 
 #[test]
 fn exit_codes_a_failing_check_is_one() {
@@ -581,7 +581,7 @@ fn a_push_to_the_base_verifies_with_no_change() {
     );
 }
 
-// ── User Story 7 ────────────────────────────────────────────────────────────
+// ── No home, no host, nothing written ───────────────────────────────────────
 
 #[test]
 fn verify_needs_no_home_and_no_host() {
@@ -680,7 +680,7 @@ fn verify_names_no_store_host_client_or_home() {
     }
 }
 
-// ── User Story 5 ────────────────────────────────────────────────────────────
+// ── The statement ───────────────────────────────────────────────────────────
 
 #[test]
 fn the_statement_names_the_tree_check_ran_on() {
@@ -730,7 +730,67 @@ fn the_statement_names_the_tree_check_ran_on() {
     assert!(!none.exists());
 }
 
-// ── User Story 6: base checks ──────────────────────────────────────────────
+/// An in-toto Statement v1: its four top-level fields and nothing else, and at
+/// least one subject, each with a digest that names something.
+fn assert_statement_v1(st: &Value) {
+    let mut keys: Vec<&str> = st.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["_type", "predicate", "predicateType", "subject"],
+        "{st}"
+    );
+    let subject = st["subject"].as_array().expect("subject is a list");
+    assert!(!subject.is_empty(), "a statement with no subject: {st}");
+    for s in subject {
+        let digest = s["digest"].as_object().expect("a digest");
+        assert!(!digest.is_empty(), "{st}");
+        assert!(
+            digest
+                .values()
+                .all(|d| d.as_str().is_some_and(|d| !d.is_empty())),
+            "{st}"
+        );
+    }
+}
+
+#[test]
+fn the_statement_is_an_in_toto_statement_v1() {
+    let f = Fixture::new("statement-v1");
+    f.branch("x").write("src.js", "x\n").commit("x");
+    let s = f.path("s.json");
+    let (v, code) = f.json(&["--statement", s.to_str().unwrap()]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["wrote"]["statementWithheld"], Value::Null, "{v}");
+    let st: Value = serde_json::from_str(&std::fs::read_to_string(&s).unwrap()).unwrap();
+    assert_statement_v1(&st);
+}
+
+/// With no tree recorded there is no subject, so no statement is written —
+/// never one with an empty subject — and the document says why.
+#[test]
+fn a_run_with_no_tree_writes_no_statement_and_says_why() {
+    let config = fixture_config().replace(
+        "check = [\"sh runner.sh\"]",
+        "check = [\"sh runner.sh\", \"sh -c 'date +%N%s > generated.txt'\"]",
+    );
+    let f = Fixture::with("statement-no-tree", Some(&config));
+    f.branch("moves").write("src.js", "x\n").commit("x");
+    let s = f.path("s.json");
+    let (v, code) = f.json(&["--statement", s.to_str().unwrap()]);
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["failed"], "tree_moved", "{v}");
+    assert!(!s.exists(), "a statement was written with no tree to name");
+    assert_eq!(v["wrote"]["statement"], Value::Null, "{v}");
+    assert!(
+        v["wrote"]["statementWithheld"]
+            .as_str()
+            .is_some_and(|w| w.starts_with("No in-toto statement")),
+        "{v}"
+    );
+}
+
+// ── Base checks ────────────────────────────────────────────────────────────
 
 /// A runner shaped like pytest. Each `def test_x(): assert "TOKEN" in "FILE"`
 /// passes when FILE holds TOKEN; `assert True` always passes. It prints
@@ -888,7 +948,7 @@ fn a_new_test_that_passes_on_the_base_is_listed() {
     );
 }
 
-// ── User Story 3: the action and its documentation ─────────────────────────
+// ── The action and its documentation ───────────────────────────────────────
 
 fn action() -> String {
     std::fs::read_to_string(Path::new(ROOT).join("action.yml")).expect("action.yml at the root")

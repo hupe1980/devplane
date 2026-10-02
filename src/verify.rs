@@ -282,10 +282,28 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
                 }),
                 base_checks: checks.json(),
             });
-        let text = serde_json::to_string_pretty(&statement).unwrap_or_default();
-        match std::fs::write(path, text + "\n") {
-            Ok(()) => wrote.statement = Some(path.display().to_string()),
-            Err(e) => {
+        // No tree, no subject, no statement: nothing is written, and the
+        // document says why. A *verified* never stands beside a statement
+        // that could not be made.
+        let written = statement.map(|st| {
+            let text = serde_json::to_string_pretty(&st).unwrap_or_default();
+            std::fs::write(path, text + "\n")
+        });
+        match written {
+            Err(why) => {
+                errors.push(format!("{why} Nothing was written to {}.", path.display()));
+                if matches!(verdict, Verdict::Verified { .. }) {
+                    verdict = Verdict::CouldNotRun {
+                        why: CouldNotRun::CouldNotWrite {
+                            path: path.display().to_string(),
+                            why: why.clone(),
+                        },
+                    };
+                }
+                wrote.statement_withheld = Some(why);
+            }
+            Ok(Ok(())) => wrote.statement = Some(path.display().to_string()),
+            Ok(Err(e)) => {
                 let why = e.to_string();
                 errors.push(format!(
                     "the statement could not be written to {}: {why}",

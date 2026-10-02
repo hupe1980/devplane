@@ -1074,8 +1074,8 @@ async fn an_edit_hidden_from_status_is_not_clean() {
 }
 
 /// The statement is about the tree the commands ran against; the commit is
-/// named only when that tree is the commit's own, and no tree is no subject —
-/// never an empty digest.
+/// named only when that tree is the commit's own, and no tree is no statement
+/// at all — never an empty subject or an empty digest.
 #[test]
 fn the_statement_is_about_the_tree_and_names_the_commit_only_when_clean() {
     let subject_of = |s: CommitStamp| {
@@ -1102,13 +1102,103 @@ fn the_statement_is_about_the_tree_and_names_the_commit_only_when_clean() {
     none.tree = None;
     none.tree_unknown = Some("`check` moved the tree: coverage.xml".into());
     let j = subject_of(none);
-    assert_eq!(j["subject"], serde_json::json!([]), "{j}");
     assert!(
-        j["subject_missing"]
+        j.get("_type").is_none() && j.get("subject").is_none(),
+        "a statement with no subject: {j}"
+    );
+    assert!(
+        j["no_statement"]
             .as_str()
-            .is_some_and(|w| w.contains("coverage.xml")),
+            .is_some_and(|w| w.starts_with("No in-toto statement") && w.contains("coverage.xml")),
         "{j}"
     );
+}
+
+/// An in-toto Statement v1: its four top-level fields and nothing else, and at
+/// least one subject, each with a digest that names something.
+fn assert_statement_v1(st: &serde_json::Value) {
+    let mut keys: Vec<&str> = st.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["_type", "predicate", "predicateType", "subject"],
+        "{st}"
+    );
+    assert_eq!(st["_type"], "https://in-toto.io/Statement/v1");
+    let subject = st["subject"].as_array().expect("subject is a list");
+    assert!(!subject.is_empty(), "a statement with no subject: {st}");
+    for s in subject {
+        let digest = s["digest"].as_object().expect("a digest");
+        assert!(!digest.is_empty(), "{st}");
+        assert!(
+            digest
+                .values()
+                .all(|d| d.as_str().is_some_and(|d| !d.is_empty())),
+            "{st}"
+        );
+    }
+}
+
+/// Every shape a change's evidence can take either makes a valid statement or
+/// makes none and says why: never an empty subject, never an extra top-level
+/// field.
+#[test]
+fn a_statement_always_has_a_subject_and_only_the_four_statement_fields() {
+    use devplane::core::certificate::NO_STATEMENT;
+    let of = |commit: Option<CommitStamp>| {
+        let mut w = change();
+        let mut r = report("check", 1, vec![CommandResult::exited("cargo test", 0)]);
+        r.commit = commit.clone();
+        w.gates.push(r);
+        let basis = basis_of(&w, true, commit.as_ref());
+        let w = finished(w, basis);
+        let c = cert_of(&w, None);
+        (c.statement(), c.json())
+    };
+    let mut dirty = stamp(Some("4f2a9c1e"), false, Reach::LocalOnly);
+    dirty.changed_files = 2;
+    for s in [
+        stamp(Some("4f2a9c1e"), true, Reach::Remote),
+        stamp(Some("4f2a9c1e"), true, Reach::NoRemote),
+        dirty,
+    ] {
+        let (st, j) = of(Some(s));
+        let st = st.expect("a tree makes a statement");
+        assert_statement_v1(&st);
+        assert_eq!(st, j);
+    }
+
+    let mut no_tree = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    no_tree.tree = None;
+    let mut empty_tree = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    empty_tree.tree = Some(String::new());
+    for (s, says) in [
+        (Some(no_tree), "no working-tree digest was recorded"),
+        (Some(empty_tree), "no working-tree digest was recorded"),
+        (None, "no gate ran in a repository"),
+    ] {
+        let (st, j) = of(s);
+        let why = st.expect_err("no tree makes no statement");
+        assert!(why.contains(says), "{why}");
+        assert_eq!(j, serde_json::json!({ NO_STATEMENT: why }));
+    }
+
+    // An unfinished change with no gate yet: no statement either.
+    let w = change();
+    let j = cert_of(&w, None).json();
+    assert!(j.get("_type").is_none(), "{j}");
+    assert!(j[NO_STATEMENT].is_string(), "{j}");
+}
+
+/// What the certificate says it establishes names what the subject now is: the
+/// tree, not the commit.
+#[test]
+fn the_limits_name_the_tree_the_subject_names() {
+    assert!(
+        LIMITS.contains("against the working tree it names"),
+        "{LIMITS}"
+    );
+    assert!(!LIMITS.contains("against this commit"), "{LIMITS}");
 }
 
 #[test]

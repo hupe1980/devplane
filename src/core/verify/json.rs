@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 pub struct Wrote {
     pub summary: Option<String>,
     pub statement: Option<String>,
+    /// Why no statement was written although one was asked for.
+    pub statement_withheld: Option<String>,
 }
 
 /// The document.
@@ -66,7 +68,11 @@ pub fn json(run: &Run<'_>, wrote: &Wrote) -> Value {
         "baseChecksSays": run.base_checks.says(),
         "tests": run.base_checks.counts(),
         "notDone": run.not_done,
-        "wrote": { "summary": wrote.summary, "statement": wrote.statement },
+        "wrote": {
+            "summary": wrote.summary,
+            "statement": wrote.statement,
+            "statementWithheld": wrote.statement_withheld,
+        },
     });
     match v {
         Verdict::Failed { why } => {

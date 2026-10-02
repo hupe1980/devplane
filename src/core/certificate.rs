@@ -1,8 +1,8 @@
 //! The done certificate: evidence a reviewer can check without trusting this
 //! tool. It borrows the in-toto statement shape but is deliberately unsigned:
 //! SLSA provenance asks the reader to trust the builder, whereas this names a
-//! commit and the gate commands so the reader re-runs them. It establishes only
-//! that these commands ended as recorded against this commit — not that the
+//! tree and the gate commands so the reader re-runs them. It establishes only
+//! that these commands ended as recorded against that tree — not that the
 //! work is correct — and says so in its own text ([`LIMITS`]).
 
 use super::change::{
@@ -45,9 +45,9 @@ pub const MAX_BYTES: usize = 64 * 1024;
 pub const PAGE_COMMAND_CHARS: usize = 120;
 
 /// What the artifact claims, in its own words, so it travels with the paste.
-pub const LIMITS: &str = "This is evidence that these commands ended as recorded against this \
-commit. It is not evidence that the work is correct, that the commands check the right things, or \
-that the specification was satisfied. The commands ran code in this tree, including tests and \
+pub const LIMITS: &str = "This is evidence that these commands ended as recorded against the \
+working tree it names. It is not evidence that the work is correct, that the commands check the \
+right things, or that the specification was satisfied. The commands ran code in this tree, including tests and \
 build scripts the change may have edited; the tree was the same before and after the run, which \
 cannot see an edit reverted during the run. The base checks put the base's tests back to see \
 whether they still pass, and their runs are observed beside this evidence, never part of it. It is \
@@ -304,33 +304,51 @@ pub fn commands_digest(report: &GateReport) -> String {
 }
 
 /// A statement's `subject`: the tree the commands ran against, and the commit
-/// only when that tree is the commit's own. With no tree there is no subject,
-/// and the second value says why — never an entry with an empty digest.
-fn subject_of(name: &str, commit: Option<&CommitStamp>) -> (serde_json::Value, Option<String>) {
+/// only when that tree is the commit's own. An in-toto statement names at
+/// least one subject, so with no tree there is no statement, and the error
+/// says why — never an empty subject or an entry with an empty digest.
+fn subject_of(name: &str, commit: Option<&CommitStamp>) -> Result<serde_json::Value, String> {
     use serde_json::json;
-    match commit.and_then(|c| c.tree.as_deref().map(|t| (c, t))) {
+    match commit.and_then(|c| c.tree.as_deref().filter(|t| !t.is_empty()).map(|t| (c, t))) {
         Some((c, tree)) => {
             let mut digest = json!({ "gitTree": tree });
             if let Some(sha) = c.commit.as_deref().filter(|_| c.clean) {
                 digest["gitCommit"] = json!(sha);
             }
-            (json!([{ "name": name, "digest": digest }]), None)
+            Ok(json!([{ "name": name, "digest": digest }]))
         }
-        None => (
-            json!([]),
-            Some(match commit {
+        None => {
+            let reason = match commit {
                 None => "no gate ran in a repository, so there is no tree to name".to_string(),
                 Some(c) => format!(
                     "no working-tree digest was recorded{}",
                     c.tree_unknown
                         .as_deref()
-                        .map(|w| format!(" — {w}"))
+                        .map(|w| format!(" — {}", w.trim_end_matches('.')))
                         .unwrap_or_default()
                 ),
-            }),
-        ),
+            };
+            Err(format!(
+                "No in-toto statement: a statement names the tree the commands ran against, \
+                 and {reason}."
+            ))
+        }
     }
 }
+
+/// An in-toto Statement v1: exactly its four top-level fields.
+fn statement_of(subject: serde_json::Value, predicate: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "_type": STATEMENT_TYPE,
+        "subject": subject,
+        "predicateType": PREDICATE_TYPE,
+        "predicate": predicate,
+    })
+}
+
+/// What stands in for a statement that cannot be made: no `_type`, so nothing
+/// reads it as one, and the sentence saying why.
+pub const NO_STATEMENT: &str = "no_statement";
 
 /// The predicate's `evidence` block for one gate run.
 fn evidence_of(r: &GateReport, attempts: u32) -> serde_json::Value {
@@ -364,15 +382,14 @@ pub struct VerifyEvidence<'a> {
     pub base_checks: serde_json::Value,
 }
 
-/// The in-toto statement for a `devplane verify` run. Unsigned.
-pub fn verify_statement(e: &VerifyEvidence<'_>) -> serde_json::Value {
+/// The in-toto statement for a `devplane verify` run. Unsigned. With no tree
+/// recorded there is no subject and so no statement: the error says why.
+pub fn verify_statement(e: &VerifyEvidence<'_>) -> Result<serde_json::Value, String> {
     use serde_json::json;
-    let (subject, no_subject) = subject_of(e.name, e.report.commit.as_ref());
-    let mut statement = json!({
-        "_type": STATEMENT_TYPE,
-        "subject": subject,
-        "predicateType": PREDICATE_TYPE,
-        "predicate": {
+    let subject = subject_of(e.name, e.report.commit.as_ref())?;
+    Ok(statement_of(
+        subject,
+        json!({
             "change": null,
             "completion": null,
             "evidence": evidence_of(e.report, 1),
@@ -381,12 +398,8 @@ pub fn verify_statement(e: &VerifyEvidence<'_>) -> serde_json::Value {
             "rederivable": REDERIVABLE,
             "limits": LIMITS,
             "signed": false,
-        }
-    });
-    if let Some(why) = no_subject {
-        statement["subject_missing"] = json!(why);
-    }
-    statement
+        }),
+    ))
 }
 
 /// How a command's outcome reads — one function for both renderings.
@@ -683,17 +696,15 @@ impl Certificate<'_> {
         o
     }
 
-    /// The structured shape, as an in-toto statement.
-    pub fn json(&self) -> serde_json::Value {
+    /// The structured shape, as an in-toto statement; with no tree to name,
+    /// none, and the error says why.
+    pub fn statement(&self) -> Result<serde_json::Value, String> {
         use serde_json::json;
         let w = self.change;
-        let (subject, no_subject) =
-            subject_of(&w.title, self.evidence.and_then(|r| r.commit.as_ref()));
-        let mut statement = json!({
-            "_type": STATEMENT_TYPE,
-            "subject": subject,
-            "predicateType": PREDICATE_TYPE,
-            "predicate": {
+        let subject = subject_of(&w.title, self.evidence.and_then(|r| r.commit.as_ref()))?;
+        Ok(statement_of(
+            subject,
+            json!({
                 "change": { "id": w.id, "title": w.title, "state": self.state.as_str(),
                           "branch": w.branch },
                 "completion": w.completion,
@@ -715,12 +726,15 @@ impl Certificate<'_> {
                 "rederivable": REDERIVABLE,
                 "limits": LIMITS,
                 "signed": false,
-            }
-        });
-        if let Some(why) = no_subject {
-            statement["subject_missing"] = json!(why);
-        }
-        statement
+            }),
+        ))
+    }
+
+    /// The structured shape as the export carries it: the statement, or an
+    /// object that is not one — `{"no_statement": why}`.
+    pub fn json(&self) -> serde_json::Value {
+        self.statement()
+            .unwrap_or_else(|why| serde_json::json!({ NO_STATEMENT: why }))
     }
 
     /// The certificate as a page renders it, every sentence already written, so

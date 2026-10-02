@@ -17,8 +17,10 @@ inputs:
     description: Branch or commit to compare against. Empty uses `devplane verify`'s default.
     default: ${{ github.base_ref }}
   version:
-    description: Release to install (`latest`, or a version such as `0.9.0`).
-    default: latest
+    description: >-
+      Release to install, such as `v0.12.0`. Pinned: the default is the release this action shipped
+      with, never whatever is newest.
+    default: v0.12.0
   statement:
     description: Path to write the in-toto statement to. Empty writes none.
     default: ""
@@ -48,16 +50,20 @@ runs:
         case "$OS/$ARCH" in
           Linux/X64|Linux/ARM64|macOS/ARM64) ;;
           *)
-            echo "Devplane's installer supports Linux and Apple Silicon macOS runners; this is $OS/$ARCH." >&2
+            echo "Devplane's release archives cover Linux and Apple Silicon macOS runners; this is $OS/$ARCH." >&2
             exit 2
             ;;
         esac
 
+    # The release's archive and its `.sha256`, checked before anything is
+    # unpacked; no installer script is run.
     - name: Install devplane
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
         INSTALL: ${{ inputs.install }}
+        OS: ${{ runner.os }}
+        ARCH: ${{ runner.arch }}
       run: |
         if [ "$INSTALL" != "true" ]; then
           command -v devplane >/dev/null || { echo "install is false and no devplane is on PATH" >&2; exit 2; }
@@ -65,16 +71,34 @@ runs:
           exit 0
         fi
         case "$VERSION" in
-          latest) url="https://github.com/hupe1980/devplane/releases/latest/download/devplane-installer.sh" ;;
-          *[!0-9A-Za-z.+-]*) echo "version must be \`latest\` or a release number such as 0.9.0" >&2; exit 2 ;;
-          *) url="https://github.com/hupe1980/devplane/releases/download/v${VERSION#v}/devplane-installer.sh" ;;
+          ""|*[!0-9A-Za-z.+-]*|v|[!v0-9]*) echo "version must be a release such as v0.12.0" >&2; exit 2 ;;
         esac
+        case "$OS/$ARCH" in
+          Linux/X64) target=x86_64-unknown-linux-musl ;;
+          Linux/ARM64) target=aarch64-unknown-linux-musl ;;
+          macOS/ARM64) target=aarch64-apple-darwin ;;
+        esac
+        archive="devplane-$target.tar.xz"
+        url="https://github.com/hupe1980/devplane/releases/download/v${VERSION#v}/$archive"
         dir="$RUNNER_TEMP/devplane"
         mkdir -p "$dir"
-        curl --proto '=https' --tlsv1.2 -LsSf "$url" -o "$RUNNER_TEMP/devplane-installer.sh"
-        # An unmanaged install: this directory only, no shell-profile edits, no updater.
-        DEVPLANE_UNMANAGED_INSTALL="$dir" sh "$RUNNER_TEMP/devplane-installer.sh" --quiet
-        bin="$(dirname "$(find "$dir" -name devplane -type f | head -n 1)")"
+        cd "$dir"
+        curl --proto '=https' --tlsv1.2 -fLsS "$url" -o "$archive"
+        curl --proto '=https' --tlsv1.2 -fLsS "$url.sha256" -o "$archive.sha256"
+        # The digest only; the file name it carries is not trusted to say which file.
+        sum="$(awk 'NR == 1 { print $1 }' "$archive.sha256")"
+        case "$sum" in
+          *[!0-9a-f]*|"") echo "$archive.sha256 holds no SHA-256 digest" >&2; exit 2 ;;
+        esac
+        [ ${#sum} -eq 64 ] || { echo "$archive.sha256 holds no SHA-256 digest" >&2; exit 2; }
+        if command -v sha256sum >/dev/null; then
+          printf '%s  %s\n' "$sum" "$archive" | sha256sum -c -
+        else
+          printf '%s  %s\n' "$sum" "$archive" | shasum -a 256 -c -
+        fi
+        tar -xJf "$archive"
+        bin="$dir/devplane-$target"
+        [ -x "$bin/devplane" ] || { echo "$archive holds no devplane-$target/devplane" >&2; exit 2; }
         echo "$bin" >> "$GITHUB_PATH"
         "$bin/devplane" --version
 
@@ -95,9 +119,13 @@ runs:
         set -e
         # The document, for the log; the summary is on the run's page.
         cat "$out"
-        verdict="$(sed -n 's/^  "verdict": "\([a-z_]*\)",\{0,1\}$/\1/p' "$out" | head -n 1)"
+        # Read as JSON, by its keys; a document that does not parse leaves both empty.
+        verdict="$(jq -r '.verdict // empty' "$out" 2>/dev/null || true)"
+        written="$(jq -r '.wrote.statement // empty' "$out" 2>/dev/null || true)"
+        case "$verdict" in verified|failed|could_not_run) ;; *) verdict="" ;; esac
         echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
-        if [ -n "$STATEMENT" ] && [ -f "$STATEMENT" ] && [ "$status" != 2 ]; then
+        # Only a statement this run wrote, never a file left at the path.
+        if [ -n "$STATEMENT" ] && [ "$written" = "$STATEMENT" ]; then
           echo "statement=$STATEMENT" >> "$GITHUB_OUTPUT"
         else
           echo "statement=" >> "$GITHUB_OUTPUT"
