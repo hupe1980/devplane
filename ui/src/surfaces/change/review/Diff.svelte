@@ -9,6 +9,7 @@
   import type { Snippet } from "svelte";
   import Icon from "../../../lib/ui/Icon.svelte";
   import Inline from "../../../lib/ui/Inline.svelte";
+  import { weakKindSays } from "../../../lib/weakKind";
   import { hunkKey, type Comment, type Hunk, type Kind, type WeakRow } from "./types";
 
   let {
@@ -108,7 +109,7 @@
 {#snippet notes(l: Line | null, span: number)}
   {@const w = weakOn(l)}
   {#if w}
-    <tr class="note weak"><td colspan={span}><Icon name="alert" size={12} /> <b>check weakened here</b> — <Inline text={w.why} />{#if w.gate_says}; <Inline text={w.gate_says} />{/if}{w.seen ? " · read" : " · not yet read"}</td></tr>
+    <tr class="note weak"><td colspan={span}><Icon name="alert" size={12} /> <b>{weakKindSays[w.kind]} here</b> — <Inline text={w.why} />{#if w.gate_says}; <Inline text={w.gate_says} />{/if}{w.seen ? " · read" : " · not yet read"}</td></tr>
   {/if}
   {#each under(l) as c (c.id)}
     <tr class="note comment" class:sent={!!c.sent_at}>

@@ -1,5 +1,6 @@
 <script lang="ts" module>
-  export type Row = { path: string; why: string; matched: string };
+  import type { WeakKind } from "../../wire/WeakKind";
+  export type Row = { path: string; why: string; matched: string; kind?: WeakKind };
   export type OfferRefusal = { says: string; rows: Row[]; seen_with: string };
 </script>
 
@@ -8,6 +9,7 @@
   // the way into the review that reads it.
   import Inline from "../../lib/ui/Inline.svelte";
   import Icon from "../../lib/ui/Icon.svelte";
+  import { weakKindSays } from "../../lib/weakKind";
 
   let { refusal, read }: { refusal: OfferRefusal; read: (path: string) => void } = $props();
 </script>
@@ -17,7 +19,7 @@
   <ul>
     {#each refusal.rows as row (row.path + row.matched)}
       <li>
-        <code>{row.path}</code> <span><Inline text={row.why} /></span>
+        <code>{row.path}</code> {#if row.kind}<b class="kind">{weakKindSays[row.kind]}</b> {/if}<span><Inline text={row.why} /></span>
         <button onclick={() => read(row.path)}><Icon name="split" size={13} /> Read it</button>
       </li>
     {/each}

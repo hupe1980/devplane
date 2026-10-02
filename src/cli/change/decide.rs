@@ -7,9 +7,36 @@ use anyhow::Result;
 
 pub(super) async fn cmd_offer(change: &str, json: bool) -> Result<()> {
     let (c, id) = host_and_change(change).await?;
+    // The offer runs base checks first, once per tree, and waits for them.
+    let base_checks = |v: &serde_json::Value| v["base_checks"].clone();
+    let before: serde_json::Value = c
+        .get(&format!("/api/changes/{id}"))
+        .await
+        .unwrap_or_default();
+    if !json
+        && matches!(
+            base_checks(&before)["absent"]["absent"].as_str(),
+            Some("not_run" | "stale" | "running")
+        )
+    {
+        eprintln!("{}", paint(DIM, crate::core::base_checks::OFFER_WAITS));
+    }
     let v: serde_json::Value = c
         .post_json(&format!("/api/changes/{id}/offer"), &serde_json::json!({}))
         .await?;
+    // What they came to, or why they did not run: said, never a reason to stop.
+    if !json {
+        let after: serde_json::Value = c
+            .get(&format!("/api/changes/{id}"))
+            .await
+            .unwrap_or_default();
+        let b = base_checks(&after);
+        if let Some(why) = b["did_not_run"].as_str() {
+            eprintln!("{}", paint(render::YELLOW, why));
+        } else if let Some(h) = b["headline"]["says"].as_str() {
+            eprintln!("{} {h}", paint(DIM, "base checks"));
+        }
+    }
     // A weakened check nobody marked seen: every row, and how to mark one.
     if v["refused"] == "weakened_unseen" {
         if json {

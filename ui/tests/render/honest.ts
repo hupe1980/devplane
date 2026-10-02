@@ -131,6 +131,12 @@ function qualified(markup: string, where: string) {
       const cert = Object.entries(all).find(([p]) => p.endsWith(`certificate-${body.id}.json`))?.[1];
       check(html(Gates, { d: body, id: body.id, certificate: cert ?? null }), `${name} gates and certificate`);
     }
+    // A weakened row is named by its own kind, not all as a skipped check.
+    if (name.startsWith("change-") && name === Object.keys(all).map((p) => p.split("/").pop()).find((n) => n?.startsWith("change-"))) {
+      const kinded = html(Gates, { d: body, id: body.id, certificate: null,
+        weakened: [{ path: "Cargo.lock", why: "1 package added", matched: "m", seen: false, kind: "supply_chain" }] });
+      if (!kinded.includes("supply chain") || kinded.includes("check weakened</b> in")) fail("the Gates view names a supply-chain row as a weakened check");
+    }
     if (name.startsWith("review-")) check(html(Pane, { id: "", review: body }), name);
     if (name === "inbox.json") check(html(Inbox, { items: body.items, loaded: true }), name);
     if (name === "changes.json") check(html(ChangeList, { all: [], open: () => {}, rows: body }), name);

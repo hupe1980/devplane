@@ -1604,11 +1604,7 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
             // A pass by commands the project no longer declares is not verified.
             let checks = config.as_ref().map(|c| c.gates.check.as_slice());
             let mut view = ChangeView::of(w, can_retry, checks);
-            view.base_checks = crate::core::base_checks::View::of(
-                w,
-                config.as_ref(),
-                crate::base_checks::is_running(&w.id),
-            );
+            view.base_checks = crate::base_checks::view(w, config.as_ref());
             match (w.spec.as_deref(), roots.get(&w.project_id), config) {
                 (Some(spec), Some(root), Some(config)) => {
                     // Boxes are read where the agent worked, as the gate is.
@@ -1728,11 +1724,26 @@ pub async fn change_certificate(
         .world
         .project(&change.project_id)
         .and_then(|p| crate::core::ProjectConfig::load(&p.root).ok());
-    cert.base_checks = crate::core::base_checks::View::of(
-        change,
-        config.as_ref(),
-        crate::base_checks::is_running(&change.id),
-    );
+    cert.base_checks = crate::base_checks::view(change, config.as_ref());
+    // The statement's two edge reads: who decided this change's tool calls,
+    // counted; and `devplane.toml` in the checked commit, when that commit
+    // is the tree that was checked.
+    cert.decided_by = store.authority_counts(&change.id, &change.runs).await.ok();
+    if let Some(sha) = cert
+        .evidence
+        .and_then(|r| r.commit.as_ref())
+        .filter(|c| c.clean)
+        .and_then(|c| c.commit.clone())
+    {
+        let dir = change.worktree.clone().filter(|w| w.exists()).or_else(|| {
+            snap.world
+                .project(&change.project_id)
+                .map(|p| p.root.clone())
+        });
+        if let Some(dir) = dir {
+            cert.config_blob = crate::git::blob_at(&dir, &sha, "devplane.toml").await;
+        }
+    }
     Some(json!({
         "finished": cert.is_finished(),
         "markdown": cert.markdown_bounded(),

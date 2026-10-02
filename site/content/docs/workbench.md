@@ -91,7 +91,9 @@ included), with the file tree beside it. Each file's facts are one strip that st
 its hunks scroll: path, lines, role, coverage, what it was asked for, and **facts** with the commands
 to check each one yourself.
 
-- **Checks weakened or changed** first ([the kinds](@/docs/verified-done.md#review-before-you-merge)).
+- **Checks weakened or changed** first ([the kinds](@/docs/verified-done.md#review-before-you-merge)),
+  including edits to the agent's own controls, to ownership and to the supply chain, each row naming
+  its kind in words.
   The line that made a row weakened carries ⚠ in the gutter and a note naming the gate that ran over
   it; the Gates view links each row back to it. A row is read when its hunks are marked seen; an
   offer waits for every one.

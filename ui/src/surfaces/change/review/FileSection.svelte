@@ -6,6 +6,7 @@
   import type { Snippet } from "svelte";
   import Icon from "../../../lib/ui/Icon.svelte";
   import Inline from "../../../lib/ui/Inline.svelte";
+  import { weakKindLabel } from "../../../lib/weakKind";
   import Diff from "./Diff.svelte";
   import { isSeen, unitSeen, unreadIn } from "./unread.svelte";
   import type { Comment, File, Hunk, WeakRow } from "./types";
@@ -86,7 +87,7 @@
         <dt>Covered by</dt><dd class:quiet={!covered}><Inline text={file.coverage_says ?? "no mapping declared"} /></dd>
         {#if file.task_says}<dt>Asked for</dt><dd class:wait={file.task_says.startsWith("not asked")}><Inline text={file.task_says} /></dd>{/if}
         {#if file.decisions.length}<dt>Decided while writing</dt><dd>{file.decisions.map((x) => x.says).join(" · ")}</dd>{/if}
-        {#each weak as w (w.why + w.matched)}<dt class="wait">Check weakened</dt><dd><Inline text={w.why} />{#if w.gate_says}; <Inline text={w.gate_says} />{/if}</dd>{/each}
+        {#each weak as w (w.why + w.matched)}<dt class="wait">{weakKindLabel(w.kind)}</dt><dd><Inline text={w.why} />{#if w.gate_says}; <Inline text={w.gate_says} />{/if}</dd>{/each}
         {#if file.marker_commands.length}<dt>Check it yourself</dt><dd class="cmds">{#each file.marker_commands as c (c)}<code>{c}</code>{/each}</dd>{/if}
       </dl>
     </details>

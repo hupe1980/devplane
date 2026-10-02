@@ -135,7 +135,17 @@ pub(super) async fn cmd_show(change: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn cmd_export(change: &str, json: bool) -> Result<()> {
+pub(super) async fn cmd_export(
+    change: &str,
+    json: bool,
+    out: Option<&std::path::Path>,
+    force: bool,
+    sign: bool,
+) -> Result<()> {
+    // Refused before anything is read: nothing is written over unasked.
+    if let Some(out) = out.filter(|o| !force && o.exists()) {
+        anyhow::bail!("{} exists; pass --force to replace it", out.display());
+    }
     let reader = crate::local::Reader::open().await?;
     let id = ids::change(&reader, change).await?;
     let v: serde_json::Value = reader
@@ -145,11 +155,66 @@ pub(super) async fn cmd_export(change: &str, json: bool) -> Result<()> {
     if let Some(e) = super::said_error(&v) {
         anyhow::bail!("{e}");
     }
-    // Unfinished work is not an error: the reply says where it is.
-    match json {
-        true => println!("{}", serde_json::to_string_pretty(&v["statement"])?),
-        false => println!("{}", v["markdown"].as_str().unwrap_or("")),
+    // Unfinished work is not an error for the Markdown: it says where it is.
+    if !json && !sign {
+        let md = v["markdown"].as_str().unwrap_or("");
+        match out {
+            None => println!("{md}"),
+            Some(out) => {
+                std::fs::write(out, format!("{md}\n"))
+                    .with_context(|| format!("writing {}", out.display()))?;
+                println!("wrote {}", out.display());
+            }
+        }
+        return Ok(());
     }
+    // The statement, or the sentence saying why there is none — an exit,
+    // never an object that is not a statement.
+    let st = &v["statement"];
+    if let Some(why) = st[crate::core::certificate::NO_STATEMENT].as_str() {
+        anyhow::bail!("{why}");
+    }
+    if st.get("_type").is_none() {
+        anyhow::bail!("the host gave no statement for `{id}`");
+    }
+    let bytes = crate::core::attest::serialize(st);
+    let Some(out) = out else {
+        print!("{}", String::from_utf8_lossy(&bytes));
+        return Ok(());
+    };
+    if !sign {
+        std::fs::write(out, &bytes).with_context(|| format!("writing {}", out.display()))?;
+        match json {
+            true => crate::cli::print_json(&serde_json::json!({ "statement": out }))?,
+            false => println!("wrote {}", out.display()),
+        }
+        return Ok(());
+    }
+    let key = crate::sign::SigningKey::from_global()?;
+    let recipe = crate::sign::sign_to(out, &bytes, &key, force)?;
+    let sig = format!("{}.sig", out.display());
+    if json {
+        return crate::cli::print_json(&recipe.json(&out.display().to_string(), &sig));
+    }
+    let dir = out
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let which = match crate::sign::fingerprint(&recipe.public_key, dir) {
+        Some(fp) => format!("{} {fp}", recipe.public_key.split(' ').next().unwrap_or("")),
+        None => recipe
+            .public_key
+            .split(' ')
+            .next()
+            .unwrap_or("")
+            .to_string(),
+    };
+    println!(
+        "wrote {} and {sig} — signed with {which} (your global user.signingkey)\n",
+        out.display()
+    );
+    println!("To check it without Devplane, in the directory holding both files:\n");
+    print!("{}", recipe.markdown());
     Ok(())
 }
 
@@ -207,6 +272,13 @@ fn print_change(w: &ChangeView<'_>) {
         "  gates      {}",
         paint(standing_colour(&w.standing), &w.standing_says)
     );
+    // Beside the standing and never in it: how many tests ran, whether the
+    // evidence tells the change from its base, and each run. Uncoloured.
+    if let Some(b) = &w.base_checks {
+        for (label, text) in b.show_lines() {
+            println!("  {label:<10} {text}");
+        }
+    }
     if let Some(b) = &c.branch {
         println!("  branch     {b}");
     }

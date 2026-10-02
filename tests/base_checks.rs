@@ -129,11 +129,18 @@ fn repo_with(tag: &str, extra: &str, workspace: &str, edit: impl FnOnce(&Path)) 
     git(&root, &["init", "-q", "-b", "main"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "Test"]);
+    // `extra` may set `timeout` or `junit` itself; the defaults stand otherwise.
+    let default = |key: &str, line: &str| match extra.contains(&format!("{key} =")) {
+        true => String::new(),
+        false => format!("{line}\n"),
+    };
     std::fs::write(
         root.join("devplane.toml"),
         format!(
-            "[gates]\ncheck = [\"sh ./scripts/test.sh\"]\ntimeout = \"60s\"\nmax_feedback_rounds = 0\n\
-             junit = [\"reports/junit.xml\"]\n{extra}\n[workspace]\n{workspace}\n[review.roles]\ntests = [\"tests/**\"]\n"
+            "[gates]\ncheck = [\"sh ./scripts/test.sh\"]\n{}max_feedback_rounds = 0\n{}{extra}\n\
+             [workspace]\n{workspace}\n[review.roles]\ntests = [\"tests/**\"]\n",
+            default("timeout", "timeout = \"60s\""),
+            default("junit", "junit = [\"reports/junit.xml\"]"),
         ),
     )
     .unwrap();
@@ -525,6 +532,16 @@ async fn a_new_test_that_fails_without_the_change_is_plain() {
         "{on_base}"
     );
     assert_eq!(on_base["weight"], "plain");
+    // The headline: the evidence tells this change from its base, by name.
+    let h = &v["base_checks"]["headline"];
+    assert_eq!(
+        h["says"],
+        "1 new test fails on the base and passes here · the base's tests pass on this change \
+         (1 file put back)",
+        "{h}"
+    );
+    assert_eq!(h["named"], json!(["tests.test_rate::test_limit"]));
+    assert_eq!(h["weight"], "plain");
 }
 
 #[tokio::test]
@@ -783,4 +800,314 @@ async fn only_the_latest_check_keeps_its_test_names() {
         12
     );
     assert_eq!(gates[1]["junit"][0]["ignored"], true);
+}
+
+/// A change whose new test also passes on the base: the rate limit is never
+/// written, and the test asserts something the base already has.
+fn a_test_that_tests_nothing_new(root: &Path) {
+    std::fs::write(
+        root.join("tests/test_rate.py"),
+        "def test_limit(): assert \"def\" in \"src/login.py\"\n",
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn nothing_here_distinguishes_a_change_whose_new_tests_pass_on_the_base() {
+    let repo = repo("nodiff", "", a_test_that_tests_nothing_new);
+    let (addr, c, _host) = boot().await;
+    let (id, worktree) = adopt(&c, &addr, &repo).await;
+    let (_, v) = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/verify"),
+        json!({ "base_checks": true }),
+    )
+    .await;
+    assert_eq!(v["passed"], true, "{v}");
+
+    // On the change: the header and the Gates view read the headline.
+    let row = get(&c, &addr, &format!("/api/changes/{id}")).await;
+    assert_eq!(
+        row["state"], "verified",
+        "beside verified, never in it: {row}"
+    );
+    let b = &row["base_checks"];
+    let says = b["headline"]["says"].as_str().unwrap();
+    assert_eq!(
+        says,
+        "nothing here distinguishes this change from its base · the base's tests pass on this \
+         change (1 file put back)"
+    );
+    assert_eq!(b["headline"]["weight"], "warn");
+    assert_eq!(b["headline"]["named"], json!([]));
+
+    // In `change show`: the same view, printed first after the counts.
+    let view: devplane::core::base_checks::View = serde_json::from_value(b.clone()).unwrap();
+    let lines = view.show_lines();
+    assert_eq!(
+        lines[0],
+        ("tests", b["counts_says"].as_str().unwrap().to_string())
+    );
+    assert_eq!(lines[1], ("base", says.to_string()), "{lines:?}");
+
+    // In `devplane verify`'s summary, first in the base-check section.
+    let home = repo.counter.with_extension("home");
+    let md = repo.counter.with_extension("summary.md");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+        .args(["verify", "--base", "main", "--summary"])
+        .arg(&md)
+        .current_dir(&worktree)
+        .env("DEVPLANE_HOME", &home)
+        .env("NO_COLOR", "1")
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .env_remove("GITHUB_EVENT_NAME")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let first = text
+        .lines()
+        .find(|l| l.starts_with("base checks"))
+        .unwrap_or_else(|| panic!("no base-check section: {text}"));
+    assert!(
+        first
+            .to_lowercase()
+            .contains("nothing here distinguishes this change from its base"),
+        "{text}"
+    );
+    let md_text = std::fs::read_to_string(&md).unwrap();
+    std::fs::remove_file(&md).ok();
+    std::fs::remove_dir_all(&home).ok();
+    let md = md_text;
+    let section = md.split("### Base checks\n\n").nth(1).unwrap_or_default();
+    assert!(
+        section
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+            .contains("nothing here distinguishes this change from its base"),
+        "{md}"
+    );
+    assert!(throwaway_checkouts(&repo.root).is_empty());
+}
+
+#[tokio::test]
+async fn junit_names_the_tests_that_pass_without_the_change() {
+    let repo = repo("named", "", |root| {
+        std::fs::write(root.join("src/rate.py"), "limit = 1\nwindow = 60\n").unwrap();
+        std::fs::write(
+            root.join("tests/test_rate.py"),
+            "def test_login_exists(): assert \"def\" in \"src/login.py\"\n\
+             def test_limit(): assert \"limit\" in \"src/rate.py\"\n\
+             def test_window(): assert \"window\" in \"src/rate.py\"\n",
+        )
+        .unwrap();
+    });
+    let (addr, c, _host) = boot().await;
+    let (id, _) = adopt(&c, &addr, &repo).await;
+    let (_, v) = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/verify"),
+        json!({ "base_checks": true }),
+    )
+    .await;
+    let b = &v["base_checks"];
+    assert_eq!(
+        b["on_base"]["says"], "1 new test passes without the change · 2 fail without it",
+        "{b}"
+    );
+    assert_eq!(
+        b["on_base"]["passing"],
+        json!(["tests.test_rate::test_login_exists"])
+    );
+    assert_eq!(
+        b["on_base"]["failing"],
+        json!([
+            "tests.test_rate::test_limit",
+            "tests.test_rate::test_window"
+        ])
+    );
+    assert!(
+        b["headline"]["says"]
+            .as_str()
+            .unwrap()
+            .starts_with("2 new tests fail on the base and pass here"),
+        "{b}"
+    );
+    assert_eq!(
+        b["headline"]["named"],
+        json!([
+            "tests.test_rate::test_limit",
+            "tests.test_rate::test_window"
+        ])
+    );
+}
+
+#[tokio::test]
+async fn fails_without_the_change_by_file() {
+    // No JUnit declared: the second run is read by its exit, by file.
+    let repo = repo("byfile", "junit = []", |root| {
+        std::fs::write(root.join("src/rate.py"), "limit = 1\n").unwrap();
+        std::fs::write(
+            root.join("tests/test_rate.py"),
+            "def test_limit(): assert \"limit\" in \"src/rate.py\"\n",
+        )
+        .unwrap();
+    });
+    let (addr, c, _host) = boot().await;
+    let (id, _) = adopt(&c, &addr, &repo).await;
+    let (_, v) = post(
+        &c,
+        &addr,
+        &format!("/api/changes/{id}/verify"),
+        json!({ "base_checks": true }),
+    )
+    .await;
+    let b = &v["base_checks"];
+    assert_eq!(
+        b["on_base"]["says"],
+        "fails without the change (1 test file) — which tests, the runner wrote no JUnit to say",
+        "{b}"
+    );
+    assert_eq!(b["on_base"]["weight"], "plain");
+    assert!(
+        b["headline"]["says"]
+            .as_str()
+            .unwrap()
+            .starts_with("the new tests fail on the base and pass here"),
+        "{b}"
+    );
+}
+
+#[tokio::test]
+async fn no_checkout_outlives_its_pair() {
+    // A pass, a base test failing on the change, and a timeout.
+    let (addr, c, _host) = boot().await;
+    for (tag, extra, edit) in [
+        ("left-pass", "", a_test_that_tests_nothing_new as fn(&Path)),
+        ("left-fail", "", speed_up_the_login_tests),
+        (
+            "left-time",
+            "timeout = \"1s\"",
+            a_test_that_tests_nothing_new,
+        ),
+    ] {
+        let repo = repo(tag, extra, edit);
+        let (id, _) = adopt(&c, &addr, &repo).await;
+        if tag == "left-time" {
+            // Only runs in the throwaway checkout sleep, past the timeout.
+            std::fs::write(repo.counter.with_extension("count.sleep"), "").unwrap();
+        }
+        let (_, v) = post(
+            &c,
+            &addr,
+            &format!("/api/changes/{id}/verify"),
+            json!({ "base_checks": true }),
+        )
+        .await;
+        assert_eq!(v["passed"], true, "{tag}: {v}");
+        assert!(v["base_checks"]["on_change"].is_object(), "{tag}: {v}");
+        if tag == "left-time" {
+            assert_eq!(
+                v["base_checks"]["on_change"]["outcome"]["ran"], "timed_out",
+                "{v}"
+            );
+            std::fs::remove_file(repo.counter.with_extension("count.sleep")).ok();
+        }
+        assert!(
+            throwaway_checkouts(&repo.root).is_empty(),
+            "{tag}: a throwaway checkout outlived its pair"
+        );
+    }
+    // A host stopped mid-pair leaves one; the next host start sweeps it.
+    let repo = repo("left-killed", "", |_| {});
+    let dir = repo
+        .root
+        .join(".claude/worktrees")
+        .join(".devplane-base-0123456789ab-01234567");
+    git(
+        &repo.root,
+        &["worktree", "add", "--detach", dir.to_str().unwrap(), "main"],
+    );
+    devplane::base_checks::sweep(&repo.root).await;
+    assert!(throwaway_checkouts(&repo.root).is_empty());
+}
+
+#[test]
+fn doctor_names_a_junit_path_git_does_not_ignore() {
+    let repo = repo("doctor", "", |_| {});
+    // Planted: the report directory is no longer ignored.
+    std::fs::write(repo.root.join(".gitignore"), "").unwrap();
+    let home = repo.root.join(".no-home");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+        .args(["doctor", "--json"])
+        .current_dir(&repo.root)
+        .env("DEVPLANE_HOME", &home)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stdout)));
+    let named = v["junit_not_ignored"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(named.len(), 1, "{}", v["junit_not_ignored"]);
+    let line = named[0].as_str().unwrap();
+    assert!(line.contains("reports/junit.xml"), "{line}");
+    assert!(line.contains("not ignored by git"), "{line}");
+
+    // Ignored again: nothing to say.
+    std::fs::write(repo.root.join(".gitignore"), "reports/\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+        .args(["doctor", "--json"])
+        .current_dir(&repo.root)
+        .env("DEVPLANE_HOME", &home)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["junit_not_ignored"], json!([]));
+}
+
+#[tokio::test]
+async fn the_offer_says_it_runs_base_checks_first() {
+    let repo = repo("offerfirst", "", a_test_that_tests_nothing_new);
+    let (addr, c, _host) = boot().await;
+    let (id, _) = adopt(&c, &addr, &repo).await;
+    let (_, v) = post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+    assert_eq!(v["passed"], true, "{v}");
+    // The runs in the throwaway checkout sleep, so the offer waits on them.
+    std::fs::write(repo.counter.with_extension("count.sleep"), "").unwrap();
+    let offer = {
+        let (c, path) = (c.clone(), format!("/api/changes/{id}/offer"));
+        tokio::spawn(async move { post(&c, &addr, &path, Value::Null).await })
+    };
+    let mut said = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !offer.is_finished() && std::time::Instant::now() < deadline {
+        let row = get(&c, &addr, &format!("/api/changes/{id}")).await;
+        said |= row["base_checks"]["counts_says"]
+            .as_str()
+            .is_some_and(|s| s.ends_with(devplane::core::base_checks::OFFER_WAITS));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (status, offered) = offer.await.unwrap();
+    assert_eq!(status, 200, "{offered}");
+    assert!(
+        said,
+        "the change never said the offer was running base checks first"
+    );
+    let row = get(&c, &addr, &format!("/api/changes/{id}")).await;
+    assert!(
+        row["base_checks"]["headline"]["says"]
+            .as_str()
+            .unwrap()
+            .starts_with(devplane::core::base_checks::NOTHING_DISTINGUISHES),
+        "{}",
+        row["base_checks"]
+    );
+    std::fs::remove_file(repo.counter.with_extension("count.sleep")).ok();
 }

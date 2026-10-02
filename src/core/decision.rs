@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// attributes a single call to a model's approval; an `auto` session is a mode,
 /// reported by `devplane status --modes`) and no `unknown`: a row whose authority cannot
 /// be established must not be written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[cfg_attr(feature = "typescript", ts(export, export_to = "wire/"))]

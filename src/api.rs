@@ -1683,13 +1683,7 @@ async fn base_checks_of(state: &Shared, id: &crate::core::ChangeId) -> serde_jso
         .ok()
         .map(|(_, c)| c);
     change
-        .and_then(|c| {
-            crate::core::base_checks::View::of(
-                &c,
-                config.as_ref(),
-                crate::base_checks::is_running(id),
-            )
-        })
+        .and_then(|c| crate::base_checks::view(&c, config.as_ref()))
         .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
         .unwrap_or(serde_json::Value::Null)
 }

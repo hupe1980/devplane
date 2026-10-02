@@ -42,12 +42,96 @@ static LANES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 > = std::sync::LazyLock::new(Default::default);
 
+/// Why the last attempt for a change stopped before a result existed, by
+/// change; cleared when a pair starts or a result is current.
+static DID_NOT_RUN: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Changes whose offer is waiting on their pair now.
+static OFFERS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
 /// Whether a pair for this change is running now.
 pub fn is_running(id: &ChangeId) -> bool {
     RUNNING
         .lock()
         .map(|m| m.contains_key(id.as_str()))
         .unwrap_or(false)
+}
+
+/// Why the last attempt for this change stopped before any result, if it did.
+pub fn did_not_run(id: &ChangeId) -> Option<String> {
+    DID_NOT_RUN
+        .lock()
+        .ok()
+        .and_then(|m| m.get(id.as_str()).cloned())
+}
+
+/// Says on the change that base checks did not run, and why.
+fn note_failure(state: &Shared, id: &ChangeId, why: String) {
+    tracing::warn!(change = %id, error = %why, "base checks did not run");
+    if let Ok(mut m) = DID_NOT_RUN.lock() {
+        m.insert(id.as_str().to_string(), why);
+    }
+    state.notify_changed();
+}
+
+fn clear_failure(id: &ChangeId) {
+    if let Ok(mut m) = DID_NOT_RUN.lock() {
+        m.remove(id.as_str());
+    }
+}
+
+/// Whether this change's offer is waiting on its pair now.
+pub fn offer_waits(id: &ChangeId) -> bool {
+    OFFERS
+        .lock()
+        .map(|s| s.contains(id.as_str()))
+        .unwrap_or(false)
+}
+
+/// A change's base checks as every surface shows them: the shared
+/// composition, with what only the host knows — an offer waiting on the pair,
+/// and why the last attempt stopped before a result.
+pub fn view(
+    change: &crate::core::Change,
+    config: Option<&ProjectConfig>,
+) -> Option<crate::core::base_checks::View> {
+    crate::core::base_checks::View::of(change, config, is_running(&change.id))
+        .map(|v| v.with_host(offer_waits(&change.id), did_not_run(&change.id)))
+}
+
+/// Takes an offer off [`OFFERS`] however it ends.
+struct Offering {
+    id: ChangeId,
+    state: Shared,
+}
+
+impl Drop for Offering {
+    fn drop(&mut self) {
+        if let Ok(mut s) = OFFERS.lock() {
+            s.remove(self.id.as_str());
+        }
+        self.state.notify_changed();
+    }
+}
+
+/// Before an offer: the pair, once per tree, waited for, with the change
+/// saying *running base checks first* meanwhile. Anything that stops them is
+/// said on the change and never stops the offer.
+pub async fn before_offer(state: &Shared, id: &ChangeId) {
+    if let Ok(mut s) = OFFERS.lock() {
+        s.insert(id.as_str().to_string());
+    }
+    let _offering = Offering {
+        id: id.clone(),
+        state: state.clone(),
+    };
+    state.notify_changed();
+    if let Err(e) = ensure(state, id).await {
+        note_failure(state, id, format!("{e:#}"));
+    }
 }
 
 fn lane(root: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
@@ -106,6 +190,7 @@ pub async fn start(state: &Shared, id: &ChangeId) -> Result<Started> {
         Err(a) => return Ok(Started::Refused(a)),
     };
     if change.base_checks.as_ref().is_some_and(|b| b.key == key) {
+        clear_failure(id);
         return Ok(Started::Current);
     }
     let (tx, rx) = tokio::sync::watch::channel(false);
@@ -118,6 +203,7 @@ pub async fn start(state: &Shared, id: &ChangeId) -> Result<Started> {
         }
         m.insert(id.as_str().to_string(), rx.clone());
     }
+    clear_failure(id);
     let flight = Flight {
         id: id.clone(),
         tx,
@@ -131,7 +217,17 @@ pub async fn start(state: &Shared, id: &ChangeId) -> Result<Started> {
         let flight = flight;
         let lane = lane(&root);
         let _held = lane.lock().await;
-        let result = run(&root, &dir, &key, &config, check.as_ref()).await;
+        // In its own task, so a pair that panics is said on the change
+        // rather than lost with the task.
+        let pair =
+            tokio::spawn(async move { run(&root, &dir, &key, &config, check.as_ref()).await });
+        let result = match pair.await {
+            Ok(r) => r,
+            Err(e) => {
+                note_failure(&state, &flight.id, format!("the run stopped: {e}"));
+                return;
+            }
+        };
         let saved = {
             let mut changes = state.changes.lock().await;
             changes.get_mut(&flight.id).map(|c| {
@@ -173,7 +269,7 @@ pub fn after_check(state: &Shared, id: &ChangeId, config: &ProjectConfig, passed
     let (state, id) = (state.clone(), id.clone());
     tokio::spawn(async move {
         if let Err(e) = start(&state, &id).await {
-            tracing::warn!(change = %id, error = %e, "base checks did not start");
+            note_failure(&state, &id, format!("{e:#}"));
         }
     });
 }

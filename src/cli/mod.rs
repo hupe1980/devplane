@@ -907,12 +907,32 @@ pub enum ChangeCmd {
     /// Print the done certificate: what was checked, against which commit,
     /// and how to check it yourself
     ///
-    /// Meant for a pull request: a reviewer can check out the commit and run
-    /// the commands. `--json` gives an in-toto statement.
+    /// Meant for a pull request: a reviewer can check out the tree and run
+    /// the commands. `--json` gives the in-toto statement (Statement v1, Test
+    /// Result predicate) instead; `--sign ssh` signs that statement with your
+    /// own SSH key. Devplane never signs and never makes a key.
     Export {
         /// The change, or a unique prefix of its id, as `devplane change list` prints it
         change: String,
+        /// Write to this file instead of printing; refused if it exists
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Replace the `--out` file (and its `.sig`) if it exists
+        #[arg(long)]
+        force: bool,
+        /// Sign the in-toto statement with the key your global git
+        /// `user.signingkey` names, by `ssh-keygen -Y sign`; writes
+        /// `<out>.sig` beside it and prints how anyone checks it
+        #[arg(long, value_enum, requires = "out")]
+        sign: Option<Signer>,
     },
+}
+
+/// Who signs an exported statement. Only the person, with SSH.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Signer {
+    /// `ssh-keygen -Y sign` with your global `user.signingkey`
+    Ssh,
 }
 
 /// The vendors whose own settings `agent connect` writes to.

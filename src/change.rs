@@ -1225,9 +1225,7 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
     // a base test that fails on this change is a row of the refusal below.
     // Anything that stops them from running is said on the change and does
     // not stop the offer.
-    if let Err(e) = crate::base_checks::ensure(state, id).await {
-        tracing::warn!(change = %id, error = %e, "base checks did not run before the offer");
-    }
+    crate::base_checks::before_offer(state, id).await;
     let change = {
         let changes = state.changes.lock().await;
         changes.get(id).cloned().context("no such change")?

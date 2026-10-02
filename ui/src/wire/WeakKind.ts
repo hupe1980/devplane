@@ -4,4 +4,4 @@
  * Which kind of alteration a weakened row is. Counted by kind, never scored:
  * a skipped test and an edited CI workflow ask different questions.
  */
-export type WeakKind = "skip" | "deleted" | "gate" | "base_tests";
+export type WeakKind = "skip" | "deleted" | "gate" | "agent_controls" | "ownership" | "supply_chain" | "base_tests";

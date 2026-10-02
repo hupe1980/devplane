@@ -772,6 +772,108 @@ pub fn on_base_weight(on_base: &OnBase) -> Weight {
     }
 }
 
+/// The headline when no new test fails on the base: whatever the counts
+/// say, the tests here would read the same without the change.
+pub const NOTHING_DISTINGUISHES: &str = "nothing here distinguishes this change from its base";
+
+/// Whether the evidence tells this change from its base: the base checks'
+/// headline. Shown beside *verified* and never part of it; counts of named
+/// tests, never a ratio.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Headline {
+    /// *3 new tests fail on the base and pass here · the base's tests pass
+    /// on this change (2 files put back)*, or [`NOTHING_DISTINGUISHES`]
+    /// with the base's tests' result beside it.
+    pub says: String,
+    pub weight: Weight,
+    /// The new tests that fail on the base and pass here, by name.
+    pub named: Vec<String>,
+    pub named_more: usize,
+}
+
+/// The headline of one pair. `check` passed on the change (no pair runs
+/// otherwise), so a new test that fails on the base passes here.
+pub fn headline(b: &BaseChecks) -> Headline {
+    let on = &b.on_base;
+    let unmeasured = |why: &str| {
+        format!(
+            "whether anything here distinguishes this change from its base was not measured: {why}"
+        )
+    };
+    let (lead, weight, named): (String, Weight, Vec<String>) = match (&on.run.outcome, &on.counted)
+    {
+        (RunOutcome::Skipped { why }, _)
+            if on.placement.no_role || !on.placement.not_separable.is_empty() =>
+        {
+            (unmeasured(why), Weight::Absent, Vec::new())
+        }
+        (RunOutcome::Skipped { why }, _) => (
+            format!("{NOTHING_DISTINGUISHES} — {why}"),
+            Weight::Warn,
+            Vec::new(),
+        ),
+        (RunOutcome::TimedOut { .. } | RunOutcome::CouldNotRun { .. }, _) => {
+            (unmeasured(&on_base_says(on)), Weight::Warn, Vec::new())
+        }
+        (_, NewTests::Counted { failing, .. }) if !failing.is_empty() => (
+            match failing.len() {
+                1 => "1 new test fails on the base and passes here".to_string(),
+                n => format!("{n} new tests fail on the base and pass here"),
+            },
+            Weight::Plain,
+            failing.iter().map(NewTest::says).collect(),
+        ),
+        (
+            RunOutcome::Failed,
+            NewTests::Counted {
+                unattributed: n @ 1..,
+                ..
+            },
+        ) => (
+            format!(
+                "no new test is named failing on the base — {} could not be attributed",
+                plural(*n, "test", "tests")
+            ),
+            Weight::Warn,
+            Vec::new(),
+        ),
+        (_, NewTests::ByFile { passed: false, .. }) => (
+            "the new tests fail on the base and pass here — which, the runner wrote no JUnit \
+                 to say"
+                .into(),
+            Weight::Plain,
+            Vec::new(),
+        ),
+        _ => (NOTHING_DISTINGUISHES.into(), Weight::Warn, Vec::new()),
+    };
+    let base = match &b.on_change.run.outcome {
+        RunOutcome::Skipped { why } => {
+            format!("the base's tests were not run on this change — {why}")
+        }
+        _ => on_change_says(&b.on_change),
+    };
+    let (named, named_more) = fold(&named, FOLD_NAMED);
+    Headline {
+        says: format!("{lead} · {base}"),
+        weight,
+        named,
+        named_more,
+    }
+}
+
+/// *a, b, c and 4 more*: the first three of a folded list, and the rest.
+fn first_three(names: &[String], more: usize) -> String {
+    let rest = names.len().saturating_sub(3) + more;
+    let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    match rest {
+        0 => shown,
+        n => format!("{shown} and {n} more"),
+    }
+}
+
+/// The sentence a surface says while an offer waits on base checks.
+pub const OFFER_WAITS: &str = "running base checks first — the offer waits for them";
+
 /// How many names a surface lists before folding.
 pub const FOLD_NAMED: usize = 20;
 pub const FOLD_NEW: usize = 50;
@@ -866,6 +968,13 @@ pub struct View {
     pub junit_notes: Vec<String>,
     /// The certificate's counts sentence.
     pub certificate: String,
+    /// Whether the evidence tells this change from its base, for a current
+    /// result: the section's first sentence on every surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headline: Option<Headline>,
+    /// Why the last attempt to run them stopped before a result existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub did_not_run: Option<String>,
 }
 
 impl View {
@@ -944,7 +1053,94 @@ impl View {
             can_run: key.is_ok() && !is_current && !running,
             junit_notes: check.junit.iter().flat_map(JunitFile::notes).collect(),
             certificate,
+            headline: stored.filter(|_| is_current).map(headline),
+            did_not_run: None,
         }
+    }
+
+    /// What only the host knows: an offer is waiting on the pair now, and
+    /// why the last attempt stopped before any result existed.
+    pub fn with_host(mut self, offer_waits: bool, did_not_run: Option<String>) -> Self {
+        if offer_waits && self.absent.as_ref().map(|a| a.absent) == Some(Absent::Running) {
+            if let Some(left) = self
+                .counts_says
+                .strip_suffix(Absent::Running.says())
+                .map(str::to_string)
+            {
+                self.counts_says = format!("{left}{OFFER_WAITS}");
+            }
+            if let Some(a) = self.absent.as_mut() {
+                a.says = OFFER_WAITS.into();
+            }
+        }
+        if let Some(why) = did_not_run.filter(|_| self.headline.is_none()) {
+            let said = format!("base checks did not run — {why}");
+            self.counts_says = format!("{} · {said}", self.counts_says);
+            self.did_not_run = Some(said);
+        }
+        self
+    }
+
+    /// `devplane change show`'s lines, label and text: the counts, the
+    /// headline first, then each run with the first three names of each
+    /// list. Uncoloured: the CLI prints them as they are.
+    pub fn show_lines(&self) -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = vec![("tests", self.counts_says.clone())];
+        if let Some(h) = &self.headline {
+            out.push(("base", h.says.clone()));
+            if !h.named.is_empty() {
+                out.push((
+                    "",
+                    format!("fail on the base: {}", first_three(&h.named, h.named_more)),
+                ));
+            }
+        }
+        if self.stale && self.on_change.is_some() {
+            out.push((
+                "",
+                format!(
+                    "these runs describe tree {}, not this one",
+                    crate::core::text::clip(self.tree.as_deref().unwrap_or(""), 10)
+                ),
+            ));
+        }
+        if let Some(o) = &self.on_change {
+            out.push(("base tests", o.says.clone()));
+            if !o.failing.is_empty() {
+                out.push((
+                    "",
+                    format!("failing: {}", first_three(&o.failing, o.failing_more)),
+                ));
+            }
+            if !o.restored.is_empty() {
+                out.push(("", format!("put back: {}", o.restored.join(", "))));
+            }
+            if !o.removed.is_empty() {
+                out.push(("", format!("removed: {}", o.removed.join(", "))));
+            }
+            if let Some(n) = o.named.as_ref().filter(|n| !n.not_run_on_change.is_empty()) {
+                out.push((
+                    "",
+                    format!(
+                        "not run on this change: {}",
+                        first_three(&n.not_run_on_change, n.not_run_on_change_more)
+                    ),
+                ));
+            }
+        }
+        if let Some(o) = &self.on_base {
+            out.push(("new tests", o.says.clone()));
+            if !o.passing.is_empty() {
+                out.push((
+                    "",
+                    format!(
+                        "pass without the change: {}",
+                        first_three(&o.passing, o.passing_more)
+                    ),
+                ));
+            }
+        }
+        out
     }
 }
 
@@ -1541,5 +1737,170 @@ mod tests {
             }
         }
         false
+    }
+
+    fn pair(on_base: OnBase, first: Run) -> BaseChecks {
+        BaseChecks {
+            key: Key {
+                base: "b".into(),
+                tree: "t".into(),
+                definition: "d".into(),
+            },
+            at: Timestamp::UNIX_EPOCH,
+            on_change: on(first),
+            on_base,
+        }
+    }
+
+    fn named_test(n: &str) -> NewTest {
+        NewTest {
+            suite: "pytest".into(),
+            class: "tests.test_rate".into(),
+            name: n.into(),
+            file: None,
+        }
+    }
+
+    #[test]
+    fn the_headline_says_whether_the_evidence_discriminates() {
+        let passed = base_run(RunOutcome::Passed, vec![]);
+        let counted = |passing: Vec<NewTest>, failing: Vec<NewTest>| NewTests::Counted {
+            passing,
+            failing,
+            skipped: 0,
+            unattributed: 0,
+        };
+        // New tests that fail on the base and pass here: counted and named.
+        let h = headline(&pair(
+            ob(
+                RunOutcome::Failed,
+                counted(
+                    vec![],
+                    vec![named_test("a"), named_test("b"), named_test("c")],
+                ),
+                vec![placed("tests/test_rate.py")],
+            ),
+            passed.clone(),
+        ));
+        assert_eq!(
+            h.says,
+            "3 new tests fail on the base and pass here · the base's tests pass on this change (1 file put back)"
+        );
+        assert_eq!(h.weight, Weight::Plain);
+        assert_eq!(
+            h.named,
+            [
+                "tests.test_rate::a",
+                "tests.test_rate::b",
+                "tests.test_rate::c"
+            ]
+        );
+
+        // Every new test passes on the base: nothing tells them apart.
+        let h = headline(&pair(
+            ob(
+                RunOutcome::Passed,
+                counted(vec![named_test("a")], vec![]),
+                vec![placed("tests/test_rate.py")],
+            ),
+            passed.clone(),
+        ));
+        assert!(h.says.starts_with(NOTHING_DISTINGUISHES), "{}", h.says);
+        assert_eq!(h.weight, Weight::Warn);
+        assert!(h.named.is_empty());
+
+        // By file, no JUnit: the same sentence when the files pass on the base.
+        let h = headline(&pair(
+            ob(
+                RunOutcome::Passed,
+                NewTests::ByFile {
+                    passed: true,
+                    why: None,
+                },
+                vec![placed("tests/test_rate.py")],
+            ),
+            passed.clone(),
+        ));
+        assert!(h.says.starts_with(NOTHING_DISTINGUISHES), "{}", h.says);
+
+        // The change adds no tests: nothing distinguishes it, and why.
+        let h = headline(&pair(
+            ob(
+                RunOutcome::Skipped {
+                    why: "the change adds or edits no tests".into(),
+                },
+                NewTests::None,
+                vec![],
+            ),
+            Run::not_run(RunOutcome::Skipped {
+                why: "the change edits no file that defines the checks".into(),
+            }),
+        ));
+        assert_eq!(
+            h.says,
+            "nothing here distinguishes this change from its base — the change adds or edits no \
+             tests · the base's tests were not run on this change — the change edits no file that \
+             defines the checks"
+        );
+
+        // No role declared: not measured, which is not the same as nothing.
+        let mut no_role = ob(
+            RunOutcome::Skipped {
+                why: "no tests role declared".into(),
+            },
+            NewTests::None,
+            vec![],
+        );
+        no_role.placement.no_role = true;
+        let h = headline(&pair(no_role, passed));
+        assert!(h.says.starts_with("whether anything here"), "{}", h.says);
+        assert!(!h.says.starts_with(NOTHING_DISTINGUISHES));
+        assert_eq!(h.weight, Weight::Absent);
+        assert!(!ratio(&h.says));
+    }
+
+    #[test]
+    fn a_current_result_leads_with_its_headline_and_change_show_prints_it() {
+        let report = GateReport {
+            gate: "check".into(),
+            at: Timestamp::UNIX_EPOCH,
+            duration_ms: 0,
+            commands: vec![],
+            attempt: 1,
+            spec: None,
+            commit: None,
+            junit: vec![],
+            base_commit: Some("b".into()),
+        };
+        let b = pair(
+            ob(
+                RunOutcome::Passed,
+                NewTests::ByFile {
+                    passed: true,
+                    why: None,
+                },
+                vec![placed("tests/test_rate.py")],
+            ),
+            base_run(RunOutcome::Passed, vec![]),
+        );
+        let v = View::of_result(&report, &b);
+        let lines = v.show_lines();
+        assert_eq!(lines[0].0, "tests");
+        assert_eq!(lines[1].0, "base", "the headline comes first: {lines:?}");
+        assert!(lines[1].1.starts_with(NOTHING_DISTINGUISHES));
+
+        // Absent: no headline, and a failure to start is said.
+        let v = View::absent(&report, Absent::NotRun)
+            .with_host(false, Some("the store is gone".into()));
+        assert!(v.headline.is_none());
+        assert!(
+            v.counts_says
+                .ends_with("base checks did not run — the store is gone"),
+            "{}",
+            v.counts_says
+        );
+        // An offer waiting on the pair says so, in place of *running*.
+        let v = View::absent(&report, Absent::Running).with_host(true, None);
+        assert!(v.counts_says.ends_with(OFFER_WAITS), "{}", v.counts_says);
     }
 }

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Transcribed by hand from https://github.com/in-toto/attestation/blob/main/spec/predicates/test-result.md (version 0.1.0, fetched 2026-10-02); unrecognised fields are allowed, as the framework's parsing rules require. ResourceDescriptor as in statement-v1.schema.json.",
+  "title": "in-toto Test Result predicate v0.1",
+  "type": "object",
+  "required": ["result", "configuration"],
+  "properties": {
+    "result": { "enum": ["PASSED", "WARNED", "FAILED"] },
+    "configuration": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ResourceDescriptor" }
+    },
+    "url": { "type": "string" },
+    "passedTests": { "type": "array", "items": { "type": "string" } },
+    "warnedTests": { "type": "array", "items": { "type": "string" } },
+    "failedTests": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "DigestSet": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "gitCommit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "gitTree": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "gitBlob": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]+$" }
+    },
+    "ResourceDescriptor": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "uri": { "type": "string" },
+        "digest": { "$ref": "#/$defs/DigestSet" },
+        "downloadLocation": { "type": "string" },
+        "mediaType": { "type": "string" },
+        "annotations": { "type": "object" }
+      },
+      "anyOf": [
+        { "required": ["uri"] },
+        { "required": ["digest"] },
+        { "required": ["content"] }
+      ]
+    }
+  }
+}

@@ -421,6 +421,25 @@ impl BaseChecks {
             return Vec::new();
         };
         let mut out = Vec::new();
+        // First: whether the evidence tells this change from its base.
+        if let Some(h) = &v.headline {
+            let mut chars = h.says.chars();
+            let mut line: String = match chars.next() {
+                Some(c) => c.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            };
+            if !h.named.is_empty() {
+                let more = match h.named_more {
+                    0 => String::new(),
+                    n => format!(" and {n} more"),
+                };
+                line.push_str(&format!(
+                    " — failing on the base: {}{more}",
+                    h.named.join(", ")
+                ));
+            }
+            out.push(format!("{line}."));
+        }
         if let Some(o) = &v.on_change {
             out.push(format!("The base's tests on this change: {}.", o.says));
         }

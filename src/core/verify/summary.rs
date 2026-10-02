@@ -120,16 +120,21 @@ fn duration(secs: u64) -> String {
     }
 }
 
-/// The kinds in the order the first section lists them, with their nouns.
-const KINDS: [(WeakKind, &str, &str); 4] = [
-    (WeakKind::Skip, "check weakened", "checks weakened"),
-    (WeakKind::Deleted, "test deleted", "tests deleted"),
-    (WeakKind::Gate, "gate changed", "gates changed"),
-    (
-        WeakKind::BaseTests,
-        "base test fails on this change",
-        "base tests fail on this change",
-    ),
+const fn nouned(k: WeakKind) -> (WeakKind, &'static str, &'static str) {
+    let (one, many) = k.nouns();
+    (k, one, many)
+}
+
+/// The kinds in the order the first section lists them, with their nouns:
+/// [`WeakKind::ALL`]'s order and [`WeakKind::nouns`]' words.
+const KINDS: [(WeakKind, &str, &str); 7] = [
+    nouned(WeakKind::ALL[0]),
+    nouned(WeakKind::ALL[1]),
+    nouned(WeakKind::ALL[2]),
+    nouned(WeakKind::ALL[3]),
+    nouned(WeakKind::ALL[4]),
+    nouned(WeakKind::ALL[5]),
+    nouned(WeakKind::ALL[6]),
 ];
 
 fn count(n: usize, one: &str, many: &str) -> String {
@@ -155,6 +160,9 @@ pub fn counts(rows: &[Weakened]) -> serde_json::Value {
         "weakened": q.weakened,
         "deleted": q.deleted,
         "gatesChanged": q.gates_changed,
+        "agentControls": q.agent_controls,
+        "ownership": q.ownership,
+        "supplyChain": q.supply_chain,
         "baseTests": q.base_tests,
         "says": counts_says(rows),
     })
@@ -696,6 +704,61 @@ mod tests {
         let v = Verdict::of(&r, &same("t"));
         let md = render(&v, Some(&r), &[], &definition(ChangeDeclares::Same));
         assert!(md.contains("This change weakens no check the diff scan recognises."));
+    }
+
+    /// Agent controls, ownership and the supply chain are counted on their
+    /// own, after the gate and before the base's tests, each its own `####`.
+    #[test]
+    fn the_controls_kinds_have_their_own_sections_and_counts() {
+        assert_eq!(
+            KINDS.map(|(k, _, _)| k),
+            [
+                WeakKind::Skip,
+                WeakKind::Deleted,
+                WeakKind::Gate,
+                WeakKind::AgentControls,
+                WeakKind::Ownership,
+                WeakKind::SupplyChain,
+                WeakKind::BaseTests,
+            ]
+        );
+        let r = report(vec![CommandResult::exited("npm test", 0)]);
+        let v = Verdict::of(&r, &same("t"));
+        let rows = [
+            row(
+                ".claude/settings.json",
+                WeakKind::AgentControls,
+                "changed lines a",
+            ),
+            row("CODEOWNERS", WeakKind::Ownership, "changed lines b"),
+            row("Cargo.lock", WeakKind::SupplyChain, "changed lines c"),
+            row("package.json", WeakKind::SupplyChain, "changed lines d"),
+        ];
+        let md = render(&v, Some(&r), &rows, &definition(ChangeDeclares::Same));
+        assert!(
+            md.contains(
+                "### Weakened checks — 1 agent control changed · 1 ownership file changed · 2 \
+                 supply-chain files changed"
+            ),
+            "{md}"
+        );
+        let sections: Vec<&str> = md.lines().filter(|l| l.starts_with("#### ")).collect();
+        assert_eq!(
+            sections,
+            [
+                "#### 1 agent control changed",
+                "#### 1 ownership file changed",
+                "#### 2 supply-chain files changed",
+            ]
+        );
+        assert!(md.find("Cargo.lock").unwrap() < md.find("### Gate").unwrap());
+        let c = counts(&rows);
+        assert_eq!(c["agentControls"], 1);
+        assert_eq!(c["ownership"], 1);
+        assert_eq!(c["supplyChain"], 2);
+        assert_eq!(c["gatesChanged"], 0);
+        // The rows never reach the verdict.
+        assert_eq!(v.exit_code(), 0);
     }
 
     #[test]

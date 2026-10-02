@@ -64,6 +64,8 @@ pub mod render;
 pub mod repo;
 /// What a repository already has set up for agents, read from disk.
 pub(crate) mod setup;
+/// The person's own SSH signature on an attested statement, at export.
+pub mod sign;
 /// The specification a change answers, read back from disk.
 pub mod spec;
 /// The wall clock, read at the edge: the pure half's constructors stamped

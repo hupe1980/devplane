@@ -1,7 +1,9 @@
 //! The done certificate: evidence a reviewer can check without trusting this
-//! tool. It borrows the in-toto statement shape but is deliberately unsigned:
-//! SLSA provenance asks the reader to trust the builder, whereas this names a
-//! tree and the gate commands so the reader re-runs them. It establishes only
+//! tool. Its structured shape is an in-toto Statement v1 with the Test Result
+//! predicate ([`super::attest`]). Devplane never signs it: SLSA provenance asks
+//! the reader to trust the builder, whereas this names a tree and the gate
+//! commands so the reader re-runs them. The person may sign the statement with
+//! their own SSH key, which says who put their name to it. It establishes only
 //! that these commands ended as recorded against that tree — not that the
 //! work is correct — and says so in its own text ([`LIMITS`]).
 
@@ -34,9 +36,7 @@ impl Origin {
     }
 }
 
-/// The predicate type this emits, versioned.
-pub const PREDICATE_TYPE: &str = "https://devplane.dev/DoneCertificate/v1";
-pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
+pub use super::attest::{STATEMENT_TYPE, TEST_RESULT_TYPE};
 
 /// The artifact's hard size ceiling.
 pub const MAX_BYTES: usize = 64 * 1024;
@@ -50,15 +50,17 @@ working tree it names. It is not evidence that the work is correct, that the com
 right things, or that the specification was satisfied. The commands ran code in this tree, including tests and \
 build scripts the change may have edited; the tree was the same before and after the run, which \
 cannot see an edit reverted during the run. The base checks put the base's tests back to see \
-whether they still pass, and their runs are observed beside this evidence, never part of it. It is \
-unsigned and detects change rather than forgery.";
+whether they still pass, and their runs are observed beside this evidence, never part of it. \
+Devplane does not sign it; unless a person signed it with their own key, it detects change rather \
+than forgery.";
 
 /// Every field a reader can check for themselves — one list shared by both renderings.
 pub const REDERIVABLE: &[&str] = &[
-    "evidence.commit.commit",
-    "evidence.commit.tree",
-    "evidence.commands[].command",
-    "evidence.commands[].outcome",
+    "subject[0].digest.gitTree",
+    "subject[0].digest.gitCommit",
+    "configuration[0].digest.sha256",
+    "commands[].command",
+    "commands[].exitCode",
     "specification.fingerprint",
     "specification.tasks_done",
     "specification.tasks_total",
@@ -93,7 +95,19 @@ pub struct Certificate<'a> {
     /// The counts and base checks, as the change's own view composed them;
     /// `None` when `check` never ran. Beside the evidence, never in it.
     pub base_checks: Option<super::base_checks::View>,
+    /// How many of this change's tool calls each authority decided, read by
+    /// the edge; empty when none were, `None` when it was not read.
+    pub decided_by: Option<std::collections::BTreeMap<super::Authority, u32>>,
+    /// `devplane.toml`'s git blob id in the checked commit, when the tree was
+    /// clean and committed and holds one.
+    pub config_blob: Option<String>,
 }
+
+/// What the certificate says when the diff was read and nothing in it altered
+/// the checks, what governs the agent or what the build trusts.
+pub const NOTHING_ALTERED: &str = "This change altered none of its checks: no skip marker added, \
+     no test file deleted, no gate or CI definition edited, and nothing that governs the agent \
+     or the build edited.";
 
 impl<'a> Certificate<'a> {
     /// Builds the certificate for a change. The evidence is the run the basis
@@ -119,6 +133,8 @@ impl<'a> Certificate<'a> {
             weakened_unreadable: None,
             weakened_read: false,
             base_checks: None,
+            decided_by: Default::default(),
+            config_blob: None,
         }
     }
 
@@ -160,11 +176,9 @@ impl<'a> Certificate<'a> {
                 "{} A person marked each of these read.",
                 super::review::weakened_sentence(w).unwrap_or_default()
             ),
-            Some(w) => super::review::weakened_sentence(w).unwrap_or_else(|| {
-                "This change altered none of its checks: no skip marker added, no test file \
-                 deleted, no gate or CI definition edited."
-                    .into()
-            }),
+            Some(w) => {
+                super::review::weakened_sentence(w).unwrap_or_else(|| NOTHING_ALTERED.into())
+            }
         }
     }
 
@@ -303,74 +317,14 @@ pub fn commands_digest(report: &GateReport) -> String {
     h.hex()
 }
 
-/// A statement's `subject`: the tree the commands ran against, and the commit
-/// only when that tree is the commit's own. An in-toto statement names at
-/// least one subject, so with no tree there is no statement, and the error
-/// says why — never an empty subject or an entry with an empty digest.
-fn subject_of(name: &str, commit: Option<&CommitStamp>) -> Result<serde_json::Value, String> {
-    use serde_json::json;
-    match commit.and_then(|c| c.tree.as_deref().filter(|t| !t.is_empty()).map(|t| (c, t))) {
-        Some((c, tree)) => {
-            let mut digest = json!({ "gitTree": tree });
-            if let Some(sha) = c.commit.as_deref().filter(|_| c.clean) {
-                digest["gitCommit"] = json!(sha);
-            }
-            Ok(json!([{ "name": name, "digest": digest }]))
-        }
-        None => {
-            let reason = match commit {
-                None => "no gate ran in a repository, so there is no tree to name".to_string(),
-                Some(c) => format!(
-                    "no working-tree digest was recorded{}",
-                    c.tree_unknown
-                        .as_deref()
-                        .map(|w| format!(" — {}", w.trim_end_matches('.')))
-                        .unwrap_or_default()
-                ),
-            };
-            Err(format!(
-                "No in-toto statement: a statement names the tree the commands ran against, \
-                 and {reason}."
-            ))
-        }
-    }
-}
-
-/// An in-toto Statement v1: exactly its four top-level fields.
-fn statement_of(subject: serde_json::Value, predicate: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "_type": STATEMENT_TYPE,
-        "subject": subject,
-        "predicateType": PREDICATE_TYPE,
-        "predicate": predicate,
-    })
-}
-
 /// What stands in for a statement that cannot be made: no `_type`, so nothing
 /// reads it as one, and the sentence saying why.
 pub const NO_STATEMENT: &str = "no_statement";
 
-/// The predicate's `evidence` block for one gate run.
-fn evidence_of(r: &GateReport, attempts: u32) -> serde_json::Value {
-    serde_json::json!({
-        // Observed by something the agent does not control.
-        Origin::KEY: Origin::ExternallyObserved.as_str(),
-        "gate": r.gate,
-        "at": r.at,
-        "attempt": r.attempt,
-        "attempts": attempts,
-        "passed": r.passed(),
-        "commit": r.commit,
-        "commands": r.commands,
-        "commands_digest": commands_digest(r),
-    })
-}
-
 /// What `devplane verify` knows when it writes a statement: a gate run and the
 /// rows its diff weakened, with no change record behind them. The statement is
-/// the certificate's own shape — one format, two callers — with `change` and
-/// `completion` absent and a `verify` block naming the base whose definition
-/// ran.
+/// the certificate's own shape — one format, two callers — with a `verify`
+/// block naming the base whose definition ran.
 pub struct VerifyEvidence<'a> {
     /// The subject's name: the repository or checkout.
     pub name: &'a str,
@@ -380,26 +334,30 @@ pub struct VerifyEvidence<'a> {
     pub verify: serde_json::Value,
     /// `predicate.devplane.baseChecks`, as [`base_checks_json`] writes it.
     pub base_checks: serde_json::Value,
+    /// The base's `devplane.toml` as a git blob id: the definition that ran.
+    pub config_blob: Option<&'a str>,
 }
 
-/// The in-toto statement for a `devplane verify` run. Unsigned. With no tree
-/// recorded there is no subject and so no statement: the error says why.
+/// The in-toto statement for a `devplane verify` run. Never signed: CI holds
+/// no person's key. With no tree recorded there is no subject and so no
+/// statement: the error says why.
 pub fn verify_statement(e: &VerifyEvidence<'_>) -> Result<serde_json::Value, String> {
-    use serde_json::json;
-    let subject = subject_of(e.name, e.report.commit.as_ref())?;
-    Ok(statement_of(
-        subject,
-        json!({
-            "change": null,
-            "completion": null,
-            "evidence": evidence_of(e.report, 1),
-            "checks_altered": e.weakened,
-            "devplane": { "verify": e.verify, "baseChecks": e.base_checks },
-            "rederivable": REDERIVABLE,
-            "limits": LIMITS,
-            "signed": false,
-        }),
-    ))
+    use super::attest;
+    let mut ext = serde_json::Map::new();
+    ext.insert("says".into(), format!("{} {LIMITS}", attest::SAYS).into());
+    ext.insert("run".into(), attest::run_of(e.report, 1));
+    ext.insert("commands".into(), attest::commands_of(e.report));
+    let says = super::review::weakened_sentence(e.weakened)
+        .unwrap_or_else(|| "This change altered none of its checks.".into());
+    ext.insert(
+        "checksAltered".into(),
+        attest::checks_altered(Some(e.weakened), None, says),
+    );
+    ext.insert("verify".into(), e.verify.clone());
+    ext.insert("baseChecks".into(), e.base_checks.clone());
+    ext.insert("rederivable".into(), REDERIVABLE.into());
+    ext.insert("signed".into(), false.into());
+    attest::statement(e.name, e.report, e.config_blob, ext).map_err(|n| n.says())
 }
 
 /// How a command's outcome reads — one function for both renderings.
@@ -476,7 +434,7 @@ pub fn commit_sentence(c: &CommitStamp) -> String {
 /// A fence one backtick longer than the longest run inside the content (min
 /// three), so untrusted commands, titles or output cannot close it and inject
 /// Markdown.
-fn fenced(content: &str) -> String {
+pub(crate) fn fenced(content: &str) -> String {
     let longest = content
         .as_bytes()
         .split(|b| *b != b'`')
@@ -711,45 +669,117 @@ impl Certificate<'_> {
         o
     }
 
-    /// The structured shape, as an in-toto statement; with no tree to name,
-    /// none, and the error says why.
-    pub fn statement(&self) -> Result<serde_json::Value, String> {
-        use serde_json::json;
-        let w = self.change;
-        let subject = subject_of(&w.title, self.evidence.and_then(|r| r.commit.as_ref()))?;
-        Ok(statement_of(
-            subject,
-            json!({
-                "change": { "id": w.id, "title": w.title, "state": self.state.as_str(),
-                          "branch": w.branch },
-                "completion": w.completion,
-                "evidence": self.evidence.map(|r| evidence_of(r, self.attempts)),
-                "basis_run_missing": self.basis_run_missing(),
-                "devplane": { "baseChecks": self.base_checks_json() },
-                "checks_altered": self.weakened,
-                "specification": self.evidence.and_then(|r| r.spec.clone()),
-                // An object so the origin rides with the text; absent entirely
-                // when the agent said nothing.
-                "agent_claim": self.claim.map(|text| json!({
-                    Origin::KEY: Origin::SelfReported.as_str(),
-                    "text": text,
-                })),
-                "verification": {
-                    "steps": self.verification_steps(),
-                    "caveat": self.verification_caveat(),
+    /// Why this certificate's evidence cannot be attested, if it cannot.
+    fn not_attestable(&self) -> Option<super::attest::NotAttestable> {
+        use super::attest::NotAttestable;
+        if self.evidence.is_some() {
+            return None;
+        }
+        // The run the basis names is gone: never another run in its place.
+        Some(
+            match self
+                .change
+                .completion
+                .as_ref()
+                .and_then(Completion::gate)
+                .filter(|_| self.basis_run_missing())
+            {
+                Some((gate, attempt)) => NotAttestable::BasisRunMissing {
+                    gate: gate.into(),
+                    attempt,
                 },
-                "rederivable": REDERIVABLE,
-                "limits": LIMITS,
-                "signed": false,
-            }),
-        ))
+                None => NotAttestable::NoCheckRun,
+            },
+        )
+    }
+
+    /// The structured shape: an in-toto Statement v1 with the Test Result
+    /// predicate, about the tree `check` ran on. With nothing to attest there
+    /// is no statement, and the error says why.
+    pub fn statement(&self) -> Result<serde_json::Value, super::attest::NotAttestable> {
+        use super::attest;
+        use serde_json::json;
+        if let Some(why) = self.not_attestable() {
+            return Err(why);
+        }
+        let Some(report) = self.evidence else {
+            return Err(attest::NotAttestable::NoCheckRun);
+        };
+        let w = self.change;
+        let mut ext = serde_json::Map::new();
+        ext.insert("says".into(), format!("{} {LIMITS}", attest::SAYS).into());
+        let mut change = json!({
+            "id": w.id, "title": w.title, "finished": self.is_finished(),
+            "state": self.state.as_str(),
+        });
+        if let Some(b) = &w.branch {
+            change["branch"] = json!(b);
+        }
+        ext.insert("change".into(), change);
+        if let Some(c) = &w.completion {
+            ext.insert("completion".into(), json!(c));
+        }
+        let mut run = attest::run_of(report, self.attempts);
+        if let Some(basis) = &w.completion {
+            run["basis"] = json!(basis.headline());
+        }
+        // Observed by something the agent does not control.
+        run[Origin::KEY] = json!(Origin::ExternallyObserved.as_str());
+        ext.insert("run".into(), run);
+        ext.insert("commands".into(), attest::commands_of(report));
+        ext.insert(
+            "checksAltered".into(),
+            attest::checks_altered(
+                self.weakened.as_deref(),
+                Some(self.weakened_read),
+                self.weakened_says(),
+            ),
+        );
+        ext.insert("baseChecks".into(), self.base_checks_json());
+        // Not read is said, never rendered as *nobody decided anything*.
+        match &self.decided_by {
+            Some(counts) => {
+                ext.insert(
+                    "permissionsDecidedBy".into(),
+                    attest::permissions_of(counts),
+                );
+            }
+            None => {
+                ext.insert(
+                    "permissionsUnknown".into(),
+                    "The decision log was not read, so who decided this change's tool calls \
+                     is not stated."
+                        .into(),
+                );
+            }
+        }
+        if let Some(spec) = &report.spec {
+            ext.insert("specification".into(), json!(spec));
+        }
+        // An object so the origin rides with the text; absent entirely when
+        // the agent said nothing.
+        if let Some(text) = self.claim {
+            ext.insert(
+                "agentClaim".into(),
+                json!({ Origin::KEY: Origin::SelfReported.as_str(), "text": text }),
+            );
+        }
+        let mut verification = json!({ "steps": self.verification_steps() });
+        if let Some(c) = self.verification_caveat() {
+            verification["caveat"] = json!(c);
+        }
+        ext.insert("verification".into(), verification);
+        ext.insert("rederivable".into(), REDERIVABLE.into());
+        // These bytes carry no signature; a person's is a file beside them.
+        ext.insert("signed".into(), false.into());
+        attest::statement(&w.title, report, self.config_blob.as_deref(), ext)
     }
 
     /// The structured shape as the export carries it: the statement, or an
     /// object that is not one — `{"no_statement": why}`.
     pub fn json(&self) -> serde_json::Value {
         self.statement()
-            .unwrap_or_else(|why| serde_json::json!({ NO_STATEMENT: why }))
+            .unwrap_or_else(|why| serde_json::json!({ NO_STATEMENT: why.says() }))
     }
 
     /// The certificate as a page renders it, every sentence already written, so
@@ -804,11 +834,12 @@ impl Certificate<'_> {
                 "caveat": "The agent\u{2019}s own account, shown beside the outcomes and never in \
                            place of them. Nothing here grades it against the evidence.",
             })),
-            // Unsigned is a position, stated beside the flag; no signing option exists.
+            // Devplane never signs; the person may, with their own key.
             "signing": {
                 "signed": false,
-                "says": "Unsigned on purpose — a signature would attest that this tool wrote \
-                         this, which is not the claim.",
+                "says": format!("Unsigned. Devplane never signs; you can sign the in-toto \
+                                 statement with your own SSH key: devplane change export {} \
+                                 --sign ssh --out <file>", self.change.id.as_str()),
             },
             "limits": LIMITS,
             "rederivable": REDERIVABLE,
@@ -1133,6 +1164,31 @@ pub fn base_checks_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing altered names the agent's controls and the build's inputs too;
+    /// a lockfile row reaches the statement with its kind.
+    #[test]
+    fn the_controls_are_named_in_what_the_change_altered() {
+        assert!(NOTHING_ALTERED.contains("no gate or CI definition edited"));
+        assert!(NOTHING_ALTERED.contains("nothing that governs the agent or the build edited"));
+        let lock = super::super::review::Weakened {
+            path: "Cargo.lock".into(),
+            why: "edits the lockfile `Cargo.lock`: 1 package added (`a` 1.0)".into(),
+            kind: super::super::review::WeakKind::SupplyChain,
+            matched: "changed lines 0".into(),
+        };
+        let rows = std::slice::from_ref(&lock);
+        let says = super::super::review::weakened_sentence(rows).unwrap();
+        let altered = super::super::attest::checks_altered(Some(rows), Some(false), says);
+        assert_eq!(altered["rows"][0]["kind"], "supply_chain", "{altered}");
+        assert!(
+            altered["says"]
+                .as_str()
+                .unwrap()
+                .starts_with("It also edited what governs the agent or what the build trusts"),
+            "{altered}"
+        );
+    }
 
     #[test]
     fn the_four_outcomes_read_differently() {

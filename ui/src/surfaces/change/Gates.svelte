@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { weakKindSays } from "../../lib/weakKind";
+  import type { WeakKind } from "../../wire/WeakKind";
   import NoCheck, { declaresNoCheck } from "../../lib/NoCheck.svelte";
   // Every gate run against this change: each command, exit code, duration and
   // output (its own bytes), and the certificate a reviewer can re-run. The
@@ -30,7 +32,7 @@
     id: string;
     reload?: () => void | Promise<void>;
     certificate?: { finished: boolean; markdown?: string } | null;
-    weakened?: Array<{ path: string; why: string; matched: string; seen: boolean; gate_says?: string | null }>;
+    weakened?: Array<{ path: string; why: string; matched: string; seen: boolean; gate_says?: string | null; kind?: WeakKind }>;
     toLine?: ((path: string) => void) | null;
   } = $props();
 
@@ -88,7 +90,7 @@
          row goes back to its line in the review. -->
     <section class="weakened" aria-label="checks this change weakened">
       {#each weakened as w (w.path + w.matched)}
-        <p><Icon name="alert" size={13} /> <b>check weakened</b> in <button class="line" onclick={() => toLine?.(w.path)}><code>{w.path}</code></button> — <Inline text={w.why} />{#if w.gate_says}; <Inline text={w.gate_says} />{/if} · {w.seen ? "read" : "not yet read"}</p>
+        <p><Icon name="alert" size={13} /> <b>{weakKindSays[w.kind ?? "skip"] ?? "check weakened"}</b> in <button class="line" onclick={() => toLine?.(w.path)}><code>{w.path}</code></button> — <Inline text={w.why} />{#if w.gate_says}; <Inline text={w.gate_says} />{/if} · {w.seen ? "read" : "not yet read"}</p>
       {/each}
     </section>
   {/if}
@@ -143,6 +145,14 @@
         <h2><Icon name="gate" size={14} /> Base checks</h2>
         {#if bc.can_run}<button onclick={runBaseChecks} disabled={asking}><Icon name="play" size={13} /> Run base checks</button>{/if}
       </header>
+      {#if bc.headline}
+        <!-- First: whether the evidence tells this change from its base. Beside verified, never in it. -->
+        <p class="headline w-{bc.headline.weight}">{bc.headline.says}</p>
+        {#if bc.headline.named.length}
+          <ul class="names" aria-label="new tests that fail on the base and pass here">{#each bc.headline.named as n, ni (ni)}<li>{n}</li>{/each}</ul>
+          {#if bc.headline.named_more}<p class="quiet">and {bc.headline.named_more} more — <code>devplane change show {id} --json</code> lists every one</p>{/if}
+        {/if}
+      {/if}
       <p class="counts">{bc.counts_says}</p>
       {#each bc.junit_notes as n, ni (ni)}<p class="w-warn">{n}</p>{/each}
       {#if asked}<p class="said">{asked}</p>{/if}
@@ -354,6 +364,9 @@
   }
   .base p {
     margin: 0;
+  }
+  .base .headline {
+    font-weight: 600;
   }
   .base button {
     display: inline-flex;

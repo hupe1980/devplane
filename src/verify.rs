@@ -281,14 +281,12 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
                     "verdict": verdict.key(),
                 }),
                 base_checks: checks.json(),
+                config_blob: def.file_blob.as_deref(),
             });
         // No tree, no subject, no statement: nothing is written, and the
         // document says why. A *verified* never stands beside a statement
         // that could not be made.
-        let written = statement.map(|st| {
-            let text = serde_json::to_string_pretty(&st).unwrap_or_default();
-            std::fs::write(path, text + "\n")
-        });
+        let written = statement.map(|st| std::fs::write(path, crate::core::attest::serialize(&st)));
         match written {
             Err(why) => {
                 errors.push(format!("{why} Nothing was written to {}.", path.display()));

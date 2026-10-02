@@ -39,6 +39,11 @@ export type BaseChecksView = {
   can_run: boolean;
   certificate: string;
   junit_notes: string[];
+  /// Whether the evidence tells this change from its base: the section's
+  /// first sentence, for a current result.
+  headline?: { says: string; weight: Weight; named: string[]; named_more: number } | null;
+  /// Why the last attempt stopped before any result.
+  did_not_run?: string | null;
   on_change?: {
     says: string;
     weight: Weight;

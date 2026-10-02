@@ -117,6 +117,9 @@ The review leads with **checks weakened or changed**. Each row says what it matc
 | check weakened | added a skip marker (`it.skip(`, `#[ignore`, `@pytest.mark.skip`, …); in a test file, removed an assertion with none in its place, added one that cannot fail (`assert True`, `expect(true)`), or changed a tolerance (`rel=`, `atol=`, `toBeCloseTo(`, …); anywhere but prose, added a lint or type suppression (`@ts-ignore`, `eslint-disable`, `# noqa`, `# type: ignore`, `#[allow(`, `//nolint`) |
 | test deleted | deleted a test file, or removed a test from a file that stays |
 | gate changed | edited what defines passing: `devplane.toml`, CI, `justfile`, `Makefile`, pre-commit, the test runner's, a linter's, the type checker's or coverage configuration, `package.json` scripts, a `Cargo.toml` profile, or a script a declared gate runs — or masked a failure there (`\|\| true`, `continue-on-error: true`, `--skip`, `-k "not`) |
+| agent controls | edited what governs the agent: its hook and settings files, its instructions, its skills or its MCP servers ([the files](#what-governs-the-agent-and-what-the-build-trusts)) |
+| ownership | edited who must review a path: `CODEOWNERS`, or branch protection or a ruleset as code |
+| supply chain | edited what the build trusts: a lockfile (with the packages it added, removed or changed), or a manifest's dependency declarations |
 
 - Only lines the change added or removed count; these are signals from the diff, not verdicts.
 - *Verified* stays the `check` exit. With a weakened row, every surface leads with it:
@@ -127,6 +130,34 @@ The review leads with **checks weakened or changed**. Each row says what it matc
 - Then the files in declared order, each with whether a declared test covers it. The
   [workbench](@/docs/workbench.md#the-review) shows the same review as a diff.
 - Two changes in one repository touching the same files raise `conflict` when either reaches review.
+
+### What governs the agent and what the build trusts
+
+The agent can edit its own hooks, permissions and instructions, and what the build pulls in, as
+easily as it edits a test. These files are read first too, one row per file and kind, each naming the
+file and what it governs. **No row says the edit is good or bad**, nothing is scored, and nothing is
+refused: the offer waits for a person to have read the row, exactly as for a skipped test.
+
+| Kind | Files |
+|---|---|
+| agent controls | `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`, `.codex/hooks.json`, `.codex/config.toml`, `.gemini/settings.json`, any file under `.github/hooks/` (Copilot's repository hooks), `.claude/skills/` or `.agents/skills/` — all at the repository root; `CLAUDE.md` and `AGENTS.md` at any depth |
+| ownership | `CODEOWNERS` at the root, in `.github/` or in `docs/`; `.github/settings.yml`; a hunk of a `.tf` file naming `github_branch_protection`, `github_branch_protection_v3` or `github_repository_ruleset` |
+| supply chain | lockfiles at any depth: `Cargo.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `go.sum`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `Gemfile.lock`, `composer.lock`, `flake.lock`; manifests: any edit to `go.mod`, `Gemfile`, `Pipfile`, `requirements*.txt`, `requirements*.in`, and a hunk of `Cargo.toml`, `package.json`, `pyproject.toml` or `composer.json` that edits its dependency declarations |
+
+- A created, deleted or renamed-away file is a row too. `devplane.toml` stays a **gate changed** row.
+- A lockfile row says how many packages were added, removed, changed version, or changed only their
+  checksum or source, with names (eight per class, then how many more) — read from the diff text,
+  never from a registry. An edit whose package name lies outside the diff's lines is counted as
+  *name not in the diff*. For `bun.lock`, `Pipfile.lock`, `pdm.lock`, `composer.lock`, `flake.lock`,
+  or a lockfile the diff shows no lines of, the row says the counts were not read and why — never
+  *0 packages*.
+- A manifest file can be two rows: a `[lints]` hunk of `Cargo.toml` is **gate changed**, a
+  `[dependencies]` hunk **supply chain**, each read on its own.
+- **Limits.** A script a hook command runs (a `.claude/hooks/check.sh` that `settings.json` names) is
+  not matched by its path: the row is the settings file that names it. Skills are matched at the
+  repository root only. A manifest edit is recognised by its dependency keys and by lines shaped as a
+  dependency declaration; one with neither is not a row (its lockfile, if any, still is). An ignored
+  file is in neither the diff nor the digest, so it is not a row.
 
 ## Offering, finishing, archiving
 
@@ -213,11 +244,66 @@ fingerprint, and whether the change edited a check. Then:
     pnpm test -- --run
 ```
 
-- Unsigned: a reviewer re-runs it without Devplane. It shows the commands ended as recorded against
-  this tree, not that the work is correct.
+- A reviewer re-runs it without Devplane. It shows the commands ended as recorded against this tree,
+  not that the work is correct.
 - It says when it cannot be checked: the commit is on no remote, or the gate ran on uncommitted files.
 - Failed, timed out, never started and could not be collected are distinct; only *failed* is a verdict
   on your code.
+
+### The statement a machine reads
+
+`--json` prints an [in-toto Statement v1](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md)
+whose predicate is the standard
+[Test Result](https://github.com/in-toto/attestation/blob/main/spec/predicates/test-result.md)
+(`https://in-toto.io/attestation/test-result/v0.1`), so a policy that has never heard of Devplane
+can read it:
+
+| Field | What |
+|---|---|
+| `subject[0].digest.gitTree` | the working tree `check` ran on; `gitCommit` beside it only when that tree was clean and committed |
+| `predicate.result` | `PASSED` when every `check` command exited 0, otherwise `FAILED`; never `WARNED`, and nothing else moves it |
+| `predicate.configuration[0]` | the `check` commands that ran, by SHA-256 of each command followed by one NUL byte; `annotations.recompute` is the `printf … \| shasum -a 256` line that reproduces it |
+| `predicate.configuration[1]` | `devplane.toml` by its git blob id, when the checked tree is committed and holds one |
+| `predicate.passedTests`, `failedTests` | the commands, by outcome |
+| `predicate.devplane` | everything Test Result has no field for: the weakened checks (rows, or *unknown* and why), the base checks, each command's exit code and timing, how many tool calls each authority decided, the steps to re-run it, and what it does not establish |
+
+`result` is `check`'s exit codes and nothing more: a weakened check is listed under
+`predicate.devplane.checksAltered`, never folded into the result. Deleting `predicate.devplane`
+leaves a statement that means exactly what it meant. Two exports of an unchanged change are
+byte-identical.
+
+With no tree to name — no `check` has run, the gate ran outside a repository, or the tree moved while
+it ran — there is no statement: the command exits 1 and says why.
+
+```sh
+devplane change export <id> --json --out cert.intoto.json
+```
+
+### Signing it with your own key
+
+Devplane never signs and never makes a key. You can put your name to the statement with the SSH key
+git already signs your commits with:
+
+```sh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub   # once, if you do not sign commits with SSH
+devplane change export <id> --sign ssh --out cert.intoto.json
+```
+
+This writes `cert.intoto.json` and `cert.intoto.json.sig` (both or neither) with
+`ssh-keygen -Y sign` under the namespace `certificate@devplane.dev` — not git's, so the signature
+cannot pass as a commit signature. Only your **global** `user.signingkey` is read: a key or signing
+program set in the repository, where an agent can write, is ignored. Then it prints what a stranger
+runs with nothing but `ssh-keygen`, in the directory holding both files:
+
+```sh
+printf '%s\n' 'you@example.com namespaces="certificate@devplane.dev" ssh-ed25519 AAAA…' > allowed_signers
+ssh-keygen -Y verify -f allowed_signers -I 'you@example.com' -n certificate@devplane.dev -s 'cert.intoto.json.sig' < 'cert.intoto.json'
+```
+
+The allowed-signers line is the key the signature claims; a reader checks it against a copy of your
+public key they obtained themselves, such as the keys your forge lists. Change one byte of the
+statement and the check fails. The statement's own `signed` field stays `false`: the signature is
+the file beside it.
 
 ## The same verdict in CI
 

@@ -6,6 +6,9 @@ mod common;
 
 use common::{git, scratch};
 use devplane::core::certificate::{Certificate, LIMITS, MAX_BYTES, REDERIVABLE};
+
+/// The fixture commit: a full object id, as git prints one.
+const COMMIT: &str = "4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d";
 use devplane::core::change::{
     Change, CommandResult, CommitStamp, Completion, Declared, GateReport, Outcome, Reach,
     SpecStamp, Waiting,
@@ -22,7 +25,7 @@ fn change() -> Change {
 fn stamp(commit: Option<&str>, clean: bool, reach: Reach) -> CommitStamp {
     CommitStamp {
         commit: commit.map(str::to_string),
-        tree: commit.map(|c| format!("tree-of-{c}")),
+        tree: commit.map(tree_of),
         tree_unknown: None,
         branch: Some("change/rate-limiting".into()),
         clean,
@@ -30,6 +33,11 @@ fn stamp(commit: Option<&str>, clean: bool, reach: Reach) -> CommitStamp {
         reach,
         remote: Some("git@github.com:acme/widgets.git".into()),
     }
+}
+
+/// The tree a fixture commit holds: a git object id, distinct from the commit.
+fn tree_of(commit: &str) -> String {
+    format!("{:0>40}", commit.chars().rev().collect::<String>())
 }
 
 fn report(gate: &str, attempt: u32, commands: Vec<CommandResult>) -> GateReport {
@@ -42,7 +50,11 @@ fn report(gate: &str, attempt: u32, commands: Vec<CommandResult>) -> GateReport 
         commands,
         attempt,
         spec: None,
-        commit: Some(stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        commit: Some(stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     }
 }
 
@@ -80,7 +92,11 @@ fn passing() -> Change {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     finished(w, basis)
 }
@@ -91,10 +107,13 @@ fn passing() -> Change {
 fn the_document_names_the_commit_the_commands_and_how_to_run_them() {
     let w = passing();
     let md = cert_of(&w, None).markdown();
-    assert!(md.contains("4f2a9c1e"), "the commit is not named:\n{md}");
+    assert!(
+        md.contains("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        "the commit is not named:\n{md}"
+    );
     assert!(md.contains("cargo test"), "the command is not named");
     assert!(
-        md.contains("git checkout 4f2a9c1e"),
+        md.contains("git checkout 4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
         "no re-derivation step"
     );
     assert!(md.contains("Check this yourself"), "no instructions at all");
@@ -105,11 +124,12 @@ fn both_shapes_report_the_same_commit_and_the_same_outcome() {
     let w = passing();
     let c = cert_of(&w, None);
     let j = c.json();
-    assert_eq!(j["subject"][0]["digest"]["gitCommit"], "4f2a9c1e");
     assert_eq!(
-        j["predicate"]["evidence"]["commands"][0]["outcome"]["code"],
-        0
+        j["subject"][0]["digest"]["gitCommit"],
+        "4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"
     );
+    assert_eq!(j["predicate"]["devplane"]["commands"][0]["exitCode"], 0);
+    assert_eq!(j["predicate"]["result"], "PASSED");
     assert!(c.markdown().contains("exit 0"));
 }
 
@@ -121,7 +141,11 @@ fn the_structured_shape_is_an_in_toto_statement() {
     assert_eq!(j["_type"], "https://in-toto.io/Statement/v1");
     assert_eq!(
         j["predicateType"],
-        "https://devplane.dev/DoneCertificate/v1"
+        "https://in-toto.io/attestation/test-result/v0.1"
+    );
+    assert!(
+        !j.to_string().contains("DoneCertificate"),
+        "the retired predicate: {j}"
     );
     assert!(j["subject"].is_array());
     assert!(j["predicate"].is_object());
@@ -131,16 +155,27 @@ fn the_structured_shape_is_an_in_toto_statement() {
 fn it_says_it_is_unsigned_rather_than_implying_otherwise() {
     // Unsigned: a signature would invite trusting the builder.
     let w = passing();
-    assert_eq!(cert_of(&w, None).json()["predicate"]["signed"], false);
+    let c = cert_of(&w, None);
+    assert_eq!(c.json()["predicate"]["devplane"]["signed"], false);
+    // Devplane never signs; the person may, and the page says how.
+    let says = c.page()["signing"]["says"].as_str().unwrap().to_string();
+    assert!(says.starts_with("Unsigned. Devplane never signs"), "{says}");
+    assert!(says.contains("--sign ssh --out"), "{says}");
+    assert!(!says.contains("on purpose"), "{says}");
 }
 
 #[test]
 fn the_verification_steps_are_data_and_not_only_prose() {
     let w = passing();
     let j = cert_of(&w, None).json();
-    let steps = j["predicate"]["verification"]["steps"].as_array().unwrap();
+    let steps = j["predicate"]["devplane"]["verification"]["steps"]
+        .as_array()
+        .unwrap();
     assert!(steps[0].as_str().unwrap().starts_with("git clone "));
-    assert_eq!(steps[1], "git checkout 4f2a9c1e");
+    assert_eq!(
+        steps[1],
+        "git checkout 4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"
+    );
     assert_eq!(steps[2], "cargo test");
 }
 
@@ -173,7 +208,11 @@ fn the_attempt_says_which_of_how_many() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -219,7 +258,11 @@ fn a_gate_that_ran_outside_a_repository_says_so() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -239,7 +282,11 @@ fn a_repository_with_no_commits_yet_is_a_state_not_a_blank() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let c = cert_of(&w, None);
@@ -257,7 +304,11 @@ fn a_commit_nobody_can_fetch_says_so_where_the_instructions_are() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -286,7 +337,11 @@ fn the_four_reaches_read_differently() {
         let basis = basis_of(
             &w,
             true,
-            Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+            Some(&stamp(
+                Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+                true,
+                Reach::Remote,
+            )),
         );
         let w = finished(w, basis);
         assert!(
@@ -305,7 +360,11 @@ fn a_dirty_tree_is_said_where_the_commit_is() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -413,7 +472,11 @@ fn the_four_outcomes_produce_four_sentences() {
         let basis = basis_of(
             &w,
             true,
-            Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+            Some(&stamp(
+                Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+                true,
+                Reach::Remote,
+            )),
         );
         let w = finished(w, basis);
         assert!(
@@ -439,7 +502,11 @@ fn a_specification_that_was_not_found_is_stated_not_omitted() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -462,7 +529,11 @@ fn unticked_tasks_appear_beside_the_outcome_and_neither_is_judged() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -496,7 +567,11 @@ fn the_four_bases_read_differently_one_at_a_time() {
             gate: "check".into(),
             attempt: 1,
             attempts: 1,
-            ran_at: Some(Box::new(stamp(Some("4f2a9c1e"), true, Reach::Remote))),
+            ran_at: Some(Box::new(stamp(
+                Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+                true,
+                Reach::Remote,
+            ))),
             now: Some(Box::new(stamp(Some("b7c2ffff"), true, Reach::Remote))),
             at,
         },
@@ -557,7 +632,11 @@ fn a_failing_gate_cannot_produce_a_gates_passed_basis() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     assert!(
         matches!(basis, Completion::ByHand { .. }),
@@ -602,7 +681,9 @@ fn every_rederivable_field_is_named_in_both_shapes_from_one_list() {
     let c = cert_of(&w, None);
     let md = c.markdown();
     let j = c.json();
-    let listed = j["predicate"]["rederivable"].as_array().unwrap();
+    let listed = j["predicate"]["devplane"]["rederivable"]
+        .as_array()
+        .unwrap();
     assert_eq!(listed.len(), REDERIVABLE.len());
     for f in REDERIVABLE {
         assert!(
@@ -681,7 +762,11 @@ fn the_artifact_is_bounded_and_says_that_it_truncated() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown_bounded();
@@ -703,7 +788,11 @@ fn untrusted_text_cannot_restructure_the_document() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let c = cert_of(&w, None);
@@ -735,7 +824,7 @@ fn untrusted_text_cannot_restructure_the_document() {
         );
     }
     assert!(md.contains("Fake heading"));
-    assert_eq!(c.json()["predicate"]["change"]["title"], nasty);
+    assert_eq!(c.json()["predicate"]["devplane"]["change"]["title"], nasty);
 }
 
 /// Numbered lines outside fenced blocks; a fence closes on a run of equal or
@@ -766,7 +855,11 @@ fn a_fence_in_the_verification_block_cannot_close_it() {
     let basis = basis_of(
         &w,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let w = finished(w, basis);
     let md = cert_of(&w, None).markdown();
@@ -888,7 +981,11 @@ fn every_shape_of_change_gets_a_basis() {
     ));
     cases.push(hung);
 
-    let here = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    let here = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
     for w in &cases {
         for declares in [true, false] {
             for now in [None, Some(&here)] {
@@ -904,7 +1001,11 @@ fn every_shape_of_change_gets_a_basis() {
 #[test]
 fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
     let w = passing();
-    let here = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    let here = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
 
     assert!(
         matches!(
@@ -924,13 +1025,17 @@ fn a_gate_that_passed_on_a_commit_that_moved_on_is_no_longer_a_pass() {
     assert!(!basis.is_checked());
     let said = basis.headline();
     assert!(
-        said.contains("tree-of") && said.contains("changed after"),
+        said.contains(&tree_of(COMMIT)[..7]) && said.contains("changed after"),
         "{said}"
     );
     assert!(!said.contains("did not pass"), "{said}");
 
     // Dirty alone is not stale: the same working-tree digest is the same tree.
-    let dirty = stamp(Some("4f2a9c1e"), false, Reach::Remote);
+    let dirty = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        false,
+        Reach::Remote,
+    );
     assert!(matches!(
         basis_of(&w, true, Some(&dirty)),
         Completion::GatesPassed { .. }
@@ -1087,18 +1192,33 @@ fn the_statement_is_about_the_tree_and_names_the_commit_only_when_clean() {
         let w = finished(w, basis);
         cert_of(&w, None).json()
     };
-    let j = subject_of(stamp(Some("4f2a9c1e"), true, Reach::Remote));
-    assert_eq!(j["subject"][0]["digest"]["gitTree"], "tree-of-4f2a9c1e");
-    assert_eq!(j["subject"][0]["digest"]["gitCommit"], "4f2a9c1e");
+    let j = subject_of(stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    ));
+    assert_eq!(j["subject"][0]["digest"]["gitTree"], tree_of(COMMIT));
+    assert_eq!(
+        j["subject"][0]["digest"]["gitCommit"],
+        "4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"
+    );
 
-    let j = subject_of(stamp(Some("4f2a9c1e"), false, Reach::Remote));
-    assert_eq!(j["subject"][0]["digest"]["gitTree"], "tree-of-4f2a9c1e");
+    let j = subject_of(stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        false,
+        Reach::Remote,
+    ));
+    assert_eq!(j["subject"][0]["digest"]["gitTree"], tree_of(COMMIT));
     assert!(
         j["subject"][0]["digest"].get("gitCommit").is_none(),
         "a commit that is not the tree named as the subject: {j}"
     );
 
-    let mut none = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    let mut none = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
     none.tree = None;
     none.tree_unknown = Some("`check` moved the tree: coverage.xml".into());
     let j = subject_of(none);
@@ -1155,11 +1275,23 @@ fn a_statement_always_has_a_subject_and_only_the_four_statement_fields() {
         let c = cert_of(&w, None);
         (c.statement(), c.json())
     };
-    let mut dirty = stamp(Some("4f2a9c1e"), false, Reach::LocalOnly);
+    let mut dirty = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        false,
+        Reach::LocalOnly,
+    );
     dirty.changed_files = 2;
     for s in [
-        stamp(Some("4f2a9c1e"), true, Reach::Remote),
-        stamp(Some("4f2a9c1e"), true, Reach::NoRemote),
+        stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        ),
+        stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::NoRemote,
+        ),
         dirty,
     ] {
         let (st, j) = of(Some(s));
@@ -1168,9 +1300,17 @@ fn a_statement_always_has_a_subject_and_only_the_four_statement_fields() {
         assert_eq!(st, j);
     }
 
-    let mut no_tree = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    let mut no_tree = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
     no_tree.tree = None;
-    let mut empty_tree = stamp(Some("4f2a9c1e"), true, Reach::Remote);
+    let mut empty_tree = stamp(
+        Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+        true,
+        Reach::Remote,
+    );
     empty_tree.tree = Some(String::new());
     for (s, says) in [
         (Some(no_tree), "no working-tree digest was recorded"),
@@ -1178,7 +1318,7 @@ fn a_statement_always_has_a_subject_and_only_the_four_statement_fields() {
         (None, "no gate ran in a repository"),
     ] {
         let (st, j) = of(s);
-        let why = st.expect_err("no tree makes no statement");
+        let why = st.expect_err("no tree makes no statement").says();
         assert!(why.contains(says), "{why}");
         assert_eq!(j, serde_json::json!({ NO_STATEMENT: why }));
     }
@@ -1219,18 +1359,18 @@ fn the_certificate_says_where_its_predicate_came_from_and_never_defaults_it() {
     let w = passing();
     let cert = cert_of(&w, Some("I added rate limiting and it all works."));
     let j = cert.json();
-    let predicate = &j["predicate"];
+    let predicate = &j["predicate"]["devplane"];
 
     assert_eq!(
-        predicate["evidence"][key], "externally_observed",
+        predicate["run"][key], "externally_observed",
         "a gate transcript is the one thing here that is not the agent's word"
     );
     assert_eq!(
-        predicate["agent_claim"][key], "self_reported",
+        predicate["agentClaim"][key], "self_reported",
         "the agent's account has to say that is what it is"
     );
     assert_eq!(
-        predicate["agent_claim"]["text"], "I added rate limiting and it all works.",
+        predicate["agentClaim"]["text"], "I added rate limiting and it all works.",
         "the claim itself still travels"
     );
 
@@ -1248,13 +1388,12 @@ fn the_certificate_says_where_its_predicate_came_from_and_never_defaults_it() {
     let none = cert_of(&bare, None);
     let jn = none.json();
     assert!(
-        jn["predicate"]["evidence"].is_null(),
-        "no gate ran, so there is no evidence to carry an origin"
+        jn.get("predicate").is_none() && jn["no_statement"].is_string(),
+        "no gate ran, so there is no evidence to attest and no origin to carry: {jn}"
     );
-    assert!(
-        jn["predicate"]["agent_claim"].is_null(),
-        "the agent said nothing, which is not the same as saying something unverified"
-    );
+    // A claim with no gate run is no statement either: a claim is never evidence.
+    let claimed = cert_of(&bare, Some("all done"));
+    assert!(claimed.json().get("predicate").is_none());
     assert!(
         !none.markdown().contains(key),
         "an origin appeared on a certificate that has no evidence and no claim"
@@ -1369,20 +1508,19 @@ fn the_certificate_carries_the_tree_digest_beside_the_commit() {
     let w = passing();
     let c = cert_of(&w, None);
     let md = c.markdown();
-    let at_commit = md.find("4f2a9c1e").expect("the commit is named");
+    let at_commit = md
+        .find("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d")
+        .expect("the commit is named");
     let at_tree = md
-        .find("tree-of-4f2a9c1e")
+        .find(&tree_of(COMMIT))
         .expect("the tree digest is not on the certificate");
     assert!(
         at_tree.abs_diff(at_commit) < 80,
         "the tree is nowhere near the commit it belongs to"
     );
-    assert_eq!(
-        c.json()["predicate"]["evidence"]["commit"]["tree"],
-        "tree-of-4f2a9c1e"
-    );
+    assert_eq!(c.json()["subject"][0]["digest"]["gitTree"], tree_of(COMMIT));
     assert!(
-        REDERIVABLE.contains(&"evidence.commit.tree"),
+        REDERIVABLE.contains(&"subject[0].digest.gitTree"),
         "a digest git produces is one a reader can re-derive"
     );
 
@@ -1417,7 +1555,11 @@ fn the_certificate_offers_no_flag_the_cli_does_not_have() {
     let basis = basis_of(
         &huge,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let huge = finished(huge, basis);
     let corpus = [
@@ -1460,8 +1602,8 @@ fn the_certificate_offers_no_flag_the_cli_does_not_have() {
         );
     }
     assert!(
-        !corpus.contains("--sign"),
-        "`--sign` is offered again, and there is no such flag"
+        flags.contains("--sign") && flags.contains("--out"),
+        "the page no longer says how a person signs: {flags:?}"
     );
 }
 
@@ -2070,7 +2212,11 @@ fn the_certificate_ends_with_its_link_and_the_command() {
     let basis = basis_of(
         &huge,
         true,
-        Some(&stamp(Some("4f2a9c1e"), true, Reach::Remote)),
+        Some(&stamp(
+            Some("4f2a9c1e0b7d3a5c9e1f2a4b6c8d0e2f4a6b8c0d"),
+            true,
+            Reach::Remote,
+        )),
     );
     let huge = finished(huge, basis);
     let (hlink, hshow) = lines(&huge);

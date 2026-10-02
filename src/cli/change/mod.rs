@@ -81,7 +81,12 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
         } => start::cmd_adopt(branch, project, spec, title, json).await,
         ChangeCmd::List => read::cmd_list(json).await,
         ChangeCmd::Show { change } => read::cmd_show(&change, json).await,
-        ChangeCmd::Export { change } => read::cmd_export(&change, json).await,
+        ChangeCmd::Export {
+            change,
+            out,
+            force,
+            sign,
+        } => read::cmd_export(&change, json, out.as_deref(), force, sign.is_some()).await,
         ChangeCmd::Review { change, seen, .. } if !seen.is_empty() => {
             review::cmd_mark_seen(&change, &seen, json).await
         }

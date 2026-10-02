@@ -6,6 +6,13 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Added
 
+- The weakened group reads what governs the agent and what the build trusts: an edit to the agent's
+  hook and settings files, `CLAUDE.md`/`AGENTS.md`, skills or MCP configuration (*agent controls*), to
+  `CODEOWNERS` or branch protection as code (*ownership*), or to a lockfile or a manifest's
+  dependencies (*supply chain*) is a row read before the green, counted by kind beside *verified*, in
+  the certificate and in `devplane verify`'s first section, and holds the offer until a person has
+  read it. A lockfile row says which packages were added, removed or changed; no row says the edit is
+  good or bad, and none changes an exit code.
 - The desktop app as packages: a disk image for Apple Silicon Macs, a per-user Windows installer, a
   `.deb` that declares its WebKitGTK dependency and an AppImage that carries its own, each with a
   `.sha256` and registering `devplane://`. Signed and notarised when the release has the signing

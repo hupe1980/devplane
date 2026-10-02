@@ -134,6 +134,28 @@ fn started_from(host_exe: Option<&str>, mine: Option<&str>) -> Option<String> {
     (theirs != mine).then(|| format!("started from {theirs}"))
 }
 
+/// The project here: each `[gates] junit` path git does not ignore, as a
+/// sentence naming it. Writing such a file moves the tree `check` is judged
+/// against, so `check` never settles on one tree. Empty outside a project.
+pub(crate) async fn junit_not_ignored(dir: &std::path::Path) -> Vec<String> {
+    let Some(root) = crate::git::toplevel(dir).await else {
+        return Vec::new();
+    };
+    let Ok(config) = crate::core::ProjectConfig::load(&root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for path in &config.gates.junit {
+        if crate::git::is_ignored(&root, path).await == Some(false) {
+            out.push(format!(
+                "`{path}` ([gates] junit) is not ignored by git, so writing it moves the tree \
+                 `check` is judged against — add it to .gitignore"
+            ));
+        }
+    }
+    out
+}
+
 pub async fn cmd_doctor(json: bool) -> Result<()> {
     let settings_path = crate::observe::connect::settings_path()?;
     let settings = crate::observe::connect::read_settings(&settings_path).unwrap_or_default();
@@ -155,6 +177,8 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
     let app = app_section();
     // Every connected vendor whose hooks run a binary that is gone.
     let gate_off = crate::observe::connect::gate_off();
+    let here = std::env::current_dir().unwrap_or_default();
+    let junit = junit_not_ignored(&here).await;
     if json {
         println!(
             "{}",
@@ -184,6 +208,7 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
                 "github": super::github::doctor_hosts(diag.as_ref().map(|d| &d.forge.github)).0,
                 "diagnostics": diag,
                 "only_gate": provider,
+                "junit_not_ignored": junit,
             }))?
         );
         return Ok(());
@@ -414,6 +439,14 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
             e
         ),
         (None, _) => println!("  telemetry {}", paint(render::RED, "not configured")),
+    }
+
+    // The project here: a JUnit path git does not ignore, by name.
+    if !junit.is_empty() {
+        println!("\n{}", paint(BOLD, "this project"));
+        for line in &junit {
+            println!("  junit     {}", paint(render::YELLOW, line));
+        }
     }
 
     // GitHub: its own section, per host, whether or not a host runs.

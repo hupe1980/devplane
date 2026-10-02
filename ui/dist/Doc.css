@@ -729,6 +729,9 @@
   .base.svelte-wqjyvl p:where(.svelte-wqjyvl) {
     margin: 0;
   }
+  .base.svelte-wqjyvl .headline:where(.svelte-wqjyvl) {
+    font-weight: 600;
+  }
   .base.svelte-wqjyvl button:where(.svelte-wqjyvl) {
     display: inline-flex;
     align-items: center;

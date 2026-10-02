@@ -1233,6 +1233,42 @@ impl Store {
         Ok((decisions, u32::try_from(waited).unwrap_or(u32::MAX)))
     }
 
+    /// How many of a change's tool calls each authority decided: rows about
+    /// the change or one of its `runs` that name a tool (Devplane's own acts,
+    /// a push or a pull request, name none). Unknown authority text is not
+    /// counted, never defaulted. Counts only — no name, no time.
+    pub async fn authority_counts(
+        &self,
+        change: &crate::core::ChangeId,
+        runs: &[RunId],
+    ) -> Result<std::collections::BTreeMap<crate::core::Authority, u32>> {
+        // A decision counts once, however many of its keys match: collected
+        // by row id across the change and each of its runs.
+        let mut seen = std::collections::HashMap::new();
+        let ids = std::iter::once(change.as_str()).chain(runs.iter().map(RunId::as_str));
+        for id in ids {
+            let rows = sqlx::query(
+                "SELECT rowid AS seq, authority FROM decisions
+                  WHERE tool IS NOT NULL AND (change_id = ?1 OR run_id = ?1)",
+            )
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in rows {
+                let seq: i64 = row.get("seq");
+                let a: String = row.get("authority");
+                seen.insert(seq, a);
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        for a in seen.values() {
+            if let Some(a) = crate::core::Authority::parse(a) {
+                *out.entry(a).or_insert(0u32) += 1;
+            }
+        }
+        Ok(out)
+    }
+
     /// The decision log, newest first, optionally about one run or change.
     pub async fn decisions(
         &self,

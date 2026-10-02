@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Transcribed by hand from the in-toto Attestation Framework, which publishes no JSON Schema: https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md (fetched 2026-10-02), https://github.com/in-toto/attestation/blob/main/spec/v1/digest_set.md and https://github.com/in-toto/attestation/blob/main/spec/v1/resource_descriptor.md (fetched 2026-09-27).",
+  "title": "in-toto Statement v1",
+  "type": "object",
+  "required": ["_type", "subject", "predicateType"],
+  "properties": {
+    "_type": { "const": "https://in-toto.io/Statement/v1" },
+    "subject": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/ResourceDescriptor" },
+          { "type": "object", "required": ["digest"] }
+        ]
+      }
+    },
+    "predicateType": { "type": "string", "pattern": "^[a-z][a-z0-9+.-]*:" },
+    "predicate": { "type": "object" }
+  },
+  "$defs": {
+    "DigestSet": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "gitCommit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "gitTree": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "gitBlob": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "gitTag": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]+$" }
+    },
+    "ResourceDescriptor": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "uri": { "type": "string" },
+        "digest": { "$ref": "#/$defs/DigestSet" },
+        "downloadLocation": { "type": "string" },
+        "mediaType": { "type": "string" },
+        "annotations": { "type": "object" }
+      },
+      "anyOf": [
+        { "required": ["uri"] },
+        { "required": ["digest"] },
+        { "required": ["content"] }
+      ]
+    }
+  }
+}

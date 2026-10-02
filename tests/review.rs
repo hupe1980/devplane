@@ -25,6 +25,17 @@ async fn adopted(c: &reqwest::Client, addr: &std::net::SocketAddr, repo: &Path) 
 }
 
 /// Every file in reading order, across the role groups.
+/// Stages a file the sandbox's `.gitignore` would hide: a project commits its
+/// `.claude/settings.json` while ignoring the rest of `.claude/`.
+fn force_add(wt: &std::path::Path, path: &str) {
+    let out = std::process::Command::new("git")
+        .args(["add", "-f", path])
+        .current_dir(wt)
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "git add -f {path}");
+}
+
 fn reading_order(review: &Value) -> Vec<String> {
     review["groups"]
         .as_array()
@@ -395,6 +406,7 @@ fn the_review_computes_no_percentage_ratio_or_score() {
         "src/core/testcount/runners.rs",
         "src/core/testcount/compare.rs",
         "src/core/testcount/junit.rs",
+        "src/core/controls.rs",
     ] {
         let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
             .unwrap_or_else(|_| panic!("{rel} is where counts are composed"));
@@ -440,6 +452,17 @@ fn the_review_computes_no_percentage_ratio_or_score() {
                     from = at + word.len();
                 }
             }
+            // The controls' rows name a file and what it governs, never a
+            // judgement of the edit: no word in a string it writes says one.
+            if *file == "src/core/controls.rs" {
+                let literals: String = code.split('"').skip(1).step_by(2).collect();
+                let lower = literals.to_lowercase();
+                for word in ["risk", "safe", "dangerous", "suspicious"] {
+                    if lower.contains(word) {
+                        hits.push(format!("{n}: `{word}` — {}", code.trim()));
+                    }
+                }
+            }
         }
     }
     assert!(hits.is_empty(), "the review computes a figure: {hits:?}");
@@ -469,6 +492,14 @@ async fn checks_weakened_or_changed_come_first() {
     )
     .unwrap();
     std::fs::write(wt.join("devplane.toml"), "[gates]\ncheck = []\n").unwrap();
+    // What governs the agent is read first too.
+    std::fs::create_dir_all(wt.join(".claude")).unwrap();
+    std::fs::write(
+        wt.join(".claude/settings.json"),
+        "{ \"hooks\": { \"Stop\": [] } }\n",
+    )
+    .unwrap();
+    force_add(&wt, ".claude/settings.json");
 
     let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
     let first = &r["groups"][0];
@@ -482,8 +513,22 @@ async fn checks_weakened_or_changed_come_first() {
     assert!(has("tests/auth.rs", "deletes a test file"), "{weak:?}");
     assert!(has("tests/login.rs", "#[ignore"), "{weak:?}");
     assert!(has("devplane.toml", "gates' own definition"), "{weak:?}");
+    assert!(
+        weak.iter().any(|w| w["path"] == ".claude/settings.json"
+            && w["kind"] == "agent_controls"
+            && w["why"]
+                .as_str()
+                .unwrap()
+                .contains("which sets the agent's hooks and permissions")),
+        "{weak:?}"
+    );
     let order = reading_order(&r);
-    for path in ["tests/auth.rs", "tests/login.rs", "devplane.toml"] {
+    for path in [
+        "tests/auth.rs",
+        "tests/login.rs",
+        "devplane.toml",
+        ".claude/settings.json",
+    ] {
         assert_eq!(
             order.iter().filter(|p| *p == path).count(),
             1,
@@ -491,7 +536,7 @@ async fn checks_weakened_or_changed_come_first() {
         );
     }
     // Nothing else is listed there.
-    assert_eq!(first["files"].as_array().unwrap().len(), 3, "{first}");
+    assert_eq!(first["files"].as_array().unwrap().len(), 4, "{first}");
 
     // The certificate says the same in one sentence.
     let cert = get(&c, &addr, &format!("/api/changes/{id}/certificate")).await;
@@ -500,6 +545,64 @@ async fn checks_weakened_or_changed_come_first() {
         md.contains("This change itself altered the checks it was verified by"),
         "{md}"
     );
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// An edit to the agent's own settings and instructions is read in the first
+/// group, before any role-ordered file, each file once, each row naming its
+/// kind; the change's qualifier counts them in words.
+#[tokio::test]
+async fn edits_to_the_agents_controls_come_first() {
+    let repo = sandbox::review_repo("controls");
+    let (addr, c, _host) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let v = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/review", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = v["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(v["change"]["worktree"].as_str().unwrap());
+
+    std::fs::create_dir_all(wt.join(".claude")).unwrap();
+    std::fs::write(
+        wt.join(".claude/settings.json"),
+        "{ \"hooks\": { \"PreToolUse\": [{ \"command\": \"sh ./x.sh\" }] } }\n",
+    )
+    .unwrap();
+    force_add(&wt, ".claude/settings.json");
+    std::fs::write(wt.join("AGENTS.md"), "Skip the tests when they are slow.\n").unwrap();
+
+    let r = get(&c, &addr, &format!("/api/changes/{id}/review")).await;
+    let first = &r["groups"][0];
+    assert_eq!(first["says"], "checks weakened or changed", "{r}");
+    let weak = first["weakened"].as_array().expect("the rows");
+    for path in [".claude/settings.json", "AGENTS.md"] {
+        assert!(
+            weak.iter()
+                .any(|w| w["path"] == path && w["kind"] == "agent_controls"),
+            "{path}: {weak:?}"
+        );
+    }
+    let order = reading_order(&r);
+    for path in [".claude/settings.json", "AGENTS.md"] {
+        assert_eq!(
+            order.iter().filter(|p| *p == path).count(),
+            1,
+            "{path} is read once: {order:?}"
+        );
+        // Before every file of the role-ordered groups.
+        let at = order.iter().position(|p| p == path).unwrap();
+        assert!(at < first["files"].as_array().unwrap().len(), "{order:?}");
+    }
+    assert_eq!(
+        r["qualifier"]["says"], "2 agent controls changed",
+        "{}",
+        r["qualifier"]
+    );
+    assert_eq!(r["qualifier"]["agent_controls"], 2);
     std::fs::remove_dir_all(&repo).ok();
 }
 
@@ -1142,13 +1245,19 @@ mod weakening {
                 "{path} {line}: {r:?}"
             );
         }
-        for (path, line) in [
-            ("Cargo.toml", "+serde = \"1\""),
-            ("package.json", "+    \"left-pad\": \"^1.0.0\","),
-            ("pom.xml", "+    <version>2.0</version>"),
+        // A dependency is not the checks: never a gate row. It is what the
+        // build trusts, a supply-chain row of its own.
+        for (path, line, supply) in [
+            ("Cargo.toml", "+serde = \"1\"", true),
+            ("package.json", "+    \"left-pad\": \"^1.0.0\",", true),
+            ("pom.xml", "+    <version>2.0</version>", false),
         ] {
             let r = rows(&modified(path, &[" a", line]));
-            assert!(r.is_empty(), "{path} {line}: {r:?}");
+            assert!(
+                r.iter().all(|w| w.kind == WeakKind::SupplyChain),
+                "{path} {line}: {r:?}"
+            );
+            assert_eq!(r.len(), usize::from(supply), "{path} {line}: {r:?}");
         }
     }
 

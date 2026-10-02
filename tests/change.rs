@@ -406,31 +406,39 @@ async fn a_finished_change_exports_a_certificate_a_stranger_could_check() {
 
     // Committed, clean, and unchanged since the gate ran: the one passing basis.
     assert_eq!(
-        st["predicate"]["completion"]["basis"], "gates_passed",
+        st["predicate"]["devplane"]["completion"]["basis"], "gates_passed",
         "{}",
-        st["predicate"]["completion"]
+        st["predicate"]["devplane"]["completion"]
     );
-    assert_eq!(st["predicate"]["evidence"]["passed"], true);
+    assert_eq!(
+        st["predicateType"],
+        "https://in-toto.io/attestation/test-result/v0.1"
+    );
+    assert_eq!(st["predicate"]["result"], "PASSED");
     assert!(md.contains("gates passed"), "{md}");
-    let tree = st["predicate"]["evidence"]["commit"]["tree"]
+    let tree = st["subject"][0]["digest"]["gitTree"]
         .as_str()
         .expect("no tree digest was stamped by the code that actually runs");
     assert_eq!(tree.len(), 40, "not a full object id: {tree}");
     assert_ne!(tree, sha);
     assert!(md.contains(tree), "the document does not carry the tree");
 
-    let steps = st["predicate"]["verification"]["steps"].as_array().unwrap();
+    let ext = &st["predicate"]["devplane"];
+    let steps = ext["verification"]["steps"].as_array().unwrap();
     assert_eq!(steps[0], format!("git checkout {sha}"));
-    for cmd in st["predicate"]["evidence"]["commands"].as_array().unwrap() {
+    for cmd in ext["commands"].as_array().unwrap() {
         assert!(
-            cmd["outcome"]["outcome"].is_string(),
+            cmd["outcome"].is_string(),
             "a command with no structured outcome: {cmd}"
         );
-        assert!(cmd["output_digest"].as_str().is_some_and(|d| d.len() == 16));
+        assert!(cmd["outputDigest"].as_str().is_some_and(|d| d.len() == 16));
     }
+    // The committed devplane.toml, named by its blob, beside the commands.
+    assert_eq!(st["predicate"]["configuration"][1]["name"], "devplane.toml");
+    assert!(ext["permissionsDecidedBy"].is_object(), "{ext}");
 
     assert!(md.contains("not evidence that the work is correct"), "{md}");
-    let caveat = &st["predicate"]["verification"]["caveat"];
+    let caveat = &st["predicate"]["devplane"]["verification"]["caveat"];
     assert!(
         caveat.is_string(),
         "a scratch repository has no remote, so the certificate owes the reader a caveat"
@@ -3021,7 +3029,7 @@ async fn an_adopted_branch_certifies_exactly_like_a_started_one() {
         "the history is git's: {adopted_cert}"
     );
     assert_eq!(
-        adopted_cert["statement"]["predicate"]["specification"]["tasks_total"], 2,
+        adopted_cert["statement"]["predicate"]["devplane"]["specification"]["tasks_total"], 2,
         "the specification travelled onto the certificate: {adopted_cert}"
     );
 
@@ -3116,13 +3124,17 @@ async fn an_adopted_branch_certifies_exactly_like_a_started_one() {
         keys(&started_cert["statement"]["predicate"])
     );
     assert_eq!(
-        keys(&adopted_cert["statement"]["predicate"]["evidence"]),
-        keys(&started_cert["statement"]["predicate"]["evidence"])
+        keys(&adopted_cert["statement"]["predicate"]["devplane"]),
+        keys(&started_cert["statement"]["predicate"]["devplane"])
+    );
+    assert_eq!(
+        keys(&adopted_cert["statement"]["predicate"]["devplane"]["run"]),
+        keys(&started_cert["statement"]["predicate"]["devplane"]["run"])
     );
     assert_eq!(keys(&adopted_cert["page"]), keys(&started_cert["page"]));
     assert_eq!(
-        adopted_cert["statement"]["predicate"]["completion"]["basis"],
-        started_cert["statement"]["predicate"]["completion"]["basis"],
+        adopted_cert["statement"]["predicate"]["devplane"]["completion"]["basis"],
+        started_cert["statement"]["predicate"]["devplane"]["completion"]["basis"],
         "both rest on the same basis"
     );
     std::fs::remove_dir_all(&repo).ok();
@@ -4933,6 +4945,156 @@ async fn an_offer_waits_for_every_weakened_row_to_be_seen() {
     );
     let text = offer.to_string();
     assert!(!text.contains(" of ") && !text.contains('%'), "{offer}");
+    std::fs::remove_dir_all(&repo).ok();
+}
+
+/// The hand-made branch on a base that commits the agent's settings and a
+/// lockfile; the branch adds a hook and a package whose name carries markup.
+fn branch_that_edits_controls(repo: &Path, branch: &str) {
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    };
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::write(
+        repo.join(".claude/settings.json"),
+        "{\n  \"hooks\": {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "the agent's settings and a lockfile"]);
+    hand_made_branch(repo, branch);
+    git(&["checkout", "-q", branch]);
+    std::fs::write(
+        repo.join(".claude/settings.json"),
+        "{\n  \"hooks\": {\n    \"PreToolUse\": [{ \"command\": \"sh ./x.sh\" }]\n  }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n\n[[package]]\nname = \"evil`pkg <b>\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "add a hook and a package"]);
+    git(&["checkout", "-q", "main"]);
+}
+
+/// An edit to the agent's settings and to a lockfile holds the offer like any
+/// weakened row: refused naming both with their kinds, released only by a
+/// person's marks, and a further edit is unseen again.
+#[tokio::test]
+async fn an_offer_waits_for_an_edited_agent_control_and_lockfile() {
+    let repo = scratch_repo("offer-controls", "escalate", 1);
+    branch_that_edits_controls(&repo, "feat/controls");
+    let (addr, c, _state) = boot().await;
+    trust(&c, &addr, &repo).await;
+    let adopted = post(
+        &c,
+        &addr,
+        "/api/changes/adopt",
+        serde_json::json!({ "branch": "feat/controls", "project": repo.to_string_lossy() }),
+    )
+    .await;
+    let id = adopted["change_id"].as_str().unwrap().to_string();
+    let wt = PathBuf::from(adopted["change"]["worktree"].as_str().unwrap());
+    post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+
+    let row = change_row(&c, &addr, &id).await;
+    assert_eq!(row["state"], "verified", "{row}");
+    assert_eq!(
+        row["qualifier"]["says"], "1 agent control changed · 1 supply-chain file changed",
+        "{row}"
+    );
+    assert_eq!(row["qualifier"]["unseen"], 2, "{row}");
+
+    let kinds = |offer: &Value| -> Vec<(String, String)> {
+        let mut k: Vec<(String, String)> = offer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["path"].as_str().unwrap().to_string(),
+                    r["kind"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        k.sort();
+        k
+    };
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(offer["refused"], "weakened_unseen", "{offer}");
+    assert_eq!(
+        kinds(&offer),
+        [
+            (".claude/settings.json".into(), "agent_controls".into()),
+            ("Cargo.lock".into(), "supply_chain".into()),
+        ],
+        "{offer}"
+    );
+    // The planted name is data: carried verbatim, never interpreted here.
+    let lock = offer["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == "Cargo.lock")
+        .unwrap();
+    assert_eq!(
+        lock["why"], "edits the lockfile `Cargo.lock`: 1 package added (`evil`pkg <b>` 0.1.0)",
+        "{offer}"
+    );
+    assert!(change_row(&c, &addr, &id).await["pull_request"].is_null());
+
+    let mark = |path: &'static str| {
+        let (c, addr, id) = (c.clone(), addr, id.clone());
+        async move {
+            post(
+                &c,
+                &addr,
+                &format!("/api/changes/{id}/review/seen"),
+                serde_json::json!({ "path": path }),
+            )
+            .await
+        }
+    };
+    mark(".claude/settings.json").await;
+    let one = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(one["refused"], "weakened_unseen", "{one}");
+    assert_eq!(
+        kinds(&one),
+        [("Cargo.lock".into(), "supply_chain".into())],
+        "{one}"
+    );
+
+    // The settings edited again: a different row, unseen.
+    std::fs::write(
+        wt.join(".claude/settings.json"),
+        "{\n  \"hooks\": {\n    \"PreToolUse\": [{ \"command\": \"sh ./y.sh\" }]\n  }\n}\n",
+    )
+    .unwrap();
+    commit_in(&wt, "another hook");
+    let again = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(again["refused"], "weakened_unseen", "{again}");
+    assert!(
+        kinds(&again).contains(&(".claude/settings.json".into(), "agent_controls".into())),
+        "{again}"
+    );
+
+    mark(".claude/settings.json").await;
+    mark("Cargo.lock").await;
+    post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
+    let offer = post(&c, &addr, &format!("/api/changes/{id}/offer"), Value::Null).await;
+    assert_eq!(offer["offer"], "commands", "{offer}");
     std::fs::remove_dir_all(&repo).ok();
 }
 

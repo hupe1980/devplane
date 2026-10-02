@@ -139,7 +139,10 @@ pub async fn cmd_gate_run(cwd: Option<PathBuf>, name: Option<String>, json: bool
                 "{}{}{}",
                 render::pad(&paint(colour, label), 10),
                 render::pad(&c.command, 24),
-                paint(DIM, &c.outcome.headline())
+                paint(
+                    DIM,
+                    &format!("{} · {}", c.outcome.headline(), c.tests.says())
+                )
             );
         }
         println!();

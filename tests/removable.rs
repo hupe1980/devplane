@@ -267,13 +267,113 @@ fn check_home_contents(s: &Sandbox) -> Check {
     }
 }
 
+/// No throwaway checkout of base checks outlives its pair: neither git nor
+/// the file system holds one once Devplane is gone.
+fn check_no_base_checkout(s: &Sandbox) -> Check {
+    let name = "no base-check checkout survives";
+    let out = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&s.repo)
+        .output();
+    let Some(out) = out.ok().filter(|o| o.status.success()) else {
+        return Check {
+            name,
+            outcome: Outcome::Skipped {
+                why: "git could not list the worktrees, so nothing was checked".into(),
+            },
+        };
+    };
+    let listed = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.contains(".devplane-base-"))
+        .map(|l| l.trim_start_matches("worktree ").to_string())
+        .collect::<Vec<_>>();
+    let on_disk = std::fs::read_dir(s.repo.join(".claude/worktrees"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(".devplane-base-"))
+        .collect::<Vec<_>>();
+    let left: Vec<String> = listed.into_iter().chain(on_disk).collect();
+    Check {
+        name,
+        outcome: match left.is_empty() {
+            true => Outcome::Passed,
+            false => Outcome::Finding {
+                subject: left.join(", "),
+                detail: "is a base-check checkout that outlived its pair".into(),
+            },
+        },
+    }
+}
+
 /// The checks that run once Devplane is gone (the home is checked before).
 fn run_all(s: &Sandbox) -> Vec<Check> {
     vec![
         check_gates(s),
         check_spec_folder(s),
         check_no_home_references(s),
+        check_no_base_checkout(s),
     ]
+}
+
+/// Base checks ran in a throwaway checkout — `devplane verify` on a branch
+/// that edits a test — and none is left once Devplane is gone.
+#[test]
+fn no_base_checkout_survives_base_checks() {
+    let s = Sandbox::new(Shape::Full);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&s.repo)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["checkout", "-q", "-b", "feat/tests"]);
+    std::fs::create_dir_all(s.repo.join("tests")).unwrap();
+    std::fs::write(s.repo.join("tests/smoke_test.sh"), "git --version\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "a test"]);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+        .args(["verify", "--base", "main", "--json"])
+        .current_dir(&s.repo)
+        .env("DEVPLANE_HOME", s.devplane_home())
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .env_remove("GITHUB_EVENT_NAME")
+        .output()
+        .expect("verify runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    // A guard that compared nothing proves nothing: the pair must have run.
+    assert!(
+        text.contains("onChange") || text.contains("on_change"),
+        "base checks did not run, so there was no checkout to look for: {text}"
+    );
+    s.remove_devplane();
+    let checks = [check_no_base_checkout(&s)];
+    assert_eq!(checks[0].outcome, Outcome::Passed, "{}", report(&checks));
+}
+
+/// Planted: a checkout a stopped pair left behind is caught.
+#[test]
+fn a_planted_base_checkout_is_caught() {
+    let s = Sandbox::new(Shape::Full);
+    let dir = s
+        .repo
+        .join(".claude/worktrees/.devplane-base-0123456789ab-01234567");
+    let out = std::process::Command::new("git")
+        .args(["worktree", "add", "--detach", "-q"])
+        .arg(&dir)
+        .arg("main")
+        .current_dir(&s.repo)
+        .output()
+        .expect("git");
+    assert!(out.status.success());
+    assert!(matches!(
+        check_no_base_checkout(&s).outcome,
+        Outcome::Finding { .. }
+    ));
 }
 
 #[test]
@@ -580,6 +680,7 @@ fn the_planted_violations_are_part_of_this_suite() {
     for planted in [
         "a_planted_home_reference_is_caught",
         "a_planted_unrunnable_gate_is_caught",
+        "a_planted_base_checkout_is_caught",
     ] {
         let Some(at) = source.find(&format!("\nfn {planted}(")) else {
             panic!("{planted} was removed — this suite no longer demonstrates that it can fail");

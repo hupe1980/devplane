@@ -8,6 +8,7 @@
 
 pub mod ask;
 pub mod attention;
+pub mod attest;
 pub mod base_checks;
 pub mod caches;
 pub mod candidates;
@@ -20,6 +21,7 @@ pub mod command;
 pub mod comments;
 pub mod config;
 pub mod context;
+pub mod controls;
 pub mod decision;
 pub mod declare;
 pub mod deeplink;

@@ -73,6 +73,7 @@ name = "saas"
 [gates]
 check = ["sh ./scripts/lint.sh", "sh ./scripts/test.sh"]
 timeout = "60s"
+junit = ["reports/junit.xml"]
 
 [policy]
 deny = ["Read(.env)", "Bash(rm -rf *)"]
@@ -90,8 +91,51 @@ paths = ["src/routes/login.ts", "src/auth/**"]
 TOML
   mkdir -p scripts
   printf '#!/bin/sh\necho "lint: 14 files, 0 problems"\n' > scripts/lint.sh
-  printf '#!/bin/sh\necho "PASS tests/login.test.ts (6)"\necho "PASS tests/session.test.ts (11)"\n' > scripts/test.sh
-  printf 'export function login() {\n  return true;\n}\n' > src/routes/login.ts
+  # A pytest-shaped fake whose output is decided by the tree it runs in:
+  # `FILTER` keeps the tests named `login…` (as `-k login` does), and
+  # `test_lockout` fails when the login route lost its lockout. Each
+  # `test("…")` in tests/*.test.ts is one more case, `it.skip` a skipped one.
+  # It prints pytest's summary and writes JUnit to reports/junit.xml.
+  cat > scripts/test.sh <<'SH'
+#!/bin/sh
+FILTER=""
+mkdir -p reports
+pass=0; fail=0; skip=0; desel=0; xml=""
+for n in login login_twice login_remember lockout reset session_create session_expire \
+         session_refresh password_rules logout audit csrf; do
+  case "$FILTER:$n" in
+    "-k login:login"*|":"*) ;;
+    *) desel=$((desel+1)); continue ;;
+  esac
+  if [ "$n" = lockout ] && ! grep -q lockout src/routes/login.ts 2>/dev/null; then
+    fail=$((fail+1)); echo "FAILED tests/test_login.py::test_$n - assert locked_out(user)"
+    xml="$xml<testcase classname=\"tests.test_login\" name=\"test_$n\"><failure/></testcase>"
+  else
+    pass=$((pass+1)); xml="$xml<testcase classname=\"tests.test_login\" name=\"test_$n\"/>"
+  fi
+done
+for f in tests/*.test.ts; do
+  [ -f "$f" ] || continue
+  while IFS= read -r line; do
+    name=$(printf '%s' "$line" | sed -nE 's/^[[:space:]]*(it|test)(\.skip)?\("([^"]*)".*/\3/p')
+    [ -n "$name" ] || continue
+    case "$line" in
+      *.skip\(*) skip=$((skip+1)); xml="$xml<testcase classname=\"$f\" name=\"$name\"><skipped/></testcase>" ;;
+      *) pass=$((pass+1)); xml="$xml<testcase classname=\"$f\" name=\"$name\"/>" ;;
+    esac
+  done < "$f"
+done
+printf '<testsuites><testsuite name="pytest">%s</testsuite></testsuites>\n' "$xml" > reports/junit.xml
+out=""
+[ "$fail" -gt 0 ] && out="$fail failed"
+[ "$pass" -gt 0 ] && out="${out:+$out, }$pass passed"
+[ "$skip" -gt 0 ] && out="${out:+$out, }$skip skipped"
+[ "$desel" -gt 0 ] && out="${out:+$out, }$desel deselected"
+echo "============ ${out:-no tests ran} in 0.04s ============"
+[ "$fail" -eq 0 ]
+SH
+  printf 'reports/\n' >> .gitignore
+  printf '// A sixth failed attempt within a minute means a lockout.\nexport function login() {\n  return true;\n}\n' > src/routes/login.ts
   printf 'test("login", () => {});\n' > tests/login.test.ts
   cat > specs/042-login-rate-limit/spec.md <<'MD'
 # Feature Specification: Rate-limit the login route
@@ -211,9 +255,14 @@ rate=$(api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Rate-limit the l
 wt=$(printf '%s' "$rate" | grep -oE '"worktree": *"[^"]+"' | head -1 | sed 's/.*"worktree": *"//; s/"$//')
 [ -n "$wt" ] && [ -d "$wt" ] || { echo "seed-host: the change has no worktree: $rate" >&2; exit 1; }
 printf 'test("login", () => {});\nit.skip("rejects the sixth attempt in a minute", () => {});\n' > "$wt/tests/login.test.ts"
-# One that stops to ask the person something.
-api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Drop the v1 API\",
-  \"agent\":\"$ECHO\",\"spec\":\"specs/043-drop-v1-api\",\"prompt\":\"question: which clients still call v1?\"}" >/dev/null
+# One that stops to ask the person something, with a test written inside the
+# code it tests: base checks cannot separate the two.
+v1=$(api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Drop the v1 API\",
+  \"agent\":\"$ECHO\",\"spec\":\"specs/043-drop-v1-api\",\"prompt\":\"question: which clients still call v1?\"}")
+# One that drops the lockout and filters the run to the three `login` tests,
+# so `check` passes with 3 of the base's 12 — base checks find it out.
+speed=$(api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Speed up the login tests\",
+  \"agent\":\"$ECHO\",\"prompt\":\"write-file src/routes/login.ts\"}")
 # A permission Devplane itself holds: the agent asks over the protocol, so the
 # answer is the window's to give (the inbox's answerable permission).
 api POST api/changes "{\"cwd\":\"$tmp/saas\",\"title\":\"Clear the build cache\",
@@ -238,3 +287,34 @@ api POST api/changes "{\"cwd\":\"$tmp/core-lib\",\"title\":\"Retry only on 5xx\"
 
 # Let the host fold what the hook processes appended, and the fixture finish.
 sleep 4
+
+# Base checks, the base's tests on each change and its new tests on the base.
+# Each change's edits land in its worktree, `check` runs on the tree as it is
+# now, then the pair is asked for and waited on, at most 60 s each.
+change_id() { printf '%s' "$1" | grep -oE '"change_id": *"[^"]+"' | head -1 | sed 's/.*"change_id": *"//; s/"$//'; }
+worktree_of() { printf '%s' "$1" | grep -oE '"worktree": *"[^"]+"' | head -1 | sed 's/.*"worktree": *"//; s/"$//'; }
+vwt=$(worktree_of "$v1")
+mkdir -p "$vwt/src/routes"
+printf 'export const v1 = () => 410;\ntest("v1 answers 410", () => {});\n' > "$vwt/src/routes/v1.ts"
+swt=$(worktree_of "$speed")
+sed 's/^FILTER=""/FILTER="-k login"/' "$swt/scripts/test.sh" > "$swt/scripts/test.sh.new"
+mv "$swt/scripts/test.sh.new" "$swt/scripts/test.sh"
+for c in "$rate" "$v1" "$speed"; do
+  id=$(change_id "$c")
+  api POST "api/changes/$id/verify" '{}' >/dev/null
+  api POST "api/changes/$id/base-checks" '{}' >/dev/null || true
+done
+for c in "$rate" "$v1" "$speed"; do
+  id=$(change_id "$c")
+  for _ in $(seq 1 120); do
+    row=$(api GET "api/changes/$id")
+    case "$row" in
+      *'"headline":'*) break ;;
+    esac
+    sleep 0.5
+  done
+  case "$row" in
+    *'"headline":'*) ;;
+    *) echo "seed-host: base checks did not finish for $id within 60 s" >&2 ;;
+  esac
+done

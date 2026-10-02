@@ -53,6 +53,12 @@ stop with a sentence naming those.
 Outputs: `verdict` (`verified`, `failed`, `could_not_run`) and `statement` (path or empty). Keep the
 statement with `actions/upload-artifact`.
 
+The statement is the [same kind the certificate gives](@/docs/verified-done.md#the-statement-a-machine-reads):
+an in-toto Statement v1 with the Test Result predicate. Its subject is the tree `check` ran on, its
+`result` is the base's `check` exit codes, `configuration` names those commands and the base's
+`devplane.toml` blob, and `predicate.devplane.verify` names the base. It is never signed — CI holds
+no person's key — and it is never the verdict: `verify`'s exit status is.
+
 ## Whose `check` runs
 
 - The one in `devplane.toml` **at the merge base**. A PR that edits `check` (to `["true"]`, say) is
@@ -78,7 +84,10 @@ is your **branch protection**'s call. To block on weakened rows, add a step read
 In order:
 
 1. the verdict and the base;
-2. **the checks this change weakened**, by kind, or that it weakened none;
+2. **the checks this change weakened**, by kind, or that it weakened none — including edits to the
+   agent's controls, to ownership and to the supply chain
+   ([the files](@/docs/verified-done.md#what-governs-the-agent-and-what-the-build-trusts)), each
+   counted under its own key in `--json`; none of them changes the exit code;
 3. each command's outcome, failures named, output folded;
 4. the [base checks](@/docs/verified-done.md#base-checks), after a pass: a base test failing on the
    change joins the weakened checks; a new test passing without the change is listed; test counts

@@ -89,6 +89,17 @@ impl Fixture {
         Self::with(tag, Some(&fixture_config()))
     }
 
+    /// The fixture with more files committed on `main` beside it.
+    fn beside(tag: &str, files: &[(&str, &str)]) -> Self {
+        let f = Self::new(tag);
+        for (path, text) in files {
+            f.write(path, text);
+        }
+        f.commit("beside the fixture");
+        git(&f.work, &["push", "-q", "origin", "main"]);
+        f
+    }
+
     fn branch(&self, name: &str) -> &Self {
         git(&self.work, &["checkout", "-q", "-b", name]);
         self
@@ -232,6 +243,57 @@ fn a_skipped_test_passes_check_and_leads_the_summary() {
         section(&md, "Base checks").contains("The base's tests on this change"),
         "{md}"
     );
+}
+
+/// An edit to the agent's settings and to a lockfile leads the summary,
+/// counted by kind, before the gate says `check` passed; the job is green.
+#[test]
+fn edited_agent_controls_and_lockfile_lead_the_summary() {
+    let lock = "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n";
+    let f = Fixture::beside(
+        "controls",
+        &[
+            (".claude/settings.json", "{\n  \"hooks\": {}\n}\n"),
+            ("Cargo.lock", lock),
+        ],
+    );
+    f.branch("controls")
+        .write(
+            ".claude/settings.json",
+            "{\n  \"hooks\": { \"Stop\": [{ \"command\": \"sh ./x.sh\" }] }\n}\n",
+        )
+        .write(
+            "Cargo.lock",
+            &format!("{lock}\n[[package]]\nname = \"b\"\nversion = \"0.1.0\"\n"),
+        )
+        .commit("a hook and a package");
+    let out_md = f.path("out.md");
+    let out = f.verify(&["--base", "main", "--summary", out_md.to_str().unwrap()]);
+    assert_eq!(code(&out), 0, "rows never fail the job: {}", stdout(&out));
+    let md = std::fs::read_to_string(&out_md).unwrap();
+    let h = headings(&md);
+    assert_eq!(
+        h[0], "### Weakened checks — 1 agent control changed · 1 supply-chain file changed",
+        "{h:?}"
+    );
+    let first = section(&md, "Weakened");
+    assert!(first.contains("#### 1 agent control changed"), "{first}");
+    assert!(
+        first.contains("#### 1 supply-chain file changed"),
+        "{first}"
+    );
+    assert!(first.contains(".claude/settings.json"), "{first}");
+    assert!(first.contains("Cargo.lock"), "{first}");
+    assert!(first.contains("1 package added"), "{first}");
+    let gate = md.find("### Gate").expect("a gate section");
+    assert!(md.find(".claude/settings.json").unwrap() < gate, "{md}");
+    assert!(md.find("Cargo.lock").unwrap() < gate, "{md}");
+
+    let (v, code) = f.json(&["--base", "main"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["weakened"]["counts"]["agentControls"], 1, "{v}");
+    assert_eq!(v["weakened"]["counts"]["supplyChain"], 1, "{v}");
+    assert_eq!(v["weakened"]["counts"]["ownership"], 0, "{v}");
 }
 
 #[test]
@@ -696,10 +758,19 @@ fn the_statement_names_the_tree_check_ran_on() {
     assert_eq!(st["_type"], "https://in-toto.io/Statement/v1");
     assert_eq!(
         st["predicateType"],
-        "https://devplane.dev/DoneCertificate/v1"
+        "https://in-toto.io/attestation/test-result/v0.1"
     );
     assert_eq!(st["subject"][0]["digest"]["gitTree"], v["tree"]);
-    assert_eq!(st["predicate"]["evidence"]["passed"], true);
+    assert_eq!(st["predicate"]["result"], "PASSED");
+    // The definition that ran: its commands by digest, and the base's file.
+    assert_eq!(
+        st["predicate"]["configuration"][0]["name"],
+        "devplane.toml#gates.check"
+    );
+    assert_eq!(
+        st["predicate"]["configuration"][1]["digest"]["gitBlob"],
+        v["definition"]["fileBlob"]
+    );
     assert_eq!(
         st["predicate"]["devplane"]["verify"]["baseCommit"],
         v["base"]["mergeBase"]
@@ -709,19 +780,26 @@ fn the_statement_names_the_tree_check_ran_on() {
         v["definition"]["fileBlob"]
     );
     assert!(
-        !st["predicate"]["checks_altered"]
+        !st["predicate"]["devplane"]["checksAltered"]["rows"]
             .as_array()
             .unwrap()
             .is_empty()
     );
-    assert_eq!(st["predicate"]["signed"], false);
+    // Weakened, and still PASSED: `result` is `check`'s exit codes alone.
+    assert_eq!(st["predicate"]["devplane"]["signed"], false);
 
     // Failing: written, with a failing result.
     f.write("tests/login.test.js", FAILING).commit("fail");
     let (_, code) = f.json(&["--statement", s.to_str().unwrap()]);
     assert_eq!(code, 1);
     let st: Value = serde_json::from_str(&std::fs::read_to_string(&s).unwrap()).unwrap();
-    assert_eq!(st["predicate"]["evidence"]["passed"], false);
+    assert_eq!(st["predicate"]["result"], "FAILED");
+    assert!(
+        !st["predicate"]["failedTests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 
     // Could not run: none written.
     let none = f.path("none.json");

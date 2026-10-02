@@ -340,11 +340,23 @@ changes nothing. After `offer` the worktree is clean.
 
 #### `devplane change export <change>`
 
-Print the [done certificate](@/docs/verified-done.md#the-done-certificate). `--json` gives an
-unsigned [in-toto statement](https://in-toto.io/Statement/v1).
+Print the [done certificate](@/docs/verified-done.md#the-done-certificate). `--json` gives the
+[in-toto statement](@/docs/verified-done.md#the-statement-a-machine-reads) instead: Statement v1 with
+the Test Result predicate.
+
+| Flag | What |
+|---|---|
+| `--out <file>` | write to `<file>` instead of printing; refused if it exists |
+| `--force` | replace `<file>` (and `<file>.sig`) |
+| `--sign ssh` | needs `--out`; signs the statement with your global `user.signingkey` by `ssh-keygen -Y sign`, writes `<file>.sig`, and prints the `ssh-keygen -Y verify` lines anyone can run |
+
+Exit 1 when the change has no statement to give (no `check` run, no tree recorded), when signing
+fails (no key set, the key is missing, `ssh-keygen` is not on `PATH`, or its own error), or when
+`--out` exists; nothing is written then. Exit 2 for `--sign` without `--out`.
 
 ```sh
 devplane change export c-01a0 > cert.md
+devplane change export c-01a0 --sign ssh --out c-01a0.intoto.json
 ```
 
 ### `devplane gate`
@@ -403,7 +415,7 @@ network.
 |---|---|
 | `--base <ref>` | any commit-ish, tried as `origin/<ref>` then `<ref>`. Default: `origin/HEAD`'s branch, else `main` |
 | `--summary <path>` | write the Markdown summary there; otherwise appended to `$GITHUB_STEP_SUMMARY` if set |
-| `--statement <path>` | write the in-toto statement when `check` ran |
+| `--statement <path>` | write the in-toto statement (Test Result predicate, never signed) when `check` ran on a recorded tree |
 | `--no-base-checks` | skip the base checks that run after a pass |
 
 `--json` prints one document: `verdict`, `exit`, `base`, `tree`, weakened rows, each command's outcome.

@@ -139,7 +139,7 @@
     <p class="sub">
       {#if standing}<span class="standing {verified && !leads ? 'done' : ''}"><Inline text={standing} /></span>{/if}
       <!-- Beside the standing, never in it: counts carry no status colour. -->
-      {#if d.base_checks}<span class="counts">{d.base_checks.counts_says}{#if d.base_checks.on_base && !d.base_checks.stale}<span class="w-{d.base_checks.on_base.weight}"> · {d.base_checks.on_base.says}</span>{/if}</span>{/if}
+      {#if d.base_checks}<span class="counts">{d.base_checks.counts_says}{#if d.base_checks.headline}<span class="w-{d.base_checks.headline.weight}"> · {d.base_checks.headline.says}</span>{:else if d.base_checks.on_base && !d.base_checks.stale}<span class="w-{d.base_checks.on_base.weight}"> · {d.base_checks.on_base.says}</span>{/if}</span>{/if}
     </p>
   {/if}
 </header>
