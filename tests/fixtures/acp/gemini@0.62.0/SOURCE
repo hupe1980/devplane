@@ -1,0 +1,29 @@
+SYNTHETIC — not a recording of a live Gemini CLI session.
+
+Gemini CLI could not be run on the machine that built this (2026-10-02,
+Darwin 25.6.0): `session/new` answered "Gemini API key is missing or not
+configured." scripts/record-acp.sh gemini replaces this file once it can be
+run.
+
+Built from:
+- the `initialize` answer of `npx -y @google/gemini-cli@0.62.0 --acp`,
+  received live on 2026-10-02 (agentInfo gemini-cli 0.62.0; sign-in method
+  details dropped);
+- the published package @google/gemini-cli@0.62.0 (npm pack, 2026-10-02),
+  bundle/gemini-ZBM332DO.js: `newSession` answers `modes` built by
+  `buildAvailableModes` (default "Default", autoEdit "Auto Edit", yolo
+  "YOLO"; plan only when plan mode is enabled) with currentModeId the
+  configured approval mode, `default` when none is set, and no session
+  config options; a call needing approval is sent as a `tool_call` and then
+  a `session/request_permission` whose tool call carries toolCallId, status
+  pending, title (for the shell tool, the command itself), content,
+  locations and kind — and no `rawInput`; its options for a command are
+  proceed_always "Allow for this session", proceed_once "Allow" and cancel
+  "Reject"; a rejected call ends with a status-only failure.
+
+The client's side (requests, ids, the reject answer) and the call id
+"run_shell_command-1" were written by hand.
+
+Later-input update observed: no. Gemini CLI 0.62.0 sends no input for a call
+at all, so no project rule about what may run can match one: a person decides
+each such call, and the replay test asserts exactly that.

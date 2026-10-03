@@ -184,9 +184,13 @@ pub struct RunView {
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// Whether a person is in the loop for an ordinary call; `None` when the
-    /// mode is unreported or unrecognised.
+    /// mode is unreported or unrecognised. For a driven run, from its mode
+    /// statement.
     #[serde(default)]
     pub asks_a_person: Option<bool>,
+    /// What a driven run says about its session's permission mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_statement: Option<ModeStatementView>,
     pub state: String,
     #[serde(default)]
     pub waiting_for: Option<String>,
@@ -241,6 +245,44 @@ pub struct RunView {
     pub sent_says: String,
 }
 
+/// A run's mode statement as surfaces carry it: the sentence, and the facts it
+/// is made of. *Decides without you* is never folded into a count.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeStatementView {
+    pub sentence: String,
+    /// The agent's own id for the mode.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The agent's own name for it.
+    #[serde(default)]
+    pub name: Option<String>,
+    pub reading: crate::core::run::Reading,
+    #[serde(default)]
+    pub decides: Option<String>,
+    pub why: crate::core::run::Why,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// When it was said.
+    #[serde(default)]
+    pub at: Option<String>,
+}
+
+impl ModeStatementView {
+    pub fn of(run: &Run) -> Option<Self> {
+        let s = run.mode_statement.as_ref()?;
+        Some(Self {
+            sentence: s.sentence(),
+            mode: s.mode.clone(),
+            name: s.name.clone(),
+            reading: s.reading,
+            decides: s.decides.clone(),
+            why: s.why,
+            detail: s.detail.clone(),
+            at: run.mode_statement_at.map(|t| t.to_string()),
+        })
+    }
+}
+
 impl RunView {
     pub fn of(run: &Run, project_name: Option<String>, now: jiff::Timestamp) -> Self {
         Self {
@@ -250,7 +292,11 @@ impl RunView {
             agent: run.agent.clone(),
             mode: run.mode.as_str().into(),
             permission_mode: run.permission_mode.as_ref().map(|m| m.label().to_string()),
-            asks_a_person: run.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+            asks_a_person: match &run.mode_statement {
+                Some(s) => s.asks_a_person(),
+                None => run.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+            },
+            mode_statement: ModeStatementView::of(run),
             state: run.state.as_str().into(),
             waiting_for: match &run.state {
                 crate::core::RunState::Waiting(w) => Some(format!("{w:?}").to_lowercase()),
@@ -1281,6 +1327,10 @@ pub struct ChangeView<'a> {
     /// worktree lacks it: the sentence naming `.worktreeinclude`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_absent: Option<String>,
+    /// What the current run says about its session's permission mode, never
+    /// folded: *decides without you* is the sentence a reviewer most needs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_statement: Option<ModeStatementView>,
 }
 
 /// A stop claim as every surface shows it: the one label, the agent's words
@@ -1424,6 +1474,7 @@ impl<'a> ChangeView<'a> {
             stop_claim: change.open_claim().map(ClaimView::of),
             claim_history: change.stop_claims.iter().rev().map(ClaimView::of).collect(),
             planning_absent: None,
+            mode_statement: None,
             change: std::borrow::Cow::Borrowed(change),
         }
     }
@@ -1661,6 +1712,10 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
             let checks = config.as_ref().map(|c| c.gates.check.as_slice());
             let mut view = ChangeView::of(w, can_retry, checks);
             view.base_checks = crate::base_checks::view(w, config.as_ref());
+            view.mode_statement = w
+                .current_run()
+                .and_then(|r| snap.world.run(r))
+                .and_then(ModeStatementView::of);
             match (w.spec.as_deref(), roots.get(&w.project_id), config) {
                 (Some(spec), Some(root), Some(config)) => {
                     // Boxes are read where the agent worked, as the gate is.

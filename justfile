@@ -70,6 +70,12 @@ reference:
 concepts:
     bash scripts/concepts-check.sh
 
+# The built-in adapter pins against the live ACP registry: current or behind.
+# Needs the network, so it is not in `verify`. `just pins --write` refreshes
+# tests/fixtures/acp/registry.json. Exit 1 when a pin is behind, 2 when unreachable.
+pins *ARGS:
+    bash scripts/pins-check.sh {{ARGS}}
+
 # Vendor changelog rows touching hooks and permission modes. Needs `just reference`.
 # A report, not a check: exits 0 whatever it prints.
 channels:

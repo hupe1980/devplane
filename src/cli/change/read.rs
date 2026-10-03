@@ -275,6 +275,16 @@ fn print_change(w: &ChangeView<'_>) {
     if let Some(at) = c.archived_at {
         println!("  archived   {at}");
     }
+    // The session's permission mode, in the agent's own words; a mode that
+    // decides without the person is printed whole, never folded.
+    if let Some(m) = &w.mode_statement {
+        let colour = match m.reading {
+            crate::core::run::Reading::DecidesWithoutYou => render::RED,
+            crate::core::run::Reading::Asks => render::GREEN,
+            crate::core::run::Reading::NotKnown => DIM,
+        };
+        println!("  mode       {}", paint(colour, &m.sentence));
+    }
     // The agent's claim: after the weakened checks on the state line, before
     // the gates, and never in the gates' words.
     if let Some(claim) = &w.stop_claim {

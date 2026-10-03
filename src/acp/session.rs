@@ -24,6 +24,8 @@ use std::time::Duration;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 
 use super::agent::AgentSpec;
+use super::calls::ToolReport;
+use super::modes::{Advertised, ModePlan, ModeProfile, Outcome};
 
 // There is no permission timeout here: the only clock that ends a wait is a
 // deadline the project sets in its own `devplane.toml` (default `never`),
@@ -36,6 +38,10 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// How long an agent that advertises `session/close` has to answer one before
 /// the connection is torn down anyway.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// How long an agent has to answer the one mode request Devplane may send at
+/// set-up before the first prompt goes anyway, reported as *did not answer*.
+const MODE_GRACE: Duration = Duration::from_secs(10);
 
 /// The most of one side of a reported diff that is kept; the rest is counted.
 pub const DIFF_KEPT_BYTES: usize = 64 * 1024;
@@ -93,13 +99,9 @@ pub enum AcpEvent {
     /// The agent's plan for the turn: what it intends to do, and how far it
     /// has got.
     Plan(Vec<PlanStep>),
-    /// A tool call started or changed.
-    Tool {
-        call: ToolRequest,
-        /// `pending`, `in_progress`, `completed`, `failed`. Absent when the
-        /// update carried no status.
-        status: Option<String>,
-    },
+    /// A tool call was reported: as sent, every field the message omitted
+    /// left `None`. The reader merges reports per call id.
+    Tool { report: ToolReport },
     /// The agent withdrew a permission request before anybody answered it
     /// (`$/cancel_request`): nothing waits on an answer any more.
     PermissionWithdrawn { request_id: String },
@@ -118,7 +120,9 @@ pub enum AcpEvent {
     /// The agent wants permission. Answer it with [`Session::decide`].
     PermissionRequested {
         request_id: String,
-        call: ToolRequest,
+        /// The request's own account of the call, sparse: merged over what
+        /// the call reported before.
+        report: ToolReport,
         options: Vec<PermissionOption>,
     },
     /// The agent asked the person a question. Answer it with
@@ -150,6 +154,14 @@ pub enum AcpEvent {
     /// never mapped onto Claude Code's modes, since no specification defines
     /// that equivalence.
     ModeChanged { mode: String },
+    /// What the session's set-up said about its mode, what Devplane asked
+    /// for, and how that ended. Once per set-up, after `Ready`.
+    ModeAdvertised {
+        advertised: Option<Advertised>,
+        profile: Option<&'static ModeProfile>,
+        plan: ModePlan,
+        outcome: Option<Outcome>,
+    },
     /// The agent asked something over the question channel that Devplane could
     /// not render, so it was cancelled — reported, because the agent was told
     /// a form could be shown.
@@ -194,8 +206,9 @@ pub struct ToolRequest {
     /// The protocol's id for this call, which a start and a finish are
     /// correlated on.
     pub id: String,
-    /// Human-readable, and the only field that is always populated.
-    pub title: String,
+    /// Human-readable; `None` until the agent sends one
+    /// ([`ToolRequest::shown_title`] names it for a person).
+    pub title: Option<String>,
     /// `read`, `edit`, `delete`, `move`, `search`, `execute`, `think`, `fetch`,
     /// `switch_mode`, `other` — the protocol's own spelling.
     pub kind: Option<String>,
@@ -262,6 +275,17 @@ pub struct PermissionOption {
 }
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>;
+
+/// The mode option a session advertised and the value last reported, so a
+/// config-option update and a mode update about one change are reported once.
+#[derive(Debug, Default)]
+struct ModeSeen {
+    /// The config option that carries the mode, when the agent uses one.
+    config_id: Option<String>,
+    last: Option<String>,
+}
+
+type Seen = Arc<std::sync::Mutex<ModeSeen>>;
 
 /// Waiting questions. Separate from [`Pending`] because an answer is a map of
 /// fields to what the person chose or typed, not an option id.
@@ -470,6 +494,10 @@ async fn connect(
     // transcript is already held, so the replayed prose is dropped.
     let replaying = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let replaying_for_notify = replaying.clone();
+    let seen: Seen = Arc::default();
+    let seen_for_notify = seen.clone();
+    let seen_for_run = seen.clone();
+    let preference = spec.mode.clone();
 
     tokio::spawn(async move {
         let result = agent_client_protocol::Client
@@ -478,7 +506,7 @@ async fn connect(
             .on_receive_notification(
                 async move |notification: SessionNotification, _cx| {
                     let replaying = replaying_for_notify.load(std::sync::atomic::Ordering::Relaxed);
-                    for event in map_update(notification.update) {
+                    for event in map_update(notification.update, &seen_for_notify) {
                         // Only the conversation is suppressed; state
                         // updates still say something true.
                         if replaying && event.is_conversation() {
@@ -568,6 +596,10 @@ async fn connect(
                         asked: asked_for_run,
                     },
                     mcp.map(|m| vec![m.wire()]).unwrap_or_default(),
+                    Setup {
+                        preference,
+                        seen: seen_for_run,
+                    },
                 )
                 .await
             })
@@ -651,12 +683,21 @@ impl Parked {
     }
 }
 
+/// What setting up a session needs beyond the connection.
+struct Setup {
+    /// The mode the person chose for this agent, if any.
+    preference: Option<String>,
+    seen: Seen,
+}
+
 /// What setting up a session produced, when it produced one.
 struct Opened {
     session_id: agent_client_protocol::schema::v1::SessionId,
     agent_name: Option<String>,
     initial_mode: Option<String>,
     can_close: bool,
+    /// The set-up's mode: advertised, planned, and how the request ended.
+    mode: AcpEvent,
 }
 
 /// The body of the connection: initialise, open a session, then serve prompts
@@ -673,6 +714,7 @@ async fn run(
     replaying: std::sync::Arc<std::sync::atomic::AtomicBool>,
     parked: Parked,
     mcp_servers: Vec<McpServer>,
+    setup: Setup,
 ) -> agent_client_protocol::Result<()> {
     // A stop during set-up — an `npx` install, a sign-in prompt, a long
     // replay, a binary that never speaks ACP — ends it here: returning tears
@@ -683,13 +725,14 @@ async fn run(
             let _ = events.send(AcpEvent::Ended { error: None }).await;
             return Ok(());
         }
-        o = open(&connection, cwd, resuming, &events, &replaying, mcp_servers) => o?,
+        o = open(&connection, cwd, resuming, &events, &replaying, mcp_servers, setup) => o?,
     };
     let Some(Opened {
         session_id,
         agent_name,
         initial_mode,
         can_close,
+        mode,
     }) = opened
     else {
         return Ok(());
@@ -704,7 +747,9 @@ async fn run(
         })
         .await;
 
-    // After `Ready`, so the run exists to record against.
+    // After `Ready`, so the run exists to record against; and before the
+    // first prompt, which `open` has held back until the mode was settled.
+    let _ = events.send(mode).await;
     if let Some(mode) = initial_mode {
         let _ = events.send(AcpEvent::ModeChanged { mode }).await;
     }
@@ -802,6 +847,7 @@ async fn open(
     events: &mpsc::Sender<AcpEvent>,
     replaying: &std::sync::atomic::AtomicBool,
     mcp_servers: Vec<McpServer>,
+    setup: Setup,
 ) -> agent_client_protocol::Result<Option<Opened>> {
     // Declaring form elicitation is what lets an agent ask a question: the
     // Claude adapter offers `AskUserQuestion` only to a client with
@@ -859,7 +905,14 @@ async fn open(
 
     let can_close = init.agent_capabilities.session_capabilities.close.is_some();
     let agent_name = init.agent_info.as_ref().map(|i| i.name.clone());
-    let mut initial_mode: Option<String> = None;
+    // Keyed by the agent's own name and version, so an overridden command or
+    // another version is unprofiled rather than misread.
+    let profile = init
+        .agent_info
+        .as_ref()
+        .and_then(|i| super::modes::profile_for(&i.name, &i.version));
+    // The set-up response's `configOptions` and `modes`, as JSON.
+    let mut setup_says = serde_json::Value::Null;
     let session_id = match resuming {
         Some(previous) => {
             // Checked up front, so a missing capability is a refusal rather
@@ -894,7 +947,7 @@ async fn open(
                     )
                     .block_task()
                     .await
-                    .map(|_| ())
+                    .map(|r| setup_says = serde_json::to_value(&r).unwrap_or_default())
             } else {
                 connection
                     .send_request(
@@ -906,7 +959,7 @@ async fn open(
                     )
                     .block_task()
                     .await
-                    .map(|_| ())
+                    .map(|r| setup_says = serde_json::to_value(&r).unwrap_or_default())
             };
             replaying.store(false, std::sync::atomic::Ordering::Relaxed);
             match resumed {
@@ -931,9 +984,8 @@ async fn open(
             {
                 Ok(r) => {
                     // The mode a session starts in: `current_mode_update`
-                    // fires only on a change, so the initial mode is reported
-                    // here.
-                    initial_mode = r.modes.as_ref().map(|m| m.current_mode_id.to_string());
+                    // fires only on a change, so it is read here.
+                    setup_says = serde_json::to_value(&r).unwrap_or_default();
                     r.session_id
                 }
                 Err(e) => {
@@ -954,12 +1006,88 @@ async fn open(
             }
         }
     };
+    // `configOptions` first (the protocol says a client that supports them
+    // ignores `modes`), an older agent's `modes` otherwise.
+    let advertised = Advertised::read(&setup_says["configOptions"], &setup_says["modes"], profile);
+    let plan = ModePlan::of(profile, advertised.as_ref(), setup.preference.as_deref());
+    let outcome = match (&plan.request, &advertised) {
+        (Some(value), Some(ad)) => Some(request_mode(connection, &session_id, ad, value).await),
+        _ => None,
+    };
+    let initial_mode = match (&outcome, &advertised) {
+        (Some(Outcome::Confirmed(v)), _) => Some(v.clone()),
+        (_, Some(ad)) => Some(ad.current.clone()),
+        _ => None,
+    };
+    {
+        let mut seen = setup.seen.lock().expect("mode seen");
+        seen.config_id = match advertised.as_ref().map(|a| &a.via) {
+            Some(super::modes::Via::Config(id)) => Some(id.clone()),
+            _ => None,
+        };
+        seen.last = initial_mode.clone();
+    }
     Ok(Some(Opened {
         session_id,
         agent_name,
         initial_mode,
         can_close,
+        mode: AcpEvent::ModeAdvertised {
+            advertised,
+            profile,
+            plan,
+            outcome,
+        },
     }))
+}
+
+/// Sends the one mode request a set-up may make, and waits for its answer up
+/// to [`MODE_GRACE`]. Never retried: a refusal or silence is reported, and the
+/// session goes on in the mode the agent is in.
+async fn request_mode(
+    connection: &ConnectionTo<Agent>,
+    session_id: &agent_client_protocol::schema::v1::SessionId,
+    advertised: &Advertised,
+    value: &str,
+) -> Outcome {
+    use agent_client_protocol::schema::v1::{SetSessionConfigOptionRequest, SetSessionModeRequest};
+    let answered = match &advertised.via {
+        super::modes::Via::Config(id) => {
+            let asked = connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id.clone(),
+                    id.clone(),
+                    value,
+                ))
+                .block_task();
+            match tokio::time::timeout(MODE_GRACE, asked).await {
+                Err(_) => return Outcome::NoAnswer,
+                // The agent answers with every option's current value, which
+                // may not be the one asked for.
+                Ok(r) => r.map(|r| {
+                    advertised
+                        .current_in(&serde_json::to_value(&r.config_options).unwrap_or_default())
+                        .unwrap_or_else(|| value.to_string())
+                }),
+            }
+        }
+        super::modes::Via::Modes => {
+            let asked = connection
+                .send_request(SetSessionModeRequest::new(
+                    session_id.clone(),
+                    value.to_string(),
+                ))
+                .block_task();
+            match tokio::time::timeout(MODE_GRACE, asked).await {
+                Err(_) => return Outcome::NoAnswer,
+                Ok(r) => r.map(|_| value.to_string()),
+            }
+        }
+    };
+    match answered {
+        Ok(v) => Outcome::Confirmed(v),
+        Err(e) => Outcome::Refused(e.message.clone()),
+    }
 }
 
 /// The wire name of a stop reason.
@@ -1009,7 +1137,7 @@ async fn ask(
     let _ = events
         .send(AcpEvent::PermissionRequested {
             request_id: request_id.clone(),
-            call: describe(request),
+            report: describe(request),
             options,
         })
         .await;
@@ -1111,31 +1239,23 @@ fn option_kind_name(k: agent_client_protocol::schema::v1::PermissionOptionKind) 
     }
 }
 
-/// What the agent is asking to do, in the protocol's own terms.
-fn describe(request: &RequestPermissionRequest) -> ToolRequest {
-    let f = &request.tool_call.fields;
-    ToolRequest {
-        id: request.tool_call.tool_call_id.to_string(),
-        title: crate::core::text::clip(
-            f.title
-                .as_deref()
-                .unwrap_or(&request.tool_call.tool_call_id.to_string()),
-            200,
-        ),
-        kind: f.kind.as_ref().and_then(wire),
-        raw_input: f.raw_input.clone(),
-        locations: f
-            .locations
-            .clone()
-            .unwrap_or_default()
-            .iter()
-            .map(|l| l.path.clone())
-            .collect(),
-    }
+/// What the request says about the call, as sent: a request may name the
+/// call by its id alone, and the reader merges it over the call's reports.
+fn describe(request: &RequestPermissionRequest) -> ToolReport {
+    report_of(
+        request.tool_call.tool_call_id.to_string(),
+        &request.tool_call.fields,
+    )
+}
+
+/// A sparse report from any of the protocol's tool-call shapes, read as JSON
+/// so an absent field and a `null` one are both *not said*.
+fn report_of(id: String, fields: &impl serde::Serialize) -> ToolReport {
+    ToolReport::from_wire(id, &serde_json::to_value(fields).unwrap_or_default())
 }
 
 /// Maps one protocol update to zero or more events.
-fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
+fn map_update(update: SessionUpdate, seen: &Seen) -> Vec<AcpEvent> {
     match update {
         SessionUpdate::AgentMessageChunk(c) => {
             text_of(&c).map(AcpEvent::Text).into_iter().collect()
@@ -1152,16 +1272,13 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
                     diffs,
                 });
             }
-            out.push(AcpEvent::Tool {
-                call: ToolRequest {
-                    id: t.tool_call_id.to_string(),
-                    title: t.title.clone(),
-                    kind: wire(&t.kind),
-                    raw_input: t.raw_input.clone(),
-                    locations: t.locations.iter().map(|l| l.path.clone()).collect(),
-                },
-                status: wire(&t.status),
-            });
+            // A first report's status and kind have schema defaults
+            // (`pending`, `other`) that are not written on the wire, so they
+            // are read from the typed call rather than the JSON.
+            let mut report = report_of(t.tool_call_id.to_string(), &t);
+            report.status = wire(&t.status);
+            report.kind = wire(&t.kind);
+            out.push(AcpEvent::Tool { report });
             out
         }
         // Content replaces the call's whole collection, so the diffs it
@@ -1178,10 +1295,12 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
                     });
                 }
             }
-            // No status means content streaming in; reporting it would count
-            // one call per chunk and blank the title.
-            if t.fields.status.is_some() {
-                out.push(tool_update(t));
+            // Sparse, as sent: an update carries only what changed, and one
+            // with no status may still bring the call's input. One that
+            // carries only content has said nothing more.
+            let report = report_of(t.tool_call_id.to_string(), &t.fields);
+            if report.says_something() {
+                out.push(AcpEvent::Tool { report });
             }
             out
         }
@@ -1209,33 +1328,36 @@ fn map_update(update: SessionUpdate) -> Vec<AcpEvent> {
         // sent.
         SessionUpdate::UserMessageChunk(_) => Vec::new(),
         // The cross-vendor answer to *which sessions decide without you*.
-        SessionUpdate::CurrentModeUpdate(m) => vec![AcpEvent::ModeChanged {
-            mode: m.current_mode_id.to_string(),
-        }],
+        SessionUpdate::CurrentModeUpdate(m) => moved_to(seen, m.current_mode_id.to_string()),
+        // A config-option update is about the mode only when the mode
+        // option's value changed; an agent that sends both kinds for one
+        // change is reported once.
+        SessionUpdate::ConfigOptionUpdate(u) => {
+            let config_id = seen.lock().expect("mode seen").config_id.clone();
+            let current = config_id.and_then(|id| {
+                serde_json::to_value(&u.config_options)
+                    .ok()?
+                    .as_array()?
+                    .iter()
+                    .find(|o| o["id"] == id.as_str())?["currentValue"]
+                    .as_str()
+                    .map(str::to_string)
+            });
+            current.map(|v| moved_to(seen, v)).unwrap_or_default()
+        }
         // Command lists are not consumed.
         _ => Vec::new(),
     }
 }
 
-/// A status-carrying `tool_call_update`, as a [`AcpEvent::Tool`].
-fn tool_update(t: agent_client_protocol::schema::v1::ToolCallUpdate) -> AcpEvent {
-    AcpEvent::Tool {
-        call: ToolRequest {
-            id: t.tool_call_id.to_string(),
-            title: t.fields.title.clone().unwrap_or_default(),
-            kind: t.fields.kind.as_ref().and_then(wire),
-            raw_input: t.fields.raw_input.clone(),
-            locations: t
-                .fields
-                .locations
-                .clone()
-                .unwrap_or_default()
-                .iter()
-                .map(|l| l.path.clone())
-                .collect(),
-        },
-        status: t.fields.status.as_ref().and_then(wire),
+/// A mode change, reported only when the value differs from the last seen.
+fn moved_to(seen: &Seen, mode: String) -> Vec<AcpEvent> {
+    let mut seen = seen.lock().expect("mode seen");
+    if seen.last.as_deref() == Some(mode.as_str()) {
+        return Vec::new();
     }
+    seen.last = Some(mode.clone());
+    vec![AcpEvent::ModeChanged { mode }]
 }
 
 /// The diffs in a tool call's content, in order. Terminal and plain content

@@ -102,6 +102,9 @@ pub struct SessionMode {
     /// from it.
     pub agent_mode: Option<String>,
     pub agent_mode_seen: Option<String>,
+    /// What a driven change says about that mode, in a sentence.
+    #[serde(default)]
+    pub mode_statement: Option<String>,
     /// A clock this session's environment put on its questions
     /// (`CLAUDE_AFK_TIMEOUT_MS` overrides the settings files).
     pub question_clock: Option<crate::core::clock::ClockLine>,
@@ -368,12 +371,16 @@ impl World {
                         mode: r.permission_mode.as_ref().map(|m| m.as_str().to_string()),
                         label: r.permission_mode.as_ref().map(|m| m.label().to_string()),
                         // `None` is *we do not know*, not *nobody is asked*.
-                        asks_a_person: r.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+                        asks_a_person: match &r.mode_statement {
+                            Some(m) => m.asks_a_person(),
+                            None => r.permission_mode.as_ref().and_then(|m| m.asks_a_person()),
+                        },
                         // "Seen", never "since": nothing announces a mode
                         // change, so this is when Devplane first heard it.
                         seen: r.permission_mode_seen.map(|t| t.to_string()),
                         agent_mode: r.agent_mode.clone(),
                         agent_mode_seen: r.agent_mode_seen.map(|t| t.to_string()),
+                        mode_statement: r.mode_statement.as_ref().map(|m| m.sentence()),
                         question_clock: r.question_clock.as_ref().map(Into::into),
                         clock_read: r.question_clock_read.is_some(),
                     })

@@ -33,11 +33,11 @@ No agent starts in an untrusted repository; `project trust` shows its hooks and 
 
 ```console
 $ devplane agent list
-claude     Claude Code    npx -y @agentclientprotocol/claude-agent-acp@0.81.2
-codex      Codex          npx -y @agentclientprotocol/codex-acp@1.13.1
+claude     Claude Code    npx -y @agentclientprotocol/claude-agent-acp@0.85.1
+codex      Codex          npx -y @agentclientprotocol/codex-acp@2.1.1
 opencode   OpenCode       opencode acp
-copilot    GitHub Copilot npx -y @github/copilot@1.0.88 --acp
-gemini     Gemini CLI     npx -y @google/gemini-cli@0.61.0 --acp
+copilot    GitHub Copilot npx -y @github/copilot@1.0.91 --acp
+gemini     Gemini CLI     npx -y @google/gemini-cli@0.62.0 --acp
 ```
 
 - `npx` agents are pinned and need Node and npm access the first time; OpenCode runs the `opencode`
@@ -66,6 +66,61 @@ devplane change start --agent '/opt/my-agent --acp' "…"
 ```
 
 An unknown bare word is an error, never a launch.
+
+## Permission modes
+
+A driven agent can run in a mode that decides without you — Claude Code's *Auto*, Codex's *Auto
+review* (a reviewer model answers), any agent's *full access* — and then it stops asking, so an empty
+inbox would look like an agent with nothing to ask. Devplane reads the mode each session opens in, as
+the agent advertises it, and says it on the change, on `devplane change show` and in `devplane status --modes`:
+
+- **You set no mode.** The session opened where the adapter starts on its own, so Devplane asks the
+  agent for its own ask-first mode before the first prompt — Codex's *Read-only*, Claude Code's
+  *Manual*, Gemini CLI's *Default* — and the change says *asked Codex to ask before acting — you set
+  no mode*. Codex starts every session in *Auto review* unless told otherwise, so this is the usual
+  Codex case.
+- **You set a mode** in the agent's own settings (Claude Code's `permissions.defaultMode`, Codex's
+  `INITIAL_AGENT_MODE`, Gemini CLI's approval mode). It is kept. When it decides without you the
+  change says so whole: *decides without you: Full access (everything) — you set it*.
+- **You chose one for Devplane** with `mode` in `agents.toml`. Devplane asks the agent for exactly
+  that value at set-up, if the agent offers it:
+
+  ```toml
+  # ~/.devplane/agents.toml
+  [agents.codex]          # a built-in: `command` may be left out
+  mode = "workspace-write"
+  ```
+
+  Use this too if you configured exactly the mode an adapter starts in by itself (for example
+  `INITIAL_AGENT_MODE=agent`): from the outside that looks like no choice at all, and Devplane would
+  ask for ask-first.
+
+Asking for the ask-first mode decides nothing: no decision, no grant. Devplane asks once, at
+set-up, and never after; if the agent or another client changes the mode later, the change follows
+it and Devplane does not move it back. A mode is named in the agent's own words, and only agents
+whose advertisement Devplane has recorded at their pinned version are read as asking or not.
+
+| The change says | Meaning |
+|---|---|
+| *asked ‹agent› to ask before acting — you set no mode* | Devplane asked for the agent's ask-first mode, and it agreed |
+| *asks you: ‹mode›* | the session opened in its ask-first mode |
+| *you chose ‹mode›* | your `agents.toml` `mode` |
+| *you chose ‹value›; ‹agent› does not offer it* | your `mode` names a value this agent does not advertise; nothing was asked |
+| *‹agent› is in ‹mode› — you set it* | configured in the agent's own settings, and it asks you |
+| *decides without you: ‹mode› (‹what›) — you set it* | configured, and it decides *what* without you |
+| *‹agent› moved to ‹mode› — …* | the mode changed mid-session |
+| *asked ‹agent› to ask before acting; it refused: ‹reason›* / *it did not answer* | the request failed (after ten seconds for no answer); the mode it is in is shown |
+| *‹agent› advertises no mode Devplane knows asks you first* | nothing was asked |
+| *‹agent› states no permission mode* | the agent advertises none |
+| *‹agent› is in ‹mode› — not known whether it asks you* | an agent or version Devplane has no record of |
+
+### What a rule can see
+
+Project rules match a call's kind and its input — the command, the file, the URL — never its title.
+Agents now report a call in pieces (an update may carry only what changed, and a permission request
+may name the call by its id alone), so Devplane joins every report of a call before a rule reads it.
+Gemini CLI 0.62.0 sends no input for a call at all: where a rule about commands is in force, each of
+its command calls goes to you, and the inbox says *the agent did not send what it means to run*.
 
 ## Steering a run
 

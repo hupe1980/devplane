@@ -92,6 +92,11 @@
         <span class="v"><b>{decisions.length}</b> recorded</span>
         <span class="s">{byAuthority.map(([a, n]) => `${n} by ${a}`).join(" · ")}</span>
       {/if}
+      {#if d.mode_statement}
+        <!-- The session's mode, as text: a mode that decides without the
+             person is the sentence itself, never an icon or a count. -->
+        <span class="s" class:fail={d.mode_statement.reading === "decides_without_you"} title={d.mode_statement.mode ?? undefined}>{d.mode_statement.sentence}{#if d.mode_statement.at} · {ago(d.mode_statement.at)}{/if}</span>
+      {/if}
     </button>
     <button class="card" onclick={() => go("agent")}>
       <span class="k"><Icon name="agent" size={14} /> Agent</span>

@@ -689,6 +689,16 @@ pub async fn cmd_modes(json: bool) -> Result<()> {
                 (Some(l), Some(false)) => (l.to_string(), render::RED),
                 (Some(l), Some(true)) => (l.to_string(), render::GREEN),
                 (Some(l), None) => (format!("{l} (unknown to this build)"), render::YELLOW),
+                // A driven session's statement: the agent's own words for its
+                // mode, and whether it asks, from that adapter's recording.
+                (None, asks) if s.mode_statement.is_some() => (
+                    s.mode_statement.clone().unwrap_or_default(),
+                    match asks {
+                        Some(false) => render::RED,
+                        Some(true) => render::GREEN,
+                        None => DIM,
+                    },
+                ),
                 // An ACP agent's self-declared mode: no vendor vocabulary maps
                 // it, so no `asks_a_person` is derived, and it is attributed to
                 // the agent. Not an alarm.

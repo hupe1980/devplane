@@ -6,6 +6,19 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Added
 
+- A driven session's permission mode is stated on the change, in the agent's own words: when you set
+  no mode, Devplane asks the agent for its own ask-first mode before the first prompt (Codex starts
+  every session in *Auto review*, where a reviewer model answers) and says so; a mode you set is kept,
+  and one that decides without you is said whole. `mode` in `agents.toml` chooses one for Devplane to
+  ask for. Asking writes no decision.
+- A tool call reported in pieces is joined before a rule reads it: an update carrying only what
+  changed, or a permission request naming the call by its id alone, no longer hides the command from
+  a project's deny rule, and an untitled call reads *untitled call ‹id›*, never blank. Where a rule
+  about commands is in force and an agent sends no command at all (Gemini CLI 0.62.0), a person
+  decides and the inbox says why.
+- The adapters are repinned to the ACP registry read on 2026-10-02 (claude-agent-acp 0.85.1,
+  codex-acp 2.1.1, Copilot 1.0.91, Gemini CLI 0.62.0), each beside a replay of its transcript; `just
+  pins` says when a pin falls behind.
 - GSD is read as a fourth specification layout: detected by `.planning/STATE.md`, every phase folder
   under `.planning/phases/` listed (inserted, prefixed and bracket-convention phases included,
   workstreams not), and no progress claimed — GSD keeps no task file, so no count, percentage or bar

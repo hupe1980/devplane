@@ -157,6 +157,21 @@ export type Detail = {
   claim_history?: ClaimView[];
   /// GSD's gitignored `.planning/` is not in this change's worktree; names `.worktreeinclude`.
   planning_absent?: string | null;
+  /// What the current run says about its session's permission mode, in the
+  /// agent's own words. *Decides without you* is shown whole, never folded.
+  mode_statement?: ModeStatement | null;
+};
+
+/// A driven session's mode statement, as the host composes it.
+export type ModeStatement = {
+  sentence: string;
+  mode?: string | null;
+  name?: string | null;
+  reading: "asks" | "decides_without_you" | "not_known";
+  decides?: string | null;
+  why: string;
+  detail?: string | null;
+  at?: string | null;
 };
 
 /// What an agent said through the stop tool, as the host renders it. The

@@ -1,0 +1,33 @@
+SYNTHETIC — not a recording of a live Codex session.
+
+codex-acp could not be run on the machine that built this (2026-10-02,
+Darwin 25.6.0): `session/new` answered "Authentication required", and no
+Codex sign-in was available. scripts/record-acp.sh codex replaces this file
+once it can be run.
+
+Built from, and only from:
+- the `initialize` answer of `npx -y @agentclientprotocol/codex-acp@2.1.1`,
+  received live on 2026-10-02 (agentInfo @agentclientprotocol/codex-acp
+  2.1.1; sign-in method details dropped);
+- the adapter's own scenario baseline at its v2.1.1 tag,
+  src/__tests__/scenarios/data/baseline/plain/command-approval.jsonl
+  (codeload.github.com/agentclientprotocol/codex-acp, tag v2.1.1, fetched
+  2026-10-02): its session/new answer, its notifications, its permission
+  request and its prompt answer, in its order, unchanged except
+  "session-1" -> s-1 and /workspace -> /work. That baseline is what the
+  adapter emits for the "plain" client profile against a scripted Codex
+  app-server, not a live model.
+
+Added by hand around it, as the JSON-RPC envelope a client sends: the
+client's initialize, session/new and session/prompt requests (Devplane's
+declared capabilities), the request ids, and the client's answer to the
+permission (allow_once, as the scenario answered it).
+
+The session opens in `agent` (Auto review) — the adapter's start when
+nothing is configured — and its mode config option offers read-only,
+workspace-write, agent and agent-full-access.
+
+The call: a `tool_call` carrying title "npm install", kind execute and its
+input, then a permission request titled "Run command" carrying the same input.
+Later-input update observed: no (the scenario sends the input with the
+first report).

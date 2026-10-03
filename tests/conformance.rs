@@ -76,9 +76,11 @@ async fn a_tool_call_is_reported() {
     let seen: Vec<(String, Option<String>, String)> = turn
         .iter()
         .filter_map(|e| match e {
-            AcpEvent::Tool { call, status } => {
-                Some((call.id.clone(), status.clone(), call.title.clone()))
-            }
+            AcpEvent::Tool { report } => Some((
+                report.id.clone(),
+                report.status.clone(),
+                report.title.clone().unwrap_or_default(),
+            )),
             _ => None,
         })
         .collect();
@@ -880,8 +882,8 @@ async fn a_tool_calls_diff_arrives_whole_before_the_call_ends() {
     let completed = turn
         .iter()
         .position(|e| {
-            matches!(e, AcpEvent::Tool { call, status } if call.id == "d1"
-                && status.as_deref() == Some("completed"))
+            matches!(e, AcpEvent::Tool { report } if report.id == "d1"
+                && report.status.as_deref() == Some("completed"))
         })
         .expect("the call completed");
     assert!(at < completed, "the diff came after the ending");
@@ -933,4 +935,355 @@ async fn devplanes_mcp_server_is_offered_on_new_and_on_resume() {
     collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
     assert_eq!(offered(&dir)[0]["args"], serde_json::json!(["mcp"]));
     again.stop();
+}
+
+// ── Sparse tool-call reports ─────────────────────────────────────────────────
+
+/// An update that carries only the call's input is forwarded, and nothing the
+/// agent did not send is filled in: no `""` title, no status.
+#[tokio::test]
+async fn a_sparse_update_is_forwarded_unfilled() {
+    let mut spec = echo_agent();
+    spec.command = format!("env DEVPLANE_ECHO_SPARSE=1 {}", spec.command);
+    let (session, mut events) = devplane::acp::spawn(&spec, scratch(), &[], None)
+        .await
+        .unwrap();
+    collect(&mut events, |e| matches!(e, AcpEvent::Ready { .. })).await;
+    session.prompt("run a tool please").await.unwrap();
+    let until_ask = collect(&mut events, |e| {
+        matches!(e, AcpEvent::PermissionRequested { .. })
+    })
+    .await;
+
+    let reports: Vec<&devplane::acp::calls::ToolReport> = until_ask
+        .iter()
+        .filter_map(|e| match e {
+            AcpEvent::Tool { report } => Some(report),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports.len(), 2, "{until_ask:?}");
+    assert_eq!(reports[0].title.as_deref(), Some("Run a command"));
+    assert_eq!(reports[0].kind.as_deref(), Some("execute"));
+    let later = reports[1];
+    assert_eq!(
+        later.raw_input,
+        Some(serde_json::json!({"command": "rm -rf build"})),
+        "the status-less update was dropped"
+    );
+    assert_eq!(
+        (
+            later.title.as_deref(),
+            later.kind.as_deref(),
+            later.status.as_deref()
+        ),
+        (None, None, None)
+    );
+    let (request_id, report) = match until_ask.last() {
+        Some(AcpEvent::PermissionRequested {
+            request_id, report, ..
+        }) => (request_id.clone(), report.clone()),
+        other => panic!("expected a permission request, got {other:?}"),
+    };
+    assert_eq!(
+        report,
+        devplane::acp::calls::ToolReport {
+            id: "s1".into(),
+            ..Default::default()
+        },
+        "nothing filled in"
+    );
+    session
+        .decide(&request_id, Some("deny".into()))
+        .await
+        .unwrap();
+    collect(&mut events, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
+    session.stop();
+}
+
+// ── Modes ────────────────────────────────────────────────────────────────────
+
+const CODEX_MODES: &str = "mode:read-only=Read-only,workspace-write=Workspace access,agent=Auto review,agent-full-access=Full access";
+
+/// The fixture presenting codex-acp 2.1.1's recorded identity and mode option,
+/// so the shipped profile applies — no test-only switch in the client.
+fn codex_like(extra: &str) -> AgentSpec {
+    let mut spec = echo_agent();
+    spec.command = format!(
+        "env DEVPLANE_ECHO_AGENT_INFO=@agentclientprotocol/codex-acp@2.1.1 \
+         'DEVPLANE_ECHO_CONFIG_MODE={CODEX_MODES}' {extra} {}",
+        spec.command
+    );
+    spec
+}
+
+/// The set-up's mode report, and what the agent was told: its heard.log after
+/// one prompt.
+async fn set_up(
+    spec: &AgentSpec,
+) -> (
+    Option<devplane::acp::modes::Advertised>,
+    devplane::acp::modes::ModePlan,
+    Option<devplane::acp::modes::Outcome>,
+    String,
+    String,
+) {
+    let dir = scratch();
+    let (session, mut events) = devplane::acp::spawn(spec, dir.clone(), &[], None)
+        .await
+        .unwrap();
+    let opened = collect(&mut events, |e| {
+        matches!(e, AcpEvent::ModeAdvertised { .. })
+    })
+    .await;
+    let (advertised, plan, outcome) = match opened.last() {
+        Some(AcpEvent::ModeAdvertised {
+            advertised,
+            plan,
+            outcome,
+            ..
+        }) => (advertised.clone(), plan.clone(), outcome.clone()),
+        other => panic!("no mode report after set-up: {other:?}"),
+    };
+    let session_id = opened
+        .iter()
+        .find_map(|e| match e {
+            AcpEvent::Ready { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("ready before the mode report");
+    session.prompt("hello mode").await.unwrap();
+    let turn = collect(&mut events, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
+    assert!(
+        turn.iter().any(|e| matches!(e, AcpEvent::TurnEnded { .. })),
+        "the first prompt never went: {turn:?}"
+    );
+    session.stop();
+    let heard = std::fs::read_to_string(dir.join(".devplane/heard.log")).unwrap_or_default();
+    (advertised, plan, outcome, heard, session_id)
+}
+
+fn set_lines(heard: &str) -> Vec<&str> {
+    heard.lines().filter(|l| l.starts_with("set_")).collect()
+}
+
+#[tokio::test]
+async fn mode_unconfigured_start_is_asked_for_ask_first_before_the_prompt() {
+    let (_, plan, outcome, heard, _) = set_up(&codex_like("DEVPLANE_ECHO_START=agent")).await;
+    assert_eq!(plan.request.as_deref(), Some("read-only"));
+    assert_eq!(plan.why, devplane::core::run::Why::AskedForAskFirst);
+    assert_eq!(
+        outcome,
+        Some(devplane::acp::modes::Outcome::Confirmed("read-only".into()))
+    );
+    assert_eq!(
+        set_lines(&heard),
+        ["set_config_option mode=read-only"],
+        "{heard}"
+    );
+    let set = heard.find("set_config_option").unwrap();
+    let prompt = heard.find("hello mode").expect("prompted");
+    assert!(
+        set < prompt,
+        "the prompt went before the mode was settled: {heard}"
+    );
+}
+
+#[tokio::test]
+async fn mode_config_option_is_used_over_modes() {
+    // The fixture advertises the same values both ways.
+    let (advertised, _, _, heard, _) = set_up(&codex_like("DEVPLANE_ECHO_START=agent")).await;
+    assert_eq!(
+        advertised.map(|a| a.via),
+        Some(devplane::acp::modes::Via::Config("mode".into()))
+    );
+    assert!(!heard.contains("set_mode"), "{heard}");
+}
+
+#[tokio::test]
+async fn mode_only_modes_uses_set_mode() {
+    let mut spec = echo_agent();
+    spec.command = format!(
+        "env DEVPLANE_ECHO_AGENT_INFO=gemini-cli@0.62.0 \
+         'DEVPLANE_ECHO_CONFIG_MODE=mode:default=Default,autoEdit=Auto Edit,yolo=YOLO' \
+         DEVPLANE_ECHO_MODES_ONLY=1 {}",
+        spec.command
+    );
+    spec.mode = Some("autoEdit".into());
+    let (advertised, plan, outcome, heard, _) = set_up(&spec).await;
+    assert_eq!(
+        advertised.map(|a| a.via),
+        Some(devplane::acp::modes::Via::Modes)
+    );
+    assert_eq!(plan.why, devplane::core::run::Why::YouChose);
+    assert_eq!(
+        outcome,
+        Some(devplane::acp::modes::Outcome::Confirmed("autoEdit".into()))
+    );
+    assert_eq!(set_lines(&heard), ["set_mode autoEdit"], "{heard}");
+}
+
+#[tokio::test]
+async fn mode_refusal_is_reported_and_the_prompt_still_goes() {
+    let (_, _, outcome, heard, _) = set_up(&codex_like(
+        "DEVPLANE_ECHO_START=agent DEVPLANE_ECHO_REFUSE_SET=1",
+    ))
+    .await;
+    match outcome {
+        Some(devplane::acp::modes::Outcome::Refused(reason)) => {
+            assert!(
+                reason.contains("locked"),
+                "the agent's own message: {reason}"
+            )
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(heard.contains("hello mode"), "{heard}");
+}
+
+/// The only test that waits the real ten seconds: the grace is not shortened
+/// through a hidden switch.
+#[tokio::test]
+async fn mode_no_answer_after_the_grace() {
+    let (_, _, outcome, heard, _) = set_up(&codex_like(
+        "DEVPLANE_ECHO_START=agent DEVPLANE_ECHO_SLOW_SET=1",
+    ))
+    .await;
+    assert_eq!(outcome, Some(devplane::acp::modes::Outcome::NoAnswer));
+    assert!(
+        heard.contains("hello mode"),
+        "the prompt waited forever: {heard}"
+    );
+}
+
+#[tokio::test]
+async fn mode_already_ask_first_sends_nothing() {
+    let (_, plan, outcome, heard, _) = set_up(&codex_like("DEVPLANE_ECHO_START=read-only")).await;
+    assert_eq!(plan.why, devplane::core::run::Why::AsksAlready);
+    assert_eq!(outcome, None);
+    assert!(set_lines(&heard).is_empty(), "{heard}");
+}
+
+#[tokio::test]
+async fn mode_none_advertised_sends_nothing() {
+    let (advertised, plan, _, heard, _) = set_up(&echo_agent()).await;
+    assert_eq!(advertised, None);
+    assert_eq!(plan.why, devplane::core::run::Why::NoneStated);
+    assert!(set_lines(&heard).is_empty(), "{heard}");
+}
+
+#[tokio::test]
+async fn mode_ask_first_not_advertised_sends_nothing() {
+    let mut spec = echo_agent();
+    spec.command = format!(
+        "env DEVPLANE_ECHO_AGENT_INFO=@agentclientprotocol/codex-acp@2.1.1 \
+         'DEVPLANE_ECHO_CONFIG_MODE=mode:agent=Auto review,workspace-write=Workspace access' \
+         DEVPLANE_ECHO_START=agent {}",
+        spec.command
+    );
+    let (_, plan, _, heard, _) = set_up(&spec).await;
+    assert_eq!(plan.why, devplane::core::run::Why::NoAskFirst);
+    assert!(set_lines(&heard).is_empty(), "{heard}");
+}
+
+#[tokio::test]
+async fn mode_on_resume_asks_again_when_back_at_the_start() {
+    let dir = scratch();
+    let spec = codex_like("DEVPLANE_ECHO_START=agent DEVPLANE_ECHO_RESUME_START=agent");
+    let (session, mut events) = devplane::acp::spawn(&spec, dir.clone(), &[], None)
+        .await
+        .unwrap();
+    let opened = collect(&mut events, |e| {
+        matches!(e, AcpEvent::ModeAdvertised { .. })
+    })
+    .await;
+    let id = opened
+        .iter()
+        .find_map(|e| match e {
+            AcpEvent::Ready { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    session.stop();
+    collect(&mut events, |e| matches!(e, AcpEvent::Ended { .. })).await;
+
+    let (again, mut events) = devplane::acp::resume(&spec, dir.clone(), id, &[], None)
+        .await
+        .unwrap();
+    let reopened = collect(&mut events, |e| {
+        matches!(e, AcpEvent::ModeAdvertised { .. })
+    })
+    .await;
+    match reopened.last() {
+        Some(AcpEvent::ModeAdvertised { plan, .. }) => {
+            assert_eq!(plan.request.as_deref(), Some("read-only"), "{plan:?}")
+        }
+        other => panic!("no mode report on resume: {other:?}"),
+    }
+    again.stop();
+    let heard = std::fs::read_to_string(dir.join(".devplane/heard.log")).unwrap_or_default();
+    assert_eq!(set_lines(&heard).len(), 2, "{heard}");
+}
+
+#[tokio::test]
+async fn mode_configured_start_is_kept() {
+    let (_, plan, outcome, heard, _) =
+        set_up(&codex_like("DEVPLANE_ECHO_START=agent-full-access")).await;
+    assert_eq!(plan.why, devplane::core::run::Why::YouSetIt);
+    assert_eq!(outcome, None);
+    assert!(set_lines(&heard).is_empty(), "{heard}");
+}
+
+#[tokio::test]
+async fn mode_preference_is_requested_once() {
+    let mut spec = codex_like("DEVPLANE_ECHO_START=agent");
+    spec.mode = Some("workspace-write".into());
+    let (_, plan, _, heard, _) = set_up(&spec).await;
+    assert_eq!(plan.why, devplane::core::run::Why::YouChose);
+    assert_eq!(
+        set_lines(&heard),
+        ["set_config_option mode=workspace-write"],
+        "{heard}"
+    );
+}
+
+#[tokio::test]
+async fn mode_preference_not_offered_requests_nothing() {
+    let mut spec = codex_like("DEVPLANE_ECHO_START=agent");
+    spec.mode = Some("turbo".into());
+    let (_, plan, _, heard, _) = set_up(&spec).await;
+    assert_eq!(plan.why, devplane::core::run::Why::ChoseUnoffered);
+    assert!(set_lines(&heard).is_empty(), "{heard}");
+}
+
+#[tokio::test]
+async fn mode_preference_already_current_requests_nothing() {
+    let mut spec = codex_like("DEVPLANE_ECHO_START=agent");
+    spec.mode = Some("agent".into());
+    let (_, plan, _, heard, _) = set_up(&spec).await;
+    assert_eq!(plan.why, devplane::core::run::Why::YouChose);
+    assert!(set_lines(&heard).is_empty(), "{heard}");
+}
+
+/// A config-option update and a mode update about one change are one change.
+#[tokio::test]
+async fn mode_change_mid_session_is_reported_once() {
+    let spec = codex_like(
+        "DEVPLANE_ECHO_START=read-only DEVPLANE_ECHO_MODE_UPDATE_AFTER=agent-full-access",
+    );
+    let (session, mut events) = devplane::acp::spawn(&spec, scratch(), &[], None)
+        .await
+        .unwrap();
+    collect(&mut events, |e| {
+        matches!(e, AcpEvent::ModeAdvertised { .. })
+    })
+    .await;
+    session.prompt("hello").await.unwrap();
+    let turn = collect(&mut events, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
+    let moved = turn
+        .iter()
+        .filter(|e| matches!(e, AcpEvent::ModeChanged { mode } if mode == "agent-full-access"))
+        .count();
+    assert_eq!(moved, 1, "{turn:?}");
+    session.stop();
 }

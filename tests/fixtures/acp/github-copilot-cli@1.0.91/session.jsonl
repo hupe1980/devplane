@@ -1,0 +1,11 @@
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false, "elicitation": {"form": {}}}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true}, "authMethods": []}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/work", "mcpServers": []}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s-1"}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "s-1", "prompt": [{"type": "text", "text": "Run the shell command `touch devplane-replay-marker` and then stop."}]}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s-1", "update": {"sessionUpdate": "tool_call", "toolCallId": "call_001", "title": "Running a shell command", "kind": "execute", "status": "pending"}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s-1", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "call_001", "rawInput": {"command": "touch devplane-replay-marker"}}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "id": 0, "method": "session/request_permission", "params": {"sessionId": "s-1", "toolCall": {"toolCallId": "call_001"}, "options": [{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"}, {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"}]}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 0, "result": {"outcome": {"outcome": "selected", "optionId": "reject-once"}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s-1", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "call_001", "status": "failed"}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}

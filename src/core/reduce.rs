@@ -177,6 +177,13 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             }
         }
 
+        // Replaced on every statement: de-duplication is the emitter's job,
+        // and the history is the log.
+        Event::ModeStated { statement } => {
+            run.mode_statement = Some(statement.clone());
+            run.mode_statement_at = Some(env.at);
+        }
+
         Event::AgentModeSeen { mode } => {
             // Only a change moves the clock, as for `PermissionModeSeen`.
             if run.agent_mode.as_deref() != Some(mode.as_str()) {
@@ -1257,6 +1264,46 @@ mod tests {
     fn ev(e: Event) -> EventEnvelope {
         let source = e.test_source();
         EventEnvelope::new(crate::core::ids::RunId::new("s1"), source, e)
+    }
+
+    /// Every statement replaces the last and moves its time; replaying the
+    /// log ends on the same statement.
+    #[test]
+    fn a_mode_statement_replaces_the_last_on_every_event() {
+        use crate::core::run::{ModeStatement, Reading, Why};
+        let stated = |why, mode: &str| {
+            ev(Event::ModeStated {
+                statement: ModeStatement {
+                    agent: "Codex".into(),
+                    mode: Some(mode.into()),
+                    name: Some(mode.into()),
+                    reading: Reading::Asks,
+                    decides: None,
+                    why,
+                    detail: None,
+                },
+            })
+        };
+        let log = [
+            stated(Why::AskedForAskFirst, "read-only"),
+            stated(Why::Moved, "agent"),
+            stated(Why::Moved, "agent"),
+        ];
+        let mut r = run();
+        for e in &log {
+            apply(&mut r, e);
+            assert_eq!(
+                r.mode_statement_at,
+                Some(e.at),
+                "the time moves on every event"
+            );
+        }
+        let mut again = run();
+        for e in &log {
+            apply(&mut again, e);
+        }
+        assert_eq!(r.mode_statement, again.mode_statement);
+        assert_eq!(r.mode_statement.unwrap().why, Why::Moved);
     }
 
     /// Hook events carry no tasks, so `sent` stays `None`, not an empty list.

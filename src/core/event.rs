@@ -438,6 +438,11 @@ pub enum Event {
     AgentModeSeen {
         mode: String,
     },
+    /// What a driven change says about its session's mode: after set-up, and
+    /// on every reported change. The log keeps every one; the run the last.
+    ModeStated {
+        statement: crate::core::run::ModeStatement,
+    },
     /// What the agent's own `session/list` says about this session. An event,
     /// not a direct edit, so it survives replay. It carries no state field and
     /// the reducer applies it only to fill gaps.
@@ -602,6 +607,7 @@ impl Event {
             Event::ModelChanged { .. } => "model_changed",
             Event::SessionEnded { .. } => "session_ended",
             Event::AgentModeSeen { .. } => "agent_mode_seen",
+            Event::ModeStated { .. } => "mode_stated",
             Event::SessionListed { .. } => "session_listed",
             Event::RosterSeen { .. } => "roster_seen",
             Event::StatusSample(_) => "status_sample",

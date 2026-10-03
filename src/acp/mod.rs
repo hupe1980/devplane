@@ -2,6 +2,8 @@
 //! in the ACP registry, so adding an agent is configuration, not integration.
 
 pub mod agent;
+pub mod calls;
+pub mod modes;
 pub mod session;
 
 pub use agent::{AgentSpec, available, builtin, resolve, user_agents};

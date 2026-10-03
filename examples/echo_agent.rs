@@ -42,6 +42,31 @@
 //! `DEVPLANE_ECHO_PIDS=<dir>` writes the pid there at start, and
 //! `DEVPLANE_ECHO_SLOW_INIT=1` answers `initialize` only after 30 seconds.
 //!
+//! Modes and identity, so a test can present a recorded adapter:
+//!
+//! | Variable | What the agent does |
+//! |----------|---------------------|
+//! | `DEVPLANE_ECHO_AGENT_INFO=<name>@<version>` | names itself so in `initialize` |
+//! | `DEVPLANE_ECHO_CONFIG_MODE=<id>:<v>=<Name>,…` | advertises a `mode` select config option of that id, and the same values as session modes |
+//! | `DEVPLANE_ECHO_MODES_ONLY=1` | advertises the values as session modes only |
+//! | `DEVPLANE_ECHO_START=<v>` | starts in that value (else the first) |
+//! | `DEVPLANE_ECHO_RESUME_START=<v>` | a resumed or loaded session reports that value |
+//! | `DEVPLANE_ECHO_REFUSE_SET=1` | answers every mode request with an error |
+//! | `DEVPLANE_ECHO_SLOW_SET=1` | answers a mode request only after 30 seconds |
+//! | `DEVPLANE_ECHO_MODE_UPDATE_AFTER=<v>` | mid-turn, moves to `<v>` and says so twice: a `config_option_update`, then a `current_mode_update` |
+//! | `DEVPLANE_ECHO_SPARSE=1` | `tool` reports a call in pieces: title and kind, then a status-less update with only the input, then a permission naming only the id, then a status-only ending |
+//! | `DEVPLANE_ECHO_REPLAY=<session.jsonl>` | replays a recorded adapter (below) |
+//!
+//! Every mode request is appended to `.devplane/heard.log` as
+//! `set_config_option <id>=<v>` or `set_mode <v>`, before any prompt.
+//!
+//! **Replay.** With `DEVPLANE_ECHO_REPLAY`, `initialize` and `session/new` are
+//! answered with the recorded answers (a fresh session id), a mode request with
+//! the recorded options and the value applied, and a prompt with every recorded
+//! `session/update` and `session/request_permission` the adapter sent after
+//! its recorded prompt, in order, each permission awaited, then the recorded
+//! prompt answer. Nothing in the transcript is changed but the session id.
+//!
 //! The question schema copies what `claude-agent-acp` sends: an
 //! `elicitation/create` form, only when the client declares `elicitation.form`.
 //! Stdout is JSON-RPC; diagnostics go to stderr.
@@ -54,8 +79,9 @@ use agent_client_protocol::schema::v1::{
     PromptRequest, PromptResponse, RequestPermissionRequest, ResumeSessionRequest,
     ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities, SessionId, SessionMode,
     SessionModeId, SessionModeState, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-    StopReason, TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, UsageUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallId,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
 use agent_client_protocol::{Agent, Client, Result, Stdio};
 
@@ -86,6 +112,129 @@ fn one_of(title: &str, options: &[(&str, &str)]) -> serde_json::Value {
         "oneOf": options.iter().map(|(v, d)| serde_json::json!(
             { "const": v, "title": v, "description": d })).collect::<Vec<_>>(),
     })
+}
+
+/// The mode the session is in now, once set-up or a request moved it.
+static CURRENT_MODE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// `DEVPLANE_ECHO_CONFIG_MODE`: the option id and each value with its name.
+fn mode_option() -> Option<(String, Vec<(String, String)>)> {
+    let spec = std::env::var("DEVPLANE_ECHO_CONFIG_MODE").ok()?;
+    let (id, values) = spec.split_once(':')?;
+    let values = values
+        .split(',')
+        .map(|v| match v.split_once('=') {
+            Some((v, n)) => (v.to_string(), n.to_string()),
+            None => (v.to_string(), v.to_string()),
+        })
+        .collect();
+    Some((id.to_string(), values))
+}
+
+fn current_mode() -> Option<String> {
+    let (_, values) = mode_option()?;
+    CURRENT_MODE
+        .lock()
+        .expect("mode")
+        .clone()
+        .or_else(|| std::env::var("DEVPLANE_ECHO_START").ok())
+        .or_else(|| values.first().map(|(v, _)| v.clone()))
+}
+
+fn config_options_json() -> serde_json::Value {
+    let Some((id, values)) = mode_option() else {
+        return serde_json::json!([]);
+    };
+    serde_json::json!([{
+        "id": id, "name": "Mode", "category": "mode", "type": "select",
+        "currentValue": current_mode(),
+        "options": values.iter().map(|(v, n)| serde_json::json!({"value": v, "name": n}))
+            .collect::<Vec<_>>(),
+    }])
+}
+
+fn modes_json() -> serde_json::Value {
+    let Some((_, values)) = mode_option() else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "currentModeId": current_mode(),
+        "availableModes": values.iter().map(|(v, n)| serde_json::json!({"id": v, "name": n}))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// A set-up answer with the configured mode advertisement added.
+fn advertising<T: serde::Serialize + serde::de::DeserializeOwned>(resp: T) -> T {
+    if mode_option().is_none() {
+        return resp;
+    }
+    let mut v = serde_json::to_value(&resp).expect("serialises");
+    if std::env::var_os("DEVPLANE_ECHO_MODES_ONLY").is_none() {
+        v["configOptions"] = config_options_json();
+    }
+    v["modes"] = modes_json();
+    serde_json::from_value(v).expect("the fixture's own advertisement parses")
+}
+
+/// Appends a line to `.devplane/heard.log`.
+fn hear(line: &str) {
+    let Some(root) = CWD.lock().expect("cwd").clone() else {
+        return;
+    };
+    let log = root.join(".devplane/heard.log");
+    std::fs::create_dir_all(log.parent().expect("parent")).ok();
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
+        writeln!(f, "{line}").ok();
+    }
+}
+
+/// Refuses a mode request when `DEVPLANE_ECHO_REFUSE_SET` says so.
+fn before_answering_a_mode_request() -> Result<()> {
+    if std::env::var_os("DEVPLANE_ECHO_REFUSE_SET").is_some() {
+        return Err(agent_client_protocol::Error::new(
+            -32000,
+            "mode changes are locked by this agent's settings",
+        ));
+    }
+    Ok(())
+}
+
+/// The recorded transcript, when replaying.
+fn replay() -> Option<Vec<serde_json::Value>> {
+    let path = std::env::var("DEVPLANE_ECHO_REPLAY").ok()?;
+    let text = std::fs::read_to_string(&path).expect("the replay file reads");
+    Some(
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("a transcript line parses"))
+            .collect(),
+    )
+}
+
+/// The recorded answer to the client's first request of `method`.
+fn recorded_answer(method: &str) -> Option<serde_json::Value> {
+    let lines = replay()?;
+    let id = lines
+        .iter()
+        .find(|e| e["dir"] == "in" && e["msg"]["method"] == method)?["msg"]["id"]
+        .clone();
+    lines
+        .iter()
+        .find(|e| e["dir"] == "out" && e["msg"]["id"] == id && e["msg"].get("method").is_none())
+        .map(|e| e["msg"]["result"].clone())
+}
+
+/// The recorded session id, which a replay replaces with the live one.
+fn recorded_session() -> Option<String> {
+    recorded_answer("session/new")?["sessionId"]
+        .as_str()
+        .map(str::to_string)
 }
 
 /// The working directory the client gave this session.
@@ -230,11 +379,27 @@ async fn main() -> Result<()> {
                                 .close(SessionCloseCapabilities::new()),
                         )
                 };
-                responder.respond(
-                    InitializeResponse::new(init.protocol_version)
-                        .agent_capabilities(caps)
-                        .auth_methods(auth),
-                )
+                if let Some(recorded) = recorded_answer("initialize") {
+                    return responder.respond(
+                        serde_json::from_value::<InitializeResponse>(recorded)
+                            .expect("the recorded initialize answer parses"),
+                    );
+                }
+                let resp = InitializeResponse::new(init.protocol_version)
+                    .agent_capabilities(caps)
+                    .auth_methods(auth);
+                let resp = match std::env::var("DEVPLANE_ECHO_AGENT_INFO")
+                    .ok()
+                    .and_then(|i| {
+                        i.rsplit_once('@')
+                            .map(|(n, v)| (n.to_string(), v.to_string()))
+                    }) {
+                    Some((name, version)) => resp.agent_info(
+                        agent_client_protocol::schema::v1::Implementation::new(name, version),
+                    ),
+                    None => resp,
+                };
+                responder.respond(resp)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -256,7 +421,14 @@ async fn main() -> Result<()> {
                 note_session(&req.mcp_servers);
                 // `DEVPLANE_ECHO_MODE=<id>` declares a session mode. The id is
                 // arbitrary: an ACP mode is whatever string the agent chooses.
-                let resp = NewSessionResponse::new(SessionId::new(id));
+                if let Some(mut recorded) = recorded_answer("session/new") {
+                    recorded["sessionId"] = serde_json::Value::String(id);
+                    return responder.respond(
+                        serde_json::from_value::<NewSessionResponse>(recorded)
+                            .expect("the recorded session/new answer parses"),
+                    );
+                }
+                let resp = advertising(NewSessionResponse::new(SessionId::new(id)));
                 let resp = match std::env::var("DEVPLANE_ECHO_MODE") {
                     Ok(m) if !m.is_empty() => resp.modes(SessionModeState::new(
                         SessionModeId::new(m.clone()),
@@ -281,7 +453,10 @@ async fn main() -> Result<()> {
                     );
                 }
                 note_session(&req.mcp_servers);
-                responder.respond(ResumeSessionResponse::new())
+                if let Ok(v) = std::env::var("DEVPLANE_ECHO_RESUME_START") {
+                    *CURRENT_MODE.lock().expect("mode") = Some(v);
+                }
+                responder.respond(advertising(ResumeSessionResponse::new()))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -297,7 +472,70 @@ async fn main() -> Result<()> {
                     );
                 }
                 note_session(&req.mcp_servers);
-                responder.respond(LoadSessionResponse::new())
+                if let Ok(v) = std::env::var("DEVPLANE_ECHO_RESUME_START") {
+                    *CURRENT_MODE.lock().expect("mode") = Some(v);
+                }
+                responder.respond(advertising(LoadSessionResponse::new()))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: SetSessionConfigOptionRequest, responder, cx| {
+                let wire = serde_json::to_value(&req).expect("serialises");
+                let value = wire["value"].as_str().unwrap_or_default().to_string();
+                hear(&format!("set_config_option {}={value}", req.config_id));
+                // Slow off the handler, so the connection keeps reading.
+                if std::env::var_os("DEVPLANE_ECHO_SLOW_SET").is_some() {
+                    return cx.spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        responder.respond(
+                            serde_json::from_value::<SetSessionConfigOptionResponse>(
+                                serde_json::json!({ "configOptions": config_options_json() }),
+                            )
+                            .expect("the fixture's own options parse"),
+                        )
+                    });
+                }
+                if let Err(e) = before_answering_a_mode_request() {
+                    return responder.respond_with_error(e);
+                }
+                *CURRENT_MODE.lock().expect("mode") = Some(value.clone());
+                // A replay answers with the recorded options, the value applied.
+                let options = match recorded_answer("session/new") {
+                    Some(mut recorded) => {
+                        let id = req.config_id.to_string();
+                        if let Some(all) = recorded["configOptions"].as_array_mut() {
+                            for o in all.iter_mut().filter(|o| o["id"] == id.as_str()) {
+                                o["currentValue"] = serde_json::Value::String(value.clone());
+                            }
+                        }
+                        recorded["configOptions"].clone()
+                    }
+                    None => config_options_json(),
+                };
+                responder.respond(
+                    serde_json::from_value::<SetSessionConfigOptionResponse>(
+                        serde_json::json!({ "configOptions": options }),
+                    )
+                    .expect("the fixture's own options parse"),
+                )
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: SetSessionModeRequest, responder, cx| {
+                hear(&format!("set_mode {}", req.mode_id));
+                if std::env::var_os("DEVPLANE_ECHO_SLOW_SET").is_some() {
+                    return cx.spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        responder.respond(SetSessionModeResponse::new())
+                    });
+                }
+                if let Err(e) = before_answering_a_mode_request() {
+                    return responder.respond_with_error(e);
+                }
+                *CURRENT_MODE.lock().expect("mode") = Some(req.mode_id.to_string());
+                responder.respond(SetSessionModeResponse::new())
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -368,6 +606,10 @@ async fn take_turn(
         .collect::<Vec<_>>()
         .join(" ");
 
+    if replay().is_some() {
+        return replay_turn(req, connection).await;
+    }
+
     let say = |t: String| {
         SessionNotification::new(
             req.session_id.clone(),
@@ -421,7 +663,75 @@ async fn take_turn(
         ))?;
     }
 
-    if wanted.contains("tool") {
+    // Mid-turn, the agent moves itself, and says so on both channels.
+    if let Ok(v) = std::env::var("DEVPLANE_ECHO_MODE_UPDATE_AFTER") {
+        *CURRENT_MODE.lock().expect("mode") = Some(v.clone());
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ConfigOptionUpdate(
+                serde_json::from_value(
+                    serde_json::json!({ "configOptions": config_options_json() }),
+                )
+                .expect("the fixture's own options parse"),
+            ),
+        ))?;
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::CurrentModeUpdate(
+                agent_client_protocol::schema::v1::CurrentModeUpdate::new(SessionModeId::new(v)),
+            ),
+        ))?;
+    }
+
+    if wanted.contains("tool") && std::env::var_os("DEVPLANE_ECHO_SPARSE").is_some() {
+        // The call in pieces, as current adapters send it: the title and kind
+        // first, then only the input, then a permission naming only the id.
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ToolCall(
+                ToolCall::new(ToolCallId::new("s1"), "Run a command".to_string())
+                    .kind(ToolKind::Execute),
+            ),
+        ))?;
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("s1"),
+                ToolCallUpdateFields::new()
+                    .raw_input(serde_json::json!({ "command": "rm -rf build" })),
+            )),
+        ))?;
+        let answer = connection
+            .send_request(RequestPermissionRequest::new(
+                req.session_id.clone(),
+                ToolCallUpdate::new(ToolCallId::new("s1"), ToolCallUpdateFields::new()),
+                vec![
+                    PermissionOption::new(
+                        PermissionOptionId::new("allow"),
+                        "Allow once".to_string(),
+                        PermissionOptionKind::AllowOnce,
+                    ),
+                    PermissionOption::new(
+                        PermissionOptionId::new("deny"),
+                        "Deny".to_string(),
+                        PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            ))
+            .block_task()
+            .await?;
+        connection.send_notification(say(format!("sparse outcome: {:?}", answer.outcome)))?;
+        for status in [ToolCallStatus::Failed, ToolCallStatus::Completed] {
+            // The second is late: it must not reopen the finished call.
+            connection.send_notification(SessionNotification::new(
+                req.session_id.clone(),
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    ToolCallId::new("s1"),
+                    ToolCallUpdateFields::new().status(status),
+                )),
+            ))?;
+        }
+    } else if wanted.contains("tool") {
         // Pending, then updates under the same id without repeating the title.
         connection.send_notification(SessionNotification::new(
             req.session_id.clone(),
@@ -689,6 +999,52 @@ async fn take_turn(
     } else {
         StopReason::EndTurn
     })
+}
+
+/// A recorded adapter's turn: everything it sent after its recorded prompt,
+/// in order, with the live session id, each permission awaited; then the
+/// recorded prompt answer.
+async fn replay_turn(
+    req: &PromptRequest,
+    connection: &agent_client_protocol::ConnectionTo<Client>,
+) -> Result<StopReason> {
+    let lines = replay().unwrap_or_default();
+    let recorded = recorded_session().unwrap_or_default();
+    let live = req.session_id.to_string();
+    let swap = |v: &serde_json::Value| -> serde_json::Value {
+        serde_json::from_str(&v.to_string().replace(&recorded, &live)).expect("still JSON")
+    };
+    let start = lines
+        .iter()
+        .position(|e| e["dir"] == "in" && e["msg"]["method"] == "session/prompt")
+        .unwrap_or(lines.len());
+    let prompt_id = lines.get(start).map(|e| e["msg"]["id"].clone());
+    let mut stop = StopReason::EndTurn;
+    for e in lines.iter().skip(start + 1).filter(|e| e["dir"] == "out") {
+        let msg = &e["msg"];
+        match msg["method"].as_str() {
+            Some("session/update") => {
+                // An update this schema cannot read is one no client could.
+                if let Ok(n) = serde_json::from_value::<SessionNotification>(swap(&msg["params"])) {
+                    connection.send_notification(n)?;
+                }
+            }
+            Some("session/request_permission") => {
+                let asked: RequestPermissionRequest = serde_json::from_value(swap(&msg["params"]))
+                    .expect("the recorded permission request parses");
+                connection.send_request(asked).block_task().await?;
+            }
+            Some(_) => {}
+            None if Some(&msg["id"]) == prompt_id.as_ref() => {
+                if let Ok(r) = serde_json::from_value::<PromptResponse>(msg["result"].clone()) {
+                    stop = r.stop_reason;
+                }
+                break;
+            }
+            None => {}
+        }
+    }
+    Ok(stop)
 }
 
 /// Launches the offered `devplane` server over stdio and calls the stop tool,

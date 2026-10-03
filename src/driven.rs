@@ -149,6 +149,7 @@ async fn start(
         session.clone(),
         events,
         keep_transcript,
+        spec,
     )
     .await;
     drop(owned);
@@ -354,7 +355,7 @@ async fn resume_run(state: &Shared, run: &RunId, join: bool) -> Result<bool> {
     .await
     .with_context(|| format!("resuming {}", spec.id))?;
 
-    register(state, run, &cwd, session, events, keep_transcript).await;
+    register(state, run, &cwd, session, events, keep_transcript, &spec).await;
 
     state
         .record(
@@ -403,6 +404,7 @@ async fn register(
     session: crate::acp::Session,
     mut events: tokio::sync::mpsc::Receiver<crate::acp::AcpEvent>,
     keep_transcript: bool,
+    spec: &AgentSpec,
 ) {
     state
         .sessions
@@ -415,9 +417,13 @@ async fn register(
     let pump_run = run_id.clone();
     let pump_cwd = cwd.to_path_buf();
     let pump_session = session;
+    let pump_agent = spec.name.clone();
+    let pump_preference = spec.mode.clone();
     tokio::spawn(async move {
         let mut pump = Pump {
             keep_transcript,
+            agent: pump_agent,
+            preference: pump_preference,
             ..Pump::default()
         };
         while let Some(event) = events.recv().await {
@@ -1779,8 +1785,83 @@ pub(crate) async fn hold_lifecycle<T>(run: &RunId, f: impl std::future::Future<O
 fn tool_label(call: &crate::acp::ToolRequest) -> String {
     match call.policy_subject() {
         Some((tool, _)) => tool.to_string(),
-        None => crate::core::text::clip(&call.title, 60),
+        None => crate::core::text::clip(&call.shown_title(), 60),
     }
+}
+
+/// How many finished calls a pump remembers, so a late update merges into its
+/// record instead of opening a second row.
+const FINISHED_KEPT: usize = 1024;
+
+/// One tool call as every report so far adds up: what the policy matcher, the
+/// ask row and the ledger read.
+#[derive(Debug, Default)]
+struct Held {
+    call: crate::acp::ToolRequest,
+    /// The label the call's row opened under, while it is open.
+    row: Option<String>,
+    finished: bool,
+}
+
+impl Held {
+    /// Whether the merged record says enough to open the call's row: an
+    /// input (not the empty placeholder an adapter sends while the input
+    /// streams in), or a status past `pending` — the call started.
+    fn ready(&self, status: Option<&str>) -> bool {
+        let has_input = self
+            .call
+            .raw_input
+            .as_ref()
+            .is_some_and(|v| !(v.is_null() || v.as_object().is_some_and(|o| o.is_empty())));
+        has_input || status.is_some_and(|s| s != "pending")
+    }
+}
+
+/// The record for one call, created on its first report.
+fn held<'a>(pump: &'a mut Pump, id: &str) -> &'a mut Held {
+    pump.calls.entry(id.to_string()).or_insert_with(|| Held {
+        call: crate::acp::ToolRequest {
+            id: id.to_string(),
+            ..Default::default()
+        },
+        ..Held::default()
+    })
+}
+
+/// Opens a call's row with the merged input known now, once.
+async fn open_row(state: &Shared, run: &RunId, cwd: &Path, pump: &mut Pump, id: &str) {
+    let h = held(pump, id);
+    if h.row.is_some() || h.finished {
+        return;
+    }
+    // Labelled for people; the arguments are what rules matched.
+    let label = tool_label(&h.call);
+    h.row = Some(label.clone());
+    let input = h.call.raw_input.clone().unwrap_or(serde_json::Value::Null);
+    state
+        .ingest(
+            run.clone(),
+            Source::Host,
+            Event::ToolStarted {
+                tool: label,
+                input,
+                // The protocol does not say where a server came from.
+                server_source: None,
+                agent_id: None,
+                call_id: Some(id.to_string()),
+            },
+            Some(cwd.to_path_buf()),
+            RunMode::Driven,
+        )
+        .await;
+}
+
+/// Whether a call is a command the agent sent no readable command for: the
+/// call says it executes, or its input has a `command` that is not text.
+fn hides_its_command(call: &crate::acp::ToolRequest) -> bool {
+    let command = call.raw_input.as_ref().and_then(|v| v.get("command"));
+    let says_execute = call.kind.as_deref() == Some("execute");
+    (says_execute || command.is_some()) && !command.is_some_and(serde_json::Value::is_string)
 }
 
 /// What this pump is holding between chunks: the running cost it has already
@@ -1789,9 +1870,21 @@ fn tool_label(call: &crate::acp::ToolRequest) -> String {
 struct Pump {
     cost: f64,
     transcript: crate::core::Coalescer,
-    /// Tool calls in flight by protocol id, with the label their row opened
-    /// under; updates need not repeat the title.
-    open_calls: std::collections::HashMap<String, String>,
+    /// Every call by protocol id, merged field by field from each report:
+    /// an update carries only what changed, and a permission request may
+    /// name the call by its id alone.
+    calls: std::collections::HashMap<String, Held>,
+    /// Finished call ids, oldest first, bounded by [`FINISHED_KEPT`].
+    finished: std::collections::VecDeque<String>,
+    /// The agent's display name, for the mode statement.
+    agent: String,
+    /// The mode the person chose for this agent, if any.
+    preference: Option<String>,
+    /// What the set-up said about the mode, for later changes.
+    mode_profile: Option<&'static crate::acp::modes::ModeProfile>,
+    mode_advertised: Option<crate::acp::modes::Advertised>,
+    /// The mode the last statement named; `None` until set-up stated one.
+    stated: Option<Option<String>>,
     /// Whether this repository keeps transcripts, fixed when the agent starts.
     keep_transcript: bool,
     /// The diffs each call's content reported last, by call id: content is
@@ -2095,7 +2188,43 @@ async fn handle(
             {
                 tracing::debug!(error = %e, "could not note that this agent declares modes");
             }
-            ingest(Event::AgentModeSeen { mode }).await;
+            ingest(Event::AgentModeSeen { mode: mode.clone() }).await;
+            // A change after set-up moves the statement; Devplane never moves
+            // the mode back.
+            if let Some(stated) = &pump.stated
+                && stated.as_deref() != Some(mode.as_str())
+            {
+                let statement = crate::acp::modes::moved(
+                    &pump.agent,
+                    pump.mode_profile,
+                    pump.mode_advertised.as_ref(),
+                    &mode,
+                );
+                pump.stated = Some(Some(mode));
+                ingest(Event::ModeStated { statement }).await;
+            }
+        }
+
+        // What the set-up said and asked: one statement, no decision row —
+        // asking an agent to ask first decides nothing for anybody.
+        AcpEvent::ModeAdvertised {
+            advertised,
+            profile,
+            plan,
+            outcome,
+        } => {
+            let statement = crate::acp::modes::statement(
+                &pump.agent,
+                profile,
+                advertised.as_ref(),
+                &plan,
+                outcome.as_ref(),
+                pump.preference.as_deref(),
+            );
+            pump.stated = Some(statement.mode.clone());
+            pump.mode_profile = profile;
+            pump.mode_advertised = advertised;
+            ingest(Event::ModeStated { statement }).await;
         }
 
         // A roster only fills gaps: `SessionInfo` carries no state.
@@ -2181,55 +2310,74 @@ async fn handle(
         }
 
         // A tool call ends the sentence before it.
-        AcpEvent::Tool { call, status } => {
+        AcpEvent::Tool { report } => {
             flush_transcript(state, run, pump).await;
-            // The protocol upserts by id, and updates need not repeat the
-            // title: the row opens once under the first label and closes on id.
-            let terminal = matches!(
-                status.as_deref(),
-                Some("completed" | "failed" | "cancelled")
-            );
-            let known = pump.open_calls.contains_key(&call.id);
-            if !known {
-                // Labelled for people; the arguments are what rules matched.
-                let label = tool_label(&call);
-                pump.open_calls.insert(call.id.clone(), label.clone());
-                ingest(Event::ToolStarted {
-                    tool: label,
-                    input: call.raw_input.clone().unwrap_or(serde_json::Value::Null),
-                    // The protocol does not say where a server came from.
-                    server_source: None,
-                    agent_id: None,
-                    call_id: Some(call.id.clone()),
-                })
-                .await;
+            // One record per id: a field a report carries replaces the stored
+            // one, a field it omits keeps it. The row opens once, with the
+            // input known then, and a finished call never reopens.
+            let id = report.id.clone();
+            let status = report.status.as_deref();
+            let terminal = matches!(status, Some("completed" | "failed" | "cancelled"));
+            let h = held(pump, &id);
+            h.call.merge(&report);
+            if h.finished {
+                return;
+            }
+            if h.ready(status) {
+                open_row(state, run, cwd, pump, &id).await;
             }
             if terminal {
-                keep_diffs(state, run, cwd, &call.id, pump).await;
-            }
-            if terminal && let Some(label) = pump.open_calls.remove(&call.id) {
-                ingest(Event::ToolFinished {
-                    tool: label,
-                    ok: status.as_deref() == Some("completed"),
-                    duration_ms: None,
-                    call_id: Some(call.id),
-                })
-                .await;
+                keep_diffs(state, run, cwd, &id, pump).await;
+                let h = held(pump, &id);
+                h.finished = true;
+                if let Some(label) = h.row.take() {
+                    ingest(Event::ToolFinished {
+                        tool: label,
+                        ok: status == Some("completed"),
+                        duration_ms: None,
+                        call_id: Some(id.clone()),
+                    })
+                    .await;
+                }
+                pump.finished.push_back(id);
+                while pump.finished.len() > FINISHED_KEPT {
+                    if let Some(old) = pump.finished.pop_front() {
+                        pump.calls.remove(&old);
+                    }
+                }
             }
         }
 
         AcpEvent::PermissionRequested {
             request_id,
-            call,
+            report,
             options,
         } => {
-            let title = call.title.clone();
+            // The request's fields over what the call reported before: the
+            // matcher, the ask row and the decision all read the whole call.
+            held(pump, &report.id).call.merge(&report);
+            open_row(state, run, cwd, pump, &report.id).await;
+            let call = held(pump, &report.id).call.clone();
+            let mut title = call.shown_title();
             // The same rules and vocabulary as a hook. A call that cannot be
             // classified is left to a person.
             let verdict = match call.policy_subject() {
                 Some((tool, input)) => state.policy.restrictive(cwd, tool, &input),
+                // A command the agent sent nothing readable for, where a rule
+                // governs commands: nobody could look, so a person decides —
+                // and the title is never matched in its place.
+                None if hides_its_command(&call)
+                    && state.policy.speaks_about(Some(cwd), "Bash") =>
+                {
+                    Verdict::Unresolved {
+                        why: "the agent did not send what it means to run".into(),
+                    }
+                }
                 None => Verdict::Undecided,
             };
+            if let Verdict::Unresolved { why } = &verdict {
+                title = format!("{title} — {why}");
+            }
 
             match verdict {
                 Verdict::Deny { rule } => {
@@ -2542,5 +2690,42 @@ async fn handle(
                 tokio::spawn(async move { crate::change::on_turn_ended(&state, &run).await });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hides_its_command;
+    use crate::acp::ToolRequest;
+
+    /// A command the agent sent nothing readable for is said so, and the
+    /// title is never read in its place.
+    #[test]
+    fn a_command_without_its_command_is_one_nobody_can_look_at() {
+        let call = |kind: Option<&str>, input: Option<serde_json::Value>| ToolRequest {
+            id: "c".into(),
+            title: Some("touch devplane-replay-marker".into()),
+            kind: kind.map(str::to_string),
+            raw_input: input,
+            locations: Vec::new(),
+        };
+        assert!(hides_its_command(&call(Some("execute"), None)));
+        assert!(hides_its_command(&call(
+            Some("execute"),
+            Some(serde_json::json!({}))
+        )));
+        assert!(hides_its_command(&call(
+            None,
+            Some(serde_json::json!({"command": ["ls"]}))
+        )));
+        assert!(!hides_its_command(&call(
+            Some("execute"),
+            Some(serde_json::json!({"command": "ls"}))
+        )));
+        assert!(
+            !hides_its_command(&call(Some("read"), None)),
+            "not a command"
+        );
+        assert!(!hides_its_command(&call(None, None)));
     }
 }

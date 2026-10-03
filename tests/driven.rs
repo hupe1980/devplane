@@ -919,3 +919,447 @@ async fn a_reported_diff_is_not_kept_where_transcripts_are_not() {
         "a diff was kept although transcripts are not"
     );
 }
+
+// ── Calls merged field by field; modes stated ────────────────────────────────
+
+/// The fixture with extra environment, as a launch spec.
+fn echo_with(env: &str) -> Option<devplane::acp::AgentSpec> {
+    let base = echo_agent()?;
+    Some(devplane::acp::AgentSpec::new(
+        "echo",
+        "Echo",
+        &format!("env {env} {}", base.command),
+    ))
+}
+
+/// Every event this run logged, oldest first.
+async fn logged(state: &Shared, run: &RunId) -> Vec<devplane::core::event::Event> {
+    let mut all = state.store.events_for_run(run, 5000).await.unwrap();
+    all.sort_by_key(|e| e.at);
+    all.into_iter().map(|e| e.event).collect()
+}
+
+/// Waits until the log holds an event `want` accepts.
+async fn await_logged(
+    state: &Shared,
+    run: &RunId,
+    what: &str,
+    want: impl Fn(&devplane::core::event::Event) -> bool,
+) -> Vec<devplane::core::event::Event> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let all = logged(state, run).await;
+        if all.iter().any(&want) {
+            return all;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never logged {what}: {all:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn decided(events: &[devplane::core::event::Event]) -> Vec<(String, String, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            devplane::core::event::Event::PermissionDecided {
+                tool, decision, by, ..
+            } => Some((tool.clone(), decision.clone(), by.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn started(events: &[devplane::core::event::Event]) -> Vec<(Option<String>, Value)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            devplane::core::event::Event::ToolStarted { call_id, input, .. } => {
+                Some((call_id.clone(), input.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+const DENY_RM: &str = "[policy]\ndeny = [\"Bash(rm -rf *)\"]\n";
+
+/// A permission that names only the call's id is matched on the input an
+/// earlier, status-less update carried, and the decision names the call.
+#[tokio::test]
+async fn a_permission_naming_only_the_id_is_matched_on_the_earlier_input() {
+    let Some(agent) = echo_with("DEVPLANE_ECHO_SPARSE=1") else {
+        return;
+    };
+    let (addr, c, state) = boot().await;
+    let repo = common::scratch_repo("sparse-deny", DENY_RM);
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo,
+        Some("run a tool please".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let events = await_logged(&state, &run, "a decision", |e| {
+        matches!(e, devplane::core::event::Event::PermissionDecided { .. })
+    })
+    .await;
+    let d = decided(&events);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(
+        d[0].0, "Run a command",
+        "the decision lost the call's title"
+    );
+    assert_eq!(d[0].1, "deny");
+    assert!(d[0].2.starts_with("policy:"), "{d:?}");
+    assert!(d.iter().all(|(t, _, _)| !t.is_empty()));
+}
+
+/// The call's ledger row opens with the input that arrived after its first
+/// report.
+#[tokio::test]
+async fn an_input_sent_later_reaches_the_ledger_row() {
+    let Some(agent) = echo_with("DEVPLANE_ECHO_SPARSE=1") else {
+        return;
+    };
+    let (addr, c, state) = boot().await;
+    let repo = common::scratch_repo("sparse-row", DENY_RM);
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo,
+        Some("run a tool please".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let events = await_logged(&state, &run, "the call's row", |e| {
+        matches!(e, devplane::core::event::Event::ToolStarted { .. })
+    })
+    .await;
+    let rows = started(&events);
+    assert_eq!(rows[0].0.as_deref(), Some("s1"));
+    assert_eq!(rows[0].1["command"], "rm -rf build", "{rows:?}");
+}
+
+/// An update after the call finished merges into its record and never opens
+/// a second row.
+#[tokio::test]
+async fn a_late_update_never_reopens_a_finished_row() {
+    let Some(agent) = echo_with("DEVPLANE_ECHO_SPARSE=1") else {
+        return;
+    };
+    let (addr, c, state) = boot().await;
+    let repo = common::scratch_repo("sparse-late", DENY_RM);
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo,
+        Some("run a tool please".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    await_run(&state, &run, |r| r.totals.turns >= 1).await;
+    let events = logged(&state, &run).await;
+    let rows: Vec<_> = started(&events)
+        .into_iter()
+        .filter(|(id, _)| id.as_deref() == Some("s1"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let finished = events
+        .iter()
+        .filter(|e| matches!(e, devplane::core::event::Event::ToolFinished { call_id, .. } if call_id.as_deref() == Some("s1")))
+        .count();
+    assert_eq!(finished, 1, "the late completion closed a second time");
+}
+
+const CODEX: &str = "DEVPLANE_ECHO_AGENT_INFO=@agentclientprotocol/codex-acp@2.1.1 \
+     'DEVPLANE_ECHO_CONFIG_MODE=mode:read-only=Read-only,workspace-write=Workspace access,agent=Auto review,agent-full-access=Full access'";
+
+async fn statement(state: &Shared, run: &RunId) -> devplane::core::run::ModeStatement {
+    await_run(state, run, |r| r.mode_statement.is_some()).await;
+    state
+        .world
+        .lock()
+        .await
+        .run(run)
+        .and_then(|r| r.mode_statement.clone())
+        .unwrap()
+}
+
+/// A Codex session that opens in Auto review with no mode set is asked for
+/// Read-only, the change says so, its calls reach the inbox, and asking wrote
+/// no decision.
+#[tokio::test]
+async fn mode_statement_says_it_asked() {
+    let Some(agent) = echo_with(&format!("{CODEX} DEVPLANE_ECHO_START=agent")) else {
+        return;
+    };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("mode-asked");
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(&state, &agent, repo, None, Vec::new())
+        .await
+        .unwrap();
+    let s = statement(&state, &run).await;
+    assert_eq!(
+        s.sentence(),
+        "asked Echo to ask before acting — you set no mode"
+    );
+    assert_eq!(s.reading, devplane::core::run::Reading::Asks);
+    assert_eq!(s.name.as_deref(), Some("Read-only"));
+    let decisions = state.store.decisions(Some(run.as_str()), 20).await.unwrap();
+    assert!(
+        decisions.is_empty(),
+        "asking for a mode decided something: {decisions:?}"
+    );
+
+    let session = state.sessions.lock().await.get(&run).cloned().unwrap();
+    session.prompt("this needs permission").await.unwrap();
+    await_run(&state, &run, |r| {
+        r.state == RunState::Waiting(devplane::core::WaitingFor::Permission)
+    })
+    .await;
+    // The board and the change read the same sentence.
+    let view = devplane::view::RunView::of(
+        state.world.lock().await.run(&run).unwrap(),
+        None,
+        jiff::Timestamp::now(),
+    );
+    assert_eq!(view.asks_a_person, Some(true));
+    assert_eq!(
+        view.mode_statement.map(|m| m.sentence),
+        Some("asked Echo to ask before acting — you set no mode".to_string())
+    );
+}
+
+/// A start the person configured is kept and named for what it decides.
+#[tokio::test]
+async fn mode_statement_names_a_deciding_mode_you_set() {
+    let Some(agent) = echo_with(&format!("{CODEX} DEVPLANE_ECHO_START=agent-full-access")) else {
+        return;
+    };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("mode-set");
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo.clone(),
+        Some("hello".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let s = statement(&state, &run).await;
+    assert_eq!(
+        s.sentence(),
+        "decides without you: Full access (everything) — you set it"
+    );
+    let heard = wait_for_heard(&repo).await;
+    assert!(
+        !heard.contains("set_"),
+        "a configured mode was overridden: {heard}"
+    );
+    let view = devplane::view::RunView::of(
+        state.world.lock().await.run(&run).unwrap(),
+        None,
+        jiff::Timestamp::now(),
+    );
+    assert_eq!(view.asks_a_person, Some(false));
+}
+
+/// A move mid-session moves the statement; the earlier one stays in the log,
+/// and Devplane does not move the mode back.
+#[tokio::test]
+async fn mode_statement_follows_a_mid_session_change() {
+    let Some(agent) = echo_with(&format!(
+        "{CODEX} DEVPLANE_ECHO_START=agent DEVPLANE_ECHO_MODE_UPDATE_AFTER=agent-full-access"
+    )) else {
+        return;
+    };
+    let (addr, c, state) = boot().await;
+    let repo = scratch_repo("mode-moved");
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo.clone(),
+        Some("hello".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    await_run(&state, &run, |r| {
+        r.mode_statement
+            .as_ref()
+            .is_some_and(|s| s.why == devplane::core::run::Why::Moved)
+    })
+    .await;
+    let s = statement(&state, &run).await;
+    assert_eq!(
+        s.sentence(),
+        "Echo moved to Full access — decides without you: everything"
+    );
+    let stated: Vec<String> = logged(&state, &run)
+        .await
+        .into_iter()
+        .filter_map(|e| match e {
+            devplane::core::event::Event::ModeStated { statement } => Some(statement.sentence()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(stated.len(), 2, "{stated:?}");
+    assert_eq!(
+        stated[0],
+        "asked Echo to ask before acting — you set no mode"
+    );
+    let heard = heard(&repo);
+    assert_eq!(
+        heard.matches("set_config_option").count(),
+        1,
+        "moved back: {heard}"
+    );
+}
+
+// ── Each pinned adapter's replay ─────────────────────────────────────────────
+
+/// Drives the host through one adapter's transcript, with a project rule
+/// denying that transcript's call by its full input.
+async fn replay(
+    registry_id: &str,
+    agent_id: &str,
+) -> (Vec<devplane::core::event::Event>, Value, Shared, RunId) {
+    let pin = devplane::acp::builtin()
+        .into_iter()
+        .find(|a| a.id == agent_id)
+        .expect("a built-in agent");
+    let (_, version) = pin.npm_pin().expect("an npm pin");
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/acp")
+        .join(format!("{registry_id}@{version}"));
+    assert!(
+        dir.join("session.jsonl").is_file(),
+        "{agent_id} is pinned to {version} and has no recording at {}",
+        dir.display()
+    );
+    let expect: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("expect.json")).unwrap()).unwrap();
+    // The rule names the call's full command; an adapter that sends none
+    // still has a rule about what may run in force.
+    let command = expect["command"]
+        .as_str()
+        .unwrap_or("touch devplane-replay-marker");
+    let config = format!("[policy]\ndeny = [\"Bash({command}*)\"]\n");
+    let agent = echo_with(&format!(
+        "DEVPLANE_ECHO_REPLAY={}",
+        dir.join("session.jsonl").display()
+    ))
+    .expect("build the fixture first");
+    let (addr, c, state) = boot().await;
+    let repo = common::scratch_repo(&format!("replay-{registry_id}"), &config);
+    trust(&c, &addr, &repo).await;
+    let run = devplane::driven::dispatch(&state, &agent, repo, Some("replay".into()), Vec::new())
+        .await
+        .unwrap();
+    let events = await_logged(&state, &run, "a decision or an ask", |e| {
+        matches!(
+            e,
+            devplane::core::event::Event::PermissionDecided { .. }
+                | devplane::core::event::Event::Blocked { .. }
+        )
+    })
+    .await;
+    // Nothing that names a call is ever blank.
+    for (title, _, _) in decided(&events) {
+        assert!(!title.is_empty());
+    }
+    for (_, input) in started(&events) {
+        assert_ne!(input, Value::String(String::new()));
+    }
+    (events, expect, state.0.clone(), run)
+}
+
+fn assert_denied_by_rule(events: &[devplane::core::event::Event], expect: &Value) {
+    let d = decided(events);
+    assert!(
+        d.iter().any(|(tool, decision, by)| decision == "deny"
+            && by.starts_with("policy:")
+            && Some(tool.as_str()) == expect["title"].as_str()),
+        "the rule never saw the call's full input, or the title was lost: {d:?} (want {expect})"
+    );
+}
+
+#[tokio::test]
+async fn replay_claude_acp_denies_the_full_input() {
+    if echo_agent().is_none() {
+        return;
+    }
+    let (events, expect, ..) = replay("claude-acp", "claude").await;
+    assert_denied_by_rule(&events, &expect);
+}
+
+#[tokio::test]
+async fn replay_codex_acp_denies_the_full_input() {
+    if echo_agent().is_none() {
+        return;
+    }
+    let (events, expect, state, run) = replay("codex-acp", "codex").await;
+    assert_denied_by_rule(&events, &expect);
+    // The transcript opens in Auto review with nothing configured: asked for
+    // Read-only, from the adapter's own advertisement.
+    let s = state
+        .world
+        .lock()
+        .await
+        .run(&run)
+        .and_then(|r| r.mode_statement.clone());
+    assert_eq!(
+        s.map(|s| s.sentence()),
+        Some("asked Echo to ask before acting — you set no mode".to_string())
+    );
+}
+
+#[tokio::test]
+async fn replay_github_copilot_cli_denies_the_full_input() {
+    if echo_agent().is_none() {
+        return;
+    }
+    let (events, expect, ..) = replay("github-copilot-cli", "copilot").await;
+    assert_denied_by_rule(&events, &expect);
+}
+
+/// Gemini CLI sends no input for a call, so no rule can match its command:
+/// with a rule about what may run in force, a person decides, the inbox says
+/// why, and the title is never matched in the command's place.
+#[tokio::test]
+async fn replay_gemini_denies_the_full_input() {
+    if echo_agent().is_none() {
+        return;
+    }
+    let (events, expect, ..) = replay("gemini", "gemini").await;
+    assert!(
+        expect["command"].is_null(),
+        "the recording now carries input: {expect}"
+    );
+    assert!(
+        decided(&events).is_empty(),
+        "a rule decided a call it could not see"
+    );
+    let blocked = events.iter().find_map(|e| match e {
+        devplane::core::event::Event::Blocked { message, .. } => message.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        blocked.as_deref(),
+        Some("touch devplane-replay-marker — the agent did not send what it means to run")
+    );
+}
