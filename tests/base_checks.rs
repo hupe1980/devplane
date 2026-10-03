@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 const RUNNER: &str = r#"#!/bin/sh
 FILTER=""
 echo ran >> "COUNTER"
-case "$(pwd)" in *devplane-base-*) [ -f "COUNTER.sleep" ] && sleep 3 ;; esac
+case "$(pwd)" in *devplane-base-*) [ -f "COUNTER.sleep" ] && sleep 8 ;; esac
 mkdir -p reports
 awk -v filter="$FILTER" '
 /^def test_/ {
@@ -666,8 +666,10 @@ async fn auto_mode_waits_on_nothing() {
     let started = std::time::Instant::now();
     let (_, v) = post(&c, &addr, &format!("/api/changes/{id}/verify"), Value::Null).await;
     assert_eq!(v["passed"], true, "{v}");
+    // The base-side runs sleep 8 s; a verdict that waited for them would take
+    // at least that, and 6 s leaves a loaded machine room to be slow.
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(3),
+        started.elapsed() < std::time::Duration::from_secs(6),
         "the verdict waited on base checks"
     );
     let row = get(&c, &addr, &format!("/api/changes/{id}")).await;
@@ -990,7 +992,7 @@ async fn no_checkout_outlives_its_pair() {
         ("left-fail", "", speed_up_the_login_tests),
         (
             "left-time",
-            "timeout = \"1s\"",
+            "timeout = \"2s\"",
             a_test_that_tests_nothing_new,
         ),
     ] {

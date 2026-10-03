@@ -586,23 +586,36 @@ pub enum IssueCmd {
 
 #[derive(Subcommand)]
 pub enum GateCmd {
-    /// Register the gate where a workflow runs it: a Spec Kit extension hook
+    /// Put the gate where a workflow runs it: Spec Kit, or a `verify` skill
     ///
-    /// Spec Kit runs hooks from `.specify/extensions.yml`; this one runs the
-    /// project's gates and reports what they exited with. Refused while the
-    /// repository declares no gate, since the hook would have nothing to run.
+    /// `--speckit` installs the Devplane extension through Spec Kit's own
+    /// `specify extension add` (its hook runs the project's gates after
+    /// implement). `--skill` offers the gate as the Claude Code skill
+    /// `verify`, which Claude Code runs before it commits: the file is shown
+    /// as a diff and written only when you confirm. Refused while the
+    /// repository declares no gate, since there would be nothing to run.
+    #[command(group = clap::ArgGroup::new("into").required(true).args(["speckit", "skill"]))]
     Install {
-        /// Register it with Spec Kit, the one workflow this installs into
-        #[arg(long, required = true)]
-        speckit: bool,
-        /// Which hook point. Defaults to `after_implement`
+        /// Install the Devplane extension into this repository's Spec Kit
         #[arg(long)]
+        speckit: bool,
+        /// Offer the gate as the skill `verify`, in `.claude/skills/`
+        #[arg(long)]
+        skill: bool,
+        /// With `--skill`: write it for every repository (`~/.claude/skills/`)
+        #[arg(long, requires = "skill")]
+        user: bool,
+        /// With `--skill`: write without asking. Needed where nobody can answer
+        #[arg(long, short = 'y', requires = "skill")]
+        yes: bool,
+        /// With `--speckit`: which hook point. Defaults to `after_implement`
+        #[arg(long, conflicts_with = "skill")]
         event: Option<String>,
         /// Print and write nothing
         #[arg(long = "dry-run")]
         dry_run: bool,
-        /// Write the hook even where the repository declares no gate to run,
-        /// or the agent cannot reach the skill
+        /// Install even where the repository declares no gate to run, or the
+        /// agent cannot reach the skill a hand-written hook names
         #[arg(long)]
         anyway: bool,
     },
@@ -1125,6 +1138,18 @@ pub async fn run(cli: Cli) -> Result<()> {
             false => forge::cmd_issues(json).await,
         },
         Command::Change { what } => change::cmd_change(what, json).await,
+        Command::Gate {
+            what:
+                Some(GateCmd::Install {
+                    skill: true,
+                    user,
+                    yes,
+                    dry_run,
+                    anyway,
+                    ..
+                }),
+            ..
+        } => gate::cmd_skill_install(user, yes, dry_run, anyway, json),
         Command::Gate {
             what:
                 Some(GateCmd::Install {

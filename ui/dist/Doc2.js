@@ -6,9 +6,9 @@ import { n as specs, r as watch, t as key } from "./store.svelte.js";
 //#region src/surfaces/plan/Doc.svelte
 var root = from_html(`<div class="pad svelte-khab3i"><!></div>`);
 var root_1 = from_html(`<span class="svelte-khab3i"><b> </b> boxes · <b> </b> ticked</span>`);
-var root_2 = from_html(`<span class="wait svelte-khab3i"><!> </span>`);
-var root_3 = from_html(`<span class="wait svelte-khab3i"><!> changed under a run</span>`);
-var root_4 = from_html(`<span class="quiet svelte-khab3i"><!></span>`);
+var root_2 = from_html(`<span class="quiet svelte-khab3i"><!></span>`);
+var root_3 = from_html(`<span class="wait svelte-khab3i"><!> </span>`);
+var root_4 = from_html(`<span class="wait svelte-khab3i"><!> changed under a run</span>`);
 var root_5 = from_html(`<a class="btn svelte-khab3i"><!> </a> <!> <!>`, 1);
 var root_6 = from_html(`<button class="btn primary svelte-khab3i"><!> Start a change…</button> <span class="quiet svelte-khab3i">No change is working to this specification; pick it in the form.</span>`, 1);
 var root_7 = from_html(`<p class="warn svelte-khab3i"><!> Its change is finished while boxes are still open.</p>`);
@@ -56,7 +56,7 @@ function Doc($$anchor, $$props) {
 		var alternate = ($$anchor) => {
 			{
 				let $0 = user_derived(() => get(total) ? "Pick a specification" : "No specification on this machine");
-				let $1 = user_derived(() => get(total) ? `${get(total)} specifications across ${specs.projects.length} projects. A specification is read as it is on disk: its outline, its boxes, and the requirements its tasks cite.` : "Devplane reads Spec Kit, OpenSpec and Kiro folders where they already are, and a plain folder a project names in devplane.toml.");
+				let $1 = user_derived(() => get(total) ? `${get(total)} specifications across ${specs.projects.length} projects. A specification is read as it is on disk: its outline, its boxes, and the requirements its tasks cite.` : "Devplane reads Spec Kit, OpenSpec, Kiro and GSD folders where they already are, and a plain folder a project names in devplane.toml.");
 				Empty($$anchor, {
 					icon: "spec",
 					get title() {
@@ -106,57 +106,67 @@ function Doc($$anchor, $$props) {
 			});
 			append($$anchor, span);
 		};
+		var consequent_3 = ($$anchor) => {
+			var span_1 = root_2();
+			var node_5 = child(span_1);
+			Inline(node_5, { get text() {
+				return get(r).plan.no_progress;
+			} });
+			reset(span_1);
+			append($$anchor, span_1);
+		};
 		if_block(node_4, ($$render) => {
 			if (get(r).plan.progress) $$render(consequent_2);
+			else if (get(r).plan.no_progress) $$render(consequent_3, 1);
 		});
-		var span_1 = sibling(node_4, 2);
-		var text_5 = only_child(span_1);
-		var node_5 = sibling(span_1, 2);
-		var consequent_3 = ($$anchor) => {
-			var span_2 = root_2();
-			var node_6 = child(span_2);
-			Icon(node_6, {
+		var span_2 = sibling(node_4, 2);
+		var text_5 = only_child(span_2);
+		var node_6 = sibling(span_2, 2);
+		var consequent_4 = ($$anchor) => {
+			var span_3 = root_3();
+			var node_7 = child(span_3);
+			Icon(node_7, {
 				name: "question",
 				size: 13
 			});
-			var text_6 = sibling(node_6);
-			reset(span_2);
+			var text_6 = sibling(node_7);
+			reset(span_3);
 			template_effect(() => set_text(text_6, ` ${get(r).plan.open_questions ?? ""} open questions`));
-			append($$anchor, span_2);
+			append($$anchor, span_3);
 		};
-		if_block(node_5, ($$render) => {
-			if (get(r).plan.open_questions > 0) $$render(consequent_3);
+		if_block(node_6, ($$render) => {
+			if (get(r).plan.open_questions > 0) $$render(consequent_4);
 		});
-		var node_7 = sibling(node_5, 2);
-		var consequent_4 = ($$anchor) => {
-			var span_3 = root_3();
-			var node_8 = child(span_3);
-			Icon(node_8, {
+		var node_8 = sibling(node_6, 2);
+		var consequent_5 = ($$anchor) => {
+			var span_4 = root_4();
+			var node_9 = child(span_4);
+			Icon(node_9, {
 				name: "alert",
 				size: 13
 			});
 			next();
-			reset(span_3);
-			append($$anchor, span_3);
+			reset(span_4);
+			append($$anchor, span_4);
 		};
-		if_block(node_7, ($$render) => {
-			if (get(r).drifted) $$render(consequent_4);
+		if_block(node_8, ($$render) => {
+			if (get(r).drifted) $$render(consequent_5);
 		});
 		reset(div_1);
 		var div_2 = sibling(div_1, 2);
-		var node_9 = child(div_2);
-		var consequent_7 = ($$anchor) => {
+		var node_10 = child(div_2);
+		var consequent_8 = ($$anchor) => {
 			var fragment_3 = root_5();
 			var a = first_child(fragment_3);
-			var node_10 = child(a);
-			Icon(node_10, {
+			var node_11 = child(a);
+			Icon(node_11, {
 				name: "change",
 				size: 14
 			});
-			var text_7 = sibling(node_10);
+			var text_7 = sibling(node_11);
 			reset(a);
-			var node_11 = sibling(a, 2);
-			var consequent_5 = ($$anchor) => {
+			var node_12 = sibling(a, 2);
+			var consequent_6 = ($$anchor) => {
 				ChangeState($$anchor, {
 					get state() {
 						return get(r).state;
@@ -166,21 +176,21 @@ function Doc($$anchor, $$props) {
 					}
 				});
 			};
-			if_block(node_11, ($$render) => {
-				if (get(r).state) $$render(consequent_5);
+			if_block(node_12, ($$render) => {
+				if (get(r).state) $$render(consequent_6);
 			});
-			var node_12 = sibling(node_11, 2);
-			var consequent_6 = ($$anchor) => {
-				var span_4 = root_4();
-				var node_13 = child(span_4);
-				Inline(node_13, { get text() {
+			var node_13 = sibling(node_12, 2);
+			var consequent_7 = ($$anchor) => {
+				var span_5 = root_2();
+				var node_14 = child(span_5);
+				Inline(node_14, { get text() {
 					return get(r).counts_says;
 				} });
-				reset(span_4);
-				append($$anchor, span_4);
+				reset(span_5);
+				append($$anchor, span_5);
 			};
-			if_block(node_12, ($$render) => {
-				if (get(r).counts_says) $$render(consequent_6);
+			if_block(node_13, ($$render) => {
+				if (get(r).counts_says) $$render(consequent_7);
 			});
 			template_effect(($0) => {
 				set_attribute(a, "href", $0);
@@ -191,8 +201,8 @@ function Doc($$anchor, $$props) {
 		var alternate_1 = ($$anchor) => {
 			var fragment_5 = root_6();
 			var button = first_child(fragment_5);
-			var node_14 = child(button);
-			Icon(node_14, {
+			var node_15 = child(button);
+			Icon(node_15, {
 				name: "play",
 				size: 14
 			});
@@ -202,16 +212,16 @@ function Doc($$anchor, $$props) {
 			delegated("click", button, () => run("new-change", "plan"));
 			append($$anchor, fragment_5);
 		};
-		if_block(node_9, ($$render) => {
-			if (get(r).change_id) $$render(consequent_7);
+		if_block(node_10, ($$render) => {
+			if (get(r).change_id) $$render(consequent_8);
 			else $$render(alternate_1, -1);
 		});
 		reset(div_2);
-		var node_15 = sibling(div_2, 2);
-		var consequent_8 = ($$anchor) => {
+		var node_16 = sibling(div_2, 2);
+		var consequent_9 = ($$anchor) => {
 			var p_2 = root_7();
-			var node_16 = child(p_2);
-			Icon(node_16, {
+			var node_17 = child(p_2);
+			Icon(node_17, {
 				name: "alert",
 				size: 13
 			});
@@ -219,8 +229,8 @@ function Doc($$anchor, $$props) {
 			reset(p_2);
 			append($$anchor, p_2);
 		};
-		if_block(node_15, ($$render) => {
-			if (get(r).contradicts_done) $$render(consequent_8);
+		if_block(node_16, ($$render) => {
+			if (get(r).contradicts_done) $$render(consequent_9);
 		});
 		reset(header);
 		var div_3 = sibling(header, 2);
@@ -240,12 +250,12 @@ function Doc($$anchor, $$props) {
 		reset(ol);
 		reset(nav);
 		var div_4 = sibling(nav, 2);
-		var node_17 = child(div_4);
-		var consequent_9 = ($$anchor) => {
+		var node_18 = child(div_4);
+		var consequent_10 = ($$anchor) => {
 			var section = root_9();
 			var h2 = child(section);
-			var node_18 = child(h2);
-			Icon(node_18, {
+			var node_19 = child(h2);
+			Icon(node_19, {
 				name: "question",
 				size: 13
 			});
@@ -262,16 +272,16 @@ function Doc($$anchor, $$props) {
 			reset(section);
 			append($$anchor, section);
 		};
-		if_block(node_17, ($$render) => {
-			if (get(r).plan.questions?.length) $$render(consequent_9);
+		if_block(node_18, ($$render) => {
+			if (get(r).plan.questions?.length) $$render(consequent_10);
 		});
-		var section_1 = sibling(node_17, 2);
-		var node_19 = sibling(child(section_1), 2);
-		var consequent_10 = ($$anchor) => {
+		var section_1 = sibling(node_18, 2);
+		var node_20 = sibling(child(section_1), 2);
+		var consequent_11 = ($$anchor) => {
 			var p_3 = root_10();
 			append($$anchor, p_3);
 		};
-		var consequent_11 = ($$anchor) => {
+		var consequent_12 = ($$anchor) => {
 			var p_4 = root_11();
 			append($$anchor, p_4);
 		};
@@ -302,31 +312,31 @@ function Doc($$anchor, $$props) {
 			});
 			reset(tbody);
 			reset(table);
-			var node_20 = sibling(table, 2);
-			var consequent_12 = ($$anchor) => {
+			var node_21 = sibling(table, 2);
+			var consequent_13 = ($$anchor) => {
 				var p_5 = root_13();
 				var text_13 = only_child(p_5);
 				template_effect(($0) => set_text(text_13, `No task cites: ${$0 ?? ""}`), [() => get(r).trace.orphan_requirements.join(", ")]);
 				append($$anchor, p_5);
 			};
-			if_block(node_20, ($$render) => {
-				if (get(r).trace.orphan_requirements.length) $$render(consequent_12);
+			if_block(node_21, ($$render) => {
+				if (get(r).trace.orphan_requirements.length) $$render(consequent_13);
 			});
-			var node_21 = sibling(node_20, 2);
-			var consequent_13 = ($$anchor) => {
+			var node_22 = sibling(node_21, 2);
+			var consequent_14 = ($$anchor) => {
 				var p_6 = root_14();
 				var text_14 = only_child(p_6);
 				template_effect(() => set_text(text_14, `${get(r).trace.tasks_citing_nothing.length ?? ""} tasks cite no requirement.`));
 				append($$anchor, p_6);
 			};
-			if_block(node_21, ($$render) => {
-				if (get(r).trace.tasks_citing_nothing.length) $$render(consequent_13);
+			if_block(node_22, ($$render) => {
+				if (get(r).trace.tasks_citing_nothing.length) $$render(consequent_14);
 			});
 			append($$anchor, fragment_6);
 		};
-		if_block(node_19, ($$render) => {
-			if (!get(r).trace) $$render(consequent_10);
-			else if (get(r).trace.unrecognised) $$render(consequent_11, 1);
+		if_block(node_20, ($$render) => {
+			if (!get(r).trace) $$render(consequent_11);
+			else if (get(r).trace.unrecognised) $$render(consequent_12, 1);
 			else $$render(alternate_2, -1);
 		});
 		reset(section_1);

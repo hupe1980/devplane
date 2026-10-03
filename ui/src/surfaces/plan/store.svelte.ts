@@ -23,13 +23,23 @@ export type PlanRow = {
   trace?: Trace | null;
   counts_says?: string | null;
 };
+/// One specification layout found in a project, by the tool's own marker.
+export type Layout = {
+  name: string;
+  root: string;
+  /// `null` for a layout that keeps no task file (GSD).
+  task_file: string | null;
+  detected_by: string;
+  /// Where this layout's changes are when they are not in this project.
+  elsewhere: string | null;
+};
 export type ProjectRow = {
   project_id: string;
   project: string;
   root: string;
   declares_markers: boolean;
   declares_plans: boolean;
-  layouts?: string[];
+  layouts?: Layout[];
   no_layout?: string | null;
   plans: PlanRow[];
 };

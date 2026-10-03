@@ -6,6 +6,18 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Added
 
+- GSD is read as a fourth specification layout: detected by `.planning/STATE.md`, every phase folder
+  under `.planning/phases/` listed (inserted, prefixed and bracket-convention phases included,
+  workstreams not), and no progress claimed — GSD keeps no task file, so no count, percentage or bar
+  appears and the surfaces say why. A change's worktree says when a gitignored `.planning/` is not
+  in it and names `.worktreeinclude`.
+- OpenSpec is read OpenSpec's way: `config.yml` is recognised beside `config.yaml`; a folder that only
+  wraps changes is not listed and a dot-named change is; task boxes are counted as `openspec list`
+  counts them (every line of `tasks.md`, `[ x]` done, `[~]`, `[-]` and `[]` open), so the counts
+  equal `openspec list --json`; a change under a custom schema shows no count and says so; and a
+  store-only project says its changes live in the named store instead of showing an empty list.
+- Kiro is detected by `.kiro/specs/`, not `.kiro/`, so a repository where `openspec init --tools
+  kiro` wrote `.kiro/skills/` reads as OpenSpec only.
 - The weakened group reads what governs the agent and what the build trusts: an edit to the agent's
   hook and settings files, `CLAUDE.md`/`AGENTS.md`, skills or MCP configuration (*agent controls*), to
   `CODEOWNERS` or branch protection as code (*ownership*), or to a lockfile or a manifest's

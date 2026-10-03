@@ -1,0 +1,1 @@
+- [ ] 1.1 Listed by OpenSpec although its name starts with a dot

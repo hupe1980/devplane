@@ -71,8 +71,9 @@
         <span class="v">{taskLine(d)}</span>
         {#if d.counts.ticked_unsent?.length}<span class="s wait">{d.counts.ticked_unsent.length} ticked that no run was sent</span>{/if}
       {:else}
-        <span class="v quiet">{d.spec ? "The specification has no tasks." : "No specification is attached."}</span>
+        <span class="v quiet">{#if d.plan?.no_progress}<Inline text={d.plan.no_progress} />{:else}{d.spec ? "The specification has no tasks." : "No specification is attached."}{/if}</span>
       {/if}
+      {#if d.planning_absent}<span class="s wait"><Inline text={d.planning_absent} /></span>{/if}
     </button>
     <button class="card" onclick={() => go("ledger")}>
       <span class="k"><Icon name="ledger" size={14} /> Decisions</span>

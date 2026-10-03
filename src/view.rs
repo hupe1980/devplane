@@ -1277,6 +1277,10 @@ pub struct ChangeView<'a> {
     /// Every stop claim on the change, newest first, open or closed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claim_history: Vec<ClaimView>,
+    /// The project keeps GSD's `.planning/` out of git, so this change's
+    /// worktree lacks it: the sentence naming `.worktreeinclude`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_absent: Option<String>,
 }
 
 /// A stop claim as every surface shows it: the one label, the agent's words
@@ -1419,6 +1423,7 @@ impl<'a> ChangeView<'a> {
             base_checks: None,
             stop_claim: change.open_claim().map(ClaimView::of),
             claim_history: change.stop_claims.iter().rev().map(ClaimView::of).collect(),
+            planning_absent: None,
             change: std::borrow::Cow::Borrowed(change),
         }
     }
@@ -1459,7 +1464,13 @@ impl<'a> ChangeView<'a> {
                 | crate::core::change::Standing::ChecksChanged { .. }
         );
         let last_pass = self.change.last_pass_at();
+        // A layout with no task file (or a schema not read) counts nothing,
+        // whatever box-like lines its files hold; its sentence says why.
+        let unread = self.plan.as_ref().and_then(|p| p.no_progress.clone());
         match trace {
+            _ if unread.is_some() => {
+                self.counts_says = unread;
+            }
             None => {
                 self.counts_says = Some(
                     "the specification folder could not be read, so nothing is counted".into(),
@@ -1696,6 +1707,22 @@ async fn change_views<'a>(snap: &'a Snapshot, store: &crate::store::Store) -> Ve
                 }
                 .to_string(),
             );
+        }
+    }
+
+    // A gitignored GSD planning folder is not carried into a worktree. Git is
+    // asked only where the folder is missing from one.
+    for (view, w) in views.iter_mut().zip(all.iter()) {
+        let (Some(root), Some(tree)) = (
+            roots.get(&w.project_id),
+            w.worktree.as_deref().filter(|d| d.is_dir()),
+        ) else {
+            continue;
+        };
+        if crate::spec::planning_absent(root, tree, true).is_some()
+            && crate::git::is_ignored(root, ".planning").await == Some(true)
+        {
+            view.planning_absent = crate::spec::planning_absent(root, tree, true);
         }
     }
     views
@@ -2710,7 +2737,7 @@ pub async fn specs(snap: &Snapshot, store: &crate::store::Store) -> Value {
             });
             // The two counts, over the working change's own runs.
             let (counts, token_rows) = match (w, &trace) {
-                (Some(w), Some(t)) if !t.unrecognised => {
+                (Some(w), Some(t)) if !t.unrecognised && plan.no_progress.is_none() => {
                     let mine: Vec<&Run> =
                         w.runs.iter().filter_map(|id| snap.world.run(id)).collect();
                     let gates = cfg.as_ref().is_some_and(|c| c.has_gates());

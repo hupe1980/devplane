@@ -234,7 +234,7 @@ function New($$anchor, $$props) {
 			var option_1_value = {};
 			template_effect(() => {
 				option_1.disabled = !!get(p).change_id;
-				set_text(text_1, `${get(p).plan.path ?? ""}${get(p).plan.progress ? ` · ${get(p).plan.progress.done} ticked · ${get(p).plan.progress.total} tasks` : ""}${get(p).change_id ? " · a change already works to it" : ""}`);
+				set_text(text_1, `${get(p).plan.path ?? ""}${get(p).plan.progress ? ` · ${get(p).plan.progress.done} ticked · ${get(p).plan.progress.total} tasks` : get(p).plan.no_progress ? " · no task file, no progress claimed" : ""}${get(p).change_id ? " · a change already works to it" : ""}`);
 				if (option_1_value !== (option_1_value = get(p).plan.path)) option_1.value = (option_1.__value = option_1_value) ?? "";
 			});
 			append($$anchor, option_1);

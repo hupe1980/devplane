@@ -1,0 +1,24 @@
+# A workflow overlay for Spec Kit's built-in `speckit` workflow: after the
+# `implement` step, the workflow engine itself runs the project's gates.
+# Nothing here depends on the agent following hook text — a shell step is run
+# by the engine, and a non-zero exit fails the run at this step.
+#
+# The engine keeps the step's output with the run (`steps.devplane-gate.output`,
+# in `.specify/workflows/runs/<run id>/state.json`), so the verdict that ended
+# the run is the gate's own JSON, not a paraphrase.
+#
+# Install it into a project with:
+#   specify workflow overlay add .specify/extensions/devplane/overlays/devplane-gate.yml
+id: "devplane-gate"
+extends: "speckit"
+priority: 10
+enabled: true
+edits:
+  - insert_after: implement
+    step:
+      id: devplane-gate
+      type: shell
+      run: "devplane gate --json"
+      # `[gates] timeout` in devplane.toml bounds each command; this bounds
+      # the step, which Spec Kit otherwise stops after five minutes.
+      timeout: 3600

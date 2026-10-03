@@ -411,12 +411,17 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
             paint(DIM, &format!("no {}", file.display()))
         );
         // The specifications are read without one: the layout is the tool's own.
-        for layout in &config.spec.layouts(&root) {
+        let layouts = config.spec.layouts(&root);
+        if layouts.is_empty() {
+            println!("\n  {:<9} {}", "spec", crate::spec::NO_LAYOUT);
+        }
+        for layout in &layouts {
             let n = crate::spec::changes(&root, layout).len();
             println!(
                 "\n  {:<9} {} in {}/ ({n} found, by {})",
                 "spec", layout.name, layout.root, layout.detected_by
             );
+            print_elsewhere(layout);
         }
         return Ok(());
     }
@@ -474,6 +479,7 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
             "  {:<9} {} in {}/ ({n} found, by {})",
             "spec", layout.name, layout.root, layout.detected_by
         );
+        print_elsewhere(layout);
     }
     if !config.spec.open_questions.is_empty() {
         // Padded by width, not spaces in the literal: `purity` rejects runs of
@@ -596,6 +602,15 @@ struct ClaudePermissions {
 enum AllowRule {
     Text(String),
     Other(serde::de::IgnoredAny),
+}
+
+/// A layout's *the changes are elsewhere* sentence, beneath its line: an
+/// OpenSpec store-only project says where its changes are rather than
+/// showing `0 found` alone.
+fn print_elsewhere(layout: &crate::spec::Detected) {
+    if let Some(e) = &layout.elsewhere {
+        println!("  {:<9} {e}", "");
+    }
 }
 
 /// Allow rules from the agent's own settings: `devplane.toml` has no allow

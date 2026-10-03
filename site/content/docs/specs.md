@@ -6,7 +6,7 @@ weight = 13
 group = "guide"
 +++
 
-Write specs with Spec Kit, OpenSpec, Kiro or plain Markdown; Devplane adopts no spec format.
+Write specs with Spec Kit, OpenSpec, Kiro, GSD or plain Markdown; Devplane adopts no spec format.
 
 ```sh
 devplane change start "password reset" --spec specs/001-password-reset
@@ -15,14 +15,40 @@ devplane change show <id>
 
 ## What Devplane reads
 
-Committed **Markdown**, one **folder** per spec, **headings** as outline, and progress as `- [ ]` /
-`- [x]` in `tasks.md` only (not `checklists/`). No section names. Detected layouts:
+Committed **Markdown**, one **folder** per spec, **headings** as outline, and progress as the boxes in
+the tool's task file, counted the tool's way (not `checklists/`). No section names. Detected layouts,
+each by its tool's own marker:
 
-| Tool | Detected by | Spec folders |
-|---|---|---|
-| Spec Kit | `.specify/` | `specs/NNN-name/` |
-| OpenSpec | `openspec/config.yaml` | `openspec/changes/<id>/` (not `archive/`) |
-| Kiro | `.kiro/` | `.kiro/specs/<feature>/` |
+| Tool | Detected by | Spec folders | Progress |
+|---|---|---|---|
+| Spec Kit | `.specify/` | `specs/NNN-name/` | `- [ ]` / `- [x]` in `tasks.md` |
+| OpenSpec | `openspec/config.yaml` (or `config.yml`, or the older `openspec/project.md`) | `openspec/changes/<id>/` (not `archive/`) | `tasks.md`, as `openspec list` counts it |
+| Kiro | `.kiro/specs/` | `.kiro/specs/<feature>/` | `- [ ]` / `- [x]` in `tasks.md` |
+| GSD | `.planning/STATE.md` | `.planning/phases/<phase>/` | none claimed |
+
+Two in one repository is normal: each folder is read by the rules of the tool whose folder it is
+under, so `specs/` reads as Spec Kit and `openspec/changes/` as OpenSpec. `devplane config check`
+lists every layout found and how many folders each holds.
+
+- **Kiro** is recognised by `.kiro/specs/`, not `.kiro/`: `openspec init --tools kiro` writes
+  `.kiro/skills/` and `.kiro/prompts/`, and steering files are not specifications.
+- **OpenSpec** changes and counts are OpenSpec's own. A folder that only wraps other change folders
+  (`openspec/changes/mobile/refresh-token/`) is not a change, as `openspec list` reports it; a
+  dot-named folder is one, as OpenSpec lists it. Every line of `tasks.md` is read, fenced blocks and
+  comments included, and a box holding `x` or `X` with any spacing is done while `[~]`, `[-]` and
+  `[]` are open tasks — so Devplane's counts equal `openspec list --json` on the same folder, and its
+  task lines are the ones `openspec instructions apply --json` locates. A change under a schema other
+  than `spec-driven` shows no count and says so.
+- **OpenSpec in a store**: when `openspec/config.yaml` names a `store:` and the project's
+  `openspec/` holds neither `specs/` nor `changes/`, the Specifications view and `devplane config
+  check` say the changes live in that store, outside this project, instead of an empty list. Nothing
+  outside the project is read.
+- **GSD** keeps no task file: a phase is done when its summary file exists, not when a box is
+  ticked. Every phase folder is listed — `01-auth`, inserted `02.1-hotfix`, prefixed `ABC-03-setup`,
+  bracket-convention `GSD.02-05-export` — with no count, percentage or bar, and the sentence *this
+  layout keeps no task file, so Devplane claims no progress for it*. Workstreams under
+  `.planning/workstreams/` are not listed. When `.planning/` is gitignored, a change's worktree does
+  not have it, and the change says to name it in `.worktreeinclude`.
 
 Any other layout is one line of configuration:
 
@@ -117,27 +143,48 @@ check = ["openspec validate --strict", "pnpm test -- --run"]
 
 ## The gate inside Spec Kit's workflow
 
-Spec Kit runs and waits for hooks in `.specify/extensions.yml` marked `optional: false`. Devplane's
-hook names the `devplane-gate` skill, which runs `devplane gate`. Copy the skill into the project (or
-`~/.claude/skills/`) first:
+Devplane ships a Spec Kit extension, `devplane`. It adds one command, `speckit.devplane.gate` (in
+Claude Code, `/speckit-devplane-gate`), which runs `devplane gate` and reports what the project's own
+checks exited with — no interpreting, no fixing, no re-running. It registers that command as a
+mandatory `after_implement` hook, so an agent following `/speckit-implement` runs your gates before
+it writes its completion report, and a red gate is in front of the agent that just wrote the code.
 
 ```sh
-mkdir -p .claude/skills/devplane-gate
-curl -LsSf -o .claude/skills/devplane-gate/SKILL.md   https://raw.githubusercontent.com/hupe1980/devplane/main/plugin/skills/devplane-gate/SKILL.md
-
-devplane gate install --speckit            # writes .specify/extensions.yml
-devplane gate install --speckit --dry-run  # print it, write nothing
-devplane gate                              # what the skill runs
+devplane gate install --speckit --dry-run  # what Spec Kit will be asked to install
+devplane gate install --speckit            # runs `specify extension add` for you
+specify extension list                     # Devplane is listed
 ```
 
-- Needs Spec Kit initialised (`.specify/`). An existing `extensions.yml` is not edited: the entry and
-  where to add it are printed.
+With `specify` on `PATH`, Spec Kit's own command installs the extension and writes
+`.specify/extensions.yml`; Devplane edits nothing there by hand. Without it, Devplane falls back to
+the hand-written hook: it creates `extensions.yml` when absent, or prints the entry to paste when it
+exists, and the hook names the `devplane-gate` skill, which must then be in `.claude/skills/` (the
+[plugin](@/docs/install.md#inside-claude-code-as-a-plugin)'s copy does not count).
+
+- Needs Spec Kit initialised (`.specify/`) and a `[gates] check`. `--anyway` overrides the gate
+  check; `--dry-run` applies the same refusals and runs nothing.
 - Hook point `after_implement` unless `--event`.
-- Refused with no `[gates] check`, or no skill at `.claude/skills/devplane-gate/SKILL.md` in the
-  repository or home. The [plugin](@/docs/install.md#inside-claude-code-as-a-plugin)'s copy does not
-  count. `--anyway` overrides; `--dry-run` applies the same refusals.
 - `devplane gate` exits 0 only on a pass, records nothing, and never waits on a person.
   [States and flags](@/docs/cli.md#devplane-gate).
+
+### When the agent skips the hook
+
+A hook runs only if the agent follows Spec Kit's text. The extension also carries a **workflow
+overlay** for Spec Kit's `speckit` workflow: a `shell` step after `implement` that runs `devplane
+gate --json`. The workflow engine runs it, not the model, so the gate runs every time:
+
+```sh
+specify workflow overlay add .specify/extensions/devplane/overlays/devplane-gate.yml
+specify workflow resolve speckit           # devplane-gate now follows implement
+specify workflow run speckit -i spec="..."
+```
+
+A red gate fails the run at `devplane-gate` (`specify workflow run` exits 1), and the gate's own JSON
+is kept with the run, under `steps.devplane-gate.output` in
+`.specify/workflows/runs/<run id>/state.json`.
+
+Remove it with `specify workflow overlay remove speckit devplane-gate` and `specify extension
+remove devplane`.
 
 ## Next
 

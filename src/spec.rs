@@ -1,10 +1,11 @@
 //! The specification a change answers, read back.
 //!
-//! No methodology is modelled: Spec Kit, Kiro and OpenSpec agree only that a
-//! specification is a committed Markdown folder structured by headings, with
-//! progress as `- [ ]` / `- [x]` boxes in `tasks.md`. So the outline is the
-//! headings and progress is the boxes; nothing here knows what a requirement
-//! is. The boxes matter because they can contradict an agent's self-report.
+//! No methodology is modelled: Spec Kit, Kiro, OpenSpec and GSD agree only
+//! that a specification is a committed Markdown folder structured by headings.
+//! Where a tool keeps progress as `- [ ]` / `- [x]` boxes in a task file, the
+//! boxes are progress, counted the tool's own way; where it keeps none (GSD),
+//! no progress is claimed. Nothing here knows what a requirement is. The boxes
+//! matter because they can contradict an agent's self-report.
 
 use crate::core::run::Run;
 use jiff::Timestamp;
@@ -49,26 +50,56 @@ pub struct Spec {
     /// Every markdown file under it, in path order. Empty when the path names
     /// nothing readable — a finding, not a blank.
     pub docs: Vec<Doc>,
+    /// How its boxes were read: the folder's dialect decides.
+    #[serde(skip)]
+    reading: Reading,
 }
+
+/// How a specification's boxes are read, chosen by the dialect whose change
+/// folder it is. Never stored: it is a function of the path and the markers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Reading {
+    /// `tasks.md` anywhere in the folder, Markdown boxes outside fences; with
+    /// no `tasks.md`, every box. Spec Kit, Kiro, a configured layout, any path.
+    #[default]
+    Markdown,
+    /// `<change>/tasks.md` only, every line, as `openspec list` counts it.
+    OpenSpec,
+    /// No count, and why: a layout with no task file, or an OpenSpec change
+    /// under a schema whose task file Devplane does not read.
+    Unread(String),
+}
+
+/// Why a GSD phase shows no count: the layout keeps no task file.
+pub const NO_TASK_FILE: &str =
+    "this layout keeps no task file, so Devplane claims no progress for it";
 
 impl Spec {
     /// Reads the specification at `named`, a file or a folder. Missing is not
     /// an error: it comes back with no documents and the caller reports it.
     pub fn read(root: &Path, named: &str, markers: &[String]) -> Self {
         let mut docs = Vec::new();
+        let mut reading = Reading::Markdown;
         // A refused path reads as absent ([`confine`] gives the reason). The
         // metadata is the link's own, so a symlink is never a document.
         if let Ok(joined) = confine(root, named) {
             let meta = std::fs::symlink_metadata(&joined).ok();
             if meta.as_ref().is_some_and(|m| m.is_file()) {
-                if let Some(d) = Doc::read(root, &joined, markers) {
+                if let Some(d) = Doc::read(root, &joined, markers, Boxes::Markdown) {
                     docs.push(d);
                 }
             } else if meta.is_some_and(|m| m.is_dir()) {
+                // A change folder of a dialect reads its boxes that dialect's way.
+                let folder = named.trim_end_matches('/').replace('\\', "/");
+                reading = reading_of(root, &folder);
+                let boxes = match reading {
+                    Reading::OpenSpec => Boxes::OpenSpec,
+                    _ => Boxes::Markdown,
+                };
                 docs.extend(
                     markdown_files(&joined)
                         .iter()
-                        .filter_map(|p| Doc::read(root, p, markers)),
+                        .filter_map(|p| Doc::read(root, p, markers, boxes)),
                 );
                 // Path order, so the folder fingerprint is stable across machines.
                 docs.sort_by(|a, b| a.path.cmp(&b.path));
@@ -77,21 +108,44 @@ impl Spec {
         Self {
             path: named.to_string(),
             docs,
+            reading,
         }
     }
 
-    /// `(checked, total)` boxes, from `tasks.md` only — the one filename all
-    /// three layouts share. Other boxes (e.g. `checklists/`) grade the
-    /// specification, not the feature. With no `tasks.md` (a one-file
-    /// specification), every box counts rather than reporting zero.
+    /// `(checked, total)` boxes in the task file, read the folder's dialect's
+    /// way. Markdown: `tasks.md` at any depth; other boxes (e.g.
+    /// `checklists/`) grade the specification, not the feature, and with no
+    /// `tasks.md` (a one-file specification) every box counts rather than
+    /// reporting zero. OpenSpec: `<change>/tasks.md` only, as `openspec list`
+    /// counts it. A layout with no task file: `(0, 0)`, and
+    /// [`Self::no_progress`] says why — never every box in the folder.
     pub fn tasks(&self) -> (u32, u32) {
-        let named = self.docs.iter().any(|d| is_task_list(&d.path));
-        self.docs
-            .iter()
-            .filter(|d| !named || is_task_list(&d.path))
-            .fold((0, 0), |(d, t), doc| {
+        let sum = |docs: &mut dyn Iterator<Item = &Doc>| {
+            docs.fold((0, 0), |(d, t), doc| {
                 (d + doc.done, t + doc.done + doc.open)
             })
+        };
+        match &self.reading {
+            Reading::Markdown => {
+                let named = self.docs.iter().any(|d| is_task_list(&d.path));
+                sum(&mut self.docs.iter().filter(|d| !named || is_task_list(&d.path)))
+            }
+            Reading::OpenSpec => {
+                let file = format!("{}/tasks.md", self.path.trim_end_matches('/'));
+                sum(&mut self.docs.iter().filter(|d| d.path == file))
+            }
+            Reading::Unread(_) => (0, 0),
+        }
+    }
+
+    /// Why this specification has no count although it may hold boxes: its
+    /// layout keeps no task file, or its OpenSpec schema is not one Devplane
+    /// reads. `None` where boxes are read (and simply may be absent).
+    pub fn no_progress(&self) -> Option<&str> {
+        match &self.reading {
+            Reading::Unread(why) => Some(why),
+            _ => None,
+        }
     }
 
     /// How many lines are marked as unresolved questions, never counting
@@ -210,7 +264,7 @@ fn is_markdown(p: &Path) -> bool {
 }
 
 impl Doc {
-    fn read(root: &Path, path: &Path, markers: &[String]) -> Option<Self> {
+    fn read(root: &Path, path: &Path, markers: &[String], boxes: Boxes) -> Option<Self> {
         let bytes = std::fs::read(path).ok()?;
         let fingerprint = crate::core::hash::hex(&bytes);
         // Lossy: a stray non-UTF-8 byte must not erase the specification.
@@ -222,6 +276,14 @@ impl Doc {
         let mut fenced = false;
         for line in text.lines() {
             let t = line.trim_start();
+            // OpenSpec's counter reads every line, fences included.
+            if boxes == Boxes::OpenSpec {
+                match openspec_box(line) {
+                    Some(true) => done += 1,
+                    Some(false) => open += 1,
+                    None => {}
+                }
+            }
             // Fenced examples (common in templates) are not structure.
             if t.starts_with("```") || t.starts_with("~~~") {
                 fenced = !fenced;
@@ -242,15 +304,21 @@ impl Doc {
                     });
                 }
             }
-            match task_box(t) {
-                Some(true) => done += 1,
-                Some(false) => open += 1,
-                None => {}
+            let ticked = match boxes {
+                Boxes::Markdown => task_box(t),
+                Boxes::OpenSpec => openspec_box(line),
+            };
+            if boxes == Boxes::Markdown {
+                match ticked {
+                    Some(true) => done += 1,
+                    Some(false) => open += 1,
+                    None => {}
+                }
             }
             // The markers are the project's words, matched case-insensitively
             // per line. A ticked box is a finished check, not a question, and a
             // marker inside backticks is a mention, not a marker.
-            if task_box(t) != Some(true)
+            if ticked != Some(true)
                 && markers.iter().any(|m| {
                     outside_code_spans(line)
                         .to_lowercase()
@@ -323,6 +391,11 @@ pub struct Plan {
     pub files: u32,
     /// `None` where there is no task list.
     pub progress: Option<Progress>,
+    /// Why there is no count when the reason is the layout, not an absent box:
+    /// *this layout keeps no task file…* (GSD), or an OpenSpec schema whose task
+    /// file Devplane does not read. A surface renders it where a count would be.
+    #[serde(default)]
+    pub no_progress: Option<String>,
     /// Which bound this reading hit, if any; `None` means all of it was read.
     pub truncated: Option<String>,
     /// Bounded; the full count is [`Self::open_questions`].
@@ -351,11 +424,16 @@ impl Plan {
             })
             .collect();
         let all_questions = spec.questions();
+        let no_progress = spec.no_progress().map(str::to_string);
         Self {
             path: named.to_string(),
             present: !spec.docs.is_empty(),
             files: spec.docs.len() as u32,
-            progress: Progress::of(done, total),
+            progress: match no_progress {
+                Some(_) => None,
+                None => Progress::of(done, total),
+            },
+            no_progress,
             truncated: (all_questions > MAX_QUESTIONS).then(|| {
                 format!(
                     "{all_questions} lines are marked unresolved; the first \
@@ -421,8 +499,11 @@ fn outside_code_spans(line: &str) -> String {
     out
 }
 
-/// `- [ ]` / `- [x]`, in the spellings GitHub renders, including numbered
-/// lists (`1. [ ]`, as OpenSpec and Kiro write).
+/// `- [ ]` / `- [x]`, in the spellings GitHub renders: a `-`, `*` or `+`
+/// bullet, or an ordered `1.` / `1)` item (CommonMark's; Kiro writes
+/// `- [ ] 1.` bullets with a dotted number). OpenSpec writes `- [ ] 1.1` — a
+/// bullet, then a dotted number — and its change folders are counted by
+/// [`openspec_box`] instead, OpenSpec's own rule.
 fn task_box(line: &str) -> Option<bool> {
     let (marker, rest) = line.split_once(' ')?;
     if !is_list_marker(marker) {
@@ -435,6 +516,79 @@ fn task_box(line: &str) -> Option<bool> {
         [b'[', b'x' | b'X', b']', ..] => Some(true),
         _ => None,
     }
+}
+
+/// OpenSpec's own task line, as `openspec list`, `status` and `archive` count
+/// it: whether the line is a task, and done. A hand-written equal of
+/// `TASK_LINE_PATTERN` in `dist/utils/task-progress.js` of
+/// `@fission-ai/openspec` 1.13.2 and 1.14.0 (unchanged between them; read
+/// 2026-09-26 and again 2026-10-02):
+///
+/// ```text
+/// ^\s*(?:[-*+]|\d{1,9}[.)])\s*\[(?:\s*([^\]\s]?)\s*\](?![([])|\s+\])\s*(.*)
+/// ```
+///
+/// A list marker (bullet or one-to-nine-digit ordered item), optional space,
+/// then a box holding at most one non-space marker, not followed by `(` or
+/// `[` (a link) unless the box is whitespace only. Done when the marker is
+/// `x` or `X`; every other marker (`~`, `-`, empty, `1`) is an open task.
+/// Applied to every line of the task file — fences, comments and front matter
+/// included — because OpenSpec's counter skips none of them. Pinned by
+/// `tests/fixtures/spec/openspec-counts/openspec-list.json`.
+pub fn openspec_box(line: &str) -> Option<bool> {
+    openspec_task(line).map(|(done, _)| done)
+}
+
+/// [`openspec_box`] with the description after the box.
+fn openspec_task(line: &str) -> Option<(bool, &str)> {
+    let s = line.trim_start_matches(js_space);
+    let rest = match s.strip_prefix(['-', '*', '+']) {
+        Some(r) => r,
+        None => {
+            let n = s.bytes().take_while(u8::is_ascii_digit).count();
+            if n == 0 || n > 9 {
+                return None;
+            }
+            s[n..].strip_prefix(['.', ')'])?
+        }
+    };
+    let inner = rest.trim_start_matches(js_space).strip_prefix('[')?;
+    // `\s*([^\]\s]?)\s*\](?![([])`: at most one marker, and not a link.
+    let a = inner.trim_start_matches(js_space);
+    let mut chars = a.chars();
+    let (marker, after) = match chars.next() {
+        Some(c) if c != ']' && !js_space(c) => (Some(c), chars.as_str()),
+        _ => (None, a),
+    };
+    if let Some(tail) = after.trim_start_matches(js_space).strip_prefix(']')
+        && !tail.starts_with(['(', '['])
+    {
+        let done = marker.is_some_and(|c| c.eq_ignore_ascii_case(&'x'));
+        return Some((done, tail.trim_start_matches(js_space)));
+    }
+    // `\s+\]`: a whitespace-only box, link or not.
+    if inner.starts_with(js_space)
+        && let Some(tail) = inner.trim_start_matches(js_space).strip_prefix(']')
+    {
+        return Some((false, tail.trim_start_matches(js_space)));
+    }
+    None
+}
+
+/// JavaScript's `\s`, which OpenSpec's pattern is written in: not quite
+/// [`char::is_whitespace`] (no U+0085; U+FEFF included).
+fn js_space(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
 }
 
 /// `-`, `*`, `+`, or `12.` / `12)`: the word before a list item's text.
@@ -493,9 +647,15 @@ pub enum Shape {
     Numbered,
     /// `<id>/`: any folder except the tool's archive folder, if it has one.
     Named { archive: Option<&'static str> },
+    /// OpenSpec's own rule, as `openspec list --json` applies it: every folder
+    /// but `archive`, dot-named ones included, less a folder that only wraps a
+    /// change (`openspec list` marks it *not a change*; see [`is_wrapper`]).
+    OpenSpec,
 }
 
 impl Shape {
+    /// By name alone. [`Shape::OpenSpec`] also needs the folder on disk, which
+    /// [`changes`] checks.
     fn admits(self, name: &str) -> bool {
         match self {
             Self::Numbered => {
@@ -515,8 +675,28 @@ impl Shape {
                 lead >= 3 && !rest.is_empty()
             }
             Self::Named { archive } => !name.starts_with('.') && Some(name) != archive,
+            Self::OpenSpec => name != "archive",
         }
     }
+}
+
+/// How a task file's boxes are counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Boxes {
+    /// `- [ ]` / `- [x]` / `- [X]` as GitHub renders them, fenced blocks
+    /// skipped: Spec Kit, Kiro, a configured layout.
+    Markdown,
+    /// OpenSpec's own counter ([`openspec_box`]), every line read.
+    OpenSpec,
+}
+
+/// A dialect's task file: which file, and how its boxes are counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskReader {
+    /// Relative to the change folder.
+    pub file: &'static str,
+    pub boxes: Boxes,
 }
 
 /// A specification layout, as four facts about its paths — and nothing else:
@@ -528,38 +708,60 @@ pub struct Dialect {
     /// Where the change folders are, relative to the project root.
     pub root: &'static str,
     pub change_folder: Shape,
-    /// The one file whose boxes are progress on the feature.
-    pub task_file: &'static str,
+    /// The one file whose boxes are progress on the feature, and how they are
+    /// counted. `None` for a tool that keeps no task file: its folders are
+    /// listed and no progress is claimed.
+    pub tasks: Option<TaskReader>,
     /// The tool's own marker (trailing `/` for a directory). Detection is by
     /// its presence only.
     pub detected_by: &'static str,
 }
 
+const MARKDOWN_TASKS: TaskReader = TaskReader {
+    file: "tasks.md",
+    boxes: Boxes::Markdown,
+};
+
 /// The layouts recognised without configuration; `[spec] plans` declares
-/// another.
+/// another. Each folder reads by the rules of the dialect whose root it is
+/// under, so two dialects in one repository never contest a folder.
 pub const DIALECTS: &[Dialect] = &[
     Dialect {
         name: "Spec Kit",
         root: "specs",
         change_folder: Shape::Numbered,
-        task_file: "tasks.md",
+        tasks: Some(MARKDOWN_TASKS),
         detected_by: ".specify/",
     },
     Dialect {
         name: "OpenSpec",
         root: "openspec/changes",
-        change_folder: Shape::Named {
-            archive: Some("archive"),
-        },
-        task_file: "tasks.md",
+        change_folder: Shape::OpenSpec,
+        tasks: Some(TaskReader {
+            file: "tasks.md",
+            boxes: Boxes::OpenSpec,
+        }),
         detected_by: "openspec/config.yaml",
     },
     Dialect {
         name: "Kiro",
         root: ".kiro/specs",
         change_folder: Shape::Named { archive: None },
-        task_file: "tasks.md",
-        detected_by: ".kiro/",
+        tasks: Some(MARKDOWN_TASKS),
+        // Not `.kiro/`: `openspec init --tools kiro` writes `.kiro/skills/`
+        // and `.kiro/prompts/`, and steering files are not specifications.
+        detected_by: ".kiro/specs/",
+    },
+    Dialect {
+        name: "GSD",
+        root: ".planning/phases",
+        // Every phase folder on disk: `01-auth`, `02.1-hotfix`,
+        // `ABC-01-setup`, `GSD.02-05-export`, `999.1-idea`. A naming rule
+        // would drop real phases.
+        change_folder: Shape::Named { archive: None },
+        // Completion is a summary file existing, not a ticked box.
+        tasks: None,
+        detected_by: ".planning/STATE.md",
     },
 ];
 
@@ -570,8 +772,8 @@ pub const PLAIN: &str = "Plain";
 /// it names what was looked for, so the reader can fix it. A test keeps it in
 /// step with [`DIALECTS`].
 pub const NO_LAYOUT: &str = "this project has no specification layout; Devplane recognises \
-     Spec Kit (`.specify/`), OpenSpec (`openspec/config.yaml`) and Kiro (`.kiro/`); \
-     `[spec] plans` declares another";
+     Spec Kit (`.specify/`), OpenSpec (`openspec/config.yaml`), Kiro (`.kiro/specs/`) and \
+     GSD (`.planning/STATE.md`); `[spec] plans` declares another";
 
 /// A layout present in one repository: a [`Dialect`], owned, since a
 /// configured root is not a constant.
@@ -580,10 +782,16 @@ pub struct Detected {
     pub name: String,
     pub root: String,
     pub change_folder: Shape,
-    pub task_file: String,
+    /// Relative to a change folder; `None` for a layout with no task file.
+    pub task_file: Option<String>,
     /// What was found, or the key that declared it: `.specify/`,
-    /// `openspec/config.yaml`, `.kiro/`, `[spec] plans`.
+    /// `openspec/config.yaml`, `.kiro/specs/`, `.planning/STATE.md`,
+    /// `[spec] plans`.
     pub detected_by: String,
+    /// Where this layout's changes are when they are not in this project: an
+    /// OpenSpec config's `store:`, named only when OpenSpec itself would use
+    /// it. A surface renders it instead of an empty list.
+    pub elsewhere: Option<String>,
 }
 
 impl Detected {
@@ -592,8 +800,9 @@ impl Detected {
             name: d.name.to_string(),
             root: d.root.to_string(),
             change_folder: d.change_folder,
-            task_file: d.task_file.to_string(),
+            task_file: d.tasks.map(|t| t.file.to_string()),
             detected_by: d.detected_by.to_string(),
+            elsewhere: None,
         }
     }
 
@@ -604,8 +813,9 @@ impl Detected {
             name: PLAIN.to_string(),
             root: plans.trim_end_matches('/').to_string(),
             change_folder: Shape::Named { archive: None },
-            task_file: "tasks.md".to_string(),
+            task_file: Some(MARKDOWN_TASKS.file.to_string()),
             detected_by: "[spec] plans".to_string(),
+            elsewhere: None,
         }
     }
 }
@@ -621,6 +831,9 @@ pub fn detect(root: &Path) -> Vec<Detected> {
                 .find(|m| marker_present(root, m))?;
             let mut det = Detected::of(d);
             det.detected_by = found.to_string();
+            if d.change_folder == Shape::OpenSpec {
+                det.elsewhere = openspec_store(root, found);
+            }
             Some(det)
         })
         .collect()
@@ -629,12 +842,59 @@ pub fn detect(root: &Path) -> Vec<Detected> {
 /// OpenSpec's older marker, still the only one in some repositories.
 pub const OPENSPEC_LEGACY_MARKER: &str = "openspec/project.md";
 
-/// A dialect's marker, then any older marker the same tool wrote.
+/// OpenSpec's alias for its config file, which it reads when `config.yaml` is
+/// absent.
+pub const OPENSPEC_CONFIG_ALIAS: &str = "openspec/config.yml";
+
+/// A dialect's marker, then any other marker the same tool writes, in the
+/// order tried; the first present is the one named.
 fn markers_of(d: &Dialect) -> Vec<&'static str> {
-    match d.name {
-        "OpenSpec" => vec![d.detected_by, OPENSPEC_LEGACY_MARKER],
+    match d.change_folder {
+        Shape::OpenSpec => vec![d.detected_by, OPENSPEC_CONFIG_ALIAS, OPENSPEC_LEGACY_MARKER],
         _ => vec![d.detected_by],
     }
+}
+
+/// The sentence for an OpenSpec project whose changes live in a store: only
+/// when the config names one *and* `openspec/` holds neither `specs/` nor
+/// `changes/` — OpenSpec consults the pointer only then (a fallback, never an
+/// override). Nothing outside the project is read.
+fn openspec_store(root: &Path, found: &str) -> Option<String> {
+    if found == OPENSPEC_LEGACY_MARKER {
+        return None;
+    }
+    let planning = ["openspec/specs/", "openspec/changes/"]
+        .iter()
+        .any(|m| marker_present(root, m));
+    if planning {
+        return None;
+    }
+    let store = scalar(&confine(root, found).ok()?, "store")?;
+    Some(format!(
+        "this project's OpenSpec changes live in store `{store}`, outside this project"
+    ))
+}
+
+/// A top-level scalar of a small YAML file, read by line: `key:` at column 0,
+/// the value bare (to a ` #` comment) or in single or double quotes. Enough
+/// for `store:` and `schema:`, each a single string by OpenSpec's own schema;
+/// anything else (a list, a block) is no value.
+fn scalar(file: &Path, key: &str) -> Option<String> {
+    if !std::fs::symlink_metadata(file).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let text = std::fs::read_to_string(file).ok()?;
+    let value = text.lines().find_map(|l| {
+        l.strip_prefix(key)?
+            .strip_prefix(':')
+            .map(|v| v.trim_end_matches('\r'))
+    })?;
+    let v = value.trim();
+    let v = match v.chars().next() {
+        Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
+        _ => v.split(" #").next().unwrap_or("").trim(),
+    };
+    (!v.is_empty() && !v.starts_with(['|', '>', '[', '{', '&', '*'])).then(|| v.to_string())
 }
 
 /// The dialect a folder is a change of, when its path is one.
@@ -647,12 +907,54 @@ fn dialect_of(root: &Path, path: &str) -> Option<&'static Dialect> {
     })
 }
 
+/// How the folder at `path` reads its boxes: by its dialect's reader, and for
+/// an OpenSpec change by its schema too.
+fn reading_of(root: &Path, path: &str) -> Reading {
+    let Some(d) = dialect_of(root, path) else {
+        return Reading::Markdown;
+    };
+    match d.tasks.map(|t| t.boxes) {
+        None => Reading::Unread(NO_TASK_FILE.to_string()),
+        Some(Boxes::Markdown) => Reading::Markdown,
+        Some(Boxes::OpenSpec) => match openspec_schema(root, path) {
+            Some(s) if s != "spec-driven" => Reading::Unread(format!(
+                "this change uses OpenSpec schema `{s}`, whose task file Devplane does not read"
+            )),
+            _ => Reading::OpenSpec,
+        },
+    }
+}
+
+/// The schema an OpenSpec change is under, as OpenSpec resolves it: the
+/// change's `.openspec.yaml`, else the project config; `None` is the default.
+fn openspec_schema(root: &Path, change: &str) -> Option<String> {
+    let at = |rel: &str| confine(root, rel).ok().and_then(|p| scalar(&p, "schema"));
+    at(&format!("{change}/.openspec.yaml"))
+        .or_else(|| at("openspec/config.yaml"))
+        .or_else(|| at(OPENSPEC_CONFIG_ALIAS))
+}
+
 fn marker_present(root: &Path, marker: &str) -> bool {
     let want_dir = marker.ends_with('/');
     let Ok(path) = confine(root, marker.trim_end_matches('/')) else {
         return false;
     };
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() == want_dir)
+}
+
+/// The sentence a change's worktree carries when the project keeps GSD's
+/// planning folder out of git: the worktree was made from git, so the folder
+/// is not there. `ignored` is git's answer for `.planning` in `root`; the
+/// caller asks it. `None` when the project has no GSD marker, the worktree has
+/// the folder, or git does not ignore it.
+pub fn planning_absent(root: &Path, worktree: &Path, ignored: bool) -> Option<String> {
+    let gsd = DIALECTS.iter().find(|d| d.name == "GSD")?;
+    let here = |at: &Path| marker_present(at, gsd.detected_by);
+    (ignored && here(root) && !here(worktree)).then(|| {
+        "GSD's `.planning/` is gitignored, so it is not in this change's worktree; \
+         name it in `.worktreeinclude` to carry it"
+            .to_string()
+    })
 }
 
 /// One change: the folder a change answers, and where its task list is.
@@ -667,8 +969,9 @@ pub struct ChangeFolder {
     pub path: String,
     /// The folder's own name: `001-password-reset`, `add-rate-limit`.
     pub name: String,
-    /// Relative to the project root; not checked for existence here.
-    pub task_file: String,
+    /// Relative to the project root; not checked for existence here. `None`
+    /// for a layout with no task file.
+    pub task_file: Option<String>,
 }
 
 impl ChangeFolder {
@@ -683,13 +986,23 @@ impl ChangeFolder {
         let name = path.rsplit('/').next().unwrap_or(&path).to_string();
         // A folder under a dialect's root reads citations that dialect's way.
         let dialect = dialect_of(root, &path);
+        let reader = dialect.map_or(Some(MARKDOWN_TASKS), |d| d.tasks);
         Ok(Self {
             root: root.to_path_buf(),
             dialect: dialect.map(|d| d.name.to_string()),
-            task_file: format!("{path}/{}", dialect.map_or("tasks.md", |d| d.task_file)),
+            task_file: reader.map(|t| format!("{path}/{}", t.file)),
             name,
             path,
         })
+    }
+
+    /// How this folder's task lines are told apart.
+    fn boxes(&self) -> Boxes {
+        DIALECTS
+            .iter()
+            .find(|d| Some(d.name) == self.dialect.as_deref())
+            .and_then(|d| d.tasks)
+            .map_or(Boxes::Markdown, |t| t.boxes)
     }
 }
 
@@ -707,15 +1020,87 @@ pub fn changes(root: &Path, layout: &Detected) -> Vec<ChangeFolder> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| layout.change_folder.admits(name))
+        .filter(|name| layout.change_folder != Shape::OpenSpec || !is_wrapper(&dir.join(name)))
         .filter_map(|name| {
             let mut c = ChangeFolder::at(root, &format!("{}/{name}", layout.root)).ok()?;
             c.dialect = Some(layout.name.clone());
-            c.task_file = format!("{}/{}", c.path, layout.task_file);
+            c.task_file = layout.task_file.as_ref().map(|f| format!("{}/{f}", c.path));
             Some(c)
         })
         .collect();
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+// OpenSpec's namespace-wrapper test, as `dist/utils/nested-change.js` of
+// `@fission-ai/openspec` 1.13.2 and 1.14.0 has it (read 2026-10-02). Its third
+// signal, a custom schema's output file, is not modelled: under the default
+// schema those outputs are exactly the markers below.
+
+/// Files only a change's root holds (`CHANGE_ROOT_MARKERS`).
+const OPENSPEC_CHANGE_MARKERS: &[&str] =
+    &[".openspec.yaml", "proposal.md", "tasks.md", "design.md"];
+
+/// How far below a folder OpenSpec looks for a nested change (`MAX_NESTING_DEPTH`).
+const OPENSPEC_NESTING: usize = 3;
+
+/// A folder directly under `openspec/changes/` that only wraps changes:
+/// it does not look like a change, holds no non-dot file of its own, and has a
+/// folder within three levels that does look like one. `openspec list` reports
+/// it *not a change*, and the folders inside it are invisible to OpenSpec.
+fn is_wrapper(dir: &Path) -> bool {
+    let dot = dir
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with('.'));
+    if dot || looks_like_change(dir) {
+        return false;
+    }
+    let own_file = std::fs::read_dir(dir).is_ok_and(|es| {
+        es.flatten().any(|e| {
+            !e.file_name().to_string_lossy().starts_with('.')
+                && !e.file_type().is_ok_and(|t| t.is_dir())
+        })
+    });
+    !own_file && nests_a_change(dir, 1)
+}
+
+fn looks_like_change(dir: &Path) -> bool {
+    OPENSPEC_CHANGE_MARKERS
+        .iter()
+        .any(|m| std::fs::metadata(dir.join(m)).is_ok_and(|m| m.is_file()))
+        || any_file_under(&dir.join("specs"))
+}
+
+/// OpenSpec's `hasAnyFileUnder`: a non-dot file (or link) anywhere below.
+fn any_file_under(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        if e.file_name().to_string_lossy().starts_with('.') {
+            return false;
+        }
+        match e.file_type() {
+            Ok(t) if t.is_dir() => any_file_under(&e.path()),
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    })
+}
+
+fn nests_a_change(dir: &Path, depth: usize) -> bool {
+    if depth > OPENSPEC_NESTING {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let sub = e.path();
+        !e.file_name().to_string_lossy().starts_with('.')
+            && e.file_type().is_ok_and(|t| t.is_dir())
+            && (looks_like_change(&sub) || nests_a_change(&sub, depth + 1))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -817,6 +1202,7 @@ pub const UNRECOGNISED: &str = "no requirement identifier of a recognised shape 
 pub fn edges(change: &ChangeFolder, shapes: &[TokenShape]) -> Trace {
     let dir = change.root.join(&change.path);
     let dialect = change.dialect.as_deref();
+    let boxes = change.boxes();
     let mut headed: Vec<Token> = Vec::new();
     let mut tasks: Vec<TaskAnchor> = Vec::new();
     let mut any = false;
@@ -835,18 +1221,25 @@ pub fn edges(change: &ChangeFolder, shapes: &[TokenShape]) -> Trace {
             continue;
         };
         let text = String::from_utf8_lossy(&bytes);
-        let is_tasks = rel == change.task_file;
+        let is_tasks = change.task_file.as_deref() == Some(rel.as_str());
         let mut fenced = false;
         // Kiro: the current requirement, and the open tasks by indentation.
         let mut requirement: Option<String> = None;
         let mut open: Vec<(usize, usize)> = Vec::new();
         for (i, line) in text.lines().enumerate() {
             let t = line.trim_start();
-            if t.starts_with("```") || t.starts_with("~~~") {
-                fenced = !fenced;
-                continue;
-            }
-            if fenced {
+            let fence = t.starts_with("```") || t.starts_with("~~~");
+            if fence || fenced {
+                fenced ^= fence;
+                // OpenSpec counts a box in a fence; so its task list holds it.
+                if is_tasks
+                    && boxes == Boxes::OpenSpec
+                    && let Some(done) = openspec_box(line)
+                {
+                    let cites = tokens_in(line, shapes);
+                    any |= !cites.is_empty();
+                    tasks.push(anchor(&tasks, &rel, i, t, done, cites));
+                }
                 continue;
             }
             let indent = line.len() - t.len();
@@ -913,25 +1306,16 @@ pub fn edges(change: &ChangeFolder, shapes: &[TokenShape]) -> Trace {
                 continue;
             }
             any |= !found.is_empty();
-            if is_tasks && let Some(done) = task_box(t) {
-                let text = t.trim_end().to_string();
-                let key = task_key(&text);
-                let occurrence = 1 + tasks
-                    .iter()
-                    .filter(|a| a.path == rel && task_key(&a.text) == key)
-                    .count() as u32;
+            let ticked = match boxes {
+                Boxes::Markdown => task_box(t),
+                Boxes::OpenSpec => openspec_box(line),
+            };
+            if is_tasks && let Some(done) = ticked {
                 while open.last().is_some_and(|(at, _)| *at >= indent) {
                     open.pop();
                 }
                 open.push((indent, tasks.len()));
-                tasks.push(TaskAnchor {
-                    path: rel.clone(),
-                    line: i as u32 + 1,
-                    text,
-                    done,
-                    cites: found,
-                    occurrence,
-                });
+                tasks.push(anchor(&tasks, &rel, i, t, done, found));
             }
         }
     }
@@ -968,6 +1352,32 @@ pub fn edges(change: &ChangeFolder, shapes: &[TokenShape]) -> Trace {
         orphan_requirements,
         tasks_citing_nothing,
         unrecognised: false,
+    }
+}
+
+/// A task line at zero-based line `i` of `rel`, numbered among the tasks
+/// with the same text before it.
+fn anchor(
+    tasks: &[TaskAnchor],
+    rel: &str,
+    i: usize,
+    t: &str,
+    done: bool,
+    cites: Vec<Token>,
+) -> TaskAnchor {
+    let text = t.trim_end().to_string();
+    let key = task_key(&text);
+    let occurrence = 1 + tasks
+        .iter()
+        .filter(|a| a.path == rel && task_key(&a.text) == key)
+        .count() as u32;
+    TaskAnchor {
+        path: rel.to_string(),
+        line: i as u32 + 1,
+        text,
+        done,
+        cites,
+        occurrence,
     }
 }
 
@@ -1110,6 +1520,10 @@ pub fn task_key(line: &str) -> String {
                 return body.trim().to_string();
             }
         }
+    }
+    // OpenSpec's wider boxes (`[~]`, `[ x]`, `[]`): ticking one keeps its key.
+    if let Some((_, body)) = openspec_task(t) {
+        return body.trim().to_string();
     }
     t.to_string()
 }
@@ -1601,6 +2015,65 @@ mod tests {
             ("some prose - [ ] mid-sentence", None),
         ] {
             assert_eq!(task_box(line.trim_start()), want, "{line}");
+        }
+    }
+
+    /// OpenSpec's counter, line by line, against the cases its own source
+    /// comment names (`@fission-ai/openspec` 1.14.0, `task-progress.js`).
+    #[test]
+    fn an_openspec_task_line_is_what_openspecs_pattern_matches() {
+        for (line, want) in [
+            ("- [ x] 1.1 padded", Some(true)),
+            ("- [X] a", Some(true)),
+            ("- [ X ] padded both sides", Some(true)),
+            ("- [x]done", Some(true)),
+            ("- [~] 1.1", Some(false)),
+            ("- [-] 1.1", Some(false)),
+            ("- [] 1.1", Some(false)),
+            ("- [1] a digit marker", Some(false)),
+            ("  - [ ] 1.1.1 indented", Some(false)),
+            ("1) [ ] paren", Some(false)),
+            ("1. [x] ordered", Some(true)),
+            ("123456789. [ ] nine digits", Some(false)),
+            ("+ [ ] plus", Some(false)),
+            ("-[ ] no space after the bullet", Some(false)),
+            ("- [ ](x) a whitespace-only box before a paren", Some(false)),
+            (
+                "- [ ][r] a whitespace-only box before a bracket",
+                Some(false),
+            ),
+            ("- [ ] trailing CR\r", Some(false)),
+            // Not tasks.
+            ("- [A](https://example.com)", None),
+            ("- [1][ref]", None),
+            ("- [](x)", None),
+            ("- [WIP] x", None),
+            ("1234567890. [ ] ten digits", None),
+            ("- plain", None),
+            ("prose - [ ] mid-line", None),
+            ("--- [ ]", None),
+        ] {
+            assert_eq!(openspec_box(line), want, "{line:?}");
+        }
+    }
+
+    /// A box in a fence is a task to OpenSpec, and not to the Markdown reader.
+    #[test]
+    fn openspec_reads_a_fenced_box_and_markdown_does_not() {
+        let root = tmp();
+        let doc = root.join("tasks.md");
+        std::fs::write(&doc, "- [x] a\n```\n- [ ] b\n```\n- [~] c\n").unwrap();
+        let md = Doc::read(&root, &doc, &[], Boxes::Markdown).unwrap();
+        let os = Doc::read(&root, &doc, &[], Boxes::OpenSpec).unwrap();
+        assert_eq!((md.done, md.open), (1, 0));
+        assert_eq!((os.done, os.open), (1, 2));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn ticking_an_openspec_box_keeps_its_key() {
+        for line in ["- [~] 1.1 a", "- [ x] 1.1 a", "- [] 1.1 a", "- [x] 1.1 a"] {
+            assert_eq!(task_key(line), "1.1 a", "{line}");
         }
     }
 

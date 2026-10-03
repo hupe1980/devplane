@@ -122,6 +122,29 @@ inside the project or the change's worktree. Only an agent Devplane started for 
 one, about its own run, once until you answer; anything else is refused with a sentence and nothing
 is recorded.
 
+## Before an agent commits
+
+Claude Code runs a project or user skill named `verify` right before it commits (docs-only and
+tests-only commits excepted). Devplane can be that skill:
+
+```sh
+devplane gate install --skill --dry-run   # the diff, and nothing written
+devplane gate install --skill             # the diff, then: Write this? [y/N]
+devplane gate install --skill --user      # in ~/.claude/skills/, for every repository
+```
+
+The skill runs `devplane gate --json` and reports what each of the project's checks exited with.
+Its pass is the agent's own run, so it says *passed* — never *verified*, which only `check` against
+a recorded tree earns ([Verified done](@/docs/verified-done.md)). It does not fix, re-run or record
+anything; a red gate is reported before the commit and the person decides.
+
+- Written to `.claude/skills/verify/SKILL.md`, with a first line naming where it came from. Delete the
+  directory to remove it.
+- Shown as a diff first, and written only when you answer yes. Where nobody can answer — a script, an
+  agent's shell, `--json` — nothing is written without `--yes`.
+- Refused in a repository with no `[gates] check`. A `verify` skill you wrote yourself is left alone
+  unless you pass `--anyway`, and then you are shown the diff that replaces it.
+
 ## Transcripts
 
 Devplane keeps what a driven agent says, on this machine. To decline:

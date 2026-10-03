@@ -158,7 +158,7 @@ Delete a `.bak` once you have what you need.
 | *refused: `CLAUDECODE` is set, so this is running inside an agent's session …* | `inbox answer --allow`, `offer`, `finish`, `archive` or `review --seen` ran inside an agent's session | run it from your own terminal |
 | every call is asked, and the inbox has `config_broken` | a `devplane.toml` or `~/.devplane/policy.toml` will not load | `devplane config check` names the error |
 | `deny … (built in: …)` on an edit to `devplane.toml` | agents may not change the rules that gate them | edit it yourself |
-| `devplane gate install --speckit` refuses: *nothing here defines `/devplane-gate`* | the skill file is not where the agent looks | [copy the skill](@/docs/specs.md#the-gate-inside-spec-kit-s-workflow), then re-run |
+| `devplane gate install --speckit` refuses: *nothing here defines `/devplane-gate`* | `specify` is not on `PATH`, so the hand-written hook was chosen, and its skill file is not where the agent looks | put Spec Kit's `specify` on `PATH` so the extension is installed, or [copy the skill](@/docs/specs.md#the-gate-inside-spec-kit-s-workflow); then re-run |
 | macOS: *"devplane" cannot be opened* | a browser download is quarantined | use the `curl` installer |
 | the page says *This binary was built without its interface* | it was built from a clone without `ui/dist` | `cd ui && npm install && npm run build`, then rebuild |
 | `change start` fails before the agent speaks | the agent is not signed in, or `npx` cannot reach npm | sign the agent in in its own terminal (`claude`, `copilot login`, …); check Node and network |

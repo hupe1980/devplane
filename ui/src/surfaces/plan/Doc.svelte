@@ -30,7 +30,7 @@
       title={total ? "Pick a specification" : "No specification on this machine"}
       body={total
         ? `${total} specifications across ${specs.projects.length} projects. A specification is read as it is on disk: its outline, its boxes, and the requirements its tasks cite.`
-        : "Devplane reads Spec Kit, OpenSpec and Kiro folders where they already are, and a plain folder a project names in devplane.toml."}
+        : "Devplane reads Spec Kit, OpenSpec, Kiro and GSD folders where they already are, and a plain folder a project names in devplane.toml."}
     />
   {/if}
 {:else}
@@ -40,7 +40,8 @@
       <p class="where"><Icon name="folder" size={12} /> {found.p.project} <span>/</span> <code>{r.plan.path}</code></p>
       <h1>{r.plan.outline[0]?.text ?? r.plan.path}</h1>
       <div class="facts">
-        {#if r.plan.progress}<span><b>{r.plan.progress.total}</b> boxes · <b>{r.plan.progress.done}</b> ticked</span>{/if}
+        {#if r.plan.progress}<span><b>{r.plan.progress.total}</b> boxes · <b>{r.plan.progress.done}</b> ticked</span>
+        {:else if r.plan.no_progress}<span class="quiet"><Inline text={r.plan.no_progress} /></span>{/if}
         <span>{r.plan.files} files</span>
         {#if r.plan.open_questions > 0}<span class="wait"><Icon name="question" size={13} /> {r.plan.open_questions} open questions</span>{/if}
         {#if r.drifted}<span class="wait"><Icon name="alert" size={13} /> changed under a run</span>{/if}

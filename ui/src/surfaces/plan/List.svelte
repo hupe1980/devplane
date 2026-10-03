@@ -1,7 +1,8 @@
 <script lang="ts">
   // Every specification on this machine, by project: folder, ticked boxes,
   // the change working to it, and anything waiting on a person. A project with
-  // no layout says which three it looked for.
+  // no layout says which it looked for; one whose changes live elsewhere says
+  // where, instead of an empty list.
   import Icon from "../../lib/ui/Icon.svelte";
   import Inline from "../../lib/ui/Inline.svelte";
   import ChangeState from "../../lib/ChangeState.svelte";
@@ -22,8 +23,12 @@
       }))
       .filter((p) => p.plans.length > 0),
   );
+  /// Projects whose changes are somewhere else: the sentence, not an empty list.
+  const away = $derived(
+    (specs.projects ?? []).filter((p) => p.plans.length === 0 && (p.layouts ?? []).some((l) => l.elsewhere)),
+  );
   /// Projects with no specification layout: one counted line, not a paragraph each.
-  const bare = $derived((specs.projects ?? []).filter((p) => p.plans.length === 0));
+  const bare = $derived((specs.projects ?? []).filter((p) => p.plans.length === 0 && !away.includes(p)));
   const sentence = $derived(bare[0]?.no_layout ?? "");
   const total = $derived((specs.projects ?? []).reduce((n, p) => n + p.plans.length, 0));
 
@@ -71,7 +76,8 @@
             <!-- The change's state on a line of its own, so it is never clipped. -->
             {#if r.state}<span class="state" title={[r.title, r.state, r.qualifier?.says].filter(Boolean).join(" · ")}><ChangeState state={r.state} q={r.qualifier} /></span>{/if}
             <span class="meta">
-              {#if r.plan.progress}<span class="boxes" title="boxes ticked in the task file · {r.plan.progress.total} tasks">{r.plan.progress.total} tasks · {r.plan.progress.done} ticked</span>{/if}
+              {#if r.plan.progress}<span class="boxes" title="boxes ticked in the task file · {r.plan.progress.total} tasks">{r.plan.progress.total} tasks · {r.plan.progress.done} ticked</span>
+              {:else if r.plan.no_progress}<span class="unread" title={r.plan.no_progress}>no task file · no progress claimed</span>{/if}
               {#if r.plan.open_questions > 0}<span class="wait"><Icon name="question" size={11} /> {r.plan.open_questions}</span>{/if}
               {#if r.drifted}<span class="wait"><Icon name="alert" size={11} /> drifted</span>{/if}
             </span>
@@ -79,6 +85,14 @@
         {/each}
       {/if}
     {/each}
+    {#if !filter.trim()}
+      {#each away as p (p.project_id)}
+        <div class="away">
+          <p class="group"><Icon name="folder" size={13} /> <span>{p.project}</span></p>
+          {#each (p.layouts ?? []).filter((l) => l.elsewhere) as l (l.root)}<p class="why"><Inline text={l.elsewhere ?? ""} /></p>{/each}
+        </div>
+      {/each}
+    {/if}
     {#if bare.length > 0 && !filter.trim()}
       <details class="bare">
         <summary><Icon name="folder" size={13} /> {bare.length} {bare.length === 1 ? "project has" : "projects have"} no specification layout</summary>
@@ -225,6 +239,18 @@
   }
   .fail {
     color: var(--fail);
+  }
+  .unread {
+    font-style: italic;
+  }
+  .away .group {
+    margin: 0;
+    cursor: default;
+  }
+  .away .why {
+    margin: 0 var(--s-4) var(--s-2) 2.2rem;
+    font-size: var(--t-xs);
+    color: var(--dim);
   }
   .bare {
     margin: var(--s-3) var(--s-3) 0;

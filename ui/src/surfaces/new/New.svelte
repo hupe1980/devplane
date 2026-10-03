@@ -25,7 +25,7 @@
 
   type Project = { id: string; name: string; root: string; trusted: boolean; default_agent?: string | null };
   type Agent = { id: string; name?: string; command?: string };
-  type Plan = { plan: { path: string; progress?: { done: number; total: number } | null }; change_id: string | null };
+  type Plan = { plan: { path: string; progress?: { done: number; total: number } | null; no_progress?: string | null }; change_id: string | null };
   type SpecProject = { project_id: string; project: string; root: string; plans: Plan[] };
 
   let {
@@ -195,7 +195,7 @@
         <select id="spec" bind:value={spec}>
           <option value="">none — just the words below</option>
           {#each plans as p (p.plan.path)}
-            <option value={p.plan.path} disabled={!!p.change_id}>{p.plan.path}{p.plan.progress ? ` · ${p.plan.progress.done} ticked · ${p.plan.progress.total} tasks` : ""}{p.change_id ? " · a change already works to it" : ""}</option>
+            <option value={p.plan.path} disabled={!!p.change_id}>{p.plan.path}{p.plan.progress ? ` · ${p.plan.progress.done} ticked · ${p.plan.progress.total} tasks` : p.plan.no_progress ? " · no task file, no progress claimed" : ""}{p.change_id ? " · a change already works to it" : ""}</option>
           {/each}
         </select>
       </section>

@@ -137,6 +137,8 @@ export type Detail = {
     path: string;
     present: boolean;
     progress?: { done: number; total: number } | null;
+    /// Why there is no count: the layout keeps no task file, or a schema not read.
+    no_progress?: string | null;
     open_questions?: number;
     outline: Heading[];
   } | null;
@@ -153,6 +155,8 @@ export type Detail = {
   stop_claim?: ClaimView | null;
   /// Every stop claim, newest first, open or closed.
   claim_history?: ClaimView[];
+  /// GSD's gitignored `.planning/` is not in this change's worktree; names `.worktreeinclude`.
+  planning_absent?: string | null;
 };
 
 /// What an agent said through the stop tool, as the host renders it. The

@@ -389,17 +389,21 @@ bench passed
 Not recorded: this ran in a repository rather than against a change. `devplane change verify <id>` is the one that leaves a row.
 ```
 
-#### `devplane gate install --speckit`
+#### `devplane gate install`
 
-Register the gate as a Spec Kit hook in `.specify/extensions.yml`, naming the `devplane-gate` skill.
-Setup and refusals: [Specifications](@/docs/specs.md#the-gate-inside-spec-kit-s-workflow).
+Put the gate where a workflow runs it. One of `--speckit` or `--skill` is required. Setup and
+refusals: [Specifications](@/docs/specs.md#the-gate-inside-spec-kit-s-workflow) and
+[Driving agents](@/docs/agents.md#before-an-agent-commits).
 
 | Flag | What |
 |---|---|
-| `--speckit` | required; Spec Kit is the one workflow supported |
-| `--event <hook>` | hook point; default `after_implement` |
-| `--dry-run` | print, write nothing (same refusals) |
-| `--anyway` | write even with no gate declared or no reachable skill |
+| `--speckit` | install the Devplane extension into this repository's Spec Kit, through `specify extension add` when `specify` is on `PATH`; without it, the hand-written hook in `.specify/extensions.yml` |
+| `--skill` | offer the gate as the Claude Code skill `verify` in `.claude/skills/`, shown as a diff and written only when you confirm |
+| `--user` | with `--skill`: in `~/.claude/skills/`, for every repository |
+| `--yes` | with `--skill`: write without asking; needed where nobody can answer |
+| `--event <hook>` | with `--speckit`: hook point; default `after_implement` |
+| `--dry-run` | print, write and run nothing (same refusals) |
+| `--anyway` | install even with no gate declared, no reachable skill for the hand-written hook, or a `verify` skill Devplane did not write |
 
 ### `devplane verify`
 

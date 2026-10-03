@@ -24,6 +24,9 @@ include = [
   "/ui/dist/*.js",
   "/ui/dist/*.css",
   "/examples",
+  # `devplane gate install` embeds the Spec Kit extension and the gate skill.
+  "/extensions/speckit-devplane",
+  "/plugin/skills/devplane-gate",
   "/README.md",
   "/CHANGELOG.md",
   "/LICENSE-MIT",

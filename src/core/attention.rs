@@ -2356,6 +2356,7 @@ mod tests {
             present: true,
             files: 1,
             progress: None,
+            no_progress: None,
             truncated: None,
             questions: vec![crate::spec::Question {
                 path: "spec.md".into(),

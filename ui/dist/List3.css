@@ -134,6 +134,18 @@
   .fail.svelte-16yypc0 {
     color: var(--fail);
   }
+  .unread.svelte-16yypc0 {
+    font-style: italic;
+  }
+  .away.svelte-16yypc0 .group:where(.svelte-16yypc0) {
+    margin: 0;
+    cursor: default;
+  }
+  .away.svelte-16yypc0 .why:where(.svelte-16yypc0) {
+    margin: 0 var(--s-4) var(--s-2) 2.2rem;
+    font-size: var(--t-xs);
+    color: var(--dim);
+  }
   .bare.svelte-16yypc0 {
     margin: var(--s-3) var(--s-3) 0;
     padding: var(--s-2) var(--s-3);
