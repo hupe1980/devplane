@@ -92,7 +92,7 @@ async fn the_diff_is_on_the_decision_that_allowed_it() {
             &state,
             ask.id.as_str(),
             devplane::driven::Answer::Permission(devplane::driven::Decision::Allow),
-            "test",
+            devplane::core::ask::AnswerPath::Cli,
         )
         .await
         .expect("delivered");
@@ -163,7 +163,7 @@ async fn no_diff_is_kept_where_transcripts_are_not() {
         &state,
         ask.id.as_str(),
         devplane::driven::Answer::Permission(devplane::driven::Decision::Allow),
-        "test",
+        devplane::core::ask::AnswerPath::Cli,
     )
     .await
     .unwrap();
@@ -208,7 +208,7 @@ async fn a_request_without_a_diff_says_so() {
         &state,
         ask.id.as_str(),
         devplane::driven::Answer::Permission(devplane::driven::Decision::Deny),
-        "test",
+        devplane::core::ask::AnswerPath::Cli,
     )
     .await
     .unwrap();

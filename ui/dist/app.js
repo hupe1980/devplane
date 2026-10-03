@@ -315,7 +315,10 @@ register({
 	nav: false,
 	bare: true,
 	reads: ["/api/inbox"],
-	select: (feed) => ({ blind: unseen(feed.board) }),
+	select: (feed, focus) => ({
+		blind: unseen(feed.board),
+		ask: focus
+	}),
 	page: () => __vitePreload(() => import("./Answer.js"), __vite__mapDeps([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]))
 });
 //#endregion
@@ -2375,10 +2378,15 @@ function App($$anchor, $$props) {
 		let id = "";
 		let f = "";
 		const want = q.get("surface");
-		if (want && surfaces().some((s) => s.id === want)) id = want;
+		const named = !!want && surfaces().some((s) => s.id === want);
+		if (named && want) id = want;
 		for (const s of surfaces()) {
 			const v = s.link ? q.get(s.link) : null;
 			if (s.link && v) {
+				if (named) {
+					f ||= v;
+					continue;
+				}
 				id = s.id;
 				f = s.linkFocus ? s.linkFocus(v) : v;
 			}

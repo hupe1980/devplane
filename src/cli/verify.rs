@@ -26,6 +26,11 @@ pub struct VerifyArgs {
     /// 2.1.0, for your own upload step; nothing is uploaded
     #[arg(long, value_name = "PATH")]
     pub sarif: Option<PathBuf>,
+    /// Read who approved the pull request this run's event names, with
+    /// $GITHUB_TOKEN from $GITHUB_API_URL: two to twelve GET requests, and
+    /// nothing written. Without it, verify makes no network request
+    #[arg(long)]
+    pub approvals: bool,
 }
 
 pub async fn cmd_verify(a: VerifyArgs, json: bool) -> Result<()> {
@@ -36,6 +41,7 @@ pub async fn cmd_verify(a: VerifyArgs, json: bool) -> Result<()> {
         statement: a.statement,
         no_base_checks: a.no_base_checks,
         sarif: a.sarif,
+        approvals: a.approvals,
     };
     let here = std::env::current_dir()?;
     match crate::verify::run(&here, &args).await {

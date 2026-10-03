@@ -7,6 +7,7 @@ pub mod auth;
 pub mod client;
 pub mod query;
 pub mod remote;
+pub mod reviews;
 
 pub use auth::{Keyring, Memory, Pending, Poll, Secret, TokenStore, Viewer};
 pub use client::{Client, GitHubHost};
@@ -31,6 +32,10 @@ pub struct PullRequest {
     pub checks: Vec<Check>,
     pub author: Option<Author>,
     pub updated_at: Option<String>,
+    /// The head commit (`headRefOid`), when GitHub said it.
+    pub head_oid: Option<String>,
+    /// The base branch's name (`baseRefName`), when GitHub said it.
+    pub base_ref: Option<String>,
 }
 
 /// A GitHub user, as GraphQL names one.
@@ -805,6 +810,45 @@ pub async fn pr_for_branch(
     .await
 }
 
+/// Reads who approved `pr`: its reviews and its base branch's review
+/// requirement, from the host the repository's remote names, with the
+/// signed-in token. Read-only. `now` is the time the reading is stamped with.
+pub async fn approvals(
+    hub: &GitHub,
+    dir: &Path,
+    pr: &PullRequest,
+    now: jiff::Timestamp,
+) -> Result<crate::core::approvals::Reading, Error> {
+    let repo = remote::of_dir(dir).await?;
+    let (Some(head), Some(base)) = (pr.head_oid.clone(), pr.base_ref.clone()) else {
+        return Err(Error::Api {
+            status: 200,
+            message: "GitHub did not say the pull request's head commit or base branch".into(),
+        });
+    };
+    let host = repo.host.clone();
+    let after_merge = pr.status() == PrStatus::Merged;
+    let on = repo.host.clone();
+    hub.call(&on, |c| async move {
+        reviews::read(
+            &c,
+            &reviews::Target {
+                host: &host,
+                owner: &repo.owner,
+                repo: &repo.name,
+                number: pr.number,
+                url: &pr.url,
+                head: &head,
+                base: &base,
+                after_merge,
+            },
+            now,
+        )
+        .await
+    })
+    .await
+}
+
 /// What [`create_pr`] came to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Offered {
@@ -924,6 +968,8 @@ mod tests {
                 login: "hupe1980".into(),
             }),
             updated_at: Some("2026-09-15T10:00:00Z".into()),
+            head_oid: None,
+            base_ref: None,
         }
     }
 

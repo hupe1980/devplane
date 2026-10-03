@@ -334,51 +334,159 @@ pub async fn stall_sweeper(state: Shared, notify_enabled: bool) {
 pub async fn pull_requests(state: Shared) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
+        pull_requests_once(&state).await;
+    }
+}
 
-        let watched: Vec<(crate::core::ChangeId, std::path::PathBuf, String)> = {
-            let changes = state.changes.lock().await;
-            changes
-                .values()
-                .filter(|w| {
-                    w.pull_request
-                        .as_ref()
-                        .map(|p| !matches!(p.status.as_str(), "merged" | "closed"))
-                        .unwrap_or(false)
-                })
-                .filter_map(|w| Some((w.id.clone(), w.worktree.clone()?, w.branch.clone()?)))
-                .collect()
-        };
+/// One pass over every change with an open pull request: its status, and —
+/// when the pull request changed since the last reading, has none, or has
+/// just merged or closed — who approved it, read from the forge. Read-only.
+/// Nothing here writes a decision: the merge is decided on the forge.
+pub async fn pull_requests_once(state: &Shared) {
+    let watched: Vec<(crate::core::ChangeId, std::path::PathBuf, String)> = {
+        let changes = state.changes.lock().await;
+        changes
+            .values()
+            .filter(|w| {
+                w.pull_request
+                    .as_ref()
+                    .map(|p| !matches!(p.status.as_str(), "merged" | "closed"))
+                    .unwrap_or(false)
+            })
+            .filter_map(|w| Some((w.id.clone(), w.worktree.clone()?, w.branch.clone()?)))
+            .collect()
+    };
 
-        for (id, dir, branch) in watched {
-            let Ok(Some(pr)) = crate::github::pr_for_branch(&state.github, &dir, &branch).await
-            else {
+    for (id, dir, branch) in watched {
+        let pr = match crate::github::pr_for_branch(&state.github, &dir, &branch).await {
+            Ok(Some(pr)) => pr,
+            Ok(None) => continue,
+            Err(e) => {
+                // Signed out, expired, unreachable: a kept reading is marked
+                // as no longer current, never shown as if it were.
+                let stale = {
+                    let mut changes = state.changes.lock().await;
+                    changes.get_mut(&id).and_then(|w| {
+                        let p = w.pull_request.as_mut()?;
+                        let Some(crate::core::approvals::ReadingState::Current { .. }) =
+                            &p.approvals
+                        else {
+                            return None;
+                        };
+                        p.approvals = Some(crate::core::approvals::ReadingState::failed(
+                            p.approvals.as_ref(),
+                            e.to_string(),
+                        ));
+                        w.updated_at = jiff::Timestamp::now();
+                        Some(w.clone())
+                    })
+                };
+                if let Some(w) = stale {
+                    crate::change::persist(state, &w).await;
+                    state.notify_changed();
+                }
                 continue;
-            };
-            let status = pr.status().as_str().to_string();
-            let failing: Vec<String> = pr.failing_checks().iter().map(|c| c.name.clone()).collect();
+            }
+        };
+        let status = pr.status().as_str().to_string();
+        let failing: Vec<String> = pr.failing_checks().iter().map(|c| c.name.clone()).collect();
 
-            let changed = {
-                let mut changes = state.changes.lock().await;
-                match changes.get_mut(&id) {
-                    Some(w) => match &mut w.pull_request {
-                        Some(existing) if existing.status != status => {
+        // Whether to read the approvals: never read, the pull request moved,
+        // a failed read to retry, or it just merged or closed (read once more,
+        // and never again: it leaves the watched set).
+        let (previous, read_now) = {
+            let changes = state.changes.lock().await;
+            match changes.get(&id).and_then(|w| w.pull_request.as_ref()) {
+                Some(p) => {
+                    let ended = matches!(status.as_str(), "merged" | "closed");
+                    let current = matches!(
+                        p.approvals,
+                        Some(crate::core::approvals::ReadingState::Current { .. })
+                    );
+                    let moved = p.approvals_for.is_none() || p.approvals_for != pr.updated_at;
+                    (p.approvals.clone(), ended || !current || moved)
+                }
+                None => continue,
+            }
+        };
+        let approvals = match read_now {
+            false => previous.clone(),
+            true => Some(
+                match crate::github::approvals(&state.github, &dir, &pr, jiff::Timestamp::now())
+                    .await
+                {
+                    Ok(reading) => crate::core::approvals::ReadingState::Current {
+                        reading: Box::new(reading),
+                    },
+                    Err(e) => crate::core::approvals::ReadingState::failed(
+                        previous.as_ref(),
+                        e.to_string(),
+                    ),
+                },
+            ),
+        };
+        let read_ok = matches!(
+            approvals,
+            Some(crate::core::approvals::ReadingState::Current { .. })
+        );
+
+        let changed = {
+            let mut changes = state.changes.lock().await;
+            match changes.get_mut(&id) {
+                Some(w) => match &mut w.pull_request {
+                    Some(existing) => {
+                        let mut moved = false;
+                        if existing.status != status {
                             existing.status = status.clone();
                             existing.failing_checks = failing;
+                            moved = true;
+                        }
+                        if existing.review_decision != pr.review_decision {
+                            existing.review_decision = pr.review_decision.clone();
+                            moved = true;
+                        }
+                        // The reading's time alone is not a change worth a
+                        // write; what it says is.
+                        let says = |a: &Option<crate::core::approvals::ReadingState>| {
+                            a.as_ref().map(|s| match s {
+                                crate::core::approvals::ReadingState::Current { reading } => (
+                                    0,
+                                    reading.sentence.clone(),
+                                    reading.bearing.clone(),
+                                    reading.after_merge,
+                                ),
+                                crate::core::approvals::ReadingState::Stale { why, .. }
+                                | crate::core::approvals::ReadingState::NotRead { why } => {
+                                    (1, why.clone(), Vec::new(), false)
+                                }
+                            })
+                        };
+                        if says(&existing.approvals) != says(&approvals) {
+                            existing.approvals = approvals;
+                            moved = true;
+                        }
+                        if read_ok && existing.approvals_for != pr.updated_at {
+                            existing.approvals_for = pr.updated_at.clone();
+                            moved = true;
+                        }
+                        if moved {
                             w.updated_at = jiff::Timestamp::now();
                             Some(w.clone())
+                        } else {
+                            None
                         }
-                        _ => None,
-                    },
+                    }
                     None => None,
-                }
-            };
-            if let Some(w) = changed {
-                tracing::info!(change = %id, %status, "pull request changed");
-                // Not `.ok()`: this write backs a `ci_red` item, and dropping
-                // it leaves the board ahead of the store.
-                crate::change::persist(&state, &w).await;
-                state.notify_changed();
+                },
+                None => None,
             }
+        };
+        if let Some(w) = changed {
+            tracing::info!(change = %id, %status, "pull request changed");
+            // Not `.ok()`: this write backs a `ci_red` item, and dropping
+            // it leaves the board ahead of the store.
+            crate::change::persist(state, &w).await;
+            state.notify_changed();
         }
     }
 }

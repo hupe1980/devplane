@@ -273,12 +273,12 @@ var root_15$2 = from_html(`<button class="svelte-axcc9r"><!> Pick it back up</bu
 var root_16$2 = from_html(`<button role="menuitem" class="svelte-axcc9r"><!> Finish</button>`);
 var root_17$2 = from_html(`<button role="menuitem" class="svelte-axcc9r"><!> Open in the editor</button> <button role="menuitem" class="svelte-axcc9r"><!> Open a terminal</button>`, 1);
 var root_18$2 = from_html(`<button role="menuitem" title="remove the worktree; the branch and the record are kept" class="svelte-axcc9r"><!> Archive</button>`);
-var root_19$1 = from_html(`<details class="pop more svelte-axcc9r"><summary aria-label="More actions" title="More actions" class="svelte-axcc9r"><!> <span class="label svelte-axcc9r">More</span></summary> <div class="card menu svelte-axcc9r" role="menu"><!> <!> <!></div></details>`);
-var root_20$1 = from_html(`<span><!></span>`);
-var root_21$1 = from_html(`<span> </span>`);
-var root_22$1 = from_html(`<span class="counts svelte-axcc9r"> <!></span>`);
-var root_23$1 = from_html(`<p class="sub svelte-axcc9r"><!> <!></p>`);
-var root_24$1 = from_html(`<header class="head svelte-axcc9r"><div class="line svelte-axcc9r"><h1 class="svelte-axcc9r"> </h1> <details class="pop state svelte-axcc9r"><summary title="where this change is, and its facts" class="svelte-axcc9r"><!><!></summary> <div class="card svelte-axcc9r"><!> <dl class="svelte-axcc9r"><!> <!> <!> <!> <!></dl></div></details> <!> <!> <!> <span class="gap svelte-axcc9r"></span> <div role="toolbar" aria-label="what you can do to this change"><!> <!> <!> <!> <!></div></div> <!> <!></header>`);
+var root_19$2 = from_html(`<details class="pop more svelte-axcc9r"><summary aria-label="More actions" title="More actions" class="svelte-axcc9r"><!> <span class="label svelte-axcc9r">More</span></summary> <div class="card menu svelte-axcc9r" role="menu"><!> <!> <!></div></details>`);
+var root_20$2 = from_html(`<span><!></span>`);
+var root_21$2 = from_html(`<span> </span>`);
+var root_22$2 = from_html(`<span class="counts svelte-axcc9r"> <!></span>`);
+var root_23$2 = from_html(`<p class="sub svelte-axcc9r"><!> <!></p>`);
+var root_24$2 = from_html(`<header class="head svelte-axcc9r"><div class="line svelte-axcc9r"><h1 class="svelte-axcc9r"> </h1> <details class="pop state svelte-axcc9r"><summary title="where this change is, and its facts" class="svelte-axcc9r"><!><!></summary> <div class="card svelte-axcc9r"><!> <dl class="svelte-axcc9r"><!> <!> <!> <!> <!></dl></div></details> <!> <!> <!> <span class="gap svelte-axcc9r"></span> <div role="toolbar" aria-label="what you can do to this change"><!> <!> <!> <!> <!></div></div> <!> <!></header>`);
 function Head($$anchor, $$props) {
 	push($$props, true);
 	let notOpened = prop($$props, "notOpened", 19, () => []), reload = prop($$props, "reload", 3, () => {});
@@ -288,7 +288,7 @@ function Head($$anchor, $$props) {
 	const more = user_derived(() => !!$$props.d.worktree || !$$props.d.completion && !$$props.d.archived_at && !!$$props.d.runs?.length || !$$props.d.archived_at && (!!$$props.d.completion || !!$$props.d.stopped));
 	let menu = state(null);
 	const shut = () => get(menu)?.removeAttribute("open");
-	var header = root_24$1();
+	var header = root_24$2();
 	var div = child(header);
 	var h1 = child(div);
 	var text = only_child(h1, true);
@@ -600,7 +600,7 @@ function Head($$anchor, $$props) {
 	});
 	var node_27 = sibling(node_23, 2);
 	var consequent_19 = ($$anchor) => {
-		var details_2 = root_19$1();
+		var details_2 = root_19$2();
 		var summary_2 = child(details_2);
 		var node_28 = child(summary_2);
 		Icon(node_28, {
@@ -699,10 +699,10 @@ function Head($$anchor, $$props) {
 	});
 	var node_37 = sibling(node_36, 2);
 	var consequent_25 = ($$anchor) => {
-		var p_1 = root_23$1();
+		var p_1 = root_23$2();
 		var node_38 = child(p_1);
 		var consequent_21 = ($$anchor) => {
-			var span_3 = root_20$1();
+			var span_3 = root_20$2();
 			var node_39 = child(span_3);
 			Inline(node_39, { get text() {
 				return $$props.standing;
@@ -716,11 +716,11 @@ function Head($$anchor, $$props) {
 		});
 		var node_40 = sibling(node_38, 2);
 		var consequent_24 = ($$anchor) => {
-			var span_4 = root_22$1();
+			var span_4 = root_22$2();
 			var text_10 = child(span_4, true);
 			var node_41 = sibling(text_10);
 			var consequent_22 = ($$anchor) => {
-				var span_5 = root_21$1();
+				var span_5 = root_21$2();
 				var text_11 = only_child(span_5);
 				template_effect(() => {
 					set_class(span_5, 1, `w-${$$props.d.base_checks.headline.weight ?? ""}`, "svelte-axcc9r");
@@ -729,7 +729,7 @@ function Head($$anchor, $$props) {
 				append($$anchor, span_5);
 			};
 			var consequent_23 = ($$anchor) => {
-				var span_6 = root_21$1();
+				var span_6 = root_21$2();
 				var text_12 = only_child(span_6);
 				template_effect(() => {
 					set_class(span_6, 1, `w-${$$props.d.base_checks.on_base.weight ?? ""}`, "svelte-axcc9r");
@@ -914,7 +914,15 @@ var root_14$4 = from_html(`<span> <!></span>`);
 var root_15$1 = from_html(`<span class="s fail svelte-1og7e16"> </span>`);
 var root_16$1 = from_html(`<p class="svelte-1og7e16"><!></p>`);
 var root_17$1 = from_html(`<section class="alert svelte-1og7e16"><!> <div><b>The specification moved under a run.</b> <!> <button class="svelte-1og7e16">Decide in Tasks</button></div></section>`);
-var root_18$1 = from_html(`<div class="grid svelte-1og7e16"><section class="cards svelte-1og7e16"><button class="card svelte-1og7e16"><span class="k svelte-1og7e16"><!> Gates</span> <!></button> <button class="card svelte-1og7e16"><span class="k svelte-1og7e16"><!> Tasks</span> <!> <!></button> <button class="card svelte-1og7e16"><span class="k svelte-1og7e16"><!> Decisions</span> <!> <!></button> <button class="card svelte-1og7e16"><span class="k svelte-1og7e16"><!> Agent</span> <span class="v svelte-1og7e16"><b> </b> <!></span> <!></button></section> <!> <section class="facts svelte-1og7e16"><h2 class="svelte-1og7e16">Facts</h2> <!></section> <section class="history svelte-1og7e16"><h2 class="svelte-1og7e16">History</h2> <!> <!></section></div>`);
+var root_18$1 = from_html(`<p class="s svelte-1og7e16"> </p>`);
+var root_19$1 = from_html(`<p class="sentence svelte-1og7e16"> </p> <!>`, 1);
+var root_20$1 = from_html(`<p class="sentence quiet svelte-1og7e16"> </p>`);
+var root_21$1 = from_html(`<p class="sentence quiet svelte-1og7e16">Approvals not read yet.</p>`);
+var root_22$1 = from_html(`<li class="svelte-1og7e16"><span class="who svelte-1og7e16"> </span> <span> </span> <span class="state"> </span> <code class="at svelte-1og7e16"> </code></li>`);
+var root_23$1 = from_html(`<ul class="reviewers svelte-1og7e16"></ul>`);
+var root_24$1 = from_html(`<p class="s wait svelte-1og7e16"> </p>`);
+var root_25$1 = from_html(`<section class="approvals svelte-1og7e16" aria-label="Who approved the pull request"><h2 class="svelte-1og7e16">Pull request approvals</h2> <!> <!> <!> <!></section>`);
+var root_26$1 = from_html(`<div class="grid svelte-1og7e16"><section class="cards svelte-1og7e16"><button class="card svelte-1og7e16"><span class="k svelte-1og7e16"><!> Gates</span> <!></button> <button class="card svelte-1og7e16"><span class="k svelte-1og7e16"><!> Tasks</span> <!> <!></button> <button class="card svelte-1og7e16"><span class="k svelte-1og7e16"><!> Decisions</span> <!> <!></button> <button class="card svelte-1og7e16"><span class="k svelte-1og7e16"><!> Agent</span> <span class="v svelte-1og7e16"><b> </b> <!></span> <!></button></section> <!> <!> <section class="facts svelte-1og7e16"><h2 class="svelte-1og7e16">Facts</h2> <!></section> <section class="history svelte-1og7e16"><h2 class="svelte-1og7e16">History</h2> <!> <!></section></div>`);
 function Overview($$anchor, $$props) {
 	push($$props, true);
 	const LIMIT = 200;
@@ -959,8 +967,14 @@ function Overview($$anchor, $$props) {
 			tone: "none"
 		}] : []
 	]);
+	const pr = user_derived(() => $$props.d.pull_request ?? null);
+	const approvals = user_derived(() => get(pr)?.approvals ?? null);
+	const reading = user_derived(() => get(approvals)?.state === "current" ? get(approvals).reading : get(approvals)?.state === "stale" ? get(approvals).last : null);
+	const kindWord = (b) => b.kind === "person" ? "a person's account" : b.kind === "model" ? get(reading)?.modelWord === "model" ? `${b.product ?? "a model"} (a model)` : `could not be attributed (${b.product ?? "a model"})` : b.kind === "bot" ? "a bot account" : `could not classify (type ${b.received ?? "?"})`;
+	const where = (b) => b.onHead === "gone" || !b.commit ? "a commit that no longer exists" : `${b.commit.slice(0, 7)} · ${b.onHead === "head" ? "head" : "older"}`;
+	const decisionWord = (x) => x ? x.toLowerCase().replace(/_/g, " ") : null;
 	const byAuthority = user_derived(() => Object.entries(get(decisions).reduce((m, x) => (m[x.authority] = (m[x.authority] ?? 0) + 1, m), {})));
-	var div = root_18$1();
+	var div = root_26$1();
 	var section = child(div);
 	var button = child(section);
 	var span = child(button);
@@ -1121,8 +1135,8 @@ function Overview($$anchor, $$props) {
 	var consequent_10 = ($$anchor) => {
 		var fragment_6 = root_12$6();
 		var span_15 = first_child(fragment_6);
-		var b = child(span_15);
-		b.textContent = "200";
+		var b_1 = child(span_15);
+		b_1.textContent = "200";
 		next();
 		reset(span_15);
 		var span_16 = sibling(span_15, 2);
@@ -1136,8 +1150,8 @@ function Overview($$anchor, $$props) {
 	var alternate_4 = ($$anchor) => {
 		var fragment_7 = root_13$5();
 		var span_17 = first_child(fragment_7);
-		var b_1 = child(span_17);
-		var text_8 = only_child(b_1, true);
+		var b_2 = child(span_17);
+		var text_8 = only_child(b_2, true);
 		next();
 		reset(span_17);
 		var span_18 = sibling(span_17, 2);
@@ -1191,9 +1205,9 @@ function Overview($$anchor, $$props) {
 	next();
 	reset(span_20);
 	var span_21 = sibling(span_20, 2);
-	var b_2 = child(span_21);
-	var text_12 = only_child(b_2, true);
-	var text_13 = sibling(b_2);
+	var b_3 = child(span_21);
+	var text_12 = only_child(b_3, true);
+	var text_13 = sibling(b_3);
 	var node_16 = sibling(text_13);
 	var consequent_13 = ($$anchor) => {
 		var text_14 = text();
@@ -1244,8 +1258,113 @@ function Overview($$anchor, $$props) {
 	if_block(node_18, ($$render) => {
 		if (($$props.d.drifts ?? []).length > 0) $$render(consequent_15);
 	});
-	var section_2 = sibling(node_18, 2);
-	var node_22 = sibling(child(section_2), 2);
+	var node_22 = sibling(node_18, 2);
+	var consequent_23 = ($$anchor) => {
+		var section_2 = root_25$1();
+		var node_23 = sibling(child(section_2), 2);
+		var consequent_17 = ($$anchor) => {
+			var fragment_10 = root_19$1();
+			var p_1 = first_child(fragment_10);
+			var text_16 = only_child(p_1, true);
+			var node_24 = sibling(p_1, 2);
+			var consequent_16 = ($$anchor) => {
+				var p_2 = root_18$1();
+				var text_17 = only_child(p_2, true);
+				template_effect(() => set_text(text_17, get(reading).requiredSays));
+				append($$anchor, p_2);
+			};
+			if_block(node_24, ($$render) => {
+				if (get(reading).requiredSays) $$render(consequent_16);
+			});
+			template_effect(() => set_text(text_16, get(reading).sentence));
+			append($$anchor, fragment_10);
+		};
+		var consequent_18 = ($$anchor) => {
+			var p_3 = root_20$1();
+			var text_18 = only_child(p_3);
+			template_effect(() => set_text(text_18, `Approvals not read: ${get(approvals).why ?? ""}`));
+			append($$anchor, p_3);
+		};
+		var alternate_5 = ($$anchor) => {
+			var p_4 = root_21$1();
+			append($$anchor, p_4);
+		};
+		if_block(node_23, ($$render) => {
+			if (get(reading)) $$render(consequent_17);
+			else if (get(approvals)?.state === "not_read") $$render(consequent_18, 1);
+			else $$render(alternate_5, -1);
+		});
+		var node_25 = sibling(node_23, 2);
+		var consequent_19 = ($$anchor) => {
+			var p_5 = root_18$1();
+			var text_19 = only_child(p_5);
+			template_effect(($0) => set_text(text_19, `GitHub says: ${$0 ?? ""}`), [() => decisionWord(get(pr).review_decision)]);
+			append($$anchor, p_5);
+		};
+		var d_1 = user_derived(() => decisionWord(get(pr).review_decision));
+		if_block(node_25, ($$render) => {
+			if (get(d_1)) $$render(consequent_19);
+		});
+		var node_26 = sibling(node_25, 2);
+		var consequent_20 = ($$anchor) => {
+			var ul = root_23$1();
+			each(ul, 21, () => get(reading).bearing, index, ($$anchor, b) => {
+				var li = root_22$1();
+				var span_23 = child(li);
+				var text_20 = only_child(span_23, true);
+				var span_24 = sibling(span_23, 2);
+				let classes_2;
+				var text_21 = only_child(span_24, true);
+				var span_25 = sibling(span_24, 2);
+				var text_22 = only_child(span_25, true);
+				var code_3 = sibling(span_25, 2);
+				var text_23 = only_child(code_3, true);
+				reset(li);
+				template_effect(($0, $1, $2) => {
+					set_attribute(span_23, "title", get(b).account?.login ?? "no user");
+					set_text(text_20, get(b).account?.login ?? "no user");
+					classes_2 = set_class(span_24, 1, "kind svelte-1og7e16", null, classes_2, { wait: get(b).kind === "model" && get(reading).modelWord === "unattributed" });
+					set_text(text_21, $0);
+					set_text(text_22, $1);
+					set_text(text_23, $2);
+				}, [
+					() => kindWord(get(b)),
+					() => get(b).state.toLowerCase().replace(/_/g, " "),
+					() => where(get(b))
+				]);
+				append($$anchor, li);
+			});
+			reset(ul);
+			append($$anchor, ul);
+		};
+		if_block(node_26, ($$render) => {
+			if (get(reading) && get(reading).bearing.length > 0) $$render(consequent_20);
+		});
+		var node_27 = sibling(node_26, 2);
+		var consequent_21 = ($$anchor) => {
+			var p_6 = root_24$1();
+			var text_24 = only_child(p_6);
+			template_effect(($0) => set_text(text_24, `As of ${$0 ?? ""} — ${get(approvals).why ?? ""}`), [() => ago(get(approvals).last.readAt)]);
+			append($$anchor, p_6);
+		};
+		var consequent_22 = ($$anchor) => {
+			var p_7 = root_18$1();
+			var text_25 = only_child(p_7);
+			template_effect(($0) => set_text(text_25, `Read ${$0 ?? ""}${get(reading).afterMerge ? ", after the merge" : ""}`), [() => ago(get(reading).readAt)]);
+			append($$anchor, p_7);
+		};
+		if_block(node_27, ($$render) => {
+			if (get(approvals)?.state === "stale") $$render(consequent_21);
+			else if (get(reading)) $$render(consequent_22, 1);
+		});
+		reset(section_2);
+		append($$anchor, section_2);
+	};
+	if_block(node_22, ($$render) => {
+		if (get(pr)) $$render(consequent_23);
+	});
+	var section_3 = sibling(node_22, 2);
+	var node_28 = sibling(child(section_3), 2);
 	{
 		let $0 = user_derived(() => [
 			{
@@ -1301,14 +1420,14 @@ function Overview($$anchor, $$props) {
 				value: ago($$props.d.updated_at)
 			}
 		]);
-		Props(node_22, { get rows() {
+		Props(node_28, { get rows() {
 			return get($0);
 		} });
 	}
-	reset(section_2);
-	var section_3 = sibling(section_2, 2);
-	var node_23 = sibling(child(section_3), 2);
-	var consequent_16 = ($$anchor) => {
+	reset(section_3);
+	var section_4 = sibling(section_3, 2);
+	var node_29 = sibling(child(section_4), 2);
+	var consequent_24 = ($$anchor) => {
 		{
 			let $0 = user_derived(() => read.data !== null);
 			Failed($$anchor, {
@@ -1325,10 +1444,10 @@ function Overview($$anchor, $$props) {
 			});
 		}
 	};
-	if_block(node_23, ($$render) => {
-		if (read.failure && !(read.failure.down && read.data === null)) $$render(consequent_16);
+	if_block(node_29, ($$render) => {
+		if (read.failure && !(read.failure.down && read.data === null)) $$render(consequent_24);
 	});
-	var node_24 = sibling(node_23, 2);
+	var node_30 = sibling(node_29, 2);
 	{
 		let $0 = user_derived(() => ($$props.d.claim_history ?? []).length ? [
 			"change",
@@ -1340,7 +1459,7 @@ function Overview($$anchor, $$props) {
 			"gates",
 			"decisions"
 		]);
-		Timeline(node_24, {
+		Timeline(node_30, {
 			get marks() {
 				return get(marks);
 			},
@@ -1349,7 +1468,7 @@ function Overview($$anchor, $$props) {
 			}
 		});
 	}
-	reset(section_3);
+	reset(section_4);
 	reset(div);
 	template_effect(() => {
 		set_text(text_12, $$props.d.runs?.length ?? 0);

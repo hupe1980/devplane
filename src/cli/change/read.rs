@@ -457,6 +457,7 @@ fn print_change(w: &ChangeView<'_>) {
             pr.status,
             paint(DIM, &pr.url)
         );
+        approvals_lines(pr);
     }
     if let Some(setup) = &c.setup {
         println!(
@@ -519,5 +520,76 @@ fn print_change(w: &ChangeView<'_>) {
             "  {}",
             paint(DIM, "— read beside the lines above, which are measured")
         );
+    }
+}
+
+/// Who approved the pull request, under its line: the sentence, GitHub's own
+/// review decision beside it, one row per reviewer that bears on it, and when
+/// it was read.
+fn approvals_lines(pr: &crate::core::change::PullRequestRef) {
+    use crate::core::approvals::{Kind, OnHead, ReadingState};
+    let one_line = |s: &str, max: usize| -> String {
+        let flat: String = s
+            .chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
+            .filter(|c| !c.is_control())
+            .collect();
+        clip(&flat, max)
+    };
+    if let Some(says) = crate::core::certificate::merge_approvals_says(Some(pr)) {
+        println!("  approvals  {}", one_line(&says, 4000));
+    }
+    if let Some(d) = pr.decision_quote() {
+        println!("             {}", paint(DIM, &format!("GitHub says: {d}")));
+    }
+    let Some(state) = &pr.approvals else {
+        return;
+    };
+    let Some(r) = state.reading() else {
+        return;
+    };
+    if let Some(rule) = &r.required_says {
+        println!("             {}", paint(DIM, rule));
+    }
+    for b in &r.bearing {
+        let kind = match &b.kind {
+            Kind::Person => "a person's account".to_string(),
+            Kind::Model { product, .. } => match crate::core::approvals::model_ratified() {
+                true => format!("{product} (a model)"),
+                false => format!("could not be attributed ({product})"),
+            },
+            Kind::Bot => "a bot account".to_string(),
+            Kind::Unclassified { received } => {
+                format!("could not classify (type {})", one_line(received, 40))
+            }
+        };
+        let login = b
+            .account
+            .as_ref()
+            .map(|a| one_line(&a.login, 64))
+            .unwrap_or_else(|| "no user".into());
+        let short = |c: &str| one_line(&c.chars().take(7).collect::<String>(), 7);
+        let at = match (b.on_head, b.commit.as_deref()) {
+            (OnHead::Gone, _) | (_, None) => "a commit that no longer exists".to_string(),
+            (OnHead::Head, Some(c)) => format!("{} (head)", short(c)),
+            (OnHead::Older, Some(c)) => format!("{} (older)", short(c)),
+        };
+        println!(
+            "             {login}  {kind}  {}  {at}",
+            one_line(b.state.as_str(), 40)
+        );
+    }
+    match state {
+        ReadingState::Stale { last, why } => println!(
+            "             {}",
+            paint(
+                render::YELLOW,
+                &format!("as of {} — {}", last.read_at, one_line(why, 400))
+            )
+        ),
+        _ => println!(
+            "             {}",
+            paint(DIM, &format!("read {}", r.read_at))
+        ),
     }
 }

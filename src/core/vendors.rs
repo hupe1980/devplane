@@ -319,6 +319,53 @@ pub fn watching() -> Watching {
     out
 }
 
+/// An account a vendor documents as its model reviewer on a forge: the only
+/// way a pull request review is read as a model's. Matched whole — host,
+/// account type and login exactly — never by a pattern in a login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ModelReviewer {
+    /// The forge host the identity is documented for.
+    pub host: &'static str,
+    pub login: &'static str,
+    /// The account type the forge reports for it.
+    pub account_type: &'static str,
+    /// The vendor's product name, as its documentation spells it.
+    pub product: &'static str,
+    pub vendor: &'static str,
+    /// The page that documents the account.
+    pub source: &'static str,
+    /// When that page was last read.
+    pub checked: &'static str,
+}
+
+/// The model reviewers vendors document. A row is added only when a vendor
+/// documents an identity; a login seen in an answer is never enough.
+pub const MODEL_REVIEWERS: &[ModelReviewer] = &[ModelReviewer {
+    host: "github.com",
+    login: "copilot-pull-request-reviewer[bot]",
+    account_type: "Bot",
+    product: "Copilot code review",
+    vendor: "GitHub",
+    source: "https://docs.github.com/en/copilot/how-tos/copilot-on-github/use-copilot-agents/copilot-code-review",
+    checked: "2026-10-03",
+}];
+
+/// The `source` values Claude Code's `claude_code.tool_decision` event
+/// documents, exactly: who decided one call, in the vendor's words. A value
+/// outside these is kept as received and attributed to nobody.
+pub const CLAUDE_CODE_DECISION_SOURCES: &[&str] = &[
+    "config",
+    "hook",
+    "user_permanent",
+    "user_temporary",
+    "user_abort",
+    "user_reject",
+];
+
+/// When [`CLAUDE_CODE_DECISION_SOURCES`] was last read against the vendor's
+/// monitoring page.
+pub const CLAUDE_CODE_DECISION_SOURCES_CHECKED: &str = "2026-10-03";
+
 #[cfg(test)]
 mod tests {
     use super::*;

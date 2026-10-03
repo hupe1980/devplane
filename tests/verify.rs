@@ -131,6 +131,9 @@ impl Fixture {
             .env_remove("GITHUB_STEP_SUMMARY")
             .env_remove("GITHUB_EVENT_NAME")
             .env_remove("GITHUB_ACTIONS")
+            .env_remove("GITHUB_EVENT_PATH")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GITHUB_API_URL")
             .env_remove("VERIFY_MARK");
         for (k, v) in env {
             c.env(k, v);
@@ -721,6 +724,37 @@ fn verify_names_no_store_host_client_or_home() {
     for e in std::fs::read_dir(Path::new(ROOT).join("src/core/verify")).unwrap() {
         sources.push(e.unwrap().path());
     }
+    // `--approvals` is the one way out, and only through these names, in
+    // the edge only; the pure half names none of them.
+    let allowed = [
+        "crate::github::reviews",
+        "crate::github::Client",
+        "crate::github::GitHubHost",
+        "crate::github::Secret",
+        "crate::github::Error",
+    ];
+    for path in &sources {
+        let text = std::fs::read_to_string(path).unwrap();
+        let edge = path.ends_with("src/verify.rs");
+        let mut rest = text.as_str();
+        while let Some(i) = rest.find("crate::github") {
+            let named = &rest[i..];
+            assert!(
+                edge && allowed.iter().any(|a| named.starts_with(a)),
+                "{} names `{}`",
+                path.display(),
+                named.lines().next().unwrap_or_default()
+            );
+            rest = &rest[i + 1..];
+        }
+        for banned in ["keyring", "Keyring", "TokenStore", "GitHub::", "for_home"] {
+            assert!(
+                !text.contains(banned),
+                "{} names `{banned}`",
+                path.display()
+            );
+        }
+    }
     for path in sources {
         let text = std::fs::read_to_string(&path).unwrap();
         for banned in [
@@ -1291,7 +1325,6 @@ fn the_action_interpolates_no_input_into_a_script() {
 fn the_action_requests_no_forge_write() {
     let a = action();
     for banned in [
-        "GITHUB_TOKEN",
         "api.github.com",
         "upload-artifact",
         "secrets.",
@@ -1299,6 +1332,32 @@ fn the_action_requests_no_forge_write() {
     ] {
         assert!(!a.contains(banned), "action.yml names `{banned}`");
     }
+    // The job's token appears once: in the verify step's environment, and
+    // only when the `approvals` input is on.
+    let token_lines: Vec<&str> = a
+        .lines()
+        .filter(|l| l.contains("GITHUB_TOKEN") || l.contains("github.token"))
+        .collect();
+    assert_eq!(
+        token_lines,
+        vec!["        GITHUB_TOKEN: ${{ inputs.approvals == 'true' && github.token || '' }}"],
+        "the token is named only behind the input"
+    );
+    let verify_step = a.split("- name: Verify").nth(1).expect("the verify step");
+    let env = verify_step.split("run: |").next().unwrap();
+    assert!(
+        env.contains("GITHUB_TOKEN: ${{ inputs.approvals == 'true'"),
+        "{env}"
+    );
+    assert!(a.contains("  approvals:\n"), "an approvals input");
+    let input = a.split("  approvals:\n").nth(1).unwrap();
+    assert!(
+        input
+            .lines()
+            .take(4)
+            .any(|l| l.trim() == "default: \"false\""),
+        "off by default"
+    );
     // No GitHub CLI call in any script.
     for b in run_blocks(&a) {
         assert!(
@@ -1342,6 +1401,7 @@ fn every_flag_verify_documents_is_implemented() {
         "--statement",
         "--no-base-checks",
         "--sarif",
+        "--approvals",
     ];
     for f in flags {
         assert!(help.contains(f), "--help lists {f}");
@@ -1386,5 +1446,222 @@ fn every_flag_verify_documents_is_implemented() {
             .code(),
         Some(2),
         "a usage error exits 2"
+    );
+}
+
+// ── `--approvals`: the one network read, opt-in ─────────────────────────────
+
+/// A loopback listener that counts connections and answers every request
+/// with `status` and `body`, recording each request line.
+struct Listener {
+    url: String,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Listener {
+    fn start(status: u16, body: &'static str) -> Self {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for stream in l.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                log.lock()
+                    .unwrap()
+                    .push(text.lines().next().unwrap_or_default().to_string());
+                let reason = if status == 200 { "OK" } else { "Forbidden" };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        Listener { url, seen }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+const JOB_TOKEN: &str = "ghs_JOBtokenNEVERshown0123456789";
+
+fn event_file(f: &Fixture, pull_request: bool) -> PathBuf {
+    let p = f.path("event.json");
+    let payload = match pull_request {
+        true => serde_json::json!({"pull_request": {"number": 9,
+            "html_url": "https://github.com/acme/app/pull/9",
+            "head": {"sha": "abc"}, "base": {"ref": "main"}}}),
+        false => serde_json::json!({"ref": "refs/heads/main"}),
+    };
+    std::fs::write(&p, payload.to_string()).unwrap();
+    p
+}
+
+fn ci_env<'a>(event: &'a str, name: &'a str, api: &'a str) -> Vec<(&'a str, &'a str)> {
+    vec![
+        ("GITHUB_EVENT_PATH", event),
+        ("GITHUB_EVENT_NAME", name),
+        ("GITHUB_API_URL", api),
+        ("GITHUB_REPOSITORY", "acme/app"),
+        ("GITHUB_TOKEN", JOB_TOKEN),
+    ]
+}
+
+#[test]
+fn verify_without_approvals_makes_no_connection() {
+    let f = Fixture::new("no-approvals");
+    let l = Listener::start(200, "[]");
+    let event = event_file(&f, true);
+    let summary = f.path("s.md");
+    let out = f.verify_in(
+        &f.work,
+        &["--summary", summary.to_str().unwrap()],
+        &ci_env(event.to_str().unwrap(), "pull_request", &l.url),
+    );
+    assert_eq!(code(&out), 0, "{}", stdout(&out));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(l.requests().is_empty(), "{:?}", l.requests());
+    let md = std::fs::read_to_string(&summary).unwrap();
+    assert!(!md.contains("### Approvals"));
+    assert!(
+        section(&md, "Not done by verify").contains("approvals were not read: pass --approvals"),
+        "{md}"
+    );
+}
+
+#[test]
+fn approvals_without_a_pull_request_say_so() {
+    let f = Fixture::new("approvals-push");
+    let l = Listener::start(200, "[]");
+    let event = event_file(&f, false);
+    let summary = f.path("s.md");
+    let out = f.verify_in(
+        &f.work,
+        &["--approvals", "--summary", summary.to_str().unwrap()],
+        &ci_env(event.to_str().unwrap(), "push", &l.url),
+    );
+    assert_eq!(code(&out), 0, "{}", stdout(&out));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(l.requests().is_empty(), "{:?}", l.requests());
+    let md = std::fs::read_to_string(&summary).unwrap();
+    assert!(
+        section(&md, "Approvals").contains("No pull request in this run."),
+        "{md}"
+    );
+}
+
+#[test]
+fn approvals_never_change_the_exit_code() {
+    // A passing branch, and the reviews refused: still 0, and said.
+    let f = Fixture::new("approvals-403");
+    let l = Listener::start(
+        403,
+        r#"{"message":"Resource not accessible by integration"}"#,
+    );
+    let event = event_file(&f, true);
+    let summary = f.path("s.md");
+    let statement = f.path("st.json");
+    let out = f.verify_in(
+        &f.work,
+        &[
+            "--approvals",
+            "--json",
+            "--summary",
+            summary.to_str().unwrap(),
+            "--statement",
+            statement.to_str().unwrap(),
+        ],
+        &ci_env(event.to_str().unwrap(), "pull_request", &l.url),
+    );
+    let (v, c) = parse(out);
+    assert_eq!(c, 0, "{v}");
+    assert!(v["approvals"]["notRead"].as_str().is_some(), "{v}");
+    let md = std::fs::read_to_string(&summary).unwrap();
+    assert!(section(&md, "Approvals").contains("Not read: "), "{md}");
+    let st: Value = serde_json::from_str(&std::fs::read_to_string(&statement).unwrap()).unwrap();
+    assert!(
+        st["predicate"]["devplane"]["mergeApprovals"]["notRead"].is_string(),
+        "{st}"
+    );
+    for r in l.requests() {
+        assert!(r.starts_with("GET /repos/acme/app/"), "{r}");
+    }
+
+    // A failing branch, and the reviews read: still 1.
+    let f = Fixture::new("approvals-failing");
+    f.branch("fail")
+        .write("tests/login.test.js", FAILING)
+        .commit("fail");
+    let l = Listener::start(200, "[]");
+    let event = event_file(&f, true);
+    let out = f.verify_in(
+        &f.work,
+        &["--approvals", "--json"],
+        &ci_env(event.to_str().unwrap(), "pull_request", &l.url),
+    );
+    let (v, c) = parse(out);
+    assert_eq!(c, 1, "{v}");
+    assert!(v["approvals"]["sentence"].is_string(), "{v}");
+}
+
+#[test]
+fn the_token_is_never_output() {
+    let f = Fixture::new("approvals-token");
+    let l = Listener::start(403, r#"{"message":"Bad credentials"}"#);
+    let event = event_file(&f, true);
+    let summary = f.path("s.md");
+    let statement = f.path("st.json");
+    let env = ci_env(event.to_str().unwrap(), "pull_request", &l.url);
+    for args in [
+        vec![
+            "--approvals",
+            "--summary",
+            summary.to_str().unwrap(),
+            "--statement",
+            statement.to_str().unwrap(),
+        ],
+        vec!["--approvals", "--json"],
+    ] {
+        let out = f.verify_in(&f.work, &args, &env);
+        for text in [
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            std::fs::read_to_string(&summary).unwrap_or_default(),
+            std::fs::read_to_string(&statement).unwrap_or_default(),
+        ] {
+            assert!(!text.contains(JOB_TOKEN), "the token was output: {text}");
+        }
+    }
+    // And never to an address that is not https or this machine.
+    let out = f.verify_in(
+        &f.work,
+        &["--approvals", "--json"],
+        &ci_env(
+            event.to_str().unwrap(),
+            "pull_request",
+            "http://example.invalid",
+        ),
+    );
+    let (v, _) = parse(out);
+    assert!(
+        v["approvals"]["notRead"]
+            .as_str()
+            .unwrap()
+            .contains("neither https nor this machine"),
+        "{v}"
     );
 }

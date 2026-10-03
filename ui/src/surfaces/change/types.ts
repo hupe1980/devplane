@@ -127,7 +127,15 @@ export type Detail = {
   waiting_says?: string | null;
   tree_now?: Stamp | null;
   archived_at?: string | null;
-  pull_request?: { url?: string; number?: number; status?: string } | null;
+  pull_request?: {
+    url?: string;
+    number?: number;
+    status?: string;
+    /// GitHub's own review decision (`APPROVED`, …), quoted as GitHub's.
+    review_decision?: string | null;
+    /// Who the approvals came from, as last read from the forge.
+    approvals?: Approvals | null;
+  } | null;
   created_at?: string;
   updated_at?: string;
   state: string;
@@ -240,3 +248,36 @@ export function ago(at?: string | null): string {
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
 }
+
+/// One reviewer's standing on a pull request, as the forge's review list said.
+export type BearingReview = {
+  account: { id: number; login: string; type: string } | null;
+  kind: "person" | "model" | "bot" | "unclassified";
+  product?: string;
+  received?: string;
+  state: string;
+  commit: string | null;
+  onHead: "head" | "older" | "gone";
+  submittedAt?: string | null;
+};
+
+/// One read of a pull request's approvals; `sentence` is the one every
+/// surface prints.
+export type ApprovalsReading = {
+  number: number;
+  url: string;
+  head: string;
+  base: string;
+  requiredSays?: string | null;
+  bearing: BearingReview[];
+  unreadPages?: number | null;
+  sentence: string;
+  modelWord: "unattributed" | "model";
+  readAt: string;
+  afterMerge: boolean;
+};
+
+export type Approvals =
+  | { state: "current"; reading: ApprovalsReading }
+  | { state: "stale"; last: ApprovalsReading; why: string }
+  | { state: "not_read"; why: string };

@@ -2550,6 +2550,7 @@ mod tests {
             url: "https://example.test/7".into(),
             status: "ready_for_review".into(),
             failing_checks: vec![],
+            ..Default::default()
         });
         let kinds: Vec<_> =
             items_for_change(&w, false, false, &ActivityMark::default(), Timestamp::now())

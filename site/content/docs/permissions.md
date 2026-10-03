@@ -302,6 +302,48 @@ hold = true        # or "45s"
   authority **you**. Unanswered: authority **nobody**, and your agent shows its own dialog.
 - A prohibition applies first and is never held.
 - An agent cannot answer its own permission ([Security](@/docs/security.md#an-agent-cannot-approve-itself-mostly)).
+- With the app running, the hold's notification carries **Allow** and **Deny**
+  ([below](#answering-from-the-notification)).
+
+## Answering from the notification
+
+With `devplane up --window` running, a permission or a question that can be answered gets one
+notification, whatever the window is doing:
+
+- **A permission** carries **Allow** (this one call) and **Deny** — nothing wider. An agent's own
+  *always allow* is answered in the window, where its scope is shown in full. A watched session's
+  permission carries them only while its hold lasts; without a hold, the notification opens the item.
+- **A question** with one field carries every option as a numbered action (`1. …`, `2. …`), or none:
+  never some of them. Too many options, several questions at once, or free text where the platform
+  has no reply box: the body says how many options wait, and one click opens the answer window on that
+  question.
+- **A click** on the notification opens the answer window on that item — not the topmost one.
+- **Pressing an action** answers as you, through the same short hold as the window's answers: the
+  answer window can still take it back (`z`) for a few seconds. Dismissing, closing or letting it time
+  out answers nothing.
+- **Answered elsewhere**, the notification is taken back where the platform allows it; one the
+  platform kept answers nothing and opens the item, saying who answered it, from where and when.
+- Quitting the app takes every notification back. Nothing retries a notification, raises its
+  interruption level, or plays a sound of its own: Do Not Disturb and Focus hold it like any other, and
+  the tray count still counts the item.
+
+What each platform offers is in [the window](@/docs/workbench.md#the-window).
+
+### Where an answer came from
+
+Every answer names who gave it — **you** — and the path, in the decision log, `devplane inbox --all`
+and the answer window:
+
+| Path | Recorded when |
+|---|---|
+| `window` | the app's own window answered: it proves that per question with a key the app hands its window in memory, never served, logged or stored |
+| `notification` | you pressed an action on the app's notification; handled inside the app, so no request can claim it |
+| `cli` | anything else holding the control token: `devplane inbox answer`, a script, **a browser tab on `devplane up`** |
+
+Neither a request's `Origin` header nor anything in its body changes the path. What this cannot
+prove, and does not claim: a program driving your desktop (scripting, accessibility) can press a
+notification or a window button as you, and a process running as you can read the window's key out of
+the app's memory.
 
 ## Tuning the rules
 

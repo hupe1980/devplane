@@ -82,6 +82,8 @@ pub struct Answer {
     pub body: Value,
     /// `X-OAuth-Scopes`, split.
     pub scopes: Vec<String>,
+    /// The `last` page the `Link` header names, when it names one.
+    pub last_page: Option<u32>,
 }
 
 impl Client {
@@ -157,8 +159,34 @@ impl Client {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(Answer { body, scopes })
+        let last_page = headers
+            .get(reqwest::header::LINK)
+            .and_then(|v| v.to_str().ok())
+            .and_then(last_page);
+        Ok(Answer {
+            body,
+            scopes,
+            last_page,
+        })
     }
+}
+
+/// The `page` of the `rel="last"` link in a `Link` header.
+fn last_page(link: &str) -> Option<u32> {
+    link.split(',')
+        .find(|part| part.contains("rel=\"last\""))
+        .and_then(|part| {
+            let url = part
+                .split(';')
+                .next()?
+                .trim()
+                .trim_matches(|c| c == '<' || c == '>');
+            let query = url.split_once('?')?.1;
+            query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("page="))
+                .and_then(|n| n.parse().ok())
+        })
 }
 
 fn unreachable(e: reqwest::Error) -> Error {
@@ -341,6 +369,14 @@ mod tests {
                 message: "Validation Failed: A pull request already exists for acme:feat/x.".into()
             })
         );
+    }
+
+    #[test]
+    fn the_last_page_is_read_from_the_link_header() {
+        let link = "<https://api.github.com/repositories/1/pulls/7/reviews?per_page=100&page=2>; \
+                    rel=\"next\", <https://api.github.com/repositories/1/pulls/7/reviews?per_page=100&page=14>; rel=\"last\"";
+        assert_eq!(last_page(link), Some(14));
+        assert_eq!(last_page("<https://x/y?page=2>; rel=\"next\""), None);
     }
 
     #[test]

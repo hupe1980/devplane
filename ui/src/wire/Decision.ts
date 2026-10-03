@@ -31,8 +31,18 @@ tool: string | null,
  */
 server_source: string | null, project_id: ProjectId | null, run_id: RunId | null, change_id: ChangeId | null, 
 /**
- * The driven tool call this decides, by the protocol's own id: the key
- * the agent's report of that call's edit is found by. `None` for
- * anything that is not a driven call.
+ * The tool call this decides, by the agent's own id: the protocol's id
+ * for a driven call (the key its reported edit is found by), the vendor's
+ * `tool_use_id` for a watched one. `None` where no channel named the call.
  */
-call_id?: string | null, };
+call_id?: string | null, 
+/**
+ * The vendor whose own report this row was written from (`claude-code`).
+ * `None` on every decision Devplane itself took or enforced.
+ */
+vendor?: string | null, 
+/**
+ * The vendor's own word for who decided, verbatim (`user_reject`,
+ * `config`). Kept beside `authority`, never instead of it.
+ */
+vendor_source?: string | null, };

@@ -96,6 +96,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/github/logout", post(github_logout))
         .route("/api/github/refresh", post(github_refresh))
         .route("/api/decisions", get(decisions))
+        .route("/api/decisions/unattributed", get(unattributed))
         .route("/api/explain", get(explain))
         .route("/api/search", get(search))
         .route("/api/diagnostics", get(diagnostics))
@@ -257,13 +258,16 @@ fn authorised_to_ingest(state: &Shared, headers: &HeaderMap) -> bool {
 /// This narrows the hole and does not close it: an agent that can drive the
 /// desktop (scripting, accessibility) can press the window's buttons, and a
 /// process running as the person can read the key out of the app's memory.
-fn path_of(state: &Shared, headers: &HeaderMap, ask_id: &str) -> &'static str {
+///
+/// No input yields [`AnswerPath::Notification`](crate::core::ask::AnswerPath):
+/// that path exists only in the app's own process.
+fn path_of(state: &Shared, headers: &HeaderMap, ask_id: &str) -> crate::core::ask::AnswerPath {
     if window_proved(state, headers, ASK_PROOF, |key| {
         crate::config::ask_proof(key, ask_id)
     }) {
-        "window"
+        crate::core::ask::AnswerPath::Window
     } else {
-        "cli"
+        crate::core::ask::AnswerPath::Cli
     }
 }
 
@@ -450,15 +454,33 @@ async fn ingest_otel(
     };
     for rec in records {
         let run = RunId::new(rec.session_id.clone());
+        // A report of who decided is filled with what its attribution needs
+        // before it is kept; the row it establishes, if any, is written after.
+        let (event, row) = match rec.event {
+            e @ crate::core::event::Event::VendorDecided { .. } => {
+                let facts = {
+                    let w = state.world.lock().await;
+                    let r = w.run(&run);
+                    crate::record::ReportedRun {
+                        cwd: r.map(|r| r.cwd.clone()).filter(|c| c.is_absolute()),
+                        project: r.and_then(|r| r.project_id.clone()),
+                        entrypoint: rec
+                            .entrypoint
+                            .clone()
+                            .or_else(|| r.and_then(|r| r.entrypoint.clone())),
+                        driven: r.is_some_and(|r| r.mode == RunMode::Driven),
+                    }
+                };
+                crate::record::vendor_report(&state.store, &run, &facts, e).await
+            }
+            e => (e, None),
+        };
         state
-            .ingest(
-                run.clone(),
-                Source::Otel,
-                rec.event,
-                None,
-                RunMode::Observed,
-            )
+            .ingest(run.clone(), Source::Otel, event, None, RunMode::Observed)
             .await;
+        if let Some(d) = row {
+            crate::record::append_vendor_row(&state.store, &d).await;
+        }
         if let Some(entry) = rec.entrypoint {
             let mut w = state.world.lock().await;
             w.set_entrypoint(&run, &entry, rec.repo_url.as_deref());
@@ -1242,7 +1264,7 @@ async fn undo_answer(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     guard!(state, headers);
-    let window = path_of(&state, &headers, &id) == "window";
+    let window = path_of(&state, &headers, &id) == crate::core::ask::AnswerPath::Window;
     match state.hold.withdraw(&id, window) {
         Ok(()) => {
             // The item is back in the list and the count.
@@ -2713,6 +2735,32 @@ async fn decisions(
     }
 }
 
+#[derive(Deserialize)]
+struct UnattributedQuery {
+    #[serde(default)]
+    about: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: i64,
+}
+
+/// The calls a vendor reported deciding that no authority can be named for,
+/// each with its reason: listed beside the decisions, never as one.
+async fn unattributed(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Query(q): Query<UnattributedQuery>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    match crate::view::unattributed(&state.store, q.about.as_deref(), q.limit).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 /// What quitting would end, and what it would leave running — read before
 /// the stop, never folded into it.
 async fn quitting(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
@@ -2840,10 +2888,12 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
         })
         .collect();
     let (lost_events, lost_decisions, last_loss) = state.unwritten.counts();
+    let decision_sources = crate::view::decision_sources(&state.store).await.ok();
     let w = state.world.lock().await;
     let live = || w.runs().filter(|r| r.state.is_live());
     Json(Diagnostics {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        decision_sources,
         gate: DiagnosticsGate {
             syntax_modelled_on: crate::core::policy::SYNTAX_MODELLED_ON.to_string(),
             // "Nothing reports a version" is a real diagnostic.
@@ -2871,6 +2921,7 @@ async fn diagnostics(State(state): State<Shared>, headers: HeaderMap) -> impl In
             last_reason: last_loss,
         },
         auto_mode,
+        notifications: state.notifications.get().map(|line| line()),
     })
     .into_response()
 }

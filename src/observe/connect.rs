@@ -1313,6 +1313,48 @@ fn is_app_mount(path: &std::path::Path) -> bool {
     p.contains("/AppTranslocation/") || p.starts_with("/Volumes/")
 }
 
+/// The permission rules in every Claude Code settings file Devplane can read
+/// for a session in `cwd`: managed policy, the project's shared and local
+/// files, and the user's. Read for naming the rule behind a decision the
+/// vendor attributes only to its configuration; a file that is absent or
+/// will not parse contributes nothing, so a rule not found here is *not
+/// named*, never *absent*.
+pub fn vendor_rule_files(cwd: &Path) -> Vec<crate::core::decision::VendorSettings> {
+    let mut paths: Vec<(PathBuf, PathBuf)> = vec![(managed_settings_path(), cwd.to_path_buf())];
+    for rel in [".claude/settings.json", ".claude/settings.local.json"] {
+        paths.push((cwd.join(rel), cwd.to_path_buf()));
+    }
+    if let Ok(user) = settings_path() {
+        let anchor = user.parent().map(Path::to_path_buf).unwrap_or_default();
+        paths.push((user, anchor));
+    }
+    let list = |v: &Value, k: &str| -> Vec<String> {
+        v.pointer(&format!("/permissions/{k}"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    paths
+        .into_iter()
+        .filter_map(|(path, anchor)| {
+            let text = std::fs::read_to_string(&path).ok()?;
+            let v: Value = serde_json::from_str(&text).ok()?;
+            Some(crate::core::decision::VendorSettings {
+                file: path.display().to_string(),
+                anchor,
+                allow: list(&v, "allow"),
+                deny: list(&v, "deny"),
+                ask: list(&v, "ask"),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

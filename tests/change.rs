@@ -1195,6 +1195,7 @@ async fn snoozing_a_change_actually_quietens_it() {
         url: "https://github.com/acme/app/pull/7".into(),
         status: "failing".into(),
         failing_checks: vec!["test".into()],
+        ..Default::default()
     });
     let id = work.id.clone();
     // No run has ever touched it.
@@ -1270,6 +1271,7 @@ async fn a_red_pull_request_reaches_the_inbox_after_the_agent_is_gone() {
         url: "https://github.com/acme/app/pull/142".into(),
         status: "failing".into(),
         failing_checks: vec!["test".into()],
+        ..Default::default()
     });
     let id = work.id.clone();
     state.changes.lock().await.insert(id.clone(), work);
@@ -1328,6 +1330,7 @@ async fn an_approved_and_green_pull_request_asks_for_nothing() {
         url: "u".into(),
         status: "ready_to_merge".into(),
         failing_checks: vec![],
+        ..Default::default()
     });
     state.changes.lock().await.insert(work.id.clone(), work);
 
@@ -4831,6 +4834,7 @@ async fn archive_keeps_the_branch_and_a_merged_pull_request_counts_as_merged() {
             url: "https://example.test/pr/7".into(),
             status: "merged".into(),
             failing_checks: Vec::new(),
+            ..Default::default()
         });
     }
     let done = post(

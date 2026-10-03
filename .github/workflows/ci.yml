@@ -182,6 +182,9 @@ jobs:
         run: cargo build --locked --example echo_agent
       - name: Test the app's host
         run: cargo test --locked --features app --test app
+      # The app's notifications, through a recording notifier.
+      - name: Test the app's notifications
+        run: cargo test --locked --features app --test notify
 
   # The desktop app's packages, built unsigned the way the release's
   # `packages` job builds them, so a packaging break is found before a tag.

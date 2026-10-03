@@ -32,6 +32,11 @@ pub struct HookPayload {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub tool_input: Option<Value>,
+    /// `PreToolUse`, `PostToolUse`, `PermissionDenied`: the vendor's id for
+    /// the call, the same one its `tool_decision` telemetry carries.
+    /// `PermissionRequest` has none.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
     #[serde(default)]
     pub tool_response: Option<Value>,
     /// `PostToolUse` / `PostToolUseFailure`: how long the tool itself ran,
@@ -177,6 +182,8 @@ pub fn to_events(p: &HookPayload) -> HookOutcome {
     {
         out.events.push(Event::PermissionModeSeen {
             mode: raw.to_string(),
+            at: None,
+            sequence: None,
         });
     }
     out
@@ -231,7 +238,9 @@ fn to_events_inner(p: &HookPayload) -> HookOutcome {
                 // Under the parent's session id: only the main thread moving
                 // on ends a question the main thread asked.
                 agent_id: p.agent_id.clone().filter(|a| !a.is_empty()),
-                call_id: None,
+                // The vendor's id for the call, which its telemetry repeats:
+                // how a report of who decided finds what the call was.
+                call_id: p.tool_use_id.clone().filter(|c| !c.is_empty()),
             })
         }
 

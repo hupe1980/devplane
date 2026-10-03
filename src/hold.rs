@@ -34,7 +34,7 @@ struct Held {
     run: String,
     answer: Answer,
     /// Where the answer came from, as the host proved it when it was held.
-    from: &'static str,
+    from: crate::core::ask::AnswerPath,
     says: String,
     title: String,
     until: jiff::Timestamp,
@@ -87,7 +87,7 @@ impl Refused {
         match self {
             Refused::NotHeld => "that answer was already sent — it can no longer be taken back",
             Refused::NotTheWindow => {
-                "that answer was given in the Devplane window, and only the window can take it back"
+                "that answer was given in Devplane — in its window or from a notification — and only the window can take it back"
             }
         }
     }
@@ -143,7 +143,9 @@ impl Hold {
         let mut slot = lock(&self.slot);
         match slot.as_ref() {
             Some(h) if h.ask == ask => {
-                if h.from == "window" && !window {
+                // Held from the window or from a notification: only the
+                // window takes it back, never another holder of the token.
+                if h.from != crate::core::ask::AnswerPath::Cli && !window {
                     return Err(Refused::NotTheWindow);
                 }
                 *slot = None;
@@ -176,7 +178,7 @@ pub async fn hold(
     state: &Shared,
     ask: &crate::core::ask::Ask,
     answer: Answer,
-    from: &'static str,
+    from: crate::core::ask::AnswerPath,
 ) -> (HeldView, Option<String>) {
     let earlier = lock(&state.hold.slot).take();
     let committed = match earlier {

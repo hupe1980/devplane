@@ -3,7 +3,7 @@
 //! piece of repository text is inert; the whole is bounded, and every fold
 //! says how much it left out.
 
-use super::{ChangeDeclares, CouldNotRun, Failed, Run, Verdict, short};
+use super::{Approvals, ChangeDeclares, CouldNotRun, Failed, Run, Verdict, short};
 use crate::core::change::{CommandResult, GateReport};
 use crate::core::review::{WeakKind, Weakened};
 
@@ -412,6 +412,9 @@ fn compose_markdown(run: &Run<'_>, room: Room) -> String {
         o.push('\n');
     }
 
+    // Who approved the pull request, when asked: beside the verdict.
+    o.push_str(&approvals_markdown(run.approvals));
+
     // 4. Not done.
     o.push_str("### Not done by verify\n\n");
     if run.not_done.is_empty() {
@@ -428,6 +431,74 @@ fn compose_markdown(run: &Run<'_>, room: Room) -> String {
     o.push_str(LIMITS);
     o.push('\n');
     o
+}
+
+/// The *Approvals* section: absent unless `--approvals` asked.
+fn approvals_markdown(a: &Approvals) -> String {
+    use crate::core::approvals::sentence::LIMITS_LINE;
+    let mut o = String::new();
+    match a {
+        Approvals::NotAsked => return o,
+        Approvals::NoPullRequest => o.push_str("### Approvals\n\nNo pull request in this run.\n\n"),
+        Approvals::NotRead { why } => o.push_str(&format!(
+            "### Approvals\n\nNot read: {}.\n\n",
+            prose(why.trim_end_matches('.'), 400)
+        )),
+        Approvals::Read(r) => {
+            o.push_str("### Approvals\n\n");
+            o.push_str(&prose(&r.sentence, 4000));
+            o.push_str("\n\n");
+            if let Some(rule) = &r.required_says {
+                o.push_str(&prose(rule, 400));
+                o.push_str("\n\n");
+            }
+            if !r.bearing.is_empty() {
+                o.push_str("| Reviewer | Kind | State | Commit |\n|---|---|---|---|\n");
+                for b in &r.bearing {
+                    o.push_str(&format!(
+                        "| {} | {} | {} | {} |\n",
+                        cell(
+                            b.account
+                                .as_ref()
+                                .map(|a| a.login.as_str())
+                                .unwrap_or("no user"),
+                            crate::core::approvals::sentence::LOGIN_CHARS
+                        ),
+                        kind_word(&b.kind),
+                        cell(b.state.as_str(), 40),
+                        match (&b.commit, b.on_head) {
+                            (_, crate::core::approvals::OnHead::Gone) | (None, _) =>
+                                "a commit that no longer exists".to_string(),
+                            (Some(c), crate::core::approvals::OnHead::Head) =>
+                                format!("{} (head)", cell(short(c), 40)),
+                            (Some(c), crate::core::approvals::OnHead::Older) =>
+                                format!("{} (older)", cell(short(c), 40)),
+                        }
+                    ));
+                }
+                o.push('\n');
+            }
+            o.push_str(LIMITS_LINE);
+            o.push_str("\n\n");
+        }
+    }
+    o
+}
+
+/// A reviewer's kind in a word or two, for the table and the terminal.
+fn kind_word(k: &crate::core::approvals::Kind) -> String {
+    use crate::core::approvals::Kind;
+    match k {
+        Kind::Person => "a person's account".into(),
+        Kind::Model { product, .. } => match crate::core::approvals::model_ratified() {
+            true => format!("{product} (a model)"),
+            false => format!("could not be attributed ({product})"),
+        },
+        Kind::Bot => "a bot account".into(),
+        Kind::Unclassified { received } => {
+            format!("could not classify (type {})", plain(received, 40))
+        }
+    }
 }
 
 /// How many annotations were printed, and how many GitHub would not show.
@@ -581,6 +652,30 @@ pub fn text(run: &Run<'_>) -> String {
     if more > 0 {
         o.push_str(&format!("  and {more} more\n"));
     }
+    match run.approvals {
+        Approvals::NotAsked => {}
+        Approvals::NoPullRequest => o.push_str("approvals    no pull request in this run\n"),
+        Approvals::NotRead { why } => {
+            o.push_str(&format!("approvals    not read: {}\n", plain(why, 400)))
+        }
+        Approvals::Read(r) => {
+            o.push_str(&format!("approvals    {}\n", plain(&r.sentence, 4000)));
+            for b in &r.bearing {
+                o.push_str(&format!(
+                    "  {}  {}  {}\n",
+                    plain(
+                        b.account
+                            .as_ref()
+                            .map(|a| a.login.as_str())
+                            .unwrap_or("no user"),
+                        crate::core::approvals::sentence::LOGIN_CHARS
+                    ),
+                    kind_word(&b.kind),
+                    plain(b.state.as_str(), 40)
+                ));
+            }
+        }
+    }
     if !run.not_done.is_empty() {
         o.push_str(&format!("not done     {}\n", run.not_done.join(" ")));
     }
@@ -683,9 +778,100 @@ mod tests {
                 base_checks: &bc,
                 not_done: &nd,
                 annotations: None,
+                approvals: &Approvals::NotAsked,
             },
             LIMIT_BYTES,
         )
+    }
+
+    fn render_with(approvals: &Approvals) -> String {
+        let b = base();
+        let d = definition(ChangeDeclares::Same);
+        let nd = not_done(Some(&d));
+        let bc = BaseChecks::NotReached;
+        let r = report(vec![
+            CommandResult::exited("npm test", 0),
+            CommandResult::exited("npm run lint", 0),
+        ]);
+        let v = Verdict::of(&r, &same("t"));
+        markdown(
+            &Run {
+                base: Some(&b),
+                definition: Some(&d),
+                rows: &[],
+                truncated: None,
+                no_change: false,
+                report: Some(&r),
+                verdict: &v,
+                base_checks: &bc,
+                not_done: &nd,
+                annotations: None,
+                approvals,
+            },
+            LIMIT_BYTES,
+        )
+    }
+
+    fn a_reading(login: &str) -> crate::core::approvals::Reading {
+        use crate::core::approvals::tests::{account, review};
+        use crate::core::approvals::{Required, Source};
+        crate::core::approvals::sentence::tests::reading(
+            Required::Count {
+                n: 1,
+                source: Source::Rules,
+                dismiss_stale: false,
+                code_owner: false,
+                last_push: false,
+            },
+            &[review(
+                1,
+                Some(account(1, login, "User")),
+                "APPROVED",
+                Some(crate::core::approvals::sentence::tests::HEAD),
+            )],
+            false,
+        )
+    }
+
+    #[test]
+    fn approvals_sit_after_base_checks_and_before_not_done() {
+        let md = render_with(&Approvals::Read(Box::new(a_reading("bob"))));
+        let h = headings(&md);
+        let at = |name: &str| h.iter().position(|x| x.starts_with(name)).unwrap();
+        assert_eq!(at("### Approvals"), at("### Base checks") + 1, "{h:?}");
+        assert_eq!(at("### Not done by verify"), at("### Approvals") + 1);
+        assert!(md.contains("1 of 1 required approvals"), "{md}");
+        assert!(md.contains("GitHub counted toward its rule"), "{md}");
+        // Not asked: no section at all.
+        let md = render_with(&Approvals::NotAsked);
+        assert!(!md.contains("### Approvals"));
+        let md = render_with(&Approvals::NoPullRequest);
+        assert!(
+            md.contains("### Approvals\n\nNo pull request in this run."),
+            "{md}"
+        );
+        let md = render_with(&Approvals::NotRead {
+            why: "GitHub refused: Resource not accessible by integration".into(),
+        });
+        assert!(md.contains("Not read: GitHub refused"), "{md}");
+    }
+
+    #[test]
+    fn planted_logins_render_inert_in_the_approvals() {
+        let md = render_with(&Approvals::Read(Box::new(a_reading(
+            "<img src=x>@someone`x`",
+        ))));
+        let section = md.split("### Approvals").nth(1).unwrap();
+        let section = section.split("### Not done").next().unwrap();
+        let sentence = section.lines().find(|l| !l.trim().is_empty()).unwrap();
+        assert!(!sentence.contains("<img"), "{sentence}");
+        assert!(!sentence.contains("@someone"), "{sentence}");
+        let rows: Vec<&str> = section
+            .lines()
+            .filter(|l| l.starts_with("| ") && l.contains("img"))
+            .collect();
+        assert_eq!(rows.len(), 1, "{section}");
+        assert!(rows[0].contains("`` <img"), "a code span: {}", rows[0]);
     }
 
     fn headings(md: &str) -> Vec<&str> {

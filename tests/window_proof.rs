@@ -126,6 +126,44 @@ async fn the_windows_proof_records_the_window() {
     );
 }
 
+/// A malformed proof, a proof minted by an earlier run of the app (another
+/// key), and a body naming the notification: each is a token holder, `cli`.
+/// No request can make the host record `notification`.
+#[tokio::test]
+async fn nothing_a_request_carries_yields_the_window_or_the_notification() {
+    let key = devplane::config::window_key();
+    let (addr, c, state) = boot(Some(&key)).await;
+    for id in ["m", "r", "n"] {
+        waiting(&state, id).await;
+    }
+    let malformed = answer(
+        &c,
+        &addr,
+        "m",
+        &[("X-Devplane-Ask-Proof", "zz-not-hex".into())],
+    )
+    .await;
+    assert_eq!(malformed, "cli");
+    let before_restart = devplane::config::ask_proof(&devplane::config::window_key(), "r");
+    let replayed = answer(&c, &addr, "r", &[("X-Devplane-Ask-Proof", before_restart)]).await;
+    assert_eq!(
+        replayed, "cli",
+        "a proof from another run of the app proves nothing"
+    );
+    let res: Value = c
+        .post(format!("http://{addr}/api/asks/n/answer"))
+        .bearer_auth(TOKEN)
+        .header("Origin", format!("http://{addr}"))
+        .json(&serde_json::json!({ "decision": "deny", "from": "notification" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(res["answered_from"], "cli", "{res}");
+}
+
 #[tokio::test]
 async fn a_host_with_no_window_records_every_answer_as_the_cli() {
     // `devplane up` in a browser: no key, so nothing can prove the window —

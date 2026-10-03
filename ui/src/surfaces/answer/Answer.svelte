@@ -1,7 +1,9 @@
 <script lang="ts">
   // The topmost thing that needs you, answerable, and nothing else — what the
   // shortcut raises. The inbox's first row (same `Item.svelte`, same routes);
-  // `Esc` gives focus back.
+  // `Esc` gives focus back. Opened from a notification (`ask`), it shows that
+  // one ask instead: waiting, focused on its first answer; or settled, saying
+  // who answered it, from where and when; or no longer answerable here.
   import Inline from "../../lib/ui/Inline.svelte";
   import Skeleton from "../../lib/Skeleton.svelte";
   import { ago } from "../../lib/text";
@@ -16,11 +18,25 @@
   import type { Answer, Item } from "../inbox/Item.svelte";
   import * as actions from "../inbox/actions";
 
+  /// One ask as the host records it (`/api/asks`), as much as is shown.
+  type AskRow = {
+    id: string;
+    message: string;
+    open: boolean;
+    outcome: string;
+    answered_at?: string | null;
+    payload?: { held_until?: string } | null;
+  };
+
   let {
     /// A planted list, for a harness; otherwise read from the host.
     items = null,
     blind = "",
-  }: { items?: Item[] | null; blind?: string } = $props();
+    /// The ask a notification opened this window on; empty for the shortcut.
+    ask = "",
+    /// That ask's record, planted for a harness; otherwise read from the host.
+    asked = null,
+  }: { items?: Item[] | null; blind?: string; ask?: string; asked?: AskRow | null } = $props();
 
   /// The host's needs-you list (as `devplane inbox --needs-you`): only what
   /// can be answered in this window. The tray's number is the whole inbox's.
@@ -34,8 +50,28 @@
   /// Which waiting item is on screen: the first, until `j`/`k` move. Kept by
   /// id, so an answered item leaving puts the next one here.
   let at = $state("");
+  /// Whether `j`/`k` moved off the ask a notification opened.
+  let moved = $state(false);
+  /// The ask a notification named, while it is still waiting here.
+  const pinned = $derived(ask ? (shown.find((x) => x.ask === ask) ?? null) : null);
   const index = $derived(Math.max(0, shown.findIndex((x) => x.id === at)));
-  const first = $derived(shown[index] ?? shown[0] ?? null);
+  const first = $derived(ask && !moved ? pinned : (shown[index] ?? shown[0] ?? null));
+  /// The named ask's record, read only once it is not waiting here.
+  const record = resource<{ open?: AskRow[]; settled?: AskRow[] }>(
+    () => (ask && !pinned && asked === null ? "/api/asks" : null),
+    { every: 2_000, tell: () => "devplane inbox --all" },
+  );
+  const recorded = $derived(
+    asked ?? [...(record.data?.open ?? []), ...(record.data?.settled ?? [])].find((a) => a.id === ask) ?? null,
+  );
+  /// Opened on a waiting ask: its first answer has the focus, once.
+  let focusedFor = "";
+  $effect(() => {
+    if (!pinned || moved || focusedFor === pinned.id) return;
+    focusedFor = pinned.id;
+    at = pinned.id;
+    queueMicrotask(() => (document.querySelector(".answer .one button") as HTMLElement | null)?.focus());
+  });
   const held = $derived(read.data?.held ?? null);
   const landed = $derived(read.data?.landed ?? null);
   $effect(() =>
@@ -43,7 +79,10 @@
       scope: "answer",
       size: () => shown.length,
       at: () => index,
-      go: (i) => (at = shown[i].id),
+      go: (i) => {
+        moved = true;
+        at = shown[i].id;
+      },
       open: () => (document.querySelector(".answer .one") as HTMLElement | null)?.focus(),
     }),
   );
@@ -110,6 +149,9 @@
     said = (await actions.copyRule(rule)).said;
   }
 
+  /// A time of day, as the person's clock reads it.
+  const clock = (t: string) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
   let now = $state(Date.now());
   $effect(() => {
     const id = setInterval(() => (now = Date.now()), 30_000);
@@ -129,7 +171,28 @@
   {:else if landed && !landed.ok}
     <p class="held failed" role="status"><b>{landed.title}</b>: {landed.says}</p>
   {/if}
-  {#if failed && read.failure}
+  {#if ask && !pinned && !moved}
+    <!-- The ask a notification named is not waiting here: say what became
+         of it, never show another item in its place. -->
+    {#if recorded}
+      <p class="settled" role="status">
+        <b>{recorded.message}</b><br />
+        {#if !recorded.open}
+          Already answered or ended — {recorded.outcome}{#if recorded.answered_at}, {clock(recorded.answered_at)}{/if}. Nothing more is recorded from here.
+        {:else if recorded.payload?.held_until && Date.parse(recorded.payload.held_until) <= now}
+          The hold ran out, so the agent is asking in its own window now. Nothing was decided here.
+        {:else}
+          Waiting, and not answerable from this window — the inbox says why.
+        {/if}
+      </p>
+    {:else if record.phase === "failed" && record.failure}
+      <Failed what="that question" failure={record.failure} />
+    {:else if loaded && (asked !== null || record.data !== null)}
+      <p class="settled" role="status">That question is no longer waiting, and no record of it was found.</p>
+    {:else}
+      <Skeleton rows={2} />
+    {/if}
+  {:else if failed && read.failure}
     <Failed what="what needs you" failure={read.failure} />
   {:else if !loaded}
     <Skeleton rows={2} />
@@ -182,5 +245,7 @@
   .hint { font-size: var(--t-xs); margin: var(--s-3) 0 0; }
   .held { font-size: var(--t-xs); margin: var(--s-2) 0 0; padding: var(--s-1) var(--s-2); border-left: 2px solid var(--wait); color: var(--dim); font-variant-numeric: tabular-nums; }
   .held.failed { border-left-color: var(--fail); color: var(--ink); }
+  .settled { font-size: var(--t-sm); margin: var(--s-2) 0 0; color: var(--dim); }
+  .settled b { color: var(--ink); font-weight: 600; }
   kbd { font-family: var(--mono); font-size: 0.625rem; border: 1px solid var(--line); border-radius: 3px; padding: 0 0.25rem; }
 </style>

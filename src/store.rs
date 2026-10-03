@@ -24,11 +24,11 @@ use std::str::FromStr;
 /// satisfy (a renamed or added column, a changed type, a dropped table). A file
 /// stamped with anything else is moved aside on open (`Store::retire`), not
 /// migrated.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// The statement that stamps it, written out because `PRAGMA user_version`
 /// accepts no bind parameter.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 15";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 17";
 
 /// The database and its sidecars readable by their owner alone, whoever
 /// opened them first — a hook creates the file long before any `up` would
@@ -952,8 +952,8 @@ impl Store {
         sqlx::query(
             "INSERT OR IGNORE INTO decisions
                (id, at, authority, action, subject, outcome, reason, tool, server_source,
-                project_id, run_id, change_id, call_id)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                project_id, run_id, change_id, call_id, vendor, vendor_source)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
         .bind(ts(&d.at))
@@ -968,9 +968,156 @@ impl Store {
         .bind(d.run_id.as_ref().map(|r| r.as_str()))
         .bind(d.change_id.as_ref().map(|w| w.as_str()))
         .bind(d.call_id.as_deref())
+        .bind(d.vendor.as_deref())
+        .bind(d.vendor_source.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The decision rows naming one call by the agent's id: Devplane's own
+    /// (`vendor` NULL) and any written from a vendor's report.
+    pub async fn decisions_for_call(&self, call: &str) -> Result<Vec<crate::core::Decision>> {
+        let rows = sqlx::query("SELECT * FROM decisions WHERE call_id = ? ORDER BY at, rowid")
+            .bind(call)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading the decisions about one call")?;
+        Ok(decode_rows("decision", &rows, decode_decision))
+    }
+
+    /// The tool and input of a call a hook reported starting, by the
+    /// vendor's id for it: what a later report of who decided it is matched
+    /// against. `None` when no hook named the call.
+    pub async fn started_call(
+        &self,
+        run: &RunId,
+        call: &str,
+    ) -> Result<Option<(String, serde_json::Value)>> {
+        let row = sqlx::query(
+            "SELECT payload FROM events
+              WHERE run_id = ? AND kind = 'tool_started'
+                AND json_extract(payload, '$.call_id') = ?
+              ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(run.as_str())
+        .bind(call)
+        .fetch_optional(&self.pool)
+        .await
+        .context("reading a started call")?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let v: serde_json::Value = serde_json::from_str(&row.get::<String, _>("payload"))?;
+        let tool = v.get("tool").and_then(|t| t.as_str()).unwrap_or_default();
+        Ok(Some((
+            tool.to_string(),
+            v.get("input").cloned().unwrap_or(serde_json::Value::Null),
+        )))
+    }
+
+    /// The permission modes a run was seen in, newest first, by any channel.
+    pub async fn modes_seen(&self, run: &RunId, limit: i64) -> Result<Vec<EventEnvelope>> {
+        let rows = sqlx::query(
+            "SELECT id, at, run_id, project_id, source, payload FROM events
+              WHERE run_id = ? AND kind = 'permission_mode_seen'
+              ORDER BY seq DESC LIMIT ?",
+        )
+        .bind(run.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the modes a run was seen in")?;
+        Ok(decode_rows("event", &rows, row_to_event))
+    }
+
+    /// Every `source` a vendor's decision report carried, with when it was
+    /// first seen. An absent source is not a value and is not listed.
+    pub async fn vendor_sources_seen(&self) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT json_extract(payload, '$.source') AS source, min(at) AS first
+               FROM events WHERE kind = 'vendor_decided'
+                 AND json_extract(payload, '$.source') IS NOT NULL
+              GROUP BY source ORDER BY first",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the decision sources seen")?;
+        Ok(rows
+            .iter()
+            .map(|r| (r.get::<String, _>("source"), r.get::<String, _>("first")))
+            .collect())
+    }
+
+    /// Vendors' reports of who decided a call, newest first, for some runs
+    /// or for every run. Observations: pruned with the event log.
+    pub async fn vendor_reports(
+        &self,
+        runs: Option<&[RunId]>,
+        limit: i64,
+    ) -> Result<Vec<EventEnvelope>> {
+        let mut out = Vec::new();
+        match runs {
+            Some(runs) => {
+                for run in runs {
+                    let rows = sqlx::query(
+                        "SELECT id, at, run_id, project_id, source, payload FROM events
+                          WHERE run_id = ? AND kind = 'vendor_decided'
+                          ORDER BY seq DESC LIMIT ?",
+                    )
+                    .bind(run.as_str())
+                    .bind(limit)
+                    .fetch_all(&self.pool)
+                    .await
+                    .context("reading vendor reports")?;
+                    out.extend(decode_rows("event", &rows, row_to_event));
+                }
+                out.sort_by_key(|e: &EventEnvelope| std::cmp::Reverse(e.at));
+                out.truncate(usize::try_from(limit).unwrap_or(0));
+            }
+            None => {
+                let rows = sqlx::query(
+                    "SELECT id, at, run_id, project_id, source, payload FROM events
+                      WHERE kind = 'vendor_decided' ORDER BY at DESC LIMIT ?",
+                )
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+                .context("reading vendor reports")?;
+                out = decode_rows("event", &rows, row_to_event);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Marks that an inbox item was put in front of the person by a desktop
+    /// notification, so a restart does not announce it again. No time is kept:
+    /// beside an answer's time it would make a time-to-answer derivable.
+    pub async fn announce_mark(&self, key: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO announced (key) VALUES (?)")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Forgets an announcement once its item left the inbox, so the same
+    /// question asked again later is announced again.
+    pub async fn announce_unmark(&self, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM announced WHERE key = ?")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every item currently marked as announced.
+    pub async fn announced(&self) -> Result<std::collections::BTreeSet<String>> {
+        use sqlx::Row;
+        let rows = sqlx::query("SELECT key FROM announced")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("key")).collect())
     }
 
     /// Records that the inbox is asking for something. Idempotent against the
@@ -1683,6 +1830,8 @@ fn decode_decision(r: &sqlx::sqlite::SqliteRow) -> Result<crate::core::Decision>
             .get::<Option<String>, _>("change_id")
             .map(crate::core::ChangeId::new),
         call_id: r.get("call_id"),
+        vendor: r.get("vendor"),
+        vendor_source: r.get("vendor_source"),
     })
 }
 
@@ -2698,7 +2847,7 @@ mod integrity_tests {
         let mut a = ask("a1");
         a.answer(
             serde_json::json!({"q": "keep"}),
-            "board",
+            crate::core::ask::AnswerPath::Window,
             jiff::Timestamp::now(),
         )
         .unwrap();
@@ -2974,5 +3123,44 @@ mod integrity_tests {
         );
         assert_eq!(s.decisions(Some("r1"), 10).await.unwrap().len(), 1);
         assert!(s.decisions(Some("nobody"), 10).await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod announced_tests {
+    use super::*;
+
+    /// The mark survives reopening the store, is one row however often it is
+    /// set, and is gone once unmarked.
+    #[tokio::test]
+    async fn an_announcement_survives_a_restart_and_carries_no_time() {
+        let dir = std::env::temp_dir().join(format!("devplane-announced-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("devplane.db");
+        {
+            let s = Store::open(&path).await.unwrap();
+            s.announce_mark("ask-1").await.unwrap();
+            s.announce_mark("ask-1").await.unwrap();
+            s.announce_mark("run-2:gate_failed").await.unwrap();
+        }
+        let s = Store::open(&path).await.unwrap();
+        let marked = s.announced().await.unwrap();
+        assert_eq!(
+            marked.into_iter().collect::<Vec<_>>(),
+            ["ask-1", "run-2:gate_failed"]
+        );
+        s.announce_unmark("ask-1").await.unwrap();
+        assert_eq!(s.announced().await.unwrap().len(), 1);
+
+        use sqlx::Row;
+        let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('announced')")
+            .fetch_all(&s.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get::<String, _>("name"))
+            .collect();
+        assert_eq!(cols, ["key"], "the mark is a key and nothing else");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

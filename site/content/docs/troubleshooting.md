@@ -147,6 +147,20 @@ sqlite3 ~/.devplane/devplane.v<n>.<time>.bak \
 Worktrees and branches are untouched; `devplane change adopt <branch>` brings one back as a change.
 Delete a `.bak` once you have what you need.
 
+## Notifications do not arrive, or carry no buttons
+
+`devplane doctor` prints one `notices` line from the running app:
+
+| It says | Do |
+|---|---|
+| *actions and reply (macOS, bundled app)* / *(Windows, installed app)* | nothing; a notification held by Do Not Disturb or Focus appears when it ends |
+| *not permitted* | macOS: System Settings › Notifications › Devplane, allow notifications |
+| *plain, no actions* | a build run from source or from `target/`: install the app for actions |
+| *no notification service answered* (Linux) | start a notification daemon; the tray count and the window still show every item |
+| *plain — the app is not running* | `devplane up --window` for answerable notifications |
+
+`DEVPLANE_NOTIFY=0` turns them off altogether.
+
 ## Other messages
 
 | You see | Means | Do |

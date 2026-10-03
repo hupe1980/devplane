@@ -170,7 +170,7 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             }
         }
 
-        Event::PermissionModeSeen { mode } => {
+        Event::PermissionModeSeen { mode, .. } => {
             let seen = crate::core::run::PermissionMode::parse(mode);
             // Only a change moves the clock: this arrives on every prompt, and
             // the fact worth carrying is how long the mode has been true.
@@ -192,6 +192,39 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             if run.agent_mode.as_deref() != Some(mode.as_str()) {
                 run.agent_mode = Some(mode.clone());
                 run.agent_mode_seen = Some(env.at);
+            }
+        }
+
+        // A vendor's report of who decided: recorded, and it moves nothing.
+        // A refusal the vendor's configuration made is counted as a rule's
+        // would be (the only sign of a rule too tight); the person's is not,
+        // and a hook's was counted by the hook.
+        Event::VendorDecided {
+            tool,
+            decision,
+            source,
+            ..
+        } => {
+            let refused = decision == "reject";
+            if refused
+                && source.as_deref() == Some("config")
+                && !echoes_last_refusal(run, env, tool)
+            {
+                run.refusals += 1;
+                run.last_refusal = Some(crate::core::run::Refusal {
+                    tool: tool.clone(),
+                    by: "Claude Code's permission settings".into(),
+                    reason: None,
+                    at: env.at,
+                });
+            }
+            if refused
+                && source.as_deref() != Some("hook")
+                && run.recent_tools.last().is_some_and(|c| c.tool == *tool)
+                && let Some(said) = run.summary.as_mut()
+                && !said.starts_with(REFUSED)
+            {
+                *said = format!("{REFUSED}{said}");
             }
         }
 
@@ -759,8 +792,8 @@ fn last_pending_tool(run: &Run) -> Option<&ToolCall> {
 }
 
 /// Whether a permission decision is about the call the run is waiting on.
-/// Telemetry is batched and arrives late, so an OpenTelemetry decision clears
-/// a block only when it names the pending call by id. A hook's decision about
+/// Telemetry never is: it is batched, arrives late, and is a record of what
+/// another channel already answered. A hook's decision about
 /// a different tool (another subagent) leaves the block alone. The host's and
 /// a feed's decisions answer the block they were raised for.
 fn decides_pending(
@@ -780,7 +813,10 @@ fn decides_pending(
     }
     let same_tool = tool.is_empty() || blocked_tool.is_none_or(|t| t == tool);
     match source {
-        Source::Otel => call_id.is_some() && call_id == pending_id && same_tool,
+        // Telemetry is recorded, never answered from: a pending permission is
+        // cleared by the hook's or the protocol's own answer, so no channel's
+        // late copy can decide what the person is still looking at.
+        Source::Otel => false,
         Source::Hook | Source::CopilotHook | Source::CodexHook => same_tool,
         _ => true,
     }
@@ -1885,6 +1921,8 @@ mod tests {
             &mut r,
             &ev(Event::PermissionModeSeen {
                 mode: "auto".into(),
+                at: None,
+                sequence: None,
             }),
         );
         let first = r.permission_mode_seen.expect("stamped on first sight");
@@ -1893,6 +1931,8 @@ mod tests {
         // The same mode again, later: nothing moves.
         let mut again = ev(Event::PermissionModeSeen {
             mode: "auto".into(),
+            at: None,
+            sequence: None,
         });
         again.at = first + jiff::SignedDuration::from_secs(600);
         apply(&mut r, &again);
@@ -1905,6 +1945,8 @@ mod tests {
         // A different mode does.
         let mut switched = ev(Event::PermissionModeSeen {
             mode: "default".into(),
+            at: None,
+            sequence: None,
         });
         switched.at = first + jiff::SignedDuration::from_secs(1200);
         apply(&mut r, &switched);
@@ -1921,6 +1963,8 @@ mod tests {
             &mut r,
             &ev(Event::PermissionModeSeen {
                 mode: "somethingNew".into(),
+                at: None,
+                sequence: None,
             }),
         );
         assert_eq!(
@@ -2534,9 +2578,25 @@ mod tests {
         assert_eq!(r.state, RunState::Working);
     }
 
-    /// A telemetry decision naming the pending call by id is the answer.
+    fn reported(source: Option<&str>, decision: &str, call_id: Option<&str>) -> Event {
+        Event::VendorDecided {
+            vendor: "claude-code".into(),
+            tool: "Bash".into(),
+            decision: decision.into(),
+            source: source.map(str::to_string),
+            call_id: call_id.map(str::to_string),
+            sequence: None,
+            at: None,
+            mode_in_force: None,
+            session: crate::core::decision::SessionKind::Interactive,
+            matched: None,
+        }
+    }
+
+    /// Telemetry is a record, never an answer: even a report naming the
+    /// pending call by id, in either shape, leaves the run waiting.
     #[test]
-    fn a_telemetry_decision_about_the_pending_call_clears_it() {
+    fn a_telemetry_decision_never_clears_a_pending_permission() {
         let mut r = run();
         apply(
             &mut r,
@@ -2551,14 +2611,33 @@ mod tests {
         blocked_on_bash(&mut r);
         apply(
             &mut r,
-            &otel(decided("Bash", "accept", "person", Some("toolu_0"))),
-        );
-        assert!(r.state.needs_human(), "another call's id");
-        apply(
-            &mut r,
             &otel(decided("Bash", "accept", "person", Some("toolu_1"))),
         );
+        assert!(r.state.needs_human(), "the pending call's own id");
+        for source in [Some("user_temporary"), Some("config"), Some("hook"), None] {
+            apply(&mut r, &otel(reported(source, "accept", Some("toolu_1"))));
+            assert!(r.state.needs_human(), "{source:?}");
+        }
+        let blocked = r.blocked_on.clone();
+        assert!(blocked.is_some());
+        // The hook's own answer still moves it on.
+        apply(&mut r, &ev(decided("Bash", "allow", "policy:Bash", None)));
         assert_eq!(r.state, RunState::Working);
+    }
+
+    /// A refusal the vendor's configuration made counts as a rule's would; the
+    /// person's does not, and a hook's was counted by the hook.
+    #[test]
+    fn a_reported_refusal_is_counted_only_when_configuration_made_it() {
+        let mut r = run();
+        apply(&mut r, &otel(reported(Some("user_reject"), "reject", None)));
+        apply(&mut r, &otel(reported(Some("hook"), "reject", None)));
+        apply(&mut r, &otel(reported(None, "reject", None)));
+        assert_eq!(r.refusals, 0);
+        apply(&mut r, &otel(reported(Some("config"), "accept", None)));
+        assert_eq!(r.refusals, 0);
+        apply(&mut r, &otel(reported(Some("config"), "reject", None)));
+        assert_eq!(r.refusals, 1);
     }
 
     /// The gate's denial, then Claude Code's telemetry copy of it: one refusal,
@@ -3102,7 +3181,7 @@ mod quitting_tests {
         answered
             .answer(
                 serde_json::json!({}),
-                "board",
+                crate::core::ask::AnswerPath::Window,
                 "2026-09-24T09:01:00Z".parse().expect("a timestamp"),
             )
             .expect("first answer");

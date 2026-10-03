@@ -219,6 +219,10 @@ pub struct RateWindow {
     pub resets_at: Option<i64>,
 }
 
+fn not_known() -> crate::core::decision::SessionKind {
+    crate::core::decision::SessionKind::NotKnown
+}
+
 /// A single observation about a run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -297,6 +301,44 @@ pub enum Event {
         /// The vendor's own spelling, parsed by `PermissionMode` at the edge
         /// and kept verbatim when it is a value this build does not know.
         mode: String,
+        /// When the vendor says the mode changed (`event.timestamp`), where
+        /// it is not when this arrived: telemetry is batched. `None` for a
+        /// hook, whose own time is the envelope's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<jiff::Timestamp>,
+        /// The vendor's per-process order (`event.sequence`), for two
+        /// observations in one instant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sequence: Option<u64>,
+    },
+    /// A vendor's own report of who decided one tool call (Claude Code's
+    /// `tool_decision`), every one kept, whatever its `source`. An observation
+    /// only: it never moves a run's waiting state, and it is a decision row
+    /// only where [`crate::core::decision::attribute`] establishes the decider.
+    VendorDecided {
+        vendor: String,
+        tool: String,
+        /// `accept` or `reject`, as sent.
+        decision: String,
+        /// The vendor's word verbatim; `None` when it sent none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sequence: Option<u64>,
+        /// The vendor's `event.timestamp`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<jiff::Timestamp>,
+        /// What the attribution was computed from, filled at the edge when it
+        /// arrived: the mode in force at `at` (`None` = not known), the
+        /// session's kind, and the vendor's rule Devplane found matching.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode_in_force: Option<String>,
+        #[serde(default = "not_known")]
+        session: crate::core::decision::SessionKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matched: Option<crate::core::decision::VendorRule>,
     },
     /// A permission decision was taken, by a rule, a hook or the human.
     PermissionDecided {
@@ -636,6 +678,7 @@ impl Event {
             Event::ToolFinished { .. } => "tool_finished",
             Event::PlanUpdated { .. } => "plan_updated",
             Event::PermissionModeSeen { .. } => "permission_mode_seen",
+            Event::VendorDecided { .. } => "vendor_decided",
             Event::PermissionDecided { .. } => "permission_decided",
             Event::QuestionAnswered { .. } => "question_answered",
             Event::ConfigChanged { .. } => "config_changed",

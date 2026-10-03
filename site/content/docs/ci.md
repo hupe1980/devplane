@@ -13,7 +13,8 @@ request's tree, and writes a job summary led by every skipped test, deleted test
 devplane verify --base main
 ```
 
-Needs only git and the repository: no host, no store, nothing in your Devplane home, no network.
+Needs only git and the repository: no host, no store, nothing in your Devplane home, and no network
+unless you ask it to read [who approved the pull request](#who-approved-the-pull-request).
 
 ## The workflow step
 
@@ -50,6 +51,7 @@ stop with a sentence naming those.
 | `statement` | empty | a path to write the in-toto statement to; nothing is written when no tree was recorded, and the log says why |
 | `sarif` | empty | a path to write the [SARIF file](#annotations-and-sarif) to; nothing is uploaded |
 | `install` | `true` | `false` uses a `devplane` already on `PATH` |
+| `approvals` | `false` | `true` reads [who approved the pull request](#who-approved-the-pull-request) with the job's token; writes nothing |
 
 Outputs: `verdict` (`verified`, `failed`, `could_not_run`), `statement` and `sarif` (path or empty). Keep the
 statement with `actions/upload-artifact`.
@@ -98,6 +100,63 @@ In order:
 - Paths, lines and commands are literal text, never markup.
 - The summary stays under the step-summary size limit, counting rows left out; `--json` lists all.
 - Nothing is posted to the pull request (no comment, review, label or status).
+
+## Who approved the pull request
+
+Since September 2026 GitHub lets Copilot code review submit an approval that counts toward a
+repository's required approvals. GitHub then shows the same green *Approved* a person's review would.
+Turn on the `approvals` input and the summary gains an **Approvals** section, after the base checks,
+saying who the required approvals came from, by kind:
+
+```text
+1 of 1 required approvals: 1 could not be attributed — a model decided, and the record has no word
+for it yet (Copilot code review, copilot-pull-request-reviewer[bot]); 0 from a person's account.
+1 dismissed: a person's account (alice), on 3f2a9c1.
+```
+
+```yaml
+on:
+  pull_request:
+  pull_request_review:
+    types: [submitted, dismissed]   # refresh the summary when a review lands or is dismissed
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # Set up what your `check` needs here, as above.
+      - uses: hupe1980/devplane@v0.12.0   # pin a release that has the approvals input
+        with: { approvals: "true" }
+```
+
+- **Read-only.** It reads the pull request's reviews and the base branch's rules with `GET` requests
+  to the job's own API address (`$GITHUB_API_URL`), with the job's token, and writes nothing to the
+  pull request: no review, comment, status or label. The token reaches only the verify step, and only
+  when the input is on; it appears in no output.
+- **Branch protection stays yours.** Nothing about approvals changes the exit code or blocks a merge.
+- **A reviewer's kind comes from what GitHub documents, never from a login's look.** A person's
+  account is an account of type `User`. A model is only an account a vendor documents as its model
+  reviewer — today `copilot-pull-request-reviewer[bot]` on github.com, which `devplane doctor`
+  lists with the page it comes from and the date it was read. Any other bot, whatever its name says,
+  is *a bot account*. Until the record has a word for a model deciding, a model's approval reads
+  *could not be attributed*, and it is never counted as a person's.
+- **A dismissed approval is said as dismissed**, with the commit it was on, and is not counted. An
+  approval on an older commit is counted and said as such.
+- **The count required** is read from the base branch's rules (the largest required count among
+  them), else classic branch protection. A job's token usually cannot read branch protection; then
+  the sentence says the number required could not be read — never *0 required*.
+- The section is as of the run. That is why `pull_request_review` is in the snippet: a review submitted
+  later starts a new run.
+- Which approvals GitHub counted toward its rule — write access, code owners, the last push — is
+  GitHub's to decide; Devplane states what it read.
+
+Without the input, in a pull request's run, *Not done by verify* says the approvals were not read and
+how to read them. `devplane verify --approvals` is the same read outside the action, given
+`GITHUB_EVENT_PATH`, `GITHUB_REPOSITORY`, `GITHUB_API_URL` and `GITHUB_TOKEN`.
 
 ## Annotations and SARIF
 

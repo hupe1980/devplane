@@ -128,6 +128,26 @@ import { fail, html, source, walk } from "../harness";
   if (/<nav/.test(answer)) fail("the answer surface carries a nav, in a 480-pixel window");
   if (!html(Answer, { items: [] }).includes("Nothing needs you.")) fail("the answer surface with nothing waiting does not say so");
   if (html(Answer, {}).includes("Nothing needs you.")) fail("the answer surface says nothing needs you before it has read");
+  // Opened from a notification on one ask: that ask, never the topmost.
+  const other = { ...permission, id: "p0", title: "Bash: rm -rf build", ask: "ask-1" };
+  const named = html(Answer, { items: [other, permission], ask: "ask-9" });
+  if (!named.includes("Bash: cargo test") || named.includes("Bash: rm -rf build"))
+    fail("the answer window opened on an ask shows another item in its place");
+  const settled = html(Answer, {
+    items: [other],
+    ask: "ask-9",
+    asked: { id: "ask-9", message: "Bash: cargo test", open: false, outcome: "you answered it from the notification · delivered to the waiting agent", answered_at: "2026-10-03T14:02:00Z" },
+  });
+  if (!settled.includes("from the notification") || !settled.includes("Already answered"))
+    fail("the answer window on an ask answered elsewhere does not say who answered it and from where");
+  if (settled.includes("Bash: rm -rf build") || settled.includes("Nothing needs you."))
+    fail("the answer window on a settled ask shows another item, or nothing, instead of what became of it");
+  const lapsed = html(Answer, {
+    items: [],
+    ask: "ask-9",
+    asked: { id: "ask-9", message: "Bash: git push", open: true, outcome: "waiting for you", payload: { held_until: "2026-01-01T00:00:00Z" } },
+  });
+  if (!lapsed.includes("asking in its own window now")) fail("the answer window on a lapsed hold does not say the agent's own dialog is asking");
   const reg = surfaces().find((s) => s.id === "answer");
   if (!reg || reg.nav !== false || reg.bare !== true) fail("the answer surface is listed or framed like a place");
   if (!/hideWindow\(\)/.test(source("../src/surfaces/answer/Answer.svelte"))) fail("Esc on the answer surface does not ask the window to hide");

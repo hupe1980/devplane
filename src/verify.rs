@@ -1,7 +1,9 @@
 //! `devplane verify`: the edge. Reads git and the base's `devplane.toml`, runs
 //! the base's `check` in the checkout, and writes the summary and statement a
 //! person named. Needs only git and the repository's files: it names no store,
-//! host, client or Devplane home, and makes no network request
+//! host or Devplane home, and makes no network request unless `--approvals`
+//! is passed — then only `GET`s for the pull request's reviews and its base
+//! branch's rules, to the job's own API address with the job's own token
 //! (`tests/verify.rs` holds that to the source).
 //!
 //! Everything decided is in [`crate::core::verify`]; this module only gathers.
@@ -9,7 +11,8 @@
 use crate::core::review::Weakened;
 use crate::core::verify::json::Wrote;
 use crate::core::verify::{
-    Base, BaseChecks, BaseSource, ChangeDeclares, CouldNotRun, Definition, Run, Trees, Verdict,
+    Approvals, Base, BaseChecks, BaseSource, ChangeDeclares, CouldNotRun, Definition, Run, Trees,
+    Verdict,
 };
 use std::path::{Path, PathBuf};
 
@@ -24,6 +27,8 @@ pub struct Args {
     pub no_base_checks: bool,
     /// `--sarif`: the weakened rows and failing named tests as SARIF 2.1.0.
     pub sarif: Option<PathBuf>,
+    /// `--approvals`: read who approved the pull request the event names.
+    pub approvals: bool,
 }
 
 /// Where the Markdown goes.
@@ -95,7 +100,99 @@ pub async fn run(dir: &Path, args: &Args) -> i32 {
         Ok(v) => v,
         Err(why) => Verdict::CouldNotRun { why },
     };
-    finish(dir, args, g, verdict).await
+    // After the verdict and never into it; nothing is read unless asked,
+    // and nothing when `check` never ran (no section would show it).
+    let approvals = match (args.approvals, g.report.is_some()) {
+        (true, true) => read_approvals().await,
+        _ => Approvals::NotAsked,
+    };
+    finish(dir, args, g, verdict, approvals).await
+}
+
+/// The pull request the runner's event payload names, if any. Reads a local
+/// file only.
+fn event_pull_request() -> Option<crate::core::verify::EventPullRequest> {
+    let path = std::env::var_os("GITHUB_EVENT_PATH").filter(|p| !p.is_empty())?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let payload: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let name = std::env::var("GITHUB_EVENT_NAME")
+        .ok()
+        .filter(|n| !n.is_empty());
+    crate::core::verify::event_pull_request(name.as_deref(), &payload)
+}
+
+/// `--approvals`: the reviews and the base branch's rules, read with
+/// `$GITHUB_TOKEN` from `$GITHUB_API_URL`. `GET` only; the token goes
+/// nowhere else and appears in no output.
+async fn read_approvals() -> Approvals {
+    let Some(pr) = event_pull_request() else {
+        return Approvals::NoPullRequest;
+    };
+    let not_read = |why: &str| Approvals::NotRead { why: why.into() };
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let Some(api) = env("GITHUB_API_URL") else {
+        return not_read("GITHUB_API_URL is not set");
+    };
+    let api = api.trim().trim_end_matches('/').to_string();
+    if !crate::core::verify::api_allowed(&api) {
+        return not_read(
+            "GITHUB_API_URL is neither https nor this machine, so the token was not sent",
+        );
+    }
+    let Some((owner, repo)) = env("GITHUB_REPOSITORY").and_then(|r| {
+        r.split_once('/')
+            .map(|(o, n)| (o.to_string(), n.to_string()))
+    }) else {
+        return not_read("GITHUB_REPOSITORY does not name owner/repository");
+    };
+    let Some(token) = env("GITHUB_TOKEN") else {
+        return not_read(
+            "no token: GITHUB_TOKEN is not set (the action passes the job's token when its approvals input is true)",
+        );
+    };
+    // The forge host the reviewers are classified for: the server the
+    // runner names, else the API address's own.
+    let server = env("GITHUB_SERVER_URL").unwrap_or_else(|| "https://github.com".into());
+    let host = server
+        .split("://")
+        .nth(1)
+        .unwrap_or(&server)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let client = crate::github::Client::new(
+        crate::github::GitHubHost {
+            name: host.clone(),
+            graphql: format!("{api}/graphql"),
+            oauth: server.clone(),
+            api,
+        },
+        crate::github::Secret::new(token),
+    );
+    let target = crate::github::reviews::Target {
+        host: &host,
+        owner: &owner,
+        repo: &repo,
+        number: pr.number,
+        url: &pr.url,
+        head: &pr.head,
+        base: &pr.base,
+        after_merge: false,
+    };
+    match crate::github::reviews::read(&client, &target, jiff::Timestamp::now()).await {
+        Ok(r) => Approvals::Read(Box::new(r)),
+        Err(crate::github::Error::Expired(_)) => {
+            not_read("GitHub did not accept the token in GITHUB_TOKEN")
+        }
+        Err(crate::github::Error::Forbidden(m)) => Approvals::NotRead {
+            why: format!(
+                "the token may not read the pull request's reviews; the job needs \
+                 pull-requests: read ({m})"
+            ),
+        },
+        Err(e) => Approvals::NotRead { why: e.to_string() },
+    }
 }
 
 async fn gather(dir: &Path, args: &Args, g: &mut Gathered) -> Result<Verdict, CouldNotRun> {
@@ -253,9 +350,19 @@ async fn gather(dir: &Path, args: &Args, g: &mut Gathered) -> Result<Verdict, Co
     Ok(verdict)
 }
 
-async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i32 {
+async fn finish(
+    dir: &Path,
+    args: &Args,
+    g: Gathered,
+    mut verdict: Verdict,
+    approvals: Approvals,
+) -> i32 {
     let checks = g.base_checks.clone().unwrap_or(BaseChecks::NotReached);
-    let not_done = crate::core::verify::not_done(g.definition.as_ref());
+    let mut not_done = crate::core::verify::not_done(g.definition.as_ref());
+    // In a pull request's CI, say the approvals were not read and how to.
+    if !args.approvals && event_pull_request().is_some() {
+        not_done.push(crate::core::verify::APPROVALS_NOT_READ.into());
+    }
     let mut wrote = Wrote::default();
     let mut errors: Vec<String> = Vec::new();
 
@@ -293,6 +400,13 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
         // No tree, no subject, no statement: nothing is written, and the
         // document says why. A *verified* never stands beside a statement
         // that could not be made.
+        // Who approved, under the Devplane predicate, when it was asked.
+        let statement = statement.map(|mut st| {
+            if let Some(a) = approvals.json() {
+                st["predicate"]["devplane"]["mergeApprovals"] = a;
+            }
+            st
+        });
         let written = statement.map(|st| std::fs::write(path, crate::core::attest::serialize(&st)));
         match written {
             Err(why) => {
@@ -385,6 +499,7 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
                 base_checks: &checks,
                 not_done: &not_done,
                 annotations,
+                approvals: &approvals,
             },
             crate::core::verify::summary::LIMIT_BYTES,
         )
@@ -421,6 +536,7 @@ async fn finish(dir: &Path, args: &Args, g: Gathered, mut verdict: Verdict) -> i
         base_checks: &checks,
         not_done: &not_done,
         annotations,
+        approvals: &approvals,
     };
     if args.json {
         let doc = crate::core::verify::json::json(&composed, &wrote);

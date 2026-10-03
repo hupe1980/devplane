@@ -1,6 +1,7 @@
 # Devplane verify: runs the base's `check` from devplane.toml on this pull
 # request and leads the job summary with the checks the change weakened.
-# Posts nothing to the pull request and needs no token beyond reading contents.
+# Posts nothing to the pull request. Needs no token unless the `approvals`
+# input is on; then the job's own token reads the pull request's reviews.
 # Every input reaches the shell through `env:`, never through an expression in
 # a script.
 name: Devplane verify
@@ -32,6 +33,11 @@ inputs:
   install:
     description: "`false` uses a `devplane` already on PATH."
     default: "true"
+  approvals:
+    description: >-
+      `true` reads who approved the pull request with the job's token (needs pull-requests: read)
+      and adds an Approvals section to the summary. Writes nothing.
+    default: "false"
 
 outputs:
   verdict:
@@ -117,11 +123,14 @@ runs:
         BASE: ${{ inputs.base }}
         STATEMENT: ${{ inputs.statement }}
         SARIF: ${{ inputs.sarif }}
+        APPROVALS: ${{ inputs.approvals }}
+        GITHUB_TOKEN: ${{ inputs.approvals == 'true' && github.token || '' }}
       run: |
         args=(verify --json)
         if [ -n "$BASE" ]; then args+=(--base "$BASE"); else echo "No base given: devplane verify uses origin/HEAD, else main."; fi
         if [ -n "$STATEMENT" ]; then args+=(--statement "$STATEMENT"); fi
         if [ -n "$SARIF" ]; then args+=(--sarif "$SARIF"); fi
+        if [ "$APPROVALS" = "true" ]; then args+=(--approvals); fi
         out="$RUNNER_TEMP/devplane-verify.json"
         set +e
         devplane "${args[@]}" > "$out"

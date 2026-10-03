@@ -142,10 +142,17 @@
     let id = "";
     let f = "";
     const want = q.get("surface");
-    if (want && surfaces().some((s) => s.id === want)) id = want;
+    // A named surface wins over a link's own surface, and the link's value is
+    // its focus: `?surface=answer&ask=<id>` opens the answer window on that ask.
+    const named = !!want && surfaces().some((s) => s.id === want);
+    if (named && want) id = want;
     for (const s of surfaces()) {
       const v = s.link ? q.get(s.link) : null;
       if (s.link && v) {
+        if (named) {
+          f ||= v;
+          continue;
+        }
         id = s.id;
         f = s.linkFocus ? s.linkFocus(v) : v;
       }

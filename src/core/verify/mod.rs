@@ -464,6 +464,93 @@ impl BaseChecks {
     }
 }
 
+/// What *Not done by verify* says in a pull request's CI when the approvals
+/// were not asked for.
+pub const APPROVALS_NOT_READ: &str = "The pull request's approvals were not read: pass \
+--approvals with the job's token (pull-requests: read).";
+
+/// Who approved the pull request, as `verify --approvals` read it. Beside the
+/// verdict, never in it: nothing here changes the exit code.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Approvals {
+    /// `--approvals` was not passed: no section, no request.
+    #[default]
+    NotAsked,
+    /// Asked, and the run's event names no pull request: no request made.
+    NoPullRequest,
+    /// Asked, and the reviews could not be read: why.
+    NotRead {
+        why: String,
+    },
+    Read(Box<super::approvals::Reading>),
+}
+
+impl Approvals {
+    /// `approvals` in `--json` and `predicate.devplane.mergeApprovals` in the
+    /// statement: the certificate's shape. `None` when not asked.
+    pub fn json(&self) -> Option<serde_json::Value> {
+        use serde_json::json;
+        match self {
+            Approvals::NotAsked => None,
+            Approvals::NoPullRequest => Some(json!({ "absent": "no pull request" })),
+            Approvals::NotRead { why } => Some(json!({ "notRead": why })),
+            Approvals::Read(r) => Some(json!(r)),
+        }
+    }
+}
+
+/// The pull request a workflow run's event names, from the runner's event
+/// payload: `pull_request` and `pull_request_review` events only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventPullRequest {
+    pub number: u64,
+    pub url: String,
+    pub head: String,
+    pub base: String,
+}
+
+/// Reads `pull_request.{number, html_url, head.sha, base.ref}` from the
+/// payload; `None` for any other event or a payload without them.
+pub fn event_pull_request(
+    event_name: Option<&str>,
+    payload: &serde_json::Value,
+) -> Option<EventPullRequest> {
+    if let Some(name) = event_name
+        && !matches!(name, "pull_request" | "pull_request_review")
+    {
+        return None;
+    }
+    let pr = payload.get("pull_request")?;
+    Some(EventPullRequest {
+        number: pr["number"].as_u64()?,
+        url: pr["html_url"].as_str().unwrap_or_default().to_string(),
+        head: pr["head"]["sha"]
+            .as_str()
+            .filter(|s| !s.is_empty())?
+            .to_string(),
+        base: pr["base"]["ref"]
+            .as_str()
+            .filter(|s| !s.is_empty())?
+            .to_string(),
+    })
+}
+
+/// Whether `verify` may send the job's token to this API address: `https`,
+/// or plain `http` to this machine's loopback only.
+pub fn api_allowed(api: &str) -> bool {
+    if api.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = api.strip_prefix("http://") else {
+        return false;
+    };
+    ["127.0.0.1", "localhost", "[::1]"].iter().any(|h| {
+        rest.strip_prefix(h).is_some_and(|after| {
+            after.is_empty() || after.starts_with(':') || after.starts_with('/')
+        })
+    })
+}
+
 /// What a reader might assume ran, and did not.
 pub fn not_done(definition: Option<&Definition>) -> Vec<String> {
     let mut out = Vec::new();
@@ -493,11 +580,51 @@ pub struct Run<'a> {
     pub not_done: &'a [String],
     /// Set when `GITHUB_ACTIONS` is: the annotations printed and left out.
     pub annotations: Option<annotate::Counted>,
+    /// Who approved the pull request, when `--approvals` asked.
+    pub approvals: &'a Approvals,
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn the_event_names_a_pull_request_only_for_pull_request_events() {
+        let payload = serde_json::json!({"pull_request": {
+            "number": 7, "html_url": "https://github.com/acme/app/pull/7",
+            "head": {"sha": "abc"}, "base": {"ref": "main"}}});
+        let want = Some(EventPullRequest {
+            number: 7,
+            url: "https://github.com/acme/app/pull/7".into(),
+            head: "abc".into(),
+            base: "main".into(),
+        });
+        assert_eq!(event_pull_request(Some("pull_request"), &payload), want);
+        assert_eq!(
+            event_pull_request(Some("pull_request_review"), &payload),
+            want
+        );
+        assert_eq!(event_pull_request(None, &payload), want);
+        assert_eq!(
+            event_pull_request(Some("pull_request_target"), &payload),
+            None
+        );
+        assert_eq!(
+            event_pull_request(Some("push"), &serde_json::json!({"ref": "refs/heads/main"})),
+            None
+        );
+    }
+
+    #[test]
+    fn the_token_goes_only_to_https_or_loopback() {
+        assert!(api_allowed("https://api.github.com"));
+        assert!(api_allowed("https://ghe.corp/api/v3"));
+        assert!(api_allowed("http://127.0.0.1:4000"));
+        assert!(api_allowed("http://localhost"));
+        assert!(!api_allowed("http://api.github.com"));
+        assert!(!api_allowed("http://127.0.0.1.evil.test"));
+        assert!(!api_allowed("ftp://x"));
+    }
     use crate::core::change::{CommandResult, Outcome};
 
     pub fn report(results: Vec<CommandResult>) -> GateReport {

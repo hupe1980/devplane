@@ -1418,6 +1418,8 @@ pub async fn offer(state: &Shared, id: &ChangeId) -> Result<Offer> {
         url: pr.url.clone(),
         status: pr.status().as_str().to_string(),
         failing_checks: Vec::new(),
+        review_decision: pr.review_decision.clone(),
+        ..PullRequestRef::default()
     };
     let saved = {
         let mut changes = state.changes.lock().await;

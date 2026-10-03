@@ -6,6 +6,38 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Added
 
+- Answer from the notification. With the app running, a permission carries **Allow** and **Deny**,
+  and a question with one field carries every option as a numbered action — or none, never some of
+  them — plus a typed reply on macOS and Windows; anything else is one click from the answer window,
+  which now opens on that very item. A press answers as you, through the same few-second hold the
+  window's answers wait in. Each item is announced once, also across a restart, within a second
+  rather than on the fifteen-second sweep, and the notification is taken back when the item is
+  answered elsewhere or the app quits. The record names the path an answer came from — `window`,
+  `notification` or `cli` — and no request can claim the first two; `board` is no longer written.
+  `devplane doctor` says what the app's notifications can do. The notifications are the platform's
+  own, driven from the app's process: Tauri's notification plugin is gone. A store from before is
+  set aside.
+
+- A change's pull request now says who approved it: GitHub's review list and the base branch's
+  rules are read when the pull request changes and once more when it merges, and one sentence says,
+  by kind, how many of the required approvals came from a person's account, a model a vendor
+  documents as its reviewer (Copilot code review), or a bot account — with dismissed approvals and
+  approvals on an older commit said as such, and GitHub's own review decision beside it. The same
+  sentence is in the certificate (`predicate.devplane.mergeApprovals`, with the `curl` that
+  re-reads the reviews) and, with `devplane verify --approvals` or the action's `approvals` input,
+  in the job summary. A model's approval reads *could not be attributed* until the record has a
+  word for a model. Read-only: nothing is written to the pull request, no merge is blocked, and no
+  decision is recorded. `verify` makes no network request without `--approvals`.
+- A session you started yourself in Claude Code now records who decided each permission, from
+  Claude Code's own telemetry, with its word kept beside the authority: `person` for an answer at
+  the terminal CLI's prompt, `rule` only when Devplane finds and names the matching rule in your
+  Claude Code settings. Every other reported call — decided under auto mode, by a mode that allows
+  it, by settings that do not say how, by another hook, in an SDK or `-p` session, or with no or an
+  undocumented source — is listed by `devplane audit --without-me` under *Not attributed*, with its
+  reason and no authority. `devplane doctor` names any source Claude Code sends that its
+  documentation does not define. Nothing is recorded as a model's decision. The store's schema
+  version is 17.
+
 - `devplane change draft <name> -- <intent>` drafts a specification with the project's own tool:
   the agent is sent Spec Kit's `/speckit-specify` (spelled the way that agent invokes it, from
   `.specify/integration.json`) or OpenSpec's installed propose workflow, followed by your words and
@@ -118,6 +150,9 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Changed
 
+- Telemetry no longer clears a waiting permission, even one naming the waiting call: only the
+  hook's or the agent protocol's own answer does. Claude Code's telemetry event names written as the
+  documented bare `event.name` (`tool_decision`) are now read.
 - *Seen* is kept by the host for every hunk, keyed by its content: the window, `devplane change
   review --seen <path>`, the inbox and the offer read the same marks, and a hunk the agent rewrites is
   unread again. A weakened row is read when its hunks are. The marks in the browser are gone.

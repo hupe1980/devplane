@@ -10,7 +10,7 @@
   import Timeline, { type Mark } from "../../lib/ui/Timeline.svelte";
   import { STATES } from "../../lib/State.svelte";
   import { weakLeads } from "../../lib/ChangeState.svelte";
-  import { exit, ago, taskLine, type Detail } from "./types";
+  import { exit, ago, taskLine, type Detail, type BearingReview } from "./types";
   import Inline from "../../lib/ui/Inline.svelte";
 
   type Decision = { id: string; at: string; authority: string; action: string; outcome: string; subject: string };
@@ -45,6 +45,24 @@
     })),
     ...(d.archived_at ? [{ at: d.archived_at, lane: "change", label: STATES.archived.word, tone: "none" as const }] : []),
   ]);
+  // Who approved the pull request, as last read from the forge: the
+  // sentence as composed by the host, never reworded here.
+  const pr = $derived(d.pull_request ?? null);
+  const approvals = $derived(pr?.approvals ?? null);
+  const reading = $derived(approvals?.state === "current" ? approvals.reading : approvals?.state === "stale" ? approvals.last : null);
+  const kindWord = (b: BearingReview): string =>
+    b.kind === "person"
+      ? "a person's account"
+      : b.kind === "model"
+        ? reading?.modelWord === "model"
+          ? `${b.product ?? "a model"} (a model)`
+          : `could not be attributed (${b.product ?? "a model"})`
+        : b.kind === "bot"
+          ? "a bot account"
+          : `could not classify (type ${b.received ?? "?"})`;
+  const where = (b: BearingReview): string =>
+    b.onHead === "gone" || !b.commit ? "a commit that no longer exists" : `${b.commit.slice(0, 7)} · ${b.onHead === "head" ? "head" : "older"}`;
+  const decisionWord = (x?: string | null) => (x ? x.toLowerCase().replace(/_/g, " ") : null);
   const byAuthority = $derived(
     Object.entries(
       decisions.reduce<Record<string, number>>((m, x) => ((m[x.authority] = (m[x.authority] ?? 0) + 1), m), {}),
@@ -116,6 +134,38 @@
     </section>
   {/if}
 
+  {#if pr}
+    <section class="approvals" aria-label="Who approved the pull request">
+      <h2>Pull request approvals</h2>
+      {#if reading}
+        <p class="sentence">{reading.sentence}</p>
+        {#if reading.requiredSays}<p class="s">{reading.requiredSays}</p>{/if}
+      {:else if approvals?.state === "not_read"}
+        <p class="sentence quiet">Approvals not read: {approvals.why}</p>
+      {:else}
+        <p class="sentence quiet">Approvals not read yet.</p>
+      {/if}
+      {#if decisionWord(pr.review_decision)}<p class="s">GitHub says: {decisionWord(pr.review_decision)}</p>{/if}
+      {#if reading && reading.bearing.length > 0}
+        <ul class="reviewers">
+          {#each reading.bearing as b, i (i)}
+            <li>
+              <span class="who" title={b.account?.login ?? "no user"}>{b.account?.login ?? "no user"}</span>
+              <span class="kind" class:wait={b.kind === "model" && reading.modelWord === "unattributed"}>{kindWord(b)}</span>
+              <span class="state">{b.state.toLowerCase().replace(/_/g, " ")}</span>
+              <code class="at">{where(b)}</code>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if approvals?.state === "stale"}
+        <p class="s wait">As of {ago(approvals.last.readAt)} — {approvals.why}</p>
+      {:else if reading}
+        <p class="s">Read {ago(reading.readAt)}{reading.afterMerge ? ", after the merge" : ""}</p>
+      {/if}
+    </section>
+  {/if}
+
   <section class="facts">
     <h2>Facts</h2>
     <Props
@@ -153,12 +203,13 @@
   }
   .cards,
   .alert,
+  .approvals,
   .history {
     grid-column: 1;
   }
   .facts {
     grid-column: 2;
-    grid-row: 1 / span 3;
+    grid-row: 1 / span 4;
   }
   .cards {
     display: grid;
@@ -226,6 +277,46 @@
     border: 1px solid var(--line);
     border-radius: var(--radius-lg);
     background: var(--panel);
+  }
+  .approvals {
+    padding: var(--s-3) var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--panel);
+    min-width: 0;
+  }
+  .approvals p {
+    margin: 0 0 var(--s-2);
+  }
+  .sentence {
+    font-size: var(--t-sm);
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+  .reviewers {
+    list-style: none;
+    margin: 0 0 var(--s-2);
+    padding: 0;
+    display: grid;
+    gap: var(--s-1);
+  }
+  .reviewers li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-1) var(--s-3);
+    font-size: var(--t-xs);
+    color: var(--dim);
+    min-width: 0;
+  }
+  .who {
+    color: var(--ink);
+    max-width: 16rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .at {
+    font-family: var(--mono);
   }
   .alert {
     display: flex;

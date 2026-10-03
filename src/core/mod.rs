@@ -6,6 +6,7 @@
 //! inbox is derived rather than stored ([`world`]), and the permission policy
 //! cannot fail open by waiting. `tests/purity.rs` enforces it.
 
+pub mod approvals;
 pub mod ask;
 pub mod attention;
 pub mod attest;
@@ -33,6 +34,7 @@ pub mod forge;
 pub mod genai;
 pub mod hash;
 pub mod ids;
+pub mod notice;
 pub mod offer;
 pub mod policy;
 pub mod preflight;

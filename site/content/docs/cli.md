@@ -446,7 +446,7 @@ refusals: [Specifications](@/docs/specs.md#the-gate-inside-spec-kit-s-workflow) 
 
 Run the base's `check` on this change, leading with the checks it weakened. For CI
 ([CI verify](@/docs/ci.md)) or before you push. Needs only git and the repository: no host, store or
-network.
+network unless `--approvals` is passed.
 
 - The change is the diff from the merge base with `--base` to the working tree, untracked included.
 - `check`, its timeout and review roles come from `devplane.toml` **at the merge base**. A change that
@@ -459,6 +459,7 @@ network.
 | `--statement <path>` | write the in-toto statement (Test Result predicate, never signed) when `check` ran on a recorded tree |
 | `--no-base-checks` | skip the base checks that run after a pass |
 | `--sarif <path>` | write the weakened rows and failing named tests as SARIF 2.1.0 for your own upload step; nothing is uploaded |
+| `--approvals` | read who approved the pull request the run's event names, with `$GITHUB_TOKEN` from `$GITHUB_API_URL`: two to twelve `GET` requests, nothing written, exit code unchanged. [Who approved the pull request](@/docs/ci.md#who-approved-the-pull-request) |
 
 Under GitHub Actions (`GITHUB_ACTIONS` set), each weakened row is also a warning annotation on its
 file and line, and each failing named test an error annotation: [CI verify](@/docs/ci.md#annotations-and-sarif).

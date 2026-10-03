@@ -10,4 +10,6 @@
   .hint.svelte-1umb941 { font-size: var(--t-xs); margin: var(--s-3) 0 0; }
   .held.svelte-1umb941 { font-size: var(--t-xs); margin: var(--s-2) 0 0; padding: var(--s-1) var(--s-2); border-left: 2px solid var(--wait); color: var(--dim); font-variant-numeric: tabular-nums; }
   .held.failed.svelte-1umb941 { border-left-color: var(--fail); color: var(--ink); }
+  .settled.svelte-1umb941 { font-size: var(--t-sm); margin: var(--s-2) 0 0; color: var(--dim); }
+  .settled.svelte-1umb941 b:where(.svelte-1umb941) { color: var(--ink); font-weight: 600; }
   kbd.svelte-1umb941 { font-family: var(--mono); font-size: 0.625rem; border: 1px solid var(--line); border-radius: 3px; padding: 0 0.25rem; }

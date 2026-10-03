@@ -15,10 +15,12 @@ register({
   band: "attention",
   order: 9,
   // The shortcut's window, not a place in the nav: it shows the topmost
-  // waiting item and nothing else, in a frame 480 pixels wide.
+  // waiting item and nothing else, in a frame 480 pixels wide — or, opened
+  // from a notification, the one ask it named.
   nav: false,
   bare: true,
   reads: ["/api/inbox"],
-  select: (feed) => ({ blind: unseen(feed.board) }),
+  // `#answer/<ask>`: a notification opened it on that ask.
+  select: (feed, focus) => ({ blind: unseen(feed.board), ask: focus }),
   page: () => import("./Answer.svelte"),
 });

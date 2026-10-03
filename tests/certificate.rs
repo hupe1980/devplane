@@ -2244,3 +2244,166 @@ fn the_certificate_ends_with_its_link_and_the_command() {
     assert!(bounded.contains("was truncated"), "the cut is not said");
     assert_eq!(tail(&bounded), vec![hshow, hlink]);
 }
+
+// ── Who approved the merge ──────────────────────────────────────────────────
+
+mod merge_approvals {
+    use super::*;
+    use devplane::core::approvals::{
+        Account, ModelWord, Reading, ReadingState, Required, Review, ReviewState, Source, bearing,
+    };
+    use devplane::core::change::PullRequestRef;
+
+    const HEAD: &str = "3f2a9c1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn reading() -> Reading {
+        let who = |id: u64, login: &str, ty: &str| {
+            Some(Account {
+                id,
+                login: login.into(),
+                account_type: ty.into(),
+            })
+        };
+        let reviews = vec![
+            Review {
+                id: 1,
+                account: who(10, "alice", "User"),
+                state: ReviewState::Dismissed,
+                commit: Some("3f2a9c1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+                submitted_at: None,
+            },
+            Review {
+                id: 2,
+                account: who(20, "copilot-pull-request-reviewer[bot]", "Bot"),
+                state: ReviewState::Approved,
+                commit: Some(HEAD.into()),
+                submitted_at: None,
+            },
+        ];
+        Reading {
+            number: 7,
+            url: "https://github.com/acme/widgets/pull/7".into(),
+            head: HEAD.into(),
+            base: "main".into(),
+            required: Required::Count {
+                n: 1,
+                source: Source::Rules,
+                dismiss_stale: true,
+                code_owner: false,
+                last_push: false,
+            },
+            required_says: None,
+            bearing: bearing("github.com", &reviews, HEAD),
+            unread_pages: None,
+            sentence: String::new(),
+            model_word: ModelWord::Unattributed,
+            read_at: jiff::Timestamp::UNIX_EPOCH,
+            after_merge: false,
+        }
+        .composed(false)
+    }
+
+    fn with_pr(approvals: Option<ReadingState>) -> Change {
+        let mut w = passing();
+        w.pull_request = Some(PullRequestRef {
+            number: 7,
+            url: "https://github.com/acme/widgets/pull/7".into(),
+            status: "ready_for_review".into(),
+            review_decision: Some("APPROVED".into()),
+            approvals,
+            ..Default::default()
+        });
+        w
+    }
+
+    #[test]
+    fn the_certificate_carries_who_approved_the_merge() {
+        let r = reading();
+        let w = with_pr(Some(ReadingState::Current {
+            reading: Box::new(r.clone()),
+        }));
+        let cert = cert_of(&w, None);
+        let st = cert.statement().unwrap();
+        let m = &st["predicate"]["devplane"]["mergeApprovals"];
+        for k in [
+            "number",
+            "url",
+            "head",
+            "base",
+            "required",
+            "bearing",
+            "sentence",
+            "modelWord",
+            "readAt",
+            "afterMerge",
+        ] {
+            assert!(m.get(k).is_some(), "{k} in {m}");
+        }
+        assert_eq!(m["sentence"], r.sentence.as_str());
+        assert!(
+            r.sentence.contains(
+                "could not be attributed — a model decided, and the record has no word for it yet"
+            ),
+            "{}",
+            r.sentence
+        );
+        let md = cert.markdown();
+        assert!(md.contains("## Merge approvals"), "{md}");
+        assert!(md.contains("1 of 1 required approvals"), "{md}");
+        assert!(md.contains("GitHub says: approved."), "{md}");
+        assert!(
+            md.contains("which approvals GitHub counted toward its rule"),
+            "the limits line: {md}"
+        );
+        assert_eq!(cert.page()["merge_approvals_says"], r.sentence.as_str());
+        let steps = st["predicate"]["devplane"]["verification"]["steps"]
+            .as_array()
+            .unwrap();
+        assert!(
+            steps.iter().any(|s| s
+                == "curl -H \"Accept: application/vnd.github+json\" https://api.github.com/repos/acme/widgets/pulls/7/reviews"),
+            "{steps:?}"
+        );
+        assert!(REDERIVABLE.contains(&"mergeApprovals.bearing[].state"));
+        assert!(REDERIVABLE.contains(&"mergeApprovals.bearing[].commit"));
+    }
+
+    #[test]
+    fn without_a_pull_request_the_block_says_so() {
+        let w = passing();
+        let st = cert_of(&w, None).statement().unwrap();
+        assert_eq!(
+            st["predicate"]["devplane"]["mergeApprovals"],
+            serde_json::json!({"absent": "no pull request"})
+        );
+        assert!(!cert_of(&w, None).markdown().contains("## Merge approvals"));
+    }
+
+    #[test]
+    fn an_unread_reading_says_why_and_never_no_approvals() {
+        let w = with_pr(Some(ReadingState::NotRead {
+            why: "GitHub sign-in expired (github.com)".into(),
+        }));
+        let st = cert_of(&w, None).statement().unwrap();
+        let m = &st["predicate"]["devplane"]["mergeApprovals"];
+        assert_eq!(m["unread"], "GitHub sign-in expired (github.com)");
+        assert!(m.get("bearing").is_none());
+
+        let last = reading();
+        let w = with_pr(Some(ReadingState::Stale {
+            last: Box::new(last.clone()),
+            why: "GitHub unreachable: timed out".into(),
+        }));
+        let cert = cert_of(&w, None);
+        let st = cert.statement().unwrap();
+        let m = &st["predicate"]["devplane"]["mergeApprovals"];
+        assert_eq!(m["unread"], "GitHub unreachable: timed out");
+        assert_eq!(m["last"]["sentence"], last.sentence.as_str());
+        let says = cert.page()["merge_approvals_says"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(says.starts_with("As of "), "{says}");
+        assert!(!says.contains("0 approvals"), "{says}");
+    }
+}

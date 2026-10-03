@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.." || exit 1
 TARGET=x86_64-unknown-linux-musl
 WANT_TOTAL=234
 WANT_ONLY_SQLX=21
-WANT_TOTAL_APP=437
+WANT_TOTAL_APP=431
 WANT_ONLY_SQLX_APP=16
 
 tree=$(mktemp)

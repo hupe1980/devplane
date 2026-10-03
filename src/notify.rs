@@ -1,26 +1,20 @@
-//! Desktop notifications, through the platform's own notifier.
+//! Desktop notifications from the command line's host, through the
+//! platform's own notifier.
 //!
 //! On macOS a plain CLI binary has no bundle identifier, so notifier crates
 //! attribute to Finder; `osascript` works from a background process and adds
 //! no dependency. Each item notifies at most once; the dedup is in memory, so
-//! a host restart with a question still open buzzes once more.
+//! a host restart with a question still open buzzes once more. The app
+//! announces through its own notifier instead (`app::notice`), with actions,
+//! a click target and withdrawal, and this path stays silent there.
 
-use crate::core::attention::{AttentionItem, AttentionKind};
+use crate::core::attention::AttentionItem;
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
-/// The four kinds that earn an interruption, and the only four: a question
-/// asked, a question abandoned, a permission waiting, and a gate that went red
-/// after its agent stopped. A list rather than a level, so raising a kind's
-/// inbox level cannot make it buzz.
-pub fn kinds_that_notify() -> &'static [AttentionKind] {
-    &[
-        AttentionKind::Question,
-        AttentionKind::QuestionAbandoned,
-        AttentionKind::Permission,
-        AttentionKind::GateFailed,
-    ]
-}
+/// The four kinds that earn an interruption — the list lives with the rest of
+/// what a notification carries ([`crate::core::notice`]).
+pub use crate::core::notice::kinds_that_notify;
 
 /// Where a notification goes: the platform's own notifier, or the app's.
 ///
@@ -29,9 +23,9 @@ pub fn kinds_that_notify() -> &'static [AttentionKind] {
 pub enum Sink {
     /// `osascript`, `notify-send`, PowerShell: the CLI host's path.
     Os,
-    /// The app's notification plugin; the notification is the app's own.
-    #[cfg(feature = "app")]
-    Tauri(tauri::AppHandle),
+    /// The app announces through its own notifier; nothing is sent from here,
+    /// so an item is never announced twice.
+    App,
 }
 
 static SINK: std::sync::OnceLock<Sink> = std::sync::OnceLock::new();
@@ -89,8 +83,7 @@ fn project_of(item: &AttentionItem) -> Option<String> {
 
 /// One inbox item, to whichever sink was chosen.
 ///
-/// The OS notifier names the product in the title; the app's notification
-/// already carries the app's name, so its title is the project alone.
+/// The OS notifier names the product in the title.
 fn announce(project: Option<&str>, what: &str) {
     match SINK.get().unwrap_or(&Sink::Os) {
         Sink::Os => send(
@@ -100,19 +93,7 @@ fn announce(project: Option<&str>, what: &str) {
             },
             what,
         ),
-        #[cfg(feature = "app")]
-        Sink::Tauri(app) => {
-            use tauri_plugin_notification::NotificationExt;
-            if let Err(e) = app
-                .notification()
-                .builder()
-                .title(project.unwrap_or("Devplane"))
-                .body(what)
-                .show()
-            {
-                tracing::warn!(error = %e, "the notification was not shown");
-            }
-        }
+        Sink::App => {}
     }
 }
 
@@ -205,7 +186,7 @@ fn platform_command(_title: &str, _body: &str) -> Option<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::attention::{Action, Level};
+    use crate::core::attention::{Action, AttentionKind, Level};
     use crate::core::ids::{AttentionId, RunId};
 
     fn item(id: &str, kind: AttentionKind) -> AttentionItem {

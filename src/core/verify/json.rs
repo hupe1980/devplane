@@ -81,6 +81,9 @@ pub fn json(run: &Run<'_>, wrote: &Wrote) -> Value {
             "leftOut": a.left_out,
         })),
     });
+    if let Some(a) = run.approvals.json() {
+        doc["approvals"] = a;
+    }
     match v {
         Verdict::Failed { why } => {
             doc["failed"] = json!(match why {
@@ -166,6 +169,7 @@ mod tests {
                     base_checks: &bc,
                     not_done: &[],
                     annotations: None,
+                    approvals: &Approvals::NotAsked,
                 },
                 &Wrote::default(),
             );

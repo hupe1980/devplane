@@ -407,6 +407,10 @@ fn the_review_computes_no_percentage_ratio_or_score() {
         "src/core/testcount/compare.rs",
         "src/core/testcount/junit.rs",
         "src/core/controls.rs",
+        // Who approved the merge: counts in words, beside the change.
+        "src/core/approvals/mod.rs",
+        "src/core/approvals/required.rs",
+        "src/core/approvals/sentence.rs",
     ] {
         let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
             .unwrap_or_else(|_| panic!("{rel} is where counts are composed"));
@@ -454,6 +458,17 @@ fn the_review_computes_no_percentage_ratio_or_score() {
             }
             // The controls' rows name a file and what it governs, never a
             // judgement of the edit: no word in a string it writes says one.
+            // The approvals sentence says who approved, never that the
+            // change is fit to merge: no such word in a string it writes.
+            if file.starts_with("src/core/approvals/") {
+                let literals: String = code.split('"').skip(1).step_by(2).collect();
+                let lower = literals.to_lowercase();
+                for word in lower.split(|c: char| !c.is_alphanumeric()) {
+                    if ["safe", "good", "ready", "score", "grade"].contains(&word) {
+                        hits.push(format!("{n}: `{word}` — {}", code.trim()));
+                    }
+                }
+            }
             if *file == "src/core/controls.rs" {
                 let literals: String = code.split('"').skip(1).step_by(2).collect();
                 let lower = literals.to_lowercase();

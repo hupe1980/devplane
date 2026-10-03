@@ -221,6 +221,55 @@ fn nothing_can_approve_except_a_person_who_answered() {
     );
 }
 
+/// Where an answer came from is the host's to say. The `notification` path is
+/// named only by the type itself and the app's in-process notification
+/// handler, so no route can record it; and the type has no way in from text,
+/// so no body or header can construct any path at all.
+#[test]
+fn only_the_apps_own_notification_handler_can_say_notification() {
+    let allowed = |path: &str| {
+        let p = path.replace('\\', "/");
+        p.ends_with("src/core/ask.rs") || p.contains("src/app/notice/")
+    };
+    let mut named = Vec::new();
+    for path in walk("src") {
+        let text = std::fs::read_to_string(&path).expect("readable source");
+        if production(&text).contains("AnswerPath::Notification") && !allowed(&path) {
+            named.push(path.clone());
+        }
+        for forbidden in [
+            "impl FromStr for AnswerPath",
+            "impl std::str::FromStr for AnswerPath",
+            "From<&str> for AnswerPath",
+            "From<String> for AnswerPath",
+            "TryFrom<&str> for AnswerPath",
+            "Deserialize<'de> for AnswerPath",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{path} reads an answer's path from text (`{forbidden}`): a request \
+                 could then name itself the window or the notification"
+            );
+        }
+    }
+    assert!(
+        named.is_empty(),
+        "`AnswerPath::Notification` is constructed outside the app's notification \
+         handler: {named:?}. Only an action handled inside the app's own process may \
+         record that path"
+    );
+    let ask = std::fs::read_to_string("src/core/ask.rs").expect("ask.rs");
+    let decl = ask
+        .split("pub enum AnswerPath")
+        .next()
+        .and_then(|before| before.rsplit("#[derive(").next())
+        .expect("AnswerPath is derived in ask.rs");
+    assert!(
+        !decl.contains("Deserialize"),
+        "`AnswerPath` derives `Deserialize`: a body could carry its own path"
+    );
+}
+
 /// Nothing in the question path writes a file or edits settings: an agent runs
 /// as the same user and could reach any such route.
 #[test]

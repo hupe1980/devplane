@@ -109,9 +109,15 @@ CREATE TABLE IF NOT EXISTS decisions (
     project_id   TEXT,
     run_id       TEXT,
     change_id      TEXT,
-    -- The driven tool call this decides, by the protocol's id: the key the
-    -- agent's own report of that call's edit (`edit_reported`) is found by.
-    call_id      TEXT
+    -- The tool call this decides, by the agent's own id: the protocol's for a
+    -- driven call (the key its `edit_reported` is found by), the vendor's
+    -- `tool_use_id` for a watched one.
+    call_id      TEXT,
+    -- Set only on a row written from a vendor's own report of who decided:
+    -- the vendor (`claude-code`) and its word verbatim (`user_reject`,
+    -- `config`). NULL on everything Devplane itself took or enforced.
+    vendor        TEXT,
+    vendor_source TEXT
 );
 
 -- Ties on `at` are common (a gate finishing as its run ends), so readers
@@ -120,6 +126,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS decisions_by_time ON decisions(at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_run ON decisions(run_id, at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_change ON decisions(change_id, at DESC);
+CREATE INDEX IF NOT EXISTS decisions_by_call ON decisions(call_id);
 
 -- What a driven agent said. Kept out of `events` because run state is a
 -- reduction over events and a sentence reduces to nothing. Pruned with the
@@ -250,3 +257,11 @@ CREATE TABLE IF NOT EXISTS review_comments (
     run_id       TEXT
 );
 CREATE INDEX IF NOT EXISTS review_comments_change ON review_comments (change_id, created_at);
+
+-- Which inbox items a desktop notification has already announced, by the
+-- item's ask id (else its inbox id), so a restart does not announce one again.
+-- A row is deleted when its item leaves the inbox. Deliberately no time: an
+-- announcement time beside an answer's would make a time-to-answer derivable.
+CREATE TABLE IF NOT EXISTS announced (
+    key  TEXT PRIMARY KEY
+);

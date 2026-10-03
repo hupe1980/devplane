@@ -135,12 +135,18 @@ pub struct AppState {
     /// trust route refuses. In memory only: never in `host.json`, the store,
     /// the log or a vendor's settings.
     pub window_key: std::sync::OnceLock<String>,
+    /// What the app's notifications can do, for `devplane doctor`: set once by
+    /// the app; absent in the CLI host, which notifies through the system.
+    pub notifications: std::sync::OnceLock<NoticeLine>,
     /// The window's last answer, waiting out its undo window. In memory
     /// only: a stop drops it, and the ask stays open.
     pub hold: crate::hold::Hold,
 }
 
 pub type Shared = Arc<AppState>;
+
+/// The app's one line about its notifications, read when asked.
+pub type NoticeLine = Box<dyn Fn() -> String + Send + Sync>;
 
 /// Where the change surface asks for a worktree to be opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -310,6 +316,7 @@ impl AppState {
             port: std::sync::OnceLock::new(),
             opener: std::sync::OnceLock::new(),
             window_key: std::sync::OnceLock::new(),
+            notifications: std::sync::OnceLock::new(),
             hold: crate::hold::Hold::default(),
         }))
     }

@@ -1,0 +1,501 @@
+{
+ "resourceLogs": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "claude-code"
+      }
+     },
+     {
+      "key": "app.entrypoint",
+      "value": {
+       "stringValue": "sdk-cli"
+      }
+     }
+    ]
+   },
+   "scopeLogs": [
+    {
+     "scope": {
+      "name": "com.anthropic.claude_code.events"
+     },
+     "logRecords": [
+      {
+       "attributes": [
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "permission_mode_changed"
+         }
+        },
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "s-ma-sdk"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": "1"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-09-30T10:00:00.000Z"
+         }
+        },
+        {
+         "key": "from_mode",
+         "value": {
+          "stringValue": "default"
+         }
+        },
+        {
+         "key": "to_mode",
+         "value": {
+          "stringValue": "default"
+         }
+        },
+        {
+         "key": "trigger",
+         "value": {
+          "stringValue": "shift_tab"
+         }
+        }
+       ],
+       "body": {
+        "stringValue": "claude_code.permission_mode_changed"
+       }
+      },
+      {
+       "attributes": [
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "s-ma-sdk"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": "2"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-09-30T10:01:00.000Z"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Bash"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_a1"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "accept"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        },
+        {
+         "key": "source",
+         "value": {
+          "stringValue": "user_permanent"
+         }
+        }
+       ],
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       }
+      },
+      {
+       "attributes": [
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "s-ma-sdk"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": "3"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-09-30T10:02:00.000Z"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Bash"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_a2"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "accept"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        },
+        {
+         "key": "source",
+         "value": {
+          "stringValue": "user_temporary"
+         }
+        }
+       ],
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       }
+      },
+      {
+       "attributes": [
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "s-ma-sdk"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": "4"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-09-30T10:03:00.000Z"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Bash"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_a3"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "reject"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        },
+        {
+         "key": "source",
+         "value": {
+          "stringValue": "user_abort"
+         }
+        }
+       ],
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       }
+      },
+      {
+       "attributes": [
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "s-ma-sdk"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": "5"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-09-30T10:04:00.000Z"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Bash"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_a4"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "reject"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        },
+        {
+         "key": "source",
+         "value": {
+          "stringValue": "user_reject"
+         }
+        }
+       ],
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       }
+      },
+      {
+       "attributes": [
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "s-ma-sdk"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": "6"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-09-30T10:05:00.000Z"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Bash"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_a5"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "accept"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        },
+        {
+         "key": "source",
+         "value": {
+          "stringValue": "config"
+         }
+        }
+       ],
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       }
+      },
+      {
+       "attributes": [
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "s-ma-sdk"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": "7"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-09-30T10:06:00.000Z"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Bash"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_a6"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "accept"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        },
+        {
+         "key": "source",
+         "value": {
+          "stringValue": "config"
+         }
+        }
+       ],
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       }
+      },
+      {
+       "attributes": [
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "s-ma-sdk"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": "8"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-09-30T10:07:00.000Z"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Read"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_a7"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "accept"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        }
+       ],
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

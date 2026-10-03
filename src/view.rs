@@ -1234,7 +1234,9 @@ pub async fn decisions(
     };
     // Each run's reported edits are read once, only for runs whose decisions
     // name a call.
-    let mut by_run: std::collections::HashMap<crate::core::RunId, (Vec<EditView>, bool)> =
+    // A watched call carries the vendor's id too, and its agent reports no
+    // edits through this channel: only a driven run's rows get the field.
+    let mut by_run: std::collections::HashMap<crate::core::RunId, (Vec<EditView>, bool, bool)> =
         Default::default();
     for run in d
         .iter()
@@ -1252,18 +1254,27 @@ pub async fn decisions(
             .filter_map(|e| EditView::of(e.event))
             .collect();
         let kept = keeps_transcripts(store, &run).await;
-        by_run.insert(run, (edits, kept));
+        let driven = driven_run(store, &run).await;
+        by_run.insert(run, (edits, kept, driven));
     }
+    // The vendor's own `hook` reports, attached to the row they name.
+    let reports = hook_reports(store, &d).await;
     Ok(d.into_iter()
         .map(|decision| {
             let (edits, kept) = match (&decision.call_id, &decision.run_id) {
-                (Some(call), Some(run)) => {
-                    let (all, kept) = by_run.get(run).cloned().unwrap_or((Vec::new(), true));
-                    let mine: Vec<EditView> =
-                        all.into_iter().filter(|e| &e.call_id == call).collect();
-                    (Some(mine), kept)
-                }
+                (Some(call), Some(run)) => match by_run.get(run).cloned() {
+                    Some((all, kept, true)) => {
+                        let mine: Vec<EditView> =
+                            all.into_iter().filter(|e| &e.call_id == call).collect();
+                        (Some(mine), kept)
+                    }
+                    _ => (None, true),
+                },
                 _ => (None, true),
+            };
+            let report = match (&decision.call_id, decision.vendor.is_none()) {
+                (Some(call), true) => reports.get(call).cloned(),
+                _ => None,
             };
             let no_edit = match &edits {
                 Some(e) if e.is_empty() && !kept => {
@@ -1276,9 +1287,185 @@ pub async fn decisions(
                 decision,
                 edits,
                 no_edit,
+                report,
             }
         })
         .collect())
+}
+
+/// Whether Devplane drives a run: its first event is the host's own.
+async fn driven_run(store: &crate::store::Store, run: &crate::core::RunId) -> bool {
+    store
+        .events_for_run(run, 1)
+        .await
+        .unwrap_or_default()
+        .first()
+        .is_some_and(|e| e.source == crate::core::Source::Host)
+}
+
+/// The runs a ledger query is about: the run itself, or a change's runs.
+async fn runs_about(
+    store: &crate::store::Store,
+    about: Option<&str>,
+) -> Option<Vec<crate::core::RunId>> {
+    let id = about?;
+    let changes = store.load_changes().await.unwrap_or_default();
+    match changes.into_iter().find(|c| c.id.as_str() == id) {
+        Some(c) => Some(c.runs),
+        None => Some(vec![crate::core::RunId::new(id)]),
+    }
+}
+
+/// A vendor's report of who decided one call, as a surface shows it beside
+/// the row it belongs to or in the list of calls nobody can be named for.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VendorReport {
+    pub at: jiff::Timestamp,
+    pub run: String,
+    pub tool: String,
+    /// `accept` or `reject`, as the vendor sent it.
+    pub decision: String,
+    pub vendor: String,
+    /// The vendor's word verbatim; absent when it sent none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// Why no decider is named, in the sentence surfaces print. Absent on a
+    /// report attached to a row. There is no authority field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+impl VendorReport {
+    fn of(e: &crate::core::EventEnvelope) -> Option<Self> {
+        let crate::core::Event::VendorDecided {
+            vendor,
+            tool,
+            decision,
+            source,
+            call_id,
+            at,
+            ..
+        } = &e.event
+        else {
+            return None;
+        };
+        Some(Self {
+            at: at.unwrap_or(e.at),
+            run: e.run_id.to_string(),
+            tool: tool.clone(),
+            decision: decision.clone(),
+            vendor: vendor.clone(),
+            source: source.clone(),
+            call_id: call_id.clone(),
+            why: None,
+        })
+    }
+}
+
+/// The vendor's `hook` reports about the calls these rows name, by call id.
+async fn hook_reports(
+    store: &crate::store::Store,
+    rows: &[crate::core::Decision],
+) -> std::collections::HashMap<String, VendorReport> {
+    let mut runs: Vec<crate::core::RunId> = rows
+        .iter()
+        .filter(|r| r.call_id.is_some() && r.vendor.is_none())
+        .filter_map(|r| r.run_id.clone())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    runs.retain(|r| seen.insert(r.clone()));
+    let mut out = std::collections::HashMap::new();
+    if runs.is_empty() {
+        return out;
+    }
+    for e in store
+        .vendor_reports(Some(&runs), 1000)
+        .await
+        .unwrap_or_default()
+    {
+        if let crate::core::Event::VendorDecided {
+            source: Some(src),
+            call_id: Some(call),
+            ..
+        } = &e.event
+            && src == "hook"
+            && let Some(r) = VendorReport::of(&e)
+        {
+            out.insert(call.clone(), r);
+        }
+    }
+    out
+}
+
+/// The calls a vendor reported deciding that no authority can be named for,
+/// newest first, each with its reason — never a decision row, never an
+/// authority. Computed when read from the kept reports, so a hook's row
+/// arriving after the vendor's report changes the answer the same way in
+/// either order.
+pub async fn unattributed(
+    store: &crate::store::Store,
+    about: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<VendorReport>> {
+    use crate::core::decision::{Attributed, Why, attribute};
+    let runs = runs_about(store, about).await;
+    let events = store.vendor_reports(runs.as_deref(), limit).await?;
+    let mut out = Vec::new();
+    // An exporter that retried a batch sent the same report twice.
+    let mut seen = std::collections::HashSet::new();
+    for e in &events {
+        let crate::core::Event::VendorDecided {
+            tool,
+            decision,
+            source,
+            call_id,
+            sequence,
+            mode_in_force,
+            session,
+            matched,
+            ..
+        } = &e.event
+        else {
+            continue;
+        };
+        if call_id.is_some()
+            && !seen.insert((e.run_id.clone(), call_id.clone(), source.clone(), *sequence))
+        {
+            continue;
+        }
+        let why = match attribute(
+            source.as_deref(),
+            decision,
+            tool,
+            mode_in_force.as_deref(),
+            *session,
+            matched.as_ref(),
+        ) {
+            Attributed::Row(_) => continue,
+            Attributed::Unattributed(why) => why,
+            Attributed::Hook => {
+                let joined = match call_id {
+                    Some(call) => store
+                        .decisions_for_call(call)
+                        .await?
+                        .iter()
+                        .any(|d| d.vendor.is_none()),
+                    None => false,
+                };
+                match joined {
+                    true => continue,
+                    false => Why::HookNotJoined,
+                }
+            }
+        };
+        if let Some(mut r) = VendorReport::of(e) {
+            r.why = Some(why.says());
+            out.push(r);
+        }
+    }
+    Ok(out)
 }
 
 /// A decision as the ledger shows it: the row, and for a driven call the
@@ -1294,6 +1481,10 @@ pub struct DecisionRow {
     /// agent sent none, or the project keeps no transcripts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_edit: Option<String>,
+    /// The vendor's own report that a hook decided this call, joined by the
+    /// call's id: Devplane's row stays the only row, with the report beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<VendorReport>,
 }
 
 /// Whether the project a run worked in keeps transcripts, read from the
@@ -3120,6 +3311,10 @@ pub fn setup(snap: &Snapshot) -> Value {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Diagnostics {
     pub version: String,
+    /// Decision sources a vendor reported that its documentation does not
+    /// define, against the date the documented ones were read.
+    #[serde(default)]
+    pub decision_sources: Option<DecisionSources>,
     pub gate: DiagnosticsGate,
     /// Live sessions whose environment Devplane could read — only the
     /// `SessionStart` hook can, so this is the question-clock coverage.
@@ -3145,6 +3340,10 @@ pub struct Diagnostics {
     pub unwritten: Unwritten,
     /// Claude Code's own auto-mode classifier, read back, never written.
     pub auto_mode: AutoModeView,
+    /// What the app's notifications can do on this machine, in one line;
+    /// absent when the host is not the app.
+    #[serde(default)]
+    pub notifications: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3227,6 +3426,63 @@ pub enum AutoModeView {
         soft_deny: usize,
         hard_deny: usize,
     },
+}
+
+/// What `devplane doctor` says about the deciders vendors reported: each
+/// value outside the documented ones, when it was first seen, and the date
+/// those were read. Calls carrying such a value are not attributed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecisionSources {
+    /// When the documented values were last read against the vendor's page.
+    pub checked: String,
+    pub unrecognised: Vec<UnrecognisedSource>,
+    /// The line a person reads.
+    pub says: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UnrecognisedSource {
+    pub value: String,
+    pub first_seen: String,
+}
+
+pub async fn decision_sources(store: &crate::store::Store) -> anyhow::Result<DecisionSources> {
+    use crate::core::vendors::{
+        CLAUDE_CODE_DECISION_SOURCES, CLAUDE_CODE_DECISION_SOURCES_CHECKED,
+    };
+    let unrecognised: Vec<UnrecognisedSource> = store
+        .vendor_sources_seen()
+        .await?
+        .into_iter()
+        .filter(|(v, _)| !CLAUDE_CODE_DECISION_SOURCES.contains(&v.as_str()))
+        .map(|(value, first_seen)| UnrecognisedSource { value, first_seen })
+        .collect();
+    let checked = CLAUDE_CODE_DECISION_SOURCES_CHECKED.to_string();
+    let says = match unrecognised.as_slice() {
+        [] => format!(
+            "every source seen was one of the six Claude Code documents (checked {checked})"
+        ),
+        some => some
+            .iter()
+            .map(|u| {
+                format!(
+                    "{:?} first seen {} — not in Claude Code's six (checked {checked}); \
+                     calls carrying it are not attributed",
+                    u.value,
+                    u.first_seen
+                        .get(0..16)
+                        .unwrap_or(&u.first_seen)
+                        .replace('T', " ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    Ok(DecisionSources {
+        checked,
+        unrecognised,
+        says,
+    })
 }
 
 #[cfg(test)]

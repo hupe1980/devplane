@@ -33,6 +33,17 @@ fn app_line(window: bool, signed: bool, updates: &str) -> String {
     )
 }
 
+/// The `notifications` line: what the running app's notifier said it can do,
+/// or that no app is running to ask.
+fn notifications_line(from_app: Option<&str>) -> String {
+    match from_app {
+        Some(line) => format!("notifications: {line}"),
+        None => "notifications: plain — the app is not running; `devplane up` notifies \
+                 through the system notifier, with no actions"
+            .to_string(),
+    }
+}
+
 /// The `app` section of `doctor`: whether this binary has the window, the
 /// shortcut (validated by the plugin's own parser where built in), and the port.
 #[derive(serde::Serialize)]
@@ -216,6 +227,9 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
                         "costs": r.channel.costs(),
                     })).collect::<Vec<_>>(),
                 },
+                // The accounts vendors document as their model reviewers: the
+                // only way a pull request review is read as a model's.
+                "model_reviewers": crate::core::vendors::MODEL_REVIEWERS,
                 "spooled_decisions": spooled,
                 // Whether or not a host answers: the sign-in record says it.
                 "github": super::github::doctor_hosts(diag.as_ref().map(|d| d.forge.github.as_slice())).0,
@@ -252,6 +266,10 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
     println!(
         "  app       {}",
         app_line(app.window, app.signed, app.updates)
+    );
+    println!(
+        "  notices   {}",
+        notifications_line(diag.as_ref().and_then(|d| d.notifications.as_deref()))
     );
     if !app.window {
         println!(
@@ -336,6 +354,20 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
         }
     }
 
+    for m in crate::core::vendors::MODEL_REVIEWERS {
+        println!(
+            "  {}{}",
+            render::pad("model reviewer", width + 2),
+            paint(
+                DIM,
+                &format!(
+                    "{}  {}  {}  checked {}",
+                    m.host, m.login, m.product, m.checked
+                )
+            )
+        );
+    }
+
     if let Some(because) = provider {
         println!(
             "\n  {} {}",
@@ -388,6 +420,16 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
                     "a hook that does not answer never blocks — the provider carries on"
                 )
             );
+        }
+    }
+    if let Some(ds) = diag.as_ref().and_then(|d| d.decision_sources.as_ref()) {
+        for (i, line) in ds.says.lines().enumerate() {
+            let label = if i == 0 { "deciders" } else { "" };
+            let colour = match ds.unrecognised.is_empty() {
+                true => DIM,
+                false => render::YELLOW,
+            };
+            println!("  {label:<9} {}", paint(colour, line));
         }
     }
     if spooled > 0 {
@@ -731,6 +773,19 @@ mod tests {
         assert_eq!(
             super::updates_word(Some(crate::config::UpdatePref::Off)),
             "off"
+        );
+    }
+
+    #[test]
+    fn with_no_app_running_the_notifications_line_says_so() {
+        assert_eq!(
+            super::notifications_line(None),
+            "notifications: plain — the app is not running; `devplane up` notifies through \
+             the system notifier, with no actions"
+        );
+        assert_eq!(
+            super::notifications_line(Some("actions and reply")),
+            "notifications: actions and reply"
         );
     }
 

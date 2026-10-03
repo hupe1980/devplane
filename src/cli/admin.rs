@@ -57,6 +57,21 @@ pub async fn cmd_audit(
         None => format!("/api/decisions?limit={limit}{filter}"),
     };
     let rows: Vec<crate::core::Decision> = raw_as(&c, &path).await?;
+    // The calls a vendor reported that no authority can be named for: listed
+    // beside what was decided without the person, never as a decision.
+    let unattributed: Vec<crate::view::VendorReport> = match without_me {
+        true => {
+            let p = match about {
+                Some(id) => format!(
+                    "/api/decisions/unattributed?limit={limit}&about={}",
+                    urlencode(id)
+                ),
+                None => format!("/api/decisions/unattributed?limit={limit}"),
+            };
+            raw_as(&c, &p).await?
+        }
+        false => Vec::new(),
+    };
 
     // Rendered to stdout, not exported: Devplane receives OTLP and sends none.
     if otel {
@@ -68,10 +83,14 @@ pub async fn cmd_audit(
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        let v = match without_me {
+            true => serde_json::json!({"decisions": rows, "unattributed": unattributed}),
+            false => serde_json::to_value(&rows)?,
+        };
+        println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    if rows.is_empty() {
+    if rows.is_empty() && unattributed.is_empty() {
         println!(
             "{}",
             paint(
@@ -109,6 +128,14 @@ pub async fn cmd_audit(
         if let Some(r) = &d.reason {
             println!("{:>21}{}", "", paint(DIM, &format!("↳ {}", clip(r, 70))));
         }
+        // A row written from the vendor's own report keeps the vendor's word.
+        if let (Some(v), Some(src)) = (&d.vendor, &d.vendor_source) {
+            println!(
+                "{:>21}{}",
+                "",
+                paint(DIM, &format!("↳ {}: {src}", vendor_name(v)))
+            );
+        }
         // Where an MCP tool was defined, reported and never graded. Three
         // states: a source, an MCP call whose source was not reported (said
         // explicitly), and a non-MCP call (nothing printed).
@@ -140,5 +167,39 @@ pub async fn cmd_audit(
             (None, false) => {}
         }
     }
+    if !unattributed.is_empty() {
+        println!();
+        println!("Not attributed ({})", unattributed.len());
+        for u in &unattributed {
+            let at = u.at.to_string();
+            let word = match &u.source {
+                Some(s) => format!("{}: {s}", vendor_name(&u.vendor)),
+                None => vendor_name(&u.vendor).to_string(),
+            };
+            println!(
+                "{} {} {} {}",
+                paint(DIM, at.get(0..19).unwrap_or("")),
+                render::pad(&u.tool, 8),
+                render::pad(&u.decision, 7),
+                u.why.as_deref().unwrap_or_default()
+            );
+            println!("{:>21}{}", "", paint(DIM, &format!("↳ {word}")));
+        }
+        println!(
+            "{}",
+            paint(
+                DIM,
+                "  Kept with the session's events, which are pruned after 30 days; decisions are kept."
+            )
+        );
+    }
     Ok(())
+}
+
+/// A vendor as the ledger names it.
+fn vendor_name(v: &str) -> &str {
+    match v {
+        crate::observe::otel::CLAUDE_CODE => "Claude Code",
+        other => other,
+    }
 }

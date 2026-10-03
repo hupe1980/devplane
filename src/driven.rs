@@ -1152,7 +1152,7 @@ pub async fn answer_without_host(
     store: &crate::store::Store,
     ask_id: &str,
     answer: Answer,
-    from: &str,
+    from: crate::core::ask::AnswerPath,
 ) -> Result<crate::core::ask::Ask> {
     use crate::core::ask::Delivery;
 
@@ -1253,7 +1253,7 @@ async fn lost_the_race(
     store: &crate::store::Store,
     ask_id: &str,
     recorded: serde_json::Value,
-    from: &str,
+    from: crate::core::ask::AnswerPath,
 ) -> String {
     match store.ask(ask_id).await {
         Ok(Some(mut now)) => match now.answer(recorded, from, jiff::Timestamp::now()) {
@@ -1297,7 +1297,7 @@ pub async fn answer_ask(
     state: &Shared,
     ask_id: &str,
     answer: Answer,
-    from: &str,
+    from: crate::core::ask::AnswerPath,
 ) -> Result<crate::core::ask::Ask> {
     use crate::core::ask::Ended;
 

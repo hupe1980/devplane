@@ -70,6 +70,8 @@ pub const REDERIVABLE: &[&str] = &[
     "baseChecks.onBase.placed[].blob",
     "baseChecks.onChange.commands[].outcome",
     "baseChecks.onBase.commands[].outcome",
+    "mergeApprovals.bearing[].state",
+    "mergeApprovals.bearing[].commit",
 ];
 
 /// The portable record of one change's completion. Assembled from a `Change`,
@@ -512,6 +514,7 @@ impl Certificate<'_> {
             }
             o.push_str(&format!("{}\n\n", inline(&self.weakened_says())));
             o.push_str(&self.base_checks_markdown());
+            o.push_str(&merge_approvals_markdown(self.change));
             o.push_str("There is no completion to certify yet.\n");
             return o;
         };
@@ -586,6 +589,7 @@ impl Certificate<'_> {
 
         // Beside the evidence and its steps, never part of them.
         o.push_str(&self.base_checks_markdown());
+        o.push_str(&merge_approvals_markdown(self.change));
 
         if let Some(report) = self.evidence
             && let Some(spec) = report.spec.as_ref()
@@ -736,6 +740,10 @@ impl Certificate<'_> {
             ),
         );
         ext.insert("baseChecks".into(), self.base_checks_json());
+        ext.insert(
+            "mergeApprovals".into(),
+            merge_approvals_json(self.change.pull_request.as_ref()),
+        );
         // Not read is said, never rendered as *nobody decided anything*.
         match &self.decided_by {
             Some(counts) => {
@@ -764,7 +772,11 @@ impl Certificate<'_> {
                 json!({ Origin::KEY: Origin::SelfReported.as_str(), "text": text }),
             );
         }
-        let mut verification = json!({ "steps": self.verification_steps() });
+        let mut steps = self.verification_steps();
+        if let Some(curl) = self.change.pull_request.as_ref().and_then(reviews_request) {
+            steps.push(curl);
+        }
+        let mut verification = json!({ "steps": steps });
         if let Some(c) = self.verification_caveat() {
             verification["caveat"] = json!(c);
         }
@@ -796,6 +808,7 @@ impl Certificate<'_> {
                 "last_gate": self.evidence.map(|g| g.summary()),
                 "checks_altered": self.weakened_says(),
                 "base_checks": self.base_checks_page(),
+                "merge_approvals_says": merge_approvals_says(self.change.pull_request.as_ref()),
             });
         };
 
@@ -826,6 +839,7 @@ impl Certificate<'_> {
             })),
             "no_evidence": self.evidence.is_none().then(|| self.no_evidence()),
             "base_checks": self.base_checks_page(),
+            "merge_approvals_says": merge_approvals_says(self.change.pull_request.as_ref()),
             "commands_digest": self.commands_digest(),
             "checks_altered": self.weakened_says(),
             "claim": self.claim.map(|text| json!({
@@ -1097,6 +1111,112 @@ pub fn base_checks_absent(view: Option<&super::base_checks::View>) -> Option<Str
             }
         }),
     }
+}
+
+/// `predicate.devplane.mergeApprovals`: the reading of who approved the
+/// change's pull request, or why there is none — never an empty list.
+pub fn merge_approvals_json(pr: Option<&super::change::PullRequestRef>) -> serde_json::Value {
+    use super::approvals::ReadingState;
+    use serde_json::json;
+    let Some(pr) = pr else {
+        return json!({ "absent": "no pull request" });
+    };
+    match &pr.approvals {
+        None => json!({ "unread": NOT_READ_YET }),
+        Some(ReadingState::NotRead { why }) => json!({ "unread": why }),
+        Some(ReadingState::Stale { last, why }) => json!({ "unread": why, "last": last }),
+        Some(ReadingState::Current { reading }) => json!(reading),
+    }
+}
+
+/// What a pull request whose approvals were never read says.
+pub const NOT_READ_YET: &str = "the pull request's approvals have not been read yet";
+
+/// The one sentence a surface shows for the approvals: the reading's, or why
+/// there is none. `None` without a pull request.
+pub fn merge_approvals_says(pr: Option<&super::change::PullRequestRef>) -> Option<String> {
+    use super::approvals::ReadingState;
+    let pr = pr?;
+    Some(match &pr.approvals {
+        None => format!("Approvals not read: {NOT_READ_YET}."),
+        Some(ReadingState::NotRead { why }) => format!("Approvals not read: {why}."),
+        Some(ReadingState::Stale { last, why }) => format!(
+            "As of {}, not current ({why}): {}",
+            last.read_at, last.sentence
+        ),
+        Some(ReadingState::Current { reading }) => reading.sentence.clone(),
+    })
+}
+
+/// The documented request that re-reads the reviews, when the pull request's
+/// address can be read as `https://<host>/<owner>/<repo>/pull/<n>`.
+pub fn reviews_request(pr: &super::change::PullRequestRef) -> Option<String> {
+    let rest = pr.url.strip_prefix("https://")?;
+    let mut parts = rest.split('/');
+    let (host, owner, repo, kind, n) = (
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+    );
+    let safe = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    };
+    if kind != "pull"
+        || n.parse::<u64>().ok()? != pr.number
+        || ![host, owner, repo].iter().all(|s| safe(s))
+    {
+        return None;
+    }
+    let api = match host.eq_ignore_ascii_case("github.com") {
+        true => "https://api.github.com".to_string(),
+        false => format!("https://{host}/api/v3"),
+    };
+    Some(format!(
+        "curl -H \"Accept: application/vnd.github+json\" {api}/repos/{owner}/{repo}/pulls/{}/reviews",
+        pr.number
+    ))
+}
+
+/// The *Merge approvals* section: absent without a pull request.
+fn merge_approvals_markdown(change: &Change) -> String {
+    use super::approvals::{ReadingState, sentence::LIMITS_LINE};
+    let Some(pr) = change.pull_request.as_ref() else {
+        return String::new();
+    };
+    let mut o = String::from("## Merge approvals\n\n");
+    if let Some(says) = merge_approvals_says(Some(pr)) {
+        o.push_str(&format!("{}\n\n", inline(&says)));
+    }
+    let reading = pr.approvals.as_ref().and_then(ReadingState::reading);
+    if let Some(r) = reading {
+        if let Some(rule) = &r.required_says {
+            o.push_str(&format!("{}\n\n", inline(rule)));
+        }
+        o.push_str(&match r.after_merge {
+            true => format!("Read at {}, after the pull request merged.\n\n", r.read_at),
+            false => format!(
+                "Read at {}. This is what the reviews said then, not necessarily at merge.\n\n",
+                r.read_at
+            ),
+        });
+    }
+    if let Some(review) = pr.decision_quote() {
+        o.push_str(&format!("GitHub says: {}.\n\n", inline(&review)));
+    }
+    if let Some(curl) = reviews_request(pr) {
+        o.push_str(
+            "To re-read the reviews (add an `Authorization` header for a private repository):\n\n",
+        );
+        o.push_str(&fenced(&curl));
+        o.push_str("\n\n");
+    }
+    o.push_str(LIMITS_LINE);
+    o.push_str("\n\n");
+    o
 }
 
 /// `predicate.devplane.baseChecks`: the whole result when current, else

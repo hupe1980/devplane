@@ -2465,7 +2465,11 @@ async fn an_ask_that_outlived_its_session_is_counted_in_the_summary() {
     // Answered, it leaves both.
     let mut answered = ask.clone();
     answered
-        .answer(serde_json::json!({}), "test", jiff::Timestamp::now())
+        .answer(
+            serde_json::json!({}),
+            devplane::core::ask::AnswerPath::Cli,
+            jiff::Timestamp::now(),
+        )
         .unwrap();
     state.store.save_ask(&answered).await.unwrap();
     let board = get_json(&c, &addr, "/api/board", &token).await;
@@ -3140,4 +3144,426 @@ async fn a_held_permission_says_somebody_is_waiting_and_offers_no_editor() {
             "a lapsed hold does not say so: {detail}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Who decided a watched call: Claude Code's own `tool_decision` reports,
+// replayed from OTLP/JSON fixtures shaped to the vendor's documented events.
+// ---------------------------------------------------------------------------
+
+/// The user's own Claude Code settings are not this test's input: every
+/// test here reads an empty user settings directory instead.
+fn no_user_settings() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("vp-claude-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: set once, before any test here reads it; no other test
+        // in this binary reads the vendor's user settings.
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &dir) };
+    });
+}
+
+fn otel_fixture(name: &str) -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/otel")
+            .join(name),
+    )
+    .expect("a fixture")
+}
+
+/// Posts an OTLP/JSON logs body with the telemetry-only bearer, as Claude
+/// Code's exporter does.
+async fn send_otel(c: &reqwest::Client, addr: &SocketAddr, token: &str, body: &str) {
+    let r = c
+        .post(format!("http://{addr}/devplane/otel/v1/logs"))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            format!("Bearer {}", devplane::config::ingest_token(token)),
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+}
+
+/// A project whose Claude Code settings allow exactly one command.
+fn project_allowing_npm_test(name: &str) -> std::path::PathBuf {
+    let dir = gate_home(name);
+    std::fs::create_dir_all(dir.join(".claude")).unwrap();
+    std::fs::write(
+        dir.join(".claude/settings.json"),
+        r#"{"permissions": {"allow": ["Bash(npm test)"]}}"#,
+    )
+    .unwrap();
+    dir
+}
+
+/// The session as its hooks reported it: started in `cwd`, then one
+/// `PreToolUse` per call with the vendor's id and the command.
+async fn started(state: &Shared, session: &str, cwd: &Path, calls: &[(&str, &str)]) {
+    let cwd = cwd.display().to_string();
+    hook(
+        state,
+        &serde_json::json!({"hook_event_name": "SessionStart", "session_id": session,
+            "cwd": cwd, "source": "startup"})
+        .to_string(),
+    )
+    .await;
+    for (id, command) in calls {
+        hook(
+            state,
+            &serde_json::json!({"hook_event_name": "PreToolUse", "session_id": session,
+                "cwd": cwd, "tool_name": "Bash", "tool_input": {"command": command},
+                "tool_use_id": id})
+            .to_string(),
+        )
+        .await;
+    }
+}
+
+/// The rows and the unattributed calls about one session.
+async fn ledger(
+    c: &reqwest::Client,
+    addr: &SocketAddr,
+    token: &str,
+    session: &str,
+) -> (Vec<Value>, Vec<Value>) {
+    let rows = get_json(c, addr, &format!("/api/decisions?about={session}"), token).await;
+    let open = get_json(
+        c,
+        addr,
+        &format!("/api/decisions/unattributed?about={session}"),
+        token,
+    )
+    .await;
+    (
+        rows.as_array().cloned().unwrap_or_default(),
+        open.as_array().cloned().unwrap_or_default(),
+    )
+}
+
+fn by_call<'a>(list: &'a [Value], call: &str) -> Option<&'a Value> {
+    list.iter().find(|v| v["call_id"] == call)
+}
+
+const DEFAULT_CALLS: &[(&str, &str)] = &[
+    ("toolu_a1", "ls"),
+    ("toolu_a2", "git status"),
+    ("toolu_a3", "rm -rf build"),
+    ("toolu_a4", "curl example.com"),
+    ("toolu_a5", "npm test"),
+    ("toolu_a6", "cargo publish"),
+];
+
+/// An interactive session in the default mode: the four `user_*` reports are
+/// the person's, the `config` report Devplane can name a rule for is that
+/// rule's, and every other report is listed with its reason — none guessed,
+/// none `unknown`.
+#[tokio::test]
+async fn an_interactive_sessions_decisions_name_who_decided() {
+    no_user_settings();
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    let dir = project_allowing_npm_test("ma-default");
+    started(&state, "s-ma-default", &dir, DEFAULT_CALLS).await;
+    send_otel(&c, &addr, &token, &otel_fixture("default-mode.json")).await;
+
+    let (rows, open) = ledger(&c, &addr, &token, "s-ma-default").await;
+    for (call, word, outcome) in [
+        ("toolu_a1", "user_permanent", "allow"),
+        ("toolu_a2", "user_temporary", "allow"),
+        ("toolu_a3", "user_abort", "deny"),
+        ("toolu_a4", "user_reject", "deny"),
+    ] {
+        let row = by_call(&rows, call).unwrap_or_else(|| panic!("{call}: {rows:?}"));
+        assert_eq!(row["authority"], "person", "{call}");
+        assert_eq!(row["vendor"], "claude-code");
+        assert_eq!(row["vendor_source"], word, "the vendor's word, verbatim");
+        assert_eq!(row["outcome"], outcome);
+    }
+    let rule = by_call(&rows, "toolu_a5").expect("a rule row");
+    assert_eq!(rule["authority"], "rule");
+    assert_eq!(rule["vendor_source"], "config");
+    assert_eq!(rule["subject"], "npm test");
+    let reason = rule["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("Bash(npm test)") && reason.contains(".claude/settings.json"),
+        "the row names the rule and its file: {reason}"
+    );
+    assert_eq!(rows.len(), 5, "nothing else was written: {rows:?}");
+
+    let unsaid = by_call(&open, "toolu_a6").expect("the unmatched config call");
+    assert!(
+        unsaid["why"]
+            .as_str()
+            .unwrap()
+            .starts_with("Claude Code's settings decided and do not say how"),
+        "{unsaid}"
+    );
+    assert!(unsaid.get("authority").is_none(), "no authority on it");
+    let silent = by_call(&open, "toolu_a7").expect("the sourceless report");
+    assert_eq!(silent["why"], "not attributed — the vendor sent no source");
+    assert!(silent.get("source").is_none());
+    assert_eq!(open.len(), 2, "{open:?}");
+
+    let all = format!("{rows:?}{open:?}");
+    assert!(!all.contains("unknown"), "{all}");
+}
+
+/// The same stream from an Agent SDK or `-p` session: the vendor reports a
+/// saved rule's match as the person's there, so no row is the person's.
+#[tokio::test]
+async fn an_sdk_sessions_user_reports_are_not_the_persons() {
+    no_user_settings();
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    let dir = project_allowing_npm_test("ma-sdk");
+    started(&state, "s-ma-sdk", &dir, DEFAULT_CALLS).await;
+    send_otel(&c, &addr, &token, &otel_fixture("sdk-session.json")).await;
+
+    let (rows, open) = ledger(&c, &addr, &token, "s-ma-sdk").await;
+    assert!(
+        rows.iter().all(|r| r["authority"] != "person"),
+        "no person row: {rows:?}"
+    );
+    for call in ["toolu_a1", "toolu_a2", "toolu_a3", "toolu_a4"] {
+        let u = by_call(&open, call).unwrap_or_else(|| panic!("{call}: {open:?}"));
+        assert_eq!(
+            u["why"],
+            "Claude Code reports a saved rule's match as the person's in this kind of session"
+        );
+        assert!(u["source"].as_str().unwrap().starts_with("user_"));
+    }
+}
+
+/// Auto mode on, three `config` calls, back to default, one more: the three
+/// are listed by `devplane audit --without-me` as unattributed with the
+/// reason and no authority; the fourth is the rule Devplane names. The file
+/// is written out of the vendor's order and read in it.
+#[tokio::test]
+async fn a_call_allowed_under_auto_mode_is_listed_as_unattributed() {
+    no_user_settings();
+    let home = gate_home("ma-auto-home");
+    let db = home.join("devplane.db");
+    let (addr, token, c, state) = boot_shared(Policy::default(), &db).await;
+    let dir = project_allowing_npm_test("ma-auto");
+    started(
+        &state,
+        "s-ma-auto",
+        &dir,
+        &[
+            ("toolu_b1", "npm test"),
+            ("toolu_b2", "npm test"),
+            ("toolu_b3", "npm test"),
+            ("toolu_b5", "rm -rf /"),
+            ("toolu_b4", "npm test"),
+        ],
+    )
+    .await;
+    send_otel(&c, &addr, &token, &otel_fixture("auto-mode.json")).await;
+
+    let (rows, open) = ledger(&c, &addr, &token, "s-ma-auto").await;
+    for call in ["toolu_b1", "toolu_b2", "toolu_b3"] {
+        assert!(by_call(&rows, call).is_none(), "{call} has no row");
+        let u = by_call(&open, call).unwrap_or_else(|| panic!("{call}: {open:?}"));
+        assert_eq!(u["why"], "could not be attributed — auto mode was on");
+        assert!(u.get("authority").is_none());
+    }
+    let after = by_call(&rows, "toolu_b4").expect("the call after auto mode");
+    assert_eq!(after["authority"], "rule");
+    assert!(after["reason"].as_str().unwrap().contains("Bash(npm test)"));
+    // The person's own answer under auto mode is still the person's.
+    assert_eq!(by_call(&rows, "toolu_b5").unwrap()["authority"], "person");
+
+    // The person's command, reading the same store with no host registered.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+        .args(["audit", "s-ma-auto", "--without-me", "--json"])
+        .env("DEVPLANE_HOME", &home)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("audit runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+    let listed: Vec<&Value> = v["unattributed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|u| u["why"] == "could not be attributed — auto mode was on")
+        .collect();
+    assert_eq!(listed.len(), 3, "{v}");
+    assert!(listed.iter().all(|u| u.get("authority").is_none()));
+    let decided = v["decisions"].as_array().unwrap();
+    assert!(
+        decided
+            .iter()
+            .any(|d| d["call_id"] == "toolu_b4" && d["authority"] == "rule"),
+        "the rule row is taken without the person: {v}"
+    );
+    assert!(
+        decided.iter().all(|d| d["authority"] != "person"),
+        "the person's own decisions stay out: {v}"
+    );
+
+    // And the sentence a person reads.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_devplane"))
+        .args(["audit", "s-ma-auto", "--without-me"])
+        .env("DEVPLANE_HOME", &home)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("audit runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Not attributed (3)"), "{text}");
+    assert_eq!(
+        text.matches("could not be attributed — auto mode was on")
+            .count(),
+        3,
+        "{text}"
+    );
+    assert!(text.contains("Claude Code: config"), "{text}");
+    assert!(!text.contains("unknown"), "{text}");
+}
+
+/// A `config` decision with no mode observed at all is not a rule by default.
+#[tokio::test]
+async fn a_config_decision_with_no_mode_seen_is_not_a_rule() {
+    no_user_settings();
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    let dir = project_allowing_npm_test("ma-nomode");
+    started(&state, "s-ma-auto", &dir, &[("toolu_b4", "npm test")]).await;
+    // The auto fixture's last call alone, with no mode change before it.
+    let full: Value = serde_json::from_str(&otel_fixture("auto-mode.json")).unwrap();
+    let mut only = full.clone();
+    let recs = only["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+        .as_array_mut()
+        .unwrap();
+    recs.retain(|r| r.to_string().contains("toolu_b4"));
+    assert_eq!(recs.len(), 1);
+    send_otel(&c, &addr, &token, &only.to_string()).await;
+    let (rows, open) = ledger(&c, &addr, &token, "s-ma-auto").await;
+    assert!(rows.is_empty(), "{rows:?}");
+    assert_eq!(
+        by_call(&open, "toolu_b4").unwrap()["why"],
+        "could not be attributed — the permission mode was not known"
+    );
+}
+
+/// The gate's own row for a call the vendor reports as `hook` is the only row,
+/// with the report beside it, whichever arrives first; a `hook` report no
+/// Devplane row names is listed, not credited.
+#[tokio::test]
+async fn a_hook_report_joins_devplanes_own_row_in_either_order() {
+    no_user_settings();
+    for gate_first in [true, false] {
+        let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+        let dir = gate_home("ma-hook");
+        started(
+            &state,
+            "s-ma-hook",
+            &dir,
+            &[("toolu_1", "rm -rf build"), ("toolu_2", "ls")],
+        )
+        .await;
+        let gate = || {
+            serde_json::json!({
+                "session": "s-ma-hook", "source": "hook", "verdict": "deny",
+                "rule": "Bash(rm -rf *)", "subject": "rm -rf build", "tool": "Bash",
+                "payload": {"hook_event_name": "PreToolUse", "session_id": "s-ma-hook",
+                    "cwd": dir.display().to_string(), "tool_name": "Bash",
+                    "tool_input": {"command": "rm -rf build"}, "tool_use_id": "toolu_1"}
+            })
+        };
+        if gate_first {
+            decided(&state, gate()).await;
+        }
+        send_otel(&c, &addr, &token, &otel_fixture("hook.json")).await;
+        if !gate_first {
+            decided(&state, gate()).await;
+        }
+        let (rows, open) = ledger(&c, &addr, &token, "s-ma-hook").await;
+        let mine: Vec<&Value> = rows.iter().filter(|r| r["call_id"] == "toolu_1").collect();
+        assert_eq!(mine.len(), 1, "one row, gate first: {gate_first}: {rows:?}");
+        assert_eq!(mine[0]["authority"], "rule");
+        assert!(mine[0].get("vendor").is_none(), "Devplane's own row");
+        assert_eq!(mine[0]["report"]["source"], "hook", "the report attached");
+        assert!(by_call(&open, "toolu_1").is_none());
+        assert_eq!(
+            by_call(&open, "toolu_2").expect("the other hook")["why"],
+            "a hook decided — no hook decision Devplane recorded names this call"
+        );
+        assert!(by_call(&rows, "toolu_2").is_none());
+    }
+}
+
+/// A source the documentation does not define writes no row and is listed
+/// verbatim, with the date the six were checked.
+#[tokio::test]
+async fn a_source_the_vendor_never_documented_is_kept_verbatim_and_not_mapped() {
+    no_user_settings();
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    let dir = project_allowing_npm_test("ma-new");
+    started(&state, "s-ma-new", &dir, &[("toolu_n1", "npm test")]).await;
+    send_otel(&c, &addr, &token, &otel_fixture("new-source.json")).await;
+    let (rows, open) = ledger(&c, &addr, &token, "s-ma-new").await;
+    assert!(rows.is_empty(), "{rows:?}");
+    let u = by_call(&open, "toolu_n1").unwrap();
+    assert_eq!(u["source"], "classifier");
+    let why = u["why"].as_str().unwrap();
+    assert!(why.contains("\"classifier\""), "{why}");
+    assert!(
+        why.contains(devplane::core::vendors::CLAUDE_CODE_DECISION_SOURCES_CHECKED),
+        "{why}"
+    );
+
+    // `devplane doctor` reads this: the value, when first seen, the date.
+    let diag = get_json(&c, &addr, "/api/diagnostics", &token).await;
+    let ds = &diag["decision_sources"];
+    assert_eq!(ds["unrecognised"][0]["value"], "classifier", "{ds}");
+    assert!(ds["unrecognised"][0]["first_seen"].as_str().is_some());
+    let says = ds["says"].as_str().unwrap();
+    assert!(says.contains("\"classifier\" first seen"), "{says}");
+    assert!(
+        says.contains(devplane::core::vendors::CLAUDE_CODE_DECISION_SOURCES_CHECKED),
+        "{says}"
+    );
+}
+
+/// With only documented sources seen, the doctor line says so, with the date.
+#[tokio::test]
+async fn doctor_says_every_source_seen_was_documented() {
+    no_user_settings();
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    let dir = project_allowing_npm_test("ma-doc");
+    started(&state, "s-ma-default", &dir, DEFAULT_CALLS).await;
+    send_otel(&c, &addr, &token, &otel_fixture("default-mode.json")).await;
+    let diag = get_json(&c, &addr, "/api/diagnostics", &token).await;
+    let ds = &diag["decision_sources"];
+    assert_eq!(ds["unrecognised"].as_array().map(Vec::len), Some(0), "{ds}");
+    assert!(
+        ds["says"]
+            .as_str()
+            .unwrap()
+            .starts_with("every source seen was one of the six Claude Code documents"),
+        "{ds}"
+    );
+}
+
+/// An exporter retrying a batch decides nothing twice.
+#[tokio::test]
+async fn a_retried_batch_writes_each_row_once() {
+    no_user_settings();
+    let (addr, token, c, state) = boot_with_state(Policy::default()).await;
+    let dir = project_allowing_npm_test("ma-retry");
+    started(&state, "s-ma-default", &dir, DEFAULT_CALLS).await;
+    let body = otel_fixture("default-mode.json");
+    send_otel(&c, &addr, &token, &body).await;
+    send_otel(&c, &addr, &token, &body).await;
+    let (rows, _) = ledger(&c, &addr, &token, "s-ma-default").await;
+    assert_eq!(rows.len(), 5, "{rows:?}");
 }

@@ -737,8 +737,18 @@ async fn two_surfaces_answering_one_hold_record_one_answer() {
     // Denials, so an agent-session environment does not refuse them before they race.
     let deny = || devplane::driven::Answer::Permission(devplane::driven::Decision::Deny);
     let (a, b) = tokio::join!(
-        devplane::driven::answer_without_host(&s, &id, deny(), "window"),
-        devplane::driven::answer_without_host(&s, &id, deny(), "cli"),
+        devplane::driven::answer_without_host(
+            &s,
+            &id,
+            deny(),
+            devplane::core::ask::AnswerPath::Window
+        ),
+        devplane::driven::answer_without_host(
+            &s,
+            &id,
+            deny(),
+            devplane::core::ask::AnswerPath::Cli
+        ),
     );
     assert_eq!(
         usize::from(a.is_ok()) + usize::from(b.is_ok()),
@@ -780,7 +790,13 @@ async fn a_hold_whose_hook_is_gone_ends_as_nobody() {
         devplane::core::ask::Ask::new(id.clone(), devplane::core::RunId::new("s-orphan"), asked);
     s.save_ask(&ask).await.unwrap();
     let deny = devplane::driven::Answer::Permission(devplane::driven::Decision::Deny);
-    let refused = devplane::driven::answer_without_host(&s, id.as_str(), deny, "cli").await;
+    let refused = devplane::driven::answer_without_host(
+        &s,
+        id.as_str(),
+        deny,
+        devplane::core::ask::AnswerPath::Cli,
+    )
+    .await;
     assert!(
         refused.is_err(),
         "an answer to nobody was recorded as delivered"
@@ -890,9 +906,10 @@ async fn a_held_answer_is_live_only_once_the_hook_has_read_it() {
     }
     let id = id.expect("the hold raised a row");
     let deny = devplane::driven::Answer::Permission(devplane::driven::Decision::Deny);
-    let answered = devplane::driven::answer_without_host(&s, &id, deny, "cli")
-        .await
-        .unwrap();
+    let answered =
+        devplane::driven::answer_without_host(&s, &id, deny, devplane::core::ask::AnswerPath::Cli)
+            .await
+            .unwrap();
     assert_eq!(
         answered.delivery, None,
         "nothing has read the answer yet, so nothing was delivered"

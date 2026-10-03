@@ -227,3 +227,19 @@ whole inbox, without an answer being held. A list narrowed to one project says h
 `devplane up --window` adds a notification when an agent asks or gives up, a menu-bar count, and a
 global shortcut (`⌘⇧Space`; `[app] shortcut`) that shows the top item over whatever you are doing;
 `Esc` returns focus. See [Install](@/docs/install.md#the-window).
+
+A permission or question can be [answered from its notification](@/docs/permissions.md#answering-from-the-notification),
+or one click away. What each platform's notifications can do:
+
+| | macOS (installed app) | Windows (installed app) | Linux |
+|---|---|---|---|
+| Allow / Deny on a permission | yes | yes | where the notification service reports actions |
+| A question's options | up to 4 | up to 5 | up to 3 |
+| A typed reply | yes | yes | no — one click to the answer window |
+| Taken back when answered elsewhere | yes | yes | yes |
+| A click opens the answer window on the item | yes | yes | where the service reports actions |
+
+A build run from source (`cargo run --features app`), a Windows build run from `target/` and a
+desktop without a notification service get a plain notification: no action, no click. `devplane doctor`
+says which you have. `devplane up` without a window always notifies through the system notifier,
+plainly.

@@ -250,6 +250,20 @@ fingerprint, and whether the change edited a check. Then:
 - Failed, timed out, never started and could not be collected are distinct; only *failed* is a verdict
   on your code.
 
+### Who approved the merge
+
+When the change has a pull request, the host reads its reviews from GitHub when the pull request
+changes, and once more when it merges. The change, the certificate's *Merge approvals* section and
+`predicate.devplane.mergeApprovals` say who the required approvals came from, by kind — a person's
+account, a model a vendor documents as its reviewer, a bot account — with each reviewer's latest
+review, the commit it was on, and when it was read. A dismissed approval is said as dismissed. The
+certificate gives the `curl` that re-reads the reviews, so a reader can check them without Devplane.
+
+A model's approval reads *could not be attributed — a model decided, and the record has no word for
+it yet* today: the record's authorities do not yet include a model, and it is never counted as a
+person's. This is evidence about a merge decided on GitHub, not a decision Devplane recorded, and
+which approvals GitHub counted toward its rule is GitHub's to decide.
+
 ### The statement a machine reads
 
 `--json` prints an [in-toto Statement v1](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md)

@@ -478,6 +478,17 @@ if [ -n "$notes_schema" ] && [ "$notes_schema" != "$code_schema" ]; then
 fi
 say "schema" "STATE.md matches src/store.rs: $code_schema"
 
+# Who approved a merge is tested against GitHub's own recorded answer; until
+# the owner records one, the guard has nothing to compare and fails here (never
+# in CI, where the recorded tests skip by name and their synthetic twins run).
+cd "$root" || exit 1
+if [ -f tests/fixtures/github/merge-decider/SOURCE ]; then
+  say "merge approvals" "a recording of GitHub's answer exists: $(grep -E '^repository|^pull_request' tests/fixtures/github/merge-decider/SOURCE | tr '\n' ' ')"
+else
+  # The owner's step, not a defect in the notes: said by name, never a pass.
+  say "merge approvals" "skipped: no recording of a pull request with a Copilot approval and a dismissed review yet — the owner runs scripts/capture-reviews.sh <owner/repo> <pr>"
+fi
+
 echo
 if [ "$fail" = 0 ]; then
   echo "ok — and every guard above found something to compare"

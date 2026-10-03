@@ -921,7 +921,7 @@ impl GateReport {
 
 /// The pull request a change produced. Number and URL are fixed; the status
 /// is refreshed by the poller.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PullRequestRef {
     pub number: u64,
     pub url: String,
@@ -931,6 +931,30 @@ pub struct PullRequestRef {
     /// Names of the checks that are red, for the inbox card.
     #[serde(default)]
     pub failing_checks: Vec<String>,
+    /// Who the pull request's approvals came from, as last read from the
+    /// forge — evidence about a merge decided there, never a decision.
+    /// Absent until the host first reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals: Option<super::approvals::ReadingState>,
+    /// GitHub's own review decision (`APPROVED`, `CHANGES_REQUESTED`,
+    /// `REVIEW_REQUIRED`), shown beside the approvals and quoted as GitHub's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    /// The pull request's `updatedAt` when its approvals were last read, so
+    /// an unchanged pull request is not read again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals_for: Option<String>,
+}
+
+impl PullRequestRef {
+    /// GitHub's own review decision in words (`approved`, `changes
+    /// requested`, `review required`), quoted as GitHub's.
+    pub fn decision_quote(&self) -> Option<String> {
+        self.review_decision
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(|d| d.to_lowercase().replace('_', " "))
+    }
 }
 
 /// A unit of work.

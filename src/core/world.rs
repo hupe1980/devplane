@@ -1526,7 +1526,14 @@ mod tests {
         }
         let say = |w: &mut World, id: &str, mode: &str| {
             w.apply(
-                env(id, Event::PermissionModeSeen { mode: mode.into() }),
+                env(
+                    id,
+                    Event::PermissionModeSeen {
+                        mode: mode.into(),
+                        at: None,
+                        sequence: None,
+                    },
+                ),
                 RunHint::default(),
             );
         };
@@ -1574,6 +1581,8 @@ mod tests {
                 "gone",
                 Event::PermissionModeSeen {
                     mode: "auto".into(),
+                    at: None,
+                    sequence: None,
                 },
             ),
             RunHint::default(),

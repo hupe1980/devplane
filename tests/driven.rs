@@ -426,7 +426,7 @@ async fn answering_a_question_clears_the_block() {
                 field.into(),
                 devplane::core::question::Chosen::Option(chosen.into()),
             )]),
-            "test",
+            devplane::core::ask::AnswerPath::Cli,
         )
         .await
         .expect_err("an answer to nothing that was asked");
@@ -444,7 +444,7 @@ async fn answering_a_question_clears_the_block() {
             "question_0".into(),
             devplane::core::question::Chosen::Option("Drop it".into()),
         )]),
-        "test",
+        devplane::core::ask::AnswerPath::Cli,
     )
     .await
     .expect("delivered");
@@ -551,7 +551,7 @@ async fn parallel_permissions_are_answered_against_their_own_request() {
         &state,
         first.id.as_str(),
         devplane::driven::Answer::Permission(devplane::driven::Decision::Allow),
-        "test",
+        devplane::core::ask::AnswerPath::Cli,
     )
     .await
     .expect("delivered");
@@ -568,7 +568,7 @@ async fn parallel_permissions_are_answered_against_their_own_request() {
         &state,
         second.id.as_str(),
         devplane::driven::Answer::Permission(devplane::driven::Decision::Deny),
-        "test",
+        devplane::core::ask::AnswerPath::Cli,
     )
     .await
     .expect("delivered");
@@ -726,7 +726,7 @@ async fn answering_a_stale_ask_leaves_the_live_requests_waiting() {
         &state,
         stale.id.as_str(),
         devplane::driven::Answer::Permission(devplane::driven::Decision::Allow),
-        "test",
+        devplane::core::ask::AnswerPath::Cli,
     )
     .await
     .expect("answered");

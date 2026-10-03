@@ -153,6 +153,9 @@ impl Local {
             ["api", "search"] => {
                 view::search(&self.store, &q("q").unwrap_or_default(), limit).await?
             }
+            ["api", "decisions", "unattributed"] => serde_json::to_value(
+                view::unattributed(&self.store, q("about").as_deref(), limit).await?,
+            )?,
             ["api", "decisions"] => serde_json::to_value(
                 view::decisions(
                     &self.store,
@@ -303,7 +306,13 @@ impl Reader {
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
                 // This process is the surface; the body's own claim is not asked.
-                let done = crate::driven::answer_without_host(&l.store, ask, answer, "cli").await?;
+                let done = crate::driven::answer_without_host(
+                    &l.store,
+                    ask,
+                    answer,
+                    crate::core::ask::AnswerPath::Cli,
+                )
+                .await?;
                 Ok(serde_json::to_value(view::render_ask(&done))?)
             }
         }
