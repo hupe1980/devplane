@@ -29,4 +29,10 @@ tool: string | null,
  * non-MCP tools and vendors or versions that do not report it — absent is
  * not unknown.
  */
-server_source: string | null, project_id: ProjectId | null, run_id: RunId | null, change_id: ChangeId | null, };
+server_source: string | null, project_id: ProjectId | null, run_id: RunId | null, change_id: ChangeId | null, 
+/**
+ * The driven tool call this decides, by the protocol's own id: the key
+ * the agent's report of that call's edit is found by. `None` for
+ * anything that is not a driven call.
+ */
+call_id?: string | null, };

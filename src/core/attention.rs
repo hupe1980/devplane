@@ -93,12 +93,14 @@ pub enum AttentionKind {
     Permission,
     /// The agent asked a question.
     Question,
-    /// A specification an in-flight change names carries a line the project's
-    /// own declared words mark unresolved (e.g. `[NEEDS CLARIFICATION]`).
+    /// One line of an in-flight change's specification that the project's own
+    /// declared words mark unresolved (e.g. `[NEEDS CLARIFICATION: …]`).
     ///
-    /// One item per project, never per marker. A project that declared no
-    /// words gets none — this tool has no default list.
-    PlanQuestion,
+    /// One item per marker line, never folded: each is a question only the
+    /// person can answer. Computed from the file on every read, so a line that
+    /// goes takes its item with it. A project that declared no words gets
+    /// none — this tool has no default list.
+    SpecQuestion,
     /// The agent asked a question and moved on without an answer. Normal, not
     /// critical: nothing is blocked any more.
     QuestionAbandoned,
@@ -201,7 +203,7 @@ impl AttentionKind {
             AttentionKind::Permission => "permission",
             AttentionKind::Question => "question",
             AttentionKind::QuestionAbandoned => "question_abandoned",
-            AttentionKind::PlanQuestion => "plan_question",
+            AttentionKind::SpecQuestion => "spec_question",
             AttentionKind::RunFailed => "run_failed",
             AttentionKind::Stalled => "stalled",
             AttentionKind::Lost => "lost",
@@ -248,7 +250,7 @@ impl AttentionKind {
             AttentionKind::Interrupted => Level::High,
             // Nothing is blocked on any of these: a row, not a notification.
             AttentionKind::QuestionAbandoned => Level::Normal,
-            AttentionKind::PlanQuestion => Level::Normal,
+            AttentionKind::SpecQuestion => Level::Normal,
             AttentionKind::ReadyToDecide => Level::Normal,
             AttentionKind::SpecDrifted => Level::Normal,
             AttentionKind::CostSpike
@@ -283,7 +285,7 @@ impl AttentionKind {
             AttentionKind::ReviewRequested
             | AttentionKind::IssueAssigned
             | AttentionKind::ChangesRequested
-            | AttentionKind::PlanQuestion => Band::OwedByYou,
+            | AttentionKind::SpecQuestion => Band::OwedByYou,
             // Machine health is the loudest notification yet not something a
             // person answers from a list.
             AttentionKind::Conflict
@@ -338,6 +340,12 @@ pub enum Action {
     /// Accept that the specification moved: the change's start fingerprint
     /// moves forward and the run's work is measured against what it saw.
     AcceptDrift,
+    /// Answer a bracketed unresolved-question marker in place: the diff is
+    /// shown, and the file is written only when the person confirms.
+    Answer,
+    /// Send the person's answer to an unbracketed marker to the change's
+    /// agent as their own message; Devplane does not edit that line.
+    TellAgent,
     Snooze,
 }
 
@@ -357,6 +365,8 @@ impl Action {
             Action::Resume => "resume",
             Action::TellRun => "tell_run",
             Action::AcceptDrift => "accept_drift",
+            Action::Answer => "answer",
+            Action::TellAgent => "tell_agent",
             Action::Snooze => "snooze",
         }
     }
@@ -665,7 +675,25 @@ pub struct AttentionItem {
     /// opens the session (the VS Code extension's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_link: Option<String>,
+    /// On an unresolved-question item: the file, the line and the line's own
+    /// words, quoted as data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<MarkerAt>,
     pub since: Timestamp,
+}
+
+/// One unresolved-question line, as an inbox item names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkerAt {
+    /// Relative to the checkout the change works in.
+    pub path: String,
+    /// From one.
+    pub line: u32,
+    /// The line as the file has it: repository text, rendered as untrusted.
+    pub text: String,
+    /// Whether the marker sits inside `[` … `]`, so an answer can replace
+    /// exactly that span.
+    pub bracketed: bool,
 }
 
 impl AttentionItem {
@@ -705,6 +733,7 @@ impl AttentionItem {
             no_offer: None,
             resume_command: None,
             session_link: None,
+            marker: None,
             since,
         }
     }
@@ -1303,50 +1332,67 @@ pub fn run_items_at(
     out
 }
 
-/// A project's specifications with open questions, first seen at `since`;
-/// `None` when none has any.
-pub fn plan_question_item_at(
+/// One item per unresolved-question line in a change's specification,
+/// first seen at `since`. `questions` are `(path, line, text)` as the
+/// specification reader found them (checklists already left out); `markers`
+/// are the project's own words. Never folded, never summed into one row.
+pub fn spec_question_items_at(
     project: &str,
-    project_id: &crate::core::ProjectId,
-    plans: &[(String, crate::spec::Plan)],
+    change: &crate::core::change::Change,
+    questions: &[(String, u32, String)],
+    markers: &[String],
     since: Timestamp,
-) -> Option<AttentionItem> {
-    let total: u32 = plans.iter().map(|(_, p)| p.open_questions).sum();
-    if total == 0 {
-        return None;
-    }
-    let where_ = match plans.iter().filter(|(_, p)| p.open_questions > 0).count() {
-        1 => {
-            let (_, p) = plans.iter().find(|(_, p)| p.open_questions > 0)?;
-            p.path.clone()
-        }
-        n => format!("{n} specifications"),
-    };
-    let first = plans
+) -> Vec<AttentionItem> {
+    let run = change.current_run().cloned();
+    questions
         .iter()
-        .flat_map(|(_, p)| p.questions.iter())
-        .next()
-        .map(|q| crate::core::text::clip(q.text.trim(), 160));
-    Some(AttentionItem {
-        project_id: Some(project_id.clone()),
-        answer_in: Some(
-            "These are lines in committed files. Answer one by editing the \
-             specification it is in."
-                .into(),
-        ),
-        ..AttentionItem::machine(
-            AttentionKind::PlanQuestion,
-            // Stable per project; clears when the line goes.
-            AttentionId::from(format!("plan-question:{}", project_id.as_str())),
-            match total {
-                1 => format!("{project}: one question in {where_} nobody has answered"),
-                n => format!("{project}: {n} questions in {where_} nobody has answered"),
-            },
-            // Repository text: rendered as untrusted, like every detail.
-            first,
-            since,
-        )
-    })
+        .map(|(path, line, text)| {
+            let bracketed = crate::core::draft::is_bracketed(text, markers);
+            let mut actions = Vec::new();
+            match (bracketed, run.is_some()) {
+                (true, _) => actions.push(Action::Answer),
+                (false, true) => actions.push(Action::TellAgent),
+                (false, false) => {}
+            }
+            actions.extend([Action::Open, Action::Snooze]);
+            AttentionItem {
+                project_id: Some(change.project_id.clone()),
+                change_id: Some(change.id.clone()),
+                run_id: run.clone(),
+                actions,
+                answer_in: Some(match (bracketed, run.is_some()) {
+                    (true, _) => "Your answer replaces the bracketed marker, word for word; you see \
+                                  the diff before anything is written."
+                        .into(),
+                    (false, true) => "Devplane does not edit this line: your answer goes to the \
+                                      change's agent as your message, and its edit comes back as a diff."
+                        .into(),
+                    (false, false) => "Devplane does not edit this line, and no agent is on this \
+                                       change to send an answer to: edit the file."
+                        .into(),
+                }),
+                marker: Some(MarkerAt {
+                    path: path.clone(),
+                    line: *line,
+                    text: text.clone(),
+                    bracketed,
+                }),
+                ..AttentionItem::machine(
+                    AttentionKind::SpecQuestion,
+                    AttentionId::from(crate::core::draft::question_id(
+                        change.id.as_str(),
+                        path,
+                        *line,
+                        text,
+                    )),
+                    format!("{project}: {path}:{line} is marked unresolved"),
+                    // Repository text: rendered as untrusted, like every detail.
+                    Some(crate::core::text::clip(text.trim(), 400)),
+                    since,
+                )
+            }
+        })
+        .collect()
 }
 
 /// The specification moved under one run of this change. Keyed on the run;
@@ -1721,7 +1767,7 @@ pub const ALL_KINDS: &[AttentionKind] = &[
     AttentionKind::Permission,
     AttentionKind::Question,
     AttentionKind::QuestionAbandoned,
-    AttentionKind::PlanQuestion,
+    AttentionKind::SpecQuestion,
     AttentionKind::RunFailed,
     AttentionKind::Stalled,
     AttentionKind::Lost,
@@ -1773,6 +1819,7 @@ pub const NEVER_FOLDED: &[AttentionKind] = &[
     AttentionKind::Permission,
     AttentionKind::Question,
     AttentionKind::QuestionAbandoned,
+    AttentionKind::SpecQuestion,
     AttentionKind::SpecDrifted,
 ];
 
@@ -2282,7 +2329,7 @@ mod tests {
         assert_eq!(
             in_band(Band::OwedByYou),
             [
-                PlanQuestion,
+                SpecQuestion,
                 ChangesRequested,
                 IssueAssigned,
                 ReviewRequested
@@ -2348,30 +2395,69 @@ mod tests {
     }
 
     #[test]
+    fn every_marker_line_is_its_own_item_with_the_answer_it_can_take() {
+        let mut change = crate::core::Change::new(ProjectId::new("p"), "x".into(), "…".into());
+        let markers = vec!["NEEDS CLARIFICATION".to_string()];
+        let lines = vec![
+            (
+                "specs/001-a/spec.md".to_string(),
+                8,
+                "- A [NEEDS CLARIFICATION: which?]".to_string(),
+            ),
+            (
+                "specs/001-a/spec.md".to_string(),
+                10,
+                "- B NEEDS CLARIFICATION which log".to_string(),
+            ),
+        ];
+        let now = Timestamp::UNIX_EPOCH;
+        let items = spec_question_items_at("proj", &change, &lines, &markers, now);
+        assert_eq!(items.len(), 2);
+        assert_ne!(items[0].id, items[1].id);
+        assert!(items[0].actions.contains(&Action::Answer));
+        assert!(
+            !items[1].actions.contains(&Action::TellAgent),
+            "no run to tell: the action is not offered"
+        );
+        assert!(
+            items[1]
+                .answer_in
+                .as_deref()
+                .unwrap()
+                .contains("edit the file")
+        );
+        let m = items[0].marker.as_ref().unwrap();
+        assert_eq!(
+            (m.path.as_str(), m.line, m.bracketed),
+            ("specs/001-a/spec.md", 8, true)
+        );
+
+        change.runs.push(RunId::new("acp-1"));
+        let items = spec_question_items_at("proj", &change, &lines, &markers, now);
+        assert!(items[1].actions.contains(&Action::TellAgent));
+        assert_eq!(items[1].run_id.as_ref().map(|r| r.as_str()), Some("acp-1"));
+        assert!(NEVER_FOLDED.contains(&AttentionKind::SpecQuestion));
+        assert!(!AttentionKind::SpecQuestion.foldable());
+    }
+
+    #[test]
     fn a_machine_row_carries_the_age_it_was_given() {
         let then = "2026-09-20T08:00:00Z".parse::<Timestamp>().unwrap();
-        let id = ProjectId::new("p");
-        let plan = crate::spec::Plan {
-            path: "specs/001".into(),
-            present: true,
-            files: 1,
-            progress: None,
-            no_progress: None,
-            truncated: None,
-            questions: vec![crate::spec::Question {
-                path: "spec.md".into(),
-                text: "[NEEDS CLARIFICATION] which?".into(),
-            }],
-            open_questions: 1,
-            outline: Vec::new(),
-            fingerprint: None,
-        };
+        let change = crate::core::Change::new(ProjectId::new("p"), "x".into(), "…".into());
+        let markers = vec!["NEEDS CLARIFICATION".to_string()];
+        let questions = vec![(
+            "specs/001/spec.md".to_string(),
+            3,
+            "[NEEDS CLARIFICATION] which?".to_string(),
+        )];
         for item in [
             gate_down_item_at("it exited 127", then),
             config_broken_item_at(Path::new("/repo"), "line 3", then),
             agent_leaked_item_at(4242, "claude --acp", None, then),
             record_incomplete_item_at(1, 0, "disk full", then),
-            plan_question_item_at("proj", &id, &[("w1".into(), plan)], then).expect("a marker"),
+            spec_question_items_at("proj", &change, &questions, &markers, then)
+                .pop()
+                .expect("a marker"),
         ] {
             assert_eq!(
                 item.since, then,
@@ -2868,7 +2954,7 @@ mod tests {
     fn is_listed(k: AttentionKind) -> bool {
         use AttentionKind::*;
         match k {
-            Permission | Question | QuestionAbandoned | PlanQuestion | RunFailed | Stalled
+            Permission | Question | QuestionAbandoned | SpecQuestion | RunFailed | Stalled
             | Lost | ContextHigh | RateLimit | CostSpike | GateFailed | CiRed
             | ChangesRequested | PrReady | ReadyToDecide | IssueAssigned | ReviewRequested
             | Conflict | Interrupted | ChangeBroken | Refused | GateDown | ConfigBroken

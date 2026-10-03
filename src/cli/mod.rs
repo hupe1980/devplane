@@ -819,9 +819,31 @@ pub enum ChangeCmd {
     /// Pick a change back up after a restart, against the same agent session
     ///
     /// Reconnects to the conversation the agent kept rather than starting anew.
+    /// With `--agent` naming another agent, continues the change with that one
+    /// instead: a new run in the same worktree, told only the words you give
+    /// here, never the earlier agent's transcript.
     Resume {
         /// The change, or a unique prefix of its id, as `devplane change list` prints it
         change: String,
+        /// Continue with this agent (an id from `devplane agents`) rather than
+        /// the one that last drove the change
+        #[arg(long)]
+        agent: Option<String>,
+        /// What the new agent should do; required with another `--agent`
+        prompt: Vec<String>,
+    },
+    /// Sign a change's agent in, after it said it needs signing in
+    ///
+    /// With no `--method`, lists the methods the agent offered. A terminal
+    /// method runs the agent's own login here, attached to this terminal, then
+    /// starts the change again; an agent method asks the agent to sign itself
+    /// in. Devplane never asks for, reads or stores a credential.
+    Login {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it
+        change: String,
+        /// The agent's id for the method, as the listing prints it
+        #[arg(long)]
+        method: Option<String>,
     },
     /// Send a message to a change's agent without stopping it
     ///
@@ -859,6 +881,66 @@ pub enum ChangeCmd {
         /// Tell the run which specification files changed
         #[arg(long)]
         tell: bool,
+    },
+    /// Draft a specification with the project's own methodology
+    ///
+    /// Starts a change whose agent is sent the methodology's own command —
+    /// Spec Kit's `/speckit-specify`, spelled the way that agent invokes it, or
+    /// OpenSpec's installed propose workflow — followed by your words, and
+    /// nothing else. The result is the change's diff, reviewed like code and
+    /// then accepted or rejected. Refused inside an agent's session.
+    Draft {
+        /// The change's name: its branch, and the folder Spec Kit writes into
+        name: String,
+        /// Which agent to send it to, as `devplane agent list` lists it.
+        /// Defaults to the project's `[agent] default`
+        #[arg(long)]
+        agent: Option<String>,
+        /// `speckit` or `openspec`; needed only where the project has both
+        #[arg(long)]
+        methodology: Option<String>,
+        /// The project: a registered name or a path. Defaults to the current
+        /// directory's repository
+        #[arg(long, value_name = "NAME|PATH")]
+        project: Option<String>,
+        /// Draft again into this change, whose last draft was rejected
+        #[arg(long)]
+        change: Option<String>,
+        /// Say what would be sent, and start nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// What the change is for, in your words, after `--`
+        #[arg(last = true, required = true)]
+        intent: Vec<String>,
+    },
+    /// Accept a change's draft: its folder becomes the specification it answers
+    DraftAccept {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it
+        change: String,
+    },
+    /// Reject a change's draft: the worktree goes back to where it was
+    ///
+    /// The change, its run and every decision stay on the record.
+    DraftReject {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it
+        change: String,
+    },
+    /// Answer one unresolved-question line in a change's specification
+    ///
+    /// A bracketed marker is replaced by your words, exactly; the diff is shown
+    /// and written only with `--yes` or a `y` on a terminal. An unbracketed one
+    /// is not edited: send your answer to the agent with `change prompt`.
+    Clarify {
+        /// The change, or a unique prefix of its id, as `devplane change list` prints it
+        change: String,
+        /// The line, as the inbox names it: `<path>:<line>`
+        at: String,
+        /// Write without asking. Required when stdin is not a terminal
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Your answer, after `--`
+        #[arg(last = true, required = true)]
+        answer: Vec<String>,
     },
     /// Take a branch somebody made by hand and make it a change
     ///

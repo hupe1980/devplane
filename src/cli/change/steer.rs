@@ -101,20 +101,174 @@ pub(super) async fn cmd_retry(change: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn cmd_resume(change: &str, json: bool) -> Result<()> {
+/// What a resume came to: the same session, or another agent's new run.
+#[derive(Deserialize)]
+struct Resumed {
+    #[serde(default)]
+    switched: Option<Switched>,
+}
+
+#[derive(Deserialize)]
+struct Switched {
+    run: String,
+    agent: String,
+    #[serde(default)]
+    was: Option<String>,
+}
+
+pub(super) async fn cmd_resume(
+    change: &str,
+    agent: Option<&str>,
+    prompt: &str,
+    json: bool,
+) -> Result<()> {
     let (c, id) = host_and_change(change).await?;
-    let answer: Answer<IgnoredAny> = c
-        .post_json(&format!("/api/changes/{id}/resume"), &serde_json::json!({}))
+    let body = match agent {
+        Some(a) => serde_json::json!({ "agent": a, "prompt": prompt }),
+        None => serde_json::json!({}),
+    };
+    let answer: Answer<Resumed> = c
+        .post_json(&format!("/api/changes/{id}/resume"), &body)
         .await?;
     if json {
         return crate::cli::print_json(&answer);
     }
-    answer.read()?;
+    match &answer.read()?.switched {
+        Some(s) => println!(
+            "{} continued {id} with {} (was {}) — run {}",
+            paint(render::GREEN, "switched —"),
+            s.agent,
+            s.was.as_deref().unwrap_or("no agent"),
+            s.run
+        ),
+        None => println!(
+            "{} the agent is back on the same conversation.",
+            paint(render::GREEN, "resumed —")
+        ),
+    }
+    Ok(())
+}
+
+/// A run as `login` reads it: how the agent was started, where, and the
+/// sign-in methods it offered.
+#[derive(Deserialize)]
+struct SignInRun {
+    #[serde(default)]
+    agent_command: Option<String>,
+    cwd: std::path::PathBuf,
+    #[serde(default)]
+    sign_in: Option<Vec<crate::core::event::SignInMethod>>,
+}
+
+pub(super) async fn cmd_login(change: &str, method: Option<&str>, json: bool) -> Result<()> {
+    let (c, id) = host_and_change(change).await?;
+    let run = run_of(&c, &id).await?;
+    let read: Answer<SignInRun> = c.get(&format!("/api/runs/{run}")).await?;
+    let run_doc = read.read()?;
+    let methods = run_doc
+        .sign_in
+        .clone()
+        .with_context(|| format!("change {id}'s agent did not say it needs signing in"))?;
+    let Some(method) = method else {
+        if json {
+            return crate::cli::print_json(&serde_json::json!({ "methods": methods }));
+        }
+        println!("The agent offers these ways to sign in, in its own words:");
+        for m in &methods {
+            let what = match m.kind.as_str() {
+                "terminal" => "runs the agent's own login in this terminal",
+                "agent" => "the agent signs itself in when asked",
+                _ => "a kind Devplane does not act on",
+            };
+            println!("  {}  \"{}\" — {what}", m.id, clip(&m.name, 60));
+            if let Some(d) = &m.description {
+                println!("      {}", paint(DIM, &format!("\"{}\"", clip(d, 100))));
+            }
+        }
+        println!("devplane change login {id} --method <id>");
+        return Ok(());
+    };
+    let chosen = methods
+        .iter()
+        .find(|m| m.id == method)
+        .with_context(|| format!("the agent offered no sign-in method `{method}`"))?;
+    let after_terminal = match chosen.kind.as_str() {
+        "agent" => false,
+        "terminal" => {
+            let command = run_doc
+                .agent_command
+                .as_deref()
+                .context("the run does not record how its agent was started")?;
+            println!(
+                "{}",
+                paint(
+                    DIM,
+                    &format!(
+                        "running the agent's own login: {command} {}",
+                        chosen.args.join(" ")
+                    )
+                )
+            );
+            let status = terminal_login(command, &chosen.args, &chosen.env, &run_doc.cwd)?;
+            if !status.success() {
+                anyhow::bail!("the agent's login exited with {status}; nothing was started");
+            }
+            true
+        }
+        other => anyhow::bail!(
+            "`{}` is a sign-in of a kind Devplane does not know (`{other}`), so it does not act on it",
+            chosen.name
+        ),
+    };
+    let answer: Answer<Started> = c
+        .post_json(
+            &format!("/api/changes/{id}/login"),
+            &serde_json::json!({ "method": method, "after_terminal": after_terminal }),
+        )
+        .await?;
+    if json {
+        return crate::cli::print_json(&answer);
+    }
     println!(
-        "{} the agent is back on the same conversation.",
-        paint(render::GREEN, "resumed —")
+        "{} run {}",
+        paint(render::GREEN, "started again —"),
+        answer.read()?.run
     );
     Ok(())
+}
+
+/// The run a sign-in started.
+#[derive(Deserialize)]
+struct Started {
+    run: String,
+}
+
+/// Runs the agent's command plus a terminal sign-in method's arguments and
+/// variables, attached to this terminal. Devplane reads nothing it prints.
+fn terminal_login(
+    command: &str,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+    dir: &std::path::Path,
+) -> Result<std::process::ExitStatus> {
+    let quoted: Vec<String> = args
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect();
+    let line = format!("{command} {}", quoted.join(" "));
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", &line]);
+        c
+    } else {
+        let mut c = std::process::Command::new("/bin/sh");
+        c.args(["-c", &line]);
+        c
+    };
+    cmd.current_dir(dir)
+        .envs(env)
+        .status()
+        .context("starting the agent's login")
 }
 
 /// The run a change-or-run argument addresses: a change through its latest run.

@@ -1,9 +1,139 @@
-import { $ as user_effect, B as append, C as remove_input_defaults, F as index, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, S as bind_value, V as comment, at as proxy, ct as user_derived, dt as pop, ft as push, g as prop, h as spell, ht as reset, it as sibling, k as set_class, mt as next, nt as first_child, ot as set, rt as only_child, st as state, tt as child, w as set_attribute, y as bind_this, z as set_text } from "./api.js";
+import { $ as user_effect, B as append, C as remove_input_defaults, F as index, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, S as bind_value, V as comment, at as proxy, ct as user_derived, dt as pop, ft as push, g as prop, h as spell, ht as reset, i as api, it as sibling, k as set_class, mt as next, nt as first_child, ot as set, rt as only_child, st as state, tt as child, w as set_attribute, y as bind_this, z as set_text } from "./api.js";
+import { n as failure } from "./resource.svelte.js";
 import { C as State, T as answerItemKeys, a as Inline, c as clip } from "./app.js";
 import { o as unreadSays } from "./unread.svelte.js";
 import { t as Qualifier } from "./Qualifier.js";
 import { t as safeHref } from "./href.js";
 import { d as untilActivity, i as copyCommand } from "./actions.js";
+//#region src/surfaces/inbox/Marker.svelte
+var root = from_html(`<button>show the edit</button>`);
+var root_1$1 = from_html(`<button>send to the agent</button>`);
+var root_2$1 = from_html(`<div class="reply svelte-oipc1d"><input type="text" class="svelte-oipc1d"/> <!></div>`);
+var root_3$1 = from_html(`<pre class="diff svelte-oipc1d"> </pre> <div class="reply svelte-oipc1d"><button class="primary svelte-oipc1d">write it</button> <button>not now</button></div>`, 1);
+var root_4$1 = from_html(`<div class="marker svelte-oipc1d"><code class="at svelte-oipc1d"> </code> <!> <!></div>`);
+function Marker($$anchor, $$props) {
+	push($$props, true);
+	const m = user_derived(() => $$props.item.marker ?? null);
+	const has = (a) => ($$props.item.actions ?? []).includes(a);
+	let words = state("");
+	let diff = state("");
+	let busy = state(false);
+	async function clarify(confirm) {
+		if (!get(m) || !$$props.item.change_id || get(busy)) return;
+		if (!get(words).trim()) return $$props.say("type your answer first — an empty answer is not one");
+		set(busy, true);
+		try {
+			const r = await api(`/api/changes/${encodeURIComponent($$props.item.change_id)}/clarify`, {
+				method: "POST",
+				body: JSON.stringify({
+					path: get(m).path,
+					line: get(m).line,
+					text: get(m).text,
+					answer: get(words),
+					confirm
+				})
+			});
+			set(diff, confirm ? "" : r.diff ?? "", true);
+			if (confirm) set(words, "");
+			$$props.say(r.says ?? (confirm ? "written" : "this is the whole edit"));
+		} catch (e) {
+			$$props.say(`that did not land: ${failure(e).says}`);
+		} finally {
+			set(busy, false);
+		}
+	}
+	async function tell() {
+		if (!$$props.item.run_id || get(busy)) return;
+		if (!get(words).trim()) return $$props.say("type your answer first — an empty answer is not one");
+		set(busy, true);
+		try {
+			const r = await api(`/api/runs/${encodeURIComponent($$props.item.run_id)}/prompt`, {
+				method: "POST",
+				body: JSON.stringify({ text: get(words) })
+			});
+			set(words, "");
+			$$props.say(`sent to the agent as your message${r.says ? ` — ${r.says}` : ""}; its edit comes back as a diff`);
+		} catch (e) {
+			$$props.say(`that did not land: ${failure(e).says}`);
+		} finally {
+			set(busy, false);
+		}
+	}
+	var fragment = comment();
+	var node = first_child(fragment);
+	var consequent_3 = ($$anchor) => {
+		var div = root_4$1();
+		var code = child(div);
+		var text = only_child(code);
+		var node_1 = sibling(code, 2);
+		var consequent_1 = ($$anchor) => {
+			var div_1 = root_2$1();
+			var input = child(div_1);
+			remove_input_defaults(input);
+			var node_2 = sibling(input, 2);
+			var consequent = ($$anchor) => {
+				var button = root();
+				template_effect(() => button.disabled = get(busy));
+				delegated("click", button, () => clarify(false));
+				append($$anchor, button);
+			};
+			var d = user_derived(() => has("answer"));
+			var alternate = ($$anchor) => {
+				var button_1 = root_1$1();
+				template_effect(() => button_1.disabled = get(busy));
+				delegated("click", button_1, tell);
+				append($$anchor, button_1);
+			};
+			if_block(node_2, ($$render) => {
+				if (get(d)) $$render(consequent);
+				else $$render(alternate, -1);
+			});
+			reset(div_1);
+			template_effect(($0, $1) => {
+				set_attribute(input, "placeholder", $0);
+				set_attribute(input, "aria-label", `your answer to ${get(m).path ?? ""} line ${get(m).line ?? ""}`);
+				set_attribute(input, "data-action", $1);
+			}, [() => has("answer") ? "your answer replaces the bracketed marker" : "your answer, for the agent", () => has("answer") ? "answer" : "tell_agent"]);
+			bind_value(input, () => get(words), ($$value) => set(words, $$value));
+			append($$anchor, div_1);
+		};
+		var d_1 = user_derived(() => has("answer") || has("tell_agent"));
+		if_block(node_1, ($$render) => {
+			if (get(d_1)) $$render(consequent_1);
+		});
+		var node_3 = sibling(node_1, 2);
+		var consequent_2 = ($$anchor) => {
+			var fragment_1 = root_3$1();
+			var pre = first_child(fragment_1);
+			var text_1 = only_child(pre, true);
+			var div_2 = sibling(pre, 2);
+			var button_2 = child(div_2);
+			var button_3 = sibling(button_2, 2);
+			reset(div_2);
+			template_effect(() => {
+				set_text(text_1, get(diff));
+				button_2.disabled = get(busy);
+				button_3.disabled = get(busy);
+			});
+			delegated("click", button_2, () => clarify(true));
+			delegated("click", button_3, () => set(diff, ""));
+			append($$anchor, fragment_1);
+		};
+		if_block(node_3, ($$render) => {
+			if (get(diff)) $$render(consequent_2);
+		});
+		reset(div);
+		template_effect(() => set_text(text, `${get(m).path ?? ""}:${get(m).line ?? ""}`));
+		append($$anchor, div);
+	};
+	if_block(node, ($$render) => {
+		if (get(m)) $$render(consequent_3);
+	});
+	append($$anchor, fragment);
+	pop();
+}
+delegate(["click"]);
+//#endregion
 //#region src/surfaces/inbox/Item.svelte
 var root_1 = from_html(`<span class="unseen svelte-kz8fai">new</span>`);
 var root_2 = from_html(`<span> </span>`);
@@ -40,7 +170,7 @@ var root_32 = from_html(`<a class="act svelte-kz8fai" data-action="launch">open 
 var root_33 = from_html(`<button data-action="snooze_hour">for an hour</button>`);
 var root_34 = from_html(`<span class="keyed svelte-kz8fai"><button data-key="s" data-action="snooze"> </button><kbd class="svelte-kz8fai">s</kbd></span> <!>`, 1);
 var root_35 = from_html(`<code class="cmd svelte-kz8fai"> </code> <button data-action="attach">copy</button>`, 1);
-var root_36 = from_html(`<li><span class="lvl svelte-kz8fai"><!></span> <div class="body svelte-kz8fai"><div class="t svelte-kz8fai"><b class="svelte-kz8fai"> </b> <span class="kind svelte-kz8fai"> </span> <!> <span class="meta svelte-kz8fai"><!> <!></span></div> <!> <!> <!> <!> <!> <!> <div class="acts svelte-kz8fai"><!> <!> <!> <!> <!> <!> <!> <!> <!> <!> <!> <!></div></div></li>`);
+var root_36 = from_html(`<li><span class="lvl svelte-kz8fai"><!></span> <div class="body svelte-kz8fai"><div class="t svelte-kz8fai"><b class="svelte-kz8fai"> </b> <span class="kind svelte-kz8fai"> </span> <!> <span class="meta svelte-kz8fai"><!> <!></span></div> <!> <!> <!> <!> <!> <!> <!> <div class="acts svelte-kz8fai"><!> <!> <!> <!> <!> <!> <!> <!> <!> <!> <!> <!></div></div></li>`);
 function Item($$anchor, $$props) {
 	push($$props, true);
 	const DETAIL_CHARS = 400;
@@ -422,22 +552,37 @@ function Item($$anchor, $$props) {
 	});
 	var node_23 = sibling(node_21, 2);
 	var consequent_18 = ($$anchor) => {
+		Marker($$anchor, {
+			get item() {
+				return $$props.item;
+			},
+			get say() {
+				return $$props.say;
+			}
+		});
+	};
+	var d_3 = user_derived(() => has("answer") || has("tell_agent"));
+	if_block(node_23, ($$render) => {
+		if (get(d_3)) $$render(consequent_18);
+	});
+	var node_24 = sibling(node_23, 2);
+	var consequent_19 = ($$anchor) => {
 		var p_5 = root_19();
-		var node_24 = child(p_5);
-		Inline(node_24, { get text() {
+		var node_25 = child(p_5);
+		Inline(node_25, { get text() {
 			return $$props.item.answer_in;
 		} });
 		reset(p_5);
 		append($$anchor, p_5);
 	};
-	if_block(node_23, ($$render) => {
-		if ($$props.item.answer_in) $$render(consequent_18);
+	if_block(node_24, ($$render) => {
+		if ($$props.item.answer_in) $$render(consequent_19);
 	});
-	var node_25 = sibling(node_23, 2);
-	var consequent_20 = ($$anchor) => {
+	var node_26 = sibling(node_24, 2);
+	var consequent_21 = ($$anchor) => {
 		var p_6 = root_22();
-		var node_26 = child(p_6);
-		var consequent_19 = ($$anchor) => {
+		var node_27 = child(p_6);
+		var consequent_20 = ($$anchor) => {
 			var span_12 = root_20();
 			var a_1 = child(span_12);
 			next();
@@ -446,8 +591,8 @@ function Item($$anchor, $$props) {
 			append($$anchor, span_12);
 		};
 		var alternate_3 = ($$anchor) => {
-			var fragment_6 = root_21();
-			var span_13 = first_child(fragment_6);
+			var fragment_7 = root_21();
+			var span_13 = first_child(fragment_7);
 			var button_6 = child(span_13);
 			next();
 			reset(span_13);
@@ -455,21 +600,21 @@ function Item($$anchor, $$props) {
 			var text_16 = only_child(code_1, true);
 			template_effect(() => set_text(text_16, $$props.item.resume_command));
 			delegated("click", button_6, copyResume);
-			append($$anchor, fragment_6);
+			append($$anchor, fragment_7);
 		};
-		if_block(node_26, ($$render) => {
-			if (get(sessionLink)) $$render(consequent_19);
+		if_block(node_27, ($$render) => {
+			if (get(sessionLink)) $$render(consequent_20);
 			else $$render(alternate_3, -1);
 		});
 		reset(p_6);
 		append($$anchor, p_6);
 	};
-	if_block(node_25, ($$render) => {
-		if ($$props.item.answer_in && (get(sessionLink) || $$props.item.resume_command)) $$render(consequent_20);
+	if_block(node_26, ($$render) => {
+		if ($$props.item.answer_in && (get(sessionLink) || $$props.item.resume_command)) $$render(consequent_21);
 	});
-	var div_7 = sibling(node_25, 2);
-	var node_27 = child(div_7);
-	var consequent_21 = ($$anchor) => {
+	var div_7 = sibling(node_26, 2);
+	var node_28 = child(div_7);
+	var consequent_22 = ($$anchor) => {
 		var span_14 = root_23();
 		var button_7 = child(span_14);
 		next();
@@ -477,12 +622,12 @@ function Item($$anchor, $$props) {
 		delegated("click", button_7, () => $$props.answer($$props.item, { decision: "allow" }));
 		append($$anchor, span_14);
 	};
-	var d_3 = user_derived(() => has("allow"));
-	if_block(node_27, ($$render) => {
-		if (get(d_3)) $$render(consequent_21);
+	var d_4 = user_derived(() => has("allow"));
+	if_block(node_28, ($$render) => {
+		if (get(d_4)) $$render(consequent_22);
 	});
-	var node_28 = sibling(node_27, 2);
-	var consequent_22 = ($$anchor) => {
+	var node_29 = sibling(node_28, 2);
+	var consequent_23 = ($$anchor) => {
 		var span_15 = root_24();
 		var button_8 = child(span_15);
 		next();
@@ -490,32 +635,32 @@ function Item($$anchor, $$props) {
 		delegated("click", button_8, () => $$props.answer($$props.item, { decision: "deny" }));
 		append($$anchor, span_15);
 	};
-	var d_4 = user_derived(() => has("deny"));
-	if_block(node_28, ($$render) => {
-		if (get(d_4)) $$render(consequent_22);
-	});
-	var node_29 = sibling(node_28, 2);
-	var consequent_23 = ($$anchor) => {
-		var button_9 = root_25();
-		delegated("click", button_9, () => $$props.act($$props.item, "retry"));
-		append($$anchor, button_9);
-	};
-	var d_5 = user_derived(() => has("retry"));
+	var d_5 = user_derived(() => has("deny"));
 	if_block(node_29, ($$render) => {
 		if (get(d_5)) $$render(consequent_23);
 	});
 	var node_30 = sibling(node_29, 2);
 	var consequent_24 = ($$anchor) => {
-		var button_10 = root_26();
-		delegated("click", button_10, () => $$props.act($$props.item, "resume"));
-		append($$anchor, button_10);
+		var button_9 = root_25();
+		delegated("click", button_9, () => $$props.act($$props.item, "retry"));
+		append($$anchor, button_9);
 	};
-	var d_6 = user_derived(() => has("resume"));
+	var d_6 = user_derived(() => has("retry"));
 	if_block(node_30, ($$render) => {
 		if (get(d_6)) $$render(consequent_24);
 	});
 	var node_31 = sibling(node_30, 2);
 	var consequent_25 = ($$anchor) => {
+		var button_10 = root_26();
+		delegated("click", button_10, () => $$props.act($$props.item, "resume"));
+		append($$anchor, button_10);
+	};
+	var d_7 = user_derived(() => has("resume"));
+	if_block(node_31, ($$render) => {
+		if (get(d_7)) $$render(consequent_25);
+	});
+	var node_32 = sibling(node_31, 2);
+	var consequent_26 = ($$anchor) => {
 		var span_16 = root_27();
 		var a_2 = child(span_16);
 		next();
@@ -523,32 +668,32 @@ function Item($$anchor, $$props) {
 		template_effect(($0) => set_attribute(a_2, "href", $0), [() => `#change/${encodeURIComponent($$props.item.change_id)}/review`]);
 		append($$anchor, span_16);
 	};
-	var d_7 = user_derived(() => has("review") && $$props.item.change_id);
-	if_block(node_31, ($$render) => {
-		if (get(d_7)) $$render(consequent_25);
-	});
-	var node_32 = sibling(node_31, 2);
-	var consequent_26 = ($$anchor) => {
-		var button_11 = root_28();
-		delegated("click", button_11, () => $$props.act($$props.item, "tell_run"));
-		append($$anchor, button_11);
-	};
-	var d_8 = user_derived(() => has("tell_run"));
+	var d_8 = user_derived(() => has("review") && $$props.item.change_id);
 	if_block(node_32, ($$render) => {
 		if (get(d_8)) $$render(consequent_26);
 	});
 	var node_33 = sibling(node_32, 2);
 	var consequent_27 = ($$anchor) => {
-		var button_12 = root_29();
-		delegated("click", button_12, () => $$props.act($$props.item, "accept_drift"));
-		append($$anchor, button_12);
+		var button_11 = root_28();
+		delegated("click", button_11, () => $$props.act($$props.item, "tell_run"));
+		append($$anchor, button_11);
 	};
-	var d_9 = user_derived(() => has("accept_drift"));
+	var d_9 = user_derived(() => has("tell_run"));
 	if_block(node_33, ($$render) => {
 		if (get(d_9)) $$render(consequent_27);
 	});
 	var node_34 = sibling(node_33, 2);
 	var consequent_28 = ($$anchor) => {
+		var button_12 = root_29();
+		delegated("click", button_12, () => $$props.act($$props.item, "accept_drift"));
+		append($$anchor, button_12);
+	};
+	var d_10 = user_derived(() => has("accept_drift"));
+	if_block(node_34, ($$render) => {
+		if (get(d_10)) $$render(consequent_28);
+	});
+	var node_35 = sibling(node_34, 2);
+	var consequent_29 = ($$anchor) => {
 		var span_17 = root_30();
 		var a_3 = child(span_17);
 		next();
@@ -556,12 +701,12 @@ function Item($$anchor, $$props) {
 		template_effect(($0) => set_attribute(a_3, "href", $0), [() => $$props.item.change_id ? `#change/${encodeURIComponent($$props.item.change_id)}` : `#why/${encodeURIComponent($$props.item.run_id ?? "")}`]);
 		append($$anchor, span_17);
 	};
-	var d_10 = user_derived(() => has("open") && ($$props.item.run_id || $$props.item.change_id));
-	if_block(node_34, ($$render) => {
-		if (get(d_10)) $$render(consequent_28);
+	var d_11 = user_derived(() => has("open") && ($$props.item.run_id || $$props.item.change_id));
+	if_block(node_35, ($$render) => {
+		if (get(d_11)) $$render(consequent_29);
 	});
-	var node_35 = sibling(node_34, 2);
-	var consequent_29 = ($$anchor) => {
+	var node_36 = sibling(node_35, 2);
+	var consequent_30 = ($$anchor) => {
 		var a_4 = root_31();
 		var text_17 = only_child(a_4, true);
 		template_effect(($0, $1) => {
@@ -571,58 +716,58 @@ function Item($$anchor, $$props) {
 		}, [() => has("open_pr") ? "open_pr" : "open_issue", () => has("open_pr") ? "open pull request" : "open issue"]);
 		append($$anchor, a_4);
 	};
-	var d_11 = user_derived(() => (has("open_pr") || has("open_issue")) && get(url));
-	if_block(node_35, ($$render) => {
-		if (get(d_11)) $$render(consequent_29);
+	var d_12 = user_derived(() => (has("open_pr") || has("open_issue")) && get(url));
+	if_block(node_36, ($$render) => {
+		if (get(d_12)) $$render(consequent_30);
 	});
-	var node_36 = sibling(node_35, 2);
-	var consequent_30 = ($$anchor) => {
+	var node_37 = sibling(node_36, 2);
+	var consequent_31 = ($$anchor) => {
 		var a_5 = root_32();
 		template_effect(() => set_attribute(a_5, "href", get(launch)));
 		append($$anchor, a_5);
 	};
-	if_block(node_36, ($$render) => {
-		if (get(launch)) $$render(consequent_30);
+	if_block(node_37, ($$render) => {
+		if (get(launch)) $$render(consequent_31);
 	});
-	var node_37 = sibling(node_36, 2);
-	var consequent_32 = ($$anchor) => {
-		var fragment_7 = root_34();
-		var span_18 = first_child(fragment_7);
+	var node_38 = sibling(node_37, 2);
+	var consequent_33 = ($$anchor) => {
+		var fragment_8 = root_34();
+		var span_18 = first_child(fragment_8);
 		var button_13 = child(span_18);
 		var text_18 = only_child(button_13, true);
 		next();
 		reset(span_18);
-		var node_38 = sibling(span_18, 2);
-		var consequent_31 = ($$anchor) => {
+		var node_39 = sibling(span_18, 2);
+		var consequent_32 = ($$anchor) => {
 			var button_14 = root_33();
 			delegated("click", button_14, () => snoozeHour()($$props.item));
 			append($$anchor, button_14);
 		};
-		var d_12 = user_derived(() => untilActivity($$props.item));
-		if_block(node_38, ($$render) => {
-			if (get(d_12)) $$render(consequent_31);
+		var d_13 = user_derived(() => untilActivity($$props.item));
+		if_block(node_39, ($$render) => {
+			if (get(d_13)) $$render(consequent_32);
 		});
 		template_effect(($0) => set_text(text_18, $0), [() => untilActivity($$props.item) ? "snooze until new activity" : "snooze 1h"]);
 		delegated("click", button_13, () => $$props.snooze($$props.item));
-		append($$anchor, fragment_7);
+		append($$anchor, fragment_8);
 	};
-	var d_13 = user_derived(() => has("snooze"));
-	if_block(node_37, ($$render) => {
-		if (get(d_13)) $$render(consequent_32);
+	var d_14 = user_derived(() => has("snooze"));
+	if_block(node_38, ($$render) => {
+		if (get(d_14)) $$render(consequent_33);
 	});
-	var node_39 = sibling(node_37, 2);
-	var consequent_33 = ($$anchor) => {
-		var fragment_8 = root_35();
-		var code_2 = first_child(fragment_8);
+	var node_40 = sibling(node_38, 2);
+	var consequent_34 = ($$anchor) => {
+		var fragment_9 = root_35();
+		var code_2 = first_child(fragment_9);
 		var text_19 = only_child(code_2);
 		var button_15 = sibling(code_2, 2);
 		template_effect(() => set_text(text_19, `devplane run attach ${$$props.item.run_id ?? ""}`));
 		delegated("click", button_15, copyAttach);
-		append($$anchor, fragment_8);
+		append($$anchor, fragment_9);
 	};
-	var d_14 = user_derived(() => has("attach") && $$props.item.run_id);
-	if_block(node_39, ($$render) => {
-		if (get(d_14)) $$render(consequent_33);
+	var d_15 = user_derived(() => has("attach") && $$props.item.run_id);
+	if_block(node_40, ($$render) => {
+		if (get(d_15)) $$render(consequent_34);
 	});
 	reset(div_7);
 	reset(div);

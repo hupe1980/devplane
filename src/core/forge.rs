@@ -220,6 +220,7 @@ pub fn items_for_forge(
             no_offer: None,
             resume_command: None,
             session_link: None,
+            marker: None,
             since: since_at,
         })
     };

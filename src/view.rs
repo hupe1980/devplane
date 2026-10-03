@@ -486,10 +486,12 @@ pub async fn current_inbox(
     let mut snoozed = forge.snoozed;
     let forge_items = forge.items;
 
-    // Unanswered questions in committed spec files, one item per project that
-    // declares markers. Derived here because `World` may not walk a folder.
+    // Unresolved-question lines in each in-flight change's specification,
+    // one item per line, read from the checkout the change works in. Derived
+    // here because `World` may not walk a folder.
     let mut from_disk = {
         let mut out = Vec::new();
+        let asked = crate::core::attention::AttentionKind::SpecQuestion;
         for p in snap.world.projects() {
             let markers = crate::core::ProjectConfig::load(&p.root)
                 .map(|c| c.spec.open_questions)
@@ -497,23 +499,41 @@ pub async fn current_inbox(
             if markers.is_empty() {
                 continue;
             }
-            let plans: Vec<(String, crate::spec::Plan)> = changes
+            for w in changes
                 .iter()
                 .filter(|w| w.project_id == p.id && !w.is_settled())
-                .filter_map(|w| {
-                    let spec = w.spec.as_deref()?;
-                    Some((
-                        w.id.as_str().to_string(),
-                        crate::spec::Plan::read(&p.root, spec, &markers),
-                    ))
-                })
-                .collect();
-            out.extend(crate::core::attention::plan_question_item_at(
-                &p.name,
-                &p.id,
-                &plans,
-                snap.started_at.unwrap_or(snap.now),
-            ));
+            {
+                let questions = crate::draft::question_lines(w, &p.root, &markers);
+                if questions.is_empty() {
+                    continue;
+                }
+                let mark = crate::core::attention::ActivityMark::of_change(w, |r| {
+                    snap.world.run(r).map(|r| r.last_event_at)
+                });
+                let items = crate::core::attention::spec_question_items_at(
+                    &p.name,
+                    w,
+                    &questions,
+                    &markers,
+                    snap.started_at.unwrap_or(snap.now),
+                );
+                for item in items {
+                    if w.snoozed.hides(&asked, snap.now, &mark)
+                        && let Some(until) = w.snoozed.until(&asked)
+                    {
+                        snoozed.push(crate::core::attention::SnoozedRow::new(
+                            item.id.as_str().to_string(),
+                            &asked,
+                            item.title,
+                            until,
+                            &format!("/api/changes/{}", w.id.as_str()),
+                            !w.current_run().is_some_and(|r| snap.live.contains(r)),
+                        ));
+                        continue;
+                    }
+                    out.push(item);
+                }
+            }
         }
         out
     };
@@ -1203,15 +1223,129 @@ pub async fn decisions(
     about: Option<&str>,
     limit: i64,
     without_me: bool,
-) -> anyhow::Result<Vec<crate::core::Decision>> {
+) -> anyhow::Result<Vec<DecisionRow>> {
     let d = store.decisions(about, limit).await?;
-    Ok(match without_me {
+    let d: Vec<crate::core::Decision> = match without_me {
         true => d
             .into_iter()
             .filter(|r| r.authority.was_taken_for_you())
             .collect(),
         false => d,
-    })
+    };
+    // Each run's reported edits are read once, only for runs whose decisions
+    // name a call.
+    let mut by_run: std::collections::HashMap<crate::core::RunId, (Vec<EditView>, bool)> =
+        Default::default();
+    for run in d
+        .iter()
+        .filter(|r| r.call_id.is_some())
+        .filter_map(|r| r.run_id.clone())
+    {
+        if by_run.contains_key(&run) {
+            continue;
+        }
+        let edits = store
+            .edits_reported(&run)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| EditView::of(e.event))
+            .collect();
+        let kept = keeps_transcripts(store, &run).await;
+        by_run.insert(run, (edits, kept));
+    }
+    Ok(d.into_iter()
+        .map(|decision| {
+            let (edits, kept) = match (&decision.call_id, &decision.run_id) {
+                (Some(call), Some(run)) => {
+                    let (all, kept) = by_run.get(run).cloned().unwrap_or((Vec::new(), true));
+                    let mine: Vec<EditView> =
+                        all.into_iter().filter(|e| &e.call_id == call).collect();
+                    (Some(mine), kept)
+                }
+                _ => (None, true),
+            };
+            let no_edit = match &edits {
+                Some(e) if e.is_empty() && !kept => {
+                    Some("no diff was kept: this project keeps no transcripts".to_string())
+                }
+                Some(e) if e.is_empty() => Some("the agent sent no diff for this call".to_string()),
+                _ => None,
+            };
+            DecisionRow {
+                decision,
+                edits,
+                no_edit,
+            }
+        })
+        .collect())
+}
+
+/// A decision as the ledger shows it: the row, and for a driven call the
+/// edits its agent reported for that call — empty when it reported none or
+/// none was kept, absent for anything that is not a driven call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionRow {
+    #[serde(flatten)]
+    pub decision: crate::core::Decision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<Vec<EditView>>,
+    /// Why a driven call's row shows no diff, in one of two sentences: the
+    /// agent sent none, or the project keeps no transcripts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_edit: Option<String>,
+}
+
+/// Whether the project a run worked in keeps transcripts, read from the
+/// directory its first event names; a run that cannot say reads as keeping
+/// them (the default), so *no diff sent* is the claim made.
+async fn keeps_transcripts(store: &crate::store::Store, run: &crate::core::RunId) -> bool {
+    let first = store.events_for_run(run, 1).await.unwrap_or_default();
+    let Some(crate::core::Event::SessionStarted { cwd, .. }) =
+        first.into_iter().next().map(|e| e.event)
+    else {
+        return true;
+    };
+    let root = crate::repo::governing_root(&cwd).unwrap_or(cwd);
+    crate::core::ProjectConfig::load(&root)
+        .map(|c| c.agent.keep_transcripts)
+        .unwrap_or(true)
+}
+
+/// One edit an agent reported for one call, as shown beside the decision
+/// about the call: the agent's claim, labelled so, never evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditView {
+    pub call_id: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub old_text: Option<String>,
+    pub new_text: String,
+    #[serde(default)]
+    pub omitted_bytes: u64,
+    pub says: String,
+}
+
+impl EditView {
+    fn of(event: crate::core::Event) -> Option<Self> {
+        match event {
+            crate::core::Event::EditReported {
+                call_id,
+                path,
+                old_text,
+                new_text,
+                omitted_bytes,
+            } => Some(Self {
+                call_id,
+                path,
+                old_text,
+                new_text,
+                omitted_bytes,
+                says: crate::driven::EDIT_SAYS.into(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 // ── Agents ──────────────────────────────────────────────────────────────────
@@ -1794,7 +1928,9 @@ pub async fn change_one(
         .into_iter()
         .find(|v| v.change.id == *id)?;
     read_diff_facts(snap, store, &mut v, true).await;
-    Some(serde_json::to_value(&v).unwrap_or(Value::Null))
+    let mut out = serde_json::to_value(&v).unwrap_or(Value::Null);
+    crate::draft::decorate(snap, &v.change, &mut out);
+    Some(out)
 }
 
 /// The done certificate for one change, fully composed.
@@ -2407,6 +2543,16 @@ async fn review_read(
     let ordered = review::order(&set, roles);
     let shape = review::shape(&set, &ordered);
     let intent = review::by_intent(&set, &wrote);
+    // A draft asks for one thing, its folder: the rest is *not asked for*.
+    let intent = match change.draft.as_ref() {
+        Some(d) if d.asks_for_folder() => match d.run.as_ref() {
+            Some(run) => {
+                crate::core::draft::asked_for_folder(intent, &set, run, &d.folder, &d.sent)
+            }
+            None => intent,
+        },
+        _ => intent,
+    };
 
     let group_of = |i: usize| intent.groups.iter().position(|g| g.files.contains(&i));
     let group_title = |g: &review::IntentGroup| {

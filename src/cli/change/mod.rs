@@ -2,6 +2,7 @@
 //! person is doing — starting, reading, steering, or deciding.
 
 mod decide;
+mod draft;
 mod read;
 mod review;
 mod start;
@@ -99,6 +100,12 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
     // anything is read.
     match &what {
         ChangeCmd::Offer { .. } => refuse_from_agent("offer")?,
+        ChangeCmd::Draft { .. } => refuse_from_agent("start the draft of")?,
+        ChangeCmd::DraftAccept { .. } => refuse_from_agent("accept the draft of")?,
+        ChangeCmd::DraftReject { .. } => refuse_from_agent("reject the draft of")?,
+        ChangeCmd::Clarify { .. } => refuse_from_agent("answer the questions in")?,
+        ChangeCmd::Resume { agent: Some(_), .. } => refuse_from_agent("switch the agent of")?,
+        ChangeCmd::Login { .. } => refuse_from_agent("sign in the agent of")?,
         ChangeCmd::Finish { .. } => refuse_from_agent("finish")?,
         ChangeCmd::Archive { .. } => refuse_from_agent("archive")?,
         ChangeCmd::ClaimRead { .. } => refuse_from_agent("mark read the claim on")?,
@@ -137,6 +144,37 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
             spec,
             title,
         } => start::cmd_adopt(branch, project, spec, title, json).await,
+        ChangeCmd::Draft {
+            name,
+            agent,
+            methodology,
+            project,
+            change,
+            dry_run,
+            intent,
+        } => {
+            draft::cmd_draft(
+                draft::Ask {
+                    name,
+                    agent,
+                    methodology,
+                    project,
+                    change,
+                    dry_run,
+                    intent,
+                },
+                json,
+            )
+            .await
+        }
+        ChangeCmd::DraftAccept { change } => draft::cmd_decide(&change, true, json).await,
+        ChangeCmd::DraftReject { change } => draft::cmd_decide(&change, false, json).await,
+        ChangeCmd::Clarify {
+            change,
+            at,
+            yes,
+            answer,
+        } => draft::cmd_clarify(&change, &at, yes, answer, json).await,
         ChangeCmd::List => read::cmd_list(json).await,
         ChangeCmd::Show { change } => read::cmd_show(&change, json).await,
         ChangeCmd::Export {
@@ -154,7 +192,14 @@ pub async fn cmd_change(what: ChangeCmd, json: bool) -> Result<()> {
             base_checks,
         } => steer::cmd_verify(&change, base_checks, json).await,
         ChangeCmd::Retry { change } => steer::cmd_retry(&change, json).await,
-        ChangeCmd::Resume { change } => steer::cmd_resume(&change, json).await,
+        ChangeCmd::Resume {
+            change,
+            agent,
+            prompt,
+        } => steer::cmd_resume(&change, agent.as_deref(), &prompt.join(" "), json).await,
+        ChangeCmd::Login { change, method } => {
+            steer::cmd_login(&change, method.as_deref(), json).await
+        }
         ChangeCmd::Prompt { run, text } => steer::cmd_prompt(&run, text, json).await,
         ChangeCmd::Stop { run, yes } => steer::cmd_stop(&run, yes, json).await,
         ChangeCmd::Drift {

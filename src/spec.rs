@@ -30,8 +30,9 @@ pub struct Doc {
     pub done: u32,
     /// `- [ ]`.
     pub open: u32,
-    /// Lines carrying one of the project's unresolved-question markers.
-    pub questions: Vec<String>,
+    /// Lines carrying one of the project's unresolved-question markers, each
+    /// with its 1-based line number.
+    pub questions: Vec<(u32, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,13 +168,19 @@ impl Spec {
     /// Every unresolved question, with its document. The single filtered
     /// source for both the count and the list, so they cannot disagree.
     pub fn question_lines(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.question_lines_at().map(|(path, _, text)| (path, text))
+    }
+
+    /// [`Self::question_lines`], each with its 1-based line number: what an
+    /// inbox item names, one per line.
+    pub fn question_lines_at(&self) -> impl Iterator<Item = (&str, u32, &str)> {
         self.docs
             .iter()
             .filter(|d| !is_checklist(&d.path))
             .flat_map(|d| {
                 d.questions
                     .iter()
-                    .map(move |q| (d.path.as_str(), q.as_str()))
+                    .map(move |(line, q)| (d.path.as_str(), *line, q.as_str()))
             })
     }
 
@@ -274,7 +281,7 @@ impl Doc {
         let (mut done, mut open) = (0u32, 0u32);
         let mut questions = Vec::new();
         let mut fenced = false;
-        for line in text.lines() {
+        for (number, line) in text.lines().enumerate() {
             let t = line.trim_start();
             // OpenSpec's counter reads every line, fences included.
             if boxes == Boxes::OpenSpec {
@@ -325,7 +332,7 @@ impl Doc {
                         .contains(&m.to_lowercase())
                 })
             {
-                questions.push(line.trim().to_string());
+                questions.push((number as u32 + 1, line.trim().to_string()));
             }
         }
 
@@ -372,6 +379,8 @@ impl Progress {
 pub struct Question {
     /// Relative to the project root.
     pub path: String,
+    /// Where it is in that file, from one.
+    pub line: u32,
     /// The line, in the project's own words.
     pub text: String,
 }
@@ -416,10 +425,11 @@ impl Plan {
         let spec = Spec::read(root, named, markers);
         let (done, total) = spec.tasks();
         let questions: Vec<Question> = spec
-            .question_lines()
+            .question_lines_at()
             .take(MAX_QUESTIONS)
-            .map(|(path, text)| Question {
+            .map(|(path, line, text)| Question {
                 path: path.to_string(),
+                line,
                 text: text.to_string(),
             })
             .collect();
@@ -1609,6 +1619,15 @@ fn every_task(trace: &Trace) -> Vec<&TaskAnchor> {
     out
 }
 
+/// Every task line the trace saw, in file order: its text without the box,
+/// and whether it is ticked — what a driven agent reads of its own change.
+pub fn task_lines(trace: &Trace) -> Vec<(String, bool)> {
+    every_task(trace)
+        .into_iter()
+        .map(|t| (t.key(), t.done))
+        .collect()
+}
+
 /// The keys of every ticked task the trace saw — what a run's close records.
 pub fn ticked_keys(trace: &Trace) -> Vec<String> {
     every_task(trace)
@@ -2124,7 +2143,7 @@ mod tests {
         );
         assert_eq!(spec.questions(), 1);
         assert!(
-            spec.docs[1].questions[0].contains("which timeout"),
+            spec.docs[1].questions[0].1.contains("which timeout"),
             "the line, so a person can read it"
         );
 

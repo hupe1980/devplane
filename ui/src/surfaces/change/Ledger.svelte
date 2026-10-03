@@ -9,6 +9,7 @@
   import Pill from "../../lib/ui/Pill.svelte";
   import Skeleton from "../../lib/Skeleton.svelte";
   import { ago } from "./types";
+  import Edits, { type Edit } from "../why/Edits.svelte";
 
   type Decision = {
     id: string;
@@ -18,6 +19,9 @@
     subject: string;
     outcome: string;
     reason?: string | null;
+    /// A driven call's reported edits; absent for anything else.
+    edits?: Edit[];
+    no_edit?: string | null;
   };
   let { id }: { id: string } = $props();
 
@@ -84,6 +88,7 @@
         <b>{pick.action}</b> · {pick.outcome} · by {pick.authority} · {new Date(pick.at).toLocaleString()}
         <pre>{pick.subject}</pre>
         {#if pick.reason}<p><Inline text={pick.reason} /></p>{/if}
+        <Edits edits={pick.edits} none={pick.no_edit} />
       </aside>
     {/if}
   {/if}

@@ -609,10 +609,53 @@ pub struct Run {
     /// first-seen order. Read as calls start, so refused edits are included.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wrote: Vec<String>,
+    /// The edits the agent reported, by call and path, newest last and
+    /// bounded by [`EDITS_KEPT`]: an index of the log's `EditReported`
+    /// events, whose diffs stay in the log. The agent's claim, never evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edits_reported: Vec<ReportedEdit>,
+    /// How the agent's session ended: `Some(true)` closed over the protocol,
+    /// `Some(false)` ended without a close, `None` while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_closed: Option<bool>,
+    /// The notices the agent addressed to the person, newest last, bounded
+    /// by [`NOTICES_KEPT`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<Notice>,
+    /// The sign-in methods the agent offered when it said it needs signing
+    /// in; cleared when a session opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<Vec<crate::core::event::SignInMethod>>,
+    /// Set when Devplane's MCP server could not be offered to the session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tools_not_offered: bool,
     /// The `seq` of the last stored event folded into this run. Projection is
     /// at-least-once and reducers count, so events at or below it are skipped.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub last_seq: i64,
+}
+
+/// How many reported edits a run indexes; older ones stay in the log.
+pub const EDITS_KEPT: usize = 512;
+
+/// How many notices a run keeps; older ones stay in the log.
+pub const NOTICES_KEPT: usize = 20;
+
+/// One edit an agent reported for one tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportedEdit {
+    pub call_id: String,
+    pub path: PathBuf,
+}
+
+/// A notice an agent addressed to the person: its own words, advisory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    pub severity: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub at: Timestamp,
 }
 
 fn is_zero_i64(n: &i64) -> bool {
@@ -768,6 +811,11 @@ impl Run {
             sent: None,
             observed: None,
             wrote: Vec::new(),
+            edits_reported: Vec::new(),
+            session_closed: None,
+            notices: Vec::new(),
+            sign_in: None,
+            tools_not_offered: false,
             last_seq: 0,
         }
     }

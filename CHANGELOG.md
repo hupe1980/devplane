@@ -6,6 +6,37 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Added
 
+- `devplane change draft <name> -- <intent>` drafts a specification with the project's own tool:
+  the agent is sent Spec Kit's `/speckit-specify` (spelled the way that agent invokes it, from
+  `.specify/integration.json`) or OpenSpec's installed propose workflow, followed by your words and
+  nothing else, in the change's own worktree. Spec Kit is told the folder Devplane numbered and not
+  to record an active feature. The drafted folder is reviewed as the change's diff and accepted or
+  rejected (`draft-accept`, `draft-reject`, or on the change); Devplane writes no line into it. The
+  New change window drafts too, and shows the exact text it will send before anything is made.
+- Each line of an open change's specification carrying one of `[spec] open_questions` is its own
+  inbox item, naming file and line — no longer one item per project. A bracketed marker is answered
+  in place as a one-line diff you confirm (`devplane change clarify`, or in the inbox); an unbracketed
+  one is sent to the change's agent as your message. After a Spec Kit draft with no words declared,
+  the change offers Spec Kit's own marker as a diff to `devplane.toml`.
+- The diff a driven agent reported for an edit is shown on the decision that allowed or refused it,
+  in the change's ledger and in the Ledger, labelled as the agent's own report and quoted as text; a
+  permission request carries the proposed diff before you answer. A clipped diff says how many bytes
+  were not kept, a call with no diff says so, and a project that keeps no transcripts says no diff
+  was kept. The worktree, not the report, is what the gates read. The store's schema version is 15.
+- `devplane change resume <change> --agent <id> "<what to do>"` continues a change with a different
+  agent in the same worktree, told only your words — never the earlier agent's transcript. Both runs
+  stay on the change, the switch is recorded as yours, and it is refused while a run is still live.
+- An agent that needs signing in shows its own sign-in methods on the change; `devplane change login
+  <change> --method <id>` runs a terminal login in your terminal and starts the change again, or asks
+  the agent to sign itself in. Devplane never asks for, reads or stores a credential.
+- A driven agent's notices to you are shown on the change; a stop records whether the session was
+  closed over the protocol; a change says when the agent was not given Devplane's tools; and the
+  agent's own session list is read page by page.
+- A change whose specification folder is in your checkout but not yet on the base branch starts:
+  the folder is declared to the agent as an additional directory, and an agent that cannot take one
+  is never prompted, saying why. An agent answering another protocol version is not driven.
+- Asked about its own change, Devplane's MCP server now includes the change's task lines.
+
 - A driven session's permission mode is stated on the change, in the agent's own words: when you set
   no mode, Devplane asks the agent for its own ask-first mode before the first prompt (Codex starts
   every session in *Auto review*, where a reviewer model answers) and says so; a mode you set is kept,

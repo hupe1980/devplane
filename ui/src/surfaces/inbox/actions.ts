@@ -208,6 +208,8 @@ export function rowActions(item: Item): RowAction[] {
   if (has("review") && item.change_id) out.push({ id: "review", label: "open the review", key: "r" });
   if (has("tell_run")) out.push({ id: "tell_run", label: "tell the run", key: null });
   if (has("accept_drift")) out.push({ id: "accept_drift", label: "accept the drift", key: null });
+  if (has("answer")) out.push({ id: "answer", label: "answer in the specification", key: null });
+  if (has("tell_agent")) out.push({ id: "tell_agent", label: "send your answer to the agent", key: null });
   if (has("open") && (item.run_id || item.change_id)) out.push({ id: "open", label: item.change_id ? "open the change" : "open the session", key: "o" });
   if ((has("open_pr") || has("open_issue")) && safeHref(item.url))
     out.push({ id: has("open_pr") ? "open_pr" : "open_issue", label: has("open_pr") ? "open pull request" : "open issue", key: null });

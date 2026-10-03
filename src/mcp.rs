@@ -157,12 +157,41 @@ impl Server {
                 .as_array()
                 .and_then(|a| a.iter().find(|x| x["id"].as_str() == Some(id)))
             {
-                Some(one) => Ok(report(one)),
+                Some(one) => Ok(report(&with_tasks(one.clone()))),
                 None => Ok(text_error(&format!("no change `{id}`"))),
             },
             Err(e) => Ok(text_error(&e.to_string())),
         }
     }
+}
+
+/// A change with its task lines, read from its specification folder where
+/// the agent works (its worktree, else the project's checkout): the agent
+/// asks for its tasks rather than being handed them in the prompt.
+fn with_tasks(mut change: serde_json::Value) -> serde_json::Value {
+    let Some(spec) = change["spec"].as_str().map(str::to_string) else {
+        return change;
+    };
+    let Some(root) = change["project_id"].as_str().map(std::path::PathBuf::from) else {
+        return change;
+    };
+    let worked_in = change["worktree"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .filter(|w| w.join(&spec).exists())
+        .unwrap_or_else(|| root.clone());
+    let Ok(config) = crate::core::ProjectConfig::load(&root) else {
+        return change;
+    };
+    let Ok(folder) = crate::spec::ChangeFolder::at(&worked_in, &spec) else {
+        return change;
+    };
+    let tasks: Vec<serde_json::Value> = crate::spec::task_lines(&config.spec.trace(&folder))
+        .into_iter()
+        .map(|(task, done)| serde_json::json!({ "task": task, "done": done }))
+        .collect();
+    change["tasks"] = serde_json::Value::Array(tasks);
+    change
 }
 
 fn report(v: &serde_json::Value) -> CallToolResponse {

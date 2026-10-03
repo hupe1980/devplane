@@ -26,6 +26,7 @@ pub mod decision;
 pub mod declare;
 pub mod deeplink;
 pub mod diff;
+pub mod draft;
 pub mod event;
 pub mod firstrun;
 pub mod forge;

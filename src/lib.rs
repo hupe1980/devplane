@@ -28,6 +28,7 @@ pub mod config;
 /// Types and the pure logic over them. Reaches nothing outside the process.
 pub mod core;
 /// Runs Devplane owns, over the Agent Client Protocol.
+pub mod draft;
 pub mod driven;
 /// The first run from the window: its checklist and the writes it confirms.
 pub mod firstrun;

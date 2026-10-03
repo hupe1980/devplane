@@ -8,6 +8,10 @@
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::StopReason;
 use agent_client_protocol::schema::v1::{
+    AuthCapabilities, AuthMethod, AuthenticateRequest, ClientSessionCapabilities,
+    NoticeCapabilities,
+};
+use agent_client_protocol::schema::v1::{
     CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
     ElicitationCapabilities, ElicitationFormCapabilities, EnvVariable, InitializeRequest,
@@ -42,6 +46,28 @@ const CLOSE_GRACE: Duration = Duration::from_secs(2);
 /// How long an agent has to answer the one mode request Devplane may send at
 /// set-up before the first prompt goes anyway, reported as *did not answer*.
 const MODE_GRACE: Duration = Duration::from_secs(10);
+
+/// How many pages of `session/list` are read before the listing says more
+/// sessions exist than were read.
+pub const LIST_PAGES: usize = 20;
+
+/// The one protocol version this client speaks.
+const SPOKEN: u16 = 1;
+
+/// What a launch adds to the session it opens, beyond the agent and its
+/// directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Launch {
+    /// Directories outside the working directory the agent is told it may
+    /// read (`additionalDirectories`): absolute paths the caller has already
+    /// confined to the project. Declared only to an agent that advertises
+    /// the capability; when it does not, the session ends before any prompt.
+    pub additional_directories: Vec<PathBuf>,
+    /// The sign-in method the person chose, sent as `authenticate` right
+    /// after `initialize`. Only ever an agent-handled method; never carries a
+    /// credential.
+    pub authenticate: Option<String>,
+}
 
 /// The most of one side of a reported diff that is kept; the rest is counted.
 pub const DIFF_KEPT_BYTES: usize = 64 * 1024;
@@ -149,6 +175,20 @@ pub enum AcpEvent {
     /// never says a session is waiting.
     SessionsListed {
         sessions: Vec<crate::core::run::ListedSession>,
+        /// The agent had more pages than [`LIST_PAGES`]: more sessions exist
+        /// than were read. The protocol reports no total.
+        truncated: bool,
+    },
+    /// A notice the agent addressed to the person: advisory, its own words.
+    Notice {
+        severity: String,
+        title: String,
+        description: Option<String>,
+    },
+    /// The agent says it needs signing in, and offers these ways. The session
+    /// ends after this; nothing was asked for or stored.
+    SignInRequired {
+        methods: Vec<crate::core::event::SignInMethod>,
     },
     /// The agent says which mode it is now in: the agent's own identifier,
     /// never mapped onto Claude Code's modes, since no specification defines
@@ -436,7 +476,19 @@ pub async fn spawn(
     env: &[(String, PathBuf)],
     mcp: Option<McpOffer>,
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
-    connect(spec, cwd, None, env, mcp).await
+    connect(spec, cwd, None, env, mcp, Launch::default()).await
+}
+
+/// [`spawn`], with what the launch adds: directories to declare, a sign-in
+/// method to ask for first.
+pub async fn spawn_with(
+    spec: &AgentSpec,
+    cwd: PathBuf,
+    env: &[(String, PathBuf)],
+    mcp: Option<McpOffer>,
+    launch: Launch,
+) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
+    connect(spec, cwd, None, env, mcp, launch).await
 }
 
 /// Starts the agent and continues an existing conversation, so a change
@@ -450,7 +502,19 @@ pub async fn resume(
     env: &[(String, PathBuf)],
     mcp: Option<McpOffer>,
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
-    connect(spec, cwd, Some(agent_session), env, mcp).await
+    connect(spec, cwd, Some(agent_session), env, mcp, Launch::default()).await
+}
+
+/// [`resume`], with what the launch adds.
+pub async fn resume_with(
+    spec: &AgentSpec,
+    cwd: PathBuf,
+    agent_session: String,
+    env: &[(String, PathBuf)],
+    mcp: Option<McpOffer>,
+    launch: Launch,
+) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
+    connect(spec, cwd, Some(agent_session), env, mcp, launch).await
 }
 
 async fn connect(
@@ -459,6 +523,7 @@ async fn connect(
     resuming: Option<String>,
     env: &[(String, PathBuf)],
     mcp: Option<McpOffer>,
+    launch: Launch,
 ) -> anyhow::Result<(Session, mpsc::Receiver<AcpEvent>)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<String>(32);
     let (ev_tx, ev_rx) = mpsc::channel::<AcpEvent>(1024);
@@ -599,6 +664,7 @@ async fn connect(
                     Setup {
                         preference,
                         seen: seen_for_run,
+                        launch,
                     },
                 )
                 .await
@@ -642,26 +708,32 @@ fn in_directory(
         .envs(config.environment().clone())
 }
 
-/// What an agent said about signing in, as a sentence for a person.
-///
-///
-/// `auth/login` is not implemented: a login belongs in the agent's own
-/// terminal, so this repeats the advertised `authMethods`.
-fn describe_auth(methods: &[agent_client_protocol::schema::v1::AuthMethod]) -> Option<String> {
-    if methods.is_empty() {
-        return None;
-    }
-    let listed: Vec<String> = methods
+/// The sign-in methods an agent advertised, in Devplane's terms: the agent's
+/// own names and kinds. Nothing here is a credential.
+fn sign_in_methods(methods: &[AuthMethod]) -> Vec<crate::core::event::SignInMethod> {
+    methods
         .iter()
-        .map(|m| match m.description() {
-            Some(d) => format!("  • {} — {d}", m.name()),
-            None => format!("  • {}", m.name()),
+        .map(|m| {
+            let (kind, args, env) = match m {
+                AuthMethod::Agent(_) => ("agent", Vec::new(), Default::default()),
+                AuthMethod::Terminal(t) => (
+                    "terminal",
+                    t.args.clone(),
+                    t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                ),
+                #[allow(unreachable_patterns)]
+                _ => ("other", Vec::new(), Default::default()),
+            };
+            crate::core::event::SignInMethod {
+                id: m.id().to_string(),
+                name: m.name().to_string(),
+                description: m.description().map(str::to_string),
+                kind: kind.into(),
+                args,
+                env,
+            }
         })
-        .collect();
-    Some(format!(
-        "This agent may need signing in first. It offers:\n{}",
-        listed.join("\n")
-    ))
+        .collect()
 }
 
 /// The requests an agent is waiting on an answer to.
@@ -688,6 +760,7 @@ struct Setup {
     /// The mode the person chose for this agent, if any.
     preference: Option<String>,
     seen: Seen,
+    launch: Launch,
 }
 
 /// What setting up a session produced, when it produced one.
@@ -849,20 +922,27 @@ async fn open(
     mcp_servers: Vec<McpServer>,
     setup: Setup,
 ) -> agent_client_protocol::Result<Option<Opened>> {
-    // Declaring form elicitation is what lets an agent ask a question: the
-    // Claude adapter offers `AskUserQuestion` only to a client with
-    // `clientCapabilities.elicitation.form`. No `fs` and no `terminal`: the
-    // agent works in its own worktree with its own tools.
     let init = connection
-        .send_request(
-            InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
-                ClientCapabilities::new().elicitation(
-                    ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
-                ),
-            ),
-        )
+        .send_request(InitializeRequest::new(ProtocolVersion::V1).client_capabilities(declared()))
         .block_task()
         .await?;
+
+    // Only version 1 is spoken; an agent answering another is not driven
+    // under a guess of what it means.
+    let answered = serde_json::to_value(init.protocol_version)
+        .ok()
+        .and_then(|v| v.as_u64());
+    if answered != Some(u64::from(SPOKEN)) {
+        let _ = events
+            .send(AcpEvent::Ended {
+                error: Some(format!(
+                    "this agent speaks ACP protocol version {}; Devplane speaks version {SPOKEN}",
+                    answered.map_or_else(|| "unknown".to_string(), |v| v.to_string())
+                )),
+            })
+            .await;
+        return Ok(None);
+    }
 
     // Recorded before anything is asked, so an agent whose session creation
     // fails is still recorded.
@@ -880,27 +960,67 @@ async fn open(
         })
         .await;
 
-    // The roster, where the agent has one: asked once, after the handshake.
-    // Errors are dropped — a listing is enrichment, not worth ending a session.
-    if init.agent_capabilities.session_capabilities.list.is_some() {
-        let listed = connection
-            .send_request(agent_client_protocol::schema::v1::ListSessionsRequest::default())
+    // The sign-in the person chose, asked for before any session: only an
+    // agent-handled method, by its id. The agent's answer, in its words, ends
+    // the run when it refuses.
+    if let Some(method) = setup.launch.authenticate.clone()
+        && let Err(e) = connection
+            .send_request(AuthenticateRequest::new(method.clone()))
             .block_task()
+            .await
+    {
+        let _ = events
+            .send(AcpEvent::Ended {
+                error: Some(format!("signing in with `{method}` failed: {}", e.message)),
+            })
             .await;
-        if let Ok(page) = listed {
-            let sessions: Vec<crate::core::run::ListedSession> = page
-                .sessions
-                .into_iter()
-                .map(|s| crate::core::run::ListedSession {
-                    agent_session: s.session_id.to_string(),
-                    title: s.title,
+        return Ok(None);
+    }
+
+    // The roster, where the agent has one: asked after the handshake, every
+    // page up to [`LIST_PAGES`]. Errors are dropped — a listing is
+    // enrichment, not worth ending a session.
+    if init.agent_capabilities.session_capabilities.list.is_some() {
+        let (sessions, truncated) = list_sessions(connection).await;
+        if !sessions.is_empty() || truncated {
+            let _ = events
+                .send(AcpEvent::SessionsListed {
+                    sessions,
+                    truncated,
                 })
-                .collect();
-            if !sessions.is_empty() {
-                let _ = events.send(AcpEvent::SessionsListed { sessions }).await;
-            }
+                .await;
         }
-        // One page: the session in front of us is on it or it is not.
+    }
+
+    // A folder the session needs that is outside its directory is declared,
+    // or the session does not start: an agent that cannot see its
+    // specification must not be prompted to implement it.
+    let extra = setup.launch.additional_directories.clone();
+    if !extra.is_empty()
+        && init
+            .agent_capabilities
+            .session_capabilities
+            .additional_directories
+            .is_none()
+    {
+        let _ = events
+            .send(AcpEvent::Ended {
+                error: Some(format!(
+                    "{} cannot be told about {}, which is outside its working directory, so \
+                     it would never see the specification; commit the folder to the base \
+                     branch, or start the change in place",
+                    init.agent_info
+                        .as_ref()
+                        .map_or("this agent", |i| i.name.as_str()),
+                    extra
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            })
+            .await;
+        return Ok(None);
     }
 
     let can_close = init.agent_capabilities.session_capabilities.close.is_some();
@@ -943,7 +1063,9 @@ async fn open(
             let resumed = if can_resume {
                 connection
                     .send_request(
-                        ResumeSessionRequest::new(sid, cwd.as_path()).mcp_servers(mcp_servers),
+                        ResumeSessionRequest::new(sid, cwd.as_path())
+                            .mcp_servers(mcp_servers)
+                            .additional_directories(extra.clone()),
                     )
                     .block_task()
                     .await
@@ -955,7 +1077,8 @@ async fn open(
                             sid,
                             cwd.as_path(),
                         )
-                        .mcp_servers(mcp_servers),
+                        .mcp_servers(mcp_servers)
+                        .additional_directories(extra.clone()),
                     )
                     .block_task()
                     .await
@@ -978,7 +1101,11 @@ async fn open(
         }
         None => {
             match connection
-                .send_request(NewSessionRequest::new(cwd).mcp_servers(mcp_servers))
+                .send_request(
+                    NewSessionRequest::new(cwd)
+                        .mcp_servers(mcp_servers)
+                        .additional_directories(extra),
+                )
                 .block_task()
                 .await
             {
@@ -989,15 +1116,26 @@ async fn open(
                     r.session_id
                 }
                 Err(e) => {
-                    // An agent that needs signing in advertises `authMethods`,
-                    // often with the command to run. The message says *may*:
-                    // the methods existing does not make this an auth failure.
-                    let hint = describe_auth(&init.auth_methods);
+                    // An agent that needs signing in says so (`auth_required`)
+                    // or fails while it advertises ways to sign in: the person
+                    // is shown the agent's own methods and chooses one.
+                    let needs_sign_in = e.code == agent_client_protocol::ErrorCode::AuthRequired
+                        || !init.auth_methods.is_empty();
+                    if needs_sign_in && !init.auth_methods.is_empty() {
+                        let _ = events
+                            .send(AcpEvent::SignInRequired {
+                                methods: sign_in_methods(&init.auth_methods),
+                            })
+                            .await;
+                    }
                     let _ = events
                         .send(AcpEvent::Ended {
-                            error: Some(match hint {
-                                Some(h) => format!("could not start a session: {e}.\n{h}"),
-                                None => format!("could not start a session: {e}"),
+                            error: Some(match needs_sign_in {
+                                true => format!(
+                                    "the agent needs signing in before a session can start: {}",
+                                    e.message
+                                ),
+                                false => format!("could not start a session: {e}"),
                             }),
                         })
                         .await;
@@ -1039,6 +1177,49 @@ async fn open(
             outcome,
         },
     }))
+}
+
+/// What the client declares at `initialize`. Form elicitation lets an agent
+/// ask a question (the Claude adapter offers `AskUserQuestion` only to a client
+/// with `elicitation.form`); terminal sign-in lets it name the login a person
+/// runs in their own terminal (`devplane change login`); notices let it
+/// address the person. No `fs` and no `terminal`: the agent works in its own
+/// worktree with its own tools.
+fn declared() -> ClientCapabilities {
+    ClientCapabilities::new()
+        .elicitation(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()))
+        .auth(AuthCapabilities::new().terminal(true))
+        .session(ClientSessionCapabilities::new().notices(NoticeCapabilities::new()))
+}
+
+/// Every page of the agent's session list up to [`LIST_PAGES`], and whether
+/// pages were left unread. A page that fails ends the reading with what was
+/// read.
+async fn list_sessions(
+    connection: &ConnectionTo<Agent>,
+) -> (Vec<crate::core::run::ListedSession>, bool) {
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..LIST_PAGES {
+        let mut ask = agent_client_protocol::schema::v1::ListSessionsRequest::default();
+        ask.cursor = cursor.take();
+        let Ok(page) = connection.send_request(ask).block_task().await else {
+            return (out, false);
+        };
+        out.extend(
+            page.sessions
+                .into_iter()
+                .map(|s| crate::core::run::ListedSession {
+                    agent_session: s.session_id.to_string(),
+                    title: s.title,
+                }),
+        );
+        match page.next_cursor.filter(|c| !c.is_empty()) {
+            Some(next) => cursor = Some(next),
+            None => return (out, false),
+        }
+    }
+    (out, cursor.is_some())
 }
 
 /// Sends the one mode request a set-up may make, and waits for its answer up
@@ -1345,6 +1526,13 @@ fn map_update(update: SessionUpdate, seen: &Seen) -> Vec<AcpEvent> {
             });
             current.map(|v| moved_to(seen, v)).unwrap_or_default()
         }
+        // Advisory words for the person, shown on the change rather than
+        // dropped; never read as an instruction to Devplane.
+        SessionUpdate::Notice(n) => vec![AcpEvent::Notice {
+            severity: wire(&n.severity).unwrap_or_else(|| "info".into()),
+            title: n.title,
+            description: n.description,
+        }],
         // Command lists are not consumed.
         _ => Vec::new(),
     }

@@ -110,6 +110,12 @@ export type Detail = {
   title: string;
   prompt?: string | null;
   spec?: string | null;
+  /// A specification drafted by the project's own methodology: what was
+  /// sent, where it was written, and where it got to.
+  draft?: { methodology: "speckit" | "openspec"; agent: string; sent: string; folder: string; outcome: "pending" | "produced" | "none_produced" | "accepted" | "rejected" } | null;
+  draft_says?: string[];
+  /// After a draft, when the project declares no unresolved-question words.
+  open_questions_offer?: { says: string; diff?: string; base?: string } | null;
   worktree?: string | null;
   branch?: string | null;
   runs?: string[];

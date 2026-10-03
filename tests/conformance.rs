@@ -239,34 +239,229 @@ async fn several_turns_run_on_one_session() {
     session.stop();
 }
 
-/// An agent that needs sign-in fails with a message naming the cause and
-/// repeating the agent's own `authMethods` instruction.
+/// An agent that needs signing in is shown by its own sign-in methods, by
+/// the agent's names and kinds, and the session ends saying why; the client
+/// declared it can run a terminal login, so the agent offered one.
 #[tokio::test]
-async fn an_agent_that_needs_a_login_says_how() {
+async fn sign_in_methods_are_the_agents_own() {
     let mut spec = echo_agent();
     spec.command = format!("env DEVPLANE_ECHO_NEEDS_AUTH=1 {}", spec.command);
 
-    let (session, mut rx) = devplane::acp::spawn(&spec, std::env::temp_dir(), &[], None)
+    let (session, mut rx) = devplane::acp::spawn(&spec, scratch(), &[], None)
         .await
         .expect("the fixture starts");
     let events = collect(&mut rx, |e| {
         matches!(e, AcpEvent::Ready { .. } | AcpEvent::Ended { .. })
     })
     .await;
+    session.stop();
+    let methods = events
+        .iter()
+        .find_map(|e| match e {
+            AcpEvent::SignInRequired { methods } => Some(methods.clone()),
+            _ => None,
+        })
+        .expect("the agent's sign-in methods are reported");
+    let shown: Vec<(&str, &str, &str)> = methods
+        .iter()
+        .map(|m| (m.id.as_str(), m.name.as_str(), m.kind.as_str()))
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("echo-login", "Log in with Echo", "agent"),
+            ("echo-terminal", "Echo's own login", "terminal"),
+        ],
+        "by the agent's own names and kinds; terminal offered because the client declared it"
+    );
+    assert_eq!(methods[1].args, vec!["--login".to_string()]);
     match events.last() {
         Some(AcpEvent::Ended { error: Some(e) }) => {
-            assert!(
-                e.contains("signing in"),
-                "the failure should name the cause: {e}"
-            );
-            assert!(
-                e.contains("Run `echo login` in the terminal"),
-                "and repeat the agent's own instruction: {e}"
-            );
+            assert!(e.contains("signing in"), "the ending names the cause: {e}")
         }
         other => panic!("expected a session that could not start, got {other:?}"),
     }
+
+    // The person chose the agent-handled method: `authenticate` first, then
+    // the session starts.
+    let dir = scratch();
+    let (session, mut rx) = devplane::acp::session::spawn_with(
+        &spec,
+        dir.clone(),
+        &[],
+        None,
+        devplane::acp::session::Launch {
+            authenticate: Some("echo-login".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the fixture starts");
+    let events = collect(&mut rx, |e| {
+        matches!(e, AcpEvent::Ready { .. } | AcpEvent::Ended { .. })
+    })
+    .await;
     session.stop();
+    assert!(
+        matches!(events.last(), Some(AcpEvent::Ready { .. })),
+        "signed in, the session starts: {events:?}"
+    );
+    let heard = std::fs::read_to_string(dir.join(".devplane/heard.log")).unwrap_or_default();
+    assert!(heard.contains("authenticate echo-login"), "{heard}");
+}
+
+/// Every page of the agent's session list is read, up to the limit, and a
+/// list longer than that says more sessions exist than were read.
+#[tokio::test]
+async fn lists_every_page() {
+    for (pages, want, truncated) in [
+        (3, 3, false),
+        (25, devplane::acp::session::LIST_PAGES, true),
+    ] {
+        let mut spec = echo_agent();
+        spec.command = format!("env DEVPLANE_ECHO_PAGES={pages} {}", spec.command);
+        let (session, mut rx) = devplane::acp::spawn(&spec, scratch(), &[], None)
+            .await
+            .expect("the fixture starts");
+        let events = collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
+        session.stop();
+        let listed = events
+            .iter()
+            .find_map(|e| match e {
+                AcpEvent::SessionsListed {
+                    sessions,
+                    truncated,
+                } => Some((sessions.len(), *truncated)),
+                _ => None,
+            })
+            .expect("the list was read");
+        assert_eq!(listed, (want, truncated), "{pages} pages");
+    }
+}
+
+/// An agent answering another protocol version is not driven: the run ends
+/// naming both versions, and no session is created.
+#[tokio::test]
+async fn another_protocol_version_is_refused() {
+    let mut spec = echo_agent();
+    spec.command = format!("env DEVPLANE_ECHO_VERSION=2 {}", spec.command);
+    let (session, mut rx) = devplane::acp::spawn(&spec, scratch(), &[], None)
+        .await
+        .expect("the fixture starts");
+    let events = collect(&mut rx, |e| {
+        matches!(e, AcpEvent::Ready { .. } | AcpEvent::Ended { .. })
+    })
+    .await;
+    session.stop();
+    match events.last() {
+        Some(AcpEvent::Ended { error: Some(e) }) => assert!(
+            e.contains("protocol version 2") && e.contains("version 1"),
+            "{e}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// A folder outside the working directory is declared to an agent that takes
+/// additional directories; an agent that does not is never prompted.
+#[tokio::test]
+async fn declares_the_spec_folder() {
+    let outside = scratch();
+    let launch = || devplane::acp::session::Launch {
+        additional_directories: vec![outside.clone()],
+        ..Default::default()
+    };
+
+    let mut spec = echo_agent();
+    spec.command = format!("env DEVPLANE_ECHO_ADDDIRS=1 {}", spec.command);
+    let dir = scratch();
+    let (session, mut rx) =
+        devplane::acp::session::spawn_with(&spec, dir.clone(), &[], None, launch())
+            .await
+            .expect("the fixture starts");
+    let events = collect(&mut rx, |e| {
+        matches!(e, AcpEvent::Ready { .. } | AcpEvent::Ended { .. })
+    })
+    .await;
+    session.stop();
+    assert!(
+        matches!(events.last(), Some(AcpEvent::Ready { .. })),
+        "{events:?}"
+    );
+    let declared: Vec<PathBuf> = serde_json::from_str(
+        &std::fs::read_to_string(dir.join(".devplane/dirs.json")).unwrap_or_default(),
+    )
+    .unwrap_or_default();
+    assert_eq!(declared, vec![outside.clone()]);
+
+    // Without the capability: ended before any prompt, saying why.
+    let dir = scratch();
+    let (session, mut rx) =
+        devplane::acp::session::spawn_with(&echo_agent(), dir.clone(), &[], None, launch())
+            .await
+            .expect("the fixture starts");
+    session.prompt("hello").await.ok();
+    let events = collect(&mut rx, |e| {
+        matches!(e, AcpEvent::Ready { .. } | AcpEvent::Ended { .. })
+    })
+    .await;
+    session.stop();
+    match events.last() {
+        Some(AcpEvent::Ended { error: Some(e) }) => {
+            assert!(e.contains("cannot be told about"), "{e}")
+        }
+        other => panic!("expected the session to end, got {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !dir.join(".devplane/heard.log").exists(),
+        "no prompt reached an agent that cannot see its specification"
+    );
+}
+
+/// A notice the agent addresses to the person arrives as an event, in its
+/// own words.
+#[tokio::test]
+async fn a_notice_is_reported_not_dropped() {
+    let (session, mut rx) = devplane::acp::spawn(&echo_agent(), scratch(), &[], None)
+        .await
+        .expect("the fixture starts");
+    session.prompt("notice").await.unwrap();
+    let events = collect(&mut rx, |e| matches!(e, AcpEvent::TurnEnded { .. })).await;
+    session.stop();
+    assert!(
+        events.iter().any(|e| matches!(e,
+            AcpEvent::Notice { severity, title, description }
+                if severity == "warning"
+                    && title == "Rate limit close"
+                    && description.as_deref() == Some("80% of this hour's requests are used"))),
+        "{events:?}"
+    );
+}
+
+/// A stop closes the session over the protocol where the agent offers it,
+/// and says it did not where it does not.
+#[tokio::test]
+async fn closes_before_ending() {
+    for (extra, want) in [("", true), ("DEVPLANE_ECHO_NO_CLOSE=1", false)] {
+        let mut spec = echo_agent();
+        if !extra.is_empty() {
+            spec.command = format!("env {extra} {}", spec.command);
+        }
+        let dir = scratch();
+        let (session, mut rx) = devplane::acp::spawn(&spec, dir.clone(), &[], None)
+            .await
+            .expect("the fixture starts");
+        collect(&mut rx, |e| matches!(e, AcpEvent::Ready { .. })).await;
+        session.stop();
+        let events = collect(&mut rx, |e| matches!(e, AcpEvent::Ended { .. })).await;
+        let sent = events.iter().find_map(|e| match e {
+            AcpEvent::Closed { sent } => Some(*sent),
+            _ => None,
+        });
+        assert_eq!(sent, Some(want), "{extra}: {events:?}");
+        assert_eq!(dir.join(".devplane/closed.log").exists(), want, "{extra}");
+    }
 }
 
 /// An agent that offers `session/load` but not `session/resume` (as GitHub

@@ -20,6 +20,10 @@
 //! | `withdraw`      | asks a permission, then withdraws it (`$/cancel_request`) |
 //! | `diff-edit`     | reports an edit call whose diff arrives whole in a status-less update |
 //! | `conflict`      | calls `spec_and_tests_conflict` on the offered `devplane` server, then waits to be cancelled |
+//! | `ask-mcp`       | calls `change` with no arguments on the offered `devplane` server and writes the answer to `.devplane/mcp-answer.txt` |
+//! | `notice`        | sends a session notice (`warning`, with a description) |
+//! | `diff-ask`      | asks permission for an edit call whose request carries its diff |
+//! | `ten-edits`     | asks permission for ten edit calls in turn, each with its own diff |
 //! | anything else   | streams the prompt back and ends the turn |
 //!
 //! The behaviour is chosen from the prompt without Devplane's closing sentence
@@ -56,6 +60,16 @@
 //! | `DEVPLANE_ECHO_MODE_UPDATE_AFTER=<v>` | mid-turn, moves to `<v>` and says so twice: a `config_option_update`, then a `current_mode_update` |
 //! | `DEVPLANE_ECHO_SPARSE=1` | `tool` reports a call in pieces: title and kind, then a status-less update with only the input, then a permission naming only the id, then a status-only ending |
 //! | `DEVPLANE_ECHO_REPLAY=<session.jsonl>` | replays a recorded adapter (below) |
+//!
+//! Protocol paths:
+//!
+//! | Variable | What the agent does |
+//! |----------|---------------------|
+//! | `DEVPLANE_ECHO_NO_CLOSE=1` | withholds the `session/close` capability |
+//! | `DEVPLANE_ECHO_ADDDIRS=1` | advertises additional directories; writes what it was given to `.devplane/dirs.json` |
+//! | `DEVPLANE_ECHO_PAGES=<n>` | advertises `session/list` and lists `n` pages of one session each |
+//! | `DEVPLANE_ECHO_NEEDS_AUTH=1` | offers one agent and one terminal sign-in method and refuses `session/new` with `auth_required` until `authenticate` names the agent method |
+//! | `DEVPLANE_ECHO_VERSION=<n>` | answers `initialize` with protocol version `n` |
 //!
 //! Every mode request is appended to `.devplane/heard.log` as
 //! `set_config_option <id>=<v>` or `set_mode <v>`, before any prompt.
@@ -240,6 +254,26 @@ fn recorded_session() -> Option<String> {
 /// The working directory the client gave this session.
 static CWD: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
+/// The agent sign-in method `authenticate` named, once it has.
+static SIGNED_IN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Writes the additional directories the client declared to
+/// `.devplane/dirs.json`, when it advertised taking them.
+fn note_dirs(dirs: &[std::path::PathBuf]) {
+    if std::env::var_os("DEVPLANE_ECHO_ADDDIRS").is_none() {
+        return;
+    }
+    let Some(root) = CWD.lock().expect("cwd").clone() else {
+        return;
+    };
+    std::fs::create_dir_all(root.join(".devplane")).ok();
+    std::fs::write(
+        root.join(".devplane/dirs.json"),
+        serde_json::to_string(dirs).unwrap_or_default(),
+    )
+    .ok();
+}
+
 /// The MCP servers the client offered on the last `session/new`, resume or
 /// load, as JSON.
 static OFFERED: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
@@ -356,28 +390,46 @@ async fn main() -> Result<()> {
                 // `DEVPLANE_ECHO_NO_RESUME=1` advertises only `loadSession`
                 // (as GitHub Copilot does), exercising the client's fallback.
                 let load_only = std::env::var_os("DEVPLANE_ECHO_NO_RESUME").is_some();
-                // `DEVPLANE_ECHO_NEEDS_AUTH=1`: an agent that requires sign-in.
+                // `DEVPLANE_ECHO_NEEDS_AUTH=1`: an agent that requires sign-in,
+                // signed in by itself when asked or by its own terminal login.
                 let auth = if std::env::var_os("DEVPLANE_ECHO_NEEDS_AUTH").is_some() {
-                    vec![agent_client_protocol::schema::v1::AuthMethod::Agent(
-                        agent_client_protocol::schema::v1::AuthMethodAgent::new(
-                            agent_client_protocol::schema::v1::AuthMethodId::new("echo-login"),
-                            "Log in with Echo",
-                        )
-                        .description(Some("Run `echo login` in the terminal".to_string())),
-                    )]
+                    use agent_client_protocol::schema::v1 as p;
+                    let mut methods = vec![p::AuthMethod::Agent(
+                        p::AuthMethodAgent::new(p::AuthMethodId::new("echo-login"), "Log in with Echo")
+                            .description(Some("Run `echo login` in the terminal".to_string())),
+                    )];
+                    // Offered only to a client that says it can run one.
+                    if init.client_capabilities.auth.terminal {
+                        let mut t = p::AuthMethodTerminal::new(
+                            p::AuthMethodId::new("echo-terminal"),
+                            "Echo's own login",
+                        );
+                        t.args = vec!["--login".into()];
+                        methods.push(p::AuthMethod::Terminal(t));
+                    }
+                    methods
                 } else {
                     vec![]
                 };
                 let caps = if load_only {
                     AgentCapabilities::new().load_session(true)
                 } else {
+                    let mut session = SessionCapabilities::new().resume(SessionResumeCapabilities::new());
+                    if std::env::var_os("DEVPLANE_ECHO_NO_CLOSE").is_none() {
+                        session = session.close(SessionCloseCapabilities::new());
+                    }
+                    if std::env::var_os("DEVPLANE_ECHO_ADDDIRS").is_some() {
+                        session = session.additional_directories(
+                            agent_client_protocol::schema::v1::SessionAdditionalDirectoriesCapabilities::new(),
+                        );
+                    }
+                    if std::env::var_os("DEVPLANE_ECHO_PAGES").is_some() {
+                        session = session
+                            .list(agent_client_protocol::schema::v1::SessionListCapabilities::new());
+                    }
                     AgentCapabilities::new()
                         .load_session(true)
-                        .session_capabilities(
-                            SessionCapabilities::new()
-                                .resume(SessionResumeCapabilities::new())
-                                .close(SessionCloseCapabilities::new()),
-                        )
+                        .session_capabilities(session)
                 };
                 if let Some(recorded) = recorded_answer("initialize") {
                     return responder.respond(
@@ -385,7 +437,15 @@ async fn main() -> Result<()> {
                             .expect("the recorded initialize answer parses"),
                     );
                 }
-                let resp = InitializeResponse::new(init.protocol_version)
+                let version = match std::env::var("DEVPLANE_ECHO_VERSION")
+                    .ok()
+                    .and_then(|v| v.parse::<u16>().ok())
+                {
+                    Some(v) => serde_json::from_value(serde_json::json!(v))
+                        .expect("a protocol version is a number"),
+                    None => init.protocol_version,
+                };
+                let resp = InitializeResponse::new(version)
                     .agent_capabilities(caps)
                     .auth_methods(auth);
                 let resp = match std::env::var("DEVPLANE_ECHO_AGENT_INFO")
@@ -408,12 +468,18 @@ async fn main() -> Result<()> {
                 // ACP gives the working directory in the protocol, not the
                 // process cwd.
                 *CWD.lock().expect("cwd") = Some(req.cwd.clone());
-                if std::env::var_os("DEVPLANE_ECHO_NEEDS_AUTH").is_some() {
+                if let Some(method) = SIGNED_IN.lock().expect("signed in").clone() {
+                    hear(&format!("authenticate {method}"));
+                }
+                if std::env::var_os("DEVPLANE_ECHO_NEEDS_AUTH").is_some()
+                    && SIGNED_IN.lock().expect("signed in").as_deref() != Some("echo-login")
+                {
                     return responder.respond_with_error(
-                        agent_client_protocol::Error::invalid_request()
+                        agent_client_protocol::Error::auth_required()
                             .data("authentication required"),
                     );
                 }
+                note_dirs(&req.additional_directories);
                 // A new id every time, so a resumed session is distinguishable
                 // from a restarted one.
                 let id = mint_session();
@@ -453,6 +519,7 @@ async fn main() -> Result<()> {
                     );
                 }
                 note_session(&req.mcp_servers);
+                note_dirs(&req.additional_directories);
                 if let Ok(v) = std::env::var("DEVPLANE_ECHO_RESUME_START") {
                     *CURRENT_MODE.lock().expect("mode") = Some(v);
                 }
@@ -536,6 +603,42 @@ async fn main() -> Result<()> {
                 }
                 *CURRENT_MODE.lock().expect("mode") = Some(req.mode_id.to_string());
                 responder.respond(SetSessionModeResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: agent_client_protocol::schema::v1::AuthenticateRequest, responder, _cx| {
+                // Only the agent-handled method signs in here; a terminal one
+                // is the person's own process, never a request.
+                if req.method_id.to_string() != "echo-login" {
+                    return responder.respond_with_error(
+                        agent_client_protocol::Error::invalid_params()
+                            .data(format!("no agent sign-in `{}`", req.method_id)),
+                    );
+                }
+                *SIGNED_IN.lock().expect("signed in") = Some(req.method_id.to_string());
+                responder.respond(agent_client_protocol::schema::v1::AuthenticateResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |req: agent_client_protocol::schema::v1::ListSessionsRequest, responder, _cx| {
+                // One session per page; the cursor is the next page's number.
+                let pages: usize = std::env::var("DEVPLANE_ECHO_PAGES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
+                let page: usize = req.cursor.as_deref().and_then(|c| c.parse().ok()).unwrap_or(0);
+                let mut resp = agent_client_protocol::schema::v1::ListSessionsResponse::new(vec![
+                    agent_client_protocol::schema::v1::SessionInfo::new(
+                        SessionId::new(format!("listed-{page}")),
+                        std::env::temp_dir(),
+                    ),
+                ]);
+                if page + 1 < pages {
+                    resp.next_cursor = Some((page + 1).to_string());
+                }
+                responder.respond(resp)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -651,6 +754,12 @@ async fn take_turn(
             )
             .ok();
         }
+    }
+
+    // A methodology's own specify command, answered as that command would be:
+    // see `draft_turn`, kept apart from the ACP behaviours above.
+    if let Some(stop) = draft_turn(req, connection, &text).await? {
+        return Ok(stop);
     }
 
     // ACP usage is a running session total; cost is optional.
@@ -889,6 +998,90 @@ async fn take_turn(
         ))?;
     }
 
+    // Asks the offered server about its own change, naming none.
+    if wanted.contains("ask-mcp") {
+        let said = call_offered("change", serde_json::json!({}), false).await;
+        if let Some(root) = CWD.lock().expect("cwd").clone() {
+            std::fs::create_dir_all(root.join(".devplane")).ok();
+            std::fs::write(root.join(".devplane/mcp-answer.txt"), &said).ok();
+        }
+    }
+
+    // Advisory words for the person.
+    if wanted.contains("notice") {
+        connection.send_notification(SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::Notice(
+                agent_client_protocol::schema::v1::Notice::new(
+                    agent_client_protocol::schema::v1::NoticeSeverity::Warning,
+                    "Rate limit close",
+                )
+                .description(Some("80% of this hour's requests are used".to_string())),
+            ),
+        ))?;
+    }
+
+    // Edit calls whose permission requests carry their diffs.
+    let edits = match () {
+        _ if wanted.contains("ten-edits") => 10,
+        _ if wanted.contains("diff-ask") => 1,
+        _ => 0,
+    };
+    let root = CWD.lock().expect("cwd").clone().filter(|_| edits > 0);
+    if let Some(root) = root {
+        for n in 1..=edits {
+            let file = root.join(format!("f{n}.txt"));
+            let id = format!("e{n}");
+            let answer = connection
+                .send_request(RequestPermissionRequest::new(
+                    req.session_id.clone(),
+                    ToolCallUpdate::new(
+                        ToolCallId::new(id.clone()),
+                        ToolCallUpdateFields::new()
+                            .title(format!("Edit f{n}.txt"))
+                            .kind(ToolKind::Edit)
+                            .raw_input(serde_json::json!({ "file_path": file.to_string_lossy() }))
+                            .content(vec![ToolCallContent::Diff(
+                                Diff::new(file.clone(), format!("after {n}\n"))
+                                    .old_text(format!("before {n}\n")),
+                            )]),
+                    ),
+                    vec![
+                        PermissionOption::new(
+                            PermissionOptionId::new("allow"),
+                            "Allow once".to_string(),
+                            PermissionOptionKind::AllowOnce,
+                        ),
+                        PermissionOption::new(
+                            PermissionOptionId::new("deny"),
+                            "Deny".to_string(),
+                            PermissionOptionKind::RejectOnce,
+                        ),
+                    ],
+                ))
+                .block_task()
+                .await?;
+            if is_cancelled(&req.session_id.to_string()) {
+                return Ok(StopReason::Cancelled);
+            }
+            let allowed = matches!(
+                &answer.outcome,
+                agent_client_protocol::schema::v1::RequestPermissionOutcome::Selected(o)
+                    if o.option_id.to_string() == "allow"
+            );
+            connection.send_notification(SessionNotification::new(
+                req.session_id.clone(),
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    ToolCallId::new(id),
+                    ToolCallUpdateFields::new().status(match allowed {
+                        true => ToolCallStatus::Completed,
+                        false => ToolCallStatus::Failed,
+                    }),
+                )),
+            ))?;
+        }
+    }
+
     // Says the spec and the tests conflict through the offered server, then
     // waits to be stopped, as an agent that has said so should.
     if wanted.contains("conflict") {
@@ -1050,6 +1243,28 @@ async fn replay_turn(
 /// Launches the offered `devplane` server over stdio and calls the stop tool,
 /// returning what it answered (each answer on its own line when called twice).
 async fn claim_conflict() -> String {
+    let reason = std::env::var("DEVPLANE_ECHO_CLAIM_REASON").unwrap_or_else(|_| {
+        "The spec says sessions last 30 days; tests/session_test.rs asserts 7.".into()
+    });
+    let paths: serde_json::Value = std::env::var("DEVPLANE_ECHO_CLAIM_PATHS")
+        .ok()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_else(|| {
+            serde_json::json!(["specs/043-sessions/spec.md", "tests/session_test.rs"])
+        });
+    let twice = std::env::var_os("DEVPLANE_ECHO_CLAIM_TWICE").is_some();
+    call_offered(
+        "spec_and_tests_conflict",
+        serde_json::json!({"reason": reason, "paths": paths}),
+        twice,
+    )
+    .await
+}
+
+/// Launches the offered `devplane` server with its own command, arguments and
+/// environment, and calls one tool (twice at once with `twice`); the answers'
+/// text, one per line, `refused: ` before an error.
+async fn call_offered(tool: &str, arguments: serde_json::Value, twice: bool) -> String {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let offered = OFFERED.lock().expect("offered").clone();
     let Some(server) = offered
@@ -1111,16 +1326,6 @@ async fn claim_conflict() -> String {
     };
     let mut stdin = child.stdin.take().expect("piped");
     let mut lines = tokio::io::BufReader::new(child.stdout.take().expect("piped")).lines();
-    let reason = std::env::var("DEVPLANE_ECHO_CLAIM_REASON").unwrap_or_else(|_| {
-        "The spec says sessions last 30 days; tests/session_test.rs asserts 7.".into()
-    });
-    let paths: serde_json::Value = std::env::var("DEVPLANE_ECHO_CLAIM_PATHS")
-        .ok()
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_else(|| {
-            serde_json::json!(["specs/043-sessions/spec.md", "tests/session_test.rs"])
-        });
-    let twice = std::env::var_os("DEVPLANE_ECHO_CLAIM_TWICE").is_some();
     let mut send = Vec::new();
     send.push(
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -1132,8 +1337,8 @@ async fn claim_conflict() -> String {
     for id in &calls {
         send.push(
             serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
-            "name": "spec_and_tests_conflict",
-            "arguments": {"reason": reason, "paths": paths}}}),
+            "name": tool,
+            "arguments": arguments}}),
         );
     }
     let mut answers = std::collections::BTreeMap::new();
@@ -1189,4 +1394,228 @@ async fn claim_conflict() -> String {
         return "the devplane server did not answer the call".into();
     }
     answers.into_values().collect::<Vec<_>>().join("\n")
+}
+
+// ── Drafting: a methodology's own command, answered as it would be ──────────
+//
+// Separate from the ACP behaviours above. A prompt that starts with a spelling
+// of Spec Kit's specify command (`/speckit-specify`, `/speckit.specify`,
+// `$speckit-specify`, `/skill:speckit-specify`) or of OpenSpec's propose
+// workflow (`/openspec-propose`, `$openspec-propose`, `/opsx:propose`,
+// `/opsx-propose`) is answered the way that command answers it: Spec Kit's
+// writes `spec.md` and `checklists/requirements.md` into
+// `$SPECIFY_FEATURE_DIRECTORY`; OpenSpec's writes a change folder under
+// `openspec/changes/<slug>` (`DEVPLANE_ECHO_SLUG`, else the first words of the
+// description). The words after the command are the description, quoted into
+// the files as the command's own template quotes it.
+//
+// Every file written is appended to `.devplane/wrote.log` as one JSON line,
+// `{"path", "content"}`, and the agent's environment to `.devplane/env.json`.
+//
+// | Variable | What the agent does |
+// |----------|---------------------|
+// | `DEVPLANE_ECHO_DRAFT_ASK=1` | asks permission to write first; a refusal writes nothing |
+// | `DEVPLANE_ECHO_DRAFT_NOTHING=1` | writes nothing, as a command that produced no folder |
+// | `DEVPLANE_ECHO_DRAFT_OUTSIDE=<path>` | also writes `<path>`, outside the folder |
+
+/// The methodology a prompt's first word invokes, and the description after it.
+fn drafted_by(text: &str) -> Option<(&'static str, &str)> {
+    const SPEC_KIT: &[&str] = &[
+        "/speckit-specify ",
+        "/speckit.specify ",
+        "$speckit-specify ",
+        "/skill:speckit-specify ",
+    ];
+    const OPENSPEC: &[&str] = &[
+        "/openspec-propose ",
+        "$openspec-propose ",
+        "/opsx:propose ",
+        "/opsx-propose ",
+    ];
+    SPEC_KIT
+        .iter()
+        .find_map(|p| text.strip_prefix(p).map(|rest| ("speckit", rest)))
+        .or_else(|| {
+            OPENSPEC
+                .iter()
+                .find_map(|p| text.strip_prefix(p).map(|rest| ("openspec", rest)))
+        })
+}
+
+/// Writes one file under the session's directory and logs it.
+fn draft_write(root: &std::path::Path, rel: &str, content: &str) {
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&path, content).ok();
+    let log = root.join(".devplane/wrote.log");
+    std::fs::create_dir_all(log.parent().expect("parent")).ok();
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
+        let line = serde_json::json!({ "path": rel, "content": content });
+        writeln!(f, "{line}").ok();
+    }
+}
+
+/// A draft command's turn; `None` when the prompt is not one.
+async fn draft_turn(
+    req: &PromptRequest,
+    connection: &agent_client_protocol::ConnectionTo<Client>,
+    text: &str,
+) -> Result<Option<StopReason>> {
+    let Some((methodology, description)) = drafted_by(text) else {
+        return Ok(None);
+    };
+    let Some(root) = CWD.lock().expect("cwd").clone() else {
+        return Ok(Some(StopReason::EndTurn));
+    };
+    let env: serde_json::Map<String, serde_json::Value> = [
+        "SPECIFY_FEATURE_DIRECTORY",
+        "SPECIFY_FEATURE_NO_PERSIST",
+        "DEVPLANE_RUN",
+    ]
+    .iter()
+    .filter_map(|k| {
+        std::env::var(k)
+            .ok()
+            .map(|v| (k.to_string(), serde_json::Value::String(v)))
+    })
+    .collect();
+    std::fs::create_dir_all(root.join(".devplane")).ok();
+    std::fs::write(
+        root.join(".devplane/env.json"),
+        serde_json::Value::Object(env).to_string(),
+    )
+    .ok();
+
+    let say = |t: String| {
+        SessionNotification::new(
+            req.session_id.clone(),
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(t),
+            ))),
+        )
+    };
+    if std::env::var_os("DEVPLANE_ECHO_DRAFT_ASK").is_some() {
+        let answer = connection
+            .send_request(RequestPermissionRequest::new(
+                req.session_id.clone(),
+                ToolCallUpdate::new(
+                    ToolCallId::new("draft-write"),
+                    ToolCallUpdateFields::new()
+                        .title("Write the specification")
+                        .kind(ToolKind::Edit),
+                ),
+                vec![
+                    PermissionOption::new(
+                        PermissionOptionId::new("allow"),
+                        "Allow once".to_string(),
+                        PermissionOptionKind::AllowOnce,
+                    ),
+                    PermissionOption::new(
+                        PermissionOptionId::new("deny"),
+                        "Deny".to_string(),
+                        PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            ))
+            .block_task()
+            .await?;
+        let allowed = matches!(
+            &answer.outcome,
+            agent_client_protocol::schema::v1::RequestPermissionOutcome::Selected(s)
+                if s.option_id.to_string() == "allow"
+        );
+        if !allowed {
+            connection.send_notification(say("not allowed to write; nothing written".into()))?;
+            return Ok(Some(StopReason::EndTurn));
+        }
+    }
+    if std::env::var_os("DEVPLANE_ECHO_DRAFT_NOTHING").is_some() {
+        connection.send_notification(say("drafted nothing".into()))?;
+        return Ok(Some(StopReason::EndTurn));
+    }
+    let folder = match methodology {
+        "speckit" => {
+            let Ok(dir) = std::env::var("SPECIFY_FEATURE_DIRECTORY") else {
+                connection.send_notification(say(
+                    "SPECIFY_FEATURE_DIRECTORY is not set; nothing written".into(),
+                ))?;
+                return Ok(Some(StopReason::EndTurn));
+            };
+            let dir = std::path::PathBuf::from(dir);
+            let rel = dir
+                .strip_prefix(&root)
+                .unwrap_or(&dir)
+                .to_string_lossy()
+                .replace('\\', "/");
+            draft_write(
+                &root,
+                &format!("{rel}/spec.md"),
+                &format!(
+                    "# Feature Specification\n\n**Input**: User description: \"{description}\"\n\n\
+                     ## Requirements\n\n\
+                     - **FR-001**: The system MUST do what the description says.\n\
+                     - **FR-002**: A lockout lasts [NEEDS CLARIFICATION: which timeout applies?].\n\
+                     - **FR-003**: The owner is told [NEEDS CLARIFICATION: by email or in the app?].\n\
+                     - **FR-004**: NEEDS CLARIFICATION which audit log keeps the attempts.\n"
+                ),
+            );
+            draft_write(
+                &root,
+                &format!("{rel}/checklists/requirements.md"),
+                "# Specification Quality Checklist\n\n- [ ] No [NEEDS CLARIFICATION] markers remain\n",
+            );
+            rel
+        }
+        _ => {
+            let slug = std::env::var("DEVPLANE_ECHO_SLUG").unwrap_or_else(|_| {
+                description
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|w| !w.is_empty())
+                    .take(4)
+                    .map(str::to_ascii_lowercase)
+                    .collect::<Vec<_>>()
+                    .join("-")
+            });
+            let rel = format!("openspec/changes/{slug}");
+            draft_write(
+                &root,
+                &format!("{rel}/.openspec.yaml"),
+                "schema: spec-driven\n",
+            );
+            draft_write(
+                &root,
+                &format!("{rel}/proposal.md"),
+                &format!(
+                    "## Why\n\n{description}\n\n## What Changes\n\n- The change the description asks for.\n"
+                ),
+            );
+            draft_write(
+                &root,
+                &format!("{rel}/tasks.md"),
+                "## 1. Implementation\n\n- [ ] 1.1 Build what the proposal says\n",
+            );
+            draft_write(
+                &root,
+                &format!("{rel}/specs/{slug}/spec.md"),
+                "## ADDED Requirements\n\n### Requirement: The described behaviour\nThe system SHALL do what the proposal says.\n",
+            );
+            rel
+        }
+    };
+    if let Ok(outside) = std::env::var("DEVPLANE_ECHO_DRAFT_OUTSIDE") {
+        draft_write(
+            &root,
+            &outside,
+            "written outside the specification folder\n",
+        );
+    }
+    connection.send_notification(say(format!("drafted {folder}")))?;
+    Ok(Some(StopReason::EndTurn))
 }

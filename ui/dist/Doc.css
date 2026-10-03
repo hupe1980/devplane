@@ -914,6 +914,44 @@
     font-size: 0.92em;
   }
 
+  h2.svelte-1dafjh {
+    margin: var(--s-3) 0 var(--s-1);
+    font-size: var(--t-sm);
+  }
+  h2.svelte-1dafjh span:where(.svelte-1dafjh) {
+    color: var(--faint);
+    font-weight: normal;
+  }
+  ul.svelte-1dafjh {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-1);
+    font-size: var(--t-sm);
+  }
+  .signin.svelte-1dafjh li:where(.svelte-1dafjh) {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-1);
+  }
+  .notice.warning.svelte-1dafjh b:where(.svelte-1dafjh) {
+    color: var(--wait);
+  }
+  .notice.error.svelte-1dafjh b:where(.svelte-1dafjh) {
+    color: var(--fail);
+  }
+  code.svelte-1dafjh {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+    user-select: all;
+  }
+  .quiet.svelte-1dafjh {
+    color: var(--faint);
+    font-size: var(--t-xs);
+  }
+
   .agent.svelte-1w0chr6 {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem);
@@ -1879,6 +1917,59 @@
   .sec.svelte-15l7e6g .n:where(.svelte-15l7e6g) {
     color: var(--faint);
     font-weight: 400;
+  }
+
+  .draft.svelte-1c7spck {
+    display: grid;
+    gap: var(--s-2);
+    margin: var(--s-2) var(--s-4);
+    padding: var(--s-3) var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--panel);
+  }
+  .head.svelte-1c7spck {
+    display: flex;
+    align-items: center;
+    gap: var(--s-2);
+    margin: 0;
+    flex-wrap: wrap;
+  }
+  .dim.svelte-1c7spck {
+    color: var(--dim);
+    font-size: var(--t-sm);
+  }
+  .sent.svelte-1c7spck,
+  .diff.svelte-1c7spck {
+    margin: 0;
+    padding: var(--s-2) var(--s-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg);
+    font-family: var(--mono);
+    font-size: var(--t-sm);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .says.svelte-1c7spck {
+    margin: 0;
+    font-size: var(--t-sm);
+    color: var(--ink);
+  }
+  .acts.svelte-1c7spck {
+    display: flex;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+  }
+  .offer.svelte-1c7spck {
+    display: grid;
+    gap: var(--s-2);
+  }
+  .primary.svelte-1c7spck {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--chrome);
+    font-weight: 600;
   }
 
   .refusal.svelte-1wz92j1 {

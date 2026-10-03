@@ -14,7 +14,10 @@
   import { go } from "../../lib/route";
   import { surfaces } from "../../lib/surfaces";
 
-  import type { Decision } from "../../wire/Decision";
+  import type { Decision as Row } from "../../wire/Decision";
+  import Edits, { type Edit } from "./Edits.svelte";
+  /// A ledger row: the decision, and for a driven call the edits it reported.
+  type Decision = Row & { edits?: Edit[]; no_edit?: string | null };
   let { about = "", blind = "" }: { about?: string; blind?: string } = $props();
 
   /// How many rows one read asks for; a full read says there are more.
@@ -128,6 +131,7 @@
           <p class="when">{new Date(pick.at).toLocaleString()} · {pick.outcome}</p>
           <pre>{pick.subject}</pre>
           {#if pick.reason}<p><Inline text={pick.reason} /></p>{/if}
+          <Edits edits={pick.edits} none={pick.no_edit} />
           <div class="links">
             {#if pick.change_id}<a href={`#change/${encodeURIComponent(pick.change_id)}`}><Icon name="change" size={13} /> the change</a>{/if}
             {#if pick.run_id}<a href={`#why/${encodeURIComponent(pick.run_id)}`}><Icon name="sessions" size={13} /> everything about this run</a>{/if}

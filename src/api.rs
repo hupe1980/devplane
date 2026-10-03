@@ -70,8 +70,17 @@ pub fn router(state: Shared) -> Router {
         .route("/api/changes/{id}/certificate", get(change_certificate))
         .route("/api/changes/{id}/open", post(open_change))
         .route("/api/changes/{id}/resume", post(resume_change))
+        .route("/api/changes/{id}/login", post(login_change))
         .route("/api/changes/{id}/claim/read", post(read_claim))
         .route("/api/changes/adopt", post(adopt_change))
+        .route("/api/changes/draft", post(draft_change))
+        .route("/api/changes/{id}/draft/accept", post(accept_draft))
+        .route("/api/changes/{id}/draft/reject", post(reject_draft))
+        .route("/api/changes/{id}/clarify", post(clarify_change))
+        .route(
+            "/api/projects/{id}/config/open-questions",
+            post(accept_open_questions),
+        )
         .route("/api/changes/{id}/archive", post(archive_change))
         .route("/api/changes/{id}/offer", post(offer_change))
         .route("/api/projects", get(projects))
@@ -1766,9 +1775,36 @@ async fn resume_change(
     State(state): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: Option<Json<ResumeBody>>,
 ) -> impl IntoResponse {
     guard!(state, headers);
     let id = change_id!(state, id);
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    // Another agent than the one that last drove it: a new run in the same
+    // worktree, told only the person's words. The same agent resumes below.
+    if let Some(agent) = body.agent.as_deref() {
+        let prompt = body.prompt.as_deref().unwrap_or_default();
+        match crate::change::resume_with_agent(&state, &id, agent, prompt).await {
+            Ok(Some(switched)) => {
+                acted_on(
+                    &state,
+                    id.as_str(),
+                    &[crate::core::AttentionKind::Interrupted],
+                    crate::core::attention::Resolution::Acted,
+                )
+                .await;
+                return Json(json!({"ok": true, "switched": switched})).into_response();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let status = match e.to_string().contains("still running") {
+                    true => StatusCode::CONFLICT,
+                    false => StatusCode::BAD_REQUEST,
+                };
+                return (status, Json(json!({"error": e.to_string()}))).into_response();
+            }
+        }
+    }
     match crate::change::resume(&state, &id).await {
         Ok(()) => {
             acted_on(
@@ -1785,6 +1821,40 @@ async fn resume_change(
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+/// What a resume may name: another agent to continue with, and the person's
+/// words for it. Both absent resumes the change's own session.
+#[derive(Deserialize, Default)]
+struct ResumeBody {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LoginBody {
+    method: String,
+    /// The person ran the agent's own terminal login; start it again.
+    #[serde(default)]
+    after_terminal: bool,
+}
+
+/// Starts a change's agent again with the sign-in method the person chose.
+/// Never carries a credential.
+async fn login_change(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<LoginBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::change::login(&state, &id, &body.method, body.after_terminal).await {
+        Ok(run) => Json(json!({"ok": true, "run": run})).into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 
@@ -2887,5 +2957,266 @@ mod snooze_tests {
         assert!(super::snooze_until(i64::MAX).is_some());
         assert!(super::snooze_until(0).is_none());
         assert!(super::snooze_until(-5).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drafting a specification by the project's own methodology
+// ---------------------------------------------------------------------------
+
+/// A draft request: the change's name, the agent, the methodology where the
+/// project has two, and the person's words, sent verbatim.
+#[derive(Deserialize)]
+struct DraftBody {
+    /// A registered project's id or name, or its root.
+    project: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    methodology: Option<String>,
+    #[serde(default)]
+    intent: String,
+    /// Draft again into this change, whose last draft was rejected.
+    #[serde(default)]
+    change: Option<String>,
+    /// Say what would be sent, and create nothing.
+    #[serde(default)]
+    preview: bool,
+}
+
+/// A refusal as every draft route says it: the cause, its sentence, and the
+/// sentence again under `error`, which every client reads.
+fn draft_refused(status: StatusCode, r: &crate::draft::Refused) -> axum::response::Response {
+    (
+        status,
+        Json(json!({"refused": r.cause, "says": r.says, "error": r.says})),
+    )
+        .into_response()
+}
+
+/// The root a request names: a registered project's id, name or root, else
+/// the path as given.
+async fn project_root_of(state: &Shared, named: &str) -> std::path::PathBuf {
+    let w = state.world.lock().await;
+    let path = std::path::Path::new(named);
+    let canonical = path.canonicalize().ok();
+    w.projects()
+        .find(|p| {
+            p.id.as_str() == named
+                || p.name == named
+                || canonical.as_deref() == Some(p.root.as_path())
+        })
+        .map(|p| p.root.clone())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Starts a draft, or with `preview` says what it would send. Every refusal
+/// comes before anything is made.
+async fn draft_change(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<DraftBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let methodology = match body.methodology.as_deref().filter(|m| !m.trim().is_empty()) {
+        None => None,
+        Some(m) => match crate::core::draft::Methodology::parse(m) {
+            Some(m) => Some(m),
+            None => {
+                return draft_refused(
+                    StatusCode::CONFLICT,
+                    &crate::draft::Refused {
+                        cause: "methodology",
+                        says: format!(
+                            "`{m}` is not a methodology drafting dispatches: speckit or openspec"
+                        ),
+                    },
+                );
+            }
+        },
+    };
+    let change = match body.change.as_deref() {
+        Some(c) => Some(change_id!(state, c.to_string())),
+        None => None,
+    };
+    let req = crate::draft::DraftRequest {
+        project: project_root_of(&state, &body.project).await,
+        name: body.name,
+        agent: body.agent,
+        methodology,
+        intent: body.intent,
+        change,
+    };
+    let status_of = |r: &crate::draft::Refused| match r.cause {
+        "empty_intent" | "no_name" => StatusCode::BAD_REQUEST,
+        _ => StatusCode::CONFLICT,
+    };
+    if body.preview {
+        return match crate::draft::preview(&req) {
+            Ok(p) => Json(json!(p)).into_response(),
+            Err(r) => {
+                // The methodologies on offer, so a surface can ask for one.
+                let offered = req
+                    .project
+                    .canonicalize()
+                    .map(|root| crate::draft::offered(&root))
+                    .unwrap_or_default();
+                let mut out = json!({"refused": r.cause, "says": r.says, "error": r.says});
+                out["offered"] = json!(offered);
+                (status_of(&r), Json(out)).into_response()
+            }
+        };
+    }
+    match crate::draft::start(&state, req).await {
+        Ok(started) => {
+            let c = state.changes.lock().await.get(&started.change).cloned();
+            Json(json!({
+                "change": started.change,
+                "change_id": started.change,
+                "run": started.run,
+                "sent": started.sent,
+                "folder": started.folder,
+                "says": started.says,
+                "worktree": c.as_ref().and_then(|c| c.worktree.clone()),
+                "branch": c.as_ref().and_then(|c| c.branch.clone()),
+            }))
+            .into_response()
+        }
+        Err(r) => draft_refused(status_of(&r), &r),
+    }
+}
+
+/// The person accepts the drafted folder as the change's specification.
+async fn accept_draft(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::draft::accept(&state, &id).await {
+        Ok(spec) => Json(json!({
+            "spec": spec,
+            "says": format!("accepted — {spec} is the specification this change answers; recorded as yours"),
+        }))
+        .into_response(),
+        Err(r) => draft_refused(StatusCode::CONFLICT, &r),
+    }
+}
+
+/// The person rejects the draft: the worktree is put back.
+async fn reject_draft(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::draft::reject(&state, &id).await {
+        Ok(removed) => Json(json!({
+            "removed": removed,
+            "says": "rejected — the worktree is back where it was at dispatch; the record is kept",
+        }))
+        .into_response(),
+        Err(r) => draft_refused(StatusCode::CONFLICT, &r),
+    }
+}
+
+/// One marker line answered: the diff, and the write only on `confirm`.
+#[derive(Deserialize)]
+struct ClarifyBody {
+    path: String,
+    line: u32,
+    text: String,
+    answer: String,
+    #[serde(default)]
+    confirm: bool,
+}
+
+async fn clarify_change(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ClarifyBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let id = change_id!(state, id);
+    match crate::draft::clarify(
+        &state,
+        &id,
+        &body.path,
+        body.line,
+        &body.text,
+        &body.answer,
+        body.confirm,
+    )
+    .await
+    {
+        Ok(a) => Json(json!({
+            "diff": a.diff,
+            "written": a.written,
+            "says": match a.written {
+                true => "written — your words replaced the marker, and the answer is recorded as yours",
+                false => "this is the whole edit; nothing is written until you confirm",
+            },
+        }))
+        .into_response(),
+        Err((status, r)) => draft_refused(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::CONFLICT),
+            &r,
+        ),
+    }
+}
+
+/// Accepting the offered `[spec] open_questions`: written exactly as offered.
+#[derive(Deserialize)]
+struct OpenQuestionsBody {
+    #[serde(default)]
+    accept: bool,
+    /// The fingerprint of `devplane.toml` the offer was computed from.
+    #[serde(default)]
+    base: String,
+}
+
+async fn accept_open_questions(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<OpenQuestionsBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    if !body.accept {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "nothing is written unless `accept` is true"})),
+        )
+            .into_response();
+    }
+    let root = {
+        let w = state.world.lock().await;
+        w.projects()
+            .find(|p| p.id.as_str() == id)
+            .map(|p| p.root.clone())
+    };
+    let Some(root) = root else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such project"})),
+        )
+            .into_response();
+    };
+    match crate::draft::accept_open_questions(&state, &root, &body.base).await {
+        Ok(diff) => Json(json!({
+            "written": true,
+            "diff": diff,
+            "says": "written — devplane.toml now declares Spec Kit's marker; recorded as yours",
+        }))
+        .into_response(),
+        Err((status, r)) => draft_refused(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::CONFLICT),
+            &r,
+        ),
     }
 }

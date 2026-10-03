@@ -11,6 +11,7 @@
   import { spell } from "../../lib/keys";
   import { answerItemKeys } from "./keys";
   import { copyCommand, untilActivity } from "./actions";
+  import Marker from "./Marker.svelte";
   import type { ReadyFacts } from "../../wire/ReadyFacts";
 
   /// How much of a detail the row shows; the rest is in the `title`.
@@ -318,6 +319,7 @@
       <p class="elsewhere"><Inline text={item.no_offer.sentence} /></p>
     {/if}
 
+    {#if has("answer") || has("tell_agent")}<Marker {item} {say} />{/if}
     <!-- A watched session has no protocol request, so nothing here can grant it. -->
     {#if item.answer_in}<p class="elsewhere"><Inline text={item.answer_in} /></p>{/if}
     <!-- The way to the vendor's own dialog: a documented link, else the
@@ -351,12 +353,8 @@
         <span class="keyed"><a class="act primary" href={`#change/${encodeURIComponent(item.change_id)}/review`} data-key="r" data-action="review">review</a><kbd>r</kbd></span>
       {/if}
       <!-- A drift: tell the run which files moved, or accept it. Either is recorded. -->
-      {#if has("tell_run")}
-        <button data-action="tell_run" onclick={() => act(item, "tell_run")}>tell the run</button>
-      {/if}
-      {#if has("accept_drift")}
-        <button data-action="accept_drift" onclick={() => act(item, "accept_drift")}>accept the drift</button>
-      {/if}
+      {#if has("tell_run")}<button data-action="tell_run" onclick={() => act(item, "tell_run")}>tell the run</button>{/if}
+      {#if has("accept_drift")}<button data-action="accept_drift" onclick={() => act(item, "accept_drift")}>accept the drift</button>{/if}
       {#if has("open") && (item.run_id || item.change_id)}
         <span class="keyed"
           ><a

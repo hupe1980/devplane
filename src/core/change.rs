@@ -1017,6 +1017,10 @@ pub struct Change {
     /// never removed, only closed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_claims: Vec<crate::core::claim::StopClaim>,
+    /// The specification draft this change was started for, when it was: the
+    /// methodology's own command, what was sent, and where it got to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<crate::core::draft::Draft>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -1059,6 +1063,7 @@ impl Change {
             snoozed: Default::default(),
             base_checks: None,
             stop_claims: Vec::new(),
+            draft: None,
             created_at: now,
             updated_at: now,
         }

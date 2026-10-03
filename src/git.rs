@@ -1711,6 +1711,33 @@ pub async fn checkout_paths(dir: &Path, treeish: &str, paths: &[String]) -> Resu
     Ok(())
 }
 
+/// Puts a checkout back to `commit`: tracked files as committed there,
+/// untracked files removed (ignored ones kept, so installed dependencies
+/// stay), then each of `also_remove` removed by name even where git ignores
+/// it. Returns what was removed by name.
+pub async fn restore_to(dir: &Path, commit: &str, also_remove: &[String]) -> Result<Vec<String>> {
+    let named: Vec<(String, PathBuf)> = also_remove
+        .iter()
+        .filter_map(|n| Some((n.clone(), crate::spec::confine(dir, n).ok()?)))
+        .filter(|(_, p)| std::fs::symlink_metadata(p).is_ok())
+        .collect();
+    git(dir, &["reset", "--quiet", "--hard", commit]).await?;
+    git(dir, &["clean", "-fdq"]).await?;
+    for (_, path) in &named {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(path)?,
+            Ok(_) => std::fs::remove_file(path)?,
+            Err(_) => {}
+        }
+    }
+    // What was there before and is not now: removed by the clean or by name.
+    Ok(named
+        .into_iter()
+        .filter(|(_, p)| std::fs::symlink_metadata(p).is_err())
+        .map(|(n, _)| n)
+        .collect())
+}
+
 /// Removes everything git does not track, ignored files included.
 pub async fn clean_all(dir: &Path) -> Result<()> {
     git(dir, &["clean", "-ffdx"]).await?;

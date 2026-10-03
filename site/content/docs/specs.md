@@ -60,7 +60,8 @@ open_questions = ["NEEDS CLARIFICATION", "TBD"]
 ```
 
 `open_questions` has no default. The **Specifications** view lists each project's spec folders, task
-counts, and lines carrying those words.
+counts, and lines carrying those words; each such line in an open change's spec is
+[its own inbox item](#answering-an-open-question).
 
 ## Naming the spec a change answers
 
@@ -80,6 +81,66 @@ $ devplane change show c-3f9a
   spec       specs/001-password-reset at 3f9a1c40b7e2d518 over 4 documents
   tasks      11 ticked · 9 seen by a passing check
 ```
+
+## Drafting a spec with the project's own tool
+
+Two sentences of intent can start the spec itself. Devplane runs the command your project already
+uses, through the agent you choose, in the change's own worktree, and writes none of the spec:
+
+```sh
+devplane change draft rate-limit --agent claude -- \
+  Limit login attempts per account. Lock the account after five tries in a row.
+devplane change review <id>          # the drafted folder, file by file
+devplane change draft-accept <id>    # or: devplane change draft-reject <id>
+```
+
+- **What is sent** is the tool's own command followed by your words, verbatim, and nothing else.
+  For **Spec Kit** the command is spelled the way that agent invokes it, from the project's
+  `.specify/integration.json`: `/speckit-specify` in skills mode, `/speckit.specify` in command mode,
+  `$speckit-specify` for Codex and `/skill:speckit-specify` for Kimi. For **OpenSpec** it is the
+  propose workflow OpenSpec installed for that agent — `/openspec-propose` (or `$openspec-propose`
+  for Codex) where the skill is installed, else `/opsx:propose` or `/opsx-propose`. `--dry-run`
+  prints it and starts nothing.
+- **Spec Kit** is told the folder to write: `SPECIFY_FEATURE_DIRECTORY` names
+  `specs/<next number>-<name>` inside the worktree, numbered the project's way
+  (`.specify/init-options.json`) and never a number another open change already holds, and
+  `SPECIFY_FEATURE_NO_PERSIST=1` keeps Spec Kit's scripts from recording an active feature (Spec Kit
+  1.0.11 and later; older versions record it inside the worktree, and the change says which version
+  it found). **OpenSpec**'s propose flow names its own change under `openspec/changes/`.
+- **Refused before anything starts**, naming what to do: no words; an agent with no Spec Kit
+  integration installed (`specify integration install <agent>`); OpenSpec's workflow missing for that
+  agent (`openspec init --tools <agent>`); a project with both tools and no `--methodology`; a project
+  whose only layout is Kiro or GSD, which drafting does not dispatch.
+- **It is a driven run**: every permission the agent asks reaches you or a rule you wrote, and is on
+  the record. While the draft waits for your decision, no gate, base check or drift check runs on it.
+- **Reviewed as a diff**: the drafted folder is what the change asked for, and any other file the run
+  touched is listed under *not asked for*. **Accept** makes the folder the spec the change answers;
+  Devplane commits nothing. **Reject** puts the worktree back where it was at dispatch and removes the
+  folder, even where git ignores it; the run and every decision stay on the record. A change answers
+  one spec, so a second draft waits until the first is rejected.
+
+Devplane writes no line into the drafted folder: every file in it is the agent's.
+
+### Answering an open question
+
+Each line in an open change's spec carrying one of your `open_questions` words is its own inbox item,
+naming the file and line and quoting it — never folded, and gone when the line is. A line in
+`checklists/` is not a question.
+
+```sh
+devplane change clarify <id> specs/002-rate-limit/spec.md:42 -- fifteen minutes
+```
+
+- **Bracketed** (`[NEEDS CLARIFICATION: which timeout applies?]`): your words replace exactly the
+  bracket. The one-line diff is shown first and written only on `--yes`, a `y` at the terminal, or
+  *write it* in the inbox; a line that changed since it was read is refused.
+- **Unbracketed**: Devplane does not edit it. Send your answer to the change's agent
+  (`devplane change prompt <id> -- <answer>`, or *send to the agent* in the inbox), and its edit comes
+  back as a diff.
+- **No words declared**: after a Spec Kit draft the change offers `open_questions =
+  ["NEEDS CLARIFICATION"]` — the marker Spec Kit's own template writes — as a diff to
+  `devplane.toml`, fenced by a comment naming Devplane and written only when you accept it. OpenSpec
+  defines no such word, so after an OpenSpec draft the change names the setting and offers none.
 
 ## Sending chosen tasks
 

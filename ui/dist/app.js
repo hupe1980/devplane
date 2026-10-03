@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["Answer.js","api.js","resource.svelte.js","frame.js","cursor.js","write.svelte.js","Failed.js","Failed.css","unread.svelte.js","unread.css","actions.js","href.js","Item.js","Qualifier.js","Qualifier.css","Item.css","Answer.css","Board.js","Grid.js","Grid.css","Empty.js","Empty.css","Props.js","Props.css","offered.svelte.js","Board.css","List.js","ChangeState.js","ChangeState.css","List.css","Doc.js","Tabs.js","Tabs.css","Doc.css","Github.js","Github.css","List2.js","Snoozed.js","Snoozed.css","List2.css","Inbox.js","Inbox.css","New.js","New.css","Palette.js","Palette.css","List3.js","store.svelte.js","List3.css","Doc2.js","Doc2.css","Quit.js","Quit.css","Search.js","Search.css","Setup.js","Setup.css","Why.js","Why.css"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["Answer.js","api.js","resource.svelte.js","frame.js","cursor.js","write.svelte.js","Failed.js","Failed.css","unread.svelte.js","unread.css","actions.js","href.js","Item.js","Qualifier.js","Qualifier.css","Item.css","Answer.css","Board.js","Grid.js","Grid.css","Empty.js","Empty.css","Props.js","Props.css","offered.svelte.js","Board.css","List.js","ChangeState.js","ChangeState.css","List.css","Doc.js","Tabs.js","Tabs.css","Edits.js","Edits.css","Doc.css","Github.js","Github.css","List2.js","Snoozed.js","Snoozed.css","List2.css","Inbox.js","Inbox.css","New.js","New.css","Palette.js","Palette.css","List3.js","store.svelte.js","List3.css","Doc2.js","Doc2.css","Quit.js","Quit.css","Search.js","Search.css","Setup.js","Setup.css","Why.js","Why.css"])))=>i.map(i=>d[i]);
 import { $ as user_effect, B as append, F as index, G as delegate, H as from_html, J as get, K as delegated, L as if_block, M as component, N as snippet, O as set_style, P as each, Q as template_effect, R as mount, U as from_svg, V as comment, W as text, X as untrack, _ as rest_props, a as claimToken, at as proxy, c as bindList, ct as user_derived, d as onAction, dt as pop, f as run, ft as push, g as prop, gt as noop, h as spell, ht as reset, i as api, it as sibling, j as action, k as set_class, l as dispatch, m as sheet, mt as next, n as Unauthorised, nt as first_child, ot as set, pt as snapshot, q as event, rt as only_child, s as bind, st as state, tt as child, v as spread_props, w as set_attribute, z as set_text } from "./api.js";
 import { i as same$1 } from "./resource.svelte.js";
 //#region \0vite/modulepreload-polyfill.js
@@ -602,7 +602,7 @@ register({
 	},
 	side: () => __vitePreload(() => import("./List.js"), __vite__mapDeps([26,1,2,4,6,7,27,13,14,28,29])),
 	document: true,
-	page: () => __vitePreload(() => import("./Doc.js"), __vite__mapDeps([30,1,2,5,6,7,8,9,18,19,20,21,22,23,24,27,13,14,28,31,32,33]))
+	page: () => __vitePreload(() => import("./Doc.js"), __vite__mapDeps([30,1,2,5,6,7,8,9,18,19,20,21,22,23,24,27,13,14,28,31,32,33,34,35]))
 });
 //#endregion
 //#region src/surfaces/github/index.ts
@@ -638,7 +638,7 @@ register({
 			configured: Object.keys(b.forge ?? {}).length
 		} };
 	},
-	page: () => __vitePreload(() => import("./Github.js"), __vite__mapDeps([34,1,2,4,6,7,11,18,19,20,21,31,32,35]))
+	page: () => __vitePreload(() => import("./Github.js"), __vite__mapDeps([36,1,2,4,6,7,11,18,19,20,21,31,32,37]))
 });
 //#endregion
 //#region src/surfaces/inbox/place.svelte.ts
@@ -780,8 +780,8 @@ register({
 		const { item, project } = address(focus, items);
 		return items.find((i) => i.id === item)?.title ?? (project ? `Inbox: ${project}` : "Inbox");
 	},
-	side: () => __vitePreload(() => import("./List2.js"), __vite__mapDeps([36,1,37,2,10,11,38,39])),
-	page: () => __vitePreload(() => import("./Inbox.js"), __vite__mapDeps([40,1,4,5,6,7,8,2,9,10,11,12,13,14,15,24,37,38,41]))
+	side: () => __vitePreload(() => import("./List2.js"), __vite__mapDeps([38,1,39,2,10,11,40,41])),
+	page: () => __vitePreload(() => import("./Inbox.js"), __vite__mapDeps([42,1,4,5,6,7,8,2,9,10,11,12,13,14,15,24,39,40,43]))
 });
 //#endregion
 //#region src/surfaces/new/index.ts
@@ -817,7 +817,7 @@ register({
 		"/api/changes/preflight"
 	],
 	select: () => ({ changeSurface: surfaces().find((s) => s.link === "change")?.id ?? "" }),
-	page: () => __vitePreload(() => import("./New.js"), __vite__mapDeps([42,1,2,5,6,7,43]))
+	page: () => __vitePreload(() => import("./New.js"), __vite__mapDeps([44,1,2,5,6,7,45]))
 });
 //#endregion
 //#region src/surfaces/palette/index.ts
@@ -844,7 +844,7 @@ register({
 	transient: true,
 	reads: ["/api/changes", "/api/projects"],
 	select: () => ({ from }),
-	page: () => __vitePreload(() => import("./Palette.js"), __vite__mapDeps([44,1,2,6,7,24,27,13,14,28,45]))
+	page: () => __vitePreload(() => import("./Palette.js"), __vite__mapDeps([46,1,2,6,7,24,27,13,14,28,47]))
 });
 //#endregion
 //#region src/surfaces/plan/index.ts
@@ -869,9 +869,9 @@ register({
 	reads: ["/api/specs"],
 	tab: (_feed, focus) => focus.split("/").filter(Boolean).pop() ?? "Specification",
 	select: () => ({}),
-	side: () => __vitePreload(() => import("./List3.js"), __vite__mapDeps([46,1,4,27,13,14,28,47,48])),
+	side: () => __vitePreload(() => import("./List3.js"), __vite__mapDeps([48,1,4,27,13,14,28,49,50])),
 	document: true,
-	page: () => __vitePreload(() => import("./Doc2.js"), __vite__mapDeps([49,1,20,21,27,13,14,28,47,50]))
+	page: () => __vitePreload(() => import("./Doc2.js"), __vite__mapDeps([51,1,20,21,27,13,14,28,49,52]))
 });
 //#endregion
 //#region src/surfaces/quit/index.ts
@@ -885,7 +885,7 @@ register({
 	bare: true,
 	reads: ["/api/quitting"],
 	select: () => ({}),
-	page: () => __vitePreload(() => import("./Quit.js"), __vite__mapDeps([51,1,2,3,52]))
+	page: () => __vitePreload(() => import("./Quit.js"), __vite__mapDeps([53,1,2,3,54]))
 });
 //#endregion
 //#region src/surfaces/search/index.ts
@@ -904,7 +904,7 @@ register({
 		q: focus,
 		blind: unseen(feed.board)
 	}),
-	page: () => __vitePreload(() => import("./Search.js"), __vite__mapDeps([53,1,2,4,18,19,20,21,54]))
+	page: () => __vitePreload(() => import("./Search.js"), __vite__mapDeps([55,1,2,4,18,19,20,21,56]))
 });
 //#endregion
 //#region src/surfaces/setup/checklist.ts
@@ -973,7 +973,7 @@ register({
 		}
 	},
 	select: () => ({ changeSurface: surfaces().find((s) => s.link === "change")?.id ?? "" }),
-	page: () => __vitePreload(() => import("./Setup.js"), __vite__mapDeps([55,1,2,4,6,7,11,18,19,22,23,56]))
+	page: () => __vitePreload(() => import("./Setup.js"), __vite__mapDeps([57,1,2,4,6,7,11,18,19,22,23,58]))
 });
 //#endregion
 //#region src/surfaces/why/index.ts
@@ -1000,7 +1000,7 @@ register({
 		about: focus,
 		blind: unseen(feed.board)
 	}),
-	page: () => __vitePreload(() => import("./Why.js"), __vite__mapDeps([57,1,2,4,6,7,18,19,20,21,58]))
+	page: () => __vitePreload(() => import("./Why.js"), __vite__mapDeps([59,1,2,4,6,7,18,19,20,21,33,34,60]))
 });
 //#endregion
 //#region src/lib/live.svelte.ts

@@ -1,4 +1,43 @@
 
+  .marker.svelte-oipc1d {
+    display: grid;
+    gap: var(--s-2);
+  }
+  .at.svelte-oipc1d {
+    font-family: var(--mono);
+    font-size: var(--t-sm);
+    color: var(--dim);
+  }
+  .reply.svelte-oipc1d {
+    display: flex;
+    gap: var(--s-2);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .reply.svelte-oipc1d input:where(.svelte-oipc1d) {
+    flex: 1;
+    min-width: 12rem;
+    font: inherit;
+    font-size: var(--t-sm);
+  }
+  .diff.svelte-oipc1d {
+    margin: 0;
+    padding: var(--s-2) var(--s-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    font-family: var(--mono);
+    font-size: var(--t-sm);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .primary.svelte-oipc1d {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--chrome);
+    font-weight: 600;
+  }
+
   /* One item in full: the title large, the answer with a firm edge, the rest quiet. */
   .item.svelte-kz8fai {
     list-style: none;

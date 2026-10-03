@@ -26,7 +26,20 @@ pub async fn dispatch_for_change(
     change: &crate::core::ChangeId,
     sent: Vec<crate::spec::SentTask>,
 ) -> Result<RunId> {
-    start(state, spec, cwd, None, Some(change), sent).await
+    dispatch_for_change_with(state, spec, cwd, change, sent, None).await
+}
+
+/// [`dispatch_for_change`], first asking the agent to sign in with the method
+/// the person chose (an agent-handled one, by its id).
+pub async fn dispatch_for_change_with(
+    state: &Shared,
+    spec: &AgentSpec,
+    cwd: PathBuf,
+    change: &crate::core::ChangeId,
+    sent: Vec<crate::spec::SentTask>,
+    sign_in: Option<String>,
+) -> Result<RunId> {
+    start(state, spec, cwd, None, Some(change), sent, sign_in).await
 }
 
 /// Starts an agent on an ad-hoc prompt, with no change behind it; safe to
@@ -38,7 +51,7 @@ pub async fn dispatch(
     prompt: Option<String>,
     sent: Vec<crate::spec::SentTask>,
 ) -> Result<RunId> {
-    start(state, spec, cwd, prompt, None, sent).await
+    start(state, spec, cwd, prompt, None, sent, None).await
 }
 
 /// Starts an agent and registers it as a run. Every start comes through here,
@@ -51,6 +64,7 @@ async fn start(
     for_change: Option<&crate::core::ChangeId>,
     // Recorded on the run before any prompt reaches the agent.
     sent: Vec<crate::spec::SentTask>,
+    sign_in: Option<String>,
 ) -> Result<RunId> {
     if !cwd.is_dir() {
         anyhow::bail!("{} is not a directory", cwd.display());
@@ -82,10 +96,15 @@ async fn start(
     let owned = lock.lock().await;
     let before = crate::observe::procs::own_group_leading_children();
     let env = agent_env(state, for_change, &run_id).await;
-    let (session, events) =
-        crate::acp::spawn(spec, cwd.clone(), &env, mcp_offer(&run_id, for_change))
-            .await
-            .with_context(|| format!("starting {}", spec.id))?;
+    let offer = mcp_offer(&run_id, for_change);
+    let offered = offer.is_some();
+    let launch = crate::acp::session::Launch {
+        additional_directories: declared_for(state, for_change, &cwd).await,
+        authenticate: sign_in,
+    };
+    let (session, events) = crate::acp::session::spawn_with(spec, cwd.clone(), &env, offer, launch)
+        .await
+        .with_context(|| format!("starting {}", spec.id))?;
     let agent_pid = crate::observe::procs::one_new_child(
         &before,
         &crate::observe::procs::own_group_leading_children(),
@@ -126,6 +145,18 @@ async fn start(
                     agent: spec.id.clone(),
                     agent_command: Some(spec.command.clone()),
                 },
+            )
+            .await;
+    }
+    // Said on the change: the agent cannot ask Devplane about its work.
+    if !offered {
+        state
+            .ingest(
+                run_id.clone(),
+                Source::Host,
+                Event::ToolsNotOffered,
+                Some(cwd.clone()),
+                RunMode::Driven,
             )
             .await;
     }
@@ -171,6 +202,45 @@ async fn agent_env(
     let mut env = cache_env(state, for_change).await;
     env.push((RUN_ENV.to_string(), PathBuf::from(run.as_str())));
     env
+}
+
+/// The folders a change's session must be told about because they are not in
+/// its working directory: its specification folder, when the worktree was made
+/// from a base that does not have it but the project's checkout does. Confined
+/// to the project — nothing outside it is ever declared.
+async fn declared_for(
+    state: &Shared,
+    change: Option<&crate::core::ChangeId>,
+    cwd: &Path,
+) -> Vec<PathBuf> {
+    let Some(id) = change else {
+        return Vec::new();
+    };
+    let Some((spec, project)) = state
+        .changes
+        .lock()
+        .await
+        .get(id)
+        .and_then(|c| Some((c.spec.clone()?, c.project_id.clone())))
+    else {
+        return Vec::new();
+    };
+    if cwd.join(&spec).exists() {
+        return Vec::new();
+    }
+    let Some(root) = state
+        .world
+        .lock()
+        .await
+        .project(&project)
+        .map(|p| p.root.clone())
+    else {
+        return Vec::new();
+    };
+    match crate::spec::confine(&root, &spec) {
+        Ok(folder) if folder.is_dir() => vec![folder.canonicalize().unwrap_or(folder)],
+        _ => Vec::new(),
+    }
 }
 
 /// The variable every agent Devplane starts carries its run id in.
@@ -345,15 +415,33 @@ async fn resume_run(state: &Shared, run: &RunId, join: bool) -> Result<bool> {
     let keep_transcript = transcripts_wanted(&cwd);
 
     let env = agent_env(state, change.as_ref(), run).await;
-    let (session, events) = crate::acp::resume(
+    let offer = mcp_offer(run, change.as_ref());
+    let offered = offer.is_some();
+    let launch = crate::acp::session::Launch {
+        additional_directories: declared_for(state, change.as_ref(), &cwd).await,
+        authenticate: None,
+    };
+    let (session, events) = crate::acp::session::resume_with(
         &spec,
         cwd.clone(),
         agent_session.clone(),
         &env,
-        mcp_offer(run, change.as_ref()),
+        offer,
+        launch,
     )
     .await
     .with_context(|| format!("resuming {}", spec.id))?;
+    if !offered {
+        state
+            .ingest(
+                run.clone(),
+                Source::Host,
+                Event::ToolsNotOffered,
+                Some(cwd.clone()),
+                RunMode::Driven,
+            )
+            .await;
+    }
 
     register(state, run, &cwd, session, events, keep_transcript, &spec).await;
 
@@ -736,6 +824,29 @@ pub async fn prompt(state: &Shared, run: &RunId, text: String) -> Result<()> {
     send_prompt(state, run, text, true).await
 }
 
+/// A new run's first prompt. A session that ended before it could take one —
+/// an agent that needs signing in, a folder it cannot be told about, a
+/// protocol it does not speak — is not an error here: the run's own ending
+/// says why, and the change shows it.
+pub async fn prompt_first(state: &Shared, run: &RunId, text: String) -> Result<()> {
+    match prompt(state, run, text).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let live = match state.sessions.lock().await.get(run) {
+                Some(s) => s.is_live(),
+                None => false,
+            };
+            match live {
+                true => Err(e),
+                false => {
+                    tracing::info!(run = %run, error = %e, "the session ended before its first prompt");
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
 /// [`prompt`], superseding what the agent waits on only when `supersede`: an
 /// answer to an old ask, sent as a message, must not withdraw a permission
 /// the agent asked for since. It queues behind the current turn instead.
@@ -1091,7 +1202,8 @@ pub async fn answer_without_host(
                     |d| d.says()
                 )
             ))
-            .for_run(&ask.run),
+            .for_run(&ask.run)
+            .for_call(call_of(&ask.payload)),
         )
         .await?;
     Ok(ask)
@@ -1236,7 +1348,8 @@ pub async fn answer_ask(
                 "answered",
             )
             .because(format!("answered from the {from} — {}", delivery.says()))
-            .for_run(&ask.run),
+            .for_run(&ask.run)
+            .for_call(call_of(&ask.payload)),
         )
         .await;
 
@@ -1509,7 +1622,8 @@ async fn decide(state: &Shared, ask: &crate::core::ask::Ask, want: Decision) -> 
         subject.clone(),
         decision,
     )
-    .for_run(run);
+    .for_run(run)
+    .for_call(call_of(&ask.payload));
     if is_standing {
         // A standing grant's later effects happen inside the agent, unseen,
         // so the log says so explicitly.
@@ -1660,7 +1774,8 @@ async fn end_unanswered(
                 outcome,
             )
             .because(because)
-            .for_run(run),
+            .for_run(run)
+            .for_call(call_of(&ask.payload)),
         )
         .await;
     // Only the run's own block is cleared; a parallel request stays shown.
@@ -1904,27 +2019,15 @@ async fn keep_diffs(state: &Shared, run: &RunId, cwd: &Path, call_id: &str, pump
         return;
     };
     for d in diffs {
-        let mut omitted: u64 = 0;
-        let mut clip = |text: String| -> String {
-            if text.len() <= crate::acp::DIFF_KEPT_BYTES {
-                return text;
-            }
-            let mut end = crate::acp::DIFF_KEPT_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            omitted += (text.len() - end) as u64;
-            text[..end].to_string()
-        };
-        let old_text = d.old_text.map(&mut clip);
-        let new_text = clip(d.new_text);
+        let path = d.path.clone();
+        let (old_text, new_text, omitted) = clipped(d);
         state
             .ingest(
                 run.clone(),
                 Source::Host,
                 Event::EditReported {
                     call_id: call_id.to_string(),
-                    path: d.path,
+                    path,
                     old_text,
                     new_text,
                     omitted_bytes: omitted,
@@ -1934,6 +2037,26 @@ async fn keep_diffs(state: &Shared, run: &RunId, cwd: &Path, call_id: &str, pump
             )
             .await;
     }
+}
+
+/// One reported diff clipped to [`crate::acp::DIFF_KEPT_BYTES`] per side,
+/// with the bytes dropped from either side.
+fn clipped(d: crate::acp::ReportedDiff) -> (Option<String>, String, u64) {
+    let mut omitted: u64 = 0;
+    let mut clip = |text: String| -> String {
+        if text.len() <= crate::acp::DIFF_KEPT_BYTES {
+            return text;
+        }
+        let mut end = crate::acp::DIFF_KEPT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        omitted += (text.len() - end) as u64;
+        text[..end].to_string()
+    };
+    let old_text = d.old_text.map(&mut clip);
+    let new_text = clip(d.new_text);
+    (old_text, new_text, omitted)
 }
 
 /// Every call's diffs not yet written, for a turn or session that ended
@@ -2070,7 +2193,8 @@ pub async fn expire(state: &Shared, ask: &crate::core::ask::Ask, ended: &crate::
                 },
             )
             .because(ended.says())
-            .for_run(&ask.run),
+            .for_run(&ask.run)
+            .for_call(call_of(&ask.payload)),
         )
         .await;
 
@@ -2109,6 +2233,40 @@ fn offered_options(payload: &serde_json::Value) -> Vec<Choice> {
         .and_then(|o| serde_json::from_value(o).ok())
         .unwrap_or_default()
 }
+
+/// The driven tool call a recorded permission request was about, by the
+/// protocol's id, as Devplane wrote it into the payload.
+fn call_of(payload: &serde_json::Value) -> Option<&str> {
+    payload.get("call_id").and_then(|v| v.as_str())
+}
+
+/// The diffs a call's content carries now, clipped as they are kept, for a
+/// pending request's payload; `None` when the repository keeps no transcript
+/// (a diff is transcript content).
+fn proposed_diffs(pump: &Pump, call_id: &str) -> Option<serde_json::Value> {
+    if !pump.keep_transcript {
+        return None;
+    }
+    let diffs = pump.diffs.get(call_id)?;
+    Some(serde_json::Value::Array(
+        diffs
+            .iter()
+            .map(|d| {
+                let (old_text, new_text, omitted) = clipped(d.clone());
+                serde_json::json!({
+                    "path": d.path,
+                    "old_text": old_text,
+                    "new_text": new_text,
+                    "omitted_bytes": omitted,
+                    "says": EDIT_SAYS,
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// How a kept diff is labelled wherever it is shown.
+pub const EDIT_SAYS: &str = "the agent's report of its edit";
 
 /// The option a recorded permission request offered for refusing, by id: the
 /// exact `reject_once` where the agent has it, any reject otherwise.
@@ -2228,7 +2386,16 @@ async fn handle(
         }
 
         // A roster only fills gaps: `SessionInfo` carries no state.
-        AcpEvent::SessionsListed { sessions } => {
+        AcpEvent::SessionsListed {
+            sessions,
+            truncated,
+        } => {
+            if truncated {
+                tracing::info!(
+                    run = %run,
+                    "more sessions exist than were read from the agent's list"
+                );
+            }
             for listed in sessions {
                 ingest(Event::SessionListed {
                     agent_session: listed.agent_session,
@@ -2396,7 +2563,8 @@ async fn handle(
                                 "deny",
                             )
                             .because(&rule)
-                            .for_run(run),
+                            .for_run(run)
+                            .for_call(Some(&call.id)),
                         )
                         .await;
                     ingest(Event::PermissionDecided {
@@ -2430,6 +2598,20 @@ async fn handle(
                 tool: tool_label(&call),
                 input: call.raw_input.clone().unwrap_or(serde_json::Value::Null),
             };
+            // The call's id, so the person's decision names the call, and the
+            // diff it proposes, so the person sees the edit before answering.
+            let mut payload =
+                serde_json::json!({ "options": choices, "call": asked_call, "call_id": call.id });
+            match proposed_diffs(pump, &call.id) {
+                Some(diffs) => payload["diffs"] = diffs,
+                None if pump.keep_transcript => {
+                    payload["no_diff"] = "the agent sent no diff with this request".into()
+                }
+                None => {
+                    payload["no_diff"] =
+                        "no diff was kept: this project keeps no transcripts".into()
+                }
+            }
             // The ask row first; everything after it is a rebuildable projection.
             let token = persist_ask(
                 state,
@@ -2437,7 +2619,7 @@ async fn handle(
                 crate::core::ask::Kind::Permission,
                 &request_id,
                 &title,
-                serde_json::json!({ "options": choices, "call": asked_call }),
+                payload,
             )
             .await;
             let Some(token) = token else {
@@ -2592,9 +2774,26 @@ async fn handle(
         }
         AcpEvent::Diffs { .. } => {}
 
-        AcpEvent::Closed { sent } => {
-            tracing::info!(run = %run, closed = sent, "the agent's session ended");
+        // Whether the session was closed over the protocol before the
+        // process went: on the record, not only in a log line.
+        AcpEvent::Closed { sent } => ingest(Event::SessionClosed { sent }).await,
+
+        // The agent's words to the person, shown on the change.
+        AcpEvent::Notice {
+            severity,
+            title,
+            description,
+        } => {
+            ingest(Event::NoticeSeen {
+                severity,
+                title,
+                description,
+            })
+            .await
         }
+
+        // The agent's own sign-in methods; the run ends right after.
+        AcpEvent::SignInRequired { methods } => ingest(Event::SignInRequired { methods }).await,
 
         AcpEvent::Ended { error } => {
             flush_transcript(state, run, pump).await;
@@ -2697,6 +2896,22 @@ async fn handle(
 mod tests {
     use super::hides_its_command;
     use crate::acp::ToolRequest;
+
+    /// A reported diff over the kept limit keeps its head and counts the
+    /// rest; markup in it is kept as the agent sent it, as text, for the
+    /// surfaces to quote.
+    #[test]
+    fn a_kept_diff_is_clipped_and_counted_and_kept_as_text() {
+        let big = "x".repeat(crate::acp::DIFF_KEPT_BYTES + 10);
+        let (old, new, omitted) = super::clipped(crate::acp::ReportedDiff {
+            path: "a.txt".into(),
+            old_text: Some("<script>alert(1)</script> [link](x)".into()),
+            new_text: big,
+        });
+        assert_eq!(new.len(), crate::acp::DIFF_KEPT_BYTES);
+        assert_eq!(omitted, 10);
+        assert_eq!(old.as_deref(), Some("<script>alert(1)</script> [link](x)"));
+    }
 
     /// A command the agent sent nothing readable for is said so, and the
     /// title is never read in its place.

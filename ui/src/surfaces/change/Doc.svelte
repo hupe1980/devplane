@@ -30,6 +30,7 @@
   import Agent from "./Agent.svelte";
   import Tasks from "./Tasks.svelte";
   import Pane from "./review/Pane.svelte";
+  import Draft from "./Draft.svelte";
   import Refusal, { type OfferRefusal, type Row } from "./Refusal.svelte";
   import { unread, unreadSays } from "./review/unread.svelte";
   import type { ReviewBody } from "./review/types";
@@ -315,6 +316,7 @@
     {#if commands.length && !pending.busy}<div class="under"><Commands {commands} /></div>{/if}
     {#if read.phase === "stale" && read.failure}<div class="under"><Failed what="this change" failure={read.failure} at={read.at} stale /></div>{/if}
     {#if refusal}<div class="under"><Refusal {refusal} read={readRow} /></div>{/if}
+    {#if d.draft}<Draft {d} review={() => setView("review")} reload={() => void read.reload()} />{/if}
 
     <div class="tabbar"><Tabs {tabs} bind:active={() => view, setView} label="views of this change" /></div>
 

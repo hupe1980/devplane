@@ -278,10 +278,20 @@ Run `[gates] check` now and record it. `--base-checks` follows a pass with the
 
 One more feedback round past `max_feedback_rounds`. Recorded as your decision.
 
-#### `devplane change resume <change>`
+#### `devplane change resume <change> [--agent <id> <prompt>...]`
 
 Reconnect to the same agent conversation after the host stopped. Offered only when the agent can
-resume; never automatic.
+resume; never automatic. With `--agent` naming another agent, continue the change with that one
+instead: a new run in the same worktree, told only your words, never the earlier agent's
+transcript. Refused while a run of the change is live, and inside an agent session (an advisory
+check).
+
+#### `devplane change login <change> [--method <id>]`
+
+For a change whose agent said it needs signing in. Without `--method`, list the agent's own
+sign-in methods. A terminal method runs the agent's login attached to this terminal, then starts
+the change again; an agent method asks the agent to sign itself in. A method of another kind is
+refused, naming it. Never asks for, reads or stores a credential; refused inside an agent session.
 
 #### `devplane change prompt <change|run> [text]...`
 
@@ -313,6 +323,33 @@ has the branch, or a fresh one under `.claude/worktrees/`.
 | `--project <root>` | the repository; default the current one |
 | `--spec <path>` | the spec it answers |
 | `--title <text>` | default: the branch's first commit subject |
+
+#### `devplane change draft <name> -- <intent>...`
+
+Start a change whose agent is sent the project's own spec command — Spec Kit's `/speckit-specify`
+as that agent spells it, or OpenSpec's installed propose workflow — followed by your words, and
+nothing else. Refused with exit `3`, before anything is made, with what to do; refused inside an
+agent session. [Full rules](@/docs/specs.md#drafting-a-spec-with-the-project-s-own-tool).
+
+| Flag | What |
+|---|---|
+| `--agent <id>` | default: the project's `[agent] default` |
+| `--methodology speckit\|openspec` | needed only where the project has both |
+| `--project <name\|path>` | default: the current repository |
+| `--change <change>` | draft again into a change whose draft was rejected |
+| `--dry-run` | print what would be sent; start nothing |
+
+#### `devplane change draft-accept <change>` / `devplane change draft-reject <change>`
+
+Accept the drafted folder as the spec the change answers, or put the worktree back to where it was
+at dispatch. Both are recorded as yours; refused while the agent is mid-turn and inside an agent
+session.
+
+#### `devplane change clarify <change> <path>:<line> -- <answer>...`
+
+Replace one bracketed open-question marker with your words, exactly: prints the one-line diff and
+writes it on `--yes` or a `y` at the terminal. An unbracketed line is refused — send the answer
+with `devplane change prompt`. [Full rules](@/docs/specs.md#answering-an-open-question).
 
 #### `devplane change offer <change>`
 

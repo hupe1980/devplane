@@ -170,7 +170,7 @@ pub async fn preflight(
                     Some(b) => b.clone(),
                     None => crate::git::base_branch(&root).await,
                 };
-                crate::git::refuse_spec_missing_from_base(&root, &base, spec)
+                spec_reachable(&root, &base, spec)
                     .await
                     .map_err(|e| format!("{e:#}"))
             }
@@ -347,7 +347,7 @@ fn refuse_unusable(root: &std::path::Path, config: &ProjectConfig) -> Result<()>
 /// chosen, and git's own gitignore engine is the one matcher. No file, no
 /// match, or a git failure copies nothing: a guess here hands an agent files
 /// nobody chose.
-async fn included_files(root: &Path) -> Vec<String> {
+pub(crate) async fn included_files(root: &Path) -> Vec<String> {
     match crate::git::ignored_files(root).await {
         Ok(files) => files,
         Err(e) => {
@@ -409,7 +409,7 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<ChangeId> {
     if req.worktree
         && let Some(spec) = &req.spec
     {
-        crate::git::refuse_spec_missing_from_base(&root, &base, spec).await?;
+        spec_reachable(&root, &base, spec).await?;
     }
     let dir = if req.worktree {
         let branch = change.branch_name();
@@ -503,9 +503,24 @@ pub async fn start(state: &Shared, req: StartRequest) -> Result<ChangeId> {
         .insert(run_id.clone(), change_id.clone());
 
     // The turn starts only once both maps answer for this run.
-    crate::driven::prompt(state, &run_id, prompt).await?;
+    crate::driven::prompt_first(state, &run_id, prompt).await?;
 
     Ok(change_id)
+}
+
+/// Whether a change's agent can reach its specification: in the base its
+/// worktree is made from, or else in the project's own checkout, where it is
+/// declared to the agent as an additional directory when the session starts
+/// (and the session ends before any prompt on an agent that cannot take one).
+/// A folder in neither is refused as before.
+async fn spec_reachable(root: &Path, base: &str, spec: &str) -> Result<()> {
+    match crate::git::refuse_spec_missing_from_base(root, base, spec).await {
+        Ok(()) => Ok(()),
+        Err(e) => match crate::spec::confine(root, spec) {
+            Ok(folder) if folder.is_dir() => Ok(()),
+            _ => Err(e),
+        },
+    }
 }
 
 /// Takes a branch somebody made by hand and makes it a change.
@@ -608,6 +623,11 @@ pub async fn adopt(state: &Shared, req: AdoptRequest) -> Result<ChangeId> {
 pub async fn on_turn_ended(state: &Shared, run: &RunId) {
     let change_id = { state.change_of_run.lock().await.get(run).cloned() };
     let Some(change_id) = change_id else { return };
+
+    // A draft's turn runs no gate, no base checks and no drift.
+    if crate::draft::on_turn_ended(state, &change_id).await {
+        return;
+    }
 
     // Stamp *ticked* and detect spec drift before the gates run.
     observe_spec(state, run).await;
@@ -813,7 +833,11 @@ pub(crate) async fn observe_spec(state: &Shared, run: &RunId) {
     let fingerprint =
         crate::spec::Spec::read(&root, &spec, &config.spec.open_questions).fingerprint();
     let changed_at = crate::spec::Spec::changed_at(&root, &spec);
-    let worked_in = dir.unwrap_or_else(|| root.clone());
+    // Where the agent worked, or the project's checkout when the folder was
+    // declared to it from there.
+    let worked_in = dir
+        .filter(|d| d.join(&spec).exists())
+        .unwrap_or_else(|| root.clone());
     let ticked = crate::spec::ChangeFolder::at(&worked_in, &spec)
         .map(|folder| crate::spec::ticked_keys(&config.spec.trace(&folder)))
         .unwrap_or_default();
@@ -1010,7 +1034,10 @@ pub(crate) fn drift_prompt(root: &Path, spec: &str, files: &[String]) -> String 
 /// Whether a turn ending should send this change to the gates: not while they
 /// run, and not once settled, so a stray turn cannot restart a stopped loop.
 pub(crate) fn may_run_gates(c: &Change) -> bool {
-    !matches!(c.waiting, Some(Waiting::Gates)) && !c.is_settled()
+    !matches!(c.waiting, Some(Waiting::Gates))
+        && !c.is_settled()
+        // A draft nobody has accepted is prose, not an implementation.
+        && !c.draft.as_ref().is_some_and(|d| d.asks_for_folder())
 }
 
 /// What `check` runs with: the shared caches and the declared JUnit paths.
@@ -1933,6 +1960,223 @@ pub async fn resume(state: &Shared, id: &ChangeId) -> Result<()> {
         )
         .await;
     Ok(())
+}
+
+/// A change continued with a different agent than the one that last drove
+/// it: what it was, and the run that now drives it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Switched {
+    pub run: RunId,
+    pub agent: String,
+    pub was: Option<String>,
+}
+
+/// Continues a change with `agent` when that is not the agent that last drove
+/// it: a new run in the change's own worktree, prompted with the person's
+/// words resolved as every prompt is (and Devplane's standing sentence) —
+/// never with any text of another run's transcript. The earlier runs stay in
+/// the change's record, each resumable with its own agent. Refused while any
+/// run of the change is live. `None` means `agent` is the one that last drove
+/// it, and the caller resumes that session as usual.
+pub async fn resume_with_agent(
+    state: &Shared,
+    id: &ChangeId,
+    agent: &str,
+    prompt: &str,
+) -> Result<Option<Switched>> {
+    let change = {
+        let changes = state.changes.lock().await;
+        changes.get(id).cloned().context("no such change")?
+    };
+    if change.archived_at.is_some() {
+        bail!("that change is archived; its worktree is gone");
+    }
+    let spec = crate::acp::resolve(agent, &state.agents)
+        .with_context(|| format!("unknown agent `{agent}`"))?;
+    let last = {
+        let w = state.world.lock().await;
+        change
+            .runs
+            .iter()
+            .rev()
+            .find_map(|r| w.run(r).map(|r| (r.agent.clone(), r.agent_command.clone())))
+    };
+    // The same agent is the same id, and for one started by its command line
+    // (`custom`), the same command.
+    let same = last.as_ref().is_some_and(|(id, command)| {
+        id == &spec.id && (spec.id != "custom" || command.as_deref() == Some(spec.command.as_str()))
+    });
+    if same {
+        return Ok(None);
+    }
+    let was = last.map(|(id, command)| match id.as_str() {
+        "custom" => command.unwrap_or(id),
+        _ => id,
+    });
+    let now = match spec.id.as_str() {
+        "custom" => spec.command.clone(),
+        _ => spec.id.clone(),
+    };
+    for run in &change.runs {
+        if crate::driven::is_live(state, run).await {
+            bail!(
+                "run {run} is still running; stop it first with `devplane change stop {}`",
+                id
+            );
+        }
+    }
+    if prompt.trim().is_empty() {
+        bail!(
+            "say what the new agent should do: it is told only your words, never the earlier \
+             agent's transcript"
+        );
+    }
+    let dir = match &change.worktree {
+        Some(d) if d.is_dir() => d.clone(),
+        Some(_) => bail!("the change's worktree is gone from disk"),
+        None => governing_config(state, id).await?.0,
+    };
+    // Resolved before anything starts, so an unfillable placeholder refuses.
+    let text = crate::driven::resolve_prompt(state, &dir, prompt, &[])
+        .await
+        .map_err(crate::driven::cannot_send)?;
+    let run = crate::driven::dispatch_for_change(state, &spec, dir, id, Vec::new()).await?;
+    attach_run(state, id, &run).await;
+    close_claims(state, id, crate::core::claim::ClosedBy::Resumed).await;
+    set_waiting(state, id, None).await;
+    state
+        .record(
+            crate::core::Decision::new(
+                crate::core::Authority::Person,
+                "change:agent.switch",
+                format!("{} → {now}", was.as_deref().unwrap_or("no agent")),
+                "continued",
+            )
+            .because("continued the change with another agent, in the same worktree")
+            .for_change(id)
+            .for_run(&run),
+        )
+        .await;
+    crate::driven::prompt_first(state, &run, text).await?;
+    Ok(Some(Switched {
+        run,
+        agent: now,
+        was,
+    }))
+}
+
+/// Starts a change's agent again after it said it needs signing in, once the
+/// person chose how: an agent-handled method is asked for with `authenticate`
+/// before the session; a terminal method (`after_terminal`) was run by the
+/// person in their own terminal, so the agent is simply started again. Any
+/// other kind is refused, naming it. No credential is asked for, read or
+/// stored; the change's own prompt is sent again.
+pub async fn login(
+    state: &Shared,
+    id: &ChangeId,
+    method: &str,
+    after_terminal: bool,
+) -> Result<RunId> {
+    let change = {
+        let changes = state.changes.lock().await;
+        changes.get(id).cloned().context("no such change")?
+    };
+    let last = change
+        .current_run()
+        .cloned()
+        .context("that change never had an agent")?;
+    if crate::driven::is_live(state, &last).await {
+        bail!("run {last} is still running; it is not waiting on a sign-in");
+    }
+    let (agent, command, methods) = {
+        let w = state.world.lock().await;
+        let r = w.run(&last).context("no such run")?;
+        (r.agent.clone(), r.agent_command.clone(), r.sign_in.clone())
+    };
+    let methods = methods.context("the change's agent did not say it needs signing in")?;
+    let chosen = methods.iter().find(|m| m.id == method).with_context(|| {
+        format!(
+            "the agent offered no sign-in method `{method}`; it offered: {}",
+            methods
+                .iter()
+                .map(|m| format!("`{}` ({})", m.id, m.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let sign_in = match (chosen.kind.as_str(), after_terminal) {
+        ("agent", _) => Some(chosen.id.clone()),
+        ("terminal", true) => None,
+        ("terminal", false) => bail!(
+            "`{}` is a sign-in the agent runs in a terminal; run `devplane change login {id} \
+             --method {}` in one",
+            chosen.name,
+            chosen.id
+        ),
+        (other, _) => bail!(
+            "`{}` is a sign-in of a kind Devplane does not know (`{other}`), so it does not act \
+             on it",
+            chosen.name
+        ),
+    };
+    // By id, or by the recorded command for an agent started by its command
+    // line (`custom`), as a resume finds it.
+    let spec = crate::acp::resolve(&agent, &state.agents)
+        .filter(|s| s.id != "custom")
+        .or_else(|| {
+            command
+                .as_deref()
+                .map(|c| crate::acp::AgentSpec::new(&agent, &agent, c))
+        })
+        .with_context(|| format!("unknown agent `{agent}`"))?;
+    let dir = match &change.worktree {
+        Some(d) if d.is_dir() => d.clone(),
+        Some(_) => bail!("the change's worktree is gone from disk"),
+        None => governing_config(state, id).await?.0,
+    };
+    let run =
+        crate::driven::dispatch_for_change_with(state, &spec, dir, id, Vec::new(), sign_in).await?;
+    attach_run(state, id, &run).await;
+    set_waiting(state, id, None).await;
+    state
+        .record(
+            crate::core::Decision::new(
+                crate::core::Authority::Person,
+                "change:agent.sign_in",
+                format!("{} — {}", spec.id, chosen.name),
+                "started",
+            )
+            .because(match after_terminal {
+                true => "signed in through the agent's own login, then started it again",
+                false => "asked the agent to sign in with the method the person chose",
+            })
+            .for_change(id)
+            .for_run(&run),
+        )
+        .await;
+    crate::driven::prompt_first(state, &run, change.prompt.clone()).await?;
+    Ok(run)
+}
+
+/// Puts a run on a change: in its record and in the run-to-change map, before
+/// any prompt, so the turn's end finds its change.
+async fn attach_run(state: &Shared, id: &ChangeId, run: &RunId) {
+    let saved = {
+        let mut changes = state.changes.lock().await;
+        changes.get_mut(id).map(|c| {
+            c.runs.push(run.clone());
+            c.updated_at = jiff::Timestamp::now();
+            c.clone()
+        })
+    };
+    if let Some(c) = saved {
+        persist(state, &c).await;
+    }
+    state
+        .change_of_run
+        .lock()
+        .await
+        .insert(run.clone(), id.clone());
 }
 
 /// How a prompt sent to a change reached an agent, from the run's state when

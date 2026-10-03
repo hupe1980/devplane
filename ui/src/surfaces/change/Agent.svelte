@@ -11,12 +11,13 @@
   import Inline from "../../lib/ui/Inline.svelte";
   import type { Tone } from "../../lib/ui/Pill.svelte";
   import type { Detail } from "./types";
+  import Session, { type SessionFacts } from "./Session.svelte";
 
   /// The run as `/api/runs/{id}` sends it — the host's own record, which has
   /// no generated wire type. `state` is a word (`working`) or, for a wait, an
   /// object naming what it waits on (`{ "waiting": "question" }`,
   /// `{ "waiting": { "other": "sandbox request" } }`).
-  type Run = {
+  type Run = SessionFacts & {
     id: string;
     agent?: string;
     state?: unknown;
@@ -189,6 +190,7 @@
           <li><Icon name="terminal" size={12} /><span>{c.tool}</span>{#if c.what}<code>{c.what}</code>{/if}</li>
         {:else}<li class="quiet">{detail ? "no tool call in flight" : runRead.failure ? "not read" : "…"}</li>{/each}
       </ul>
+      <Session facts={detail} change={d.id} reload={() => void runRead.reload()} />
     </aside>
   </div>
 {/if}

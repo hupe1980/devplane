@@ -4465,16 +4465,14 @@ fn git_ok(dir: &Path, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-/// A spec never committed is not in the worktree's base: the start refuses,
-/// naming folder and base, before creating anything.
+/// A spec folder in neither the worktree's base nor the project's checkout is
+/// refused, naming folder and base, before creating anything.
 #[tokio::test]
 async fn a_spec_missing_from_the_base_is_refused_before_anything_is_created() {
     let Some(agent) = echo_agent() else { return };
     let repo = counts_repo("spec-base");
     let (addr, c, _state) = boot().await;
     trust(&c, &addr, &repo).await;
-    std::fs::create_dir_all(repo.join("specs/042-new")).unwrap();
-    std::fs::write(repo.join("specs/042-new/spec.md"), "# New\n").unwrap();
 
     let v = post(
         &c,
@@ -4482,17 +4480,14 @@ async fn a_spec_missing_from_the_base_is_refused_before_anything_is_created() {
         "/api/changes",
         serde_json::json!({
             "cwd": repo.to_string_lossy(),
-            "title": "work to a spec nobody committed",
+            "title": "work to a spec nobody wrote",
             "agent": agent,
             "spec": "specs/042-new",
         }),
     )
     .await;
     let err = v["error"].as_str().unwrap_or_else(|| panic!("{v}"));
-    assert!(
-        err.contains("specs/042-new") && err.contains("`main`"),
-        "{err}"
-    );
+    assert!(err.contains("specs/042-new"), "{err}");
     assert_eq!(worktrees_of(&repo).len(), 1, "a worktree was made");
     assert!(
         get(&c, &addr, "/api/changes")
@@ -4503,6 +4498,80 @@ async fn a_spec_missing_from_the_base_is_refused_before_anything_is_created() {
         "a change was recorded"
     );
     std::fs::remove_dir_all(&repo).ok();
+}
+
+/// A spec folder in the checkout but not yet committed is declared to the
+/// worktree's agent as an additional directory, by its absolute path under the
+/// project; an agent that cannot take one ends before any prompt, saying why.
+#[tokio::test]
+async fn declares_the_spec_folder() {
+    let Some(agent) = echo_agent() else { return };
+    for (env, declared) in [
+        ("DEVPLANE_ECHO_ADDDIRS=1", true),
+        ("DEVPLANE_ECHO_X=1", false),
+    ] {
+        let repo = counts_repo("spec-declared");
+        let (addr, c, state) = boot().await;
+        trust(&c, &addr, &repo).await;
+        std::fs::create_dir_all(repo.join("specs/042-new")).unwrap();
+        std::fs::write(repo.join("specs/042-new/spec.md"), "# New\n").unwrap();
+        let v = post(
+            &c,
+            &addr,
+            "/api/changes",
+            serde_json::json!({
+                "cwd": repo.to_string_lossy(),
+                "title": "work to a spec not yet committed",
+                "agent": format!("env {env} {agent}"),
+                "spec": "specs/042-new",
+            }),
+        )
+        .await;
+        let id = v["change_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{v}"))
+            .to_string();
+        let (worktree, run) = {
+            let changes = state.changes.lock().await;
+            let w = changes.get(&devplane::core::ChangeId::new(&id)).unwrap();
+            (w.worktree.clone().unwrap(), w.runs[0].clone())
+        };
+        let want = repo.join("specs/042-new").canonicalize().unwrap();
+        let ended = common::until(
+            "the agent to start or end",
+            std::time::Duration::from_secs(30),
+            || {
+                let (state, run, worktree) = (state.clone(), run.clone(), worktree.clone());
+                async move {
+                    let dirs = std::fs::read_to_string(worktree.join(".devplane/dirs.json")).ok();
+                    let w = state.world.lock().await;
+                    let r = w.run(&run)?;
+                    match (dirs, r.totals.turns, r.state.is_live()) {
+                        (Some(d), t, _) if t >= 1 => Some(Ok(d)),
+                        (None, _, false) => Some(Err(())),
+                        _ => None,
+                    }
+                }
+            },
+        )
+        .await;
+        match (ended, declared) {
+            (Ok(d), true) => {
+                let got: Vec<PathBuf> = serde_json::from_str(&d).unwrap();
+                assert_eq!(
+                    got,
+                    vec![want.clone()],
+                    "declared by its path under the project"
+                );
+            }
+            (Err(()), false) => assert!(
+                !worktree.join(".devplane/heard.log").exists(),
+                "an agent that cannot see its specification was prompted"
+            ),
+            other => panic!("{env}: {other:?}"),
+        }
+        std::fs::remove_dir_all(&repo).ok();
+    }
 }
 
 /// Offering work no passing check saw, or a branch with nothing past its

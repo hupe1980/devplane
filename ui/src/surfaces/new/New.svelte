@@ -22,6 +22,7 @@
   import { run } from "../../lib/keys";
   import Icon from "../../lib/ui/Icon.svelte";
   import { surfaces } from "../../lib/surfaces";
+  import Draft from "./Draft.svelte";
 
   type Project = { id: string; name: string; root: string; trusted: boolean; default_agent?: string | null };
   type Agent = { id: string; name?: string; command?: string };
@@ -69,6 +70,8 @@
   let agent = $state("");
   let spec = $state("");
   let worktree = $state(true);
+  /// Starting from a prompt, or drafting a specification by the project's own methodology.
+  let drafting = $state(false);
   let filter = $state("");
 
   const shownProjects = $derived(
@@ -154,10 +157,14 @@
   const gatesAt = surfaces().find((s) => s.holds === "gates")?.id ?? "";
 </script>
 
+{#if drafting}
+  <Draft {projects} {agents} {changeSurface} implement={() => (drafting = false)} {close} />
+{:else}
 <form class="new" onsubmit={start} aria-label="start a new change">
   <header>
     <Icon name="change" size={16} />
     <h1>New change</h1>
+    <button type="button" class="mode" onclick={() => (drafting = true)}>Draft a specification instead</button>
     <button type="button" class="x" aria-label="close" onclick={close}><Icon name="x" size={14} /></button>
   </header>
 
@@ -264,6 +271,7 @@
     </button>
   </footer>
 </form>
+{/if}
 
 <style>
   .new {
@@ -282,8 +290,11 @@
     margin: 0;
     font-size: var(--t-md);
   }
-  .x {
+  .mode {
     margin-left: auto;
+    font-size: var(--t-xs);
+  }
+  .x {
     border: 0;
     background: none;
     color: var(--dim);

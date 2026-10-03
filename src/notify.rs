@@ -230,6 +230,7 @@ mod tests {
             no_offer: None,
             resume_command: None,
             session_link: None,
+            marker: None,
             since: jiff::Timestamp::now(),
         }
     }

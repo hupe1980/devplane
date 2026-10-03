@@ -5,6 +5,7 @@ import { t as cursor } from "./cursor.js";
 import { t as Failed } from "./Failed.js";
 import { t as Grid } from "./Grid.js";
 import { t as Empty } from "./Empty.js";
+import { t as Edits } from "./Edits.js";
 //#region src/surfaces/why/Why.svelte
 var root = from_html(`<button> <span class="svelte-1r7h8sn"> </span></button>`);
 var root_1 = from_html(`<button class="more svelte-1r7h8sn"> </button>`);
@@ -16,7 +17,7 @@ var root_6 = from_html(`<p class="quiet svelte-1r7h8sn">Nothing matches.</p>`);
 var root_7 = from_html(`<p><!></p>`);
 var root_8 = from_html(`<a class="svelte-1r7h8sn"><!> the change</a>`);
 var root_9 = from_html(`<a class="svelte-1r7h8sn"><!> everything about this run</a>`);
-var root_10 = from_html(`<aside class="drawer svelte-1r7h8sn"><header class="svelte-1r7h8sn"><!> <b> </b> <button class="x svelte-1r7h8sn" aria-label="close"><!></button></header> <p class="when svelte-1r7h8sn"> </p> <pre class="svelte-1r7h8sn"> </pre> <!> <div class="links svelte-1r7h8sn"><!> <!></div></aside>`);
+var root_10 = from_html(`<aside class="drawer svelte-1r7h8sn"><header class="svelte-1r7h8sn"><!> <b> </b> <button class="x svelte-1r7h8sn" aria-label="close"><!></button></header> <p class="when svelte-1r7h8sn"> </p> <pre class="svelte-1r7h8sn"> </pre> <!> <!> <div class="links svelte-1r7h8sn"><!> <!></div></aside>`);
 var root_11 = from_html(`<div class="frame svelte-1r7h8sn"><!> <!></div>`);
 var root_12 = from_html(`<div class="ledger svelte-1r7h8sn"><header class="head svelte-1r7h8sn"><h1 class="svelte-1r7h8sn">Ledger</h1> <button title="rule, timer and nobody — what was decided instead of you"><!> Decided for you <span class="svelte-1r7h8sn"> </span></button> <div class="chips svelte-1r7h8sn" role="group" aria-label="by authority"><!> <!></div> <span class="gap svelte-1r7h8sn"></span> <label class="find svelte-1r7h8sn"><!><input placeholder="Filter" aria-label="filter the ledger" class="svelte-1r7h8sn"/></label></header> <!> <!> <!> <!></div>`);
 function Why($$anchor, $$props) {
@@ -393,12 +394,21 @@ function Why($$anchor, $$props) {
 			if_block(node_14, ($$render) => {
 				if (get(pick).reason) $$render(consequent_13);
 			});
-			var div_3 = sibling(node_14, 2);
-			var node_16 = child(div_3);
+			var node_16 = sibling(node_14, 2);
+			Edits(node_16, {
+				get edits() {
+					return get(pick).edits;
+				},
+				get none() {
+					return get(pick).no_edit;
+				}
+			});
+			var div_3 = sibling(node_16, 2);
+			var node_17 = child(div_3);
 			var consequent_14 = ($$anchor) => {
 				var a_1 = root_8();
-				var node_17 = child(a_1);
-				Icon(node_17, {
+				var node_18 = child(a_1);
+				Icon(node_18, {
 					name: "change",
 					size: 13
 				});
@@ -407,14 +417,14 @@ function Why($$anchor, $$props) {
 				template_effect(($0) => set_attribute(a_1, "href", $0), [() => `#change/${encodeURIComponent(get(pick).change_id)}`]);
 				append($$anchor, a_1);
 			};
-			if_block(node_16, ($$render) => {
+			if_block(node_17, ($$render) => {
 				if (get(pick).change_id) $$render(consequent_14);
 			});
-			var node_18 = sibling(node_16, 2);
+			var node_19 = sibling(node_17, 2);
 			var consequent_15 = ($$anchor) => {
 				var a_2 = root_9();
-				var node_19 = child(a_2);
-				Icon(node_19, {
+				var node_20 = child(a_2);
+				Icon(node_20, {
 					name: "sessions",
 					size: 13
 				});
@@ -423,7 +433,7 @@ function Why($$anchor, $$props) {
 				template_effect(($0) => set_attribute(a_2, "href", $0), [() => `#why/${encodeURIComponent(get(pick).run_id)}`]);
 				append($$anchor, a_2);
 			};
-			if_block(node_18, ($$render) => {
+			if_block(node_19, ($$render) => {
 				if (get(pick).run_id) $$render(consequent_15);
 			});
 			reset(div_3);

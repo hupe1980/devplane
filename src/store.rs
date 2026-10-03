@@ -24,11 +24,11 @@ use std::str::FromStr;
 /// satisfy (a renamed or added column, a changed type, a dropped table). A file
 /// stamped with anything else is moved aside on open (`Store::retire`), not
 /// migrated.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// The statement that stamps it, written out because `PRAGMA user_version`
 /// accepts no bind parameter.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 14";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 15";
 
 /// The database and its sidecars readable by their owner alone, whoever
 /// opened them first — a hook creates the file long before any `up` would
@@ -510,6 +510,19 @@ impl Store {
         Ok(decode_rows("event", &rows, row_to_event))
     }
 
+    /// The edits a driven run's agent reported (`edit_reported`), oldest
+    /// first: the agent's own claims, kept only where transcripts are.
+    pub async fn edits_reported(&self, run: &RunId) -> Result<Vec<EventEnvelope>> {
+        let rows = sqlx::query(
+            "SELECT id, at, run_id, project_id, source, payload FROM events
+             WHERE run_id = ? AND kind = 'edit_reported' ORDER BY seq ASC",
+        )
+        .bind(run.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(decode_rows("event", &rows, row_to_event))
+    }
+
     /// Every tool call observed on this machine, newest first, with the
     /// directory whose rules govern it (from the run; calls whose run is pruned
     /// are dropped). Only tools a path or command rule can speak for.
@@ -939,8 +952,8 @@ impl Store {
         sqlx::query(
             "INSERT OR IGNORE INTO decisions
                (id, at, authority, action, subject, outcome, reason, tool, server_source,
-                project_id, run_id, change_id)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                project_id, run_id, change_id, call_id)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
         .bind(ts(&d.at))
@@ -954,6 +967,7 @@ impl Store {
         .bind(d.project_id.as_ref().map(|p| p.as_str()))
         .bind(d.run_id.as_ref().map(|r| r.as_str()))
         .bind(d.change_id.as_ref().map(|w| w.as_str()))
+        .bind(d.call_id.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1668,6 +1682,7 @@ fn decode_decision(r: &sqlx::sqlite::SqliteRow) -> Result<crate::core::Decision>
         change_id: r
             .get::<Option<String>, _>("change_id")
             .map(crate::core::ChangeId::new),
+        call_id: r.get("call_id"),
     })
 }
 
@@ -2118,6 +2133,7 @@ mod tests {
             no_offer: None,
             resume_command: None,
             session_link: None,
+            marker: None,
             since: jiff::Timestamp::now(),
         }
     }
@@ -2194,6 +2210,7 @@ mod tests {
             no_offer: None,
             resume_command: None,
             session_link: None,
+            marker: None,
             since: jiff::Timestamp::now(),
             options: Vec::new(),
             actions: Vec::new(),

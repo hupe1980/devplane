@@ -99,6 +99,11 @@ pub struct Decision {
     pub run_id: Option<RunId>,
     #[serde(default)]
     pub change_id: Option<ChangeId>,
+    /// The driven tool call this decides, by the protocol's own id: the key
+    /// the agent's report of that call's edit is found by. `None` for
+    /// anything that is not a driven call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 
 impl Decision {
@@ -124,6 +129,7 @@ impl Decision {
             project_id: None,
             run_id: None,
             change_id: None,
+            call_id: None,
         }
     }
 
@@ -158,6 +164,12 @@ impl Decision {
 
     pub fn for_run(mut self, run: &RunId) -> Self {
         self.run_id = Some(run.clone());
+        self
+    }
+
+    /// Names the driven tool call this decides.
+    pub fn for_call(mut self, call: Option<&str>) -> Self {
+        self.call_id = call.filter(|c| !c.is_empty()).map(str::to_string);
         self
     }
 

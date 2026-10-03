@@ -78,7 +78,9 @@ tauri-plugin-opener = { version = "2", optional = true }
 # The update check: off until the person switches it on in `app.toml`, run
 # only by the window's process, never by the CLI.
 tauri-plugin-updater = { version = "2", optional = true }
-agent-client-protocol = "2.2"
+# Session notices: the agent's advisory messages to the person, sent by both
+# driven adapters (an ACP RFD, behind the crate's feature).
+agent-client-protocol = { version = "2.2", features = ["unstable_session_notices"] }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "tokio", "http1"] }
 clap = { version = "4", features = ["derive", "env"] }

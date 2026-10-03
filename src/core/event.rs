@@ -522,9 +522,54 @@ pub enum Event {
         #[serde(default)]
         paths: Vec<String>,
     },
+    /// How a driven session ended on the agent's side: `sent` when it was
+    /// closed over the protocol (`session/close`) before the process went,
+    /// `false` when the agent does not offer a close or did not answer one.
+    SessionClosed {
+        sent: bool,
+    },
+    /// A notice the agent addressed to the person (`session/update` kind
+    /// `notice`): advisory, the agent's own words, never an instruction to
+    /// Devplane.
+    NoticeSeen {
+        /// `info`, `warning`, `error`, or the agent's own value.
+        severity: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// The agent said it needs signing in before a session can start, and
+    /// offered these ways. The run ends; nothing was asked for or stored.
+    SignInRequired {
+        methods: Vec<SignInMethod>,
+    },
+    /// Devplane's MCP server could not be offered to this session, so the
+    /// agent cannot ask Devplane about its change.
+    ToolsNotOffered,
     /// Something changed that no observation describes (a change phase, a gate
     /// verdict, a snooze). Tells subscribers to ask again; applied to no run.
     Refresh,
+}
+
+/// One way an agent says it can be signed in, as it named it. Agent text:
+/// shown quoted, acted on only by the person's choice, and never carrying a
+/// credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignInMethod {
+    /// The agent's id for the method, what `authenticate` names.
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `agent` (the agent signs in itself when asked), `terminal` (the
+    /// agent's own login, run in a terminal the person operates), or `other`
+    /// for any kind the protocol does not define: shown, never acted on.
+    pub kind: String,
+    /// Terminal methods only: what is added to the agent's command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -569,6 +614,10 @@ impl Event {
             | Event::SpecObserved { .. }
             | Event::EditReported { .. }
             | Event::StopClaimed { .. }
+            | Event::SessionClosed { .. }
+            | Event::NoticeSeen { .. }
+            | Event::SignInRequired { .. }
+            | Event::ToolsNotOffered
             | Event::Refresh => Source::Host,
             _ => Source::Hook,
         }
@@ -617,6 +666,10 @@ impl Event {
             Event::SpecObserved { .. } => "spec_observed",
             Event::EditReported { .. } => "edit_reported",
             Event::StopClaimed { .. } => "stop_claimed",
+            Event::SessionClosed { .. } => "session_closed",
+            Event::NoticeSeen { .. } => "notice_seen",
+            Event::SignInRequired { .. } => "sign_in_required",
+            Event::ToolsNotOffered => "tools_not_offered",
             Event::Refresh => "refresh",
         }
     }
@@ -634,6 +687,8 @@ impl Event {
                 | Event::Lost { .. }
                 | Event::TasksSent { .. }
                 | Event::SpecObserved { .. }
+                | Event::SessionClosed { .. }
+                | Event::ToolsNotOffered
                 | Event::Refresh
         )
     }

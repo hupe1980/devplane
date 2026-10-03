@@ -15,6 +15,7 @@ import "./render/first_run";
 import "./render/behaviour";
 import "./render/words";
 import "./render/dialects";
+import "./render/draft";
 import { finish } from "./harness";
 
 finish();

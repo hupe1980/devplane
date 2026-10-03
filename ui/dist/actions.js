@@ -239,6 +239,16 @@ function rowActions(item) {
 		label: "accept the drift",
 		key: null
 	});
+	if (has("answer")) out.push({
+		id: "answer",
+		label: "answer in the specification",
+		key: null
+	});
+	if (has("tell_agent")) out.push({
+		id: "tell_agent",
+		label: "send your answer to the agent",
+		key: null
+	});
 	if (has("open") && (item.run_id || item.change_id)) out.push({
 		id: "open",
 		label: item.change_id ? "open the change" : "open the session",

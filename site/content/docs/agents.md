@@ -44,8 +44,11 @@ gemini     Gemini CLI     npx -y @google/gemini-cli@0.62.0 --acp
   on your `PATH`.
 - Capabilities (`resume`, `load`, `modes`, sign-in) are listed only for agents that have run, with the
   date. *Not probed* differs from *not supported*.
-- Agents sign in in their own terminal; a failed start shows the advertised methods (*Run `copilot
-  login` in the terminal*).
+- An agent that needs signing in shows its own sign-in methods on the change, by its own names.
+  `devplane change login <change>` lists them; `--method <id>` runs a terminal method's login in your
+  terminal and then starts the change again, or asks the agent to sign itself in for an agent
+  method. A method of a kind Devplane does not know is shown and never acted on. Devplane never asks
+  for, reads or stores a credential.
 
 ## Adding an agent
 
@@ -141,13 +144,25 @@ unanswered.
 ## What a driven agent is given
 
 - **Devplane's MCP server** ([`devplane mcp`](@/docs/cli.md#devplane-mcp)): four questions — inbox,
-  change, explain, audit — and one claim, `spec_and_tests_conflict` (below).
+  change, explain, audit — and one claim, `spec_and_tests_conflict` (below). Asked `change` with no
+  id, it answers about the agent's own change: its phase, its gate verdicts, its specification and
+  its task lines, framed as a report, not instructions. When the server could not be offered, the
+  change says so.
+- **Its specification folder**, when the folder is in your checkout but not on the base branch the
+  worktree was made from: declared as an additional directory. An agent that cannot take one ends
+  before any prompt, saying why.
 - **A way to say the spec and the tests conflict.** Every implementation prompt and every round of
   gate feedback ends with one sentence: if the specification and the tests cannot both be
   satisfied, call `spec_and_tests_conflict` with what conflicts and leave the tests as they are, and
   without that tool, say so plainly.
 - **`DEVPLANE_RUN`** in its environment, marking an agent session.
-- **A clean ending**: `session/close` where offered, before its processes end.
+- **A clean ending**: `session/close` where offered, before its processes end; the change says
+  whether the session was closed that way.
+
+What the agent addresses to you as a notice is shown on the change, quoted. The diff an agent
+reports for an edit is kept beside the decision that allowed or refused that call, labelled as the
+agent's own report; the worktree, not the report, is what the gates read. A project with `[agent]
+keep_transcripts = false` keeps no diff, and the ledger row says so.
 - **Withdrawn questions leave the inbox** when the agent cancels a request.
 
 ## When the spec and the tests conflict
@@ -229,6 +244,18 @@ devplane change resume <change>
 
 Uses `session/resume`, else `session/load` with replay suppressed (GitHub Copilot). With neither it
 says so; a fresh session is never passed off as a resume. Never automatic.
+
+To continue with a different agent — the first one stopped, ran out of credit, or is not doing well:
+
+```sh
+devplane change resume <change> --agent codex "Finish the rate limiter; the tests are in tests/login.test.ts"
+```
+
+The new agent starts in the change's own worktree and is told your words and Devplane's standing
+sentence — nothing from the earlier agent's conversation; it reads the specification, the tasks and
+the worktree as files and through Devplane's MCP server. Both runs stay on the change, the earlier
+one resumable with its own agent, and the switch is recorded as yours. It is refused while a run of
+the change is still live.
 
 ## Handing over
 

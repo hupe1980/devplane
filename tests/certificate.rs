@@ -1759,24 +1759,33 @@ fn a_project_that_declares_no_markers_has_no_questions() {
     );
     assert!(plan.questions.is_empty());
 
-    let id = devplane::core::ProjectId::from("p1");
+    let change = devplane::core::Change::new(
+        devplane::core::ProjectId::from("p1"),
+        "x".into(),
+        "…".into(),
+    );
+    let lines: Vec<(String, u32, String)> = devplane::spec::Spec::read(&root, "specs/001-x", &[])
+        .question_lines_at()
+        .map(|(p, l, t)| (p.to_string(), l, t.to_string()))
+        .collect();
     assert!(
-        devplane::core::attention::plan_question_item_at(
+        devplane::core::attention::spec_question_items_at(
             "proj",
-            &id,
-            &[("w1".into(), plan)],
+            &change,
+            &lines,
+            &[],
             jiff::Timestamp::UNIX_EPOCH,
         )
-        .is_none(),
+        .is_empty(),
         "an item was raised for a project that declared no words"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Many markers in one project raise one inbox item naming the count, never
-/// one per marker.
+/// Every marker line is its own inbox item, each naming its file and line,
+/// and none of them folds: each is a question only the person can answer.
 #[test]
-fn many_markers_in_one_project_are_one_item() {
+fn many_markers_are_one_item_each_and_never_folded() {
     let root = std::env::temp_dir().join(format!("dp-manymark-{}", uuid::Uuid::new_v4().simple()));
     let dir = root.join("specs/001-x");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1792,25 +1801,35 @@ fn many_markers_in_one_project_are_one_item() {
         plan.questions.len() <= 20,
         "the lines handed to a surface are bounded; the count is not"
     );
+    assert_eq!(plan.questions[0].line, 3, "each question names its line");
 
-    let id = devplane::core::ProjectId::from("p1");
-    let item = devplane::core::attention::plan_question_item_at(
+    let change = devplane::core::Change::new(
+        devplane::core::ProjectId::from("p1"),
+        "x".into(),
+        "…".into(),
+    );
+    let lines: Vec<(String, u32, String)> =
+        devplane::spec::Spec::read(&root, "specs/001-x", &markers)
+            .question_lines_at()
+            .map(|(p, l, t)| (p.to_string(), l, t.to_string()))
+            .collect();
+    let items = devplane::core::attention::spec_question_items_at(
         "proj",
-        &id,
-        &[("w1".into(), plan)],
+        &change,
+        &lines,
+        &markers,
         jiff::Timestamp::UNIX_EPOCH,
-    )
-    .expect("forty markers is a fact worth one item");
-    assert!(
-        item.title.contains("40 questions"),
-        "the item names the count: {}",
-        item.title
     );
-    assert_eq!(item.level, devplane::core::attention::Level::Normal);
+    assert_eq!(items.len(), 40, "one item per marker line");
     assert!(
-        item.actions.is_empty(),
-        "nothing here can be answered from the inbox: the answer is an edit to a committed file"
+        items[0].title.contains("specs/001-x/spec.md:3"),
+        "{}",
+        items[0].title
     );
+    assert_eq!(items[0].level, devplane::core::attention::Level::Normal);
+    let (rendered, folded) = devplane::core::attention::fold(items);
+    assert_eq!(rendered.len(), 40, "no marker is folded into a summary");
+    assert!(folded.is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
 

@@ -67,6 +67,9 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             // The agent named the conversation: working, and now resumable.
             run.agent_session = Some(agent_session.clone());
             run.state = RunState::Working;
+            // Signed in after all, and a fresh session not yet closed.
+            run.sign_in = None;
+            run.session_closed = None;
         }
 
         Event::AgentProcessSpawned { pid } => {
@@ -664,9 +667,43 @@ pub fn apply(run: &mut Run, env: &EventEnvelope) {
             run.blocked_on = None;
         }
 
-        // Kept in the log for review; what the agent claims it edited changes
-        // nothing about where the run is.
-        Event::EditReported { .. } => {}
+        // The diff stays in the log; the run indexes which call reported an
+        // edit to which path, so a decision about the call can find it. The
+        // agent's claim changes nothing about where the run is.
+        Event::EditReported { call_id, path, .. } => {
+            let edit = crate::core::run::ReportedEdit {
+                call_id: call_id.clone(),
+                path: path.clone(),
+            };
+            if !run.edits_reported.contains(&edit) {
+                run.edits_reported.push(edit);
+                let over = run
+                    .edits_reported
+                    .len()
+                    .saturating_sub(crate::core::run::EDITS_KEPT);
+                run.edits_reported.drain(..over);
+            }
+        }
+        Event::SessionClosed { sent } => run.session_closed = Some(*sent),
+        Event::NoticeSeen {
+            severity,
+            title,
+            description,
+        } => {
+            run.notices.push(crate::core::run::Notice {
+                severity: severity.clone(),
+                title: title.clone(),
+                description: description.clone(),
+                at: env.at,
+            });
+            let over = run
+                .notices
+                .len()
+                .saturating_sub(crate::core::run::NOTICES_KEPT);
+            run.notices.drain(..over);
+        }
+        Event::SignInRequired { methods } => run.sign_in = Some(methods.clone()),
+        Event::ToolsNotOffered => run.tools_not_offered = true,
         // The agent's claim lives on its change; the stop that follows ends the run.
         Event::StopClaimed { .. } => {}
 

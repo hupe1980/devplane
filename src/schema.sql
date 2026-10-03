@@ -108,7 +108,10 @@ CREATE TABLE IF NOT EXISTS decisions (
     server_source TEXT,
     project_id   TEXT,
     run_id       TEXT,
-    change_id      TEXT
+    change_id      TEXT,
+    -- The driven tool call this decides, by the protocol's id: the key the
+    -- agent's own report of that call's edit (`edit_reported`) is found by.
+    call_id      TEXT
 );
 
 -- Ties on `at` are common (a gate finishing as its run ends), so readers
