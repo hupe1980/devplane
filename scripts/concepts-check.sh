@@ -408,7 +408,7 @@ done
 say "directories" "every src/ui/tests directory the notes name exists"
 
 # "N dialects" outside the roadmap and the log must be the number the code models.
-num() { case "$1" in one) echo 1;; two) echo 2;; three) echo 3;; four) echo 4;; five) echo 5;; six) echo 6;; *) echo "$1";; esac; }
+num() { case "$1" in one) echo 1;; two) echo 2;; three) echo 3;; four) echo 4;; five) echo 5;; six) echo 6;; seven) echo 7;; eight) echo 8;; *) echo "$1";; esac; }
 dialects=$(awk '/^pub const DIALECTS/,/^\];/' ../src/spec.rs | grep -c 'name: "')
 expect "dialects in src/spec.rs" "$dialects" || true
 bad_dialects=""
@@ -418,12 +418,21 @@ for f in $DOCS; do
   while read -r w; do
     [ -n "$w" ] || continue
     [ "$(num "$w")" = "$dialects" ] || bad_dialects="$bad_dialects\n  $f says $w"
-  done <<< "$(prose "$f" | grep -viE '#dialects|plain|would|will|unbuilt' \
-               | grep -oiE '\b(one|two|three|four|five|six|[0-9]+) (spec )?dialects (are |is )?(modell?ed|read)' \
-               | awk '{print tolower($1)}')"
+  # Any number word directly before "dialects" is a count, wherever the line
+  # cites the retired anchor; "two dialects in one repository" is not a count.
+  done <<< "$(prose "$f" | grep -viE 'would|will|unbuilt' \
+               | grep -oiE '\b(one|two|three|four|five|six|seven|eight|[0-9]+) (spec )?dialects\b( in one)?' \
+               | grep -viE ' in one$' | awk '{print tolower($1)}')"
 done
+# STATE's own row says it in a cell: "Spec dialects modelled | **four, …".
+state_dialects=$(grep '^| Spec dialects modelled |' STATE.md | grep -oiE '^\| Spec dialects modelled \| \*\*[a-z0-9]+' \
+  | sed 's/.*\*\*//' | tr '[:upper:]' '[:lower:]')
+expect "dialect count in STATE.md's row" "$state_dialects" || true
+if [ -n "$state_dialects" ] && [ "$(num "$state_dialects")" != "$dialects" ]; then
+  bad_dialects="$bad_dialects\n  STATE.md's row says $state_dialects"
+fi
 [ -z "$bad_dialects" ] || { printf '%b\n' "dialect counts that are not the code's ($dialects):$bad_dialects"; fail=1; }
-say "dialects" "code models $dialects; every modelled/read count outside the roadmap agrees"
+say "dialects" "code models $dialects; every count outside the roadmap, STATE's row included, agrees"
 
 # "N top-level commands" must be the number COMMAND_GROUPS lists.
 commands=$(awk '/^pub const COMMAND_GROUPS/,/^\];/' ../src/cli/mod.rs | grep -oE '&\[[^]]*\]|^ +"[a-z]+",' | grep -oE '"[a-z]+"' | wc -l | tr -d ' ')
