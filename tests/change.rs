@@ -3361,14 +3361,25 @@ async fn a_killed_host_is_recovered_by_the_next_one() {
     };
     common::trust_from_a_terminal(&home, &repo);
 
+    // `echo_agent` pids this host started (`sh` execs the agent, so the host is
+    // its parent). Other tests' agents run concurrently, and a new one of
+    // theirs taken for this host's would be killed below, mid-turn.
+    let host_pid = info["pid"].as_u64().expect("a pid") as u32;
     let echoes = || -> std::collections::HashSet<u32> {
         devplane::observe::procs::snapshot()
             .into_iter()
-            .filter(|p| p.command.contains("echo_agent"))
+            .filter(|p| p.ppid == host_pid && p.command.contains("echo_agent"))
             .map(|p| p.pid)
             .collect()
     };
     let before = echoes();
+    // Somebody else's agent, started in the same window: it must survive.
+    let mut bystander = std::process::Command::new(&agent)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("a bystander agent");
     let started = post_to(
         port,
         "/api/changes".into(),
@@ -3403,8 +3414,17 @@ async fn a_killed_host_is_recovered_by_the_next_one() {
         info_path.exists(),
         "a killed host cannot clear its record; the next start has to"
     );
-    // The orphaned agent is the harness's to end.
+    // The orphaned agent is the harness's to end, and only it.
     unsafe { libc::kill(agent_pid as i32, libc::SIGKILL) };
+    // A kill lands asynchronously: given time to, the bystander would be gone.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let bystander_alive = matches!(bystander.try_wait(), Ok(None));
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    assert!(
+        bystander_alive,
+        "the harness killed an agent this host never started"
+    );
 
     let mut second = spawn_host();
     let mut second_guard = common::HostGuard::new(second.id());
