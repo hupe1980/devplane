@@ -613,7 +613,8 @@ mod tests {
         }
     }
 
-    /// A row written before the cut still reads, and says what it said.
+    /// A row answered from `board`, a path no surface writes, still loads
+    /// and says what it said.
     #[test]
     fn an_old_board_row_still_loads_and_reads_as_stored() {
         let mut a = ask();

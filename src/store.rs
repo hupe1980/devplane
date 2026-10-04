@@ -2183,7 +2183,7 @@ mod tests {
 
     /// A store from before schema 14 kept trust in a column; setting it
     /// aside first moves its trusted roots to `trusted.toml`, so no trust a
-    /// person granted vanishes with the hard cut.
+    /// person granted is lost.
     #[tokio::test]
     async fn an_older_stores_trusted_roots_move_to_their_own_file() {
         let dir = std::env::temp_dir().join(format!(

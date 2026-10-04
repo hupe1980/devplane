@@ -389,8 +389,8 @@ fi
 
 # ---- prose about the code, compared to the code (D080) --------------------
 cd "$root/concepts" || exit 1
-# The sprint of 2026-10-02 found fourteen wrong statements under an all-green
-# run: each was a claim in prose no guard read. These read the cheapest kinds.
+# An all-green run can still carry wrong claims in prose no guard reads.
+# These read the cheapest kinds.
 # Run from concepts/ like the guards above; fenced blocks are illustrations.
 prose() { awk '/^```/{f=!f; next} !f' "$1"; }
 

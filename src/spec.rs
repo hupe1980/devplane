@@ -531,8 +531,7 @@ fn task_box(line: &str) -> Option<bool> {
 /// OpenSpec's own task line, as `openspec list`, `status` and `archive` count
 /// it: whether the line is a task, and done. A hand-written equal of
 /// `TASK_LINE_PATTERN` in `dist/utils/task-progress.js` of
-/// `@fission-ai/openspec` 1.13.2 and 1.14.0 (unchanged between them; read
-/// 2026-09-26 and again 2026-10-02):
+/// `@fission-ai/openspec` 1.13.2 and 1.14.0 (unchanged between them):
 ///
 /// ```text
 /// ^\s*(?:[-*+]|\d{1,9}[.)])\s*\[(?:\s*([^\]\s]?)\s*\](?![([])|\s+\])\s*(.*)
@@ -1043,7 +1042,7 @@ pub fn changes(root: &Path, layout: &Detected) -> Vec<ChangeFolder> {
 }
 
 // OpenSpec's namespace-wrapper test, as `dist/utils/nested-change.js` of
-// `@fission-ai/openspec` 1.13.2 and 1.14.0 has it (read 2026-10-02). Its third
+// `@fission-ai/openspec` 1.13.2 and 1.14.0 has it. Its third
 // signal, a custom schema's output file, is not modelled: under the default
 // schema those outputs are exactly the markers below.
 

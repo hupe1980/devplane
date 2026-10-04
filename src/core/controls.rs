@@ -1217,8 +1217,8 @@ mod tests {
         assert!(took < bound, "{took:?}");
     }
 
-    /// Diffs produced by each format's own tool, 2026-10-02 (see the spec's
-    /// task notes): lock, commit, change the manifest, lock again, `git diff`.
+    /// Diffs produced by each format's own tool: lock, commit, change the
+    /// manifest, lock again, `git diff`.
     mod fixtures {
         pub const CARGO: &str = r#"@@ -4,20 +4,20 @@ version = 4
 

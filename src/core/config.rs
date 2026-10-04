@@ -916,7 +916,6 @@ fn removed_key(t: &toml::Table) -> Option<String> {
     None
 }
 
-/// The parse error, with the retired `include` key pointed at its replacement.
 /// A key in a repository's `devplane.toml` that would widen a permission or
 /// set how soon one is offered. A repository is text anybody can send, so
 /// nothing read from one may grant.
@@ -949,6 +948,7 @@ fn repository_grant_key(t: &toml::Table) -> Option<String> {
     None
 }
 
+/// The parse error, pointing a `[workspace] include` key at `.worktreeinclude`.
 fn explain_unknown(e: &toml::de::Error) -> String {
     let text = e.to_string();
     if text.contains("unknown field `include`") {

@@ -214,24 +214,22 @@ pub fn groups_block() -> String {
 /// What `devplane --help` says above the listing. The window is named only
 /// in a build that has it.
 #[cfg(feature = "app")]
-const LONG_ABOUT: &str = "Devplane — know when an agent's work is actually done. Run any ACP \
-     agent in its own worktree, verify its change with your own checks run outside the agent, \
-     see the weakened tests first, and keep the record of who decided what while you were not \
-     looking.\n\n\
+const LONG_ABOUT: &str = "Devplane puts in front of you the evidence for deciding whether an \
+     agent's change is safe to merge — evidence your own project produces — and keeps the record \
+     of how you know.\n\n\
      Start with `devplane up` (or `devplane up --window`), then \
      `devplane change start \"<what to do>\"`.";
 #[cfg(not(feature = "app"))]
-const LONG_ABOUT: &str = "Devplane — know when an agent's work is actually done. Run any ACP \
-     agent in its own worktree, verify its change with your own checks run outside the agent, \
-     see the weakened tests first, and keep the record of who decided what while you were not \
-     looking.\n\n\
+const LONG_ABOUT: &str = "Devplane puts in front of you the evidence for deciding whether an \
+     agent's change is safe to merge — evidence your own project produces — and keeps the record \
+     of how you know.\n\n\
      Start with `devplane up`, then `devplane change start \"<what to do>\"`.";
 
 #[derive(Parser)]
 #[command(
     name = "devplane",
     version,
-    about = "Know when an agent's work is actually done",
+    about = "The evidence for deciding whether an agent's change is safe to merge",
     long_about = LONG_ABOUT,
     after_help = groups_block(),
     after_long_help = groups_block(),
@@ -841,7 +839,7 @@ pub enum ChangeCmd {
     Resume {
         /// The change, or a unique prefix of its id, as `devplane change list` prints it
         change: String,
-        /// Continue with this agent (an id from `devplane agents`) rather than
+        /// Continue with this agent (an id from `devplane agent list`) rather than
         /// the one that last drove the change
         #[arg(long)]
         agent: Option<String>,

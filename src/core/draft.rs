@@ -173,8 +173,8 @@ pub fn below(v: &str, than: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// How Spec Kit spells a command for an integration in skills mode. From
-/// `src/specify_cli/_invocation_style.py` in github/spec-kit, read on
-/// 2026-10-03 (release v1.1.0, published 2026-10-02): dollar-skills agents use
+/// `src/specify_cli/_invocation_style.py` in github/spec-kit v1.1.0:
+/// dollar-skills agents use
 /// `$`, Kimi uses `/skill:`, every other agent `/`. In command mode (the `.`
 /// separator) every agent uses `/`.
 const DOLLAR_SKILLS: &[&str] = &["codex", "zcode", "command-code"];
@@ -198,7 +198,7 @@ pub const SPECKIT_KEYS: &[&str] = &[
 ];
 
 /// Devplane's agent id as Spec Kit's integration key. The built-in agents
-/// share their names with Spec Kit's keys (dated 2026-10-03); a user agent is
+/// share their names with Spec Kit's keys; a user agent is
 /// recognised when its id is one of [`SPECKIT_KEYS`].
 pub fn speckit_key(agent: &str) -> Option<&'static str> {
     SPECKIT_KEYS.iter().copied().find(|k| *k == agent)
@@ -379,8 +379,8 @@ pub fn next_folder(
 
 /// Where OpenSpec's generators put its propose workflow for each agent, and
 /// how the agent invokes it: OpenSpec's supported-tools reference and its
-/// command-generation adapters, read on 2026-10-03 (v1.14.0, published
-/// 2026-09-30). The skill comes first: it is preferred where both exist.
+/// command-generation adapters at v1.14.0. The skill comes first: it is
+/// preferred where both exist.
 pub const OPENSPEC_PROPOSE: &[(&str, &str, &str)] = &[
     (
         "claude",

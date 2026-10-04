@@ -294,8 +294,8 @@ fn the_outline_reads_the_specification_first_and_checklists_last() {
 // ---------------------------------------------------------------------------
 
 /// `openspec init --tools kiro` writes `.kiro/skills/` and `.kiro/prompts/`
-/// (the tree in `openspec-kiro/` is what OpenSpec 1.14.0 wrote on 2026-10-02,
-/// bodies trimmed to their front matter). No Kiro specification exists, so
+/// (the tree in `openspec-kiro/` is what OpenSpec 1.14.0 wrote, bodies
+/// trimmed to their front matter). No Kiro specification exists, so
 /// only OpenSpec is reported.
 #[test]
 fn an_openspec_repository_set_up_for_kiro_reads_as_one_dialect() {
@@ -344,7 +344,7 @@ fn json(path: &Path) -> serde_json::Value {
 
 /// The oracle is OpenSpec itself: `openspec-list.json` is the output of
 /// `openspec list --json --sort name` from `@fission-ai/openspec` 1.14.0, run
-/// in the fixture on 2026-10-02, minus `root.path` and each `lastModified`.
+/// in the fixture, minus `root.path` and each `lastModified`.
 /// The change list is every entry OpenSpec does not mark as a wrapper
 /// (`nested`), and each `(done, total)` is its `(completedTasks,
 /// totalTasks)`. The one stated difference: a change under a schema Devplane
@@ -399,10 +399,10 @@ fn openspec_counts_equal_openspecs_own() {
     );
 }
 
-/// Since OpenSpec 1.14.0, `openspec instructions apply --json` gives each task
+/// OpenSpec 1.14.0's `openspec instructions apply --json` gives each task
 /// its `sourcePath` and one-based `line`: the task's anchor, from the tool.
 /// `openspec-apply.json` holds that output for every change in the fixture
-/// (1.14.0, 2026-10-02; paths made relative to the fixture). Devplane's task
+/// (paths made relative to the fixture). Devplane's task
 /// anchors — what a dispatch selects by `file:line` — are the same lines with
 /// the same done state.
 #[test]
