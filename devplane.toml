@@ -31,7 +31,8 @@ plans          = "specs"
 open_questions = ["NEEDS CLARIFICATION"]
 
 [policy]
-# Devplane only refuses or defers; grants belong in the agent's settings.json.
+# A repository only refuses or defers. Allows belong in the agent's settings.json,
+# or as a grant in your own ~/.devplane/policy.toml.
 deny = ["Read(.env)", "Bash(rm -rf *)"]
 ask  = ["Bash(git push *)"]
 

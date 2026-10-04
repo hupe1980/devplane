@@ -6,16 +6,16 @@ weight = 4
 group = "start"
 +++
 
-Start with `devplane doctor`: host, gate (installed **and answering**), what is watched, GitHub, and
-channels, on one screen.
+Start with `devplane doctor`: the host, the gate (installed **and answering**), what is watched,
+GitHub, and notifications, on one screen.
 
 ## The gate is off
 
 ```console
 $ devplane doctor
 claude code
-  gate      off for PreToolUse — its hook runs /Users/you/.npm/_npx/…/devplane, which no longer exists
-            run `devplane agent connect claude` from an installed devplane (or pass `--bin <path>`)
+  gate off Claude Code — its hooks run /Users/you/.npm/_npx/…/devplane, which no longer exists
+            connect again from where Devplane is now: devplane agent connect claude
 ```
 
 **Cause.** Hooks run the binary by full path. If it is gone (npx cache cleared, reinstalled, moved),
@@ -25,18 +25,18 @@ the hook runs nothing and blocks nothing.
 
 ```sh
 devplane agent connect claude  # and codex, copilot, if you use them
-devplane doctor                # the gate line should say "answering"
+devplane doctor
 ```
 
-`agent connect` refuses a temporary binary (npx cache, App Translocation, disk image, AppImage);
-`--bin <path>` names a permanent one.
+`agent connect` refuses a temporary binary (npx cache, App Translocation, a disk image, an AppImage's
+mount); `--bin <path>` names a permanent one.
 
 | `doctor` says | Means | Do |
 |---|---|---|
 | `INSTALLED AND NOT ANSWERING` | the hook ran and did not answer in time | run the command it prints by hand and read the error |
 | `out of date` | the installed hooks are not the ones this version writes | `devplane agent connect claude` |
 | `not installed` | nothing was connected | `devplane agent connect claude` |
-| `N decision(s) taken while no host was running` | hooks decided while the store was busy; they are enforced | start a host to file them |
+| `N decision(s) taken while no host was running` | hooks decided while the store was busy; they were enforced | start a host to file them |
 
 **Codex** runs hooks only after you approve them in its dialog; `doctor` cannot tell.
 
@@ -47,20 +47,19 @@ $ devplane up --no-browser
 Error: port 47831 on 127.0.0.1 is taken by another process (python3, pid 4121), so the host did not start. …
 ```
 
-**Cause.** Another process holds the port. Devplane never moves on its own: `agent connect` wrote this
-port and the token into your agents' settings, so a moved host would leave the token going to the
-holder.
+**Cause.** Another process holds the port. Devplane never moves: `agent connect` wrote this port and
+the token into your agents' settings.
 
-**Fix.** Stop that process, or choose another port and reconnect:
+**Fix.** Stop that process, or choose another port and reconnect while that host is up:
 
 ```sh
 devplane up --no-browser --port 47900  # or DEVPLANE_PORT=47900
-devplane agent connect claude          # run while that host is up: telemetry follows its port
+devplane agent connect claude          # telemetry follows the running host's port
 ```
 
-For the window, pin the port in `~/.devplane/app.toml` (`[app] port = 47900`).
+For the window, set `[app] port = 47900` in `~/.devplane/app.toml`.
 
-*A host is already running (pid …, port …)*: another host owns this home. `devplane down`, or use it.
+*a host is already running (pid …, port …)*: another host owns this home. Use it, or `devplane down`.
 A second instance needs its own `DEVPLANE_HOME` and port.
 
 ## A session is not watched
@@ -71,16 +70,14 @@ A second instance needs its own `DEVPLANE_HOME` and port.
 |---|---|---|
 | hooks not installed | `devplane doctor` → `claude code` | `devplane agent connect claude` |
 | a session that never reported | `devplane status --all` | it appears once it acts |
-| the `claude` binary is not found, so the roster is not read | `devplane doctor` | set `DEVPLANE_CLAUDE_BIN` ([Install](@/docs/install.md#finding-the-claude-binary)) |
+| `claude` not found, so the roster is not read | `devplane doctor` | set `DEVPLANE_CLAUDE_BIN` ([Install](@/docs/install.md#finding-the-claude-binary)) |
 | Codex hooks not approved | Codex's own hook dialog | approve them there |
 | Copilot publishes no roster | — | a Copilot session appears after its first hook |
-| OpenCode is opt-in | `devplane doctor` → `channels` | `export DEVPLANE_OPENCODE_URL=http://127.0.0.1:4096` before starting the host |
+| OpenCode is opt-in | `devplane doctor` → `watched` | `export DEVPLANE_OPENCODE_URL=http://127.0.0.1:4096` before starting the host |
 | Gemini CLI | — | not watchable; drive it: `devplane change start --agent gemini` |
 
 **Cost and context blank**: telemetry goes to the port fixed at `agent connect`. Use 47831, or run
 `devplane agent connect claude` while the host is up, then restart the Claude Code session.
-
-The workbench's **Sight** panel lists what this machine cannot see.
 
 ## GitHub is not read
 
@@ -91,20 +88,14 @@ github
   github.com   not signed in — devplane auth login
 ```
 
-**Fix.** Sign in:
-
-```sh
-devplane auth login  # enter the shown code at GitHub's device page
-devplane doctor      # github.com   signed in as you · repo, read:org
-```
-
-Or **Setup → GitHub → Sign in**.
+**Fix.** `devplane auth login` (enter the code it shows at GitHub's device page), or **Setup → GitHub →
+Sign in**. `doctor` then says *signed in as you*.
 
 | State | Means |
 |---|---|
-| no credential store (some Linux) | sign-in refuses rather than write a file |
-| *Sign-in expired* | the token was revoked and removed; sign in again |
-| *Rate limited* | says when the limit resets |
+| no credential store (some Linux) | sign-in refuses rather than write the token to a file |
+| *sign-in expired* | GitHub no longer accepts the token, so it was removed; sign in again |
+| *rate limited* | says when the limit resets |
 | *unreachable* | the last lists are kept, marked stale |
 | no GitHub app for the host | `gh auth token \| devplane auth login --with-token`, or pipe a fine-grained token |
 | **not a GitHub repository** | no remote, or a remote on another host |
@@ -114,28 +105,22 @@ Or **Setup → GitHub → Sign in**.
 ## A verified change went stale
 
 ```console
-$ devplane change show c-3f9a
+$ devplane change show c-019a
   gates      gates passed, stale — the working tree changed after it ran (tree 1a2b3c4 then, 5d6e7f8 now)
 ```
 
-**Cause.** Any edit since the pass, committed or not, or a changed `check` in `devplane.toml`.
+**Cause.** An edit since the pass, committed or not, or a changed `check` in `devplane.toml`.
 
-**Fix.** Run the gate again, or let the agent's next turn end:
-
-```sh
-devplane change verify c-3f9a
-```
-
-A gate that writes the tree (formatter, generator) never verifies; use `cargo fmt --check`,
-`prettier --check`. See [Verified done](@/docs/verified-done.md).
+**Fix.** `devplane change verify <id>`, or let the agent's next turn end. A gate that writes the tree
+(a formatter, a generator) never verifies; use `cargo fmt --check`, `prettier --check`.
 
 ## The ledger is empty after an upgrade
 
 `devplane audit`, the Ledger and the change list are empty, and `~/.devplane` has a new
 `devplane.v<n>.<time>.bak`.
 
-**Cause.** A new store schema. Devplane does not migrate: it moves the old file aside (never deleting
-one that holds anything; an empty one is) and starts fresh.
+**Cause.** A new store schema. Devplane does not migrate: it moves the old file aside (an empty one is
+deleted) and starts fresh.
 
 **Fix.** Nothing is lost. Read the old log:
 
@@ -149,30 +134,31 @@ Delete a `.bak` once you have what you need.
 
 ## Notifications do not arrive, or carry no buttons
 
-`devplane doctor` prints one `notices` line from the running app:
+`devplane doctor` prints a `notices` line from the running app:
 
 | It says | Do |
 |---|---|
-| *actions and reply (macOS, bundled app)* / *(Windows, installed app)* | nothing; a notification held by Do Not Disturb or Focus appears when it ends |
+| *actions and reply* | nothing; a notification held by Do Not Disturb or Focus appears when it ends |
 | *not permitted* | macOS: System Settings › Notifications › Devplane, allow notifications |
-| *plain, no actions* | a build run from source or from `target/`: install the app for actions |
+| *plain, no actions* | a build run from source or from `target/`, or a service that reports no actions: install the app |
 | *no notification service answered* (Linux) | start a notification daemon; the tray count and the window still show every item |
 | *plain — the app is not running* | `devplane up --window` for answerable notifications |
 
-`DEVPLANE_NOTIFY=0` turns them off altogether.
+`DEVPLANE_NOTIFY=0` turns them off.
 
 ## Other messages
 
 | You see | Means | Do |
 |---|---|---|
-| *no host is running — start one with `devplane up` …* | the command starts, steers or stops an agent, which only a host can | `devplane up` in another terminal, or `devplane up --no-browser` |
-| *nothing was done: stdin is not a terminal …* | `agent connect` or `agent disconnect` ran from a script or an agent's shell | read the diff it printed, then re-run with `--yes` |
+| *no host is running — start one with `devplane up` …* | the command starts, steers or stops an agent, which only a host can | `devplane up` in another terminal |
+| *nothing was done: stdin is not a terminal …* | `agent connect` or `disconnect` ran from a script or an agent's shell | read the diff it printed, then re-run with `--yes` |
 | *not connecting: every hook runs the binary's path …* | you ran `agent connect` from npx or a disk image | install the binary; see [the gate is off](#the-gate-is-off) |
 | `change offer` exits `3` | a weakened check in the change is unread | `devplane change review <id>`, then `--seen <path>` for each row |
-| *refused: `CLAUDECODE` is set, so this is running inside an agent's session …* | `inbox answer --allow`, `offer`, `finish`, `archive` or `review --seen` ran inside an agent's session | run it from your own terminal |
+| *refused: `CLAUDECODE` is set, so this is running inside an agent's session …* | a command an agent may not run ran inside an agent's session | run it from your own terminal |
 | every call is asked, and the inbox has `config_broken` | a `devplane.toml` or `~/.devplane/policy.toml` will not load | `devplane config check` names the error |
 | `deny … (built in: …)` on an edit to `devplane.toml` | agents may not change the rules that gate them | edit it yourself |
-| `devplane gate install --speckit` refuses: *nothing here defines `/devplane-gate`* | `specify` is not on `PATH`, so the hand-written hook was chosen, and its skill file is not where the agent looks | put Spec Kit's `specify` on `PATH` so the extension is installed, or [copy the skill](@/docs/specs.md#the-gate-inside-spec-kit-s-workflow); then re-run |
+| `gate install --speckit` refuses: *nothing here defines `/devplane-gate`* | `specify` is not on `PATH`, so the hand-written hook was chosen, and its skill is missing | put `specify` on `PATH`, or [copy the skill](@/docs/specs.md#the-gate-inside-spec-kit-s-workflow); then re-run |
+| *trusting a repository is a person's decision, and this request cannot show it came from the Devplane window* | you pressed **Trust** in a browser tab, which cannot prove it is you | `devplane project trust <path>` in your own terminal |
 | macOS: *"devplane" cannot be opened* | a browser download is quarantined | use the `curl` installer |
-| the page says *This binary was built without its interface* | it was built from a clone without `ui/dist` | `cd ui && npm install && npm run build`, then rebuild |
+| the page says *built without its interface* | built from a clone without `ui/dist` | `cd ui && npm install && npm run build`, then rebuild |
 | `change start` fails before the agent speaks | the agent is not signed in, or `npx` cannot reach npm | sign the agent in in its own terminal (`claude`, `copilot login`, …); check Node and network |

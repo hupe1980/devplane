@@ -1,13 +1,15 @@
 # Devplane verify: runs the base's `check` from devplane.toml on this pull
-# request and leads the job summary with the checks the change weakened.
+# request, then the base checks (the base's tests on the change, the change's
+# new tests on the base), and leads the job summary with the checks the change
+# weakened.
 # Posts nothing to the pull request. Needs no token unless the `approvals`
 # input is on; then the job's own token reads the pull request's reviews.
 # Every input reaches the shell through `env:`, never through an expression in
 # a script.
 name: Devplane verify
 description: >-
-  Runs the base's `check` from devplane.toml on this pull request, leading the job summary with the
-  checks the change weakened. Posts nothing to the pull request.
+  Runs the base's `check` from devplane.toml on this pull request, then the base checks, and leads
+  the job summary with the checks the change weakened. Posts nothing to the pull request.
 author: hupe1980
 branding:
   icon: check-circle

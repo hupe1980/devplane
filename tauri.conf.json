@@ -17,7 +17,7 @@
     "license": "MIT OR Apache-2.0",
     "homepage": "https://hupe1980.github.io/devplane",
     "category": "DeveloperTool",
-    "shortDescription": "Decide whether an agent's change is safe to merge.",
+    "shortDescription": "The evidence for deciding whether an agent's change is safe to merge.",
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

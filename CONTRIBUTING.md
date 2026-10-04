@@ -1,38 +1,34 @@
 # Contributing
 
-One person maintains Devplane. The most useful contribution is a precise report; the second is a
-test.
+The most useful contribution is a precise report; the second is a test.
 
 ## Reports that matter most
 
-1. **A prohibition that did not fire.** Use the *gate widening* issue template with the exact call
-   and the exact rule. (Devplane never approves a call, so there is no allow-side report.)
-2. **A vendor release that moved something.** Claude Code, Copilot and Codex change weekly. Use the
-   *vendor drift* template and quote the changelog row.
+1. **A permission verdict that was wrong**: a prohibition that did not fire, or a grant that allowed
+   more than its rule. Use the *gate widening* issue template with the exact call and the exact rule.
+2. **A vendor release that moved something.** Use the *vendor drift* template and quote the
+   changelog row.
 
 ## Prerequisites
 
-- Rust stable (the minimum supported version is 1.94), [`just`](https://just.systems) and bash.
+- Rust 1.94 or later, [`just`](https://just.systems) and bash.
 - Node 22 or later, for the interface in `ui/`.
-- [Zola](https://www.getzola.org) 0.23, for `just site-build site-check`.
+- [Zola](https://www.getzola.org) 0.23, for the site.
 - On Linux, `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`:
-  `just check` runs clippy with every feature, which compiles the window.
+  clippy runs with every feature, which compiles the window.
 
 ## Before a pull request
 
 ```sh
-just check                   # fmt, clippy, build, test — the Rust half of CI
+just check                   # fmt, clippy, build, test, wire-check — what CI runs
 just ui-build ui-check wire  # the interface, its type check, the generated wire types
-just verify                  # check, then deps (dependency count), site-build and site-check (Zola links)
-just notes                   # checks over the maintainer's gitignored notes; says "skipped" where absent
+just verify                  # check, then the dependency count and the site build and link check
+just bars                    # the UX bars, each against its budget (needs a Playwright Chromium)
 ```
 
-CI also fails when `ui/dist` or `ui/src/wire` differs from what those recipes produce, so commit any
-diff they leave.
-
-Features are specified with [GitHub Spec Kit](https://github.com/github/spec-kit) before they are
-built. Those working files are not published; every behaviour they ask for is a test, and
-`just verify` runs all of them.
+CI fails when `ui/dist` or `ui/src/wire` differs from what those recipes produce, so commit any diff
+they leave. `just notes` checks the maintainer's notes and prints "skipped" in a checkout without
+them; contributors need nothing from it.
 
 A change to the permission layer needs a test that asserts **both** the verdict and the rule that
 produced it. A dependency bump is a reviewed change: agents and packages are pinned on purpose.
@@ -42,7 +38,7 @@ produced it. A dependency bump is a reviewed change: agents and packages are pin
 `ui/` is a Svelte project built to a bundle the binary embeds at compile time.
 
 ```sh
-cd ui && npm install  # Node 22+
+cd ui && npm install
 npm run build         # → ui/dist/, embedded into the binary
 npm run dev           # a dev server that proxies /api to a running host (`devplane up --no-browser`)
 npm run check         # svelte-check over TypeScript and every component
@@ -50,33 +46,23 @@ npm run render        # renders every surface and asserts on the result
 npm run dev:fixtures  # the interface over recorded host responses, no host needed (POSIX shells)
 ```
 
-- **`ui/dist/` is committed**, because `cargo publish` packages what is in git. Change a surface, run
-  `npm run build`, commit the result. CI rebuilds it and fails if `ui/dist` differs.
+- **`ui/dist/` is committed**, because `cargo publish` packages what is in git.
 - **`ui/fixtures/` are recorded, never hand-written**: `bash scripts/capture-fixtures.sh` seeds a real
-  host and saves what it serves. `bash scripts/make-board.sh` photographs the same seed into
-  `site/static/`.
-- **`ui/src/wire/` is generated** from the Rust types (`ts-rs`). After changing a type that crosses
-  the API, run `just wire` and commit the result, new files included.
+  host and saves what it serves; `just make-board` photographs the same seed into `site/static/`.
+- **`ui/src/wire/` is generated** from the Rust types (`ts-rs`) by `just wire`; commit new files too.
 - **The built output stays readable** (`minify: false`), and **nothing is fetched from outside the
   machine**, fonts included.
 - A surface is a directory under `ui/src/surfaces/`: an `index.ts` that registers itself and binds its
-  keys, plus its components. The frame is `ui/src/shell/`. Keys go through `ui/src/lib/keys.ts`;
-  `npm run build` runs `scripts/check-keys.mjs` first and fails on a key bound twice in one scope or a
-  surface rebinding a global. `tests/ui_bundle.rs` holds the interface to the API and the bundle.
-- **`cargo package` shares the target directory**, and its verification build embeds the packaged
-  interface, which a later `cargo build` can reuse. `rm -rf target/package` after packaging, or set
-  `CARGO_TARGET_DIR` elsewhere.
-- TypeScript is pinned at 5.9 because `svelte-check` does not accept 7.
+  keys, plus its components. Keys go through `ui/src/lib/keys.ts`; `npm run build` fails on a key
+  bound twice in one scope or a surface rebinding a global.
+- **`cargo package` shares the target directory** and can leave a packaged interface a later build
+  reuses: `rm -rf target/package` after packaging.
 
 ## The window
 
-```sh
-just app                 # cargo run --features app -- up --window
-```
-
-The app is the cargo feature `app`, off by default; on Linux it needs the packages under
-*Prerequisites*. `tests/app.rs` drives the app's host without a
-window (`cargo test --features app --test app`); `scripts/make-icon.py` regenerates `icons/`.
+`just app` runs `cargo run --features app -- up --window`. The feature is off by default; on Linux it
+needs the packages under *Prerequisites*. `cargo test --features app --test app` drives the app's host
+without a window; `scripts/make-icon.py` regenerates `icons/`.
 
 ## Out of scope
 
@@ -85,4 +71,5 @@ parsing transcript JSONL on the critical path; a React or WASM interface.
 
 ## Licence
 
-MIT OR Apache-2.0, at your option. By contributing you agree your contribution is licensed the same way.
+MIT OR Apache-2.0, at your option. By contributing you agree your contribution is licensed the same
+way.

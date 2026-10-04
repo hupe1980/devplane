@@ -2,282 +2,144 @@
 
 Notable changes per release, in the style of [Keep a Changelog](https://keepachangelog.com/). Dates are UTC.
 
-## Unreleased
+## 0.12.0 — unreleased
 
-### Added
-
-- Grants: your own allow rule, per project, in your own `~/.devplane/policy.toml` — never in a
-  repository. After you answer the same permission the same way several times from the window or a
-  notification, its inbox item offers the exact rule as the lines it adds to the file, with the
-  answers it comes from and what the project declares it may write, and writes it only when you
-  confirm. A grant answers a driven run's request and a Claude Code `PermissionRequest` only after
-  every deny, ask and unreadable line, never `PreToolUse`; it allows a line only when every command
-  on it is granted and nothing on it is rewritten or redirected. Every allow is a `rule` decision
-  naming the grant, and one broader than the agent's own settings is said to widen the agent.
-  `devplane config grants` lists them with what they decided; `devplane config revoke` removes one
-  and lists every decision it made. A machine-wide `[policy] allow`, a wildcard command, a forge
-  write, a threshold below 2, and any grant key in `devplane.toml` are refused by name. The store's
-  schema version is 18.
-
-- Answer from the notification. With the app running, a permission carries **Allow** and **Deny**,
-  and a question with one field carries every option as a numbered action — or none, never some of
-  them — plus a typed reply on macOS and Windows; anything else is one click from the answer window,
-  which now opens on that very item. A press answers as you, through the same few-second hold the
-  window's answers wait in. Each item is announced once, also across a restart, within a second
-  rather than on the fifteen-second sweep, and the notification is taken back when the item is
-  answered elsewhere or the app quits. The record names the path an answer came from — `window`,
-  `notification` or `cli` — and no request can claim the first two; `board` is no longer written.
-  `devplane doctor` says what the app's notifications can do. The notifications are the platform's
-  own, driven from the app's process: Tauri's notification plugin is gone. A store from before is
-  set aside.
-
-- A change's pull request now says who approved it: GitHub's review list and the base branch's
-  rules are read when the pull request changes and once more when it merges, and one sentence says,
-  by kind, how many of the required approvals came from a person's account, a model a vendor
-  documents as its reviewer (Copilot code review), or a bot account — with dismissed approvals and
-  approvals on an older commit said as such, and GitHub's own review decision beside it. The same
-  sentence is in the certificate (`predicate.devplane.mergeApprovals`, with the `curl` that
-  re-reads the reviews) and, with `devplane verify --approvals` or the action's `approvals` input,
-  in the job summary. A model's approval reads *could not be attributed* until the record has a
-  word for a model. Read-only: nothing is written to the pull request, no merge is blocked, and no
-  decision is recorded. `verify` makes no network request without `--approvals`.
-- A session you started yourself in Claude Code now records who decided each permission, from
-  Claude Code's own telemetry, with its word kept beside the authority: `person` for an answer at
-  the terminal CLI's prompt, `rule` only when Devplane finds and names the matching rule in your
-  Claude Code settings. Every other reported call — decided under auto mode, by a mode that allows
-  it, by settings that do not say how, by another hook, in an SDK or `-p` session, or with no or an
-  undocumented source — is listed by `devplane audit --without-me` under *Not attributed*, with its
-  reason and no authority. `devplane doctor` names any source Claude Code sends that its
-  documentation does not define. Nothing is recorded as a model's decision. The store's schema
-  version is 17.
-
-- `devplane change draft <name> -- <intent>` drafts a specification with the project's own tool:
-  the agent is sent Spec Kit's `/speckit-specify` (spelled the way that agent invokes it, from
-  `.specify/integration.json`) or OpenSpec's installed propose workflow, followed by your words and
-  nothing else, in the change's own worktree. Spec Kit is told the folder Devplane numbered and not
-  to record an active feature. The drafted folder is reviewed as the change's diff and accepted or
-  rejected (`draft-accept`, `draft-reject`, or on the change); Devplane writes no line into it. The
-  New change window drafts too, and shows the exact text it will send before anything is made.
-- Each line of an open change's specification carrying one of `[spec] open_questions` is its own
-  inbox item, naming file and line — no longer one item per project. A bracketed marker is answered
-  in place as a one-line diff you confirm (`devplane change clarify`, or in the inbox); an unbracketed
-  one is sent to the change's agent as your message. After a Spec Kit draft with no words declared,
-  the change offers Spec Kit's own marker as a diff to `devplane.toml`.
-- The diff a driven agent reported for an edit is shown on the decision that allowed or refused it,
-  in the change's ledger and in the Ledger, labelled as the agent's own report and quoted as text; a
-  permission request carries the proposed diff before you answer. A clipped diff says how many bytes
-  were not kept, a call with no diff says so, and a project that keeps no transcripts says no diff
-  was kept. The worktree, not the report, is what the gates read. The store's schema version is 15.
-- `devplane change resume <change> --agent <id> "<what to do>"` continues a change with a different
-  agent in the same worktree, told only your words — never the earlier agent's transcript. Both runs
-  stay on the change, the switch is recorded as yours, and it is refused while a run is still live.
-- An agent that needs signing in shows its own sign-in methods on the change; `devplane change login
-  <change> --method <id>` runs a terminal login in your terminal and starts the change again, or asks
-  the agent to sign itself in. Devplane never asks for, reads or stores a credential.
-- A driven agent's notices to you are shown on the change; a stop records whether the session was
-  closed over the protocol; a change says when the agent was not given Devplane's tools; and the
-  agent's own session list is read page by page.
-- A change whose specification folder is in your checkout but not yet on the base branch starts:
-  the folder is declared to the agent as an additional directory, and an agent that cannot take one
-  is never prompted, saying why. An agent answering another protocol version is not driven.
-- Asked about its own change, Devplane's MCP server now includes the change's task lines.
-
-- A driven session's permission mode is stated on the change, in the agent's own words: when you set
-  no mode, Devplane asks the agent for its own ask-first mode before the first prompt (Codex starts
-  every session in *Auto review*, where a reviewer model answers) and says so; a mode you set is kept,
-  and one that decides without you is said whole. `mode` in `agents.toml` chooses one for Devplane to
-  ask for. Asking writes no decision.
-- A tool call reported in pieces is joined before a rule reads it: an update carrying only what
-  changed, or a permission request naming the call by its id alone, no longer hides the command from
-  a project's deny rule, and an untitled call reads *untitled call ‹id›*, never blank. Where a rule
-  about commands is in force and an agent sends no command at all (Gemini CLI 0.62.0), a person
-  decides and the inbox says why.
-- The adapters are repinned to the ACP registry read on 2026-10-02 (claude-agent-acp 0.85.1,
-  codex-acp 2.1.1, Copilot 1.0.91, Gemini CLI 0.62.0), each beside a replay of its transcript; `just
-  pins` says when a pin falls behind.
-- GSD is read as a fourth specification layout: detected by `.planning/STATE.md`, every phase folder
-  under `.planning/phases/` listed (inserted, prefixed and bracket-convention phases included,
-  workstreams not), and no progress claimed — GSD keeps no task file, so no count, percentage or bar
-  appears and the surfaces say why. A change's worktree says when a gitignored `.planning/` is not
-  in it and names `.worktreeinclude`.
-- OpenSpec is read OpenSpec's way: `config.yml` is recognised beside `config.yaml`; a folder that only
-  wraps changes is not listed and a dot-named change is; task boxes are counted as `openspec list`
-  counts them (every line of `tasks.md`, `[ x]` done, `[~]`, `[-]` and `[]` open), so the counts
-  equal `openspec list --json`; a change under a custom schema shows no count and says so; and a
-  store-only project says its changes live in the named store instead of showing an empty list.
-- Kiro is detected by `.kiro/specs/`, not `.kiro/`, so a repository where `openspec init --tools
-  kiro` wrote `.kiro/skills/` reads as OpenSpec only.
-- The weakened group reads what governs the agent and what the build trusts: an edit to the agent's
-  hook and settings files, `CLAUDE.md`/`AGENTS.md`, skills or MCP configuration (*agent controls*), to
-  `CODEOWNERS` or branch protection as code (*ownership*), or to a lockfile or a manifest's
-  dependencies (*supply chain*) is a row read before the green, counted by kind beside *verified*, in
-  the certificate and in `devplane verify`'s first section, and holds the offer until a person has
-  read it. A lockfile row says which packages were added, removed or changed; no row says the edit is
-  good or bad, and none changes an exit code.
-- The desktop app as packages: a disk image for Apple Silicon Macs, a per-user Windows installer, a
-  `.deb` that declares its WebKitGTK dependency and an AppImage that carries its own, each with a
-  `.sha256` and registering `devplane://`. Signed and notarised when the release has the signing
-  credentials; otherwise every file says `-unsigned`, no update manifest is published, and the release
-  never displaces a signed one as the default download. Pull requests bundle all four, unsigned. The
-  command line's archives and installers are unchanged.
-- Update checks in the app, off until you answer in Setup or the first-run checklist: one request per
-  launch to a fixed address, nothing sent about you, nothing downloaded before **Install and restart**,
-  and the download verified against the release key before anything is replaced. The command line
-  never checks.
-- Started from Finder, the Start menu or a launcher, the app's executable opens the window; typed in a
-  terminal it is the command line. Opened while another host serves the home, it says so and offers
-  that host's page instead of exiting unseen.
-- `devplane doctor` says whether this binary carries the window, whether it is a signed build, and
-  whether update checks are on, and reports *gate off* by agent for Codex and Copilot as for Claude
-  Code. Hooks written from an AppImage are recognised as Devplane's.
-- The certificate ends with the change's `devplane://` link and `devplane change show <id>`, as plain
-  text.
-
-- A driven agent can say the specification and the tests conflict: `spec_and_tests_conflict` on
-  Devplane's MCP server records its claim on the change — quoted, attributed to the agent and run,
-  read after the weakened checks and before the gates — stops the run, and runs `check` once with
-  nothing handed back. The claim never changes *verified* and is not a failure. It is the server's
-  one write besides `explain`'s audit row, bounded, and only about the caller's own run. Every
-  implementation prompt and feedback round now names the tool. `devplane change claim-read` marks a
-  claim read.
-- A first-run checklist in Setup, opened first while a step is left: sessions already running, update
-  checks, connect an agent, trust a repository, declare a check, the spec dialect, and a first change
-  that reads *verified*. Each step is read from the machine, can be skipped and brought back, and
-  writes only a diff the person confirmed.
-- Declare a check from the window: commands the repository already has (`cargo test`, the test script
-  with its package manager, `justfile` recipes, CI steps) offered with their file and line, and
-  `openspec validate --all --strict` as a named gate, never part of `check`; the change to
-  `devplane.toml` is shown as a diff and written only on confirm.
-- Connect and disconnect an agent, and trust a repository after reading what it would allow, from the
-  window.
-- The review reads in one scroll: every hunk of every file in one column, in review order, each
-  file's facts a strip that stays in view; `j`/`k` cross files.
-- Review comments: press a line number or `f`, and the comment waits in a pending review kept by the
-  host; **Send N comments** (or `⌘Enter`) sends them all as one turn to the change's agent, each tied
-  to the tree and hunk it was written against, resuming the session or starting a run when none is
-  live. After the agent's next turn each comment says whether its hunk changed.
-- The line that weakened a check is marked in the diff's gutter with the gate that ran over it, and
-  the Gates view links back to it.
-- The offer names the files nobody opened, by path (*2 files not opened: …*), in the window and
-  `devplane change offer`; it never refuses for them.
-
-### Changed
-
-- Telemetry no longer clears a waiting permission, even one naming the waiting call: only the
-  hook's or the agent protocol's own answer does. Claude Code's telemetry event names written as the
-  documented bare `event.name` (`tool_decision`) are now read.
-- *Seen* is kept by the host for every hunk, keyed by its content: the window, `devplane change
-  review --seen <path>`, the inbox and the offer read the same marks, and a hunk the agent rewrites is
-  unread again. A weakened row is read when its hunks are. The marks in the browser are gone.
-- A change's header is one line, with the rest under **More**; at 1280×800 the review's first diff
-  line is above 300 px. Each count is said once; the address names the hunk under the cursor.
-- The store's schema is version 13: an older store is set aside, not migrated.
-- A failed read says what it means for the page, names `devplane doctor`, offers Retry and keeps the
-  host's raw answer behind a disclosure; no loading skeleton stays beside it.
-- An empty list on a host no session has reported to says what it cannot see, so it never reads like
-  an empty one.
-- No count is shown while a list is loading (Specifications).
-- The forge offers *Sign in* when the host's error is a missing sign-in, says *not read yet* before
-  its first read, and names a project whose read failed; *No open issue* only after a read.
-- New change says, before anything is created, when the project declares no `check`.
-- A gate command that is not installed reads *`<program>` is not on PATH*, not a failing check.
-- An uncommitted `devplane.toml` no longer makes a checkout dirty for a new change: it governs from
-  the checkout.
-
-## 0.12.0 — 2026-09-27
-
-The verdict runs the base's tests against the change and runs in CI; the command line is a set of nouns; offering
-commits the tree the gates passed on.
+The verdict runs the base's tests against the change and runs in CI; the command line is a set of nouns.
 
 ### Breaking
 
-- Commands are noun first. `ls`/`ps` → `status` (`ls` stays an alias); `show`, `watch`, `attach` → `run
-  show|watch|attach`; `open`, `serve`, `app` → `up`, `up --no-browser`, `up --window`; `quit` → `down`; `answer`,
-  `snooze` → `inbox answer|snooze`; `forge prs|issues` → `pr list`, `issue list`; `speckit` → `gate install
-  --speckit`; `check`, `explain` → `config check|explain`; `trust` → `project trust`; `agents`, `connect`,
-  `disconnect` → `agent list|connect|disconnect`; `login`, `logout` → `auth login|logout`. An old name is refused
-  with the new one.
+- Commands are noun first. An old name is refused with the new one:
+
+  | Old | New |
+  | --- | --- |
+  | `ps` | `status` (`ls` stays an alias) |
+  | `open`, `serve`, `app` | `up`, `up --no-browser`, `up --window` |
+  | `quit` | `down` |
+  | `show`, `watch`, `attach` | `run show`, `run watch`, `run attach` |
+  | `answer`, `snooze` | `inbox answer`, `inbox snooze` |
+  | `forge prs`, `forge issues` | `pr list`, `issue list` |
+  | `speckit` | `gate install --speckit` |
+  | `check`, `explain` | `config check`, `config explain` |
+  | `trust` | `project trust` |
+  | `agents`, `connect`, `disconnect` | `agent list`, `agent connect`, `agent disconnect` |
+  | `login`, `logout` | `auth login`, `auth logout` |
+  | `diagnostics` | `doctor` |
+
+- Removed: `report` and `[reports]`, `rewind`, `modes` (use `status --modes`) and `attention` (in `doctor`).
 - `--json` is one global flag. Every change, run and ask id accepts a unique prefix.
-- `devplane.toml` keys: `[policy] never_auto`/`always_ask` → `deny`/`ask`; `[project] default_agent` → `[agent]
-  default`; `[policy] max_parallel_runs`/`stall_timeout` → `[agent] max_parallel`/`stall_timeout`; `[transcripts]
-  keep` → `[agent] keep_transcripts`; `[gates.named.X]` → `[gates.X]`; `[budget] usd` → `max_usd`. `[gates]
-  on_fail` and `[github] draft` are gone. Old keys are refused by name.
-- `change offer` commits the tree the last passing `check` ran against to the change's branch, then pushes; it
-  refuses if the tree moved. `archive` after an offer needs no `--discard-uncommitted`.
-- `devplane gate` reports `passed`, not `verified`; only a change is *verified*.
-- `gate install --speckit` refuses a repository with no gate, unless `--anyway`.
-- `POST /api/projects/trust` refuses a request that carries only the control token.
-- A binding on a chord the browser keeps (`⌘W`, `⌘T`, `⌘N`, `⌘L`, `⌘R`, `⌘Q`, `⌘Tab`) fails the build.
-- Store schema 12. An older store is moved aside; a newer one is refused.
+- `devplane.toml` keys, refused by name under the old spelling: `[policy] never_auto`/`always_ask` → `deny`/`ask`;
+  `[project] default_agent` → `[agent] default`; `[policy] max_parallel_runs`/`stall_timeout` → `[agent]
+  max_parallel`/`stall_timeout`; `[transcripts] keep` → `[agent] keep_transcripts`; `[gates.named.X]` →
+  `[gates.X]`; `[budget] usd` → `max_usd`. `[gates] on_fail` and `[github] draft` are gone.
+- Store schema 18: an older store is set aside, not migrated. Repository trust moves to `~/.devplane/trusted.toml`
+  and is carried over.
+- `change offer` commits the tree the last passing `check` ran on, then pushes; it refuses if the tree moved.
+  `archive` after an offer needs no `--discard-uncommitted`.
+- `devplane gate` reports `passed`, not `verified`. `gate install --speckit` needs a gate, unless `--anyway`.
+- `POST /api/projects/trust` needs the window's proof; the control token alone is refused.
+- The record names where an answer came from as `window`, `notification` or `cli`; `board` is no longer written.
 - Minimum Rust is 1.94.
 
 ### Added
 
-- `devplane verify [--base <ref>] [--summary <path>] [--statement <path>] [--no-base-checks]`: runs the base's
-  `check` on this checkout with no host, store or network, and writes a summary led by the weakened checks (to
-  `$GITHUB_STEP_SUMMARY` in CI). Exit 0 passed, 1 failed or tree moved, 2 could not run. `action.yml` runs it as a
-  composite action.
-- Base checks: the base's tests run on the change, and the change's new tests run on the base, in a throwaway
-  checkout. A base test failing on the change is shown with the weakened checks and holds the offer; new tests
-  that pass without the change are named. They run on offer, on `change verify --base-checks`, from the Gates view,
-  in `verify`, or after every passing `check` with `[gates] base_checks = "auto"`.
-- Test counts beside *verified*, read from the runner's summary (cargo, nextest, pytest, jest, vitest, go).
-- `[gates] junit` names the JUnit files `check` writes, so tests are named, not only counted.
-- The workbench leads a change with its evidence, has one keyboard cursor on every list, keeps the open view in
-  the address, and fits narrow windows.
-- The inbox from the keyboard: `1`–`9` choose an option, `t` types an answer and `⌘↵` sends it, `a`/`d` allow or
-  deny a permission Devplane holds, `w` reaches a session the vendor owns (its VS Code link, or its resume command
-  copied), `s` snoozes, `o` opens, `r` reviews. Each key is printed on its control, and a key that does not apply
-  says why. The answer window takes the same keys; Search and Setup take the list keys.
-- An answer from the window is held for 5 seconds before it reaches the agent, and `z` takes it back with nothing
-  recorded. Answering another item sends the held one at once. The host holds it, so closing the page still sends
-  it; quitting drops it, says so first, and leaves the question open. `devplane inbox answer` is never held.
-- `?` lists the keys for the item first, then the surface's, then those that work everywhere.
-- `s` snoozes an inbox item until its session (or change) next reports activity, not for an hour; **for an hour**
-  sits beside it. Snoozed items are counted at the foot of the list and listed with a way back each.
-  `devplane inbox snooze <id> --until-activity` does the same from a terminal. A snooze that would hide a question
-  or a permission is refused, naming it.
-- One count: the inbox badge, the status bar's *need you* and the tray and dock badge show the same number — the
-  whole inbox, without a held answer. Asks that outlived their sessions keep their own noun.
-- `⌘K` over an inbox item lists that item's actions first, with their keys.
+**The verdict**
+
+- Base checks run the base's tests on the change and its new tests on the base. A base test failing on the change
+  holds the offer; new tests that fail on the base are named. `[gates] base_checks = "auto"` runs them after every pass.
+- Test counts beside *verified* (cargo, nextest, pytest, jest, vitest, go); `[gates] junit` names failing tests.
+- `[gates] serial = true` makes gates that share a database take turns across worktrees.
+- Edits to agent controls (hooks, settings, `CLAUDE.md`/`AGENTS.md`, skills, MCP), ownership (`CODEOWNERS`) or
+  dependencies (lockfiles, manifests) are shown with the weakened checks and hold the offer.
+- An agent can stop with `spec_and_tests_conflict` (MCP) when the specification and tests conflict; the claim is
+  shown on the change and never changes *verified*. `change claim-read` marks it read.
+- The offer names the files nobody opened, by path.
+
+**CI and the certificate**
+
+- `devplane verify` runs the base's `check` on a checkout with no host or network and writes a job summary led by
+  the weakened checks. Exit 0 passed, 1 failed, 2 could not run. `action.yml` wraps it.
+- On GitHub Actions, `verify` annotates weakened rows and failing tests on their lines; `--sarif <path>` writes SARIF.
+- `verify --approvals` (the action's `approvals` input) and the change say whether required approvals came from a
+  person, a vendor's review model or a bot.
+- The certificate uses the in-toto Test Result predicate; `change export --sign ssh` signs it with your SSH key.
+
+**Permissions and the record**
+
+- Grants: answer the same permission the same way several times and the inbox offers an allow rule for that project
+  in your `~/.devplane/policy.toml`. `config grants` lists them; `config revoke` removes one.
+- Claude Code sessions you start yourself record who decided each permission; what cannot be attributed is listed
+  by `audit --without-me`.
+- A driven session's permission mode is shown on the change; `mode` in `agents.toml` chooses one.
+
+**The inbox and notifications**
+
+- Answer from the notification: **Allow**/**Deny**, a question's options, or a typed reply (macOS, Windows).
+- Keys: `1`–`9` choose, `t` types an answer, `a`/`d` allow or deny, `s` snoozes, `o` opens, `r` reviews; `?` lists them.
+- An answer from the window waits 5 seconds before it is sent; `z` takes it back.
+- `s` snoozes until the next activity (`inbox snooze --until-activity`); snoozed items are listed with a way back.
+- The inbox, status bar and tray or dock badge show one count. `⌘K` over an item lists its actions first.
+- Each open question in a specification is its own inbox item; answer it in place with `change clarify`.
+
+**The review and the window**
+
+- The review reads in one scroll; `j`/`k` cross files. The line that weakened a check is marked in the gutter.
+- Review comments: press a line number or `f`; **Send N comments** (`⌘↵`) sends them to the agent as one turn.
+- A first-run checklist in Setup, from connecting an agent to a first *verified* change.
+- From the window: declare a check from the commands the repository already has, connect an agent, trust a repository.
+- One keyboard cursor on every list; the open view is kept in the address.
+
+**Agents**
+
+- `change draft <name> -- <intent>` drafts a specification with Spec Kit's or OpenSpec's own command;
+  `draft-accept`/`draft-reject` decide it.
+- `change resume <change> --agent <id>` continues a change with another agent in the same worktree.
+- `change login <change> --method <id>` signs in an agent that asked for it.
+- The diff an agent reported for an edit is shown on its permission request and decision.
+- Adapters pinned to claude-agent-acp 0.85.1, codex-acp 2.1.1, Copilot 1.0.91 and Gemini CLI 0.62.0.
+
+**Specifications**
+
+- GSD is read as a fourth layout (`.planning/`).
+- `gate install --skill` offers the gate as Claude Code's `verify` skill; the Spec Kit extension adds a workflow step.
+
+**The desktop app**
+
+- Packages for macOS (Apple Silicon), Windows, `.deb` and AppImage, each with a `.sha256`; unsigned ones say so.
+- Update checks, off until you turn them on; nothing is downloaded before **Install and restart**.
+- Launched from Finder, the Start menu or a launcher, the executable opens the window.
+- `devplane doctor` reports the window, signing, update checks, notifications and dangling hooks.
+
+### Changed
+
+- OpenSpec task counts match `openspec list --json`, and `config.yml` is read. Kiro is detected by `.kiro/specs/`.
+- *Seen* marks are kept by the host; a hunk the agent rewrites is unread again.
+- A failed read names `devplane doctor` and offers Retry. The forge offers *Sign in* when sign-in is missing.
+- A tool call reported in pieces is joined before a rule reads it.
 
 ### Security
 
-- A change could read *verified* with no weakened check shown: through `assume-unchanged`, a `-diff` attribute, an
-  uncommitted `.gitignore`, an embedded repository, `info/exclude`, a truncated diff, or runner configuration such
-  as `.cargo/config.toml`. The review now diffs the digested tree and reads the whole change.
-- The policy reader no longer lets a prohibited command through `git config alias`, `tar --to-command`, GNU `sed
-  e`, `zip -TT`, `less`, `man -P`, `tmux`, or a script run by path.
-- Agents are denied reading or writing Devplane's home on every vendor's hook.
-- An answer is recorded as the window's only when it carries a proof under a key the app hands its own webviews in
-  memory; every other holder of the token is recorded as the command line. The `Origin` header and the request body
-  are no longer read for it. The CLI proves the host holds the token before sending it.
-- Trusting a repository over HTTP needs the window's proof; `devplane project trust` writes it directly and is refused
-  inside an agent session.
-- CI judges a pull request with the base's `action.yml`, never the pull request's own. The action installs a pinned
-  release after checking its `.sha256`, and pipes nothing into a shell.
-- Opening a worktree in an editor or terminal no longer goes through a shell, so a path containing `&`, `;` or `|`
-  cannot run a command.
-- The certificate's subject is the checked tree, and names the commit only when the commit is that tree. With no
-  recorded tree there is no in-toto statement, and the export says why, instead of a statement with an empty subject.
+- A weakened check could be hidden from the review (`assume-unchanged`, `-diff`, `info/exclude`, an embedded
+  repository, a truncated diff, runner configuration). The review now diffs the digested tree.
+- The policy reader catches prohibited commands run through `git config alias`, `tar --to-command`, `sed e`,
+  `zip -TT`, `less`, `man -P`, `tmux`, or a script run by path.
+- Agents are denied reading or writing Devplane's home, `trusted.toml` included, on every vendor's hook.
+- An answer counts as the window's only with the app's in-memory proof. `project trust` is refused inside an agent.
+- A telemetry event no longer clears a waiting permission.
+- CI judges a pull request with the base's `action.yml`, which installs a pinned, checksummed release.
+- Opening a worktree in an editor or terminal no longer goes through a shell.
+- A line in the change cannot forge or silence a `verify` annotation.
 
 ### Fixed
-- An Alt shortcut typed inside a text field (`⌥3` for `£`) switched the view and dropped the draft.
-- The command palette opened without focus in its field, and listed some commands twice.
-- *Offer* was enabled while a weakened check was unread; it is held, with the reason beside it.
-- A `devplane://` link opened with the app closed was rejected on Linux and Windows; a second launch now hands its
-  link to the running app.
+
+- An Alt shortcut typed in a text field (`⌥3` for `£`) switched the view and dropped the draft.
+- The command palette opened without focus, and listed some commands twice.
+- *Offer* was enabled while a weakened check was unread.
+- A `devplane://` link opened with the app closed was rejected on Linux and Windows.
 - On Linux, opening a terminal reported success when none had started.
-
-- `change show <prefix>` failed where other commands took the prefix.
 - An older run snapshot could overwrite a newer one and lose events.
-- A file named by a task sent to the agent was reported as not asked for.
-- The change timeline printed dates in the browser's locale.
-
-### Removed
-
-- Reports between projects (`report`, `[reports]`), `rewind`, `modes` (now `status --modes`) and `attention`
-  (now in `doctor`).
+- A missing gate program read as a failing check; it now says *not on PATH*.
+- An uncommitted `devplane.toml` blocked a new change.
+- Claude Code telemetry events named by the bare `event.name` were not read.
 
 ## 0.11.0 — 2026-09-26
 

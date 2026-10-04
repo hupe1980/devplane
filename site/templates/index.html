@@ -4,16 +4,10 @@
 <section class="hero">
   <div class="wrap">
     <p class="eyebrow">Local-first · One binary · MIT OR Apache-2.0</p>
-    <h1>Let the agent work.<br><span class="accent">Know when it is done.</span></h1>
+    <h1>Let the agent work.<br><span class="accent">Decide on evidence.</span></h1>
     <p class="lede">
-      Devplane tells you when an agent's work is actually done. Run any agent that speaks the
-      <a href="{{ config.extra.acp }}" rel="noopener">Agent Client Protocol</a> in its own worktree,
-      verify its change with your own checks run outside the agent, see the weakened tests first, and
-      keep the record of who decided what while you were not looking.
-    </p>
-    <p class="muted small">
-      It sits on top of your tools: the spec is your spec tool’s folder, the checks are your commands,
-      the isolation is <code>git worktree</code>. Delete Devplane and the project still builds.
+      Devplane puts in front of you, in minutes, the evidence for deciding whether an agent's change
+      is safe to merge — evidence your own project produces — and keeps the record of how you know.
     </p>
 
     <div class="cta-row">
@@ -38,7 +32,6 @@
   state      <span class="t-ok">✓ verified</span>
   gates      <span class="t-ok">`check` exited zero against the working tree as it stands</span>
   branch     change/password-reset-3f9a1c
-  spec       specs/142-password-reset <span class="t-dim">at 3f9a1c40b7e2d518 over 4 documents</span>
   tasks      11 ticked · 9 seen by a passing check
 <span class="t-dim">$</span> devplane change offer c-3f9a
 </code></pre>
@@ -55,87 +48,53 @@
   <div class="wrap">
     <h2 class="section-head">The loop</h2>
     <ol class="loop">
-      <li><strong>Specify</strong><span>The spec you already write — Spec Kit, OpenSpec, Kiro, or plain Markdown.</span></li>
-      <li><strong>Start a change</strong><span>An isolated worktree, any ACP agent, the tasks you chose. One prompt to several repositories if you like.</span></li>
-      <li><strong>Supervise</strong><span>Questions, permissions and red checks, across every project, most urgent first.</span></li>
-      <li><strong>Verify</strong><span>Your own <code>check</code> passed against the tree exactly as it stands — or it is not verified.</span></li>
-      <li><strong>Review and offer</strong><span>Weakened checks read first, then a pull request with a certificate anyone can re-run.</span></li>
+      <li><strong>Specify</strong><span>The spec you already write: Spec Kit, OpenSpec, Kiro or plain Markdown.</span></li>
+      <li><strong>Start a change</strong><span>Its own worktree and branch, an agent, the tasks you chose.</span></li>
+      <li><strong>Supervise</strong><span>Questions, permissions and red checks across every project, most urgent first.</span></li>
+      <li><strong>Verify</strong><span>Your own <code>check</code> passed against the tree exactly as it stands, or it is not verified.</span></li>
+      <li><strong>Review and offer</strong><span>Weakened checks first, then a draft pull request of exactly the tree that passed.</span></li>
     </ol>
   </div>
 </section>
 
 <section class="wrap">
-  <h2 class="section-head">What it does</h2>
+  <h2 class="section-head">What makes it different</h2>
   <div class="features">
     <article class="feature">
-      <h3>A workbench, not a dashboard</h3>
-      <p>
-        Laid out like your editor: a palette on <kbd>⌘K</kbd>, an activity bar, tabs, a bottom panel.
-        A change opens as a document with six views — Overview, Tasks, Review, Gates, Ledger, Agent —
-        and the review is a file tree beside the diff, walked with <kbd>j</kbd>/<kbd>k</kbd>.
-      </p>
-      <a class="more" href="{{ get_url(path='/docs/workbench/') }}">The workbench</a>
-    </article>
-
-    <article class="feature">
-      <h3>Verified means verified</h3>
-      <p>
-        Your committed gate, run by Devplane rather than the agent, against a digest of the working
-        tree — uncommitted files included, hashed byte for byte. Touch one file and it is stale. In CI,
-        <code>devplane verify</code> runs the base branch’s <code>check</code> on every pull request.
-      </p>
+      <h3>Weakened checks first</h3>
+      <p>A skipped test, a deleted assertion, an edited CI file or lockfile leads the review, and the offer waits until you have read it.</p>
       <a class="more" href="{{ get_url(path='/docs/verified-done/') }}">Verified done</a>
     </article>
 
     <article class="feature">
-      <h3>Weakened checks first</h3>
-      <p>
-        A skipped test, a removed assertion, a test that asserts nothing, a loosened tolerance, an
-        edited CI file: read before anything is green, and the offer waits until you have. Your spec
-        folder — Spec Kit, OpenSpec, Kiro — says what was asked for.
-      </p>
-      <a class="more" href="{{ get_url(path='/docs/verified-done/#review-before-you-merge') }}">Review before you merge</a>
+      <h3>Base checks</h3>
+      <p>The base branch's tests run on the change, and the change's new tests on the base: in CI with <code>devplane verify</code>.</p>
+      <a class="more" href="{{ get_url(path='/docs/ci/') }}">CI verify</a>
     </article>
 
     <article class="feature">
-      <h3>Any ACP agent, and the ones you already run</h3>
-      <p>
-        Drives Claude&nbsp;Code, Codex, GitHub&nbsp;Copilot, OpenCode and Gemini&nbsp;CLI, or any agent
-        you name in one file. Watches the sessions you started yourself, and says which ones it cannot see.
-      </p>
+      <h3>A certificate anyone can re-run</h3>
+      <p>What was checked, against which commit, and the commands to check it yourself, as text or an in-toto statement.</p>
+      <a class="more" href="{{ get_url(path='/docs/verified-done/') }}">Verified done</a>
+    </article>
+
+    <article class="feature">
+      <h3>The record of who decided</h3>
+      <p>Every decision carries its authority — a person, a rule, a timer, nobody, or Devplane — and Devplane approves nothing on its own.</p>
+      <a class="more" href="{{ get_url(path='/docs/decisions/') }}">The decision log</a>
+    </article>
+
+    <article class="feature">
+      <h3>Any ACP agent</h3>
+      <p>Claude&nbsp;Code, Codex, GitHub&nbsp;Copilot, OpenCode and Gemini&nbsp;CLI built in, any other in one file, and the sessions you started yourself.</p>
       <a class="more" href="{{ get_url(path='/docs/agents/') }}">Driving agents</a>
     </article>
 
     <article class="feature">
-      <h3>Devplane never approves</h3>
-      <p>
-        It can refuse a tool call and put one in front of you; it cannot approve one. Rules use
-        Claude&nbsp;Code’s syntax, reach through shell tricks, and fail closed when the file will not load.
-        An agent cannot answer its own permission.
-      </p>
-      <a class="more" href="{{ get_url(path='/docs/permissions/') }}">Permissions</a>
+      <h3>Local-first</h3>
+      <p>One binary, no account, no cloud relay, loopback only. Delete it and the project still builds.</p>
+      <a class="more" href="{{ get_url(path='/docs/security/') }}">Security</a>
     </article>
-
-    <article class="feature">
-      <h3>Who decided</h3>
-      <p>
-        Every decision is on the record with its authority — a person, a rule, a timer, nobody, or
-        Devplane doing what your project wrote down. “Refused” is not an answer;
-        “refused&nbsp;by <code>Bash(rm *)</code>” is.
-      </p>
-      <a class="more" href="{{ get_url(path='/docs/decisions/') }}">The decision log</a>
-    </article>
-  </div>
-</section>
-
-<section class="wrap">
-  <h2 class="section-head">Principles</h2>
-  <div class="principles">
-    <div><h3>Local-first</h3><p>No account, no cloud relay, no telemetry of our own. Loopback only, with a token in a file only you can read. Nothing starts unless you start it.</p></div>
-    <div><h3>On top, never the only way in</h3><p>Plain files your agents read without Devplane: the spec folder, your gate commands, <code>git worktree</code>, <code>AGENTS.md</code>.</p></div>
-    <div><h3>Documented interfaces only</h3><p>Hooks, OpenTelemetry, the session roster, the Agent Client Protocol. No transcript scraping.</p></div>
-    <div><h3>The model is never the authority</h3><p>Gates, policy and the inbox are functions of trusted inputs. None of them calls a model.</p></div>
-    <div><h3>Evidence over claims</h3><p>An agent saying it is done is an input. Exit codes against a tree digest are the verdict, and a stranger can re-run them.</p></div>
   </div>
 </section>
 

@@ -1,11 +1,8 @@
 # Devplane for Spec Kit
 
-Spec Kit's commands read a specification and report on it. None of them decides whether the code is
-done. This extension adds the one thing that can: **the project's own checks, run after
-`/speckit-implement`, judged by their exit codes.**
-
-It reads no `tasks.md`, scores no coverage and grades no prose. It runs the commands your repository
-already declares under `[gates]` in `devplane.toml` and says what each one exited with.
+Runs your project's own checks after `/speckit-implement` and reports what each command exited
+with. It reads no `tasks.md`, scores no coverage and grades no prose: the checks are the commands
+your repository declares under `[gates]` in `devplane.toml`.
 
 ## What it installs
 
@@ -13,7 +10,7 @@ already declares under `[gates]` in `devplane.toml` and says what each one exite
 |---|---|
 | `speckit.devplane.gate` | A command (in Claude Code, the `/speckit-devplane-gate` skill) that runs `devplane gate --json` and reports the verdict verbatim. It never fixes, never re-runs, never calls a pass *verified*. |
 | An `after_implement` hook | Mandatory (`optional: false`) and without a `condition`, so every agent that follows Spec Kit's hook text runs the gate before it writes its completion report. |
-| `overlays/devplane-gate.yml` | A workflow overlay for the `speckit` workflow: a `shell` step after `implement` that runs `devplane gate --json`. The workflow engine runs it, so the gate runs whether or not the agent followed the hook — and a red gate fails the run. |
+| `overlays/devplane-gate.yml` | A workflow overlay for the `speckit` workflow: a `shell` step after `implement` that runs `devplane gate --json`. The workflow engine runs it whether or not the agent followed the hook, and a red gate fails the run. |
 
 ## Requirements
 
@@ -40,9 +37,9 @@ specify extension add --dev extensions/speckit-devplane
 ```
 
 `devplane gate install --speckit` does the same through `specify` when it is on `PATH`, after showing
-what it will run.
+what it runs.
 
-To have the workflow engine run the gate as well — the deterministic route — add the overlay:
+To have the workflow engine run the gate as well, add the overlay:
 
 ```sh
 specify workflow overlay add .specify/extensions/devplane/overlays/devplane-gate.yml
@@ -57,6 +54,7 @@ specify workflow resolve speckit  # devplane-gate now follows implement
 | `failed` | 1 | At least one did not; each is named with its exit code. |
 | `no_gates` | 1 | The repository declares no checks. Nothing was checked, and that is not a pass. |
 | `config_unreadable` | 1 | `devplane.toml` would not parse. Nothing ran, and that is not a pass. |
+| `unknown_gate` | 1 | The command was given a gate name the repository does not declare. |
 
 When the overlay's step fails, the run stops at `devplane-gate` and the gate's own JSON is kept with
 the run, under `steps.devplane-gate.output.stdout` in `.specify/workflows/runs/<run id>/state.json`.

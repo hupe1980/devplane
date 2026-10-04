@@ -13,8 +13,8 @@ request's tree, and writes a job summary led by every skipped test, deleted test
 devplane verify --base main
 ```
 
-Needs only git and the repository: no host, no store, nothing in your Devplane home, and no network
-unless you ask it to read [who approved the pull request](#who-approved-the-pull-request).
+It needs only git and the repository: no host, no store, and no network unless you ask it to read
+[who approved the pull request](#who-approved-the-pull-request).
 
 ## The workflow step
 
@@ -40,34 +40,34 @@ jobs:
       - uses: hupe1980/devplane@v0.12.0   # pin a release tag
 ```
 
-The action downloads the released binary's archive, checks it against the release's `.sha256`, then runs `devplane verify --base <the pull request's base
-branch>`; its exit status is `verify`'s. Runners: Linux (x64, ARM64) and Apple Silicon macOS; others
-stop with a sentence naming those.
+The action downloads the release's `devplane-<target>.tar.xz`, checks it against its `.sha256`, and
+runs `devplane verify --base <the pull request's base branch>`; the step's exit status is `verify`'s.
+Runners: Linux (x64, ARM64) and Apple Silicon macOS; any other stops with exit 2, naming those.
 
 | Input | Default | What |
 |---|---|---|
 | `base` | the pull request's base branch | what the change is compared against; empty uses `verify`'s default |
-| `version` | the release the action shipped with (`v0.12.0`) | which release to install, such as `v0.12.0`; `latest` is refused |
-| `statement` | empty | a path to write the in-toto statement to; nothing is written when no tree was recorded, and the log says why |
+| `version` | the release the action shipped with (`v0.12.0`) | the release to install; `latest` is refused |
+| `statement` | empty | a path to write the in-toto statement to |
 | `sarif` | empty | a path to write the [SARIF file](#annotations-and-sarif) to; nothing is uploaded |
 | `install` | `true` | `false` uses a `devplane` already on `PATH` |
-| `approvals` | `false` | `true` reads [who approved the pull request](#who-approved-the-pull-request) with the job's token; writes nothing |
+| `approvals` | `false` | `true` reads [who approved the pull request](#who-approved-the-pull-request) with the job's token |
 
-Outputs: `verdict` (`verified`, `failed`, `could_not_run`), `statement` and `sarif` (path or empty). Keep the
-statement with `actions/upload-artifact`.
+Outputs: `verdict` (`verified`, `failed`, `could_not_run`), `statement` and `sarif` (the path this run
+wrote, or empty). Keep the statement with `actions/upload-artifact`.
 
-The statement is the [same kind the certificate gives](@/docs/verified-done.md#the-statement-a-machine-reads):
-an in-toto Statement v1 with the Test Result predicate. Its subject is the tree `check` ran on, its
-`result` is the base's `check` exit codes, `configuration` names those commands and the base's
-`devplane.toml` blob, and `predicate.devplane.verify` names the base. It is never signed — CI holds
-no person's key — and it is never the verdict: `verify`'s exit status is.
+The statement is the [certificate's kind](@/docs/verified-done.md#the-statement-a-machine-reads): its
+subject is the tree `check` ran on, its `result` the base's `check` exit codes, and
+`predicate.devplane.verify` names the base. It is never signed, and never the verdict: the exit
+status is.
 
 ## Whose `check` runs
 
-- The one in `devplane.toml` **at the merge base**. A PR that edits `check` (to `["true"]`, say) is
-  judged by the base's; the edit is the summary's first row, both command lists shown. Review roles
-  come from the base too.
-- The PR that adds `devplane.toml` exits 2. Make the job required once the file is on the base.
+- The one in `devplane.toml` **at the merge base**. A pull request that edits `check` (to `["true"]`,
+  say) is judged by the base's, and the edit is the summary's first row. Review roles come from the
+  base too.
+- The pull request that adds `devplane.toml` exits 2. Make the job required once the file is on the
+  base.
 - `[workspace] setup` and named gates do not run; prepare the runner before the action.
 
 ## Exit codes
@@ -78,35 +78,29 @@ no person's key — and it is never the verdict: `verify`'s exit status is.
 | 1 | `failed` | a command failed, timed out or never started, or `check` changed the tree it ran on |
 | 2 | `could_not_run` | the base did not resolve, the checkout is shallow (use `fetch-depth: 0`), the merge base has no `devplane.toml` or no `check`, the diff could not be read, or `check` passed and the summary, statement or SARIF file could not be written |
 
-**A weakened check never fails the job**; it is read first, not a verdict. Whether the job must pass
-is your **branch protection**'s call. To block on weakened rows, add a step reading `devplane verify
---json`.
+**A weakened check never fails the job.** Whether the job must pass is your branch protection's call.
+To block on weakened rows, add a step that reads `devplane verify --json`.
 
 ## What the summary says
 
-In order:
+1. The verdict and the base.
+2. **The checks this change weakened**, by kind
+   ([the kinds](@/docs/verified-done.md#review-before-you-merge)), or that it weakened none.
+3. Each command's outcome, failures named, output folded.
+4. After a pass, the [base checks](@/docs/verified-done.md#base-checks): a base test failing on the
+   change joins the weakened rows; a new test passing without the change is listed.
+   `--no-base-checks` skips them.
+5. What `verify` did not do.
 
-1. the verdict and the base;
-2. **the checks this change weakened**, by kind, or that it weakened none — including edits to the
-   agent's controls, to ownership and to the supply chain
-   ([the files](@/docs/verified-done.md#what-governs-the-agent-and-what-the-build-trusts)), each
-   counted under its own key in `--json`; none of them changes the exit code;
-3. each command's outcome, failures named, output folded;
-4. the [base checks](@/docs/verified-done.md#base-checks), after a pass: a base test failing on the
-   change joins the weakened checks; a new test passing without the change is listed; test counts
-   beside the verdict. Neither changes the exit code; `--no-base-checks` skips them;
-5. what `verify` did not do, and its limits.
-
-- Paths, lines and commands are literal text, never markup.
-- The summary stays under the step-summary size limit, counting rows left out; `--json` lists all.
-- Nothing is posted to the pull request (no comment, review, label or status).
+None of the rows changes the exit code. Paths and commands are literal text, never markup. The summary
+stays under GitHub's size limit and counts what it left out; `--json` lists everything. Nothing is
+posted to the pull request.
 
 ## Who approved the pull request
 
-Since September 2026 GitHub lets Copilot code review submit an approval that counts toward a
-repository's required approvals. GitHub then shows the same green *Approved* a person's review would.
-Turn on the `approvals` input and the summary gains an **Approvals** section, after the base checks,
-saying who the required approvals came from, by kind:
+GitHub lets Copilot code review submit an approval that counts toward required approvals (since
+September 2026), shown as the same green *Approved*. With the `approvals` input on, the summary gains
+an **Approvals** section saying whom the required approvals came from:
 
 ```text
 1 of 1 required approvals: 1 could not be attributed — a model decided, and the record has no word
@@ -129,60 +123,45 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       # Set up what your `check` needs here, as above.
-      - uses: hupe1980/devplane@v0.12.0   # pin a release that has the approvals input
+      - uses: hupe1980/devplane@v0.12.0
         with: { approvals: "true" }
 ```
 
-- **Read-only.** It reads the pull request's reviews and the base branch's rules with `GET` requests
-  to the job's own API address (`$GITHUB_API_URL`), with the job's token, and writes nothing to the
-  pull request: no review, comment, status or label. The token reaches only the verify step, and only
-  when the input is on; it appears in no output.
-- **Branch protection stays yours.** Nothing about approvals changes the exit code or blocks a merge.
-- **A reviewer's kind comes from what GitHub documents, never from a login's look.** A person's
-  account is an account of type `User`. A model is only an account a vendor documents as its model
-  reviewer — today `copilot-pull-request-reviewer[bot]` on github.com, which `devplane doctor`
-  lists with the page it comes from and the date it was read. Any other bot, whatever its name says,
-  is *a bot account*. Until the record has a word for a model deciding, a model's approval reads
-  *could not be attributed*, and it is never counted as a person's.
-- **A dismissed approval is said as dismissed**, with the commit it was on, and is not counted. An
-  approval on an older commit is counted and said as such.
-- **The count required** is read from the base branch's rules (the largest required count among
-  them), else classic branch protection. A job's token usually cannot read branch protection; then
-  the sentence says the number required could not be read — never *0 required*.
-- The section is as of the run. That is why `pull_request_review` is in the snippet: a review submitted
-  later starts a new run.
-- Which approvals GitHub counted toward its rule — write access, code owners, the last push — is
-  GitHub's to decide; Devplane states what it read.
+- **Read-only.** `GET` requests to `$GITHUB_API_URL` with the job's token, which reaches only the
+  verify step and only with the input on. Nothing is written to the pull request, and the exit code
+  does not change.
+- **A reviewer's kind comes from what GitHub documents**, never from a login's look: a person is an
+  account of type `User`; a model is an account a vendor documents as its model reviewer
+  (`copilot-pull-request-reviewer[bot]` on github.com, listed by `devplane doctor` with its source).
+  Any other bot is *a bot account*. A model's approval is never counted as a person's.
+- **A dismissed approval** is said as dismissed and not counted; an approval on an older commit is
+  counted and said as such.
+- **The count required** comes from the base branch's rulesets, else classic branch protection. A
+  job's token usually cannot read branch protection; then the sentence says so, never *0 required*.
+- The section is as of the run, hence `pull_request_review` in the triggers. Which approvals GitHub
+  counts toward its rule is GitHub's to decide.
 
-Without the input, in a pull request's run, *Not done by verify* says the approvals were not read and
-how to read them. `devplane verify --approvals` is the same read outside the action, given
-`GITHUB_EVENT_PATH`, `GITHUB_REPOSITORY`, `GITHUB_API_URL` and `GITHUB_TOKEN`.
+`devplane verify --approvals` does the same outside the action, given `GITHUB_EVENT_PATH`,
+`GITHUB_REPOSITORY`, `GITHUB_API_URL` and `GITHUB_TOKEN`.
 
 ## Annotations and SARIF
 
-When `GITHUB_ACTIONS` is set, `verify` also prints each weakened row — every kind: skip, deleted
-test, gate, agent controls, ownership, supply chain, base tests — as a **warning** annotation, and
-each test that failed in `check`, named from the JUnit files `[gates] junit` declares, as an
-**error** annotation:
+With `GITHUB_ACTIONS` set, `verify` prints each weakened row as a **warning** annotation, and each
+test that failed in `check` (named from the JUnit files `[gates] junit` declares) as an **error**:
 
 ```text
 ::warning file=tests/login.test.js,line=1,title=Devplane verify — check weakened::adds a skip marker `it.skip(` — it.skip("rejects an expired token", async () => {
 ```
 
-- The line is the added line the row quotes, or where a removed line stood. A row that matched no
-  single line (an edit to a whole gate definition, a deleted file) is annotated on its file; a row
-  with no file (the base checks as a whole, a truncated diff) on none, its path in the message.
-- GitHub shows at most 10 warning and 10 error annotations per step. `verify` prints that many of
-  each and the summary says how many it left out.
-- Annotations change no exit code. A failing test's annotation stands beside the `failed` it
-  already caused.
-- The rest of the log is printed with workflow commands paused, so no line the change wrote is read
-  as a command.
+- A row is annotated on the line it quotes, else on its file, else with no file and its path in the
+  message.
+- GitHub shows at most 10 warnings and 10 errors per step; the summary counts the rest.
+- Annotations change no exit code. The rest of the log is printed with workflow commands paused, so
+  no line the change wrote is read as a command.
 
-`--sarif <path>` (the action's `sarif` input) writes the same rows, none left out, as a SARIF 2.1.0
-file. A row with no file is placed on `devplane.toml`, since code scanning needs a location.
-**Nothing is uploaded.** To show the rows in code scanning, add your own step; it needs
-`security-events: write`, which the verify job above does not ask for:
+`--sarif <path>` (the `sarif` input) writes every row as a SARIF 2.1.0 file; a row with no file is
+placed on `devplane.toml`. **Nothing is uploaded.** To show the rows in code scanning, add your own
+step with `security-events: write`:
 
 ```yaml
       - uses: hupe1980/devplane@v0.12.0
@@ -198,8 +177,8 @@ file. A row with no file is placed on `devplane.toml`, since code scanning needs
 ## Limits
 
 - The summary shows the commands ended as recorded against this tree, not that the work is correct.
-- `check` runs code from the PR's tree, including edited tests.
-- On `pull_request`, the workflow file and action also come from the PR's tree; guard
+- `check` runs code from the pull request's tree, including edited tests.
+- On `pull_request`, the workflow file also comes from the pull request's tree; guard
   `.github/workflows/` with branch protection and code owners.
 
 ## Locally

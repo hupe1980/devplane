@@ -6,8 +6,8 @@ weight = 22
 group = "reference"
 +++
 
-**Devplane approves nothing on its own.** It *refuses* (`deny`) or *defers to a person* (`ask`), and
-allows only what you wrote yourself: a [grant](#grants-your-own-rule-per-project) in your own
+**Devplane approves nothing on its own.** A rule *refuses* a call (`deny`) or *puts it in front of a
+person* (`ask`). The only allow is a [grant](#grants-your-own-rule-per-project) you wrote in your own
 `~/.devplane/policy.toml`, never in a repository.
 
 ```toml
@@ -24,11 +24,11 @@ ask = [
 ```
 
 - `~/.devplane/policy.toml` holds a machine-wide `[policy]` of the same shape.
-- The same rules answer watched sessions' hooks (no host needed), driven runs' permission requests,
-  and Devplane's own actions. Every verdict lands in the [decision log](@/docs/decisions.md) with the
-  rule named.
+- The same rules answer watched sessions' hooks (no host needed), driven runs' permission requests
+  and Devplane's own actions. Every verdict is in the [decision log](@/docs/decisions.md), naming the
+  rule.
 
-Test before you commit:
+Test a rule before you commit it:
 
 ```sh
 devplane config explain 'pnpm test && rm -rf /'
@@ -40,7 +40,7 @@ devplane config check             # does devplane.toml parse; is any rule refuse
 ## The syntax is Claude Code's
 
 A prohibition copies between `settings.json` and `devplane.toml` unchanged. `devplane doctor` prints
-the baseline: rule syntax modelled on Claude Code 2.1.273. What a rule *reaches* is wider here, only
+the baseline: rule syntax modelled on Claude Code 2.1.273. A rule here reaches more calls, always
 toward a prompt ([stricter](#where-devplane-is-stricter-than-claude-code)).
 
 ### Tools
@@ -56,8 +56,8 @@ toward a prompt ([stricter](#where-devplane-is-stricter-than-claude-code)).
 ### Commands
 
 For `Bash`, `PowerShell` and `Monitor` the specifier matches **tokens, not text**. The line splits into
-simple commands on `&&`, `||`, `;`, `|`, `&` and newlines, quotes removed as the shell would. A rule
-is a token prefix: program, then flags **as a set**, then operands.
+simple commands on `&&`, `||`, `;`, `|`, `&` and newlines, with quotes removed as the shell would. A
+rule is a token prefix: the program, then its flags **as a set**, then operands.
 
 | You write | Matches | Does not match |
 |---|---|---|
@@ -94,8 +94,8 @@ A `deny` fires when **any** simple command matches. `Bash(rm *)` refuses all of 
 Quoted text is data: `echo "a; rm -rf x"` meets no `rm` rule; `grep -e 'rm -rf' f` is a pattern.
 
 > [!WARNING]
-> A `Bash` rule reads the line; it cannot follow a program that decides at run time what to execute.
-> For containment, use a sandbox.
+> A `Bash` rule reads the line. It cannot follow a program that decides at run time what to execute;
+> for containment, use a sandbox.
 
 ### Paths
 
@@ -162,12 +162,12 @@ deny = [
 
 ## Devplane's own files are protected
 
-A built-in prohibition beneath your rules: an agent may not edit Devplane's files in `~/.devplane`
-(`policy.toml`, `agents.toml`, the store, `token`, `host.json`), read the token, or edit its
-repository's `devplane.toml`.
+A built-in prohibition sits beneath your rules. An agent may not edit Devplane's files in
+`~/.devplane` (`policy.toml`, `agents.toml`, the store, `token`, `host.json`), read the token, or
+edit its repository's `devplane.toml`.
 
-- It covers file tools and shell commands that write, truncate, move, remove or redirect into those
-  files, or remove, move or chmod `~/.devplane`, also after `cd`, `pushd` or `git -C` on the line.
+- It covers file tools, and shell commands that write, truncate, move, remove or redirect into those
+  files or remove, move or chmod `~/.devplane`, including after `cd`, `pushd` or `git -C`.
 - The same on a directory above them (`rm -rf ~`, `rm -rf .` in the project) is asked about.
 
 ```console
@@ -176,10 +176,10 @@ deny  Bash
         by writes `/home/you/code/saas/devplane.toml` (built in: an agent may not change Devplane's own rules, records or credentials, nor read its token)
 ```
 
-- An unknown program is refused `~/.devplane` files and asked about for `devplane.toml` (`git add
+- An unknown program is refused on `~/.devplane` files and asked about on `devplane.toml` (`git add
   devplane.toml` is ordinary, `sed -i` is not).
-- A name the reader cannot resolve (variable, glob, untraceable `cd`) is asked about. A spelling that
-  never names them (`~/.dev*/tok*`), or a script opening the file itself, is not seen.
+- A name the reader cannot resolve (a variable, a glob, an untraceable `cd`) is asked about. A
+  spelling that never names them (`~/.dev*/tok*`), or a script opening the file itself, is not seen.
 - Reading the rest stays allowed. Edit `devplane.toml` yourself and commit it.
 
 ## Order: deny wins
@@ -190,9 +190,9 @@ deny  Bash
 4. your own [grant](#grants-your-own-rule-per-project), where a person was about to be asked
 5. *undecided*: no answer; your agent asks as usual
 
-Specificity does not change the order; neither file cancels the other's prohibitions. The governing
-`devplane.toml` is at the root of the checkout the command runs in; a worktree inherits the rules and
-gates of its owning checkout, so relaxing a rule on the agent's branch changes nothing.
+Specificity does not change the order, and neither file cancels the other's prohibitions. The
+governing `devplane.toml` is at the root of the checkout the command runs in. A worktree takes the
+rules and gates of its owning checkout, so relaxing a rule on the agent's branch changes nothing.
 
 ## Rules that cannot work are refused
 
@@ -206,13 +206,13 @@ gates of its owning checkout, so relaxing a rule on the agent's branch changes n
 | `Agent(researcher)` | that tool has no field for a bare specifier to match |
 | `Bash(rm -rf *` | the bracket is never closed |
 
-And one **warning**, because the list behind it is a snapshot of Claude Code's tool reference:
+And one **warning**, because its list is a snapshot of Claude Code's tool reference:
 
 | Warned about | Why |
 |---|---|
-| `Bahs(rm *)`, `Stop Task` | not a tool name Claude Code documents, so the rule matches nothing. The name shown in a transcript is not always the rule name — `Stop Task` is written `TaskStop` |
+| `Bahs(rm *)`, `Stop Task` | not a tool name Claude Code documents, so the rule matches nothing. A transcript's label is not always the rule name: `Stop Task` is written `TaskStop` |
 
-`Cd(<path>)` rules govern a slash command, not a tool call; `config check` says so. Keep them in
+`config check` notes that `Cd(<path>)` rules govern a slash command, not a tool call. Keep them in
 `settings.json`.
 
 ## Rules that do nothing
@@ -228,15 +228,20 @@ $ devplane config check
             every call it names
 ```
 
-- Decided by pattern containment; silent when unprovable; lists with a `!` exception are skipped.
+- It decides by pattern containment, says nothing when it cannot prove it, and skips lists with a
+  `!` exception.
 - It also names allow rules in `.claude/settings.json` that grant more than they look like
   (`Bash(python:*)` approves `python -c` with any code). It writes nothing.
 
 ## Where Devplane is stricter than Claude Code
 
-Always toward a prompt: wrappers and `-c` are looked through, program names match through the path
-case-folded, flags are a set even in an exact rule, more writers meet `Edit` (`cp`, `install`,
-`rsync`, `ln`, `truncate`, `dd of=`), and an unreadable line is asked about.
+Always toward a prompt:
+
+- wrappers and `-c` are looked through;
+- program names match through the path, case-folded;
+- flags are a set, even in an exact rule;
+- more writers meet `Edit` (`cp`, `install`, `rsync`, `ln`, `truncate`, `dd of=`);
+- an unreadable line is asked about.
 
 ## When a line cannot be read, a person is asked
 
@@ -260,16 +265,16 @@ ask — unreadable  Bash
 | more than 8 wrappers before the command | `sudo sudo … sudo ls` |
 | a line past 65,536 characters | — |
 
-- Only where the project has rules for the tool; a rule that answers the call always wins.
-- The audit outcome is `unresolved`, under the authority of the rules that made it a question.
-- A heredoc fed to a non-executing program (`cat`, `tee`, `grep`, `jq`, …) is data; fed to `bash`,
-  `| sudo bash` or `| python3` it is read.
+- This applies only where the project has rules for the tool. A rule that answers the call wins.
+- The audit outcome is `unresolved`, under `rule`: your rules made it a question.
+- A heredoc fed to a program that does not execute it (`cat`, `tee`, `grep`, `jq`, …) is data. Fed to
+  `bash`, `| sudo bash` or `| python3`, it is read.
 
 ## When the file is broken, every call is asked
 
 A `devplane.toml` that will not load **fails closed**: every gated call in that repository goes to a
-person, naming the file and error. A broken `~/.devplane/policy.toml` does so machine-wide. A critical
-inbox item stays until it loads.
+person, naming the file and the error. A broken `~/.devplane/policy.toml` does the same machine-wide.
+A critical inbox item stays until the file loads.
 
 ```console
 $ devplane config explain 'cat .env'
@@ -279,7 +284,7 @@ ask — unreadable  Bash
 
 ## Auto mode
 
-Auto mode never prompts, so `PermissionRequest` never fires there. `devplane agent connect claude`
+Auto mode never prompts, so `PermissionRequest` never fires in it. `devplane agent connect claude`
 installs two synchronous hooks:
 
 | Hook | Fires | Carries |
@@ -287,22 +292,23 @@ installs two synchronous hooks:
 | `PreToolUse` | before every tool call, in every mode | a prohibition, or nothing |
 | `PermissionRequest` | when a person was going to be asked | the same, plus the request to show you |
 
-`PreToolUse` never answers *allow* — an allow there would skip Claude Code's own checks — and
-`PermissionRequest` does only with your own grant. `devplane status --modes` shows which sessions run without prompts;
-`devplane doctor` probes the gate and prints the round trip.
+`PreToolUse` never answers *allow*, because an allow there would skip Claude Code's own checks.
+`PermissionRequest` answers *allow* only for your own grant. `devplane status --modes` shows which
+sessions run without prompts; `devplane doctor` probes the gate and prints the round trip.
 
 ## Answering a watched session's permission
 
-A permission in a session **you** started can be answered elsewhere if the project sets a hold:
+A permission in a session **you** started can be answered from Devplane when the project sets a hold:
 
 ```toml
 [questions]
 hold = true        # or "45s"
 ```
 
-- A call your `ask` rules matched becomes an ask; the hook waits for the hold.
-- Answer in the Inbox or with `devplane inbox answer <ask> --allow` (or `--deny`); first answer wins,
-  authority **you**. Unanswered: authority **nobody**, and your agent shows its own dialog.
+- A call your `ask` rules matched becomes an ask, and the hook waits for the hold.
+- Answer in the Inbox or with `devplane inbox answer <ask> --allow` (or `--deny`). The first answer
+  wins, recorded as `person`. Unanswered, it is recorded as `nobody` and your agent shows its own
+  dialog.
 - A prohibition applies first and is never held.
 - An agent cannot answer its own permission ([Security](@/docs/security.md#an-agent-cannot-approve-itself-mostly)).
 - With the app running, the hold's notification carries **Allow** and **Deny**
@@ -310,51 +316,44 @@ hold = true        # or "45s"
 
 ## Answering from the notification
 
-With `devplane up --window` running, a permission or a question that can be answered gets one
-notification, whatever the window is doing:
+With `devplane up --window` running, each permission or question that can be answered gets one
+notification.
 
-- **A permission** carries **Allow** (this one call) and **Deny** — nothing wider. An agent's own
-  *always allow* is answered in the window, where its scope is shown in full. A watched session's
-  permission carries them only while its hold lasts; without a hold, the notification opens the item.
-- **A question** with one field carries every option as a numbered action (`1. …`, `2. …`), or none:
-  never some of them. Too many options, several questions at once, or free text where the platform
-  has no reply box: the body says how many options wait, and one click opens the answer window on that
-  question.
-- **A click** on the notification opens the answer window on that item — not the topmost one.
-- **Pressing an action** answers as you, through the same short hold as the window's answers: the
-  answer window can still take it back (`z`) for a few seconds. Dismissing, closing or letting it time
-  out answers nothing.
-- **Answered elsewhere**, the notification is taken back where the platform allows it; one the
-  platform kept answers nothing and opens the item, saying who answered it, from where and when.
-- Quitting the app takes every notification back. Nothing retries a notification, raises its
-  interruption level, or plays a sound of its own: Do Not Disturb and Focus hold it like any other, and
-  the tray count still counts the item.
+| On the notification | What happens |
+|---|---|
+| a permission | **Allow** (this one call) and **Deny**, nothing wider. An agent's *always allow* is answered in the window, where its scope is shown. A watched session's permission has the actions only while its hold lasts |
+| a question with one field | every option as a numbered action, or none. With too many options, several questions or free text, the body says how many options wait |
+| a click | opens the answer window on that item |
+| an action | answers as you, through the window's short undo hold (`z`). Dismissing or a timeout answers nothing |
+| answered elsewhere | taken back where the platform allows; a kept one answers nothing and opens the item, saying who answered |
+
+Quitting the app takes every notification back. Nothing retries a notification, raises its
+interruption level or plays its own sound; Do Not Disturb and Focus hold it like any other.
 
 What each platform offers is in [the window](@/docs/workbench.md#the-window).
 
 ### Where an answer came from
 
-Every answer names who gave it — **you** — and the path, in the decision log, `devplane inbox --all`
-and the answer window:
+Every answer is recorded as yours, with its path, in the decision log, `devplane inbox --all` and the
+answer window:
 
 | Path | Recorded when |
 |---|---|
-| `window` | the app's own window answered: it proves that per question with a key the app hands its window in memory, never served, logged or stored |
-| `notification` | you pressed an action on the app's notification; handled inside the app, so no request can claim it |
+| `window` | the app's own window, proved per question with a key held only in the app's memory |
+| `notification` | an action pressed on the app's notification, handled inside the app |
 | `cli` | anything else holding the control token: `devplane inbox answer`, a script, **a browser tab on `devplane up`** |
 
-Neither a request's `Origin` header nor anything in its body changes the path. What this cannot
-prove, and does not claim: a program driving your desktop (scripting, accessibility) can press a
-notification or a window button as you, and a process running as you can read the window's key out of
-the app's memory.
+No request header or body changes the path. It cannot tell you from a program driving your desktop
+(scripting, accessibility), or from a process running as you that reads the window's key from
+memory.
 
 ## Grants: your own rule, per project
 
-A grant is an allow you wrote, for one project, in your own file — your answer given in advance:
+A grant is an allow you wrote for one project in your own file: your answer, given in advance.
 
 ```toml
 # ~/.devplane/policy.toml
-[grants]                  # when one is offered (each at least 2)
+[grants]                  # when one is offered; default 5, at least 2
 offer_after = 5
 offer_again_after = 5
 
@@ -365,37 +364,37 @@ allow = [
 ]
 ```
 
-- **Offered, not asked for.** After you answer the same call the same way from the window or a
-  notification `offer_after` times — never a refusal among them — its permission item offers the
-  exact rule, the answers it comes from, and the lines it adds to the file. Nothing is written until
-  you confirm. Answers from the command line do not count: any holder of the token can send one.
-- **Only after every prohibition.** Deny, ask and an unreadable line all win; the order has no
-  setting. A grant answers a driven run's request with the agent's own *allow once*, and a Claude
-  Code `PermissionRequest`; never `PreToolUse`, Codex or Copilot.
-- **Narrower than an allow list.** It allows a line only when every command on it is granted, no
+`[projects."<root>"]` may set its own `offer_after` and `offer_again_after`. `until` takes a date
+(start of that day, UTC) or a timestamp; past it, the grant answers nothing and the item says it
+lapsed.
+
+- **Offered, not asked for.** After you answer the same call the same way `offer_after` times from
+  the window or a notification, with no refusal among them, its permission item offers the exact rule
+  and the lines it adds. Nothing is written until you confirm. Command-line answers do not count:
+  any holder of the token can send one.
+- **Only after every prohibition.** Deny, ask and an unreadable line all win. A grant answers a
+  driven run's request (with the agent's *allow once*) and a Claude Code `PermissionRequest`; never
+  `PreToolUse`, Codex or Copilot hooks.
+- **Narrower than an allow list.** A line is allowed only when every command on it is granted, no
   argument is rewritten by the shell, nothing is redirected to a file and no wrapper (`sudo`, `env`)
   stands in front. A call whose input never arrived is never granted. A path grant reaches only
   files inside the project.
-- **Refused by name**, by `devplane config check` and every load: a machine-wide `[policy] allow`
-  (there is no global switch), a wildcard where the command goes (`Bash(*)`), a program that runs any
-  code (`Bash(python *)`), a forge write (`git push`, `gh`), any tool but `Bash`, `Read` and `Edit`, a
-  path outside the project, and a threshold below 2. In a repository's `devplane.toml`, any
-  `[policy] allow`, `[grants]`, `[projects]` or threshold is refused: a repository cannot grant.
-- **What it may write** is what the project declares — the change's worktree and the caches
-  `[workspace] share` sets up. Devplane does not know what the command itself touches, and the offer
-  says so.
+- **Refused by name**, by `devplane config check` and on every load: a machine-wide `[policy] allow`,
+  a wildcard command (`Bash(*)`), a program that runs any code (`Bash(python *)`), a forge write
+  (`git push`, `gh`), any tool but `Bash`, `Read` and `Edit`, a path outside the project, and a
+  threshold below 2. A repository's `devplane.toml` cannot grant.
 - **Recorded and named.** Every call a grant allows is a `rule` decision naming the grant. Where the
   agent's own settings would have asked, the record, the offer, `devplane config check` and
-  `devplane doctor` say the grant is *widening the agent*, by count and by rule.
+  `devplane doctor` say the grant is *widening the agent*.
 - **Revoking lists what it did.** `devplane config grants` shows each grant, the calls it decided
-  and, where a gate later failed on a change it decided on, how many were reversed — absent where
-  nothing could be observed. `devplane config revoke 'Bash(cargo test)'` removes it and lists every
-  decision it made. A grant whose `until` passed answers nothing, and the item says it lapsed.
-- The built-in rule above keeps agents from reading or editing `policy.toml`. That narrows the hole
-  and does not close it: a process running as you can still write the file.
+  and how many were later reversed by a failed gate. `devplane config revoke '<rule>'` removes it and
+  lists every decision it made.
+- Devplane does not know what a granted command itself touches, and the offer says so.
+- The built-in rule above keeps agents from editing `policy.toml`. A process running as you can still
+  write it.
 
 ## Tuning the rules
 
 - **Asked too often:** an inbox permission carries the narrowest allow rule and the `settings.json`
-  for it; `devplane config explain --replay` suggests allow rules from past calls.
+  for it. `devplane config explain --replay` suggests allow rules from past calls.
 - **A rule too tight:** five refusals in one run raise a `refused` item naming the rule.

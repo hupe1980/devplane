@@ -1,6 +1,6 @@
 [package]
 name = "devplane"
-description = "Know when an agent's work is actually done. Run any ACP agent in its own worktree, verify its change with your own checks run outside the agent, see the weakened tests first, and keep the record of who decided what. Local-first, one binary, no account."
+description = "The evidence for deciding whether an agent's change is safe to merge, produced by your own project's checks, and the record of how you know."
 version = "0.12.0"
 edition = "2024"
 rust-version = "1.94"
@@ -9,7 +9,7 @@ repository = "https://github.com/hupe1980/devplane"
 homepage = "https://hupe1980.github.io/devplane"
 authors = ["hupe1980"]
 readme = "README.md"
-keywords = ["ai", "agents", "claude-code", "developer-tools", "orchestration"]
+keywords = ["ai-agents", "code-review", "verification", "acp", "developer-tools"]
 categories = ["command-line-utilities", "development-tools"]
 # Explicit so the package leaves out the site, scripts, CI and `ui/node_modules`.
 include = [
