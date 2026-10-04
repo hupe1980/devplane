@@ -1,5 +1,6 @@
-//! The permission policy: it can prohibit a call or defer it to a person;
-//! nothing here answers yes. The rule syntax is Claude Code's, but a command
+//! The permission policy: it can prohibit a call or defer it to a person, and
+//! it answers yes only with a [`crate::core::grant::Grant`] the person wrote in
+//! their own file — never on its own. The rule syntax is Claude Code's, but a command
 //! rule matches tokens after wrappers are stripped (`sudo rm -fr /` meets
 //! `Bash(rm -rf *)`), and an unreadable line is [`Verdict::Unresolved`] rather
 //! than silence — being wider only ever costs a prompt.
@@ -27,8 +28,11 @@ impl Class {
 }
 
 /// What the policy decided about one tool call, variants in the order they win.
-/// `Unresolved` (*nobody could look*) is distinct from `Undecided`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Unresolved` (*nobody could look*) is distinct from `Undecided`. `Allow`
+/// carries the person's own grant and is reached only when every prohibition,
+/// question and doubt has passed; nothing reads a verdict from text, so it has
+/// no `Deserialize`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Deny {
@@ -43,13 +47,26 @@ pub enum Verdict {
         why: String,
     },
     Undecided,
+    /// The person's own rule, written in their `~/.devplane/policy.toml` for
+    /// this project, answers the call. Built in one place only.
+    Allow {
+        grant: crate::core::grant::Grant,
+    },
 }
 
 impl Verdict {
     pub fn rule(&self) -> Option<&str> {
         match self {
             Verdict::Deny { rule } | Verdict::Ask { rule } => Some(rule),
+            Verdict::Allow { grant } => Some(grant.rule()),
             Verdict::Unresolved { .. } | Verdict::Undecided => None,
+        }
+    }
+    /// The grant that allowed the call, on an allow.
+    pub fn grant(&self) -> Option<&crate::core::grant::Grant> {
+        match self {
+            Verdict::Allow { grant } => Some(grant),
+            _ => None,
         }
     }
     pub fn as_str(&self) -> &'static str {
@@ -58,6 +75,7 @@ impl Verdict {
             Verdict::Ask { .. } => "ask",
             Verdict::Unresolved { .. } => "unresolved",
             Verdict::Undecided => "undecided",
+            Verdict::Allow { .. } => "allow",
         }
     }
     pub fn why(&self) -> Option<&str> {
@@ -540,6 +558,21 @@ enum Spec {
     },
 }
 
+/// A rule's specifier as a reader outside this module may inspect it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecView<'a> {
+    /// No specifier, or `*`.
+    Any,
+    Command {
+        program: &'a str,
+        flags: &'a [String],
+        operands: &'a [String],
+    },
+    /// A path pattern, as written.
+    Path(&'a str),
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     raw: String,
@@ -628,6 +661,40 @@ impl Rule {
 
     pub fn is_negated(&self) -> bool {
         self.negated
+    }
+    /// The tool the rule names, as written.
+    pub fn tool_name(&self) -> &str {
+        self.tool.as_str()
+    }
+    /// An unclosed bracket or text after it.
+    pub fn is_malformed(&self) -> bool {
+        self.malformed
+    }
+    /// What the rule's specifier is, for a reader that must refuse some.
+    pub fn spec_view(&self) -> SpecView<'_> {
+        match &self.spec {
+            Spec::Any => SpecView::Any,
+            Spec::Command(c) => SpecView::Command {
+                program: &c.program,
+                flags: &c.flags,
+                operands: &c.operands,
+            },
+            Spec::Path(_) => SpecView::Path(
+                self.raw
+                    .split_once('(')
+                    .map(|(_, s)| s.trim_end_matches(')'))
+                    .unwrap_or(""),
+            ),
+            Spec::Domain(_) | Spec::Content(_) | Spec::Param { .. } => SpecView::Other,
+        }
+    }
+    /// Whether this command rule, read as an approval, names one simple
+    /// command — the vendor's allow semantics, one command at a time.
+    pub fn allows_command(&self, cmd: &Simple) -> bool {
+        match &self.spec {
+            Spec::Command(spec) if !self.negated && !self.malformed => spec.matches(cmd, false),
+            _ => false,
+        }
     }
     pub fn as_str(&self) -> &str {
         &self.raw

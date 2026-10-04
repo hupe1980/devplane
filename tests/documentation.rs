@@ -128,6 +128,20 @@ fn check(blocks: Vec<Block>) -> usize {
             continue;
         }
 
+        if b.names.contains("policy.toml") {
+            // The person's own file: it must load as Devplane loads it, with
+            // every grant it shows accepted.
+            let parsed = devplane::core::GlobalConfig::parse(&b.body);
+            assert!(
+                parsed.as_ref().is_ok_and(|g| g.grants().is_ok()),
+                "{}: this `policy.toml` example does not load: {:?}\n{}",
+                b.source,
+                parsed.err(),
+                b.body
+            );
+            continue;
+        }
+
         if b.names.contains("agents.toml") {
             // It must add an agent, pinned.
             let home = std::env::temp_dir().join(format!(

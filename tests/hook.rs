@@ -711,6 +711,7 @@ async fn raise_hold(s: &Store, session: &str) -> String {
             Path::new("/tmp/alpha"),
             "Bash",
             "git push",
+            &serde_json::json!({ "command": "git push" }),
             std::time::Duration::from_secs(20),
             false,
         )
@@ -891,6 +892,7 @@ async fn a_held_answer_is_live_only_once_the_hook_has_read_it() {
             Path::new("/tmp/alpha"),
             "Bash",
             "git push",
+            &serde_json::json!({ "command": "git push" }),
             std::time::Duration::from_secs(20),
             false,
         )

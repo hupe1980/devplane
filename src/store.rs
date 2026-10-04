@@ -24,11 +24,11 @@ use std::str::FromStr;
 /// satisfy (a renamed or added column, a changed type, a dropped table). A file
 /// stamped with anything else is moved aside on open (`Store::retire`), not
 /// migrated.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// The statement that stamps it, written out because `PRAGMA user_version`
 /// accepts no bind parameter.
-const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 17";
+const SCHEMA_VERSION_PRAGMA: &str = "PRAGMA user_version = 18";
 
 /// The database and its sidecars readable by their owner alone, whoever
 /// opened them first — a hook creates the file long before any `up` would
@@ -952,8 +952,8 @@ impl Store {
         sqlx::query(
             "INSERT OR IGNORE INTO decisions
                (id, at, authority, action, subject, outcome, reason, tool, server_source,
-                project_id, run_id, change_id, call_id, vendor, vendor_source)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                project_id, run_id, change_id, call_id, vendor, vendor_source, grant_name)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
         .bind(ts(&d.at))
@@ -970,9 +970,47 @@ impl Store {
         .bind(d.call_id.as_deref())
         .bind(d.vendor.as_deref())
         .bind(d.vendor_source.as_deref())
+        .bind(d.grant.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Every decision a grant made, oldest first: what revoking it lists.
+    pub async fn decisions_by_grant(&self, name: &str) -> Result<Vec<crate::core::Decision>> {
+        let rows = sqlx::query("SELECT * FROM decisions WHERE grant_name = ? ORDER BY at, rowid")
+            .bind(name)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading the decisions one grant made")?;
+        Ok(decode_rows("decision", &rows, decode_decision))
+    }
+
+    /// Gate failures on one change, oldest first: the observable reversal of
+    /// a grant that decided on that change.
+    pub async fn gate_failures(&self, change: &str) -> Result<Vec<crate::core::Decision>> {
+        let rows = sqlx::query(
+            "SELECT * FROM decisions WHERE change_id = ? AND action = 'gate:run' \
+             AND outcome = 'fail' ORDER BY at, rowid",
+        )
+        .bind(change)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading a change's gate failures")?;
+        Ok(decode_rows("decision", &rows, decode_decision))
+    }
+
+    /// Permission asks a person answered from the window or a notification —
+    /// the paths the host proves — newest first: what a grant offer counts.
+    pub async fn answered_permissions(&self, limit: i64) -> Result<Vec<crate::core::ask::Ask>> {
+        let rows = sqlx::query(
+            "SELECT * FROM asks WHERE kind = 'permission' AND answer IS NOT NULL \
+             AND answered_from IN ('window', 'notification') ORDER BY asked_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(decode_rows("ask", &rows, decode_ask))
     }
 
     /// The decision rows naming one call by the agent's id: Devplane's own
@@ -1832,6 +1870,7 @@ fn decode_decision(r: &sqlx::sqlite::SqliteRow) -> Result<crate::core::Decision>
         call_id: r.get("call_id"),
         vendor: r.get("vendor"),
         vendor_source: r.get("vendor_source"),
+        grant: r.get("grant_name"),
     })
 }
 
@@ -2280,6 +2319,7 @@ mod tests {
             change_id: None,
             offer: None,
             no_offer: None,
+            grant: Default::default(),
             resume_command: None,
             session_link: None,
             marker: None,
@@ -2357,6 +2397,7 @@ mod tests {
             change_id: None,
             offer: None,
             no_offer: None,
+            grant: Default::default(),
             resume_command: None,
             session_link: None,
             marker: None,

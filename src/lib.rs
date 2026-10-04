@@ -38,6 +38,7 @@ pub mod gates;
 pub mod git;
 /// GitHub, spoken to directly: sign-in, issues, pull requests, checks.
 pub mod github;
+pub mod grant_file;
 /// The one answer the window gave and has not sent yet, and its undo.
 pub mod hold;
 /// `devplane hook` and `devplane statusline`, run in the vendor's process.

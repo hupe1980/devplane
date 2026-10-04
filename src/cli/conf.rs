@@ -146,7 +146,8 @@ pub fn cmd_explain(
 
     // The machine-wide policy is included: this is the gate as enforced.
     let (cache, global_error) = crate::policy_cache::PolicyCache::from_disk();
-    let verdict = cache.restrictive(&dir, &tool, &input);
+    // Where a person was about to be asked, the person's own grants answer too.
+    let verdict = cache.decide(&dir, &tool, &input);
 
     // Where the rules came from and whether they loaded: a broken
     // `devplane.toml` has no rules in force, and must not read as "no rule
@@ -177,6 +178,7 @@ pub fn cmd_explain(
         crate::core::Verdict::Ask { .. } => (YELLOW, "ask"),
         crate::core::Verdict::Unresolved { .. } => (YELLOW, "ask — unreadable"),
         crate::core::Verdict::Undecided => (DIM, "undecided"),
+        crate::core::Verdict::Allow { .. } => (render::GREEN, "allow — your grant"),
     };
     println!("{}  {}", paint(colour, headline), paint(BOLD, &tool));
     match (verdict.rule(), verdict.why()) {
@@ -250,7 +252,7 @@ pub async fn cmd_replay(dir: PathBuf, limit: i64, json: bool) -> Result<()> {
         let slot = match verdict {
             crate::core::Verdict::Ask { .. } | crate::core::Verdict::Unresolved { .. } => 0,
             crate::core::Verdict::Deny { .. } => 1,
-            crate::core::Verdict::Undecided => 2,
+            crate::core::Verdict::Undecided | crate::core::Verdict::Allow { .. } => 2,
         };
         counts[slot] += 1;
         if slot != 2 {
@@ -386,6 +388,7 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
         }
     };
     let problems = config.validate();
+    let persons = PersonsFile::read(&root);
 
     if json {
         println!(
@@ -393,16 +396,29 @@ pub async fn cmd_check(path: PathBuf, json: bool) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "file": file.display().to_string(),
                 "exists": file.exists(),
-                "ok": !problems.iter().any(|p| p.fatal),
+                "ok": !problems.iter().any(|p| p.fatal) && persons.error.is_none(),
                 // The same read-back the board shows; it carries `problems`.
                 "describes": config.describe(),
+                "persons_file": {
+                    "error": persons.error,
+                    "grants": persons.grants,
+                    "widening": persons.widening,
+                },
             }))?
         );
-        if problems.iter().any(|p| p.fatal) {
+        if problems.iter().any(|p| p.fatal) || persons.error.is_some() {
             return Err(crate::cli::Exit(1).into());
         }
         return Ok(());
     }
+    if let Some(e) = &persons.error {
+        println!("{} {e}", paint(render::RED, "error  "));
+        anyhow::bail!(
+            "{} will not load, so until it does every call is asked",
+            crate::core::grant::FILE
+        );
+    }
+    persons.print();
 
     if !file.exists() {
         println!(
@@ -631,4 +647,268 @@ fn vendor_allow_rules(root: &std::path::Path) -> Vec<String> {
         }));
     }
     out
+}
+
+/// The person's own `~/.devplane/policy.toml` as it bears on one project: why
+/// it will not load (a refused grant, a global switch, a threshold below 2,
+/// each by name), the grants it holds for the project, and which of them
+/// widen the agent beyond its own settings.
+struct PersonsFile {
+    error: Option<String>,
+    grants: Vec<String>,
+    widening: Vec<String>,
+}
+
+impl PersonsFile {
+    fn read(root: &Path) -> Self {
+        let home = match crate::config::home() {
+            Ok(h) => h,
+            Err(e) => {
+                return Self {
+                    error: Some(e.to_string()),
+                    grants: Vec::new(),
+                    widening: Vec::new(),
+                };
+            }
+        };
+        let loaded = crate::core::GlobalConfig::load(&home)
+            .map_err(|e| e.to_string())
+            .and_then(|g| g.grants());
+        match loaded {
+            Err(error) => Self {
+                error: Some(error),
+                grants: Vec::new(),
+                widening: Vec::new(),
+            },
+            Ok(g) => {
+                let grants: Vec<String> = g
+                    .in_project(root)
+                    .iter()
+                    .map(|g| g.rule().to_string())
+                    .collect();
+                let agent =
+                    crate::policy_cache::agent_allow_rules(root, dirs::home_dir().as_deref());
+                let widening = grants
+                    .iter()
+                    .filter(|r| crate::policy_cache::widens_the_agent(r, &agent))
+                    .cloned()
+                    .collect();
+                Self {
+                    error: None,
+                    grants,
+                    widening,
+                }
+            }
+        }
+    }
+
+    fn print(&self) {
+        if self.grants.is_empty() {
+            return;
+        }
+        println!(
+            "  {:<9} {} in {}: {}",
+            "grants",
+            self.grants.len(),
+            crate::core::grant::FILE,
+            self.grants.join(", ")
+        );
+        if !self.widening.is_empty() {
+            println!(
+                "  {:<9} {}",
+                "",
+                paint(YELLOW, &widening_line(&self.widening))
+            );
+        }
+    }
+}
+
+/// *widening the agent: 2 grants — `a`, `b`*: said by count and by rule.
+pub(crate) fn widening_line(rules: &[String]) -> String {
+    format!(
+        "widening the agent: {} {} — {}; where {} the agent's own settings would have asked",
+        rules.len(),
+        if rules.len() == 1 { "grant" } else { "grants" },
+        rules
+            .iter()
+            .map(|r| format!("`{r}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        if rules.len() == 1 {
+            "it answers,"
+        } else {
+            "they answer,"
+        }
+    )
+}
+
+/// `devplane config grants`: every grant in the person's file, with what it
+/// decided and, where observable, how many of those were reversed.
+pub async fn cmd_grants(json: bool) -> Result<()> {
+    let home = crate::config::home()?;
+    let g = crate::core::GlobalConfig::load(&home)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .grants()
+        .map_err(|e| anyhow::anyhow!("{} will not load: {e}", crate::core::grant::FILE))?;
+    let store = crate::store::Store::open(&crate::config::db_path()?).await?;
+    let rows = crate::view::grant_rows(&store, &g, jiff::Timestamp::now()).await;
+    let widening: Vec<String> = rows
+        .iter()
+        .filter(|r| r.widens && !r.lapsed)
+        .map(|r| r.rule.clone())
+        .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "grants": rows,
+                "widening": widening,
+                "reversals_counted": crate::view::REVERSALS_COUNTED,
+            }))?
+        );
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!(
+            "{}",
+            paint(
+                DIM,
+                &format!(
+                    "{} grants nothing. A grant is offered in the inbox after you answer the \
+                     same call the same way several times.",
+                    crate::core::grant::FILE
+                )
+            )
+        );
+        return Ok(());
+    }
+    let mut root = String::new();
+    for r in &rows {
+        if r.root != root {
+            root = r.root.clone();
+            println!("{}", paint(BOLD, &root));
+        }
+        let decided = format!(
+            "decided {} {}",
+            r.decided,
+            if r.decided == 1 { "call" } else { "calls" }
+        );
+        let reversed = match r.reversed {
+            Some(n) => format!(" · {n} reversed of the {}", r.decided),
+            None => String::new(),
+        };
+        let lapsed = match (&r.until, r.lapsed) {
+            (Some(u), true) => format!(" · lapsed {u} — calls it matched are asked again"),
+            (Some(u), false) => format!(" · until {u}"),
+            _ => String::new(),
+        };
+        println!("  {:<32} {decided}{reversed}{lapsed}", r.rule);
+        for rev in &r.reversals {
+            println!("    {}", paint(DIM, &rev.cause));
+        }
+    }
+    if !widening.is_empty() {
+        println!("{}", paint(YELLOW, &widening_line(&widening)));
+    }
+    println!("{}", paint(DIM, crate::view::REVERSALS_COUNTED));
+    Ok(())
+}
+
+/// `devplane config revoke`: removes a grant from the person's file and lists
+/// every decision it made. Refused inside an agent's session: the file is the
+/// person's, and an agent may not edit what governs it.
+pub async fn cmd_revoke(rule: String, dir: PathBuf, json: bool) -> Result<()> {
+    if let Some(var) = crate::hook::agent_session() {
+        anyhow::bail!(
+            "refused: `{var}` is set, so this is running inside an agent's session, and an agent \
+             may not change the person's grants. Revoke it from the Devplane window or a \
+             terminal of your own."
+        );
+    }
+    let dir = dir.canonicalize().context("that path does not exist")?;
+    let root = crate::repo::governing_root(&dir)
+        .map(|r| r.canonicalize().unwrap_or(r))
+        .unwrap_or(dir);
+    let root_text = root.display().to_string();
+    let home = crate::config::home()?;
+    if !crate::grant_file::remove(&home, &root_text, &rule)? {
+        anyhow::bail!(
+            "{} grants no `{rule}` for {root_text}; `devplane config grants` lists what it does",
+            crate::core::grant::FILE
+        );
+    }
+    let name = crate::core::grant::name_of(&rule, &root);
+    let store = crate::store::Store::open(&crate::config::db_path()?).await?;
+    let decided = store.decisions_by_grant(&name).await?;
+    store
+        .append_decision(
+            &crate::core::Decision::new(
+                crate::core::Authority::Person,
+                "policy:revoke",
+                name.clone(),
+                "revoked",
+            )
+            .because(format!(
+                "removed from {} in a terminal; it had decided {} {}",
+                crate::core::grant::FILE,
+                decided.len(),
+                if decided.len() == 1 { "call" } else { "calls" }
+            )),
+        )
+        .await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "revoked": name, "decided": decided,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "revoked {name}; it decided {} {}{}",
+        decided.len(),
+        if decided.len() == 1 { "call" } else { "calls" },
+        if decided.is_empty() { "." } else { ":" }
+    );
+    for d in &decided {
+        println!(
+            "  {}  {}  {}{}",
+            d.at.strftime("%Y-%m-%d %H:%M"),
+            d.outcome,
+            d.subject,
+            d.run_id
+                .as_ref()
+                .map(|r| format!("   (run {})", r.as_str()))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+/// Across every project in the person's file: why it will not load, or the
+/// grants broader than the agent's own settings — for `devplane doctor`.
+pub(crate) fn grants_widening() -> (Option<String>, Vec<String>) {
+    let Ok(home) = crate::config::home() else {
+        return (None, Vec::new());
+    };
+    let g = match crate::core::GlobalConfig::load(&home)
+        .map_err(|e| e.to_string())
+        .and_then(|g| g.grants())
+    {
+        Ok(g) => g,
+        Err(e) => return (Some(e), Vec::new()),
+    };
+    let now = jiff::Timestamp::now();
+    let user = dirs::home_dir();
+    let widening = g
+        .all()
+        .filter(|g| !g.is_lapsed(now))
+        .filter(|g| {
+            let agent = crate::policy_cache::agent_allow_rules(g.root(), user.as_deref());
+            crate::policy_cache::widens_the_agent(g.rule(), &agent)
+        })
+        .map(|g| g.name())
+        .collect();
+    (None, widening)
 }

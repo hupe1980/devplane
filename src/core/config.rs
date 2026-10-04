@@ -523,21 +523,46 @@ pub struct PolicySection {
 
 /// The machine-wide rules, from `~/.devplane/policy.toml`, in the same
 /// `[policy]` shape a project writes so rules can be pasted between them.
+/// Also the person's grants: `[grants]` says when one is offered, and
+/// `[projects."<root>"] allow` holds the rules they wrote for one project.
+/// Only this file may hold a grant; a repository's `devplane.toml` is refused
+/// if it tries.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GlobalConfig {
     pub policy: PolicySection,
+    pub grants: crate::core::grant::GrantSettings,
+    pub projects: BTreeMap<String, crate::core::grant::ProjectGrants>,
 }
 
 impl GlobalConfig {
-    /// Parses `policy.toml`'s text, naming any removed key.
+    /// Parses `policy.toml`'s text, naming any removed key, a machine-wide
+    /// `allow`, and the first grant that cannot be one.
     pub fn parse(text: &str) -> Result<Self, String> {
-        if let Ok(table) = text.parse::<toml::Table>()
-            && let Some(why) = removed_key(&table)
-        {
-            return Err(why);
+        if let Ok(table) = text.parse::<toml::Table>() {
+            if let Some(why) = removed_key(&table) {
+                return Err(why);
+            }
+            if table
+                .get("policy")
+                .and_then(|p| p.as_table())
+                .is_some_and(|p| p.contains_key("allow"))
+            {
+                return Err(
+                    "`[policy] allow` would grant for every project, and there is no global \
+                     switch: a grant is written per project, under `[projects.\"<root>\"] allow`"
+                        .into(),
+                );
+            }
         }
-        toml::from_str(text).map_err(|e| e.to_string())
+        let parsed: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        parsed.grants()?;
+        Ok(parsed)
+    }
+
+    /// The person's grants, or the first reason one cannot be.
+    pub fn grants(&self) -> Result<crate::core::grant::Grants, String> {
+        crate::core::grant::Grants::parse(&self.grants, &self.projects)
     }
 
     pub fn policy(&self) -> crate::core::Policy {
@@ -558,12 +583,16 @@ impl GlobalConfig {
 }
 
 impl ProjectConfig {
-    /// Parses a file's text, naming any removed key.
+    /// Parses a file's text, naming any removed key and any key that would
+    /// grant a permission.
     pub fn parse(text: &str) -> Result<Self, String> {
-        if let Ok(table) = text.parse::<toml::Table>()
-            && let Some(why) = removed_key(&table)
-        {
-            return Err(why);
+        if let Ok(table) = text.parse::<toml::Table>() {
+            if let Some(why) = removed_key(&table) {
+                return Err(why);
+            }
+            if let Some(why) = repository_grant_key(&table) {
+                return Err(why);
+            }
         }
         toml::from_str(text).map_err(|e| explain_unknown(&e))
     }
@@ -888,6 +917,38 @@ fn removed_key(t: &toml::Table) -> Option<String> {
 }
 
 /// The parse error, with the retired `include` key pointed at its replacement.
+/// A key in a repository's `devplane.toml` that would widen a permission or
+/// set how soon one is offered. A repository is text anybody can send, so
+/// nothing read from one may grant.
+fn repository_grant_key(t: &toml::Table) -> Option<String> {
+    let refuse = |what: &str| {
+        Some(format!(
+            "{what} in devplane.toml is refused: a repository cannot grant a permission or \
+             decide how soon one is offered. A grant lives in your own \
+             ~/.devplane/policy.toml, under `[projects.\"<root>\"] allow`"
+        ))
+    };
+    if t.get("policy")
+        .and_then(|p| p.as_table())
+        .is_some_and(|p| p.contains_key("allow"))
+    {
+        return refuse("`[policy] allow`");
+    }
+    for section in ["grants", "projects"] {
+        if t.contains_key(section) {
+            return refuse(&format!("`[{section}]`"));
+        }
+    }
+    for (name, v) in t {
+        for key in ["offer_after", "offer_again_after"] {
+            if name == key || v.as_table().is_some_and(|s| s.contains_key(key)) {
+                return refuse(&format!("`{key}`"));
+            }
+        }
+    }
+    None
+}
+
 fn explain_unknown(e: &toml::de::Error) -> String {
     let text = e.to_string();
     if text.contains("unknown field `include`") {
@@ -1622,5 +1683,55 @@ mod hold_tests {
             "the refusal does not say why"
         );
         assert_eq!(HOLD_CEILING_MS, Hold::CEILING.as_millis() as u64);
+    }
+
+    #[test]
+    fn a_repository_that_tries_to_grant_is_refused_by_name() {
+        for (text, names) in [
+            ("[policy]\nallow = [\"Bash(ls)\"]\n", "`[policy] allow`"),
+            ("[grants]\noffer_after = 2\n", "`[grants]`"),
+            (
+                "[projects.\"/r\"]\nallow = [\"Bash(ls)\"]\n",
+                "`[projects]`",
+            ),
+            ("[questions]\noffer_after = 2\n", "`offer_after`"),
+            ("offer_again_after = 3\n", "`offer_again_after`"),
+        ] {
+            let e = ProjectConfig::parse(text).unwrap_err();
+            assert!(e.contains(names), "{text}: {e}");
+            assert!(e.contains("a repository cannot grant"), "{e}");
+        }
+    }
+
+    #[test]
+    fn the_persons_file_refuses_a_global_switch_a_low_threshold_and_a_wildcard() {
+        for (text, says) in [
+            ("[policy]\nallow = [\"Bash(ls)\"]\n", "every project"),
+            ("[grants]\noffer_after = 1\n", "below 2"),
+            ("[grants]\noffer_again_after = 0\n", "below 2"),
+            ("[projects.\"/r\"]\noffer_after = 1\n", "below 2"),
+            ("[projects.\"/r\"]\nallow = [\"Bash(*)\"]\n", "wildcard"),
+            (
+                "[projects.\"/r\"]\nallow = [\"Bash(git push *)\"]\n",
+                "forge write",
+            ),
+            ("[projects.\"r\"]\nallow = [\"Bash(ls)\"]\n", "absolute"),
+            (
+                "[projects.\"/r\"]\nallow = [{ rule = \"Bash(ls)\", until = \"soon\" }]\n",
+                "not a date",
+            ),
+            ("[order]\ngrants = \"first\"\n", "unknown field"),
+        ] {
+            let e = GlobalConfig::parse(text).unwrap_err();
+            assert!(e.contains(says), "{text}: {e}");
+        }
+        let ok = GlobalConfig::parse(
+            "[policy]\ndeny = []\n[grants]\noffer_after = 3\n\
+             [projects.\"/r\"]\nallow = [\"Bash(cargo test)\", { rule = \"Edit(src/**)\", until = \"2026-12-01\" }]\n",
+        )
+        .unwrap();
+        let g = ok.grants().unwrap();
+        assert_eq!(g.all().count(), 2);
+        assert_eq!(g.thresholds(std::path::Path::new("/r")).0, 3);
     }
 }

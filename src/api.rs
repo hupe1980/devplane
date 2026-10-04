@@ -86,6 +86,8 @@ pub fn router(state: Shared) -> Router {
         .route("/api/projects", get(projects))
         .route("/api/specs", get(specs))
         .route("/api/projects/trust", post(trust_project))
+        .route("/api/grants", get(list_grants).post(add_grant))
+        .route("/api/grants/revoke", post(revoke_grant))
         .route("/api/projects/reload", post(reload_projects))
         .route("/api/projects/{id}/snooze", post(snooze_project))
         .route("/api/issues", post(list_issues))
@@ -275,6 +277,10 @@ fn path_of(state: &Shared, headers: &HeaderMap, ask_id: &str) -> crate::core::as
 const ASK_PROOF: &str = "x-devplane-ask-proof";
 /// The header carrying the window's proof for trusting a repository.
 const TRUST_PROOF: &str = "x-devplane-trust-proof";
+/// The header carrying the window's proof for writing a grant.
+const GRANT_PROOF: &str = "x-devplane-grant-proof";
+/// The header carrying the window's proof for revoking a grant.
+const REVOKE_PROOF: &str = "x-devplane-revoke-proof";
 
 /// Whether `header` holds the proof `make` computes from the window key.
 /// False when the host holds no key (the CLI host), whatever the request says.
@@ -2356,6 +2362,195 @@ async fn change_certificate(
 
 /// Marks a project as one an agent may be started in: an explicit act,
 /// because a headless agent runs the repository's own hooks and MCP servers.
+#[derive(Deserialize)]
+struct GrantBody {
+    /// The project's canonical root, as the offer named it.
+    root: String,
+    rule: String,
+}
+
+/// The person's grants, with what each decided and its reversals as counts.
+async fn list_grants(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    guard!(state, headers);
+    let (grants, error) = state.policy.grants();
+    let rows = crate::view::grant_rows(&state.store, &grants, jiff::Timestamp::now()).await;
+    let widening: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.widens && !r.lapsed)
+        .map(|r| r.rule.as_str())
+        .collect();
+    Json(json!({
+        "grants": rows,
+        "error": error,
+        "widening": widening,
+        "reversals_counted": crate::view::REVERSALS_COUNTED,
+    }))
+    .into_response()
+}
+
+/// The project a canonical root is, if the world knows it.
+async fn project_at(state: &Shared, root: &std::path::Path) -> Option<crate::core::ProjectId> {
+    let w = state.world.lock().await;
+    w.projects()
+        .find(|p| p.root.canonicalize().ok().as_deref() == Some(root) || p.root == root)
+        .map(|p| p.id.clone())
+}
+
+/// Writes a grant the window offered, on the person's confirm. The control
+/// token is not enough — an agent can read it — so the request must carry the
+/// window's proof for this root and this rule, and the ledger must offer this
+/// rule now: a grant is only ever written after the person's repeated answers.
+async fn add_grant(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<GrantBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    let line = format!(
+        "[projects.{}]\nallow = [{}]",
+        crate::core::grant::toml_string(&body.root),
+        crate::core::grant::toml_string(&body.rule)
+    );
+    if !window_proved(&state, &headers, GRANT_PROOF, |key| {
+        crate::config::grant_proof(key, &body.root, &body.rule)
+    }) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": format!(
+                    "adding a grant is a person's decision, and this request cannot show it came \
+                     from the Devplane window. Add it to {} yourself:\n\n{line}",
+                    crate::core::grant::FILE
+                )
+            })),
+        )
+            .into_response();
+    }
+    let root = std::path::PathBuf::from(&body.root);
+    let project = project_at(&state, &root).await;
+    let Some(offer) = crate::view::grant_offered_now(
+        &state.store,
+        &state.policy,
+        &root,
+        project.as_ref(),
+        &body.rule,
+    )
+    .await
+    else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "`{}` is not offered for {} now: a grant is written only after you answered \
+                     the same call the same way, from the window, as often as your {} says",
+                    body.rule,
+                    body.root,
+                    crate::core::grant::FILE
+                )
+            })),
+        )
+            .into_response();
+    };
+    let written = crate::grant_file::add(&state.home, &body.root, &body.rule);
+    state.policy.forget_grants();
+    if let Err(e) = written {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("{e:#}") })),
+        )
+            .into_response();
+    }
+    let name = crate::core::grant::name_of(&body.rule, &root);
+    let d = crate::core::Decision::new(
+        crate::core::Authority::Person,
+        "policy:grant",
+        name.clone(),
+        "granted",
+    )
+    .because(format!(
+        "added to {} from the window, after {} answers",
+        crate::core::grant::FILE,
+        offer.allowed
+    ))
+    .in_project(project);
+    state.record(d).await;
+    state.notify_changed();
+    Json(json!({ "granted": name, "file": crate::core::grant::FILE })).into_response()
+}
+
+/// Revokes a grant from the window, and lists every decision it made.
+async fn revoke_grant(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<GrantBody>,
+) -> impl IntoResponse {
+    guard!(state, headers);
+    if !window_proved(&state, &headers, REVOKE_PROOF, |key| {
+        crate::config::revoke_proof(key, &body.root, &body.rule)
+    }) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": format!(
+                    "revoking a grant is a person's decision, and this request cannot show it came \
+                     from the Devplane window. In a terminal of your own:\n\n  devplane config \
+                     revoke '{}' --dir {}",
+                    body.rule, body.root
+                )
+            })),
+        )
+            .into_response();
+    }
+    let removed = crate::grant_file::remove(&state.home, &body.root, &body.rule);
+    state.policy.forget_grants();
+    match removed {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!(
+                        "{} grants no `{}` for {}",
+                        crate::core::grant::FILE, body.rule, body.root
+                    )
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": format!("{e:#}") })),
+            )
+                .into_response();
+        }
+    }
+    let root = std::path::PathBuf::from(&body.root);
+    let name = crate::core::grant::name_of(&body.rule, &root);
+    let decided = state
+        .store
+        .decisions_by_grant(&name)
+        .await
+        .unwrap_or_default();
+    let project = project_at(&state, &root).await;
+    let d = crate::core::Decision::new(
+        crate::core::Authority::Person,
+        "policy:revoke",
+        name.clone(),
+        "revoked",
+    )
+    .because(format!(
+        "removed from {} from the window; it had decided {} {}",
+        crate::core::grant::FILE,
+        decided.len(),
+        if decided.len() == 1 { "call" } else { "calls" }
+    ))
+    .in_project(project);
+    state.record(d).await;
+    state.notify_changed();
+    Json(json!({ "revoked": name, "decided": decided })).into_response()
+}
+
 #[derive(Deserialize)]
 struct TrustBody {
     /// The repository root, in the body because a filesystem path is not one

@@ -192,6 +192,7 @@ fn hold(
             Path::new("/tmp/alpha"),
             "Bash",
             call,
+            &serde_json::json!({ "command": call }),
             wait,
             false,
         )
@@ -1063,6 +1064,79 @@ async fn dispatching_into_a_directory_that_does_not_exist_is_refused() {
         .await
         .unwrap();
     assert!(res["error"].as_str().unwrap_or("").contains("directory"));
+}
+
+/// The engine answers allow only through the person's own grant, written in
+/// their `policy.toml` for this project, and only to a `PermissionRequest` — a
+/// dialog that was about to ask them. `PreToolUse` never allows, an unrelated
+/// call is not allowed, and a prohibition in the repository beats the grant.
+#[tokio::test]
+async fn the_engine_answers_allow_only_through_a_persons_grant() {
+    let home = gate_home("grant");
+    let repo = common::scratch_repo("gate-grant", "");
+    let root = repo.canonicalize().unwrap();
+    let grant = format!(
+        "[projects.{:?}]\nallow = [\"Bash(cargo test)\"]\n",
+        root.display().to_string()
+    );
+    let call = |event: &str, cmd: &str| {
+        format!(
+            r#"{{"hook_event_name":"{event}","session_id":"granted","cwd":{cwd:?},
+                "tool_name":"Bash","tool_input":{{"command":"{cmd}"}}}}"#,
+            cwd = root.display().to_string()
+        )
+    };
+
+    let allowed = gate(&home, &grant, &call("PermissionRequest", "cargo test"));
+    assert_eq!(
+        allowed["hookSpecificOutput"]["decision"]["behavior"], "allow",
+        "{allowed}"
+    );
+    // Before every call, never: an allow there skips the vendor's own checks.
+    assert_eq!(
+        gate(&home, &grant, &call("PreToolUse", "cargo test")),
+        serde_json::json!({})
+    );
+    // A call the grant does not name is the person's.
+    assert_eq!(
+        gate(
+            &home,
+            &grant,
+            &call("PermissionRequest", "cargo test && rm -rf src")
+        ),
+        serde_json::json!({})
+    );
+    // No grant in the file: no allow, whatever the call.
+    assert_eq!(
+        gate(&home, "", &call("PermissionRequest", "cargo test")),
+        serde_json::json!({})
+    );
+    // The repository's prohibition beats the person's grant.
+    std::fs::write(
+        root.join("devplane.toml"),
+        "[policy]\ndeny = [\"Bash(cargo test *)\"]\n",
+    )
+    .unwrap();
+    let denied = gate(&home, &grant, &call("PermissionRequest", "cargo test"));
+    assert_eq!(denied["hookSpecificOutput"]["decision"]["behavior"], "deny");
+
+    // The allow was recorded under `rule`, naming the grant.
+    let store = devplane::store::Store::open(&home.join("devplane.db"))
+        .await
+        .unwrap();
+    let name = format!("`Bash(cargo test)` for {}", root.display());
+    let rows = store.decisions_by_grant(&name).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].authority, devplane::core::Authority::Rule);
+    assert_eq!(rows[0].outcome, "allow");
+    assert!(
+        rows[0]
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("your rule permitted"),
+        "{rows:?}"
+    );
 }
 
 /// `PreToolUse` answers a prohibition in every mode, including auto mode where

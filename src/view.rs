@@ -693,7 +693,101 @@ async fn fill_offers(
             Ok(offer) => items[n].offer = Some(offer),
             Err(why) => items[n].no_offer = Some(why.into()),
         }
+        let project = items[n].project_id.clone();
+        items[n].grant = grant_note(store, policy, &cwd, &tool, &input, project.as_ref()).await;
     }
+}
+
+/// What a permission item says about a grant: the person's own rule offered
+/// after their repeated, identical, proved answers; why none is; or a grant
+/// of theirs that lapsed. Counted from the `asks` rows alone.
+async fn grant_note(
+    store: &crate::store::Store,
+    policy: &crate::policy_cache::PolicyCache,
+    cwd: &std::path::Path,
+    tool: &str,
+    input: &Value,
+    project: Option<&crate::core::ProjectId>,
+) -> crate::core::attention::GrantNote {
+    use crate::core::attention::GrantNote;
+    use crate::core::grant;
+    let now = jiff::Timestamp::now();
+    if let Some(g) = policy.lapsed_for(cwd, tool, input, now) {
+        return GrantNote {
+            grant_lapsed: Some(format!(
+                "Your grant `{}` for this project lapsed at {} — so this is asked again. \
+                 Change or remove its `until` in {} to answer it again.",
+                g.rule(),
+                g.until().map(|t| t.to_string()).unwrap_or_default(),
+                grant::FILE
+            )),
+            ..GrantNote::default()
+        };
+    }
+    let (Some(root), Some(content)) = (
+        crate::repo::governing_root(cwd).and_then(|r| r.canonicalize().ok()),
+        crate::core::policy::rule_content(tool, input),
+    ) else {
+        return GrantNote::default();
+    };
+    let history: Vec<grant::Answered> = store
+        .answered_permissions(2000)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|a| a.project.as_ref() == project)
+        .filter_map(grant::Answered::from_ask)
+        .collect();
+    let (grants, error) = policy.grants();
+    if error.is_some() {
+        // A file that will not load is the person's to fix; nothing is offered
+        // on top of it.
+        return GrantNote::default();
+    }
+    let shared = crate::core::ProjectConfig::load(&root)
+        .map(|c| c.workspace.share)
+        .unwrap_or_default();
+    let agent = crate::policy_cache::agent_allow_rules(&root, dirs::home_dir().as_deref());
+    let allows = |rule: &str| !crate::policy_cache::widens_the_agent(rule, &agent);
+    let cx = grant::OfferContext {
+        root: &root,
+        thresholds: grants.thresholds(&root),
+        shared: &shared,
+        has_table: grants.has_project(&root),
+        granted: grants.in_project(&root).iter().map(|g| g.rule()).collect(),
+        agent_allows: &allows,
+    };
+    match grant::offer(tool, &content, &history, &cx) {
+        Ok(o) => GrantNote {
+            grant_offer: Some(o),
+            ..GrantNote::default()
+        },
+        Err(no) => GrantNote {
+            grant_no: no.says(),
+            ..GrantNote::default()
+        },
+    }
+}
+
+/// The offer for `rule` in the project at `root`, re-derived from the ledger
+/// now: what accepting a grant requires.
+pub async fn grant_offered_now(
+    store: &crate::store::Store,
+    policy: &crate::policy_cache::PolicyCache,
+    root: &std::path::Path,
+    project: Option<&crate::core::ProjectId>,
+    rule: &str,
+) -> Option<crate::core::grant::GrantOffer> {
+    let parsed = crate::core::Rule::parse(rule, crate::core::policy::Class::Allow)?;
+    let tool = parsed.tool_name().to_string();
+    let content = rule
+        .strip_prefix(&format!("{tool}("))
+        .and_then(|r| r.strip_suffix(')'))?
+        .to_string();
+    let field = crate::core::policy::rule_content_field(&tool)?;
+    let input = serde_json::json!({ field: content });
+    let note = grant_note(store, policy, root, &tool, &input, project).await;
+    note.grant_offer.filter(|o| o.rule == rule)
 }
 
 /// One waiting row, with the name of the project it came from.
@@ -3483,6 +3577,88 @@ pub async fn decision_sources(store: &crate::store::Store) -> anyhow::Result<Dec
         unrecognised,
         says,
     })
+}
+
+// ── Grants ──────────────────────────────────────────────────────────────────
+
+/// One reversal of a grant's decision, with its cause.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantReversal {
+    pub decision: String,
+    pub cause: String,
+}
+
+/// One grant in the person's file, with what it decided — counts about the
+/// grant, never about the person.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantRow {
+    pub name: String,
+    pub rule: String,
+    pub root: String,
+    pub until: Option<String>,
+    pub lapsed: bool,
+    /// Calls it allowed.
+    pub decided: u32,
+    /// Of those, how many an observable event later reversed; absent where
+    /// none of its calls was on a change, so nothing could be observed.
+    pub reversed: Option<u32>,
+    pub reversals: Vec<GrantReversal>,
+    pub widens: bool,
+}
+
+/// The causes a reversal is counted from, said wherever the count is.
+pub const REVERSALS_COUNTED: &str = "Reversals are counted when a gate failed on a change after \
+    the grant decided on it. A commit you reverted is not counted: nothing in the record shows it.";
+
+/// Every grant in the person's file, with its decisions and reversals.
+pub async fn grant_rows(
+    store: &crate::store::Store,
+    grants: &crate::core::grant::Grants,
+    now: jiff::Timestamp,
+) -> Vec<GrantRow> {
+    let mut out = Vec::new();
+    for g in grants.all() {
+        let decided = store
+            .decisions_by_grant(&g.name())
+            .await
+            .unwrap_or_default();
+        let mut on_change = false;
+        let mut reversals = Vec::new();
+        for d in &decided {
+            let Some(change) = &d.change_id else {
+                continue;
+            };
+            on_change = true;
+            let failed = store
+                .gate_failures(change.as_str())
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .any(|f| f.at > d.at);
+            if failed {
+                reversals.push(GrantReversal {
+                    decision: d.id.clone(),
+                    cause: format!(
+                        "a gate failed on change {} after it decided",
+                        change.as_str()
+                    ),
+                });
+            }
+        }
+        let agent = crate::policy_cache::agent_allow_rules(g.root(), dirs::home_dir().as_deref());
+        out.push(GrantRow {
+            name: g.name(),
+            rule: g.rule().to_string(),
+            root: g.root().display().to_string(),
+            until: g.until().map(|t| t.to_string()),
+            lapsed: g.is_lapsed(now),
+            decided: decided.len() as u32,
+            reversed: on_change.then_some(reversals.len() as u32),
+            reversals,
+            widens: crate::policy_cache::widens_the_agent(g.rule(), &agent),
+        });
+    }
+    out
 }
 
 #[cfg(test)]

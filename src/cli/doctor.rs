@@ -113,6 +113,24 @@ fn gate_section(diag: Option<&crate::view::Diagnostics>) {
             "prohibitions are Devplane's own and need no agreement from the agent"
         )
     );
+    // The person's grants: said out loud wherever they widen the agent.
+    match super::conf::grants_widening() {
+        (Some(e), _) => println!(
+            "  {}",
+            paint(
+                render::RED,
+                &format!(
+                    "{} will not load, so every call is asked: {e}",
+                    crate::core::grant::FILE
+                )
+            )
+        ),
+        (None, w) if !w.is_empty() => println!(
+            "  {}",
+            paint(render::YELLOW, &super::conf::widening_line(&w))
+        ),
+        _ => {}
+    }
 
     match diag.map(|d| d.gate.sessions_reporting_a_version) {
         None => println!("  {}", paint(DIM, "no host, so no session was asked")),
@@ -204,6 +222,10 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
     let here = std::env::current_dir().unwrap_or_default();
     let junit = junit_not_ignored(&here).await;
     if json {
+        let grants_json = {
+            let (error, widening) = super::conf::grants_widening();
+            serde_json::json!({ "error": error, "widening": widening })
+        };
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -216,6 +238,7 @@ pub async fn cmd_doctor(json: bool) -> Result<()> {
                 "measurement": {
                     "syntax_modelled_on": crate::core::policy::SYNTAX_MODELLED_ON,
                 },
+                "grants": grants_json,
                 "watched": {
                     "oldest_check": crate::core::vendors::CHECKED,
                     "rows": crate::core::vendors::watched().iter().map(|r| serde_json::json!({

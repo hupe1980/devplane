@@ -2529,7 +2529,9 @@ async fn handle(
             // The same rules and vocabulary as a hook. A call that cannot be
             // classified is left to a person.
             let verdict = match call.policy_subject() {
-                Some((tool, input)) => state.policy.restrictive(cwd, tool, &input),
+                // A person was about to be asked, so the person's own grants
+                // answer too — after every prohibition, question and doubt.
+                Some((tool, input)) => state.policy.decide(cwd, tool, &input),
                 // A command the agent sent nothing readable for, where a rule
                 // governs commands: nobody could look, so a person decides —
                 // and the title is never matched in its place.
@@ -2577,6 +2579,48 @@ async fn handle(
                     })
                     .await;
                     return;
+                }
+                // The person's own grant answers with the agent's own
+                // allow-once option, never one the agent would remember; an
+                // agent offering none is asked the person, as before.
+                Verdict::Allow { grant } => {
+                    if let Some(once) = options.iter().find(|o| o.kind == "allow_once") {
+                        let _ = session.decide(&request_id, Some(once.id.clone())).await;
+                        let root = grant.root().to_path_buf();
+                        let widens = crate::policy_cache::widens_the_agent(
+                            grant.rule(),
+                            &crate::policy_cache::agent_allow_rules(
+                                &root,
+                                dirs::home_dir().as_deref(),
+                            ),
+                        );
+                        let mut row = crate::core::Decision::new(
+                            crate::core::Authority::Rule,
+                            "agent:tool.use",
+                            title.clone(),
+                            "allow",
+                        )
+                        .because(crate::core::grant::reason(&grant, widens))
+                        .by_grant(&grant)
+                        .for_run(run)
+                        .for_call(Some(&call.id));
+                        // The change too, so a gate that fails on it later is
+                        // counted against the grant.
+                        if let Some(change) = state.change_of_run.lock().await.get(run).cloned() {
+                            row = row.for_change(&change);
+                        }
+                        state.record(row).await;
+                        ingest(Event::PermissionDecided {
+                            tool: title,
+                            decision: "allow".into(),
+                            by: format!("grant:{}", grant.name()),
+                            reason: None,
+                            context: None,
+                            call_id: None,
+                        })
+                        .await;
+                        return;
+                    }
                 }
                 // Ask, Unresolved and Undecided all go to a person: a driven
                 // permission request already is one.

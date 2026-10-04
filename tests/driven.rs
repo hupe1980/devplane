@@ -1020,6 +1020,110 @@ async fn a_permission_naming_only_the_id_is_matched_on_the_earlier_input() {
     assert!(d.iter().all(|(t, _, _)| !t.is_empty()));
 }
 
+/// Writes the person's own grant for `repo` into the host's home.
+fn grant_in_home(state: &Shared, repo: &Path, rule: &str) -> PathBuf {
+    let root = repo.canonicalize().unwrap();
+    std::fs::create_dir_all(&state.home).unwrap();
+    std::fs::write(
+        state.home.join("policy.toml"),
+        format!(
+            "[projects.{:?}]\nallow = [{:?}]\n",
+            root.display().to_string(),
+            rule
+        ),
+    )
+    .unwrap();
+    root
+}
+
+/// The person's own grant answers a driven permission with the agent's own
+/// allow-once option, and the record names the grant under `rule`.
+#[tokio::test]
+async fn a_grant_answers_a_driven_permission_and_names_itself() {
+    let Some(agent) = echo_with("DEVPLANE_ECHO_SPARSE=1") else {
+        return;
+    };
+    let (addr, c, state) = boot().await;
+    let repo = common::scratch_repo("grant-allow", "");
+    trust(&c, &addr, &repo).await;
+    let root = grant_in_home(&state, &repo, "Bash(rm -rf build)");
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo,
+        Some("run a tool please".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let events = await_logged(&state, &run, "a decision", |e| {
+        matches!(e, devplane::core::event::Event::PermissionDecided { .. })
+    })
+    .await;
+    let d = decided(&events);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0].1, "allow");
+    let name = format!("`Bash(rm -rf build)` for {}", root.display());
+    assert_eq!(d[0].2, format!("grant:{name}"));
+    let rows = state.store.decisions_by_grant(&name).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].authority, devplane::core::Authority::Rule);
+    assert_eq!(rows[0].outcome, "allow");
+    let reason = rows[0].reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("your rule permitted what the agent asked about"),
+        "{reason}"
+    );
+    assert!(!reason.contains("would have allowed"), "{reason}");
+    assert!(
+        state
+            .store
+            .open_asks()
+            .await
+            .unwrap()
+            .iter()
+            .all(|a| a.run != run),
+        "a call the grant answered still asked the person"
+    );
+}
+
+/// A prohibition in the repository beats the person's grant.
+#[tokio::test]
+async fn a_project_deny_beats_a_grant() {
+    let Some(agent) = echo_with("DEVPLANE_ECHO_SPARSE=1") else {
+        return;
+    };
+    let (addr, c, state) = boot().await;
+    let repo = common::scratch_repo("grant-deny", DENY_RM);
+    trust(&c, &addr, &repo).await;
+    let root = grant_in_home(&state, &repo, "Bash(rm -rf build)");
+    let run = devplane::driven::dispatch(
+        &state,
+        &agent,
+        repo,
+        Some("run a tool please".into()),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let events = await_logged(&state, &run, "a decision", |e| {
+        matches!(e, devplane::core::event::Event::PermissionDecided { .. })
+    })
+    .await;
+    let d = decided(&events);
+    assert_eq!(d[0].1, "deny", "{d:?}");
+    assert_eq!(d[0].2, "policy:Bash(rm -rf *)");
+    let name = format!("`Bash(rm -rf build)` for {}", root.display());
+    assert!(
+        state
+            .store
+            .decisions_by_grant(&name)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// The call's ledger row opens with the input that arrived after its first
 /// report.
 #[tokio::test]

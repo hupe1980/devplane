@@ -1,13 +1,14 @@
 +++
 title = "Permissions"
-description = "Devplane never approves a tool call. It refuses one (deny) or puts one in front of you (ask), in Claude Code's rule syntax, per repository — and fails closed when the rules will not load."
+description = "Devplane approves nothing on its own. It refuses a tool call (deny) or puts one in front of you (ask), in Claude Code's rule syntax, per repository, and allows only what you wrote in your own grant — failing closed when the rules will not load."
 weight = 22
 [extra]
 group = "reference"
 +++
 
-**Devplane never approves a tool call.** It *refuses* (`deny`) or *defers to a person* (`ask`);
-grants stay in your agent's own `permissions.allow`.
+**Devplane approves nothing on its own.** It *refuses* (`deny`) or *defers to a person* (`ask`), and
+allows only what you wrote yourself: a [grant](#grants-your-own-rule-per-project) in your own
+`~/.devplane/policy.toml`, never in a repository.
 
 ```toml
 # devplane.toml
@@ -186,7 +187,8 @@ deny  Bash
 1. `deny`, across **both** files
 2. `ask`
 3. *unresolved*: the line hides what it runs, so a person is asked
-4. *undecided*: no answer; your agent asks as usual
+4. your own [grant](#grants-your-own-rule-per-project), where a person was about to be asked
+5. *undecided*: no answer; your agent asks as usual
 
 Specificity does not change the order; neither file cancels the other's prohibitions. The governing
 `devplane.toml` is at the root of the checkout the command runs in; a worktree inherits the rules and
@@ -285,7 +287,8 @@ installs two synchronous hooks:
 | `PreToolUse` | before every tool call, in every mode | a prohibition, or nothing |
 | `PermissionRequest` | when a person was going to be asked | the same, plus the request to show you |
 
-Neither answers *allow*. `devplane status --modes` shows which sessions run without prompts;
+`PreToolUse` never answers *allow* — an allow there would skip Claude Code's own checks — and
+`PermissionRequest` does only with your own grant. `devplane status --modes` shows which sessions run without prompts;
 `devplane doctor` probes the gate and prints the round trip.
 
 ## Answering a watched session's permission
@@ -344,6 +347,52 @@ Neither a request's `Origin` header nor anything in its body changes the path. W
 prove, and does not claim: a program driving your desktop (scripting, accessibility) can press a
 notification or a window button as you, and a process running as you can read the window's key out of
 the app's memory.
+
+## Grants: your own rule, per project
+
+A grant is an allow you wrote, for one project, in your own file — your answer given in advance:
+
+```toml
+# ~/.devplane/policy.toml
+[grants]                  # when one is offered (each at least 2)
+offer_after = 5
+offer_again_after = 5
+
+[projects."/home/you/code/saas"]
+allow = [
+  "Bash(cargo test)",
+  { rule = "Bash(cargo clippy --all-targets)", until = "2026-12-01" },
+]
+```
+
+- **Offered, not asked for.** After you answer the same call the same way from the window or a
+  notification `offer_after` times — never a refusal among them — its permission item offers the
+  exact rule, the answers it comes from, and the lines it adds to the file. Nothing is written until
+  you confirm. Answers from the command line do not count: any holder of the token can send one.
+- **Only after every prohibition.** Deny, ask and an unreadable line all win; the order has no
+  setting. A grant answers a driven run's request with the agent's own *allow once*, and a Claude
+  Code `PermissionRequest`; never `PreToolUse`, Codex or Copilot.
+- **Narrower than an allow list.** It allows a line only when every command on it is granted, no
+  argument is rewritten by the shell, nothing is redirected to a file and no wrapper (`sudo`, `env`)
+  stands in front. A call whose input never arrived is never granted. A path grant reaches only
+  files inside the project.
+- **Refused by name**, by `devplane config check` and every load: a machine-wide `[policy] allow`
+  (there is no global switch), a wildcard where the command goes (`Bash(*)`), a program that runs any
+  code (`Bash(python *)`), a forge write (`git push`, `gh`), any tool but `Bash`, `Read` and `Edit`, a
+  path outside the project, and a threshold below 2. In a repository's `devplane.toml`, any
+  `[policy] allow`, `[grants]`, `[projects]` or threshold is refused: a repository cannot grant.
+- **What it may write** is what the project declares — the change's worktree and the caches
+  `[workspace] share` sets up. Devplane does not know what the command itself touches, and the offer
+  says so.
+- **Recorded and named.** Every call a grant allows is a `rule` decision naming the grant. Where the
+  agent's own settings would have asked, the record, the offer, `devplane config check` and
+  `devplane doctor` say the grant is *widening the agent*, by count and by rule.
+- **Revoking lists what it did.** `devplane config grants` shows each grant, the calls it decided
+  and, where a gate later failed on a change it decided on, how many were reversed — absent where
+  nothing could be observed. `devplane config revoke 'Bash(cargo test)'` removes it and lists every
+  decision it made. A grant whose `until` passed answers nothing, and the item says it lapsed.
+- The built-in rule above keeps agents from reading or editing `policy.toml`. That narrows the hole
+  and does not close it: a process running as you can still write the file.
 
 ## Tuning the rules
 

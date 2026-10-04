@@ -94,18 +94,50 @@ pub async fn decided(store: &Store, env: DecidedEnvelope) -> Result<()> {
         store.append_decision(&d).await?;
     }
     if let Some(rule) = env.rule.as_deref() {
+        // An allow is the person's own grant: the row names it, and says
+        // whether it widened the agent, never what the vendor would have done.
+        let because = match (env.verdict.as_str(), env.grant.as_deref()) {
+            ("allow", Some(name)) => {
+                let widens = cwd
+                    .as_deref()
+                    .and_then(crate::repo::governing_root)
+                    .map(|root| {
+                        crate::policy_cache::widens_the_agent(
+                            rule,
+                            &crate::policy_cache::agent_allow_rules(
+                                &root,
+                                dirs::home_dir().as_deref(),
+                            ),
+                        )
+                    })
+                    .unwrap_or(true);
+                let mut s = format!(
+                    "allowed by your grant {name} in {} — your rule permitted what the agent \
+                     asked about",
+                    crate::core::grant::FILE
+                );
+                if widens {
+                    s.push_str(", widening the agent: its own settings would have asked");
+                }
+                s
+            }
+            _ => rule.to_string(),
+        };
         let mut d = crate::core::Decision::new(
             crate::core::Authority::Rule,
             "agent:tool.use",
             subject,
             &env.verdict,
         )
-        .because(format!("{rule}{late}"))
+        .because(format!("{because}{late}"))
         .by_tool(env.tool.clone())
         .from_server(env.server_source.clone())
         .for_run(&run)
         .for_call(call.as_deref())
         .in_project(project.clone());
+        if env.verdict == "allow" {
+            d.grant = env.grant.clone();
+        }
         if let Some(at) = env.at {
             d = d.at(at);
         }
@@ -129,11 +161,14 @@ pub async fn decided(store: &Store, env: DecidedEnvelope) -> Result<()> {
         "allow" | "deny" => events.push(Event::PermissionDecided {
             tool: env.tool.clone(),
             decision: env.verdict.clone(),
-            by: env
-                .rule
-                .as_deref()
-                .map(|r| format!("policy:{r}"))
-                .unwrap_or_else(|| "policy".into()),
+            by: match (&env.grant, env.verdict.as_str()) {
+                (Some(g), "allow") => format!("grant:{g}"),
+                _ => env
+                    .rule
+                    .as_deref()
+                    .map(|r| format!("policy:{r}"))
+                    .unwrap_or_else(|| "policy".into()),
+            },
             reason: env.why.clone(),
             context: context.clone(),
             call_id: None,
@@ -260,12 +295,16 @@ pub async fn end_orphaned_holds(store: &Store) {
 /// Writes the ask, notifies when no host is up to, and polls until an answer
 /// lands or the hold runs out. Returns `None` for everything but an answer: a
 /// lapse ends the row as `nobody` and the vendor's own dialog takes over.
+// The call is passed twice on purpose: as the words the inbox shows and as
+// the input a later grant offer counts by.
+#[allow(clippy::too_many_arguments)]
 pub async fn hold(
     store: &Store,
     session: &str,
     cwd: &Path,
     tool: &str,
     call: &str,
+    input: &serde_json::Value,
     wait: std::time::Duration,
     notify: bool,
 ) -> Option<String> {
@@ -284,6 +323,9 @@ pub async fn hold(
         payload: serde_json::json!({
             "tool": tool,
             "call": call,
+            // The call itself, so a person's repeated answer to it can be
+            // counted toward offering them a grant.
+            "input": input,
             "held_until": held_until.to_string(),
             "options": [
                 {"id": "allow", "label": "Allow"},

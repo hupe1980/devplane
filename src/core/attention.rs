@@ -612,6 +612,20 @@ impl SnoozedRow {
     }
 }
 
+/// What a permission item says about a grant: at most one of the three.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantNote {
+    /// The exact rule to write to the person's file, with what it derives from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_offer: Option<crate::core::grant::GrantOffer>,
+    /// Why no grant is offered, where that is worth saying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_no: Option<String>,
+    /// A grant of the person's that would have answered this, and lapsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_lapsed: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttentionItem {
     pub id: AttentionId,
@@ -667,6 +681,10 @@ pub struct AttentionItem {
     /// Why there is no offer, on a permission item without one.
     #[serde(default)]
     pub no_offer: Option<crate::core::offer::NoOfferView>,
+    /// On a permission item: the person's own grant offered, why none is,
+    /// or a grant of theirs that lapsed — filled by the host from the ledger.
+    #[serde(flatten, default)]
+    pub grant: GrantNote,
     /// On a dialog the vendor owns: the command that resumes its session in a
     /// terminal, for a person to run. Devplane runs nothing with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -731,6 +749,7 @@ impl AttentionItem {
             change_id: None,
             offer: None,
             no_offer: None,
+            grant: Default::default(),
             resume_command: None,
             session_link: None,
             marker: None,

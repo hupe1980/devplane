@@ -6,6 +6,19 @@ Notable changes per release, in the style of [Keep a Changelog](https://keepacha
 
 ### Added
 
+- Grants: your own allow rule, per project, in your own `~/.devplane/policy.toml` — never in a
+  repository. After you answer the same permission the same way several times from the window or a
+  notification, its inbox item offers the exact rule as the lines it adds to the file, with the
+  answers it comes from and what the project declares it may write, and writes it only when you
+  confirm. A grant answers a driven run's request and a Claude Code `PermissionRequest` only after
+  every deny, ask and unreadable line, never `PreToolUse`; it allows a line only when every command
+  on it is granted and nothing on it is rewritten or redirected. Every allow is a `rule` decision
+  naming the grant, and one broader than the agent's own settings is said to widen the agent.
+  `devplane config grants` lists them with what they decided; `devplane config revoke` removes one
+  and lists every decision it made. A machine-wide `[policy] allow`, a wildcard command, a forge
+  write, a threshold below 2, and any grant key in `devplane.toml` are refused by name. The store's
+  schema version is 18.
+
 - Answer from the notification. With the app running, a permission carries **Allow** and **Deny**,
   and a question with one field carries every option as a numbered action — or none, never some of
   them — plus a typed reply on macOS and Windows; anything else is one click from the answer window,

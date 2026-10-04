@@ -245,6 +245,18 @@ pub fn trust_proof(window_key: &str, path: &str) -> String {
     hmac_sha256(window_key, &format!("trust {path}"))
 }
 
+/// What the window sends to write a grant: HMAC-SHA256 keyed by the window
+/// key over `grant <root> <rule>`, so it is worth nothing for another rule or
+/// another project.
+pub fn grant_proof(window_key: &str, root: &str, rule: &str) -> String {
+    hmac_sha256(window_key, &format!("grant {root} {rule}"))
+}
+
+/// What the window sends to revoke a grant: over `revoke <root> <rule>`.
+pub fn revoke_proof(window_key: &str, root: &str, rule: &str) -> String {
+    hmac_sha256(window_key, &format!("revoke {root} {rule}"))
+}
+
 fn hmac_sha256(token: &str, message: &str) -> String {
     use sha2::{Digest, Sha256};
     const BLOCK: usize = 64;

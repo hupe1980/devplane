@@ -228,7 +228,17 @@ async fn decide_claude(body: Option<&str>, source: crate::core::event::Source) -
     let tool = payload.tool_name.clone().unwrap_or_default();
     let input = payload.tool_input.clone().unwrap_or(Value::Null);
     let pre = payload.hook_event_name == "PreToolUse";
-    let verdict = judge(&cache, payload.cwd.as_deref(), &tool, &input);
+    let mut verdict = judge(&cache, payload.cwd.as_deref(), &tool, &input);
+    // A `PermissionRequest` means a person was about to be asked, so the
+    // person's own grant may answer — only there, only after every
+    // prohibition, question and doubt, and never for Codex.
+    if !pre
+        && verdict == Verdict::Undecided
+        && source == crate::core::event::Source::Hook
+        && let Some(dir) = payload.cwd.as_deref()
+    {
+        verdict = cache.decide(dir, &tool, &input);
+    }
 
     // `PreToolUse` fires on every call and carries only a prohibition or a
     // question; `PermissionRequest` means a person was about to be asked, so
@@ -342,6 +352,7 @@ async fn hold_for_a_person(
         dir,
         tool,
         &crate::observe::hook::describe_call(tool, input),
+        input,
         hold,
         !host_up,
     )
@@ -393,7 +404,8 @@ async fn decide_copilot(body: Option<&str>) -> Result<()> {
         Verdict::Ask { rule } => GateReply::ask(format!("{rule} asks that a person decides this")),
         // Never folded into `undecided`: unreadable means a person decides.
         Verdict::Unresolved { why } => GateReply::ask(format!("{why}; a person decides this")),
-        Verdict::Undecided => GateReply::undecided(),
+        // Copilot's hook fires on every call: a grant never answers there.
+        Verdict::Undecided | Verdict::Allow { .. } => GateReply::undecided(),
     };
     answer(&reply.to_json().to_string());
     report(
@@ -429,6 +441,7 @@ async fn report(
         source,
         verdict: verdict.as_str().to_string(),
         rule: verdict.rule().map(str::to_string),
+        grant: verdict.grant().map(|g| g.name()),
         server_source: None,
         why: verdict.why().map(str::to_string),
         subject,

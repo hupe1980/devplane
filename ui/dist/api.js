@@ -5789,6 +5789,14 @@ async function windowProof(path, opts) {
 	if (!key || !writes(opts) || !crypto?.subtle) return {};
 	const asked = /^\/api\/asks\/([^/?#]+)\/(?:answer|undo)$/.exec(path);
 	if (asked) return { "X-Devplane-Ask-Proof": await hmac(key, `ask ${decodeURIComponent(asked[1])}`) };
+	const grant = /^\/api\/grants(\/revoke)?$/.exec(path);
+	if (grant && typeof opts.body === "string") {
+		const { root, rule } = JSON.parse(opts.body);
+		if (typeof root === "string" && typeof rule === "string") {
+			const [header, word] = grant[1] ? ["X-Devplane-Revoke-Proof", "revoke"] : ["X-Devplane-Grant-Proof", "grant"];
+			return { [header]: await hmac(key, `${word} ${root} ${rule}`) };
+		}
+	}
 	if (path === "/api/projects/trust" && typeof opts.body === "string") {
 		const repo = JSON.parse(opts.body).path;
 		if (typeof repo === "string") return { "X-Devplane-Trust-Proof": await hmac(key, `trust ${repo}`) };

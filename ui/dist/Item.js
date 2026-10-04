@@ -1,4 +1,4 @@
-import { $ as user_effect, B as append, C as remove_input_defaults, F as index, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, S as bind_value, V as comment, at as proxy, ct as user_derived, dt as pop, ft as push, g as prop, h as spell, ht as reset, i as api, it as sibling, k as set_class, mt as next, nt as first_child, ot as set, rt as only_child, st as state, tt as child, w as set_attribute, y as bind_this, z as set_text } from "./api.js";
+import { $ as user_effect, B as append, C as remove_input_defaults, F as index, G as delegate, H as from_html, J as get, K as delegated, L as if_block, P as each, Q as template_effect, S as bind_value, V as comment, W as text, at as proxy, ct as user_derived, dt as pop, ft as push, g as prop, h as spell, ht as reset, i as api, it as sibling, k as set_class, mt as next, nt as first_child, ot as set, rt as only_child, st as state, t as Refused, tt as child, w as set_attribute, y as bind_this, z as set_text } from "./api.js";
 import { n as failure } from "./resource.svelte.js";
 import { C as State, T as answerItemKeys, a as Inline, c as clip } from "./app.js";
 import { o as unreadSays } from "./unread.svelte.js";
@@ -6,11 +6,11 @@ import { t as Qualifier } from "./Qualifier.js";
 import { t as safeHref } from "./href.js";
 import { d as untilActivity, i as copyCommand } from "./actions.js";
 //#region src/surfaces/inbox/Marker.svelte
-var root = from_html(`<button>show the edit</button>`);
-var root_1$1 = from_html(`<button>send to the agent</button>`);
-var root_2$1 = from_html(`<div class="reply svelte-oipc1d"><input type="text" class="svelte-oipc1d"/> <!></div>`);
-var root_3$1 = from_html(`<pre class="diff svelte-oipc1d"> </pre> <div class="reply svelte-oipc1d"><button class="primary svelte-oipc1d">write it</button> <button>not now</button></div>`, 1);
-var root_4$1 = from_html(`<div class="marker svelte-oipc1d"><code class="at svelte-oipc1d"> </code> <!> <!></div>`);
+var root$1 = from_html(`<button>show the edit</button>`);
+var root_1$2 = from_html(`<button>send to the agent</button>`);
+var root_2$2 = from_html(`<div class="reply svelte-oipc1d"><input type="text" class="svelte-oipc1d"/> <!></div>`);
+var root_3$2 = from_html(`<pre class="diff svelte-oipc1d"> </pre> <div class="reply svelte-oipc1d"><button class="primary svelte-oipc1d">write it</button> <button>not now</button></div>`, 1);
+var root_4$2 = from_html(`<div class="marker svelte-oipc1d"><code class="at svelte-oipc1d"> </code> <!> <!></div>`);
 function Marker($$anchor, $$props) {
 	push($$props, true);
 	const m = user_derived(() => $$props.item.marker ?? null);
@@ -62,24 +62,24 @@ function Marker($$anchor, $$props) {
 	var fragment = comment();
 	var node = first_child(fragment);
 	var consequent_3 = ($$anchor) => {
-		var div = root_4$1();
+		var div = root_4$2();
 		var code = child(div);
 		var text = only_child(code);
 		var node_1 = sibling(code, 2);
 		var consequent_1 = ($$anchor) => {
-			var div_1 = root_2$1();
+			var div_1 = root_2$2();
 			var input = child(div_1);
 			remove_input_defaults(input);
 			var node_2 = sibling(input, 2);
 			var consequent = ($$anchor) => {
-				var button = root();
+				var button = root$1();
 				template_effect(() => button.disabled = get(busy));
 				delegated("click", button, () => clarify(false));
 				append($$anchor, button);
 			};
 			var d = user_derived(() => has("answer"));
 			var alternate = ($$anchor) => {
-				var button_1 = root_1$1();
+				var button_1 = root_1$2();
 				template_effect(() => button_1.disabled = get(busy));
 				delegated("click", button_1, tell);
 				append($$anchor, button_1);
@@ -103,7 +103,7 @@ function Marker($$anchor, $$props) {
 		});
 		var node_3 = sibling(node_1, 2);
 		var consequent_2 = ($$anchor) => {
-			var fragment_1 = root_3$1();
+			var fragment_1 = root_3$2();
 			var pre = first_child(fragment_1);
 			var text_1 = only_child(pre, true);
 			var div_2 = sibling(pre, 2);
@@ -128,6 +128,165 @@ function Marker($$anchor, $$props) {
 	};
 	if_block(node, ($$render) => {
 		if (get(m)) $$render(consequent_3);
+	});
+	append($$anchor, fragment);
+	pop();
+}
+delegate(["click"]);
+//#endregion
+//#region src/surfaces/inbox/GrantOffer.svelte
+var root = from_html(`<p class="elsewhere svelte-ybm2pj"> </p>`);
+var root_1$1 = from_html(`<p class="dim svelte-ybm2pj"> </p>`);
+var root_2$1 = from_html(`<button>Always allow in this project…</button>`);
+var root_3$1 = from_html(`<span> </span>`);
+var root_4$1 = from_html(`<p class="dim svelte-ybm2pj"> <!></p> <pre class="diff svelte-ybm2pj"></pre> <p class="confirm svelte-ybm2pj"><button class="primary svelte-ybm2pj"> </button> <button>Cancel</button></p>`, 1);
+var root_5$1 = from_html(`<p class="svelte-ybm2pj">You allowed <code class="svelte-ybm2pj"> </code> <!></p> <!>`, 1);
+var root_6$1 = from_html(`<section class="grant svelte-ybm2pj" aria-label="always allow this in this project"><!></section>`);
+var root_7$1 = from_html(`<!> <!>`, 1);
+function GrantOffer($$anchor, $$props) {
+	push($$props, true);
+	let no = prop($$props, "no", 3, null), lapsed = prop($$props, "lapsed", 3, null);
+	let step = state("shown");
+	const fromWhere = user_derived(() => {
+		if (!$$props.offer) return "";
+		const window = $$props.offer.derived_from.filter((a) => a.from === "window").length;
+		const notification = $$props.offer.derived_from.length - window;
+		const parts = [];
+		if (window) parts.push(`${window} from the window`);
+		if (notification) parts.push(`${notification} from a notification`);
+		return parts.join(", ");
+	});
+	async function write() {
+		if (!$$props.offer) return;
+		set(step, "writing");
+		try {
+			await api("/api/grants", {
+				method: "POST",
+				body: JSON.stringify({
+					root: $$props.offer.root,
+					rule: $$props.offer.rule
+				})
+			});
+			set(step, "written");
+			$$props.say(`added ${$$props.offer.rule} to ${$$props.offer.file} — it answers this from the next call`);
+		} catch (e) {
+			set(step, "shown");
+			$$props.say(e instanceof Refused ? e.message : "the grant was not written");
+		}
+	}
+	var fragment = root_7$1();
+	var node = first_child(fragment);
+	var consequent_1 = ($$anchor) => {
+		var fragment_1 = comment();
+		var node_1 = first_child(fragment_1);
+		var consequent = ($$anchor) => {
+			var p = root();
+			var text = only_child(p, true);
+			template_effect(() => set_text(text, no()));
+			append($$anchor, p);
+		};
+		if_block(node_1, ($$render) => {
+			if (no()) $$render(consequent);
+		});
+		append($$anchor, fragment_1);
+	};
+	var alternate_1 = ($$anchor) => {
+		var section = root_6$1();
+		var node_2 = child(section);
+		var consequent_2 = ($$anchor) => {
+			var p_1 = root_1$1();
+			var text_1 = only_child(p_1);
+			template_effect(() => set_text(text_1, `Written to ${$$props.offer.file ?? ""}. It answers this from the next call; answer this one above.`));
+			append($$anchor, p_1);
+		};
+		var alternate = ($$anchor) => {
+			var fragment_2 = root_5$1();
+			var p_2 = first_child(fragment_2);
+			var code = sibling(child(p_2));
+			var text_2 = only_child(code, true);
+			var text_3 = sibling(code);
+			var node_3 = sibling(text_3);
+			var consequent_3 = ($$anchor) => {
+				var button = root_2$1();
+				delegated("click", button, () => set(step, "confirming"));
+				append($$anchor, button);
+			};
+			if_block(node_3, ($$render) => {
+				if (get(step) === "shown") $$render(consequent_3);
+			});
+			reset(p_2);
+			var node_4 = sibling(p_2, 2);
+			var consequent_5 = ($$anchor) => {
+				var fragment_3 = root_4$1();
+				var p_3 = first_child(fragment_3);
+				var text_4 = child(p_3);
+				var node_5 = sibling(text_4);
+				var consequent_4 = ($$anchor) => {
+					var text_5 = text("Your agent's own settings would ask about this — the grant widens the agent.");
+					append($$anchor, text_5);
+				};
+				if_block(node_5, ($$render) => {
+					if ($$props.offer.widens) $$render(consequent_4);
+				});
+				reset(p_3);
+				var pre = sibling(p_3, 2);
+				each(pre, 21, () => $$props.offer.diff, index, ($$anchor, l) => {
+					var span = root_3$1();
+					let classes;
+					var text_6 = only_child(span);
+					template_effect(() => {
+						classes = set_class(span, 1, "svelte-ybm2pj", null, classes, { add: get(l).op === "+" });
+						set_text(text_6, `${get(l).op ?? ""} ${get(l).text ?? ""}
+`);
+					});
+					append($$anchor, span);
+				});
+				reset(pre);
+				var p_4 = sibling(pre, 2);
+				var button_1 = child(p_4);
+				var text_7 = only_child(button_1);
+				var button_2 = sibling(button_1, 2);
+				reset(p_4);
+				template_effect(($0) => {
+					set_text(text_4, `It may write: ${$0 ?? ""}. ${$$props.offer.writes_says ?? ""}. `);
+					set_attribute(pre, "aria-label", `the lines added to ${$$props.offer.file ?? ""}`);
+					button_1.disabled = get(step) === "writing";
+					set_text(text_7, `Write to ${$$props.offer.file ?? ""}`);
+					button_2.disabled = get(step) === "writing";
+				}, [() => $$props.offer.writes.join(", ")]);
+				delegated("click", button_1, write);
+				delegated("click", button_2, () => set(step, "shown"));
+				append($$anchor, fragment_3);
+			};
+			if_block(node_4, ($$render) => {
+				if (get(step) !== "shown") $$render(consequent_5);
+			});
+			template_effect(() => {
+				set_text(text_2, $$props.offer.rule);
+				set_text(text_3, ` ${$$props.offer.allowed ?? ""} times (${get(fromWhere) ?? ""}). `);
+			});
+			append($$anchor, fragment_2);
+		};
+		if_block(node_2, ($$render) => {
+			if (get(step) === "written") $$render(consequent_2);
+			else $$render(alternate, -1);
+		});
+		reset(section);
+		append($$anchor, section);
+	};
+	if_block(node, ($$render) => {
+		if (!$$props.offer) $$render(consequent_1);
+		else $$render(alternate_1, -1);
+	});
+	var node_6 = sibling(node, 2);
+	var consequent_6 = ($$anchor) => {
+		var p_5 = root();
+		var text_8 = only_child(p_5, true);
+		template_effect(() => set_text(text_8, lapsed()));
+		append($$anchor, p_5);
+	};
+	if_block(node_6, ($$render) => {
+		if (lapsed()) $$render(consequent_6);
 	});
 	append($$anchor, fragment);
 	pop();
@@ -170,7 +329,7 @@ var root_32 = from_html(`<a class="act svelte-kz8fai" data-action="launch">open 
 var root_33 = from_html(`<button data-action="snooze_hour">for an hour</button>`);
 var root_34 = from_html(`<span class="keyed svelte-kz8fai"><button data-key="s" data-action="snooze"> </button><kbd class="svelte-kz8fai">s</kbd></span> <!>`, 1);
 var root_35 = from_html(`<code class="cmd svelte-kz8fai"> </code> <button data-action="attach">copy</button>`, 1);
-var root_36 = from_html(`<li><span class="lvl svelte-kz8fai"><!></span> <div class="body svelte-kz8fai"><div class="t svelte-kz8fai"><b class="svelte-kz8fai"> </b> <span class="kind svelte-kz8fai"> </span> <!> <span class="meta svelte-kz8fai"><!> <!></span></div> <!> <!> <!> <!> <!> <!> <!> <div class="acts svelte-kz8fai"><!> <!> <!> <!> <!> <!> <!> <!> <!> <!> <!> <!></div></div></li>`);
+var root_36 = from_html(`<li><span class="lvl svelte-kz8fai"><!></span> <div class="body svelte-kz8fai"><div class="t svelte-kz8fai"><b class="svelte-kz8fai"> </b> <span class="kind svelte-kz8fai"> </span> <!> <span class="meta svelte-kz8fai"><!> <!></span></div> <!> <!> <!> <!> <!> <!> <!> <!> <div class="acts svelte-kz8fai"><!> <!> <!> <!> <!> <!> <!> <!> <!> <!> <!> <!></div></div></li>`);
 function Item($$anchor, $$props) {
 	push($$props, true);
 	const DETAIL_CHARS = 400;
@@ -551,6 +710,21 @@ function Item($$anchor, $$props) {
 		else if ($$props.item.no_offer) $$render(consequent_17, 1);
 	});
 	var node_23 = sibling(node_21, 2);
+	GrantOffer(node_23, {
+		get offer() {
+			return $$props.item.grant_offer;
+		},
+		get no() {
+			return $$props.item.grant_no;
+		},
+		get lapsed() {
+			return $$props.item.grant_lapsed;
+		},
+		get say() {
+			return $$props.say;
+		}
+	});
+	var node_24 = sibling(node_23, 2);
 	var consequent_18 = ($$anchor) => {
 		Marker($$anchor, {
 			get item() {
@@ -562,26 +736,26 @@ function Item($$anchor, $$props) {
 		});
 	};
 	var d_3 = user_derived(() => has("answer") || has("tell_agent"));
-	if_block(node_23, ($$render) => {
+	if_block(node_24, ($$render) => {
 		if (get(d_3)) $$render(consequent_18);
 	});
-	var node_24 = sibling(node_23, 2);
+	var node_25 = sibling(node_24, 2);
 	var consequent_19 = ($$anchor) => {
 		var p_5 = root_19();
-		var node_25 = child(p_5);
-		Inline(node_25, { get text() {
+		var node_26 = child(p_5);
+		Inline(node_26, { get text() {
 			return $$props.item.answer_in;
 		} });
 		reset(p_5);
 		append($$anchor, p_5);
 	};
-	if_block(node_24, ($$render) => {
+	if_block(node_25, ($$render) => {
 		if ($$props.item.answer_in) $$render(consequent_19);
 	});
-	var node_26 = sibling(node_24, 2);
+	var node_27 = sibling(node_25, 2);
 	var consequent_21 = ($$anchor) => {
 		var p_6 = root_22();
-		var node_27 = child(p_6);
+		var node_28 = child(p_6);
 		var consequent_20 = ($$anchor) => {
 			var span_12 = root_20();
 			var a_1 = child(span_12);
@@ -602,18 +776,18 @@ function Item($$anchor, $$props) {
 			delegated("click", button_6, copyResume);
 			append($$anchor, fragment_7);
 		};
-		if_block(node_27, ($$render) => {
+		if_block(node_28, ($$render) => {
 			if (get(sessionLink)) $$render(consequent_20);
 			else $$render(alternate_3, -1);
 		});
 		reset(p_6);
 		append($$anchor, p_6);
 	};
-	if_block(node_26, ($$render) => {
+	if_block(node_27, ($$render) => {
 		if ($$props.item.answer_in && (get(sessionLink) || $$props.item.resume_command)) $$render(consequent_21);
 	});
-	var div_7 = sibling(node_26, 2);
-	var node_28 = child(div_7);
+	var div_7 = sibling(node_27, 2);
+	var node_29 = child(div_7);
 	var consequent_22 = ($$anchor) => {
 		var span_14 = root_23();
 		var button_7 = child(span_14);
@@ -623,10 +797,10 @@ function Item($$anchor, $$props) {
 		append($$anchor, span_14);
 	};
 	var d_4 = user_derived(() => has("allow"));
-	if_block(node_28, ($$render) => {
+	if_block(node_29, ($$render) => {
 		if (get(d_4)) $$render(consequent_22);
 	});
-	var node_29 = sibling(node_28, 2);
+	var node_30 = sibling(node_29, 2);
 	var consequent_23 = ($$anchor) => {
 		var span_15 = root_24();
 		var button_8 = child(span_15);
@@ -636,30 +810,30 @@ function Item($$anchor, $$props) {
 		append($$anchor, span_15);
 	};
 	var d_5 = user_derived(() => has("deny"));
-	if_block(node_29, ($$render) => {
+	if_block(node_30, ($$render) => {
 		if (get(d_5)) $$render(consequent_23);
 	});
-	var node_30 = sibling(node_29, 2);
+	var node_31 = sibling(node_30, 2);
 	var consequent_24 = ($$anchor) => {
 		var button_9 = root_25();
 		delegated("click", button_9, () => $$props.act($$props.item, "retry"));
 		append($$anchor, button_9);
 	};
 	var d_6 = user_derived(() => has("retry"));
-	if_block(node_30, ($$render) => {
+	if_block(node_31, ($$render) => {
 		if (get(d_6)) $$render(consequent_24);
 	});
-	var node_31 = sibling(node_30, 2);
+	var node_32 = sibling(node_31, 2);
 	var consequent_25 = ($$anchor) => {
 		var button_10 = root_26();
 		delegated("click", button_10, () => $$props.act($$props.item, "resume"));
 		append($$anchor, button_10);
 	};
 	var d_7 = user_derived(() => has("resume"));
-	if_block(node_31, ($$render) => {
+	if_block(node_32, ($$render) => {
 		if (get(d_7)) $$render(consequent_25);
 	});
-	var node_32 = sibling(node_31, 2);
+	var node_33 = sibling(node_32, 2);
 	var consequent_26 = ($$anchor) => {
 		var span_16 = root_27();
 		var a_2 = child(span_16);
@@ -669,30 +843,30 @@ function Item($$anchor, $$props) {
 		append($$anchor, span_16);
 	};
 	var d_8 = user_derived(() => has("review") && $$props.item.change_id);
-	if_block(node_32, ($$render) => {
+	if_block(node_33, ($$render) => {
 		if (get(d_8)) $$render(consequent_26);
 	});
-	var node_33 = sibling(node_32, 2);
+	var node_34 = sibling(node_33, 2);
 	var consequent_27 = ($$anchor) => {
 		var button_11 = root_28();
 		delegated("click", button_11, () => $$props.act($$props.item, "tell_run"));
 		append($$anchor, button_11);
 	};
 	var d_9 = user_derived(() => has("tell_run"));
-	if_block(node_33, ($$render) => {
+	if_block(node_34, ($$render) => {
 		if (get(d_9)) $$render(consequent_27);
 	});
-	var node_34 = sibling(node_33, 2);
+	var node_35 = sibling(node_34, 2);
 	var consequent_28 = ($$anchor) => {
 		var button_12 = root_29();
 		delegated("click", button_12, () => $$props.act($$props.item, "accept_drift"));
 		append($$anchor, button_12);
 	};
 	var d_10 = user_derived(() => has("accept_drift"));
-	if_block(node_34, ($$render) => {
+	if_block(node_35, ($$render) => {
 		if (get(d_10)) $$render(consequent_28);
 	});
-	var node_35 = sibling(node_34, 2);
+	var node_36 = sibling(node_35, 2);
 	var consequent_29 = ($$anchor) => {
 		var span_17 = root_30();
 		var a_3 = child(span_17);
@@ -702,10 +876,10 @@ function Item($$anchor, $$props) {
 		append($$anchor, span_17);
 	};
 	var d_11 = user_derived(() => has("open") && ($$props.item.run_id || $$props.item.change_id));
-	if_block(node_35, ($$render) => {
+	if_block(node_36, ($$render) => {
 		if (get(d_11)) $$render(consequent_29);
 	});
-	var node_36 = sibling(node_35, 2);
+	var node_37 = sibling(node_36, 2);
 	var consequent_30 = ($$anchor) => {
 		var a_4 = root_31();
 		var text_17 = only_child(a_4, true);
@@ -717,19 +891,19 @@ function Item($$anchor, $$props) {
 		append($$anchor, a_4);
 	};
 	var d_12 = user_derived(() => (has("open_pr") || has("open_issue")) && get(url));
-	if_block(node_36, ($$render) => {
+	if_block(node_37, ($$render) => {
 		if (get(d_12)) $$render(consequent_30);
 	});
-	var node_37 = sibling(node_36, 2);
+	var node_38 = sibling(node_37, 2);
 	var consequent_31 = ($$anchor) => {
 		var a_5 = root_32();
 		template_effect(() => set_attribute(a_5, "href", get(launch)));
 		append($$anchor, a_5);
 	};
-	if_block(node_37, ($$render) => {
+	if_block(node_38, ($$render) => {
 		if (get(launch)) $$render(consequent_31);
 	});
-	var node_38 = sibling(node_37, 2);
+	var node_39 = sibling(node_38, 2);
 	var consequent_33 = ($$anchor) => {
 		var fragment_8 = root_34();
 		var span_18 = first_child(fragment_8);
@@ -737,14 +911,14 @@ function Item($$anchor, $$props) {
 		var text_18 = only_child(button_13, true);
 		next();
 		reset(span_18);
-		var node_39 = sibling(span_18, 2);
+		var node_40 = sibling(span_18, 2);
 		var consequent_32 = ($$anchor) => {
 			var button_14 = root_33();
 			delegated("click", button_14, () => snoozeHour()($$props.item));
 			append($$anchor, button_14);
 		};
 		var d_13 = user_derived(() => untilActivity($$props.item));
-		if_block(node_39, ($$render) => {
+		if_block(node_40, ($$render) => {
 			if (get(d_13)) $$render(consequent_32);
 		});
 		template_effect(($0) => set_text(text_18, $0), [() => untilActivity($$props.item) ? "snooze until new activity" : "snooze 1h"]);
@@ -752,10 +926,10 @@ function Item($$anchor, $$props) {
 		append($$anchor, fragment_8);
 	};
 	var d_14 = user_derived(() => has("snooze"));
-	if_block(node_38, ($$render) => {
+	if_block(node_39, ($$render) => {
 		if (get(d_14)) $$render(consequent_33);
 	});
-	var node_40 = sibling(node_38, 2);
+	var node_41 = sibling(node_39, 2);
 	var consequent_34 = ($$anchor) => {
 		var fragment_9 = root_35();
 		var code_2 = first_child(fragment_9);
@@ -766,7 +940,7 @@ function Item($$anchor, $$props) {
 		append($$anchor, fragment_9);
 	};
 	var d_15 = user_derived(() => has("attach") && $$props.item.run_id);
-	if_block(node_40, ($$render) => {
+	if_block(node_41, ($$render) => {
 		if (get(d_15)) $$render(consequent_34);
 	});
 	reset(div_7);

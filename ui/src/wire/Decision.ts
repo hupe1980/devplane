@@ -45,4 +45,9 @@ vendor?: string | null,
  * The vendor's own word for who decided, verbatim (`user_reject`,
  * `config`). Kept beside `authority`, never instead of it.
  */
-vendor_source?: string | null, };
+vendor_source?: string | null, 
+/**
+ * The person's grant that allowed the call (`` `Bash(cargo test)` for
+ * /root ``), on every allow a grant made; what revoking it lists by.
+ */
+grant?: string | null, };

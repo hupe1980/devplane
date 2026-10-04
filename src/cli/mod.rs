@@ -686,6 +686,22 @@ pub enum ConfigCmd {
         #[arg(long, default_value_t = 5000)]
         limit: i64,
     },
+    /// List the grants in your ~/.devplane/policy.toml, with what each decided
+    ///
+    /// A grant is your own rule for one project, offered in the inbox after you
+    /// answered the same call the same way several times.
+    Grants,
+    /// Remove a grant from your ~/.devplane/policy.toml, and list every decision it made
+    ///
+    ///   devplane config revoke 'Bash(cargo test)'
+    #[command(verbatim_doc_comment)]
+    Revoke {
+        /// The rule, exactly as the file has it
+        rule: String,
+        /// A directory in the project the grant is for
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1262,6 +1278,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 dir,
                 ..
             } => conf::cmd_explain(dir, tool, call, input, json),
+            ConfigCmd::Grants => conf::cmd_grants(json).await,
+            ConfigCmd::Revoke { rule, dir } => conf::cmd_revoke(rule, dir, json).await,
         },
         Command::Agent { what } => match what {
             AgentCmd::List => agent::cmd_agents(json).await,

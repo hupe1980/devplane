@@ -197,6 +197,33 @@ pub async fn cmd_inbox(json: bool, project: Option<&str>, needs_you: bool) -> Re
         } else if let Some(no) = &i.no_offer {
             println!("     {}", paint(DIM, &no.sentence));
         }
+        // The person's own grant, offered after their repeated answers:
+        // printed as the lines to add to their file, never written from here.
+        if let Some(g) = &i.grant.grant_offer {
+            println!(
+                "     {}",
+                paint(
+                    DIM,
+                    &format!(
+                        "you allowed this {} times from the window — to always allow it in this \
+                         project, add to {}:",
+                        g.allowed, g.file
+                    )
+                )
+            );
+            for l in &g.diff {
+                match l.op.as_str() {
+                    "+" => println!("       {}", paint(render::GREEN, &format!("+ {}", l.text))),
+                    _ => println!("       {}", paint(DIM, &format!("  {}", l.text))),
+                }
+            }
+            println!("     {}", paint(DIM, &g.writes_says));
+        } else if let Some(no) = &i.grant.grant_no {
+            println!("     {}", paint(DIM, no));
+        }
+        if let Some(lapsed) = &i.grant.grant_lapsed {
+            println!("     {}", paint(DIM, lapsed));
+        }
         // A change has no run of its own once the agent is gone.
         let subject = match (change_id, run_id) {
             (Some(w), _) => format!("change {}", clip(w, 14)),

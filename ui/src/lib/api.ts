@@ -91,9 +91,10 @@ async function hmac(key: string, message: string): Promise<string> {
   return Array.from(sig, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/// The window's proof for the two requests the host takes only from it: an
-/// answer to one ask, and trusting one repository. Bound to that ask or that
-/// path, so it is worth nothing for another. Empty outside the window.
+/// The window's proof for the requests the host takes only from it: an answer
+/// to one ask, trusting one repository, and writing or revoking one grant.
+/// Bound to that ask, path or rule, so it is worth nothing for another. Empty
+/// outside the window.
 async function windowProof(path: string, opts: RequestInit): Promise<Record<string, string>> {
   const key = windowKey();
   if (!key || !writes(opts) || !crypto?.subtle) return {};
@@ -103,6 +104,18 @@ async function windowProof(path: string, opts: RequestInit): Promise<Record<stri
   if (asked) {
     const id = decodeURIComponent(asked[1]);
     return { "X-Devplane-Ask-Proof": await hmac(key, `ask ${id}`) };
+  }
+  // Writing or revoking a grant in the person's own policy.toml: bound to the
+  // project's root and the exact rule.
+  const grant = /^\/api\/grants(\/revoke)?$/.exec(path);
+  if (grant && typeof opts.body === "string") {
+    const { root, rule } = JSON.parse(opts.body) as { root?: unknown; rule?: unknown };
+    if (typeof root === "string" && typeof rule === "string") {
+      const [header, word] = grant[1]
+        ? ["X-Devplane-Revoke-Proof", "revoke"]
+        : ["X-Devplane-Grant-Proof", "grant"];
+      return { [header]: await hmac(key, `${word} ${root} ${rule}`) };
+    }
   }
   if (path === "/api/projects/trust" && typeof opts.body === "string") {
     const repo = (JSON.parse(opts.body) as { path?: unknown }).path;

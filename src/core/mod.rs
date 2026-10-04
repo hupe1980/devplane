@@ -32,6 +32,7 @@ pub mod event;
 pub mod firstrun;
 pub mod forge;
 pub mod genai;
+pub mod grant;
 pub mod hash;
 pub mod ids;
 pub mod notice;

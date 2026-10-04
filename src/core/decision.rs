@@ -122,6 +122,10 @@ pub struct Decision {
     /// `config`). Kept beside `authority`, never instead of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor_source: Option<String>,
+    /// The person's grant that allowed the call (`` `Bash(cargo test)` for
+    /// /root ``), on every allow a grant made; what revoking it lists by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<String>,
 }
 
 impl Decision {
@@ -150,7 +154,15 @@ impl Decision {
             call_id: None,
             vendor: None,
             vendor_source: None,
+            grant: None,
         }
+    }
+
+    /// Names the person's grant that allowed this call.
+    #[must_use]
+    pub fn by_grant(mut self, grant: &crate::core::grant::Grant) -> Self {
+        self.grant = Some(grant.name());
+        self
     }
 
     /// Overrides the timestamp, for a decision filed later than it was taken
@@ -597,9 +609,12 @@ pub struct DecidedEnvelope {
     pub session: String,
     #[serde(default)]
     pub source: crate::core::event::Source,
-    /// `deny`, `ask`, `unresolved` or `undecided` — never `allow`, which
-    /// [`crate::core::Verdict`] cannot express.
+    /// `deny`, `ask`, `unresolved`, `undecided`, or `allow` when the
+    /// person's own grant answered (then [`Self::grant`] names it).
     pub verdict: String,
+    /// The grant that allowed the call, on an `allow`.
+    #[serde(default)]
+    pub grant: Option<String>,
     /// The rule that produced it. `None` for `undecided` (observed only) and
     /// `unresolved` (see [`Self::why`]).
     #[serde(default)]

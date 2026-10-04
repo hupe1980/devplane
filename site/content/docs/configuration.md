@@ -249,7 +249,10 @@ paths = ["src/core/auth.rs"]
 
 All under `~/.devplane/` (or `DEVPLANE_HOME`).
 
-**`policy.toml`**: only a `[policy]` with `deny` and `ask`, applied to every project; fails closed.
+**`policy.toml`**: a `[policy]` with `deny` and `ask`, applied to every project, and your own
+grants — `[grants]` (`offer_after`, `offer_again_after`) and `[projects."<root>"]` with `allow` —
+described under [Permissions](@/docs/permissions.md#grants-your-own-rule-per-project). Fails closed;
+a `[policy] allow` is refused, and so is any of these keys in a repository's `devplane.toml`.
 
 **`app.toml`**: the window, and which GitHub this machine signs in to:
 

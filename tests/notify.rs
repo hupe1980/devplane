@@ -311,6 +311,7 @@ async fn allow_from_the_notification_reaches_the_waiting_hook() {
             Path::new("/nowhere"),
             "Bash",
             "git push",
+            &serde_json::json!({ "command": "git push" }),
             Duration::from_secs(30),
             false,
         )

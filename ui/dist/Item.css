@@ -38,6 +38,55 @@
     font-weight: 600;
   }
 
+  .grant.svelte-ybm2pj {
+    display: grid;
+    gap: var(--s-2);
+    font-size: var(--t-sm);
+    padding: var(--s-3);
+    border: 1px dashed var(--line);
+    border-radius: var(--radius-lg);
+  }
+  .grant.svelte-ybm2pj p:where(.svelte-ybm2pj) {
+    margin: 0;
+  }
+  code.svelte-ybm2pj,
+  .diff.svelte-ybm2pj {
+    font-family: var(--mono);
+    font-size: var(--t-xs);
+  }
+  .diff.svelte-ybm2pj {
+    margin: 0;
+    padding: var(--s-2);
+    background: var(--chrome);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .add.svelte-ybm2pj {
+    color: var(--add);
+    background: var(--add-bg);
+  }
+  .confirm.svelte-ybm2pj {
+    display: flex;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+  }
+  .primary.svelte-ybm2pj {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--chrome);
+    font-weight: 600;
+  }
+  .dim.svelte-ybm2pj,
+  .elsewhere.svelte-ybm2pj {
+    color: var(--dim);
+  }
+  .elsewhere.svelte-ybm2pj {
+    margin: 0;
+    font-size: var(--t-sm);
+  }
+
   /* One item in full: the title large, the answer with a firm edge, the rest quiet. */
   .item.svelte-kz8fai {
     list-style: none;

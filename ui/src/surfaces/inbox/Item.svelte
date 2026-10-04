@@ -12,6 +12,7 @@
   import { answerItemKeys } from "./keys";
   import { copyCommand, untilActivity } from "./actions";
   import Marker from "./Marker.svelte";
+  import GrantOffer, { type GrantOffer as Offered } from "./GrantOffer.svelte";
   import type { ReadyFacts } from "../../wire/ReadyFacts";
 
   /// How much of a detail the row shows; the rest is in the `title`.
@@ -43,6 +44,7 @@
     offer?: { rule: string; file: string; section: string; covers: number; more?: boolean } | null;
     /// Why there is no rule to offer, on a permission that has none.
     no_offer?: { reason: string; sentence: string } | null;
+    grant_offer?: Offered | null; grant_no?: string | null; grant_lapsed?: string | null; // a grant: GrantOffer.svelte
     /// The whole form behind a question; `options` is only the first
     /// question's buttons.
     form?: FormQuestion[] | null;
@@ -319,6 +321,7 @@
       <p class="elsewhere"><Inline text={item.no_offer.sentence} /></p>
     {/if}
 
+    <GrantOffer offer={item.grant_offer} no={item.grant_no} lapsed={item.grant_lapsed} {say} />
     {#if has("answer") || has("tell_agent")}<Marker {item} {say} />{/if}
     <!-- A watched session has no protocol request, so nothing here can grant it. -->
     {#if item.answer_in}<p class="elsewhere"><Inline text={item.answer_in} /></p>{/if}

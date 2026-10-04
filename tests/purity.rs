@@ -182,17 +182,88 @@ fn no_message_carries_a_collapsed_line_continuation() {
 /// session assertions are the load-bearing ones.
 #[test]
 fn nothing_can_approve_except_a_person_who_answered() {
+    // The engine's one allow carries a grant, and a grant has one way in: the
+    // person's own file. No model, clock, default or repository can make one.
     let policy = std::fs::read_to_string("src/core/policy.rs").expect("policy.rs");
     let verdict = policy
         .split("pub enum Verdict")
         .nth(1)
-        .and_then(|s| s.split('}').next())
+        .and_then(|s| s.split("\n}").next())
         .expect("Verdict is an enum in policy.rs");
     assert!(
-        !verdict.contains("Allow"),
-        "`Verdict` grew an `Allow` variant. The policy engine may refuse and defer and \
-         nothing else — this is the constitution's Principle II, and it cost \
-         $1,756-$3,511 a month to learn"
+        verdict.contains("Allow {\n        grant: crate::core::grant::Grant,\n    }"),
+        "`Verdict::Allow` must carry the person's `Grant` and nothing else. The policy \
+         engine may refuse and defer on its own and allow only what a person wrote — \
+         this is the constitution's Principle II, and it cost $1,756-$3,511 a month to learn"
+    );
+    let built = |needle: &str| -> Vec<(String, usize)> {
+        walk("src")
+            .into_iter()
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(&path).expect("source");
+                let n = production(&text).matches(needle).count();
+                (n > 0).then_some((path.replace('\\', "/"), n))
+            })
+            .collect()
+    };
+    let allows = built("Verdict::Allow { grant:");
+    assert_eq!(
+        allows.len(),
+        1,
+        "`Verdict::Allow` is built in more than one file: {allows:?}"
+    );
+    assert!(
+        allows[0].0.ends_with("src/policy_cache.rs") && allows[0].1 == 1,
+        "`Verdict::Allow` must be built once, in `PolicyCache::decide`: {allows:?}"
+    );
+    let cache = std::fs::read_to_string("src/policy_cache.rs").expect("policy_cache.rs");
+    let decide = cache
+        .split("pub fn decide_at(")
+        .nth(1)
+        .and_then(|s| s.split("\n    }\n").next())
+        .expect("PolicyCache::decide_at");
+    assert!(
+        decide.contains("Verdict::Allow { grant:")
+            && decide.find("self.restrictive(").unwrap_or(usize::MAX)
+                < decide.find("Verdict::Allow").unwrap_or(0),
+        "the allow is no longer made after every prohibition in `decide_at`"
+    );
+    let parses = built("Grants::parse(");
+    assert!(
+        parses
+            .iter()
+            .all(|(f, _)| f.ends_with("src/core/config.rs")),
+        "a grant is parsed from somewhere other than the person's file: {parses:?}"
+    );
+    let grant = std::fs::read_to_string("src/core/grant.rs").expect("grant.rs");
+    let decl = grant
+        .split("pub struct Grant {")
+        .next()
+        .and_then(|before| before.rsplit("#[derive(").next())
+        .expect("Grant is derived in grant.rs");
+    for banned in ["Deserialize", "Default"] {
+        assert!(
+            !decl.contains(banned),
+            "`Grant` derives `{banned}`: it could be made from text or from nothing"
+        );
+    }
+    assert!(
+        grant
+            .split("pub struct Grant {")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .is_some_and(|fields| !fields.contains("pub ")),
+        "`Grant` has a public field, so it can be built outside its parser"
+    );
+    let config = std::fs::read_to_string("src/core/config.rs").expect("config.rs");
+    let project = config
+        .split("pub struct ProjectConfig {")
+        .nth(1)
+        .and_then(|s| s.split('}').next())
+        .expect("ProjectConfig");
+    assert!(
+        !project.contains("grant") && !project.contains("projects"),
+        "a repository's devplane.toml grew a grant field: a repository is text anybody can send"
     );
 
     // Exactly one accept, inside the answer channel: a second would be a

@@ -306,7 +306,8 @@ impl AppState {
             leaked_agents: Mutex::new(Vec::new()),
             forge: Mutex::new(ForgeState::default()),
             github: Arc::new(crate::github::GitHub::new(&home)),
-            policy: PolicyCache::new(policy, home.clone(), dirs::home_dir()),
+            policy: PolicyCache::new(policy, home.clone(), dirs::home_dir())
+                .with_grants_file(home.join("policy.toml")),
             home,
             ingest_token: crate::config::ingest_token(&token),
             token,

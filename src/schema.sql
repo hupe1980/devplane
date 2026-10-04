@@ -117,7 +117,11 @@ CREATE TABLE IF NOT EXISTS decisions (
     -- the vendor (`claude-code`) and its word verbatim (`user_reject`,
     -- `config`). NULL on everything Devplane itself took or enforced.
     vendor        TEXT,
-    vendor_source TEXT
+    vendor_source TEXT,
+    -- The person's grant that allowed the call, as `` `<rule>` for <root> ``:
+    -- set on every allow a grant in ~/.devplane/policy.toml made, and what
+    -- revoking that grant lists its decisions by. NULL on every other row.
+    grant_name    TEXT
 );
 
 -- Ties on `at` are common (a gate finishing as its run ends), so readers
@@ -127,6 +131,7 @@ CREATE INDEX IF NOT EXISTS decisions_by_time ON decisions(at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_run ON decisions(run_id, at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_change ON decisions(change_id, at DESC);
 CREATE INDEX IF NOT EXISTS decisions_by_call ON decisions(call_id);
+CREATE INDEX IF NOT EXISTS decisions_by_grant ON decisions(grant_name);
 
 -- What a driven agent said. Kept out of `events` because run state is a
 -- reduction over events and a sentence reduces to nothing. Pruned with the

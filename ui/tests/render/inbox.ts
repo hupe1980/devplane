@@ -98,6 +98,24 @@ const list = (props: Record<string, unknown>) => html(List, { open, ...props });
     actions: ["allow", "deny"], no_offer: { reason: "no_family", sentence: "One call is not a pattern yet." } }], loaded: true });
   if (!noOffer.includes("One call is not a pattern yet.")) fail("a permission with no offer is a blank where a rule belongs");
 
+  // The person's own grant: offered with the answers it comes from, written
+  // only after a confirm — nothing on first render says it was written.
+  const grantItem = { id: "g", kind: "permission", level: "high", title: "Bash: cargo test", ask: "a",
+    actions: ["allow", "deny"], grant_offer: { rule: "Bash(cargo test)", root: "/r", file: "~/.devplane/policy.toml",
+      allowed: 5, derived_from: [{ ask: "x", at: "2026-10-04T09:00:00Z", from: "window" }],
+      writes: ["the change's worktree"], writes_says: "Devplane does not know what this command itself touches",
+      widens: true, diff: [{ op: "+", text: '[projects."/r"]' }, { op: "+", text: '  "Bash(cargo test)",' }] } };
+  const granting = html(Inbox, { items: [grantItem], loaded: true });
+  if (!granting.includes("Bash(cargo test)") || !granting.includes("5 times")) fail("a grant offer does not name its rule and how often it was allowed");
+  if (!/Always allow in this project/.test(granting)) fail("a grant offer has no control to start it");
+  if (/Write to ~\/\.devplane\/policy\.toml/.test(granting)) fail("a grant offer can be written without a confirm step");
+  const grantCode = source("../src/surfaces/inbox/GrantOffer.svelte");
+  if (!/step === "writing"/.test(grantCode) || !/"\/api\/grants"/.test(grantCode)) fail("the grant is not written through its one route");
+  if (!/\{#if step !== "shown"\}/.test(grantCode) || !/offer\.diff/.test(grantCode)) fail("the confirm does not show the lines it writes");
+  const noGrant = html(Inbox, { items: [{ ...grantItem, grant_offer: null,
+    grant_no: "No grant is offered: you allowed this 5 times and refused it 1 time." }], loaded: true });
+  if (!noGrant.includes("refused it 1 time")) fail("inconsistent answers do not say why no grant is offered");
+
   // A recorded watched-session permission offers what the host offered.
   const watched = html(Inbox, { items: [recorded.items[0]], loaded: true });
   if (!watched.includes(recorded.items[0].answer_in ?? "")) fail("a dialog another tool owns does not say where to answer it");
