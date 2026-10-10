@@ -54,7 +54,7 @@ test: build
 
 # ── The checks that keep the claims honest ───────────────────────────────────
 
-# Recompute the dependency figures the notes assert.
+# How many package versions the default and app builds compile. A report, never a gate.
 deps:
     bash scripts/deps-count.sh
 

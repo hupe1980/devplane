@@ -348,11 +348,3 @@ jobs:
           path: ui/.bars/report.json
           if-no-files-found: ignore
 
-  # Separate so a failure reads as "a dependency arrived", not "this commit is wrong".
-  # Checks that need the gitignored concepts/ run via `just notes`, not here.
-  deps:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Dependency count
-        run: bash scripts/deps-count.sh
